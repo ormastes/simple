@@ -69,7 +69,7 @@ fn c1_call_runtime_helpers_are_pub_crate() {
     //
     // Post-C1: the import succeeds and this test body trivially passes.
     // We just assert the module compiled (reaching this line proves it).
-    assert!(true, "call_runtime helpers are importable as pub(crate)");
+    // reaching this line proves the module compiled
 }
 
 /// Arity-0: codegen path that calls a runtime function with no arguments.
@@ -180,10 +180,7 @@ main = arity_3_site()
 fn c1_all_arity_helpers_coexist_in_helpers_rs() {
     // If any helper is missing or has a visibility conflict, this file won't compile.
     // Reaching this line confirms all 5 are importable simultaneously.
-    assert!(
-        true,
-        "call_runtime_0/1/2/2_void/3 all coexist in helpers.rs"
-    );
+    // reaching this line confirms all 5 are importable simultaneously
 }
 
 // ============================================================================
@@ -194,10 +191,7 @@ fn c1_all_arity_helpers_coexist_in_helpers_rs() {
 /// Pre-C2: compile error (not exported). Post-C2: this test compiles and passes.
 #[test]
 fn c2_declare_uniform_i64_import_is_pub_crate() {
-    assert!(
-        true,
-        "declare_uniform_i64_import is importable as pub(crate)"
-    );
+    // reaching this line confirms declare_uniform_i64_import is importable as pub(crate)
 }
 
 /// Idempotency: calling declare_uniform_i64_import twice with the same name
@@ -274,7 +268,7 @@ fn c2_declare_uniform_i64_import_idempotent() {
     }
 
     // If we reach here without panic, idempotency holds.
-    assert!(true, "declare_uniform_i64_import is idempotent for same name");
+    // reaching this line without panic confirms idempotency holds
 }
 
 /// Verify that declare_uniform_i64_import with n_params=0 (no-arg import)

@@ -17,19 +17,18 @@ fn test_func():
     assert_eq!(hir_module.functions.len(), 1);
     let hir_func = &hir_module.functions[0];
 
-    // Fields exist (even if empty for this simple function)
-    assert!(hir_func.module_path.is_empty() || !hir_func.module_path.is_empty());
-    assert!(hir_func.attributes.len() >= 0); // always true, just checking field exists
-    assert!(hir_func.effects.len() >= 0);
+    // Fields are accessible (compile-time check; field access above verifies they exist)
+    let _ = &hir_func.attributes;
+    let _ = &hir_func.effects;
 
     // Verify MIR function has metadata fields
     let mir_module = mir::lower_to_mir(&hir_module).expect("Failed to lower to MIR");
     let mir_func = &mir_module.functions[0];
 
-    // Metadata accessible for AOP weaving
-    assert!(mir_func.module_path.is_empty() || !mir_func.module_path.is_empty());
-    assert!(mir_func.attributes.len() >= 0);
-    assert!(mir_func.effects.len() >= 0);
+    // Metadata accessible for AOP weaving (compile-time check)
+    let _ = &mir_func.module_path;
+    let _ = &mir_func.attributes;
+    let _ = &mir_func.effects;
     assert_eq!(mir_func.name, "test_func");
 }
 

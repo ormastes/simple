@@ -358,13 +358,13 @@ pub fn rt_u32_alloc_filled(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_smf_parse_relocs(args: &[Value]) -> Result<Value, CompileError> {
     // Extract the [u8] data array
     let data_vals = match args.first() {
-        Some(Value::Array(a)) => a.borrow().clone(),
+        Some(Value::Array(a)) => a.as_ref().clone(),
         _ => return Ok(Value::array(vec![])),
     };
     let data: Vec<u8> = data_vals
         .iter()
         .map(|v| match v {
-            Value::Int(n) => *n as u8,
+            Value::Int(n) => n as u8,
             _ => 0u8,
         })
         .collect();
