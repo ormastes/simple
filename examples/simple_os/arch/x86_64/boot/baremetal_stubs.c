@@ -15200,6 +15200,11 @@ __attribute__((weak)) RuntimeValue ios_dark(void)        { return 0; }
 __attribute__((weak)) RuntimeValue ios_light(void)       { return 0; }
 __attribute__((weak)) RuntimeValue theme_ui_theme(RuntimeValue name) { (void)name; return 0; }
 
+/* --- H. arm_fs_exec_trace: shared tracing extern across arch loaders.
+ * x86_64_fs_exec_spawn.spl + arm{,64}_fs_exec_spawn.spl all import this name;
+ * stub as a no-op on x86_64.  TODO: rename to neutral fs_exec_trace. */
+__attribute__((weak)) void arm_fs_exec_trace(RuntimeValue id) { (void)id; }
+
 /* End of Wave 11: missing-symbol stubs */
 
 #endif /* __x86_64__ || __i386__ */
