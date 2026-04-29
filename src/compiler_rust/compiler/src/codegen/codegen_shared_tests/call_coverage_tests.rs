@@ -130,7 +130,7 @@ cranelift_only_test!(shared_cast_f32_to_f64, |f: &mut MirFunction| {
     let src = f.new_vreg();
     let dest = f.new_vreg();
     let block = f.block_mut(BlockId(0)).unwrap();
-    block.instructions.push(MirInst::ConstFloat { dest: src, value: 3.14 });
+    block.instructions.push(MirInst::ConstFloat { dest: src, value: 2.5 });
     block.instructions.push(MirInst::Cast {
         dest,
         source: src,
@@ -144,7 +144,7 @@ cranelift_only_test!(shared_cast_f64_to_f32, |f: &mut MirFunction| {
     let src = f.new_vreg();
     let dest = f.new_vreg();
     let block = f.block_mut(BlockId(0)).unwrap();
-    block.instructions.push(MirInst::ConstFloat { dest: src, value: 3.14 });
+    block.instructions.push(MirInst::ConstFloat { dest: src, value: 2.5 });
     block.instructions.push(MirInst::Cast {
         dest,
         source: src,

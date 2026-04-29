@@ -17,7 +17,7 @@ shared_test!(shared_const_float, |f: &mut MirFunction| {
     let fv = f.new_vreg();
     let dest = f.new_vreg();
     let block = f.block_mut(BlockId(0)).unwrap();
-    block.instructions.push(MirInst::ConstFloat { dest: fv, value: 3.14 });
+    block.instructions.push(MirInst::ConstFloat { dest: fv, value: 2.5 });
     block.instructions.push(MirInst::Cast {
         dest,
         source: fv,

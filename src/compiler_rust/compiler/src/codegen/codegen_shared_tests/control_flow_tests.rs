@@ -106,7 +106,7 @@ mod interpreter_coverage_extras {
         let insts = vec![
             MirInst::ConstFloat {
                 dest: VReg(0),
-                value: 3.14,
+                value: 2.5,
             },
             MirInst::Cast {
                 dest: VReg(1),

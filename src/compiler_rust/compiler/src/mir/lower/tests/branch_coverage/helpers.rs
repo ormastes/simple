@@ -21,7 +21,7 @@ pub(super) fn has_inst(mir: &MirModule, pred: impl Fn(&MirInst) -> bool) -> bool
         .iter()
         .flat_map(|f| f.blocks.iter())
         .flat_map(|b| b.instructions.iter())
-        .any(|i| pred(i))
+        .any(pred)
 }
 
 /// Helper: count instructions matching a predicate
@@ -30,7 +30,7 @@ pub(super) fn count_inst(mir: &MirModule, pred: impl Fn(&MirInst) -> bool) -> us
         .iter()
         .flat_map(|f| f.blocks.iter())
         .flat_map(|b| b.instructions.iter())
-        .filter(|i| pred(i))
+        .filter(pred)
         .count()
 }
 

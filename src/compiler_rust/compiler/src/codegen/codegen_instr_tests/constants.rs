@@ -25,7 +25,7 @@ fn codegen_const_float() {
         let fv = f.new_vreg();
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstFloat { dest: fv, value: 3.14 });
+        block.instructions.push(MirInst::ConstFloat { dest: fv, value: 2.5 });
         block.instructions.push(MirInst::Cast {
             dest,
             source: fv,

@@ -276,75 +276,31 @@ impl SmfReaderMemory:
     Each entry is 24 bytes: offset(8) | sym_idx(4) | type(1) | pad(3) | addend(8).
     Returns empty list for old SMF files without relocation sections.
 
-    Performance: hot loop hoists self.* fields and inlines bytes_to_u64 /
-    bytes_to_u32 to avoid 4 function-call frames per entry. Required for SMFs
-    with >100k relocations inside the interpreter (compile.smf has ~139k).
+    Delegates to rt_smf_parse_relocs (Rust native) which pre-allocates the
+    full result array in O(N) C-side, bypassing the O(N^2) interpreter push
+    loop that makes 100k+ reloc tables (compile.smf has ~139k) time out.
+    The flat [i64] result is decoded: 4 values per entry [offset, sym_idx, type, addend].
     """
     fn read_relocations() -> Result<[SmfRelocEntry], text>:
-        val section_entry_size = 56
-        val section_count = self.header.section_count as i64
-        val reloc_entry_size = 24
-        # Hoist hot fields once.
-        val data = self.data
-        val data_len = data.len()
-        val sections_off = self.sections_offset
-        val header = self.header
-        var i = 0
-        while i < section_count:
-            val entry_off = sections_off + i * section_entry_size
-            val entry_end = entry_off + section_entry_size
-            if entry_end > data_len:
-                i = i + 1
-                continue
-            val sec_type = data[entry_off] as i32
-            if sec_type == 5:
-                val sec_offset_raw = bytes_to_u64(data, entry_off + 8) as i64
-                val sec_offset = smf_payload_file_offset(header, sec_offset_raw)
-                val sec_size = bytes_to_u64(data, entry_off + 16) as i64
-                if sec_offset + sec_size > data_len:
-                    return Err("Reloc section extends beyond SMF data")
-                val entry_count = sec_size / reloc_entry_size
-                var relocs: [SmfRelocEntry] = []
-                var j = 0
-                while j < entry_count:
-                    val e_off = sec_offset + j * reloc_entry_size
-                    # Inline u64 for offset (e_off..e_off+7)
-                    val o0 = data[e_off] as u64
-                    val o1 = data[e_off + 1] as u64
-                    val o2 = data[e_off + 2] as u64
-                    val o3 = data[e_off + 3] as u64
-                    val o4 = data[e_off + 4] as u64
-                    val o5 = data[e_off + 5] as u64
-                    val o6 = data[e_off + 6] as u64
-                    val o7 = data[e_off + 7] as u64
-                    val r_offset = (o0 | (o1 << 8) | (o2 << 16) | (o3 << 24) | (o4 << 32) | (o5 << 40) | (o6 << 48) | (o7 << 56)) as i64
-                    # Inline u32 for sym_idx (e_off+8 .. e_off+11)
-                    val s0 = data[e_off + 8] as u32
-                    val s1 = data[e_off + 9] as u32
-                    val s2 = data[e_off + 10] as u32
-                    val s3 = data[e_off + 11] as u32
-                    val r_sym_idx = (s0 | (s1 << 8) | (s2 << 16) | (s3 << 24)) as i64
-                    val r_type = data[e_off + 12] as i32
-                    # Inline u64 for addend (e_off+16 .. e_off+23)
-                    val a0 = data[e_off + 16] as u64
-                    val a1 = data[e_off + 17] as u64
-                    val a2 = data[e_off + 18] as u64
-                    val a3 = data[e_off + 19] as u64
-                    val a4 = data[e_off + 20] as u64
-                    val a5 = data[e_off + 21] as u64
-                    val a6 = data[e_off + 22] as u64
-                    val a7 = data[e_off + 23] as u64
-                    val r_addend = (a0 | (a1 << 8) | (a2 << 16) | (a3 << 24) | (a4 << 32) | (a5 << 40) | (a6 << 48) | (a7 << 56)) as i64
-                    relocs.push(SmfRelocEntry(
-                        offset: r_offset,
-                        symbol_index: r_sym_idx,
-                        reloc_type: r_type,
-                        addend: r_addend
-                    ))
-                    j = j + 1
-                return Ok(relocs)
-            i = i + 1
-        Ok([])
+        val flat = rt_smf_parse_relocs(
+            self.data,
+            self.sections_offset,
+            self.header.section_count as i64,
+            self.header.smf_data_offset
+        )
+        val entry_count = flat.len() / 4
+        var relocs: [SmfRelocEntry] = []
+        var j = 0
+        while j < entry_count:
+            val base = j * 4
+            relocs.push(SmfRelocEntry(
+                offset: flat[base],
+                symbol_index: flat[base + 1],
+                reloc_type: flat[base + 2] as i32,
+                addend: flat[base + 3]
+            ))
+            j = j + 1
+        Ok(relocs)
 
 # ============================================================================
 # SMF Relocation Entry (read-side)
@@ -356,6 +312,11 @@ struct SmfRelocEntry:
     symbol_index: i64
     reloc_type: i32        # Wire values: 1=Abs64, 2=Rel32, 3=PltRel32, 4=GotRel32
     addend: i64
+
+# Native Rust extern: parses SMF Reloc section (type 5) at native speed.
+# Returns flat [i64] with 4 values per entry: [offset, sym_idx, type, addend, ...].
+# Pre-allocates the entire result Vec in Rust (O(N)), bypassing O(N^2) interpreter push.
+extern fn rt_smf_parse_relocs(data: [u8], sections_off: i64, section_count: i64, smf_data_offset: i64) -> [i64]
 
 # ============================================================================
 # Parsing Functions
