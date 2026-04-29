@@ -466,7 +466,7 @@ pub(crate) fn generate_stub_object(
                 continue;
             }
 
-            let bare = if sym.starts_with('_') { &sym[1..] } else { sym.as_str() };
+            let bare = sym.strip_prefix('_').unwrap_or(sym.as_str());
             let rt_sym = format!("_rt_{}", bare);
             if matches!(
                 bare,

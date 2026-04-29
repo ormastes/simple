@@ -528,17 +528,15 @@ impl CompilerPipeline {
         // Check if we have a main function. If not, fall back to interpreter mode.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
-        if !has_main_function && source_path.is_none() {
-            if !target.is_wasm() {
-                // Fallback: evaluate via interpreter and wrap result
-                // Note: Interpreter result is architecture-neutral (just an i32)
-                let main_value = self.evaluate_module_with_project(&ast_module.items)?;
-                return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
-            }
+        if !has_main_function && source_path.is_none() && !target.is_wasm() {
+            // Fallback: evaluate via interpreter and wrap result
+            // Note: Interpreter result is architecture-neutral (just an i32)
             // Export-only wasm modules are valid for browser hydration and do
             // not require a native/server-style `main` entrypoint. Keep the
             // earlier script-statement fallback guard, then continue into wasm
             // code generation for function-only modules.
+            let main_value = self.evaluate_module_with_project(&ast_module.items)?;
+            return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
         }
 
         // 8. Apply hybrid transformation if needed

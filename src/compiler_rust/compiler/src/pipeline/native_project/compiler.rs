@@ -141,6 +141,7 @@ impl NativeProjectBuilder {
 }
 
 /// Compile a single .spl file to object code.
+#[allow(clippy::too_many_arguments)] // reason: native compilation requires all project context
 pub(crate) fn compile_file_to_object(
     source: &str,
     file_path: &Path,

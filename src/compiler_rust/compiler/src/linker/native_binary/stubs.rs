@@ -422,6 +422,7 @@ static inline int64_t _rt_now_nanos(void) {{
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // reason: stub generation requires all linker context
     fn build_auto_stubs_from_obj(
         &self,
         temp_path: &Path,

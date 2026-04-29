@@ -491,7 +491,7 @@ fn parse_inline_dimension(text: &str) -> HashMap<String, i32> {
         *dims.entry(name).or_insert(0) += sign * exp;
         sym.clear();
     };
-    while let Some(c) = chars.next() {
+    for c in chars {
         match c {
             '*' | ' ' | '·' => {
                 flush(&mut current, sign, &mut dims);

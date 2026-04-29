@@ -27,7 +27,7 @@ struct BridgeRequest {
 fn get_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> {
     match args.get(idx) {
         Some(Value::Int(v)) => Ok(*v),
-        _ => Err(CompileError::runtime(&format!(
+        _ => Err(CompileError::runtime(format!(
             "{name}: argument {idx} must be an integer"
         ))),
     }
@@ -36,7 +36,7 @@ fn get_i64(args: &[Value], idx: usize, name: &str) -> Result<i64, CompileError> 
 fn get_string(args: &[Value], idx: usize, name: &str) -> Result<String, CompileError> {
     match args.get(idx) {
         Some(Value::Str(v)) => Ok(v.clone()),
-        _ => Err(CompileError::runtime(&format!(
+        _ => Err(CompileError::runtime(format!(
             "{name}: argument {idx} must be a string"
         ))),
     }
@@ -139,7 +139,7 @@ fn parse_request(path: &Path) -> Option<BridgeRequest> {
 
 pub fn rt_host_wm_server_start(_args: &[Value]) -> Result<Value, CompileError> {
     let dir = std::env::temp_dir().join(format!("simple-host-wm-{}-{}", std::process::id(), now_nanos()));
-    ensure_bridge_dirs(&dir).map_err(|e| CompileError::runtime(&format!("rt_host_wm_server_start: {e}")))?;
+    ensure_bridge_dirs(&dir).map_err(|e| CompileError::runtime(format!("rt_host_wm_server_start: {e}")))?;
     Ok(Value::Str(dir.to_string_lossy().to_string()))
 }
 
@@ -278,7 +278,7 @@ pub fn rt_host_wm_client_request(args: &[Value]) -> Result<Value, CompileError> 
         Some(dir) => dir,
         None => return Ok(Value::Tuple(vec![Value::Int(1), Value::Int(0)])),
     };
-    ensure_bridge_dirs(&dir).map_err(|e| CompileError::runtime(&format!("rt_host_wm_client_request: {e}")))?;
+    ensure_bridge_dirs(&dir).map_err(|e| CompileError::runtime(format!("rt_host_wm_client_request: {e}")))?;
     let client_id = get_i64(args, 0, "rt_host_wm_client_request")?;
     let method = get_i64(args, 1, "rt_host_wm_client_request")?;
     let window_id = get_i64(args, 2, "rt_host_wm_client_request")?;
@@ -299,7 +299,7 @@ pub fn rt_host_wm_client_request(args: &[Value]) -> Result<Value, CompileError> 
         hex_encode(&app_id)
     );
     write_atomic(&request_path(&dir, request_id), &request)
-        .map_err(|e| CompileError::runtime(&format!("rt_host_wm_client_request write: {e}")))?;
+        .map_err(|e| CompileError::runtime(format!("rt_host_wm_client_request write: {e}")))?;
 
     let reply = reply_path(&dir, request_id);
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms as u64);

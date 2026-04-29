@@ -73,10 +73,10 @@ pub(crate) fn compile_inline_asm_c(
     target: Option<(&str, &str, &str)>,
 ) -> Result<Option<PathBuf>, String> {
     if let Some((triple, _, _)) = target {
-        if triple.starts_with("aarch64") || triple.starts_with("arm") {
-            if !crate::codegen::inline_asm::collected_inline_asm_blocks().is_empty() {
-                return Ok(None);
-            }
+        if (triple.starts_with("aarch64") || triple.starts_with("arm"))
+            && !crate::codegen::inline_asm::collected_inline_asm_blocks().is_empty()
+        {
+            return Ok(None);
         }
     }
     let Some(c_path) = write_inline_asm_c_for_target(temp_dir, target)? else {

@@ -351,6 +351,7 @@ fn resolve_name(
 }
 
 /// Resolve a Call target that is still unresolved after local/use_map/import_map lookup.
+#[allow(clippy::too_many_arguments)] // reason: call resolution requires full module context
 fn resolve_call_target(
     target: &mut crate::mir::CallTarget,
     name: &str,

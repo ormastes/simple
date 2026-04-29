@@ -714,7 +714,7 @@ int main(int argc, char** argv) {
                 object_paths,
                 &main_o,
                 selected_runtime.as_ref().map(|(p, _)| p.as_path()),
-                &imports,
+                imports,
             )?;
             cmd.arg(&stubs_o);
         }
@@ -1008,7 +1008,7 @@ int main(int argc, char** argv) {
                     std::process::Command::new(p)
                         .arg("--version")
                         .output()
-                        .is_some_and(|o| o.status.success())
+                        .is_ok_and(|o| o.status.success())
                 })
                 .map(|s| s.to_string())
         };
@@ -1218,7 +1218,7 @@ int main(int argc, char** argv) {
                         std::process::Command::new(bin)
                             .arg("--version")
                             .output()
-                            .is_some_and(|o| o.status.success())
+                            .is_ok_and(|o| o.status.success())
                     })
                     .unwrap_or(&"objcopy");
                 let objcopy = std::process::Command::new(objcopy_bin)

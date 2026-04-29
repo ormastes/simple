@@ -476,53 +476,53 @@ impl Lowerer {
         for item in &imported_module.items {
             match item {
                 Node::Class(class_def) => {
-                    if self.should_import_symbol(&class_def.name, target) || matches!(target, ImportTarget::Glob) {
-                        if self.module.types.lookup(&class_def.name).is_none() {
-                            self.module.types.register_named(
-                                class_def.name.clone(),
-                                super::super::types::HirType::Struct {
-                                    name: class_def.name.clone(),
-                                    fields: vec![],
-                                    has_snapshot: false,
-                                    generic_params: class_def.generic_params.clone(),
-                                    is_generic_template: class_def.is_generic_template,
-                                    type_bindings: std::collections::HashMap::new(),
-                                },
-                            );
-                        }
+                    if (self.should_import_symbol(&class_def.name, target) || matches!(target, ImportTarget::Glob))
+                        && self.module.types.lookup(&class_def.name).is_none()
+                    {
+                        self.module.types.register_named(
+                            class_def.name.clone(),
+                            super::super::types::HirType::Struct {
+                                name: class_def.name.clone(),
+                                fields: vec![],
+                                has_snapshot: false,
+                                generic_params: class_def.generic_params.clone(),
+                                is_generic_template: class_def.is_generic_template,
+                                type_bindings: std::collections::HashMap::new(),
+                            },
+                        );
                     }
                 }
                 Node::Struct(struct_def) => {
-                    if self.should_import_symbol(&struct_def.name, target) || matches!(target, ImportTarget::Glob) {
-                        if self.module.types.lookup(&struct_def.name).is_none() {
-                            self.module.types.register_named(
-                                struct_def.name.clone(),
-                                super::super::types::HirType::Struct {
-                                    name: struct_def.name.clone(),
-                                    fields: vec![],
-                                    has_snapshot: false,
-                                    generic_params: struct_def.generic_params.clone(),
-                                    is_generic_template: struct_def.is_generic_template,
-                                    type_bindings: std::collections::HashMap::new(),
-                                },
-                            );
-                        }
+                    if (self.should_import_symbol(&struct_def.name, target) || matches!(target, ImportTarget::Glob))
+                        && self.module.types.lookup(&struct_def.name).is_none()
+                    {
+                        self.module.types.register_named(
+                            struct_def.name.clone(),
+                            super::super::types::HirType::Struct {
+                                name: struct_def.name.clone(),
+                                fields: vec![],
+                                has_snapshot: false,
+                                generic_params: struct_def.generic_params.clone(),
+                                is_generic_template: struct_def.is_generic_template,
+                                type_bindings: std::collections::HashMap::new(),
+                            },
+                        );
                     }
                 }
                 Node::Enum(enum_def) => {
-                    if self.should_import_symbol(&enum_def.name, target) || matches!(target, ImportTarget::Glob) {
-                        if self.module.types.lookup(&enum_def.name).is_none() {
-                            self.module.types.register_named(
-                                enum_def.name.clone(),
-                                super::super::types::HirType::Enum {
-                                    name: enum_def.name.clone(),
-                                    variants: vec![],
-                                    generic_params: enum_def.generic_params.clone(),
-                                    is_generic_template: enum_def.is_generic_template,
-                                    type_bindings: std::collections::HashMap::new(),
-                                },
-                            );
-                        }
+                    if (self.should_import_symbol(&enum_def.name, target) || matches!(target, ImportTarget::Glob))
+                        && self.module.types.lookup(&enum_def.name).is_none()
+                    {
+                        self.module.types.register_named(
+                            enum_def.name.clone(),
+                            super::super::types::HirType::Enum {
+                                name: enum_def.name.clone(),
+                                variants: vec![],
+                                generic_params: enum_def.generic_params.clone(),
+                                is_generic_template: enum_def.is_generic_template,
+                                type_bindings: std::collections::HashMap::new(),
+                            },
+                        );
                     }
                 }
                 _ => {}
@@ -580,53 +580,53 @@ impl Lowerer {
             for item in &sibling_module.items {
                 match item {
                     Node::Class(class_def) => {
-                        if self.should_import_symbol(&class_def.name, target) || matches!(target, ImportTarget::Glob) {
-                            if self.module.types.lookup(&class_def.name).is_none() {
-                                self.module.types.register_named(
-                                    class_def.name.clone(),
-                                    super::super::types::HirType::Struct {
-                                        name: class_def.name.clone(),
-                                        fields: vec![],
-                                        has_snapshot: false,
-                                        generic_params: class_def.generic_params.clone(),
-                                        is_generic_template: class_def.is_generic_template,
-                                        type_bindings: std::collections::HashMap::new(),
-                                    },
-                                );
-                            }
+                        if (self.should_import_symbol(&class_def.name, target) || matches!(target, ImportTarget::Glob))
+                            && self.module.types.lookup(&class_def.name).is_none()
+                        {
+                            self.module.types.register_named(
+                                class_def.name.clone(),
+                                super::super::types::HirType::Struct {
+                                    name: class_def.name.clone(),
+                                    fields: vec![],
+                                    has_snapshot: false,
+                                    generic_params: class_def.generic_params.clone(),
+                                    is_generic_template: class_def.is_generic_template,
+                                    type_bindings: std::collections::HashMap::new(),
+                                },
+                            );
                         }
                     }
                     Node::Struct(struct_def) => {
-                        if self.should_import_symbol(&struct_def.name, target) || matches!(target, ImportTarget::Glob) {
-                            if self.module.types.lookup(&struct_def.name).is_none() {
-                                self.module.types.register_named(
-                                    struct_def.name.clone(),
-                                    super::super::types::HirType::Struct {
-                                        name: struct_def.name.clone(),
-                                        fields: vec![],
-                                        has_snapshot: false,
-                                        generic_params: struct_def.generic_params.clone(),
-                                        is_generic_template: struct_def.is_generic_template,
-                                        type_bindings: std::collections::HashMap::new(),
-                                    },
-                                );
-                            }
+                        if (self.should_import_symbol(&struct_def.name, target) || matches!(target, ImportTarget::Glob))
+                            && self.module.types.lookup(&struct_def.name).is_none()
+                        {
+                            self.module.types.register_named(
+                                struct_def.name.clone(),
+                                super::super::types::HirType::Struct {
+                                    name: struct_def.name.clone(),
+                                    fields: vec![],
+                                    has_snapshot: false,
+                                    generic_params: struct_def.generic_params.clone(),
+                                    is_generic_template: struct_def.is_generic_template,
+                                    type_bindings: std::collections::HashMap::new(),
+                                },
+                            );
                         }
                     }
                     Node::Enum(enum_def) => {
-                        if self.should_import_symbol(&enum_def.name, target) || matches!(target, ImportTarget::Glob) {
-                            if self.module.types.lookup(&enum_def.name).is_none() {
-                                self.module.types.register_named(
-                                    enum_def.name.clone(),
-                                    super::super::types::HirType::Enum {
-                                        name: enum_def.name.clone(),
-                                        variants: vec![],
-                                        generic_params: enum_def.generic_params.clone(),
-                                        is_generic_template: enum_def.is_generic_template,
-                                        type_bindings: std::collections::HashMap::new(),
-                                    },
-                                );
-                            }
+                        if (self.should_import_symbol(&enum_def.name, target) || matches!(target, ImportTarget::Glob))
+                            && self.module.types.lookup(&enum_def.name).is_none()
+                        {
+                            self.module.types.register_named(
+                                enum_def.name.clone(),
+                                super::super::types::HirType::Enum {
+                                    name: enum_def.name.clone(),
+                                    variants: vec![],
+                                    generic_params: enum_def.generic_params.clone(),
+                                    is_generic_template: enum_def.is_generic_template,
+                                    type_bindings: std::collections::HashMap::new(),
+                                },
+                            );
                         }
                     }
                     _ => {}

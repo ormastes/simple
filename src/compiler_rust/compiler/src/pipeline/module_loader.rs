@@ -214,9 +214,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             continue;
         }
 
-        let stdlib_parts: Vec<String> = if !parts.is_empty() && parts[0] == "std" {
-            parts[1..].to_vec()
-        } else if !parts.is_empty() && parts[0] == "std_lib" {
+        let stdlib_parts: Vec<String> = if !parts.is_empty() && (parts[0] == "std" || parts[0] == "std_lib") {
             parts[1..].to_vec()
         } else {
             parts.to_vec()

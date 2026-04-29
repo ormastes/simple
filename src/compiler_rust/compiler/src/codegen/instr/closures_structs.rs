@@ -138,6 +138,7 @@ pub(crate) fn compile_indirect_call<M: Module>(
     indirect_call_with_result(ctx, builder, sig_ref, fn_ptr, &call_args, dest);
 }
 
+#[allow(clippy::too_many_arguments)] // reason: struct init requires all field context
 pub(crate) fn compile_struct_init<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

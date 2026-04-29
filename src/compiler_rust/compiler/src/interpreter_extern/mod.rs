@@ -1284,18 +1284,18 @@ pub(crate) fn call_extern_function(
         // FFI Array Operations (7 functions)
         // ====================================================================
         "rt_array_new" => ffi_array::rt_array_new_fn(&evaluated),
-        // `rt_array_new_with_cap(cap)` — same shape as rt_array_new(cap).
-        // Without this entry, the call falls through to dynamic FFI which
-        // returns Value::Int(raw_ptr), causing all method dispatch on the
-        // returned [u8] to fail with "method len/push not found on type i64".
+        // `rt_array_new_with_cap(cap)` — returns Value::Array so Simple-land method
+        // dispatch (.len(), .push(), etc.) works on the result.
         // See doc/08_tracking/bug/interpreter_class_field_method_dispatch_2026-04-28.md
-        "rt_array_new_with_cap" => ffi_array::rt_array_new_fn(&evaluated),
+        "rt_array_new_with_cap" => ffi_array::rt_array_new_with_cap_fn(&evaluated),
         "rt_array_push" => ffi_array::rt_array_push_fn(&evaluated),
         "rt_array_get" => ffi_array::rt_array_get_fn(&evaluated),
         "rt_array_set" => ffi_array::rt_array_set_fn(&evaluated),
         "rt_array_pop" => ffi_array::rt_array_pop_fn(&evaluated),
         "rt_array_clear" => ffi_array::rt_array_clear_fn(&evaluated),
         "rt_array_len" => ffi_array::rt_array_len_fn(&evaluated),
+        // `rt_bytes_u8_at(arr, idx)` — index into a Value::Array byte buffer.
+        "rt_bytes_u8_at" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
 
         // ====================================================================
         // FFI Dictionary Operations (7 functions)

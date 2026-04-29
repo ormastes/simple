@@ -31,6 +31,56 @@ pub fn rt_array_new_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(rv.to_raw() as i64))
 }
 
+/// Create new array with capacity — interpreter-native variant.
+///
+/// Returns `Value::Array` so that Simple-land method dispatch (`.len()`, `.push()`, etc.)
+/// works correctly on the returned value.  The capacity hint is accepted and ignored;
+/// the interpreter uses a Vec which grows on demand.
+pub fn rt_array_new_with_cap_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::array(vec![]))
+}
+
+/// Get byte at index from a `Value::Array` — interpreter-native variant.
+///
+/// Handles arrays created by `rt_array_new_with_cap_fn` which are stored as
+/// `Value::Array(Arc<Vec<Value>>)`.  Returns the element as an `i64` (the
+/// raw byte value stored as `Value::Int`), mirroring the runtime behaviour.
+pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let arr = args.first().ok_or_else(|| {
+        CompileError::semantic_with_context(
+            "rt_bytes_u8_at expects 2 arguments".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )
+    })?;
+
+    let idx = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_bytes_u8_at expects 2 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    match arr {
+        Value::Array(vec) => {
+            let byte_val = vec.get(idx as usize).cloned().unwrap_or(Value::Int(0));
+            match byte_val {
+                Value::Int(n) => Ok(Value::Int(n & 0xFF)),
+                _ => Ok(Value::Int(0)),
+            }
+        }
+        Value::Int(raw) => {
+            // Fall back to runtime call for heap-backed arrays (raw pointer)
+            let arr_rv = RuntimeValue::from_raw(*raw as u64);
+            let rv = rt_array_get(arr_rv, idx);
+            Ok(Value::Int(rv.to_raw() as i64 & 0xFF))
+        }
+        _ => Ok(Value::Int(0)),
+    }
+}
+
 // ============================================================================
 // Array Manipulation
 // ============================================================================

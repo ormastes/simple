@@ -166,9 +166,9 @@ impl ModuleResolver {
 
                 // Strategy 1: Try stdlib
                 if segments[0] != "crate" {
-                    let stdlib_segments = if !segments.is_empty() && segments[0] == "std_lib" {
-                        &segments[1..]
-                    } else if !segments.is_empty() && (segments[0] == "std" || segments[0] == "lib") {
+                    let stdlib_segments = if !segments.is_empty()
+                        && (segments[0] == "std_lib" || segments[0] == "std" || segments[0] == "lib")
+                    {
                         &segments[1..]
                     } else {
                         segments

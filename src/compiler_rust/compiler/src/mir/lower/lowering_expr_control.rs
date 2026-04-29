@@ -37,9 +37,7 @@ fn try_collect_int_match<'a>(
                 Some((cases, node))
             };
         };
-        let Some(else_b) = else_branch.as_ref() else {
-            return None;
-        };
+        let else_b = else_branch.as_ref()?;
         let HirExprKind::Binary { op: BinOp::Eq, left, right } = &condition.kind else {
             return None;
         };
@@ -190,7 +188,7 @@ impl<'a> MirLowerer<'a> {
                     .map(|(k, _)| *k)
                     .fold((i64::MAX, i64::MIN), |(lo, hi), k| (lo.min(k), hi.max(k)));
                 let key_span = span.1.saturating_sub(span.0);
-                if cases.len() >= SWITCH_MIN_ARMS && key_span >= 0 && key_span <= SWITCH_MAX_SPAN {
+                if cases.len() >= SWITCH_MIN_ARMS && (0..=SWITCH_MAX_SPAN).contains(&key_span) {
                     return self.lower_int_switch(val_reg, body.ty, cases, default);
                 }
             }
