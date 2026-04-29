@@ -143,8 +143,10 @@ fn test_native_hir_resolver_roots_include_project_src_for_narrow_sources() {
 
 #[test]
 fn test_incremental_cache_dir_custom() {
-    let mut config = NativeBuildConfig::default();
-    config.cache_dir = Some(PathBuf::from("/tmp/my_cache"));
+    let config = NativeBuildConfig {
+        cache_dir: Some(PathBuf::from("/tmp/my_cache")),
+        ..Default::default()
+    };
 
     let builder =
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
@@ -267,8 +269,10 @@ fn test_runtime_bundle_auto_prefers_runtime_for_non_compiler_entry() {
     std::fs::write(&runtime, b"runtime").unwrap();
     std::fs::write(&native_all, b"all").unwrap();
 
-    let mut config = NativeBuildConfig::default();
-    config.runtime_path = Some(temp.path().to_path_buf());
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
 
     let mut builder =
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_mcp_native"))
@@ -290,8 +294,10 @@ fn test_runtime_bundle_auto_prefers_native_all_for_compiler_entry() {
     std::fs::write(&runtime, b"runtime").unwrap();
     std::fs::write(&native_all, b"all").unwrap();
 
-    let mut config = NativeBuildConfig::default();
-    config.runtime_path = Some(temp.path().to_path_buf());
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
 
     let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple_native"))
         .config(config);
@@ -308,8 +314,10 @@ fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
 
-    let mut config = NativeBuildConfig::default();
-    config.runtime_path = Some(temp.path().to_path_buf());
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
 
     let mut builder = NativeProjectBuilder::new(
         PathBuf::from("/project"),
@@ -334,8 +342,10 @@ fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
 
-    let mut config = NativeBuildConfig::default();
-    config.runtime_path = Some(temp.path().to_path_buf());
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
     config.runtime_bundle = "all".to_string();
 
     let mut builder = NativeProjectBuilder::new(

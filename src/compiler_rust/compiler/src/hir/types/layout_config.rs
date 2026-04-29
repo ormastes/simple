@@ -645,9 +645,11 @@ mod tests {
 
     #[test]
     fn test_phase_patterns() {
-        let mut patterns = PhasePatterns::default();
-        patterns.startup = vec!["init_*".to_string(), "parse_*".to_string()];
-        patterns.cold = vec!["help_*".to_string(), "debug_*".to_string()];
+        let patterns = PhasePatterns {
+            startup: vec!["init_*".to_string(), "parse_*".to_string()],
+            cold: vec!["help_*".to_string(), "debug_*".to_string()],
+            ..Default::default()
+        };
 
         assert_eq!(patterns.find_phase("init_app"), Some(LayoutPhase::Startup));
         assert_eq!(patterns.find_phase("parse_args"), Some(LayoutPhase::Startup));
@@ -657,8 +659,10 @@ mod tests {
 
     #[test]
     fn test_anchor_patterns() {
-        let mut anchors = AnchorPatterns::default();
-        anchors.event_loop = vec!["main_loop".to_string(), "*_loop".to_string()];
+        let anchors = AnchorPatterns {
+            event_loop: vec!["main_loop".to_string(), "*_loop".to_string()],
+            ..Default::default()
+        };
 
         assert!(anchors.is_event_loop("main_loop"));
         assert!(anchors.is_event_loop("event_loop"));
