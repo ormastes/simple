@@ -420,11 +420,10 @@ mod tests {
         assert_eq!(a.function_call_count("main"), 2);
         assert_eq!(a.ffi_call_count("rt_print"), 1);
     }
-}
 
-#[cfg(test)]
-impl CoverageCollector {
-    fn was_line_executed_compat(&self, file: &str, line: usize) -> bool {
-        self.is_line_executed(Path::new(file), line)
+    impl CoverageCollector {
+        fn was_line_executed_compat(&self, file: &str, line: usize) -> bool {
+            self.is_line_executed(Path::new(file), line)
+        }
     }
 }

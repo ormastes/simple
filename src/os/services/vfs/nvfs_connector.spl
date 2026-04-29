@@ -36,12 +36,45 @@ fn _log_error(msg: text):
 
 struct NvfsVfsConnection:
     """Mounted NVFS POSIX shim plus VFS-style mount prefix."""
+    conn_id:     i64
     mount_path:  text
-    driver:      NvfsPosixDriver
     read_only:   bool
     want_caps:   u32
     require_caps: u32
     max_bytes:   i64
+
+struct NvfsVfsConnectionSlot:
+    conn_id: i64
+    driver:  NvfsPosixDriver
+
+var _nvfs_vfs_connections: [NvfsVfsConnectionSlot] = []
+var _nvfs_vfs_next_conn_id: i64 = 1
+
+fn _nvfs_vfs_alloc_conn_id() -> i64:
+    val conn_id = _nvfs_vfs_next_conn_id
+    _nvfs_vfs_next_conn_id = _nvfs_vfs_next_conn_id + 1
+    conn_id
+
+fn _nvfs_vfs_find_connection_idx(conn_id: i64) -> i64:
+    var i: i64 = 0
+    while i < _nvfs_vfs_connections.len() as i64:
+        if _nvfs_vfs_connections[i].conn_id == conn_id:
+            return i
+        i = i + 1
+    -1
+
+fn _nvfs_vfs_load_driver(conn_id: i64) -> Result<NvfsPosixDriver, FsError>:
+    val idx = _nvfs_vfs_find_connection_idx(conn_id)
+    if idx < 0:
+        return Err(FsError.NotFound)
+    Ok(_nvfs_vfs_connections[idx].driver)
+
+fn _nvfs_vfs_store_driver(conn_id: i64, driver: NvfsPosixDriver) -> Result<(), FsError>:
+    val idx = _nvfs_vfs_find_connection_idx(conn_id)
+    if idx < 0:
+        return Err(FsError.NotFound)
+    _nvfs_vfs_connections[idx] = NvfsVfsConnectionSlot(conn_id: conn_id, driver: driver)
+    Ok(())
 
 fn nvfs_vfs_connect(
     mount_path:  text,
@@ -68,9 +101,11 @@ fn nvfs_vfs_connect(
     if mount_r.is_err():
         _log_error("driver.mount failed for '{trimmed}'")
         return Err(mount_r.unwrap_err())
+    val conn_id = _nvfs_vfs_alloc_conn_id()
+    _nvfs_vfs_connections.push(NvfsVfsConnectionSlot(conn_id: conn_id, driver: driver))
     Ok(NvfsVfsConnection(
+        conn_id:     conn_id,
         mount_path:  trimmed,
-        driver:      driver,
         read_only:   read_only,
         want_caps:   want_caps,
         require_caps: require_caps,
@@ -103,8 +138,11 @@ fn nvfs_vfs_write_text(conn: NvfsVfsConnection, path: text, content: text) -> Re
     if rel_r.is_err():
         return Err(rel_r.unwrap_err())
     val rel = rel_r.unwrap()
-    var driver = conn.driver
-    val open_r = driver.open(rel, OpenFlags.read_write().with_create())
+    val driver_r = _nvfs_vfs_load_driver(conn.conn_id)
+    if driver_r.is_err():
+        return Err(driver_r.unwrap_err())
+    var driver = driver_r.unwrap()
+    val open_r = driver.open(rel, OpenFlags.write_only().with_append().with_create())
     if open_r.is_err():
         _log_error("open failed for '{path}'")
         return Err(open_r.unwrap_err())
@@ -117,6 +155,9 @@ fn nvfs_vfs_write_text(conn: NvfsVfsConnection, path: text, content: text) -> Re
     val buf = rt_text_to_bytes(content)
     val write_r = driver.write(handle, 0, buf)
     driver.close(handle)
+    val persist_r = _nvfs_vfs_store_driver(conn.conn_id, driver)
+    if persist_r.is_err():
+        return Err(persist_r.unwrap_err())
     if write_r.is_err():
         _log_error("write failed for '{path}'")
         return Err(write_r.unwrap_err())
@@ -128,18 +169,25 @@ fn nvfs_vfs_read_bytes(conn: NvfsVfsConnection, path: text) -> Result<[u8], FsEr
     if rel_r.is_err():
         return Err(rel_r.unwrap_err())
     val rel = rel_r.unwrap()
-    var driver = conn.driver
+    val driver_r = _nvfs_vfs_load_driver(conn.conn_id)
+    if driver_r.is_err():
+        return Err(driver_r.unwrap_err())
+    var driver = driver_r.unwrap()
     val stat_r = driver.stat(rel)
     if stat_r.is_err():
+        val _ = _nvfs_vfs_store_driver(conn.conn_id, driver)
         return Err(stat_r.unwrap_err())
     val size = stat_r.unwrap().size.to_i64()
     if size > conn.max_bytes:
+        val _ = _nvfs_vfs_store_driver(conn.conn_id, driver)
         _log_warn("read rejected: file size {size} > max {conn.max_bytes}")
         return Err(FsError.TooLarge)
     if size <= 0:
+        val _ = _nvfs_vfs_store_driver(conn.conn_id, driver)
         return Ok([])
     val open_r = driver.open(rel, OpenFlags.read_only())
     if open_r.is_err():
+        val _ = _nvfs_vfs_store_driver(conn.conn_id, driver)
         _log_error("open failed for '{path}'")
         return Err(open_r.unwrap_err())
     val handle = open_r.unwrap()
@@ -150,6 +198,9 @@ fn nvfs_vfs_read_bytes(conn: NvfsVfsConnection, path: text) -> Result<[u8], FsEr
         i = i + 1
     val read_r = driver.read(handle, 0, buf)
     driver.close(handle)
+    val persist_r = _nvfs_vfs_store_driver(conn.conn_id, driver)
+    if persist_r.is_err():
+        return Err(persist_r.unwrap_err())
     if read_r.is_err():
         _log_error("read failed for '{path}'")
         return Err(read_r.unwrap_err())
@@ -176,7 +227,10 @@ fn nvfs_vfs_file_size(conn: NvfsVfsConnection, path: text) -> Result<i64, FsErro
     val rel_r = _nvfs_relpath(conn, path)
     if rel_r.is_err():
         return Err(rel_r.unwrap_err())
-    var driver = conn.driver
+    val driver_r = _nvfs_vfs_load_driver(conn.conn_id)
+    if driver_r.is_err():
+        return Err(driver_r.unwrap_err())
+    val driver = driver_r.unwrap()
     val stat_r = driver.stat(rel_r.unwrap())
     if stat_r.is_err():
         return Err(stat_r.unwrap_err())

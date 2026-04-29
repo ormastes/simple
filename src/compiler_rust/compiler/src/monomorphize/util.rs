@@ -169,6 +169,55 @@ pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteTyp
     }
 }
 
+/// Convert a ConcreteType to an AST Type.
+pub fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
+    match concrete {
+        ConcreteType::Int => AstType::Simple("Int".to_string()),
+        ConcreteType::Float => AstType::Simple("Float".to_string()),
+        ConcreteType::Bool => AstType::Simple("Bool".to_string()),
+        ConcreteType::String => AstType::Simple("String".to_string()),
+        ConcreteType::Nil => AstType::Simple("Nil".to_string()),
+        ConcreteType::Named(name) => AstType::Simple(name.clone()),
+        ConcreteType::Array(elem) => AstType::Array {
+            element: Box::new(concrete_to_ast_type(elem)),
+            size: None,
+        },
+        ConcreteType::Tuple(elems) => AstType::Tuple(elems.iter().map(concrete_to_ast_type).collect()),
+        ConcreteType::Dict { key, value } => AstType::Generic {
+            name: "Dict".to_string(),
+            args: vec![concrete_to_ast_type(key), concrete_to_ast_type(value)],
+        },
+        ConcreteType::Function { params, ret } => AstType::Function {
+            params: params.iter().map(concrete_to_ast_type).collect(),
+            ret: Some(Box::new(concrete_to_ast_type(ret))),
+        },
+        ConcreteType::Optional(inner) => AstType::Optional(Box::new(concrete_to_ast_type(inner))),
+        ConcreteType::Pointer {
+            kind,
+            capability: _,
+            inner,
+        } => {
+            // Note: capability is preserved in ConcreteType for monomorphization,
+            // but AST Pointer doesn't have a capability field - it's derived from kind
+            let ast_kind = match kind {
+                PointerKind::Unique => simple_parser::ast::PointerKind::Unique,
+                PointerKind::Shared => simple_parser::ast::PointerKind::Shared,
+                PointerKind::Weak => simple_parser::ast::PointerKind::Weak,
+                PointerKind::Handle => simple_parser::ast::PointerKind::Handle,
+                PointerKind::Borrow => simple_parser::ast::PointerKind::Borrow,
+                PointerKind::BorrowMut => simple_parser::ast::PointerKind::BorrowMut,
+                PointerKind::RawConst => simple_parser::ast::PointerKind::RawConst,
+                PointerKind::RawMut => simple_parser::ast::PointerKind::RawMut,
+            };
+            AstType::Pointer {
+                kind: ast_kind,
+                inner: Box::new(concrete_to_ast_type(inner)),
+            }
+        }
+        ConcreteType::Specialized { name, args: _ } => AstType::Simple(name.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,54 +364,5 @@ main = identity(42)
             false
         });
         assert!(call_rewritten, "Call site should be rewritten to identity$Int");
-    }
-}
-
-/// Convert a ConcreteType to an AST Type.
-pub fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
-    match concrete {
-        ConcreteType::Int => AstType::Simple("Int".to_string()),
-        ConcreteType::Float => AstType::Simple("Float".to_string()),
-        ConcreteType::Bool => AstType::Simple("Bool".to_string()),
-        ConcreteType::String => AstType::Simple("String".to_string()),
-        ConcreteType::Nil => AstType::Simple("Nil".to_string()),
-        ConcreteType::Named(name) => AstType::Simple(name.clone()),
-        ConcreteType::Array(elem) => AstType::Array {
-            element: Box::new(concrete_to_ast_type(elem)),
-            size: None,
-        },
-        ConcreteType::Tuple(elems) => AstType::Tuple(elems.iter().map(concrete_to_ast_type).collect()),
-        ConcreteType::Dict { key, value } => AstType::Generic {
-            name: "Dict".to_string(),
-            args: vec![concrete_to_ast_type(key), concrete_to_ast_type(value)],
-        },
-        ConcreteType::Function { params, ret } => AstType::Function {
-            params: params.iter().map(concrete_to_ast_type).collect(),
-            ret: Some(Box::new(concrete_to_ast_type(ret))),
-        },
-        ConcreteType::Optional(inner) => AstType::Optional(Box::new(concrete_to_ast_type(inner))),
-        ConcreteType::Pointer {
-            kind,
-            capability: _,
-            inner,
-        } => {
-            // Note: capability is preserved in ConcreteType for monomorphization,
-            // but AST Pointer doesn't have a capability field - it's derived from kind
-            let ast_kind = match kind {
-                PointerKind::Unique => simple_parser::ast::PointerKind::Unique,
-                PointerKind::Shared => simple_parser::ast::PointerKind::Shared,
-                PointerKind::Weak => simple_parser::ast::PointerKind::Weak,
-                PointerKind::Handle => simple_parser::ast::PointerKind::Handle,
-                PointerKind::Borrow => simple_parser::ast::PointerKind::Borrow,
-                PointerKind::BorrowMut => simple_parser::ast::PointerKind::BorrowMut,
-                PointerKind::RawConst => simple_parser::ast::PointerKind::RawConst,
-                PointerKind::RawMut => simple_parser::ast::PointerKind::RawMut,
-            };
-            AstType::Pointer {
-                kind: ast_kind,
-                inner: Box::new(concrete_to_ast_type(inner)),
-            }
-        }
-        ConcreteType::Specialized { name, args: _ } => AstType::Simple(name.clone()),
     }
 }

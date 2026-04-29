@@ -139,7 +139,7 @@ impl Default for NativeBinaryOptions {
             target,
             layout_optimize: false,
             layout_profile: None,
-            strip: false,
+            strip: true, // Strip debug symbols by default for release builds; pass --no-strip to opt out
             pie: true, // Default to PIE for security (codegen generates PIC)
             shared: false,
             libraries,

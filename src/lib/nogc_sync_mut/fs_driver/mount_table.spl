@@ -150,30 +150,51 @@ impl MountTable:
 
     fn stat(path: text) -> Result<StatInfo, FsError>:
         """Stat path via the appropriate mounted driver."""
-        val entry_opt = self.lookup_text(path)
-        match entry_opt:
-            case nil:
+        val resolved = self.resolve(Path(raw: path))
+        match resolved:
+            case Err(e):
+                Err(e)
+            case Ok(pair):
+                val mount_id = pair.0
+                val relpath = pair.1
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == mount_id:
+                        return self.mounts[i].driver.stat_path(relpath)
+                    i = i + 1
                 Err(FsError.NotFound)
-            case Some(entry):
-                entry.driver.stat_path(Path(raw: path))
 
     fn open(path: text, flags: OpenFlags) -> Result<FileHandle, FsError>:
         """Open path for I/O via the appropriate mounted driver."""
-        val entry_opt = self.lookup_text(path)
-        match entry_opt:
-            case nil:
+        val resolved = self.resolve(Path(raw: path))
+        match resolved:
+            case Err(e):
+                Err(e)
+            case Ok(pair):
+                val mount_id = pair.0
+                val relpath = pair.1
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == mount_id:
+                        return self.mounts[i].driver.open_path(relpath, flags)
+                    i = i + 1
                 Err(FsError.NotFound)
-            case Some(entry):
-                entry.driver.open_path(Path(raw: path), flags)
 
     fn opendir(path: text) -> Result<DirHandle, FsError>:
         """Open directory via the appropriate mounted driver."""
-        val entry_opt = self.lookup_text(path)
-        match entry_opt:
-            case nil:
+        val resolved = self.resolve(Path(raw: path))
+        match resolved:
+            case Err(e):
+                Err(e)
+            case Ok(pair):
+                val mount_id = pair.0
+                val relpath = pair.1
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == mount_id:
+                        return self.mounts[i].driver.opendir_path(relpath)
+                    i = i + 1
                 Err(FsError.NotFound)
-            case Some(entry):
-                entry.driver.opendir_path(Path(raw: path))
 
     fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
         """Read directory entries via the driver that owns the handle (probe each mount)."""
@@ -197,12 +218,19 @@ impl MountTable:
 
     fn mkdir(path: text, mode: u32) -> Result<(), FsError>:
         """Create directory at path via the appropriate mounted driver."""
-        val entry_opt = self.lookup_text(path)
-        match entry_opt:
-            case nil:
+        val resolved = self.resolve(Path(raw: path))
+        match resolved:
+            case Err(e):
+                Err(e)
+            case Ok(pair):
+                val mount_id = pair.0
+                val relpath = pair.1
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == mount_id:
+                        return self.mounts[i].driver.mkdir_path(relpath.raw, mode)
+                    i = i + 1
                 Err(FsError.NotFound)
-            case Some(entry):
-                entry.driver.mkdir_path(path, mode)
 
     fn block_device_for(path: text) -> Result<text, FsError>:
         """Return a text tag identifying the block device for the mount at path."""
@@ -255,21 +283,40 @@ impl MountTable:
 
     fn unlink(path: text) -> Result<(), FsError>:
         """Remove a file from the filesystem."""
-        val entry_opt = self.lookup_text(path)
-        match entry_opt:
-            case nil:
+        val resolved = self.resolve(Path(raw: path))
+        match resolved:
+            case Err(e):
+                Err(e)
+            case Ok(pair):
+                val mount_id = pair.0
+                val relpath = pair.1
+                var i: i32 = 0
+                while i < self.mounts.len() as i32:
+                    if self.mounts[i].id == mount_id:
+                        return self.mounts[i].driver.unlink_path_text(relpath.raw)
+                    i = i + 1
                 Err(FsError.NotFound)
-            case Some(entry):
-                entry.driver.unlink_path_text(path)
 
     fn rename(old_path: text, new_path: text) -> Result<(), FsError>:
         """Rename a file or directory."""
-        val entry_opt = self.lookup_text(old_path)
-        match entry_opt:
-            case nil:
-                Err(FsError.NotFound)
-            case Some(entry):
-                entry.driver.rename_path_text(old_path, new_path)
+        val old_resolved = self.resolve(Path(raw: old_path))
+        match old_resolved:
+            case Err(e):
+                Err(e)
+            case Ok(old_pair):
+                val new_resolved = self.resolve(Path(raw: new_path))
+                match new_resolved:
+                    case Err(e):
+                        Err(e)
+                    case Ok(new_pair):
+                        if old_pair.0.id != new_pair.0.id:
+                            return Err(FsError.InvalidArg)
+                        var i: i32 = 0
+                        while i < self.mounts.len() as i32:
+                            if self.mounts[i].id == old_pair.0:
+                                return self.mounts[i].driver.rename_path_text(old_pair.1.raw, new_pair.1.raw)
+                            i = i + 1
+                        Err(FsError.NotFound)
 
     fn ftruncate(handle: FileHandle, new_size: i64) -> Result<(), FsError>:
         """Truncate or extend an open file; probe each mount to find handle owner."""

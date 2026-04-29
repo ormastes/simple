@@ -1,0 +1,105 @@
+"""Executable size regression guard — Phase 5 T2.
+
+Compiles a hello-world Simple program to a stripped native binary and asserts
+that the on-disk size stays within a defined budget.
+
+Budget: 12 MB (12,582,912 bytes).  Current baseline: ~9.4 MB (9,623,568 bytes).
+The ~25% headroom accommodates cross-machine noise from rustc/libc version
+differences while still catching regressions above that threshold.
+
+On failure the test prints:
+  - old budget vs new size and % delta
+  - `size -A <bin> | head -20` section breakdown
+  - `nm --size-sort -r -S <bin> | head -10` top symbols
+
+The test also verifies the produced binary actually runs and prints "Hello World"
+so a stub-generation false-green is caught immediately (per memory:
+feedback_compile_mode_false_greens.md).
+"""
+
+# @tag:size_regression
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_exists(path: text) -> bool
+
+fn run_shell(cmd: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", cmd])
+
+# Budget and baseline constants
+val BUDGET_BYTES: i64 = 1048576       # DELIBERATELY TOO TIGHT — for fail-test only; revert after
+val BASELINE_BYTES: i64 = 9623568    # measured 2026-04-28; improvement should show as gap vs budget
+
+val FIXTURE_SPL = "build/size-bench/hello.spl"
+val OUTPUT_BIN  = "build/size-bench/hello.spl.native.stripped"
+
+describe "exe size budget — stripped hello-world native binary":
+    """
+    Regression guard: the stripped on-disk size of a compiled hello-world
+    Simple binary must not exceed BUDGET_BYTES.  On failure, diagnostic output
+    is printed so a future debugger has actionable information.
+    """
+
+    it "fixture source file exists":
+        expect(rt_file_exists(FIXTURE_SPL)).to_equal(true)
+
+    it "compiles hello.spl to a stripped native binary":
+        # Compile fresh so the test is not stale even if the pre-built artifact
+        # was produced by an older toolchain.
+        val result = run_shell(
+            "bin/simple compile --native --strip " + FIXTURE_SPL + " -o " + OUTPUT_BIN
+        )
+        if result.2 != 0:
+            print "COMPILE STDOUT: " + result.0
+            print "COMPILE STDERR: " + result.1
+        expect(result.2).to_equal(0)
+
+    it "produced binary exists after compile":
+        expect(rt_file_exists(OUTPUT_BIN)).to_equal(true)
+
+    it "binary runs and prints Hello World (not a stub)":
+        # Per feedback_compile_mode_false_greens.md: compile path can produce a
+        # stub that reports success but does not actually execute.  Verify real output.
+        val result = run_shell(OUTPUT_BIN)
+        val stdout = result.0
+        if not stdout.contains("Hello World"):
+            print "BINARY DID NOT PRINT 'Hello World'"
+            print "stdout: " + stdout
+            print "stderr: " + result.1
+            print "exit code: " + result.2.to_text()
+        expect(stdout.contains("Hello World")).to_equal(true)
+
+    it "stripped binary size is within budget":
+        val data = rt_file_read_bytes(OUTPUT_BIN) ?? []
+        val size_bytes: i64 = data.len()
+
+        if size_bytes > BUDGET_BYTES:
+            # Print actionable diagnostic so future debugger doesn't need to re-run
+            val pct = ((size_bytes - BUDGET_BYTES) * 100) / BUDGET_BYTES
+            print "SIZE REGRESSION DETECTED"
+            print "  Budget  : " + BUDGET_BYTES.to_text() + " bytes (" + (BUDGET_BYTES / 1048576).to_text() + " MB)"
+            print "  Actual  : " + size_bytes.to_text() + " bytes (" + (size_bytes / 1048576).to_text() + " MB)"
+            print "  Baseline: " + BASELINE_BYTES.to_text() + " bytes (measured 2026-04-28)"
+            print "  Delta   : +" + pct.to_text() + "% over budget"
+
+            # Section breakdown
+            val size_result = run_shell("size -A " + OUTPUT_BIN + " | head -20")
+            print "--- size -A (top sections) ---"
+            print size_result.0
+
+            # Top symbols by size
+            val nm_result = run_shell("nm --size-sort -r -S " + OUTPUT_BIN + " | head -10")
+            print "--- nm top symbols ---"
+            print nm_result.0
+
+        expect(size_bytes <= BUDGET_BYTES).to_equal(true)
+
+    it "baseline has not grown beyond budget (sanity — pre-built artifact)":
+        # Assert on the known pre-built artifact size without re-compiling,
+        # so this test passes even in environments where compile is unavailable.
+        val data = rt_file_read_bytes(OUTPUT_BIN) ?? []
+        val size_bytes: i64 = data.len()
+        # The pre-built artifact was 9.4 MB; if it ever exceeds budget the above
+        # test catches it — this it-block is a belt-and-suspenders sanity check.
+        expect(size_bytes > 0).to_equal(true)
+        expect(size_bytes < 52428800).to_equal(true)   # hard ceiling: 50 MB

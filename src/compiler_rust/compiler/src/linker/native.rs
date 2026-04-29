@@ -494,6 +494,8 @@ impl NativeLinker {
                 if options.pie {
                     cmd.arg("-pie");
                 }
+                // Fold byte-identical functions (safe for non-fn-pointer-compared code)
+                cmd.arg("--icf=all");
             }
             Self::Lld => {
                 if let Some(t) = threads {
@@ -513,6 +515,8 @@ impl NativeLinker {
                 if options.pie {
                     cmd.arg("-pie");
                 }
+                // Fold byte-identical functions (safe for non-fn-pointer-compared code)
+                cmd.arg("--icf=all");
             }
             Self::Ld => {
                 #[cfg(target_os = "macos")]
