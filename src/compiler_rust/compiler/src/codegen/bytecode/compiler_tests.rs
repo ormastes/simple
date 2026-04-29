@@ -151,7 +151,7 @@ fn test_compile_comparison() {
 
     let args = [RuntimeValue::from_int(3), RuntimeValue::from_int(5)];
     let result = vm.call_function(0, &args).expect("Execution failed");
-    assert_eq!(result.as_bool(), true);
+    assert!(result.as_bool());
 }
 
 #[test]
@@ -296,5 +296,5 @@ fn test_compile_bool_const() {
     let mut vm = BytecodeVM::new();
     vm.load_bytecode(&compiled.code);
     let result = vm.execute().expect("Execution failed");
-    assert_eq!(result.as_bool(), true);
+    assert!(result.as_bool());
 }

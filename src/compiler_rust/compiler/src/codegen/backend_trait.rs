@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn test_backend_kind_clone() {
         let backend = BackendKind::Cranelift;
-        let cloned = backend.clone();
+        let cloned = backend;
         assert_eq!(backend, cloned, "Clone should produce equal value");
     }
 

@@ -110,7 +110,7 @@ fn unit_type_basic() {
     // Standalone unit: `unit Name: BaseType as suffix`
     let result = compile_to_mir("unit UserId: i64 as uid\n\nfn test() -> i64:\n    return 42\n");
     if let Ok(mir) = result {
-        assert!(mir.functions.len() >= 1);
+        assert!(!mir.functions.is_empty());
     }
 }
 

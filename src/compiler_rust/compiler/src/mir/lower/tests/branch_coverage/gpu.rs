@@ -21,7 +21,7 @@ fn gpu_compute_basic() {
         "@gpu\nfn compute(data: [f64]) -> [f64]:\n    return data\n\nfn test():\n    val d = [1.0, 2.0]\n    val r = compute(d)\n",
     );
     if let Ok(mir) = result {
-        assert!(mir.functions.len() >= 1);
+        assert!(!mir.functions.is_empty());
     }
 }
 

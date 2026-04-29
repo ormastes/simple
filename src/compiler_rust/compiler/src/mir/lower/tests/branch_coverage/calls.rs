@@ -270,7 +270,7 @@ bindings = [
 ]
 "#;
     let mir = compile_to_mir_with_di(source, di_toml).expect("DI singleton lowering");
-    assert!(mir.functions.len() >= 1);
+    assert!(!mir.functions.is_empty());
 }
 
 #[test]
@@ -484,7 +484,7 @@ fn aop_advice_lowering() {
         "@before(\"test_*\")\nfn log_before():\n    print \"before\"\n\nfn test_something() -> i64:\n    return 42\n",
     );
     if let Ok(mir) = result {
-        assert!(mir.functions.len() >= 1);
+        assert!(!mir.functions.is_empty());
     }
 }
 

@@ -276,6 +276,6 @@ fn match_enum_pattern() {
         "enum Shape:\n    Circle(i64)\n    Square(i64)\n\nfn test(s: Shape) -> i64:\n    match s:\n        Shape.Circle(r): return r\n        Shape.Square(w): return w\n",
     );
     if let Ok(mir) = mir {
-        assert!(mir.functions.len() >= 1);
+        assert!(!mir.functions.is_empty());
     }
 }

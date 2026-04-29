@@ -268,7 +268,7 @@ fn enum_unit_variant_via_global() {
     let result = compile_to_mir("enum Color:\n    Red\n    Blue\n\nfn test():\n    val c = Color.Red\n");
     // Verify it compiles (or documents the current limitation)
     if let Ok(mir) = result {
-        assert!(mir.functions.len() >= 1);
+        assert!(!mir.functions.is_empty());
     }
 }
 
