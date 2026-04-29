@@ -1,0 +1,182 @@
+name: SimpleOS Build & QEMU Smoke
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'examples/simple_os/**'
+      - 'src/os/**'
+      - 'src/lib/nogc_async_mut_noalloc/**'
+      - 'scripts/check-simpleos-bootstrap-qemu.shs'
+      - 'scripts/os_qemu_test.shs'
+      - '.github/workflows/simpleos-build.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'examples/simple_os/**'
+      - 'src/os/**'
+      - 'src/lib/nogc_async_mut_noalloc/**'
+      - 'scripts/check-simpleos-bootstrap-qemu.shs'
+      - 'scripts/os_qemu_test.shs'
+      - '.github/workflows/simpleos-build.yml'
+  schedule:
+    # Nightly at 04:00 UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Bootstrap mode'
+        required: false
+        default: 'smoke'
+        type: choice
+        options:
+          - smoke
+          - full
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Smoke job: every PR + push. ~10 min budget.
+  # Mirrors check-simpleos-bootstrap-qemu.shs --smoke locally.
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: SimpleOS x86_64 QEMU Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup bootstrap runtime
+        run: |
+          if [ -f bin/release/simple ]; then
+            chmod +x bin/release/simple
+          fi
+          if [ -f bin/simple ]; then
+            chmod +x bin/simple
+          fi
+          if [ ! -x bin/simple ]; then
+            echo "error: bin/simple missing or not executable" >&2
+            exit 1
+          fi
+          ./bin/simple --version || true
+
+      - name: Install QEMU + LLVM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 llvm
+          qemu-system-x86_64 --version | head -n 1
+          llvm-objcopy --version | head -n 1
+
+      - name: SimpleOS bootstrap smoke (--smoke)
+        timeout-minutes: 15
+        run: sh scripts/check-simpleos-bootstrap-qemu.shs --smoke
+
+      - name: Upload kernel ELF (smoke)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-x86_64-kernel-smoke
+          path: build/os/simpleos_x86_64.elf
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Full job: nightly cron + tag pushes + manual --full dispatch.
+  # Runs --full bootstrap + multi-tier QEMU validation. ~30+ min budget.
+  # Uploads kernel + disk image as release assets on tag pushes.
+  # ---------------------------------------------------------------------------
+  full:
+    name: SimpleOS x86_64 Full Bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    needs: smoke
+    if: |
+      github.event_name == 'schedule' ||
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup bootstrap runtime
+        run: |
+          if [ -f bin/release/simple ]; then
+            chmod +x bin/release/simple
+          fi
+          if [ -f bin/simple ]; then
+            chmod +x bin/simple
+          fi
+          ./bin/simple --version || true
+
+      - name: Install QEMU + LLVM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 llvm mtools
+
+      - name: Cache cargo vendor
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/compiler_rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: simpleos-cargo-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            simpleos-cargo-
+
+      - name: SimpleOS full bootstrap (--full)
+        timeout-minutes: 60
+        run: sh scripts/check-simpleos-bootstrap-qemu.shs --full
+
+      - name: Upload SimpleOS kernel ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-x86_64-kernel
+          path: build/os/simpleos_x86_64.elf
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload SimpleOS disk images
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-x86_64-images
+          path: |
+            build/os/*.img.zst
+            build/os/initramfs.img.zst
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Summary
+  # ---------------------------------------------------------------------------
+  summary:
+    name: SimpleOS Build Summary
+    runs-on: ubuntu-latest
+    needs: [smoke, full]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          {
+            echo "# SimpleOS Build Results"
+            echo ""
+            echo "| Job | Result |"
+            echo "|-----|--------|"
+            echo "| Smoke (x86_64) | ${{ needs.smoke.result }} |"
+            echo "| Full (x86_64)  | ${{ needs.full.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate critical failures
+        run: |
+          # Smoke is required on every PR. Full is best-effort outside tags/nightly.
+          if [ "${{ needs.smoke.result }}" != "success" ] && [ "${{ needs.smoke.result }}" != "skipped" ]; then
+            echo "Smoke job failed" >&2
+            exit 1
+          fi

@@ -1059,9 +1059,66 @@ jobs:
             simple-full-*.tar.gz.sha256
           retention-days: 7
 
+  simpleos-build:
+    name: SimpleOS x86_64 Kernel Build
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup bootstrap runtime
+        run: |
+          if [ -f bin/release/simple ]; then
+            chmod +x bin/release/simple
+          fi
+          if [ -f bin/simple ]; then
+            chmod +x bin/simple
+          fi
+          ./bin/simple --version || true
+
+      - name: Install QEMU + LLVM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 llvm mtools
+
+      - name: Build SimpleOS kernel (--full)
+        timeout-minutes: 50
+        run: sh scripts/check-simpleos-bootstrap-qemu.shs --full
+
+      - name: Package SimpleOS release tarball
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          PKG="simpleos-${VERSION}-x86_64"
+          mkdir -p "${PKG}"
+          if [ -f build/os/simpleos_x86_64.elf ]; then
+            cp build/os/simpleos_x86_64.elf "${PKG}/"
+          fi
+          if compgen -G "build/os/*.img.zst" > /dev/null; then
+            cp build/os/*.img.zst "${PKG}/"
+          fi
+          tar -czf "${PKG}.tar.gz" "${PKG}"
+          sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256"
+          ls -lh "${PKG}.tar.gz" "${PKG}.tar.gz.sha256"
+
+      - name: Upload SimpleOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-x86_64-package
+          path: |
+            simpleos-*.tar.gz
+            simpleos-*.tar.gz.sha256
+          retention-days: 7
+          if-no-files-found: warn
+
   create-release:
     name: Create GitHub Release
-    needs: [build-bootstrap, build-installers]
+    needs: [build-bootstrap, build-installers, simpleos-build]
     if: always() && needs.build-bootstrap.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
