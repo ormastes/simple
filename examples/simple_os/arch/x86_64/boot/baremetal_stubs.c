@@ -10977,6 +10977,41 @@ cleanup:
     return out;
 }
 
+RuntimeValue rt_tls13_aes128_gcm_encrypt(RuntimeValue key_rv, RuntimeValue nonce_rv,
+                                         RuntimeValue plaintext_rv, RuntimeValue aad_rv)
+{
+    uint32_t key_len = 0, nonce_len = 0, pt_len = 0, aad_len = 0;
+    uint8_t *key = _tls_copy_runtime_bytes(key_rv, &key_len);
+    uint8_t *nonce = _tls_copy_runtime_bytes(nonce_rv, &nonce_len);
+    uint8_t *plaintext = _tls_copy_runtime_bytes(plaintext_rv, &pt_len);
+    uint8_t *aad = _tls_copy_runtime_bytes(aad_rv, &aad_len);
+    uint8_t *ciphertext = NULL;
+    RuntimeValue out = NIL_VALUE;
+
+    if (!key || !nonce || !aad || (!plaintext && pt_len != 0) ||
+        key_len != 16U || nonce_len != 12U) {
+        goto cleanup;
+    }
+
+    /* Output is ciphertext (pt_len bytes) + tag (16 bytes). */
+    uint32_t out_len = pt_len + 16U;
+    ciphertext = (uint8_t *)malloc(out_len > 0 ? out_len : 1U);
+    if (!ciphertext) goto cleanup;
+    if (_tls_aes128_gcm_encrypt_raw(key, nonce, plaintext, pt_len, aad, aad_len,
+                                    ciphertext, ciphertext + pt_len) != 0) {
+        goto cleanup;
+    }
+    out = _tls_runtime_array_from_bytes(ciphertext, out_len);
+
+cleanup:
+    if (key) free(key);
+    if (nonce) free(nonce);
+    if (plaintext) free(plaintext);
+    if (aad) free(aad);
+    if (ciphertext) free(ciphertext);
+    return out;
+}
+
 RuntimeValue rt_tls13_record_encrypt(RuntimeValue key_rv, RuntimeValue iv_rv,
                                      int64_t seq_num_i64, int64_t content_type_i64,
                                      RuntimeValue plaintext_rv)

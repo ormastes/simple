@@ -5,15 +5,15 @@
 # This is a bridge away from path->builtin kernel embedding on x86_64 baremetal
 # while the full filesystem-backed user ELF exec path is still under
 # construction.
+#
+# NOTE: do NOT import os.apps.* or os.services.vfs.vfs_init here.  Those
+# imports drag the entire userspace closure (shell, vfs_service, netstack,
+# fat32, UI session, …) into the freestanding kernel ELF and produce hundreds
+# of unresolved class-metadata symbols at link time.  All entries use the
+# resident-task placeholder from builtin_binary_registry until real ELF-exec
+# lands via `kernel/loader/elf_loader.spl`.
 
-use os.apps.browser_demo.browser_demo.{browser_demo_remote_main}
-use os.apps.editor.editor.{editor_remote_main}
-use os.apps.file_manager.file_manager.{file_manager_remote_main}
-use os.apps.hello_world.hello_world.{hello_world_remote_main}
-use os.apps.shell.shell_app.{shell_remote_main}
-use os.apps.smux.smux_remote.{smux_remote_main}
-
-use os.services.vfs.vfs_init.{g_vfs_read_file_text}
+use os.kernel.loader.builtin_binary_registry.{_resident_binary_entry}
 
 fn disk_manifest_filename_for_path(path: text) -> text:
     """Map canonical app paths to the packaged FAT32 manifest filename."""
@@ -47,28 +47,14 @@ fn parse_disk_launch_entry_name(content: text) -> text:
     ""
 
 fn resolve_disk_launch_entry(path: text) -> u64?:
-    """Resolve a disk-backed resident app entry from the FAT32 image."""
+    """Resolve a disk-backed resident app entry from the FAT32 image.
+
+    Until real ELF-exec lands, all known app paths resolve to the resident-task
+    placeholder.  The manifest filename check is preserved so callers can
+    distinguish known vs unknown paths; VFS reads are deferred to the ELF exec
+    path and are not performed here.
+    """
     val manifest_name = disk_manifest_filename_for_path(path)
     if manifest_name == "":
         return nil
-
-    val content = g_vfs_read_file_text(manifest_name)
-    if content.trim() == "":
-        return nil
-
-    val entry_name = parse_disk_launch_entry_name(content)
-    match entry_name:
-        case "browser_demo_remote_main":
-            Some(browser_demo_remote_main as u64)
-        case "hello_world_remote_main":
-            Some(hello_world_remote_main as u64)
-        case "file_manager_remote_main":
-            Some(file_manager_remote_main as u64)
-        case "shell_remote_main":
-            Some(shell_remote_main as u64)
-        case "editor_remote_main":
-            Some(editor_remote_main as u64)
-        case "smux_remote_main":
-            Some(smux_remote_main as u64)
-        case _:
-            nil
+    Some(_resident_binary_entry as u64)

@@ -865,7 +865,7 @@ fn test_vm_stress_large_stack() {
         encoder.emit_i64(i as i64);
     }
     encoder.emit_opcode(RET);
-    encoder.emit_u16(((count - 1)));
+    encoder.emit_u16(count - 1);
 
     let code = encoder.finish();
     let mut vm = BytecodeVM::new();

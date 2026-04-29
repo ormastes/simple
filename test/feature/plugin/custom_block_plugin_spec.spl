@@ -59,15 +59,17 @@ fn _is_builtin(kind: text) -> bool:
             return true
     false
 
-fn register_block(def: BlockDef):
-    # Reject silent override of built-ins — caller must unregister first
+fn register_block(def: BlockDef) -> bool:
+    # Reject silent override of built-ins — caller must unregister first.
+    # Returns false if keyword already taken (matches real register_block -> bool).
     if _is_builtin(def.kind) and is_block(def.kind):
-        return
+        return false
     # Also reject any already-registered non-builtin without prior unregister
     if is_block(def.kind):
-        return
+        return false
     _registry = _registry + [def.kind]
     _registry_defs = _registry_defs + [def]
+    true
 
 fn unregister_block(kind: text) -> bool:
     var remaining_kw: [text] = []
@@ -86,7 +88,7 @@ fn unregister_block(kind: text) -> bool:
     removed
 
 fn with_block(def: BlockDef, body: fn() -> bool) -> bool:
-    register_block(def)
+    val _reg = register_block(def)
     val result = body()
     unregister_block(def.kind)
     result
@@ -104,6 +106,38 @@ fn check(condition: bool):
     expect(condition).to_equal(true)
 
 # ============================================================================
+# Two-phase plugin loading doubles (mirrors plugin_startup.spl API)
+# ============================================================================
+
+# Indexed plugin hook table (pure-Simple path)
+var _plugin_hooks: [text] = []
+var _plugin_hook_fns: [fn() -> bool] = []
+
+fn register_simple_plugin(name: text, hook: fn() -> bool):
+    """Register a pure-Simple plugin setup hook (local double)."""
+    var i = 0
+    while i < _plugin_hooks.len():
+        if _plugin_hooks[i] == name:
+            _plugin_hook_fns[i] = hook
+            return
+        i = i + 1
+    _plugin_hooks = _plugin_hooks + [name]
+    _plugin_hook_fns = _plugin_hook_fns + [hook]
+
+fn activate_plugin(name: text) -> bool:
+    """Activate a named plugin (local double — pure-Simple path only)."""
+    var i = 0
+    while i < _plugin_hooks.len():
+        if _plugin_hooks[i] == name:
+            return (_plugin_hook_fns[i])()
+        i = i + 1
+    false
+
+fn _reset_plugin_hooks():
+    _plugin_hooks = []
+    _plugin_hook_fns = []
+
+# ============================================================================
 # Spec
 # ============================================================================
 
@@ -112,7 +146,7 @@ describe "AC-2: Custom Block Plugin — add and replace":
     it "new block registers and is visible":
         _reset_registry()
         val csv_def = BlockDef.create("csv", "raw")
-        register_block(csv_def)
+        val _ok = register_block(csv_def)
         check(is_block("csv"))
         val all = list_blocks()
         check(all.contains("csv"))
@@ -127,7 +161,7 @@ describe "AC-2: Custom Block Plugin — add and replace":
     it "unregister_block removes the entry":
         _reset_registry()
         val csv_def = BlockDef.create("csv", "raw")
-        register_block(csv_def)
+        val _ok = register_block(csv_def)
         check(is_block("csv"))
         val removed = unregister_block("csv")
         check(removed)
@@ -143,13 +177,15 @@ describe "AC-2: Custom Block Plugin — add and replace":
         check(not is_block("csv"))
 
     it "replacing a built-in is rejected — built-in stays intact":
-        # register_block has no return value today (Phase 5 decides error
-        # signalling).  We test state preservation: attempt to register a
-        # fake 'm' def with a different mode; the original must survive.
+        # register_block now returns false when keyword is already taken.
+        # Attempt to register a fake 'm' def; registry must reject it and
+        # the original built-in definition must be unchanged.
         _reset_registry()
         val original = get_block("m")
         val fake_m = BlockDef(kind: "m", mode: "math_fake", description: "fake")
-        register_block(fake_m)
+        val rejected = register_block(fake_m)
+        # Must return false — keyword was already taken
+        check(not rejected)
         val after = get_block("m")
         # Built-in must still be present and its mode must not have changed
         check(is_block("m"))
@@ -158,29 +194,45 @@ describe "AC-2: Custom Block Plugin — add and replace":
     it "replace flow: unregister then register succeeds with new def":
         _reset_registry()
         val csv_v1 = BlockDef.create("csv", "raw")
-        register_block(csv_v1)
+        val _ok1 = register_block(csv_v1)
         check(is_block("csv"))
         unregister_block("csv")
         val csv_v2 = BlockDef(kind: "csv", mode: "normal", description: "csv v2")
-        register_block(csv_v2)
+        val _ok2 = register_block(csv_v2)
         check(is_block("csv"))
         val current = get_block("csv")
         check(current.mode == "normal")
         check(current.description == "csv v2")
 
-    it "use_plugin semantics: blocks register only after explicit use_plugin call":
-        # Contract for Phase 5 — in-process path bypasses use_plugin so this
-        # it block asserts nothing about runtime wiring.
+    it "use_plugin semantics: blocks register only after explicit activate_plugin call":
+        # Validates the two-phase contract from plugin_startup.spl:
+        #   Phase 1 (index): plugin hook is registered but blocks NOT yet active
+        #   Phase 2 (activate): activate_plugin("csv_plugin") fires the hook,
+        #                       which calls register_block; is_block returns true.
         #
-        # Phase 5 must implement: src/compiler/15.blocks/plugin_startup.spl
-        # scans <project>/.simple-plugins/ at compiler start; each plugin entry
-        # is activated only when user code calls std.plugin.use_plugin(name).
-        # Until use_plugin is called, the plugin's blocks must NOT appear in
-        # block_registry().  After use_plugin, register_block is called for
-        # each block in the plugin manifest.
-        #
-        # The assertion below is intentionally trivial; real wiring is Phase 5.
-        check(true)
+        # This scenario uses local doubles (same API shape as real module) so it
+        # runs in interpreter mode without importing compiler.blocks.plugin_startup.
+        # The companion spec plugin_startup_block_spec.spl imports the real module.
+        _reset_registry()
+        _reset_plugin_hooks()
+
+        # Phase 1: register the plugin hook (simulates module init of csv_plugin.spl)
+        fn csv_register() -> bool:
+            val csv_def = BlockDef.create("csv", "raw")
+            val _r = register_block(csv_def)
+            true
+
+        register_simple_plugin("csv_plugin", csv_register)
+
+        # Before activate: block must NOT be in registry
+        check(not is_block("csv"))
+
+        # Phase 2: activate the plugin
+        val ok = activate_plugin("csv_plugin")
+        check(ok)
+
+        # After activate: block IS in registry
+        check(is_block("csv"))
 
 # ============================================================================
 # FEATURE TAGS

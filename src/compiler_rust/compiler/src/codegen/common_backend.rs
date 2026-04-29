@@ -20,7 +20,7 @@ use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirModule};
 
 use super::instr::compile_function_body;
-use super::runtime_ffi::RUNTIME_FUNCS;
+use super::runtime_ffi::runtime_funcs_for_target;
 use super::shared::{build_mir_signature, create_body_stub, expand_with_outlined};
 
 /// Common error type for codegen backends
@@ -239,7 +239,7 @@ impl<M: Module> CodegenBackend<M> {
     /// Create a new backend with a pre-configured module and target
     pub fn with_module_and_target(mut module: M, target: Target) -> BackendResult<Self> {
         let ctx = module.make_context();
-        let runtime_funcs = Self::declare_runtime_functions(&mut module)?;
+        let runtime_funcs = Self::declare_runtime_functions(&mut module, &target)?;
 
         Ok(Self {
             module,
@@ -333,11 +333,15 @@ impl<M: Module> CodegenBackend<M> {
     }
 
     /// Declare external runtime functions for FFI using shared specifications.
-    pub fn declare_runtime_functions(module: &mut M) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
+    ///
+    /// Only declares functions appropriate for the given target (e.g., ARM-specific
+    /// functions are excluded from x86_64 baremetal builds) to avoid spurious
+    /// undefined-symbol link errors.
+    pub fn declare_runtime_functions(module: &mut M, target: &Target) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
         let call_conv = super::shared::platform_call_conv();
 
-        for spec in RUNTIME_FUNCS {
+        for spec in runtime_funcs_for_target(target) {
             let sig = spec.build_signature(call_conv);
             let id = module
                 .declare_function(spec.name, Linkage::Import, &sig)
