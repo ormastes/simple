@@ -51,18 +51,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup bootstrap runtime
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/compiler_rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: simpleos-rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            simpleos-rust-bootstrap-
+
+      - name: Build Simple bootstrap binary
         run: |
-          if [ -f bin/release/simple ]; then
-            chmod +x bin/release/simple
-          fi
-          if [ -f bin/simple ]; then
-            chmod +x bin/simple
-          fi
-          if [ ! -x bin/simple ]; then
-            echo "error: bin/simple missing or not executable" >&2
-            exit 1
-          fi
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          test -x target/bootstrap/simple
+          ./target/bootstrap/simple --version || true
+
+      - name: Run scripts/setup.sh (creates bin/simple wrapper)
+        run: |
+          sh scripts/setup.sh
+          test -x bin/simple
           ./bin/simple --version || true
 
       - name: Install QEMU + LLVM toolchain
@@ -73,7 +86,7 @@ jobs:
           llvm-objcopy --version | head -n 1
 
       - name: SimpleOS bootstrap smoke (--smoke)
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: sh scripts/check-simpleos-bootstrap-qemu.shs --smoke
 
       - name: Upload kernel ELF (smoke)
@@ -104,31 +117,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup bootstrap runtime
-        run: |
-          if [ -f bin/release/simple ]; then
-            chmod +x bin/release/simple
-          fi
-          if [ -f bin/simple ]; then
-            chmod +x bin/simple
-          fi
-          ./bin/simple --version || true
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install QEMU + LLVM toolchain
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 llvm mtools
-
-      - name: Cache cargo vendor
+      - name: Cache Rust build artifacts
         uses: actions/cache@v4
         with:
           path: |
             src/compiler_rust/target
             ~/.cargo/registry
             ~/.cargo/git
-          key: simpleos-cargo-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          key: simpleos-rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
           restore-keys: |
-            simpleos-cargo-
+            simpleos-rust-bootstrap-
+
+      - name: Build Simple bootstrap binary
+        run: |
+          cd src/compiler_rust
+          cargo build --profile bootstrap -p simple-driver
+          test -x target/bootstrap/simple
+
+      - name: Run scripts/setup.sh (creates bin/simple wrapper)
+        run: sh scripts/setup.sh
+
+      - name: Install QEMU + LLVM toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 llvm mtools
 
       - name: SimpleOS full bootstrap (--full)
         timeout-minutes: 60
