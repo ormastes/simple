@@ -67,6 +67,43 @@ fn strip_flattened_import_nodes(module: Module) -> Module {
     }
 }
 
+fn find_project_root_hint(path: &Path) -> Option<PathBuf> {
+    let normalized = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut current = if normalized.is_dir() {
+        normalized
+    } else {
+        normalized.parent()?.to_path_buf()
+    };
+    loop {
+        if current.join("src").is_dir() || current.join("Cargo.toml").is_file() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+pub(super) fn native_single_file_project_hint(source_path: &Path) -> Option<PathBuf> {
+    let normalized = if source_path.is_absolute() {
+        source_path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(source_path)
+    };
+    if !normalized.starts_with(std::env::temp_dir()) {
+        return None;
+    }
+    if find_project_root_hint(source_path).is_some() {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok()?;
+    find_project_root_hint(&cwd)
+}
+
 /// Link a WASM object file into a complete WASM module using wasm-ld.
 ///
 /// LLVM emits WASM object files (.o) which are relocatable format.
@@ -240,7 +277,8 @@ impl CompilerPipeline {
 
             // Lower to HIR (with module resolution support if source file is available)
             let hir_module = if let Some(source_path) = source_file {
-                crate::hir::lower_with_context(&module, source_path)
+                let project_hint = native_single_file_project_hint(source_path);
+                crate::hir::lower_with_context_and_project_hint(&module, source_path, project_hint.as_deref())
             } else {
                 crate::hir::lower(&module)
             }
@@ -383,7 +421,8 @@ impl CompilerPipeline {
 
         // 5-7. Type check and lower to MIR (with module resolution if source file available)
         let mut mir_module = if let Some(source_path) = source_file {
-            self.type_check_and_lower_with_context(&ast_module, source_path)?
+            let project_hint = native_single_file_project_hint(source_path);
+            self.type_check_and_lower_with_context_and_project_hint(&ast_module, source_path, project_hint.as_deref())?
         } else {
             self.type_check_and_lower(&ast_module)?
         };
@@ -412,7 +451,13 @@ impl CompilerPipeline {
         }
 
         // 9. Generate machine code via selected backend
-        let object_code = self.compile_mir_to_object(&mir_module, Target::host())?;
+        let object_code = self.compile_mir_to_object(
+            &mir_module,
+            Target::host(),
+            crate::optimizations::NativeOptimizationLevel::Standard,
+            None,
+            simple_common::target::TargetCpu::builtin_default_for_arch(Target::host().arch),
+        )?;
 
         // 10. Partition generic templates from specialized instances
         let (templates, _specialized, metadata) = crate::monomorphize::partition_generic_constructs(&ast_module);
@@ -522,7 +567,8 @@ impl CompilerPipeline {
 
         // 5-7. Type check and lower to MIR
         let mut mir_module = if let Some(path) = source_path {
-            self.type_check_and_lower_with_context(&ast_module, path)?
+            let project_hint = native_single_file_project_hint(path);
+            self.type_check_and_lower_with_context_and_project_hint(&ast_module, path, project_hint.as_deref())?
         } else {
             self.type_check_and_lower(&ast_module)?
         };
@@ -552,7 +598,13 @@ impl CompilerPipeline {
         }
 
         // 9. Generate machine code via selected backend for the target architecture
-        let object_code = self.compile_mir_to_object(&mir_module, target)?;
+        let object_code = self.compile_mir_to_object(
+            &mir_module,
+            target,
+            crate::optimizations::NativeOptimizationLevel::Standard,
+            None,
+            simple_common::target::TargetCpu::builtin_default_for_arch(target.arch),
+        )?;
 
         // 10. Partition generic templates from specialized instances
         let (templates, _specialized, metadata) = crate::monomorphize::partition_generic_constructs(&ast_module);
@@ -641,7 +693,7 @@ impl CompilerPipeline {
         let mir_module = self.type_check_and_lower(&ast_module)?;
 
         // Get options
-        let options = options.unwrap_or_else(|| NativeBinaryOptions::default().output(output));
+        let options = options.unwrap_or_else(|| NativeBinaryOptions::for_native_executable().output(output));
 
         // Check for main function (not required for shared libraries)
         if !options.shared {
@@ -658,7 +710,13 @@ impl CompilerPipeline {
         }
 
         // Generate object code
-        let object_code = self.compile_mir_to_object(&mir_module, options.target)?;
+        let object_code = self.compile_mir_to_object(
+            &mir_module,
+            options.target,
+            options.opt_level,
+            options.backend,
+            options.cpu.clone(),
+        )?;
 
         // Build native binary
         let mut builder = NativeBinaryBuilder::new(object_code)
@@ -780,19 +838,14 @@ impl CompilerPipeline {
         }
 
         // Produce MIR.
+        let native_project_hint = source_path.and_then(native_single_file_project_hint);
         let mir_module = if bootstrap_mode {
             // Lenient lowering path (mirrors native_project bootstrap flow)
             use crate::hir::Lowerer;
-            use crate::module_resolver::ModuleResolver;
             let dummy_path = source_path.unwrap_or_else(|| Path::new("bootstrap.spl"));
-            let hir_source_root = dummy_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("."));
-            let resolver = ModuleResolver::new(
-                // project root defaults to cwd in this simplified path
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                hir_source_root.clone(),
+            let resolver = crate::module_resolver::ModuleResolver::single_file_with_project_hint(
+                dummy_path,
+                native_project_hint.as_deref(),
             );
             let mut lowerer = Lowerer::with_module_resolver(resolver, dummy_path.to_path_buf());
             lowerer.set_strict_mode(false);
@@ -802,13 +855,13 @@ impl CompilerPipeline {
                 .map_err(|e| crate::error::factory::hir_lowering_failed(&e))?;
             crate::mir::lower_to_mir(&hir).map_err(|e| crate::error::factory::mir_lowering_failed(&e))?
         } else if let Some(path) = source_path {
-            self.type_check_and_lower_with_context(&ast_module, path)?
+            self.type_check_and_lower_with_context_and_project_hint(&ast_module, path, native_project_hint.as_deref())?
         } else {
             self.type_check_and_lower(&ast_module)?
         };
 
         // Get options
-        let options = options.unwrap_or_else(|| NativeBinaryOptions::default().output(output));
+        let options = options.unwrap_or_else(|| NativeBinaryOptions::for_native_executable().output(output));
 
         // Check for main function (not required for shared libraries)
         if !options.shared {
@@ -825,7 +878,13 @@ impl CompilerPipeline {
         }
 
         // Generate object code
-        let object_code = self.compile_mir_to_object(&mir_module, options.target)?;
+        let object_code = self.compile_mir_to_object(
+            &mir_module,
+            options.target,
+            options.opt_level,
+            options.backend,
+            options.cpu.clone(),
+        )?;
 
         // Build native binary
         let mut builder = NativeBinaryBuilder::new(object_code)
@@ -860,5 +919,28 @@ impl CompilerPipeline {
 
         // Build
         builder.build().map_err(|e| CompileError::Codegen(format!("{e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_single_file_project_hint;
+
+    #[test]
+    fn native_single_file_project_hint_only_applies_to_temp_sources() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("repo root");
+        let temp_source = std::env::temp_dir().join("simple_native_probe_hint_test.spl");
+        let external_dir = tempfile::tempdir().expect("external tempdir");
+        let external_source = external_dir.path().join("outside.spl");
+
+        let temp_hint = native_single_file_project_hint(&temp_source);
+        let external_hint = native_single_file_project_hint(&external_source);
+
+        assert_eq!(temp_hint.as_deref(), Some(repo_root.as_path()));
+        assert!(external_hint.is_none());
     }
 }

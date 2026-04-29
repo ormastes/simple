@@ -514,20 +514,21 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
         }
         Err(_) => path,
     };
-    let run_result: Result<i32, String> =
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner.run_file_interpreted(exec_path_ref))) {
-            Ok(inner) => inner,
-            Err(panic_info) => {
-                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    s.to_string()
-                } else {
-                    "test panicked (possible stack overflow)".to_string()
-                };
-                Err(msg)
-            }
-        };
+    let run_result: Result<i32, String> = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runner.run_file_interpreted(exec_path_ref)
+    })) {
+        Ok(inner) => inner,
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "test panicked (possible stack overflow)".to_string()
+            };
+            Err(msg)
+        }
+    };
 
     // Stop watchdog and reset the timeout flag for the next test.
     stop_watchdog();
@@ -986,20 +987,76 @@ fn rewrite_method_expect_line(line: &str) -> String {
     };
 
     let op_form = match matcher {
-        "to_equal" | "to_be" => Some(if negated { format!("{} != {}", actual, arg_str) } else { format!("{} == {}", actual, arg_str) }),
-        "to_be_nil" => Some(if negated { format!("{} != nil", actual) } else { format!("{} == nil", actual) }),
-        "to_be_truthy" => Some(if negated { format!("not ({})", actual) } else { actual.to_string() }),
-        "to_be_falsy" | "to_be_false" => Some(if negated { actual.to_string() } else { format!("not ({})", actual) }),
-        "to_be_true" => Some(if negated { format!("not ({})", actual) } else { actual.to_string() }),
-        "to_be_greater_than" => Some(if negated { format!("{} <= {}", actual, arg_str) } else { format!("{} > {}", actual, arg_str) }),
-        "to_be_less_than" => Some(if negated { format!("{} >= {}", actual, arg_str) } else { format!("{} < {}", actual, arg_str) }),
-        "to_be_at_least" => Some(if negated { format!("{} < {}", actual, arg_str) } else { format!("{} >= {}", actual, arg_str) }),
-        "to_be_at_most" => Some(if negated { format!("{} > {}", actual, arg_str) } else { format!("{} <= {}", actual, arg_str) }),
-        "to_contain" => Some(if negated { format!("not (({}).contains({}))", actual, arg_str) } else { format!("({}).contains({})", actual, arg_str) }),
-        "to_start_with" => Some(if negated { format!("not (({}).starts_with({}))", actual, arg_str) } else { format!("({}).starts_with({})", actual, arg_str) }),
-        "to_end_with" => Some(if negated { format!("not (({}).ends_with({}))", actual, arg_str) } else { format!("({}).ends_with({})", actual, arg_str) }),
-        "to_have_length" => Some(if negated { format!("({}).len() != {}", actual, arg_str) } else { format!("({}).len() == {}", actual, arg_str) }),
-        "to_be_empty" => Some(if negated { format!("({}).len() != 0", actual) } else { format!("({}).len() == 0", actual) }),
+        "to_equal" | "to_be" => Some(if negated {
+            format!("{} != {}", actual, arg_str)
+        } else {
+            format!("{} == {}", actual, arg_str)
+        }),
+        "to_be_nil" => Some(if negated {
+            format!("{} != nil", actual)
+        } else {
+            format!("{} == nil", actual)
+        }),
+        "to_be_truthy" => Some(if negated {
+            format!("not ({})", actual)
+        } else {
+            actual.to_string()
+        }),
+        "to_be_falsy" | "to_be_false" => Some(if negated {
+            actual.to_string()
+        } else {
+            format!("not ({})", actual)
+        }),
+        "to_be_true" => Some(if negated {
+            format!("not ({})", actual)
+        } else {
+            actual.to_string()
+        }),
+        "to_be_greater_than" => Some(if negated {
+            format!("{} <= {}", actual, arg_str)
+        } else {
+            format!("{} > {}", actual, arg_str)
+        }),
+        "to_be_less_than" => Some(if negated {
+            format!("{} >= {}", actual, arg_str)
+        } else {
+            format!("{} < {}", actual, arg_str)
+        }),
+        "to_be_at_least" => Some(if negated {
+            format!("{} < {}", actual, arg_str)
+        } else {
+            format!("{} >= {}", actual, arg_str)
+        }),
+        "to_be_at_most" => Some(if negated {
+            format!("{} > {}", actual, arg_str)
+        } else {
+            format!("{} <= {}", actual, arg_str)
+        }),
+        "to_contain" => Some(if negated {
+            format!("not (({}).contains({}))", actual, arg_str)
+        } else {
+            format!("({}).contains({})", actual, arg_str)
+        }),
+        "to_start_with" => Some(if negated {
+            format!("not (({}).starts_with({}))", actual, arg_str)
+        } else {
+            format!("({}).starts_with({})", actual, arg_str)
+        }),
+        "to_end_with" => Some(if negated {
+            format!("not (({}).ends_with({}))", actual, arg_str)
+        } else {
+            format!("({}).ends_with({})", actual, arg_str)
+        }),
+        "to_have_length" => Some(if negated {
+            format!("({}).len() != {}", actual, arg_str)
+        } else {
+            format!("({}).len() == {}", actual, arg_str)
+        }),
+        "to_be_empty" => Some(if negated {
+            format!("({}).len() != 0", actual)
+        } else {
+            format!("({}).len() == 0", actual)
+        }),
         _ => None,
     };
     match op_form {
@@ -1036,9 +1093,11 @@ fn preprocess_matchers_only(path: &Path) -> Result<PathBuf, String> {
         return Ok(path.to_path_buf());
     }
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("spec.spl");
-    let tmp_path = path.parent().unwrap_or_else(|| Path::new(".")).join(format!(".spipe_matchers_{}", file_name));
-    fs::write(&tmp_path, out_lines.join("\n"))
-        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
+    let tmp_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".spipe_matchers_{}", file_name));
+    fs::write(&tmp_path, out_lines.join("\n")).map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
     Ok(tmp_path)
 }
 
@@ -1645,8 +1704,13 @@ pub fn run_test_file_smf_mode(path: &Path, cache: &BuildCache, options: &super::
         Ok((exit_code, stdout, stderr)) => {
             let combined_output = format!("{}\n{}", stdout, stderr);
             let individual_results = parse_individual_results(&combined_output);
-            let (passed, failed, skipped) =
-                derive_counts_from_bdd_snapshot(&bdd_snapshot, &individual_results, &combined_output, exit_code, options);
+            let (passed, failed, skipped) = derive_counts_from_bdd_snapshot(
+                &bdd_snapshot,
+                &individual_results,
+                &combined_output,
+                exit_code,
+                options,
+            );
 
             let result = TestFileResult {
                 path: path.to_path_buf(),

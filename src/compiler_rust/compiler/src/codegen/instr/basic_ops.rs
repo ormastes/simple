@@ -318,7 +318,10 @@ mod tests {
             let vreg_ret = f.new_vreg();
 
             let block = f.block_mut(BlockId(0)).unwrap();
-            block.instructions.push(MirInst::ConstFloat { dest: vreg_f64, value: 255.9 });
+            block.instructions.push(MirInst::ConstFloat {
+                dest: vreg_f64,
+                value: 255.9,
+            });
             block.instructions.push(MirInst::Cast {
                 dest: vreg_f32,
                 source: vreg_f64,
@@ -351,7 +354,10 @@ mod tests {
             let vreg_ret = f.new_vreg();
 
             let block = f.block_mut(BlockId(0)).unwrap();
-            block.instructions.push(MirInst::ConstFloat { dest: vreg_f64, value: -3.7 });
+            block.instructions.push(MirInst::ConstFloat {
+                dest: vreg_f64,
+                value: -3.7,
+            });
             block.instructions.push(MirInst::Cast {
                 dest: vreg_f32,
                 source: vreg_f64,

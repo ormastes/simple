@@ -123,8 +123,18 @@ pub fn lower(module: &Module) -> LowerResult<HirModule> {
 /// # Returns
 /// The lowered HIR module with all imported types loaded
 pub fn lower_with_context(module: &Module, current_file: &Path) -> LowerResult<HirModule> {
+    lower_with_context_and_project_hint(module, current_file, None)
+}
+
+/// Lower an AST module to HIR with module resolution support, optionally borrowing
+/// project context from a separate hint path.
+pub fn lower_with_context_and_project_hint(
+    module: &Module,
+    current_file: &Path,
+    project_hint: Option<&Path>,
+) -> LowerResult<HirModule> {
     // Create a module resolver for this compilation
-    let module_resolver = ModuleResolver::single_file(current_file);
+    let module_resolver = ModuleResolver::single_file_with_project_hint(current_file, project_hint);
 
     Lowerer::with_module_resolver(module_resolver, current_file.to_path_buf()).lower_module(module)
 }
@@ -140,7 +150,17 @@ pub fn lower_lenient(module: &Module) -> LowerResult<HirModule> {
 /// Memory safety violations produce warnings instead of errors.
 /// Use this for bootstrap compilation and backwards compatibility.
 pub fn lower_with_context_lenient(module: &Module, current_file: &Path) -> LowerResult<HirModule> {
-    let module_resolver = ModuleResolver::single_file(current_file);
+    lower_with_context_lenient_and_project_hint(module, current_file, None)
+}
+
+/// Lower an AST module to HIR with lenient mode and module resolution support,
+/// optionally borrowing project context from a separate hint path.
+pub fn lower_with_context_lenient_and_project_hint(
+    module: &Module,
+    current_file: &Path,
+    project_hint: Option<&Path>,
+) -> LowerResult<HirModule> {
+    let module_resolver = ModuleResolver::single_file_with_project_hint(current_file, project_hint);
     let mut lowerer = Lowerer::with_module_resolver(module_resolver, current_file.to_path_buf());
     // Switch to lenient mode — both memory safety and type resolution
     lowerer.set_strict_mode(false);

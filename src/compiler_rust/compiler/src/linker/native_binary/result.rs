@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use crate::linker::error::{LinkerError, LinkerResult};
 use crate::linker::layout::LayoutOptimizer;
+use crate::optimizations::NativeOptimizationLevel;
+use crate::default_native_codegen_backend;
 
 use super::builder::NativeBinaryBuilder;
 use super::options::{NativeBinaryOptions, asm_ret_instruction, detect_c_compiler};
@@ -23,12 +25,14 @@ pub fn compile_to_native_binary(
     output: impl Into<PathBuf>,
     options: Option<NativeBinaryOptions>,
 ) -> LinkerResult<NativeBinaryResult> {
-    use crate::codegen::Codegen;
+    use crate::codegen::{Codegen, NativeBackend};
+    use crate::codegen::llvm::LlvmBackend;
     use crate::hir;
     use crate::mir;
+    use simple_common::target::NativeCodegenBackend;
 
     let output = output.into();
-    let options = options.unwrap_or_else(|| NativeBinaryOptions::default().output(&output));
+    let options = options.unwrap_or_else(|| NativeBinaryOptions::for_native_executable().output(&output));
 
     let mut parser = simple_parser::Parser::new(source);
     let ast_module = parser
@@ -41,11 +45,24 @@ pub fn compile_to_native_binary(
     let mir_module =
         mir::lower_to_mir(&hir_module).map_err(|e| LinkerError::LinkFailed(format!("MIR lowering error: {}", e)))?;
 
-    let codegen =
-        Codegen::for_target(options.target).map_err(|e| LinkerError::LinkFailed(format!("codegen error: {}", e)))?;
-    let object_code = codegen
-        .compile_module(&mir_module)
-        .map_err(|e| LinkerError::LinkFailed(format!("compilation error: {}", e)))?;
+    let object_code = match options.backend.unwrap_or(default_native_codegen_backend()) {
+        NativeCodegenBackend::Cranelift => {
+            let codegen =
+                Codegen::for_target_with_opt_level_and_cpu(options.target, options.opt_level, options.cpu.clone())
+                    .map_err(|e| LinkerError::LinkFailed(format!("codegen error: {}", e)))?;
+            codegen
+                .compile_module(&mir_module)
+                .map_err(|e| LinkerError::LinkFailed(format!("compilation error: {}", e)))?
+        }
+        NativeCodegenBackend::Llvm => {
+            let mut backend =
+                LlvmBackend::new_with_opt_level_and_cpu(options.target, options.opt_level, options.cpu.clone())
+                    .map_err(|e| LinkerError::LinkFailed(format!("codegen error: {}", e)))?;
+            backend
+                .compile(&mir_module)
+                .map_err(|e| LinkerError::LinkFailed(format!("compilation error: {}", e)))?
+        }
+    };
 
     let mut builder = NativeBinaryBuilder::new(object_code).options(options);
 
@@ -59,7 +76,7 @@ pub fn compile_to_native_binary(
 
 #[cfg(test)]
 mod tests {
-    use simple_common::target::{Target, TargetArch, TargetOS};
+    use simple_common::target::{NativeCodegenBackend, Target, TargetArch, TargetCpu, TargetOS};
 
     use super::*;
     use crate::linker::layout::LayoutOptimizer;
@@ -185,6 +202,13 @@ mod tests {
     fn test_target_architecture() {
         let options = NativeBinaryOptions::new().target(Target::host());
         assert_eq!(options.target, Target::host());
+    }
+
+    #[test]
+    fn test_for_native_executable_defaults_to_available_backend_and_arch_cpu_policy() {
+        let options = NativeBinaryOptions::for_native_executable();
+        assert_eq!(options.backend, Some(crate::default_native_codegen_backend()));
+        assert_eq!(options.cpu, TargetCpu::builtin_default_for_arch(options.target.arch));
     }
 
     #[test]

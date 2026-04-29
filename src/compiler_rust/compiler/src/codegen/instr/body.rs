@@ -123,11 +123,19 @@ pub(super) fn build_vreg_types(func: &MirFunction) -> HashMap<VReg, TypeId> {
                 MirInst::FieldGet { dest, field_type, .. } => {
                     types_map.insert(*dest, *field_type);
                 }
-                MirInst::IndirectCall { dest: Some(d), return_type, .. } => {
+                MirInst::IndirectCall {
+                    dest: Some(d),
+                    return_type,
+                    ..
+                } => {
                     types_map.insert(*d, *return_type);
                 }
                 MirInst::IndirectCall { dest: None, .. } => {}
-                MirInst::MethodCallVirtual { dest: Some(d), return_type, .. } => {
+                MirInst::MethodCallVirtual {
+                    dest: Some(d),
+                    return_type,
+                    ..
+                } => {
                     types_map.insert(*d, *return_type);
                 }
                 MirInst::MethodCallVirtual { dest: None, .. } => {}
@@ -800,7 +808,11 @@ pub fn compile_function_body<M: Module>(
                 builder.ins().brif(cond_val, then_bl, &[], else_bl, &[]);
             }
 
-            Terminator::Switch { discriminant, cases, default } => {
+            Terminator::Switch {
+                discriminant,
+                cases,
+                default,
+            } => {
                 // B5: lower MIR Switch to Cranelift's Switch builder, which
                 // emits br_table for dense integer dispatches.
                 let disc_val = vreg_values.get(discriminant).copied().unwrap_or_else(|| {

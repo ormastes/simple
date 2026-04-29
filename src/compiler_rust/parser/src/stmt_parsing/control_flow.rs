@@ -1099,29 +1099,22 @@ impl<'a> Parser<'a> {
 
             // B4-sugar Phase 3: desugar `defer x.bits[lo..hi] = v` here too.
             // Side-effect guard mirrors the no_paren wrapper.
-            let (target, value) = if let Some((lvalue, lo, hi)) =
-                crate::expressions::bitfield::match_bits_write_target(&expr)
-            {
-                if !crate::expressions::bitfield::is_pure_lvalue(&lvalue) {
-                    return Err(ParseError::syntax_error_with_span(
-                        "bitfield assignment with side-effecting receiver/index \
+            let (target, value) =
+                if let Some((lvalue, lo, hi)) = crate::expressions::bitfield::match_bits_write_target(&expr) {
+                    if !crate::expressions::bitfield::is_pure_lvalue(&lvalue) {
+                        return Err(ParseError::syntax_error_with_span(
+                            "bitfield assignment with side-effecting receiver/index \
                          in defer body — bind to a temp first. The desugar \
                          duplicates the lvalue, so calls on the lvalue spine \
                          would re-execute their side effects.",
-                        assign_span,
-                    ));
-                }
-                let new_value =
-                    crate::expressions::bitfield::build_bits_write_value(
-                        lvalue.clone(),
-                        lo,
-                        hi,
-                        value,
-                    );
-                (lvalue, new_value)
-            } else {
-                (expr, value)
-            };
+                            assign_span,
+                        ));
+                    }
+                    let new_value = crate::expressions::bitfield::build_bits_write_value(lvalue.clone(), lo, hi, value);
+                    (lvalue, new_value)
+                } else {
+                    (expr, value)
+                };
 
             // Wrap as a Block containing one assignment Node
             let assign_node = Node::Assignment(AssignmentStmt {

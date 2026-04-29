@@ -604,7 +604,8 @@ pub(crate) fn evaluate_expr(
                 ctx,
             ))
         }
-        #[allow(unreachable_patterns)] // reason: exhaustive match guard; retained for forward-compatibility when new variants are added
+        #[allow(unreachable_patterns)]
+        // reason: exhaustive match guard; retained for forward-compatibility when new variants are added
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)

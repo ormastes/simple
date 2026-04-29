@@ -447,10 +447,7 @@ fn process_use_stmt(
                     if let Value::Function { def, .. } = export_value {
                         global_functions.insert(name.clone(), Arc::clone(def));
                         FUNCTION_OVERLOADS.with(|cell| {
-                            cell.borrow_mut()
-                                .entry(name.clone())
-                                .or_default()
-                                .push(Arc::clone(def));
+                            cell.borrow_mut().entry(name.clone()).or_default().push(Arc::clone(def));
                         });
                     }
                     env.insert(name.clone(), export_value.clone());

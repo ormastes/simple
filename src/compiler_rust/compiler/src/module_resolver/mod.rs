@@ -47,6 +47,19 @@ mod tests {
     }
 
     #[test]
+    fn test_single_file_mode_with_project_hint_uses_hint_root() {
+        let dir = create_test_project();
+        let external = tempfile::tempdir().unwrap();
+        let external_file = external.path().join("probe.spl");
+        fs::write(&external_file, "fn main() -> i64:\n    0\n").unwrap();
+
+        let resolver = ModuleResolver::single_file_with_project_hint(&external_file, Some(dir.path()));
+
+        assert_eq!(resolver.project_root(), dir.path());
+        assert_eq!(resolver.source_root(), dir.path().join("src"));
+    }
+
+    #[test]
     fn test_resolve_file_module() {
         let dir = create_test_project();
         let src = dir.path().join("src");

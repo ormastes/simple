@@ -3,7 +3,8 @@
 use super::*;
 use crate::hir;
 use crate::mir::lower_to_mir;
-use simple_common::target::{Target, TargetArch, TargetOS};
+use crate::optimizations::NativeOptimizationLevel;
+use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
 use simple_parser::Parser;
 
 fn compile_to_object(source: &str) -> CodegenResult<Vec<u8>> {
@@ -73,4 +74,58 @@ fn test_cranelift_target_support() {
             println!("{}: Not supported (expected)", name);
         }
     }
+}
+
+#[test]
+fn test_cranelift_x86_64_cpu_levels_are_accepted() {
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    for cpu in [
+        TargetCpu::X86_64V1,
+        TargetCpu::X86_64V2,
+        TargetCpu::X86_64V3,
+        TargetCpu::X86_64V4,
+    ] {
+        let result = Codegen::for_target_with_opt_level_and_cpu(target, NativeOptimizationLevel::Standard, cpu.clone());
+        assert!(
+            result.is_ok(),
+            "expected {:?} to be accepted, got {:?}",
+            cpu,
+            result.err()
+        );
+    }
+}
+
+#[test]
+fn test_cranelift_rejects_x86_64_cpu_levels_for_non_x86_64_targets() {
+    let target = Target::new(TargetArch::Aarch64, TargetOS::Linux);
+    let result =
+        Codegen::for_target_with_opt_level_and_cpu(target, NativeOptimizationLevel::Standard, TargetCpu::X86_64V3);
+    assert!(result.is_err());
+    let message = format!("{:?}", result.err());
+    assert!(message.contains("only applies to x86_64"));
+}
+
+#[test]
+fn test_cranelift_rejects_scaffolded_32bit_hosted_targets() {
+    for arch in [TargetArch::Arm, TargetArch::Riscv32] {
+        let target = Target::new(arch, TargetOS::Linux);
+        let result =
+            Codegen::for_target_with_opt_level_and_cpu(target, NativeOptimizationLevel::Standard, TargetCpu::Default);
+        assert!(result.is_err(), "expected {:?} hosted target to be rejected", arch);
+        let message = format!("{:?}", result.err());
+        assert!(message.contains("use --backend llvm"));
+    }
+}
+
+#[test]
+fn test_cranelift_rejects_custom_cpu_strings() {
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let result = Codegen::for_target_with_opt_level_and_cpu(
+        target,
+        NativeOptimizationLevel::Standard,
+        TargetCpu::Custom("znver4".to_string()),
+    );
+    assert!(result.is_err());
+    let message = format!("{:?}", result.err());
+    assert!(message.contains("does not accept free-form CPU"));
 }

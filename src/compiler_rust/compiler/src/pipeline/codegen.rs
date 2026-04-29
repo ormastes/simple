@@ -1,11 +1,12 @@
 //! Code generation, JIT compilation, and object file emission.
 
-use simple_common::target::Target;
+use simple_common::target::{NativeCodegenBackend, Target, TargetCpu};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::path::Path;
 
 use super::core::CompilerPipeline;
+use super::execution::native_single_file_project_hint;
 use crate::codegen::llvm::LlvmBackend;
 use crate::codegen::{backend_trait::NativeBackend, BackendKind, Codegen};
 use crate::hir::{BinOp, HirType, Signedness, TypeRegistry, UnaryOp};
@@ -13,6 +14,7 @@ use crate::import_loader::load_module_with_imports;
 use crate::mir;
 use crate::mir::{CallTarget, MirFunction, MirInst, GpuMemoryScope, Terminator};
 use crate::monomorphize::monomorphize_module;
+use crate::optimizations::NativeOptimizationLevel;
 use crate::CompileError;
 use simple_parser::ast;
 
@@ -21,20 +23,18 @@ impl CompilerPipeline {
         &self,
         mir_module: &mir::MirModule,
         target: Target,
+        opt_level: NativeOptimizationLevel,
+        backend_preference: Option<NativeCodegenBackend>,
+        cpu: TargetCpu,
     ) -> Result<Vec<u8>, CompileError> {
-        if target.arch.is_32bit() && cfg!(not(feature = "llvm")) {
-            return Err(CompileError::Codegen(
-                "32-bit targets require the LLVM backend; build with --features llvm".to_string(),
-            ));
-        }
-
         // Coverage module is complete and available via SIMPLE_COVERAGE env var
         let coverage_enabled = crate::coverage::is_coverage_enabled();
-        let backend = select_backend(&target)?;
+        let backend = select_backend(&target, backend_preference)?;
 
         match backend {
             BackendKind::Cranelift => {
-                let mut codegen = Codegen::for_target(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                let mut codegen = Codegen::for_target_with_opt_level_and_cpu(target, opt_level, cpu.clone())
+                    .map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 // During bootstrap, emit the entry module without mangling so the linker
                 // sees a public main symbol.
                 codegen.set_entry_module(true);
@@ -43,7 +43,8 @@ impl CompilerPipeline {
                     .map_err(|e| CompileError::Codegen(format!("{e}")))
             }
             BackendKind::Llvm => {
-                let backend = LlvmBackend::new(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                let backend = LlvmBackend::new_with_opt_level_and_cpu(target, opt_level, cpu.clone())
+                    .map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 backend
                     .with_coverage(coverage_enabled)
                     .compile(mir_module)
@@ -65,7 +66,8 @@ impl CompilerPipeline {
             BackendKind::CraneliftJit | BackendKind::LlvmJit | BackendKind::AutoJit => {
                 // JIT backends are for in-process execution, not AOT compilation.
                 // Fall back to Cranelift AOT for object code generation.
-                let codegen = Codegen::for_target(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                let codegen = Codegen::for_target_with_opt_level_and_cpu(target, opt_level, cpu)
+                    .map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 codegen
                     .compile_module(mir_module)
                     .map_err(|e| CompileError::Codegen(format!("{e}")))
@@ -85,7 +87,9 @@ impl CompilerPipeline {
         let ast_module = monomorphize_module(&ast_module);
 
         // Type check and lower to MIR (with module resolution for imports)
-        let mir_module = self.type_check_and_lower_with_context(&ast_module, source)?;
+        let project_hint = native_single_file_project_hint(source);
+        let mir_module =
+            self.type_check_and_lower_with_context_and_project_hint(&ast_module, source, project_hint.as_deref())?;
 
         // Generate PTX from MIR
         let ptx = generate_ptx(&mir_module);
@@ -104,7 +108,9 @@ impl CompilerPipeline {
             let ast_module = load_module_with_imports(source, &mut HashSet::new())?;
             let vhdl_metadata = collect_vhdl_source_metadata(&ast_module);
             let ast_module = monomorphize_module(&ast_module);
-            let mir_module = self.type_check_and_lower_with_context(&ast_module, source)?;
+            let project_hint = native_single_file_project_hint(source);
+            let mir_module =
+                self.type_check_and_lower_with_context_and_project_hint(&ast_module, source, project_hint.as_deref())?;
             let vhdl = generate_vhdl_with_metadata(&mir_module, &vhdl_metadata)?;
             std::fs::write(output, vhdl).map_err(|e| CompileError::Io(format!("{e}")))?;
             Ok(())
@@ -2457,15 +2463,16 @@ fn emit_ptx_terminator(out: &mut String, term: &Terminator, is_kernel: bool, _bl
             out.push_str(&format!("    @%p{} bra BB{};\n", cond.0, then_block.0));
             out.push_str(&format!("    bra BB{};\n", else_block.0));
         }
-        Terminator::Switch { discriminant, cases, default } => {
+        Terminator::Switch {
+            discriminant,
+            cases,
+            default,
+        } => {
             // PTX has no direct jump-table primitive in our emit path; fall
             // back to a chain of compare-and-branches. Switch terminator is
             // primarily a Cranelift-host optimization (B5).
             for (k, target) in cases {
-                out.push_str(&format!(
-                    "    setp.eq.s64 %p_sw, %rd{}, {};\n",
-                    discriminant.0, k
-                ));
+                out.push_str(&format!("    setp.eq.s64 %p_sw, %rd{}, {};\n", discriminant.0, k));
                 out.push_str(&format!("    @%p_sw bra BB{};\n", target.0));
             }
             out.push_str(&format!("    bra BB{};\n", default.0));
@@ -2477,8 +2484,27 @@ fn emit_ptx_terminator(out: &mut String, term: &Terminator, is_kernel: bool, _bl
     }
 }
 
-fn select_backend(target: &Target) -> Result<BackendKind, CompileError> {
+fn select_backend(
+    target: &Target,
+    backend_preference: Option<NativeCodegenBackend>,
+) -> Result<BackendKind, CompileError> {
     let mut backend = BackendKind::for_target(target);
+
+    if let Some(requested) = backend_preference {
+        backend = match requested {
+            NativeCodegenBackend::Cranelift => BackendKind::Cranelift,
+            NativeCodegenBackend::Llvm => {
+                if cfg!(feature = "llvm") {
+                    BackendKind::Llvm
+                } else {
+                    return Err(CompileError::Codegen(
+                        "native backend 'llvm' requested but this build does not include the 'llvm' feature"
+                            .to_string(),
+                    ));
+                }
+            }
+        };
+    }
 
     // SIMPLE_FORCE_LLVM takes precedence over SIMPLE_BACKEND
     let force_llvm = env::var("SIMPLE_FORCE_LLVM")
@@ -2571,7 +2597,7 @@ mod tests {
         env::remove_var("SIMPLE_BACKEND");
         env::remove_var("SIMPLE_FORCE_LLVM");
         let target = Target::host();
-        let backend = select_backend(&target).unwrap();
+        let backend = select_backend(&target, None).unwrap();
         assert_eq!(backend, BackendKind::for_target(&target));
     }
 
@@ -2579,7 +2605,7 @@ mod tests {
     fn backend_env_respects_cranelift_override() {
         env::set_var("SIMPLE_BACKEND", "cranelift");
         let target = Target::host();
-        let backend = select_backend(&target).unwrap();
+        let backend = select_backend(&target, None).unwrap();
         assert_eq!(backend, BackendKind::Cranelift);
         env::remove_var("SIMPLE_BACKEND");
     }
@@ -2589,7 +2615,7 @@ mod tests {
     fn backend_env_respects_llvm_override() {
         env::set_var("SIMPLE_BACKEND", "llvm");
         let target = Target::host();
-        let backend = select_backend(&target).unwrap();
+        let backend = select_backend(&target, None).unwrap();
         assert_eq!(backend, BackendKind::Llvm);
         env::remove_var("SIMPLE_BACKEND");
     }
@@ -2598,7 +2624,7 @@ mod tests {
     fn backend_env_unknown_value_errors() {
         env::set_var("SIMPLE_BACKEND", "unknown-backend");
         let target = Target::host();
-        let result = select_backend(&target);
+        let result = select_backend(&target, None);
         assert!(result.is_err());
         env::remove_var("SIMPLE_BACKEND");
     }

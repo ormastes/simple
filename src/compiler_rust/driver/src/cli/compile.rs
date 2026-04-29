@@ -5,7 +5,8 @@ use crate::{Interpreter, RunConfig};
 use crate::runner::Runner;
 use crate::CompileOptions;
 use simple_common::smf::{SectionType, SmfHeader, SmfSection, SECTION_FLAG_READ};
-use simple_common::target::{Target, TargetArch};
+use simple_common::target::{NativeCodegenBackend, Target, TargetArch, TargetCpu};
+use simple_compiler::{available_native_codegen_backends, is_native_codegen_backend_available};
 use simple_compiler::optimizations::NativeOptimizationLevel;
 use std::fs;
 use std::mem;
@@ -570,25 +571,55 @@ fn push_struct<T>(out: &mut Vec<u8>, value: &T) {
 
 /// List available target architectures
 pub fn list_targets() -> i32 {
-    println!("Available target architectures:");
+    let available_backends = available_native_codegen_backends()
+        .iter()
+        .map(|backend| backend.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let aarch64_cpus = if is_native_codegen_backend_available(NativeCodegenBackend::Llvm) {
+        "default,native,generic/custom(cpu string via llvm)"
+    } else {
+        "default,native,generic"
+    };
+    let riscv64_cpus = if is_native_codegen_backend_available(NativeCodegenBackend::Llvm) {
+        "default,native,generic/custom(cpu string via llvm)"
+    } else {
+        "default,native,generic"
+    };
+
+    println!("Available native compilation targets:");
     println!();
-    println!("Host architecture: {} (default)", TargetArch::host());
+    println!("Host architecture: {}", TargetArch::host());
     println!();
-    println!("64-bit targets:");
-    println!("  x86_64   - AMD/Intel 64-bit");
-    println!("  aarch64  - ARM 64-bit (Apple Silicon, ARM servers)");
-    println!("  riscv64  - RISC-V 64-bit");
+    println!("Stable hosted targets:");
+    println!(
+        "  x86_64   backends={}   cpus=default,native,x86-64-v1,x86-64-v2,x86-64-v3,x86-64-v4",
+        available_backends
+    );
+    println!("  aarch64  backends={}   cpus={}", available_backends, aarch64_cpus);
+    println!("  riscv64  backends={}   cpus={}", available_backends, riscv64_cpus);
     println!();
-    println!("32-bit targets:");
-    println!("  i686     - Intel/AMD 32-bit");
-    println!("  armv7    - ARM 32-bit");
-    println!("  riscv32  - RISC-V 32-bit");
+    println!("Generic-only hosted targets:");
+    if is_native_codegen_backend_available(NativeCodegenBackend::Llvm) {
+        println!("  i686     backends=llvm            cpus=default,custom(cpu string)");
+    } else {
+        println!("  i686     backends=unavailable     status=requires an llvm-enabled build");
+    }
+    println!();
+    println!("Scaffolded hosted targets:");
+    if is_native_codegen_backend_available(NativeCodegenBackend::Llvm) {
+        println!("  armv7    backends=llvm only       status=scaffolded; Cranelift rejects this lane explicitly");
+        println!("  riscv32  backends=llvm only       status=scaffolded; Cranelift rejects this lane explicitly");
+    } else {
+        println!("  armv7    backends=unavailable     status=scaffolded; requires an llvm-enabled build");
+        println!("  riscv32  backends=unavailable     status=scaffolded; requires an llvm-enabled build");
+    }
     println!();
     println!("WebAssembly targets:");
     println!("  wasm32-unknown-unknown  - Standalone/browser WASM module");
     println!("  wasm32-wasi             - WASI-compatible WASM module");
     println!();
-    println!("Usage: simple compile <source.spl> --target <target>");
+    println!("Use: simple compile <source.spl> --native --target <target> --backend <llvm|cranelift> --cpu <policy>");
     0
 }
 
@@ -598,6 +629,8 @@ pub fn compile_file_native(
     source: &Path,
     output: Option<PathBuf>,
     target: Option<Target>,
+    backend: Option<NativeCodegenBackend>,
+    cpu: Option<TargetCpu>,
     linker: Option<simple_compiler::linker::NativeLinker>,
     opt_level: NativeOptimizationLevel,
     layout_optimize: bool,
@@ -621,6 +654,7 @@ pub fn compile_file_native(
     // Build options
     let mut options = NativeBinaryOptions::new()
         .output(&out_path)
+        .opt_level(opt_level)
         .layout_optimize(layout_optimize)
         .strip(strip)
         .pie(pie)
@@ -630,6 +664,14 @@ pub fn compile_file_native(
     // Set target if specified
     if let Some(t) = target {
         options = options.target(t);
+    }
+
+    if let Some(cpu) = cpu {
+        options = options.cpu(cpu);
+    }
+
+    if let Some(backend) = backend {
+        options = options.backend(backend);
     }
 
     // Set linker if specified

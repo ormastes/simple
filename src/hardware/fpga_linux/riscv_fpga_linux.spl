@@ -309,6 +309,18 @@ impl RiscvFpgaLane:
             return "00000FFC"
         "0000000000000FFC"
 
+    fn sstatus_mask_hex() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return "800DE133"
+        "00000000800DE133"
+
+    fn sv39_page_fault_cause_decimal(access_kind: text) -> text:
+        if access_kind == "read":
+            return "13"
+        if access_kind == "write":
+            return "15"
+        "12"
+
     fn boot_stride_decimal() -> text:
         if self.xlen == RiscvXlen.Rv32:
             return "4"
@@ -1162,7 +1174,83 @@ impl RiscvFpgaLane:
             "        variable decode_dispatch_class : std_logic_vector(3 downto 0);\n" +
             "        variable decode_continue_exec : std_logic;\n" +
             "        variable decode_should_trap : std_logic;\n" +
-            "        variable decode_should_halt : std_logic;\n"
+            "        variable decode_should_halt : std_logic;\n" +
+            "        variable csr_old_val : xword_t;\n" +
+            "        variable csr_new_val : xword_t;\n" +
+            "        variable translated_addr_v : xword_t;\n" +
+            "        variable translated_fault_v : std_logic;\n"
+
+    fn core_vhdl_mmu_port_lines() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return ""
+        "        mmu_dmem_l2_pte : in  xword_t;\n" +
+            "        mmu_dmem_l1_pte : in  xword_t;\n" +
+            "        mmu_dmem_l0_pte : in  xword_t;\n" +
+            "        debug_priv_mode : out std_logic_vector(1 downto 0);\n"
+
+    fn core_vhdl_mmu_helper_lines() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return ""
+        "    procedure sv39_translate_data(\n" +
+            "        vaddr      : in  xword_t;\n" +
+            "        satp       : in  xword_t;\n" +
+            "        priv_mode  : in  std_logic_vector(1 downto 0);\n" +
+            "        is_write   : in  std_logic;\n" +
+            "        l2_pte     : in  xword_t;\n" +
+            "        l1_pte     : in  xword_t;\n" +
+            "        l0_pte     : in  xword_t;\n" +
+            "        paddr      : out xword_t;\n" +
+            "        fault      : out std_logic\n" +
+            "    ) is\n" +
+            "        variable pte_v : xword_t;\n" +
+            "        variable translated_v : xword_t;\n" +
+            "    begin\n" +
+            "        translated_v := vaddr;\n" +
+            "        fault := '0';\n" +
+            "        if priv_mode = \"11\" then\n" +
+            "            paddr := translated_v;\n" +
+            "            return;\n" +
+            "        end if;\n" +
+            "        if satp(63 downto 60) /= \"1000\" then\n" +
+            "            paddr := translated_v;\n" +
+            "            return;\n" +
+            "        end if;\n" +
+            "        pte_v := l2_pte;\n" +
+            "        if pte_v(0) = '0' or (pte_v(2) = '1' and pte_v(1) = '0') then\n" +
+            "            fault := '1';\n" +
+            "        elsif pte_v(1) = '1' or pte_v(3) = '1' then\n" +
+            "            fault := '1';\n" +
+            "        else\n" +
+            "            pte_v := l1_pte;\n" +
+            "            if pte_v(0) = '0' or (pte_v(2) = '1' and pte_v(1) = '0') then\n" +
+            "                fault := '1';\n" +
+            "            elsif pte_v(1) = '1' or pte_v(3) = '1' then\n" +
+            "                fault := '1';\n" +
+            "            else\n" +
+            "                pte_v := l0_pte;\n" +
+            "                if pte_v(0) = '0' or (pte_v(2) = '1' and pte_v(1) = '0') then\n" +
+            "                    fault := '1';\n" +
+            "                elsif is_write = '1' and pte_v(2) = '0' then\n" +
+            "                    fault := '1';\n" +
+            "                elsif is_write = '0' and pte_v(1) = '0' then\n" +
+            "                    fault := '1';\n" +
+            "                elsif priv_mode = \"00\" and pte_v(4) = '0' then\n" +
+            "                    fault := '1';\n" +
+            "                elsif priv_mode = \"01\" and pte_v(4) = '1' then\n" +
+            "                    fault := '1';\n" +
+            "                elsif pte_v(6) = '0' then\n" +
+            "                    fault := '1';\n" +
+            "                elsif is_write = '1' and pte_v(7) = '0' then\n" +
+            "                    fault := '1';\n" +
+            "                else\n" +
+            "                    translated_v := (others => '0');\n" +
+            "                    translated_v(55 downto 12) := pte_v(53 downto 10);\n" +
+            "                    translated_v(11 downto 0) := vaddr(11 downto 0);\n" +
+            "                end if;\n" +
+            "            end if;\n" +
+            "        end if;\n" +
+            "        paddr := translated_v;\n" +
+            "    end procedure;\n"
 
     fn core_vhdl_semihost_region() -> text:
         "                if imem_rdata = x\"01F01013\" and semi_phase_reg = 0 then\n" +
@@ -1181,7 +1269,7 @@ impl RiscvFpgaLane:
             "                    else\n" +
             "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                    end if;\n" +
-            "                elsif imem_rdata(6 downto 0) = \"1110011\" and semi_phase_reg = 0 then\n" +
+            "                elsif imem_rdata = x\"00100073\" and semi_phase_reg = 0 then\n" +
             "                    halt_reg <= '1';\n" +
             "                else\n"
 
@@ -1208,8 +1296,14 @@ impl RiscvFpgaLane:
             "                elsif imem_rdata(6 downto 0) = \"0010011\" then\n" +
             "                    decode_dispatch_class_bits := \"0000000000000000000000000000\" & \"0011\";\n" +
             "                    decode_trap_halt_control_bits := \"00000000000000000000000000000\" & '0' & '0' & '1';\n" +
+            "                elsif imem_rdata(6 downto 0) = \"0011011\" then\n" +
+            "                    decode_dispatch_class_bits := \"0000000000000000000000000000\" & \"1100\";\n" +
+            "                    decode_trap_halt_control_bits := \"00000000000000000000000000000\" & '0' & '0' & '1';\n" +
             "                elsif imem_rdata(6 downto 0) = \"0110011\" then\n" +
             "                    decode_dispatch_class_bits := \"0000000000000000000000000000\" & \"0100\";\n" +
+            "                    decode_trap_halt_control_bits := \"00000000000000000000000000000\" & '0' & '0' & '1';\n" +
+            "                elsif imem_rdata(6 downto 0) = \"0111011\" then\n" +
+            "                    decode_dispatch_class_bits := \"0000000000000000000000000000\" & \"1101\";\n" +
             "                    decode_trap_halt_control_bits := \"00000000000000000000000000000\" & '0' & '0' & '1';\n" +
             "                elsif imem_rdata(6 downto 0) = \"0000011\" then\n" +
             "                    decode_dispatch_class_bits := \"0000000000000000000000000000\" & \"0101\";\n" +
@@ -1231,7 +1325,7 @@ impl RiscvFpgaLane:
             "                    decode_trap_halt_control_bits := \"00000000000000000000000000000\" & '0' & '0' & '1';\n" +
             "                elsif imem_rdata(6 downto 0) = \"1110011\" then\n" +
             "                    decode_dispatch_class_bits := \"0000000000000000000000000000\" & \"1011\";\n" +
-            "                    decode_trap_halt_control_bits := \"00000000000000000000000000000\" & '1' & '0' & '0';\n" +
+            "                    decode_trap_halt_control_bits := \"00000000000000000000000000000\" & '0' & '0' & '1';\n" +
             "                else\n" +
             "                    decode_trap_halt_control_bits := \"00000000000000000000000000000\" & '0' & '1' & '0';\n" +
             "                end if;\n" +
@@ -1261,6 +1355,18 @@ impl RiscvFpgaLane:
             "                        elsif imem_rdata(14 downto 12) = \"111\" then\n" +
             "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"1001\" & '0';\n" +
             "                        end if;\n" +
+            "                    when \"1100\" =>\n" +
+            "                        decode_i_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 20);\n" +
+            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        if imem_rdata(14 downto 12) = \"000\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0000\" & '0';\n" +
+            "                        elsif imem_rdata(14 downto 12) = \"001\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0010\" & '0';\n" +
+            "                        elsif imem_rdata(14 downto 12) = \"101\" and imem_rdata(30 downto 30) = \"0\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0110\" & '0';\n" +
+            "                        elsif imem_rdata(14 downto 12) = \"101\" and imem_rdata(30 downto 30) = \"1\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0111\" & '0';\n" +
+            "                        end if;\n" +
             "                    when \"0100\" =>\n" +
             "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" and imem_rdata(31 downto 25) = \"0000000\" then\n" +
@@ -1286,6 +1392,19 @@ impl RiscvFpgaLane:
             "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"1000\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"111\" then\n" +
             "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"1001\" & '1';\n" +
+            "                        end if;\n" +
+            "                    when \"1101\" =>\n" +
+            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        if imem_rdata(14 downto 12) = \"000\" and imem_rdata(30 downto 30) = \"0\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0000\" & '1';\n" +
+            "                        elsif imem_rdata(14 downto 12) = \"000\" and imem_rdata(30 downto 30) = \"1\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0001\" & '1';\n" +
+            "                        elsif imem_rdata(14 downto 12) = \"001\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0010\" & '1';\n" +
+            "                        elsif imem_rdata(14 downto 12) = \"101\" and imem_rdata(30 downto 30) = \"0\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0110\" & '1';\n" +
+            "                        elsif imem_rdata(14 downto 12) = \"101\" and imem_rdata(30 downto 30) = \"1\" then\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0111\" & '1';\n" +
             "                        end if;\n" +
             "                    when \"0101\" =>\n" +
             "                        decode_i_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 20);\n" +
@@ -1377,6 +1496,21 @@ impl RiscvFpgaLane:
             "                                    end if;\n" +
             "                                end if;\n" +
             "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                            when \"1100\" =>\n" +
+            "                                if decode_writeback_rd_i /= 0 then\n" +
+            "                                    if XLEN = 64 and decode_execute_is_reg = '0' then\n" +
+            "                                        case decode_execute_alu_op is\n" +
+            "                                            when \"0000\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(signed(regs(rs1_i)(31 downto 0)) + signed(imm_i(31 downto 0)), XLEN));\n" +
+            "                                            when \"0010\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_left(unsigned(regs(rs1_i)(31 downto 0)), to_integer(unsigned(imem_rdata(24 downto 20)))))), XLEN));\n" +
+            "                                            when \"0110\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_right(unsigned(regs(rs1_i)(31 downto 0)), to_integer(unsigned(imem_rdata(24 downto 20)))))), XLEN));\n" +
+            "                                            when \"0111\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(shift_right(signed(regs(rs1_i)(31 downto 0)), to_integer(unsigned(imem_rdata(24 downto 20)))), XLEN));\n" +
+            "                                            when others => trap_reg <= '1';\n" +
+            "                                        end case;\n" +
+            "                                    else\n" +
+            "                                        trap_reg <= '1';\n" +
+            "                                    end if;\n" +
+            "                                end if;\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                            when \"0100\" =>\n" +
             "                                if decode_writeback_rd_i /= 0 then\n" +
             "                                    if decode_execute_is_reg = '1' then\n" +
@@ -1408,11 +1542,44 @@ impl RiscvFpgaLane:
             "                                    end if;\n" +
             "                                end if;\n" +
             "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                            when \"1101\" =>\n" +
+            "                                if decode_writeback_rd_i /= 0 then\n" +
+            "                                    if XLEN = 64 and decode_execute_is_reg = '1' then\n" +
+            "                                        case decode_execute_alu_op is\n" +
+            "                                            when \"0000\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(signed(regs(rs1_i)(31 downto 0)) + signed(regs(rs2_i)(31 downto 0)), XLEN));\n" +
+            "                                            when \"0001\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(signed(regs(rs1_i)(31 downto 0)) - signed(regs(rs2_i)(31 downto 0)), XLEN));\n" +
+            "                                            when \"0010\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_left(unsigned(regs(rs1_i)(31 downto 0)), to_integer(unsigned(regs(rs2_i)(4 downto 0)))))), XLEN));\n" +
+            "                                            when \"0110\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_right(unsigned(regs(rs1_i)(31 downto 0)), to_integer(unsigned(regs(rs2_i)(4 downto 0)))))), XLEN));\n" +
+            "                                            when \"0111\" => regs(decode_writeback_rd_i) <= std_logic_vector(resize(shift_right(signed(regs(rs1_i)(31 downto 0)), to_integer(unsigned(regs(rs2_i)(4 downto 0)))), XLEN));\n" +
+            "                                            when others => trap_reg <= '1';\n" +
+            "                                        end case;\n" +
+            "                                    else\n" +
+            "                                        trap_reg <= '1';\n" +
+            "                                    end if;\n" +
+            "                                end if;\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                            when \"0101\" =>\n" +
             "                                addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
-            "                                dmem_addr_reg <= std_logic_vector(addr_i);\n" +
+            "                                if XLEN = 64 then\n" +
+            "                                    sv39_translate_data(std_logic_vector(addr_i), csr_satp_reg, priv_mode_reg, '0', mmu_dmem_l2_pte, mmu_dmem_l1_pte, mmu_dmem_l0_pte, translated_addr_v, translated_fault_v);\n" +
+            "                                else\n" +
+            "                                    translated_addr_v := std_logic_vector(addr_i);\n" +
+            "                                    translated_fault_v := '0';\n" +
+            "                                end if;\n" +
+            "                                dmem_addr_reg <= translated_addr_v;\n" +
             "                                dmem_re_reg <= '1';\n" +
             "                                load_pending_reg <= '0';\n" +
+            "                                if translated_fault_v = '1' then\n" +
+            "                                    dmem_re_reg <= '0';\n" +
+            "                                    csr_mepc_reg <= pc_reg;\n" +
+            "                                    csr_mcause_reg <= std_logic_vector(to_unsigned({self.sv39_page_fault_cause_decimal(\"read\")}, XLEN));\n" +
+            "                                    csr_mtval_reg <= std_logic_vector(addr_i);\n" +
+            "                                    csr_mstatus_reg(7) <= csr_mstatus_reg(3);\n" +
+            "                                    csr_mstatus_reg(3) <= '0';\n" +
+            "                                    csr_mstatus_reg(12 downto 11) <= priv_mode_reg;\n" +
+            "                                    priv_mode_reg <= \"11\";\n" +
+            "                                    pc_reg <= csr_mtvec_reg;\n" +
+            "                                else\n" +
             "                                case decode_memory_funct3 is\n" +
             "                                    when \"000\" =>\n" +
             "                                        dmem_width_reg <= \"00\";\n" +
@@ -1469,10 +1636,29 @@ impl RiscvFpgaLane:
             "                                load_pending_addr_reg <= std_logic_vector(addr_i);\n" +
             "                                load_pending_funct3_reg <= decode_memory_funct3;\n" +
             "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                end if;\n" +
             "                            when \"0110\" =>\n" +
             "                                imm_i := resize(signed(decode_store_immediate_bits(11 downto 0)), XLEN);\n" +
             "                                addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
-            "                                dmem_addr_reg <= std_logic_vector(addr_i);\n" +
+            "                                if XLEN = 64 then\n" +
+            "                                    sv39_translate_data(std_logic_vector(addr_i), csr_satp_reg, priv_mode_reg, '1', mmu_dmem_l2_pte, mmu_dmem_l1_pte, mmu_dmem_l0_pte, translated_addr_v, translated_fault_v);\n" +
+            "                                else\n" +
+            "                                    translated_addr_v := std_logic_vector(addr_i);\n" +
+            "                                    translated_fault_v := '0';\n" +
+            "                                end if;\n" +
+            "                                dmem_addr_reg <= translated_addr_v;\n" +
+            "                                if translated_fault_v = '1' then\n" +
+            "                                    dmem_we_reg <= '0';\n" +
+            "                                    dmem_wstrb_reg <= (others => '0');\n" +
+            "                                    csr_mepc_reg <= pc_reg;\n" +
+            "                                    csr_mcause_reg <= std_logic_vector(to_unsigned({self.sv39_page_fault_cause_decimal(\"write\")}, XLEN));\n" +
+            "                                    csr_mtval_reg <= std_logic_vector(addr_i);\n" +
+            "                                    csr_mstatus_reg(7) <= csr_mstatus_reg(3);\n" +
+            "                                    csr_mstatus_reg(3) <= '0';\n" +
+            "                                    csr_mstatus_reg(12 downto 11) <= priv_mode_reg;\n" +
+            "                                    priv_mode_reg <= \"11\";\n" +
+            "                                    pc_reg <= csr_mtvec_reg;\n" +
+            "                                else\n" +
             "                                case decode_memory_funct3 is\n" +
             "                                    when \"000\" =>\n" +
             "                                        dmem_width_reg <= \"00\";\n" +
@@ -1529,7 +1715,8 @@ impl RiscvFpgaLane:
             "                                        dmem_width_reg <= \"00\";\n" +
             "                                        trap_reg <= '1';\n" +
             "                                end case;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n"
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                end if;\n"
 
     fn core_vhdl_control_region() -> text:
         "                            when \"0111\" =>\n" +
@@ -1569,6 +1756,153 @@ impl RiscvFpgaLane:
             "                                end if;\n" +
             "                            when \"1010\" =>\n" +
             "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                            when \"1011\" =>\n" +
+            "                                if imem_rdata(14 downto 12) = \"000\" then\n" +
+            "                                    if imem_rdata = x\"00100073\" then\n" +
+            "                                        halt_reg <= '1';\n" +
+            "                                    elsif imem_rdata = x\"00000073\" then\n" +
+            "                                        if priv_mode_reg = \"00\" and csr_medeleg_reg(8) = '1' then\n" +
+            "                                            csr_sepc_reg <= pc_reg;\n" +
+            "                                            csr_scause_reg <= std_logic_vector(to_unsigned(8, XLEN));\n" +
+            "                                            csr_stval_reg <= (others => '0');\n" +
+            "                                            csr_mstatus_reg(5) <= csr_mstatus_reg(1);\n" +
+            "                                            csr_mstatus_reg(1) <= '0';\n" +
+            "                                            csr_mstatus_reg(8) <= '0';\n" +
+            "                                            priv_mode_reg <= \"01\";\n" +
+            "                                            pc_reg <= csr_stvec_reg;\n" +
+            "                                        else\n" +
+            "                                            csr_mepc_reg <= pc_reg;\n" +
+            "                                            if priv_mode_reg = \"00\" then\n" +
+            "                                                csr_mcause_reg <= std_logic_vector(to_unsigned(8, XLEN));\n" +
+            "                                            elsif priv_mode_reg = \"01\" then\n" +
+            "                                                csr_mcause_reg <= std_logic_vector(to_unsigned(9, XLEN));\n" +
+            "                                            else\n" +
+            "                                                csr_mcause_reg <= std_logic_vector(to_unsigned(11, XLEN));\n" +
+            "                                            end if;\n" +
+            "                                            csr_mtval_reg <= (others => '0');\n" +
+            "                                            csr_mstatus_reg(7) <= csr_mstatus_reg(3);\n" +
+            "                                            csr_mstatus_reg(3) <= '0';\n" +
+            "                                            csr_mstatus_reg(12 downto 11) <= priv_mode_reg;\n" +
+            "                                            priv_mode_reg <= \"11\";\n" +
+            "                                            pc_reg <= csr_mtvec_reg;\n" +
+            "                                        end if;\n" +
+            "                                    elsif imem_rdata = x\"30200073\" then\n" +
+            "                                        csr_mstatus_reg(3) <= csr_mstatus_reg(7);\n" +
+            "                                        csr_mstatus_reg(7) <= '1';\n" +
+            "                                        csr_mstatus_reg(12 downto 11) <= \"00\";\n" +
+            "                                        priv_mode_reg <= csr_mstatus_reg(12 downto 11);\n" +
+            "                                        pc_reg <= csr_mepc_reg;\n" +
+            "                                    elsif imem_rdata = x\"10200073\" then\n" +
+            "                                        csr_mstatus_reg(1) <= csr_mstatus_reg(5);\n" +
+            "                                        csr_mstatus_reg(5) <= '1';\n" +
+            "                                        if csr_mstatus_reg(8) = '1' then\n" +
+            "                                            priv_mode_reg <= \"01\";\n" +
+            "                                        else\n" +
+            "                                            priv_mode_reg <= \"00\";\n" +
+            "                                        end if;\n" +
+            "                                        csr_mstatus_reg(8) <= '0';\n" +
+            "                                        pc_reg <= csr_sepc_reg;\n" +
+            "                                    elsif imem_rdata(31 downto 25) = \"0001001\" then\n" +
+            "                                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                    else\n" +
+            "                                        trap_reg <= '1';\n" +
+            "                                    end if;\n" +
+            "                                else\n" +
+            "                                    csr_old_val := (others => '0');\n" +
+            "                                    csr_new_val := (others => '0');\n" +
+            "                                    case imem_rdata(31 downto 20) is\n" +
+            "                                        when x\"100\" => csr_old_val := csr_mstatus_reg and x\"{self.sstatus_mask_hex()}\";\n" +
+            "                                        when x\"300\" => csr_old_val := csr_mstatus_reg;\n" +
+            "                                        when x\"104\" => csr_old_val := csr_mie_reg and csr_mideleg_reg;\n" +
+            "                                        when x\"304\" => csr_old_val := csr_mie_reg;\n" +
+            "                                        when x\"105\" => csr_old_val := csr_stvec_reg;\n" +
+            "                                        when x\"305\" => csr_old_val := csr_mtvec_reg;\n" +
+            "                                        when x\"140\" => csr_old_val := csr_sscratch_reg;\n" +
+            "                                        when x\"340\" => csr_old_val := csr_mscratch_reg;\n" +
+            "                                        when x\"141\" => csr_old_val := csr_sepc_reg;\n" +
+            "                                        when x\"341\" => csr_old_val := csr_mepc_reg;\n" +
+            "                                        when x\"142\" => csr_old_val := csr_scause_reg;\n" +
+            "                                        when x\"342\" => csr_old_val := csr_mcause_reg;\n" +
+            "                                        when x\"143\" => csr_old_val := csr_stval_reg;\n" +
+            "                                        when x\"180\" => csr_old_val := csr_satp_reg;\n" +
+            "                                        when x\"343\" => csr_old_val := csr_mtval_reg;\n" +
+            "                                        when x\"144\" =>\n" +
+            "                                            csr_old_val := (others => '0');\n" +
+            "                                            csr_old_val(9) := irq_external;\n" +
+            "                                            csr_old_val(5) := irq_timer;\n" +
+            "                                            csr_old_val(1) := irq_software;\n" +
+            "                                            csr_old_val := csr_old_val and csr_mideleg_reg;\n" +
+            "                                        when x\"302\" => csr_old_val := csr_medeleg_reg;\n" +
+            "                                        when x\"303\" => csr_old_val := csr_mideleg_reg;\n" +
+            "                                        when x\"344\" =>\n" +
+            "                                            csr_old_val := (others => '0');\n" +
+            "                                            csr_old_val(11) := irq_external;\n" +
+            "                                            csr_old_val(7) := irq_timer;\n" +
+            "                                            csr_old_val(3) := irq_software;\n" +
+            "                                        when others => trap_reg <= '1';\n" +
+            "                                    end case;\n" +
+            "                                    if trap_reg = '0' then\n" +
+            "                                        case imem_rdata(14 downto 12) is\n" +
+            "                                            when \"001\" => csr_new_val := regs(rs1_i);\n" +
+            "                                            when \"010\" =>\n" +
+            "                                                if rs1_i = 0 then\n" +
+            "                                                    csr_new_val := csr_old_val;\n" +
+            "                                                else\n" +
+            "                                                    csr_new_val := csr_old_val or regs(rs1_i);\n" +
+            "                                                end if;\n" +
+            "                                            when \"011\" =>\n" +
+            "                                                if rs1_i = 0 then\n" +
+            "                                                    csr_new_val := csr_old_val;\n" +
+            "                                                else\n" +
+            "                                                    csr_new_val := csr_old_val and (not regs(rs1_i));\n" +
+            "                                                end if;\n" +
+            "                                            when \"101\" => csr_new_val := std_logic_vector(to_unsigned(rs1_i, XLEN));\n" +
+            "                                            when \"110\" =>\n" +
+            "                                                if rs1_i = 0 then\n" +
+            "                                                    csr_new_val := csr_old_val;\n" +
+            "                                                else\n" +
+            "                                                    csr_new_val := csr_old_val or std_logic_vector(to_unsigned(rs1_i, XLEN));\n" +
+            "                                                end if;\n" +
+            "                                            when \"111\" =>\n" +
+            "                                                if rs1_i = 0 then\n" +
+            "                                                    csr_new_val := csr_old_val;\n" +
+            "                                                else\n" +
+            "                                                    csr_new_val := csr_old_val and (not std_logic_vector(to_unsigned(rs1_i, XLEN)));\n" +
+            "                                                end if;\n" +
+            "                                            when others => trap_reg <= '1';\n" +
+            "                                        end case;\n" +
+            "                                    end if;\n" +
+            "                                    if trap_reg = '0' then\n" +
+            "                                        if rd_i /= 0 then\n" +
+            "                                            regs(rd_i) <= csr_old_val;\n" +
+            "                                        end if;\n" +
+            "                                        case imem_rdata(14 downto 12) is\n" +
+            "                                            when \"001\" | \"010\" | \"011\" | \"101\" | \"110\" | \"111\" =>\n" +
+            "                                                case imem_rdata(31 downto 20) is\n" +
+            "                                                    when x\"100\" => csr_mstatus_reg <= (csr_mstatus_reg and (not x\"{self.sstatus_mask_hex()}\")) or (csr_new_val and x\"{self.sstatus_mask_hex()}\");\n" +
+            "                                                    when x\"300\" => csr_mstatus_reg <= csr_new_val;\n" +
+            "                                                    when x\"104\" => csr_mie_reg <= (csr_mie_reg and (not csr_mideleg_reg)) or (csr_new_val and csr_mideleg_reg);\n" +
+            "                                                    when x\"304\" => csr_mie_reg <= csr_new_val;\n" +
+            "                                                    when x\"105\" => csr_stvec_reg <= csr_new_val;\n" +
+            "                                                    when x\"305\" => csr_mtvec_reg <= csr_new_val;\n" +
+            "                                                    when x\"140\" => csr_sscratch_reg <= csr_new_val;\n" +
+            "                                                    when x\"340\" => csr_mscratch_reg <= csr_new_val;\n" +
+            "                                                    when x\"141\" => csr_sepc_reg <= csr_new_val;\n" +
+            "                                                    when x\"341\" => csr_mepc_reg <= csr_new_val;\n" +
+            "                                                    when x\"142\" => csr_scause_reg <= csr_new_val;\n" +
+            "                                                    when x\"342\" => csr_mcause_reg <= csr_new_val;\n" +
+            "                                                    when x\"143\" => csr_stval_reg <= csr_new_val;\n" +
+            "                                                    when x\"180\" => csr_satp_reg <= csr_new_val;\n" +
+            "                                                    when x\"343\" => csr_mtval_reg <= csr_new_val;\n" +
+            "                                                    when x\"302\" => csr_medeleg_reg <= csr_new_val;\n" +
+            "                                                    when x\"303\" => csr_mideleg_reg <= csr_new_val;\n" +
+            "                                                    when others => null;\n" +
+            "                                                end case;\n" +
+            "                                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                            when others => trap_reg <= '1';\n" +
+            "                                        end case;\n" +
+            "                                    end if;\n" +
+            "                                end if;\n" +
             "                            when others =>\n" +
             "                                trap_reg <= '1';\n" +
             "                        end case;\n" +
@@ -1589,13 +1923,45 @@ impl RiscvFpgaLane:
         "    signal semi_phase_reg : integer range 0 to 2 := 0;\n" +
             "    signal semi_trigger_reg : std_logic := '0';\n" +
             "    signal semi_op_reg : xword_t := (others => '0');\n" +
-            "    signal semi_param_reg : xword_t := (others => '0');\n"
+            "    signal semi_param_reg : xword_t := (others => '0');\n" +
+            "    signal priv_mode_reg : std_logic_vector(1 downto 0) := \"11\";\n" +
+            "    signal csr_mstatus_reg : xword_t := (others => '0');\n" +
+            "    signal csr_mie_reg : xword_t := (others => '0');\n" +
+            "    signal csr_mideleg_reg : xword_t := (others => '0');\n" +
+            "    signal csr_medeleg_reg : xword_t := (others => '0');\n" +
+            "    signal csr_mtvec_reg : xword_t := (others => '0');\n" +
+            "    signal csr_mscratch_reg : xword_t := (others => '0');\n" +
+            "    signal csr_mepc_reg : xword_t := (others => '0');\n" +
+            "    signal csr_mcause_reg : xword_t := (others => '0');\n" +
+            "    signal csr_mtval_reg : xword_t := (others => '0');\n" +
+            "    signal csr_stvec_reg : xword_t := (others => '0');\n" +
+            "    signal csr_sscratch_reg : xword_t := (others => '0');\n" +
+            "    signal csr_sepc_reg : xword_t := (others => '0');\n" +
+            "    signal csr_scause_reg : xword_t := (others => '0');\n" +
+            "    signal csr_stval_reg : xword_t := (others => '0');\n" +
+            "    signal csr_satp_reg : xword_t := (others => '0');\n"
 
     fn core_vhdl_semihost_reset_lines() -> text:
         "            semi_phase_reg <= 0;\n" +
             "            semi_trigger_reg <= '0';\n" +
             "            semi_op_reg <= (others => '0');\n" +
-            "            semi_param_reg <= (others => '0');\n"
+            "            semi_param_reg <= (others => '0');\n" +
+            "            priv_mode_reg <= \"11\";\n" +
+            "            csr_mstatus_reg <= (others => '0');\n" +
+            "            csr_mie_reg <= (others => '0');\n" +
+            "            csr_mideleg_reg <= (others => '0');\n" +
+            "            csr_medeleg_reg <= (others => '0');\n" +
+            "            csr_mtvec_reg <= (others => '0');\n" +
+            "            csr_mscratch_reg <= (others => '0');\n" +
+            "            csr_mepc_reg <= (others => '0');\n" +
+            "            csr_mcause_reg <= (others => '0');\n" +
+            "            csr_mtval_reg <= (others => '0');\n" +
+            "            csr_stvec_reg <= (others => '0');\n" +
+            "            csr_sscratch_reg <= (others => '0');\n" +
+            "            csr_sepc_reg <= (others => '0');\n" +
+            "            csr_scause_reg <= (others => '0');\n" +
+            "            csr_stval_reg <= (others => '0');\n" +
+            "            csr_satp_reg <= (others => '0');\n"
 
     fn core_vhdl_semihost_default_lines() -> text:
         "            semi_trigger_reg <= '0';\n"
@@ -1604,6 +1970,11 @@ impl RiscvFpgaLane:
         "    semi_trigger <= semi_trigger_reg;\n" +
             "    semi_op <= semi_op_reg;\n" +
             "    semi_param <= semi_param_reg;\n"
+
+    fn core_vhdl_mmu_output_lines() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return ""
+        "    debug_priv_mode <= priv_mode_reg;\n"
 
     fn core_vhdl() -> text:
         val package_name = self.package_name()
@@ -1626,6 +1997,10 @@ impl RiscvFpgaLane:
             "        dmem_re       : out std_logic;\n" +
             "        dmem_width    : out std_logic_vector(1 downto 0);\n" +
             "        dmem_wstrb    : out std_logic_vector((XLEN / 8) - 1 downto 0);\n" +
+            "        irq_software  : in  std_logic;\n" +
+            "        irq_timer     : in  std_logic;\n" +
+            "        irq_external  : in  std_logic;\n" +
+            self.core_vhdl_mmu_port_lines() +
             "        debug_pc      : out xword_t;\n" +
             self.core_vhdl_semihost_port_lines() +
             "        trap          : out std_logic;\n" +
@@ -1649,6 +2024,7 @@ impl RiscvFpgaLane:
             "    signal load_pending_rd_reg : integer range 0 to 31 := 0;\n" +
             "    signal load_pending_addr_reg : xword_t := (others => '0');\n" +
             "    signal load_pending_funct3_reg : std_logic_vector(2 downto 0) := (others => '0');\n" +
+            self.core_vhdl_mmu_helper_lines() +
             "begin\n" +
             "    imem_addr <= pc_reg;\n" +
             "    dmem_addr <= dmem_addr_reg;\n" +
@@ -1658,6 +2034,7 @@ impl RiscvFpgaLane:
             "    dmem_width <= dmem_width_reg;\n" +
             "    dmem_wstrb <= dmem_wstrb_reg;\n" +
             "    debug_pc <= pc_reg;\n" +
+            self.core_vhdl_mmu_output_lines() +
             self.core_vhdl_semihost_output_lines() +
             "    trap <= trap_reg;\n" +
             "    halt <= halt_reg;\n\n" +
@@ -1698,7 +2075,11 @@ impl RiscvFpgaLane:
             "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"001\" =>\n" +
-            "                        if load_pending_rd_reg /= 0 then\n" +
+            "                        if XLEN = 64 then\n" +
+            "                            if load_pending_rd_reg /= 0 then\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                            end if;\n" +
+            "                        elsif load_pending_rd_reg /= 0 then\n" +
             "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"010\" =>\n" +
@@ -1722,7 +2103,11 @@ impl RiscvFpgaLane:
             "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"101\" =>\n" +
-            "                        if load_pending_rd_reg /= 0 then\n" +
+            "                        if XLEN = 64 then\n" +
+            "                            if load_pending_rd_reg /= 0 then\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                            end if;\n" +
+            "                        elsif load_pending_rd_reg /= 0 then\n" +
             "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"110\" =>\n" +
@@ -1738,6 +2123,87 @@ impl RiscvFpgaLane:
             "                load_pending_reg <= '0';\n" +
             "                regs(0) <= (others => '0');\n" +
             "            elsif halt_reg = '0' and trap_reg = '0' then\n" +
+            "                if priv_mode_reg /= \"11\" and csr_mstatus_reg(1) = '1' then\n" +
+            "                    if irq_external = '1' and csr_mideleg_reg(9) = '1' and csr_mie_reg(9) = '1' then\n" +
+            "                        csr_sepc_reg <= pc_reg;\n" +
+            "                        csr_new_val := std_logic_vector(to_unsigned(9, XLEN));\n" +
+            "                        csr_new_val(XLEN - 1) := '1';\n" +
+            "                        csr_scause_reg <= csr_new_val;\n" +
+            "                        csr_stval_reg <= (others => '0');\n" +
+            "                        csr_mstatus_reg(5) <= csr_mstatus_reg(1);\n" +
+            "                        csr_mstatus_reg(1) <= '0';\n" +
+            "                        if priv_mode_reg = \"01\" then\n" +
+            "                            csr_mstatus_reg(8) <= '1';\n" +
+            "                        else\n" +
+            "                            csr_mstatus_reg(8) <= '0';\n" +
+            "                        end if;\n" +
+            "                        priv_mode_reg <= \"01\";\n" +
+            "                        pc_reg <= csr_stvec_reg;\n" +
+            "                    elsif irq_timer = '1' and csr_mideleg_reg(5) = '1' and csr_mie_reg(5) = '1' then\n" +
+            "                        csr_sepc_reg <= pc_reg;\n" +
+            "                        csr_new_val := std_logic_vector(to_unsigned(5, XLEN));\n" +
+            "                        csr_new_val(XLEN - 1) := '1';\n" +
+            "                        csr_scause_reg <= csr_new_val;\n" +
+            "                        csr_stval_reg <= (others => '0');\n" +
+            "                        csr_mstatus_reg(5) <= csr_mstatus_reg(1);\n" +
+            "                        csr_mstatus_reg(1) <= '0';\n" +
+            "                        if priv_mode_reg = \"01\" then\n" +
+            "                            csr_mstatus_reg(8) <= '1';\n" +
+            "                        else\n" +
+            "                            csr_mstatus_reg(8) <= '0';\n" +
+            "                        end if;\n" +
+            "                        priv_mode_reg <= \"01\";\n" +
+            "                        pc_reg <= csr_stvec_reg;\n" +
+            "                    elsif irq_software = '1' and csr_mideleg_reg(1) = '1' and csr_mie_reg(1) = '1' then\n" +
+            "                        csr_sepc_reg <= pc_reg;\n" +
+            "                        csr_new_val := std_logic_vector(to_unsigned(1, XLEN));\n" +
+            "                        csr_new_val(XLEN - 1) := '1';\n" +
+            "                        csr_scause_reg <= csr_new_val;\n" +
+            "                        csr_stval_reg <= (others => '0');\n" +
+            "                        csr_mstatus_reg(5) <= csr_mstatus_reg(1);\n" +
+            "                        csr_mstatus_reg(1) <= '0';\n" +
+            "                        if priv_mode_reg = \"01\" then\n" +
+            "                            csr_mstatus_reg(8) <= '1';\n" +
+            "                        else\n" +
+            "                            csr_mstatus_reg(8) <= '0';\n" +
+            "                        end if;\n" +
+            "                        priv_mode_reg <= \"01\";\n" +
+            "                        pc_reg <= csr_stvec_reg;\n" +
+            "                    elsif csr_mstatus_reg(3) = '1' then\n" +
+            "                    if irq_external = '1' and csr_mie_reg(11) = '1' then\n" +
+            "                        csr_mepc_reg <= pc_reg;\n" +
+            "                        csr_new_val := std_logic_vector(to_unsigned(11, XLEN));\n" +
+            "                        csr_new_val(XLEN - 1) := '1';\n" +
+            "                        csr_mcause_reg <= csr_new_val;\n" +
+            "                        csr_mtval_reg <= (others => '0');\n" +
+            "                        csr_mstatus_reg(7) <= csr_mstatus_reg(3);\n" +
+            "                        csr_mstatus_reg(3) <= '0';\n" +
+            "                        csr_mstatus_reg(12 downto 11) <= priv_mode_reg;\n" +
+            "                        priv_mode_reg <= \"11\";\n" +
+            "                        pc_reg <= csr_mtvec_reg;\n" +
+            "                    elsif irq_timer = '1' and csr_mie_reg(7) = '1' then\n" +
+            "                        csr_mepc_reg <= pc_reg;\n" +
+            "                        csr_new_val := std_logic_vector(to_unsigned(7, XLEN));\n" +
+            "                        csr_new_val(XLEN - 1) := '1';\n" +
+            "                        csr_mcause_reg <= csr_new_val;\n" +
+            "                        csr_mtval_reg <= (others => '0');\n" +
+            "                        csr_mstatus_reg(7) <= csr_mstatus_reg(3);\n" +
+            "                        csr_mstatus_reg(3) <= '0';\n" +
+            "                        csr_mstatus_reg(12 downto 11) <= priv_mode_reg;\n" +
+            "                        priv_mode_reg <= \"11\";\n" +
+            "                        pc_reg <= csr_mtvec_reg;\n" +
+            "                    elsif irq_software = '1' and csr_mie_reg(3) = '1' then\n" +
+            "                        csr_mepc_reg <= pc_reg;\n" +
+            "                        csr_new_val := std_logic_vector(to_unsigned(3, XLEN));\n" +
+            "                        csr_new_val(XLEN - 1) := '1';\n" +
+            "                        csr_mcause_reg <= csr_new_val;\n" +
+            "                        csr_mtval_reg <= (others => '0');\n" +
+            "                        csr_mstatus_reg(7) <= csr_mstatus_reg(3);\n" +
+            "                        csr_mstatus_reg(3) <= '0';\n" +
+            "                        csr_mstatus_reg(12 downto 11) <= priv_mode_reg;\n" +
+            "                        priv_mode_reg <= \"11\";\n" +
+            "                        pc_reg <= csr_mtvec_reg;\n" +
+            "                    else\n" +
             self.core_vhdl_semihost_region() +
             "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
             "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
@@ -1746,6 +2212,29 @@ impl RiscvFpgaLane:
             "                if decode_continue_exec = '1' then\n" +
             self.core_vhdl_execute_load_store_region() +
             self.core_vhdl_control_region() +
+            "                end if;\n" +
+            "                    end if;\n" +
+            "                    else\n" +
+            self.core_vhdl_semihost_region() +
+            "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
+            "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
+            "                rs2_i := to_integer(unsigned(imem_rdata(24 downto 20)));\n" +
+            self.core_vhdl_decode_staging_region() +
+            "                if decode_continue_exec = '1' then\n" +
+            self.core_vhdl_execute_load_store_region() +
+            self.core_vhdl_control_region() +
+            "                end if;\n" +
+            "                    end if;\n" +
+            "                else\n" +
+            self.core_vhdl_semihost_region() +
+            "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
+            "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
+            "                rs2_i := to_integer(unsigned(imem_rdata(24 downto 20)));\n" +
+            self.core_vhdl_decode_staging_region() +
+            "                if decode_continue_exec = '1' then\n" +
+            self.core_vhdl_execute_load_store_region() +
+            self.core_vhdl_control_region() +
+            "                end if;\n" +
             "                end if;\n" +
             "            end if;\n" +
             "        end if;\n" +

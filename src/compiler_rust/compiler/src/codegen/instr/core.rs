@@ -11,8 +11,8 @@ use crate::hir::{BinOp, TypeId};
 use crate::mir::VReg;
 
 use super::helpers::{
-    adapted_call, call_runtime_1, call_runtime_1_void, call_runtime_2, call_runtime_2_void,
-    call_runtime_3, create_string_constant, declare_named_bytes,
+    adapted_call, call_runtime_1, call_runtime_1_void, call_runtime_2, call_runtime_2_void, call_runtime_3,
+    create_string_constant, declare_named_bytes,
 };
 use super::{InstrContext, InstrResult};
 
@@ -251,7 +251,10 @@ pub(crate) fn compile_binop<M: Module>(
             let use_signed = lhs_signed.unwrap_or(true);
             if std::env::var("FR_DRIVER_0002B_TRACE").is_ok() {
                 let lhs_ty = ctx.vreg_types.get(&left_vreg).copied();
-                eprintln!("[shr-dispatch] left_vreg={:?} vreg_ty={:?} lhs_signed={:?} use_signed={}", left_vreg, lhs_ty, lhs_signed, use_signed);
+                eprintln!(
+                    "[shr-dispatch] left_vreg={:?} vreg_ty={:?} lhs_signed={:?} use_signed={}",
+                    left_vreg, lhs_ty, lhs_signed, use_signed
+                );
             }
             let li = if pre_lhs_is_int {
                 ensure_i64_typed(builder, pre_lhs, Some(use_signed))

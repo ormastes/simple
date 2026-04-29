@@ -12,12 +12,14 @@ use lazy compiler.driver.driver_api.{aot_native_file_with_backend, aot_native_pr
 use lazy compiler.backend.linker.lib_smf_writer.{LibSmfBuilder}
 use lazy app.compile.native.{compile_native}
 use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult, OutputFormat}
+use compiler.common.driver_core_types.{compileoptions_normalize_mir_optimization}
+use compiler.mir_opt.{mir_optimization_inventory_lines}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 extern fn rt_native_build(args: [text]) -> i64
 
 # Pure Simple compiler implementation (no Rust FFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -53,12 +55,13 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     options.output_file = out
     options.verbose = verbose
     options.low_memory = low_memory
+    options.profile = profile
     if release or opt_level > 0:
-        options.release = true
-        options.optimize = true
+        options.release = release
         options.opt_level = opt_level
     if backend != "" and backend != "auto":
         options.backend = backend
+    options = compileoptions_normalize_mir_optimization(options)
 
     val driver = CompilerDriver.create(options)
     val result = CompilerDriver.run_compile(driver)
@@ -89,7 +92,7 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         source_file.replace(".spl", ".lsm")
     val smf_out = out + ".smf.tmp"
 
-    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2)
+    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev")
     if compile_status != 0:
         return compile_status
 
@@ -155,6 +158,7 @@ fn cli_compile(args: [text]) -> i64:
     var driver_mode: text = ""
     var opt_level: i64 = 0
     var optimization_requested: bool = false
+    var profile: text = "dev"
 
     var i = 0
     if args.len() > 0 and args[0] == "compile":
@@ -181,6 +185,7 @@ fn cli_compile(args: [text]) -> i64:
             print "  --release             Release build (optimized, prefers LLVM)"
             print "  --release-optimized   Max optimization: -O3 + x86-64-v3 + ThinLTO"
             print "  --opt-level=<level>   Optimization level: none, basic, standard, aggressive"
+            print "  --profile=<name>      Compile profile: dev, test, prod"
             print "  --list-optimizations  Print implemented optimization groups and levels"
             print "  --lto                 Enable ThinLTO (+2-3% speed)"
             print "  --march=<target>      CPU target: native, x86-64-v2, x86-64-v3, x86-64-v4"
@@ -221,12 +226,8 @@ fn cli_compile(args: [text]) -> i64:
             print "  - [syntax] async desugar (basic, inventory-only)"
             print "  - [syntax] placeholder lambda rewrite (basic, inventory-only)"
             print "  - [syntax] collection pattern desugar (basic, inventory-only)"
-            print "  - [mir] constant folding (basic, inventory-only)"
-            print "  - [mir] copy propagation (basic, inventory-only)"
-            print "  - [mir] dead code elimination (basic, inventory-only)"
-            print "  - [mir] global value numbering (standard, inventory-only)"
-            print "  - [mir] common subexpression elimination (standard, inventory-only)"
-            print "  - [mir] inlining and loop pipeline (aggressive, inventory-only)"
+            for line in mir_optimization_inventory_lines():
+                print line
             print "  - [native] release build mode (basic, native-default)"
             print "  - [native] 4KB layout optimization (aggressive, native-default)"
             return 0
@@ -263,12 +264,14 @@ fn cli_compile(args: [text]) -> i64:
                 return 1
         elif arg == "--release":
             release = true
+            profile = "prod"
             if opt_level < 2:
                 opt_level = 2
             optimization_requested = true
         elif arg == "--release-optimized":
             release_optimized = true
             release = true
+            profile = "prod"
             use_lto = true
             march_target = "x86-64-v3"
             opt_level = 3
@@ -291,6 +294,23 @@ fn cli_compile(args: [text]) -> i64:
                 _cli_eprint("Valid levels: none, basic, standard, aggressive")
                 return 1
             optimization_requested = true
+        elif arg.starts_with("--profile="):
+            profile = arg.substring(10)
+            if profile == "prod":
+                release = true
+                if opt_level < 2:
+                    opt_level = 2
+        elif arg == "--profile":
+            i = i + 1
+            if i < args.len():
+                profile = args[i]
+                if profile == "prod":
+                    release = true
+                    if opt_level < 2:
+                        opt_level = 2
+            else:
+                _cli_eprint("Error: --profile requires an argument")
+                return 1
         elif arg == "--lto":
             use_lto = true
         elif arg.starts_with("--march="):
@@ -368,7 +388,7 @@ fn cli_compile(args: [text]) -> i64:
             out = source_file.replace(".spl", "")
         # Use Pure Simple compiler driver for all LLVM backends
         if backend == "llvm-lib" or backend == "llvmlib":
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level)
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile)
         return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
@@ -390,7 +410,7 @@ fn cli_compile(args: [text]) -> i64:
         return cli_compile_via_runtime(args)
 
     # Use Pure Simple compiler driver for all compilation
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:
@@ -765,7 +785,8 @@ fn cli_native_build(args: [text]) -> i64:
             print "Implemented optimization inventory:"
             print "  - [syntax] async desugar (basic, inventory-only)"
             print "  - [syntax] placeholder lambda rewrite (basic, inventory-only)"
-            print "  - [mir] constant fold (standard, planned inventory)"
+            for line in mir_optimization_inventory_lines():
+                print line
             print "  - [layout] native layout optimize (aggressive, Rust native path)"
             return 0
         if arg.starts_with("--backend="):
@@ -932,8 +953,8 @@ fn cli_native_build(args: [text]) -> i64:
             options.output_format = OutputFormat.Both
             options.backend = "llvm-lib"
             options.release = release
-            options.optimize = opt_level > 0
             options.opt_level = opt_level
+            options = compileoptions_normalize_mir_optimization(options)
             val driver = CompilerDriver.create(options)
             CompilerDriver.run_compile(driver)
         elif source_dirs.len() > 0:

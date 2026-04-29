@@ -12,9 +12,12 @@ fn debug_os_entry_closure() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // manifest_dir = .../src/compiler_rust/compiler
     let project_root = manifest_dir
-        .parent().unwrap()  // src/compiler_rust
-        .parent().unwrap()  // src
-        .parent().unwrap()  // repo root
+        .parent()
+        .unwrap() // src/compiler_rust
+        .parent()
+        .unwrap() // src
+        .parent()
+        .unwrap() // repo root
         .to_path_buf();
 
     let entry = project_root.join("examples/simple_os/arch/x86_64/os_entry.spl");
@@ -31,8 +34,12 @@ fn debug_os_entry_closure() {
     eprintln!("=== {} files discovered ===", files.len());
     for (p, _) in &files {
         let ps = p.to_string_lossy();
-        if ps.contains("shell_app") || ps.contains("/vfs") || ps.contains("terminal")
-            || ps.contains("hello_world") || ps.contains("fs_types") {
+        if ps.contains("shell_app")
+            || ps.contains("/vfs")
+            || ps.contains("terminal")
+            || ps.contains("hello_world")
+            || ps.contains("fs_types")
+        {
             eprintln!("  {}", p.display());
         }
     }
@@ -269,7 +276,7 @@ fn test_runtime_bundle_auto_prefers_runtime_for_non_compiler_entry() {
     std::fs::write(&runtime, b"runtime").unwrap();
     std::fs::write(&native_all, b"all").unwrap();
 
-    let config = NativeBuildConfig {
+    let mut config = NativeBuildConfig {
         runtime_path: Some(temp.path().to_path_buf()),
         ..Default::default()
     };
@@ -294,7 +301,7 @@ fn test_runtime_bundle_auto_prefers_native_all_for_compiler_entry() {
     std::fs::write(&runtime, b"runtime").unwrap();
     std::fs::write(&native_all, b"all").unwrap();
 
-    let config = NativeBuildConfig {
+    let mut config = NativeBuildConfig {
         runtime_path: Some(temp.path().to_path_buf()),
         ..Default::default()
     };
@@ -342,7 +349,7 @@ fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
 
-    let config = NativeBuildConfig {
+    let mut config = NativeBuildConfig {
         runtime_path: Some(temp.path().to_path_buf()),
         ..Default::default()
     };

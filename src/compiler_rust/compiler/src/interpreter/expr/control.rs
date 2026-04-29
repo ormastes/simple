@@ -72,7 +72,10 @@ pub(super) fn eval_control_expr(
             } = branch_result
             {
                 let mut block_env = Env::clone(&*captured_env);
-                let mut block = simple_parser::ast::Block { statements: nodes, ..Default::default() };
+                let mut block = simple_parser::ast::Block {
+                    statements: nodes,
+                    ..Default::default()
+                };
                 let (flow, last_val) = exec_block_fn(&block, &mut block_env, functions, classes, enums, impl_methods)?;
                 // Write back mutations from block_env to the outer env.
                 // This ensures that me-method self-updates inside if-expression

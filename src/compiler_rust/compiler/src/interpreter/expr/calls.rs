@@ -465,11 +465,13 @@ pub(super) fn eval_call_expr(
                                 let impl_func = impl_methods
                                     .get(enum_name.as_str())
                                     .and_then(|methods| methods.iter().find(|m| m.name == *field).cloned())
-                                    .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| {
-                                        cell.borrow()
-                                            .get(enum_name.as_str())
-                                            .and_then(|methods| methods.iter().find(|m| m.name == *field).cloned())
-                                    }));
+                                    .or_else(|| {
+                                        GLOBAL_IMPL_METHODS.with(|cell| {
+                                            cell.borrow()
+                                                .get(enum_name.as_str())
+                                                .and_then(|methods| methods.iter().find(|m| m.name == *field).cloned())
+                                        })
+                                    });
                                 if let Some(func) = impl_func {
                                     Ok(Value::Function {
                                         name: func.name.clone(),

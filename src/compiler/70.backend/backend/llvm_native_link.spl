@@ -32,6 +32,7 @@ struct NativeLinkOptions:
     verbose: bool
     pie: bool
     bare_metal: bool
+    opt_level: i64
 
 impl NativeLinkOptions:
     static fn default() -> NativeLinkOptions:
@@ -39,14 +40,15 @@ impl NativeLinkOptions:
             debug: false,
             verbose: false,
             pie: true,
-            bare_metal: false
+            bare_metal: false,
+            opt_level: 3
         )
 
 # ============================================================================
 # C-Based Entry Point Compiler (no llc needed)
 # ============================================================================
 
-fn compile_entry_point_c(pid: i64, verbose: bool) -> Result<text, text>:
+fn compile_entry_point_c(pid: i64, verbose: bool, opt_level: i64) -> Result<text, text>:
     """Compile entry point as C source (no llc needed)."""
     val cc = find_c_compiler()
     if cc == "":
@@ -71,12 +73,14 @@ fn compile_entry_point_c(pid: i64, verbose: bool) -> Result<text, text>:
     val use_msvc = _is_msvc_cc(cc)
     var comp_args: [text] = []
     if use_msvc:
-        comp_args = ["/c", "/O2", "/Gy", "/Fo{entry_o}", entry_c]
+        val msvc_opt = if opt_level <= 0: "/Od" elif opt_level == 1: "/O1" elif opt_level == 2: "/O2" else: "/Ox"
+        comp_args = ["/c", msvc_opt, "/Gy", "/Fo{entry_o}", entry_c]
     else:
         comp_args = ["-c"]
         if not _is_windows():
             comp_args.push("-fPIC")
-        comp_args.push("-O2")
+        val cc_opt = if opt_level <= 0: "-O0" elif opt_level == 1: "-Oz" elif opt_level == 2: "-O2" else: "-O3"
+        comp_args.push(cc_opt)
         comp_args.push("-ffunction-sections")
         comp_args.push("-fdata-sections")
         comp_args.push("-o")
@@ -111,7 +115,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 
     # Step 1: Compile C runtime to object files
     print "[LLVM-LINK] step 1: compile_runtime_objects..."
-    val rt_result = compile_runtime_objects(verbose, false)
+    val rt_result = compile_runtime_objects(verbose, options.opt_level)
     print "[LLVM-LINK] compile_runtime_objects returned"
     val runtime_objects = match rt_result:
         case Ok(paths):
@@ -122,7 +126,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 
     # Step 2: Generate and compile entry point
     print "[LLVM-LINK] step 2: compile entry point..."
-    val c_result = compile_entry_point_c(pid, verbose)
+    val c_result = compile_entry_point_c(pid, verbose, options.opt_level)
     print "[LLVM-LINK] entry point compiled"
     val entry_obj_path = match c_result:
         case Ok(path):
@@ -171,4 +175,3 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
 # ============================================================================
 # Exports
 # ============================================================================
-

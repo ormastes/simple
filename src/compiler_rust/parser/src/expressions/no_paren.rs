@@ -74,13 +74,7 @@ impl<'a> Parser<'a> {
                             span,
                         ));
                     }
-                    let new_value = super::bitfield::build_bits_augmented_value(
-                        lvalue.clone(),
-                        lo,
-                        hi,
-                        binop,
-                        value,
-                    );
+                    let new_value = super::bitfield::build_bits_augmented_value(lvalue.clone(), lo, hi, binop, value);
                     return Ok(Node::Assignment(AssignmentStmt {
                         span,
                         target: lvalue,

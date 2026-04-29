@@ -228,10 +228,7 @@ mod tests {
         use std::time::{SystemTime, UNIX_EPOCH};
         fault_detection::reset_timeout();
         // Route the crash log to a test-private dir so we don't pollute .simple/logs
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let tmp_dir = std::env::temp_dir().join(format!("watchdog_log_test_{}", nanos));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         std::fs::create_dir_all(&tmp_dir).unwrap();
@@ -243,10 +240,7 @@ mod tests {
         // Wait until the watchdog fires
         let deadline = Instant::now() + Duration::from_secs(10);
         while !fault_detection::is_timeout_exceeded() {
-            assert!(
-                Instant::now() < deadline,
-                "watchdog did not fire within 10 seconds"
-            );
+            assert!(Instant::now() < deadline, "watchdog did not fire within 10 seconds");
             std::thread::sleep(Duration::from_millis(50));
         }
         stop_watchdog();

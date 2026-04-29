@@ -192,11 +192,7 @@ pub(crate) fn adapted_call(
 /// Call a runtime function with no arguments (arity-0, void return).
 /// The function must be pre-declared in `ctx.runtime_funcs`.
 #[inline]
-pub fn call_runtime_0<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    func_name: &str,
-) {
+pub fn call_runtime_0<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder, func_name: &str) {
     let func_id = ctx
         .runtime_funcs
         .get(func_name)
@@ -350,7 +346,10 @@ pub fn declare_uniform_i64_import<M: Module>(
         sig.params.push(AbiParam::new(types::I64));
     }
     sig.returns.push(AbiParam::new(types::I64));
-    let result = ctx.module.declare_function(name, Linkage::Import, &sig).map_err(Box::new);
+    let result = ctx
+        .module
+        .declare_function(name, Linkage::Import, &sig)
+        .map_err(Box::new);
     if let Ok(id) = &result {
         ctx.func_ids.insert(name.to_string(), *id);
     }

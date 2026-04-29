@@ -694,16 +694,10 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
             // but float VRegs (e.g. result of fmul) sometimes flow into BoxInt and
             // cranelift's verifier rejects `ishl.f64`. Bitcast preserves the
             // bit-pattern as i64 so the subsequent ishl is well-typed.
-            val = self
-                .builder
-                .ins()
-                .bitcast(types::I64, MemFlags::new(), val);
+            val = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
         } else if val_type == types::F32 {
             let promoted = self.builder.ins().fpromote(types::F64, val);
-            val = self
-                .builder
-                .ins()
-                .bitcast(types::I64, MemFlags::new(), promoted);
+            val = self.builder.ins().bitcast(types::I64, MemFlags::new(), promoted);
         }
         let three = self.builder.ins().iconst(types::I64, 3);
         let boxed = self.builder.ins().ishl(val, three);

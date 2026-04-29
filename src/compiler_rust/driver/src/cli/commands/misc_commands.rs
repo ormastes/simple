@@ -143,9 +143,7 @@ pub fn handle_build(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
             println!("  --check            Check formatting without modifying files");
             println!();
             println!("LINT OPTIONS:");
-            println!(
-                "  --fix              Iteratively apply clippy machine-applicable fixes"
-            );
+            println!("  --fix              Iteratively apply clippy machine-applicable fixes");
             println!();
             println!("BOOTSTRAP OPTIONS:");
             println!("  --backend=<name>   Backend: llvm, cranelift, c, auto (default: auto)");

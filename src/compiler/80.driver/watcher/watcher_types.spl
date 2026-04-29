@@ -48,6 +48,13 @@ struct WatcherRequest:
     kind: WatcherRequestKind
     source_hash: i64
     options_hash: i64
+    backend: text
+    opt_level: i64
+    release: bool
+    debug_info: bool
+    gc_off: bool
+    profile: text
+    allowed_families: [text]
     timestamp: i64
 
 fn watcher_request_new(source_path: text, kind: WatcherRequestKind) -> WatcherRequest:
@@ -56,6 +63,13 @@ fn watcher_request_new(source_path: text, kind: WatcherRequestKind) -> WatcherRe
         kind: kind,
         source_hash: 0,
         options_hash: 0,
+        backend: "auto",
+        opt_level: 0,
+        release: false,
+        debug_info: true,
+        gc_off: false,
+        profile: "dev",
+        allowed_families: [],
         timestamp: rt_time_now_unix_micros()
     )
 
@@ -76,6 +90,13 @@ struct WatcherConfig:
     request_dir: text
     lock_path: text
     max_concurrent: i64
+    backend: text
+    opt_level: i64
+    release: bool
+    debug_info: bool
+    gc_off: bool
+    profile: text
+    allowed_families: [text]
 
 fn watcher_config_default() -> WatcherConfig:
     WatcherConfig(
@@ -86,12 +107,30 @@ fn watcher_config_default() -> WatcherConfig:
         smf_dir: "build/smf",
         request_dir: ".build/watcher/requests",
         lock_path: ".build/watcher/watcher.lock",
-        max_concurrent: 50
+        max_concurrent: 50,
+        backend: "auto",
+        opt_level: 0,
+        release: false,
+        debug_info: true,
+        gc_off: false,
+        profile: "dev",
+        allowed_families: []
     )
 
 impl WatcherConfig:
     fn to_text() -> text:
-        "WatcherConfig(poll: {self.poll_interval_ms}ms, shb: {self.shb_dir}, smf: {self.smf_dir})"
+        "WatcherConfig(poll: {self.poll_interval_ms}ms, shb: {self.shb_dir}, smf: {self.smf_dir}, backend: {self.backend}, opt: {self.opt_level})"
+
+fn watcher_request_for_config(source_path: text, kind: WatcherRequestKind, config: WatcherConfig) -> WatcherRequest:
+    var wr = watcher_request_new(source_path, kind)
+    wr.backend = config.backend
+    wr.opt_level = config.opt_level
+    wr.release = config.release
+    wr.debug_info = config.debug_info
+    wr.gc_off = config.gc_off
+    wr.profile = config.profile
+    wr.allowed_families = config.allowed_families
+    wr
 
 # ============================================================================
 # Watcher State
@@ -149,6 +188,13 @@ fn watcher_request_to_daemon(wr: WatcherRequest) -> DaemonRequest:
     dr.fields["source_path"] = wr.source_path
     dr.fields["source_hash"] = "{wr.source_hash}"
     dr.fields["options_hash"] = "{wr.options_hash}"
+    dr.fields["backend"] = wr.backend
+    dr.fields["opt_level"] = "{wr.opt_level}"
+    dr.fields["release"] = if wr.release: "1" else: "0"
+    dr.fields["debug_info"] = if wr.debug_info: "1" else: "0"
+    dr.fields["gc_off"] = if wr.gc_off: "1" else: "0"
+    dr.fields["profile"] = wr.profile
+    dr.fields["allowed_families"] = wr.allowed_families.join(",")
     dr
 
 fn daemon_request_to_watcher(dr: DaemonRequest) -> WatcherRequest:
@@ -162,11 +208,26 @@ fn daemon_request_to_watcher(dr: DaemonRequest) -> WatcherRequest:
 
     val source_hash_str = dr.fields["source_hash"] ?? "0"
     val options_hash_str = dr.fields["options_hash"] ?? "0"
+    val backend = dr.fields["backend"] ?? "auto"
+    val opt_level_str = dr.fields["opt_level"] ?? "0"
+    val release_str = dr.fields["release"] ?? "0"
+    val debug_info_str = dr.fields["debug_info"] ?? "1"
+    val gc_off_str = dr.fields["gc_off"] ?? "0"
+    val profile = dr.fields["profile"] ?? "dev"
+    val allowed_families_str = dr.fields["allowed_families"] ?? ""
+    val allowed_families = if allowed_families_str == "": [] else: allowed_families_str.split(",")
 
     WatcherRequest(
         source_path: source_path,
         kind: kind,
         source_hash: source_hash_str.to_i64() ?? 0,
         options_hash: options_hash_str.to_i64() ?? 0,
+        backend: backend,
+        opt_level: opt_level_str.to_i64() ?? 0,
+        release: release_str == "1",
+        debug_info: debug_info_str == "1",
+        gc_off: gc_off_str == "1",
+        profile: profile,
+        allowed_families: allowed_families,
         timestamp: dr.timestamp
     )

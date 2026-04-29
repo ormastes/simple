@@ -281,9 +281,11 @@ mod tests {
     fn test_set_args_from_c_strings() {
         rt_clear_args();
 
-        let c_args = [CString::new("program").unwrap(),
+        let c_args = [
+            CString::new("program").unwrap(),
             CString::new("foo").unwrap(),
-            CString::new("bar").unwrap()];
+            CString::new("bar").unwrap(),
+        ];
 
         let argv: Vec<*const u8> = c_args.iter().map(|s| s.as_ptr() as *const u8).collect();
 

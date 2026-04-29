@@ -193,6 +193,154 @@ impl fmt::Display for TargetParseError {
 
 impl std::error::Error for TargetParseError {}
 
+/// Native codegen backend selection for AOT/native builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NativeCodegenBackend {
+    Cranelift,
+    Llvm,
+}
+
+impl NativeCodegenBackend {
+    pub const fn name(&self) -> &'static str {
+        match self {
+            NativeCodegenBackend::Cranelift => "cranelift",
+            NativeCodegenBackend::Llvm => "llvm",
+        }
+    }
+}
+
+impl fmt::Display for NativeCodegenBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+impl FromStr for NativeCodegenBackend {
+    type Err = NativeCodegenBackendParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cranelift" | "clif" => Ok(Self::Cranelift),
+            "llvm" => Ok(Self::Llvm),
+            other => Err(NativeCodegenBackendParseError(other.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeCodegenBackendParseError(pub String);
+
+impl fmt::Display for NativeCodegenBackendParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown backend '{}'. Supported: cranelift, llvm", self.0)
+    }
+}
+
+impl std::error::Error for NativeCodegenBackendParseError {}
+
+/// CPU selection policy for native compilation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TargetCpu {
+    /// Backend/arch-specific default.
+    Default,
+    /// Host-native CPU and features.
+    Native,
+    /// x86-64-v1 baseline profile.
+    X86_64V1,
+    /// x86-64-v2 profile.
+    X86_64V2,
+    /// x86-64-v3 profile.
+    X86_64V3,
+    /// x86-64-v4 profile.
+    X86_64V4,
+    /// Backend-specific free-form CPU string.
+    Custom(String),
+}
+
+impl TargetCpu {
+    pub const fn builtin_default_for_arch(arch: TargetArch) -> Self {
+        match arch {
+            TargetArch::X86_64 => Self::X86_64V3,
+            _ => Self::Default,
+        }
+    }
+
+    pub const fn is_x86_64_level(&self) -> bool {
+        matches!(
+            self,
+            TargetCpu::X86_64V1 | TargetCpu::X86_64V2 | TargetCpu::X86_64V3 | TargetCpu::X86_64V4
+        )
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            TargetCpu::Default => "default",
+            TargetCpu::Native => "native",
+            TargetCpu::X86_64V1 => "x86-64-v1",
+            TargetCpu::X86_64V2 => "x86-64-v2",
+            TargetCpu::X86_64V3 => "x86-64-v3",
+            TargetCpu::X86_64V4 => "x86-64-v4",
+            TargetCpu::Custom(value) => value.as_str(),
+        }
+    }
+
+    pub fn llvm_cpu_name(&self, arch: TargetArch) -> Option<&str> {
+        match self {
+            TargetCpu::Default => None,
+            TargetCpu::Native => Some("native"),
+            TargetCpu::X86_64V1 if arch == TargetArch::X86_64 => Some("x86-64"),
+            TargetCpu::X86_64V2 if arch == TargetArch::X86_64 => Some("x86-64-v2"),
+            TargetCpu::X86_64V3 if arch == TargetArch::X86_64 => Some("x86-64-v3"),
+            TargetCpu::X86_64V4 if arch == TargetArch::X86_64 => Some("x86-64-v4"),
+            TargetCpu::Custom(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl Default for TargetCpu {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl fmt::Display for TargetCpu {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for TargetCpu {
+    type Err = TargetCpuParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let normalized = s.trim();
+        if normalized.is_empty() {
+            return Err(TargetCpuParseError("cpu value must not be empty".to_string()));
+        }
+        match normalized.to_ascii_lowercase().as_str() {
+            "default" => Ok(Self::Default),
+            "native" => Ok(Self::Native),
+            "x86-64-v1" => Ok(Self::X86_64V1),
+            "x86-64-v2" => Ok(Self::X86_64V2),
+            "x86-64-v3" => Ok(Self::X86_64V3),
+            "x86-64-v4" => Ok(Self::X86_64V4),
+            _ => Ok(Self::Custom(normalized.to_string())),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetCpuParseError(pub String);
+
+impl fmt::Display for TargetCpuParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid cpu selection: {}", self.0)
+    }
+}
+
+impl std::error::Error for TargetCpuParseError {}
+
 /// Pointer size (32-bit or 64-bit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PointerSize {
@@ -739,6 +887,29 @@ mod tests {
         let target = Target::parse("aarch64-macos").unwrap();
         assert_eq!(target.arch, TargetArch::Aarch64);
         assert_eq!(target.os, TargetOS::MacOS);
+    }
+
+    #[test]
+    fn test_parse_native_backend() {
+        assert_eq!(
+            "llvm".parse::<NativeCodegenBackend>().unwrap(),
+            NativeCodegenBackend::Llvm
+        );
+        assert_eq!(
+            "cranelift".parse::<NativeCodegenBackend>().unwrap(),
+            NativeCodegenBackend::Cranelift
+        );
+    }
+
+    #[test]
+    fn test_parse_target_cpu() {
+        assert_eq!("default".parse::<TargetCpu>().unwrap(), TargetCpu::Default);
+        assert_eq!("native".parse::<TargetCpu>().unwrap(), TargetCpu::Native);
+        assert_eq!("x86-64-v3".parse::<TargetCpu>().unwrap(), TargetCpu::X86_64V3);
+        assert_eq!(
+            "znver4".parse::<TargetCpu>().unwrap(),
+            TargetCpu::Custom("znver4".to_string())
+        );
     }
 
     #[test]

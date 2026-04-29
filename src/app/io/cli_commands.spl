@@ -912,14 +912,25 @@ fn cli_test_daemon_run(args: [text], clean: bool) -> i64:
 fn cli_watch_daemon(args: [text]) -> i64:
     if args.len() == 0:
         print "Usage:"
-        print "  simple watch-daemon start       Start watch daemon (foreground, SHB+SMF)"
+        print "  simple watch-daemon start [options]"
+        print "                                  Start watch daemon (foreground, SHB+SMF)"
         print "  simple watch-daemon stop        Stop watch daemon"
         print "  simple watch-daemon status      Show daemon status"
+        print ""
+        print "Start Options:"
+        print "  --backend=<name>        Default SMF backend: auto, cranelift, llvm"
+        print "  --opt-level=<level>     Default SMF optimization: none, basic, standard, aggressive"
+        print "  --release               Default SMF release mode"
+        print "  --debug-info            Keep debug info enabled (default)"
+        print "  --no-debug-info         Disable debug info for watcher builds"
+        print "  --gc-off                Disable GC for watcher builds"
+        print "  --profile=<name>        Default watcher compile profile: dev, test, prod"
+        print "  --allow-family=<name>   Allow one runtime family; repeat or comma-separate"
         return 1
 
     val subcmd = args[0]
     if subcmd == "start":
-        return cli_watch_daemon_start()
+        return cli_watch_daemon_start(args[1:])
     elif subcmd == "stop":
         return cli_watch_daemon_stop()
     elif subcmd == "status":
@@ -928,13 +939,97 @@ fn cli_watch_daemon(args: [text]) -> i64:
         print "Unknown watch-daemon subcommand: {subcmd}"
         return 1
 
-fn cli_watch_daemon_start() -> i64:
+fn cli_watch_daemon_start(args: [text]) -> i64:
     use compiler.driver.watcher.watcher_types.{watcher_config_default}
     use compiler.driver.watcher.watcher_daemon.{watcher_daemon_start}
     use app.io.{thread_sleep_ms}
 
-    print "Starting watch daemon (SHB+SMF mode, Cranelift default)..."
     var config = watcher_config_default()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--backend="):
+            config.backend = arg.substring(10)
+        elif arg == "--backend":
+            i = i + 1
+            if i >= args.len():
+                print "Error: --backend requires an argument"
+                return 1
+            config.backend = args[i]
+        elif arg.starts_with("--opt-level="):
+            val level = arg.substring(12)
+            if level == "none" or level == "0":
+                config.opt_level = 0
+            elif level == "basic" or level == "1":
+                config.opt_level = 1
+                config.release = true
+            elif level == "standard" or level == "2" or level == "speed":
+                config.opt_level = 2
+                config.release = true
+            elif level == "aggressive" or level == "3" or level == "max":
+                config.opt_level = 3
+                config.release = true
+            else:
+                print "Error: Unknown optimization level: {level}"
+                print "Valid levels: none, basic, standard, aggressive"
+                return 1
+        elif arg == "--release":
+            config.release = true
+            if config.profile == "dev":
+                config.profile = "prod"
+            if config.opt_level < 2:
+                config.opt_level = 2
+        elif arg == "--debug-info":
+            config.debug_info = true
+        elif arg == "--no-debug-info":
+            config.debug_info = false
+        elif arg == "--gc-off":
+            config.gc_off = true
+        elif arg.starts_with("--profile="):
+            config.profile = arg.substring(10)
+            if config.profile == "prod":
+                config.release = true
+                if config.opt_level < 2:
+                    config.opt_level = 2
+        elif arg == "--profile":
+            i = i + 1
+            if i >= args.len():
+                print "Error: --profile requires an argument"
+                return 1
+            config.profile = args[i]
+            if config.profile == "prod":
+                config.release = true
+                if config.opt_level < 2:
+                    config.opt_level = 2
+        elif arg.starts_with("--allow-family="):
+            val family_arg = arg.substring(15)
+            if family_arg != "":
+                for family in family_arg.split(","):
+                    val trimmed = family.trim()
+                    if trimmed != "":
+                        config.allowed_families.push(trimmed)
+        elif arg == "--allow-family":
+            i = i + 1
+            if i >= args.len():
+                print "Error: --allow-family requires an argument"
+                return 1
+            for family in args[i].split(","):
+                val trimmed = family.trim()
+                if trimmed != "":
+                    config.allowed_families.push(trimmed)
+        else:
+            print "Error: Unknown watch-daemon start option: {arg}"
+            return 1
+        i = i + 1
+
+    print "Starting watch daemon (SHB+SMF mode)..."
+    print "  backend: {config.backend}"
+    print "  opt_level: {config.opt_level}"
+    print "  release: {config.release}"
+    print "  debug_info: {config.debug_info}"
+    print "  gc_off: {config.gc_off}"
+    print "  profile: {config.profile}"
+    print "  allowed_families: {config.allowed_families.join(\",\")}"
     val daemon = watcher_daemon_start(config)
     if not daemon.is_running():
         print "Failed to start watch daemon (lock acquisition failed)"

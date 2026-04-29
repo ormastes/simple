@@ -29,8 +29,7 @@ mod common;
 
 use common::{find_hir_function, parse_and_lower};
 use simple_compiler::codegen::instr::helpers::{
-    call_runtime_0, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3,
-    declare_uniform_i64_import,
+    call_runtime_0, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, declare_uniform_i64_import,
 };
 use simple_compiler::codegen::instr::{InstrContext, InstrResult};
 use simple_compiler::CompilerPipeline;
@@ -50,9 +49,7 @@ fn compile_ok(src: &str) -> Result<(), String> {
     let out_path = dir.path().join("test.smf");
     std::fs::write(&src_path, src).map_err(|e| e.to_string())?;
     let mut compiler = CompilerPipeline::new().map_err(|e| e.to_string())?;
-    compiler
-        .compile(&src_path, &out_path)
-        .map_err(|e| e.to_string())
+    compiler.compile(&src_path, &out_path).map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -229,9 +226,7 @@ fn c2_declare_uniform_i64_import_idempotent() {
 
     // Declare a function body in which we call declare_uniform_i64_import twice.
     let mut fn_sig = module.make_signature();
-    fn_sig
-        .returns
-        .push(cranelift_codegen::ir::AbiParam::new(types::I64));
+    fn_sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
     let test_fn_id = module
         .declare_function("test_idempotent", Linkage::Export, &fn_sig)
         .expect("declare test fn");
@@ -255,12 +250,7 @@ fn c2_declare_uniform_i64_import_idempotent() {
         );
 
         // Second call with the same name — must not panic or produce duplicate error.
-        let _ref2 = declare_uniform_i64_import(
-            &mut instr_ctx,
-            &mut builder,
-            "rt_dummy_uniform",
-            1,
-        );
+        let _ref2 = declare_uniform_i64_import(&mut instr_ctx, &mut builder, "rt_dummy_uniform", 1);
 
         let zero = builder.ins().iconst(types::I64, 0);
         builder.ins().return_(&[zero]);
@@ -281,10 +271,7 @@ fn zero_param_rt() -> i64:
 
 main = zero_param_rt()
 "#;
-    assert!(
-        compile_ok(src).is_ok(),
-        "zero-param uniform import must compile"
-    );
+    assert!(compile_ok(src).is_ok(), "zero-param uniform import must compile");
 }
 
 /// Verify that declare_uniform_i64_import with n_params=3 (3-arg uniform)
@@ -297,10 +284,7 @@ fn three_param_rt(a: i64, b: i64, c: i64) -> i64:
 
 main = three_param_rt(1, 2, 3)
 "#;
-    assert!(
-        compile_ok(src).is_ok(),
-        "3-param uniform import must compile"
-    );
+    assert!(compile_ok(src).is_ok(), "3-param uniform import must compile");
 }
 
 // ============================================================================
@@ -349,8 +333,5 @@ fn dict_test() -> i64:
 
 main = dict_test()
 "#;
-    assert!(
-        compile_ok(src).is_ok(),
-        "dict codegen must still work after C1+C2"
-    );
+    assert!(compile_ok(src).is_ok(), "dict codegen must still work after C1+C2");
 }

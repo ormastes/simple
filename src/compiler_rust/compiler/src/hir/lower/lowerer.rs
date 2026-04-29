@@ -61,7 +61,8 @@ pub struct Lowerer {
     /// Function names imported via `use` statements (should not become globals in MIR)
     pub(super) imported_function_names: HashSet<String>,
     /// Global struct definitions from all compilation units for cross-module field resolution.
-    #[allow(clippy::type_complexity)] // reason: Arc<HashMap<String, Vec<(String, String)>>> is the cross-module struct field index
+    #[allow(clippy::type_complexity)]
+    // reason: Arc<HashMap<String, Vec<(String, String)>>> is the cross-module struct field index
     pub(super) global_struct_defs: Option<std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>>,
     /// Field names that appear in more than one globally-known struct.
     /// Cross-module lookups skip these to avoid picking the wrong struct's

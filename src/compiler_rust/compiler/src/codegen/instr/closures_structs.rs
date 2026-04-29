@@ -651,8 +651,14 @@ fn try_compile_builtin_method_call<M: Module>(
             let actual_is_float = src_ty == types::F32 || src_ty == types::F64;
             let to_is_int = matches!(
                 to_ty,
-                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64
-                    | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
             );
             if actual_is_float && to_is_int {
                 let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
@@ -838,7 +844,9 @@ fn try_compile_builtin_method_call<M: Module>(
             let val_ty = builder.func.dfg.value_type(val);
             let val_def = builder.func.dfg.value_def(val);
             let inst_text = match val_def {
-                cranelift_codegen::ir::ValueDef::Result(inst, _) => Some(format!("{}", builder.func.dfg.display_inst(inst))),
+                cranelift_codegen::ir::ValueDef::Result(inst, _) => {
+                    Some(format!("{}", builder.func.dfg.display_inst(inst)))
+                }
                 _ => None,
             };
             eprintln!(

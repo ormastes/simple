@@ -114,8 +114,7 @@ pub(crate) fn validate_unit_type(value: &Value, expected_type: &str) -> Result<(
             }
 
             // Rule 3: suffix-to-family alias.
-            let suffix_family =
-                UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
+            let suffix_family = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
             if suffix_family.as_deref() == Some(expected_type) {
                 return Ok(());
             }
@@ -124,8 +123,7 @@ pub(crate) fn validate_unit_type(value: &Value, expected_type: &str) -> Result<(
             // dimensional signature as the expected unit. This lets
             // `100_km / 2_h` (a `mps`/composite) satisfy a `kmph` parameter.
             let expected_dim = get_unit_dimension(expected_type);
-            let actual_dim = get_unit_dimension(suffix)
-                .or_else(|| get_unit_dimension(actual_family));
+            let actual_dim = get_unit_dimension(suffix).or_else(|| get_unit_dimension(actual_family));
             if let (Some(exp), Some(act)) = (expected_dim, actual_dim) {
                 if exp.exponents == act.exponents && !exp.exponents.is_empty() {
                     return Ok(());
@@ -384,16 +382,11 @@ pub(crate) fn get_unit_dimension(family: &str) -> Option<Dimension> {
 /// at least deterministic across runs.
 pub(crate) const COMPOUND_PRIORITY: &[&str] = &[
     // velocity
-    "mps", "kmph", "mph", "fps", "knot",
-    // energy
-    "J", "Wh", "kWh", "cal", "BTU",
-    // power
-    "W", "kW", "hp",
-    // pressure
-    "Pa", "kPa", "bar", "atm", "psi",
-    // frequency
-    "Hz", "kHz", "MHz", "GHz", "rpm", "bpm",
-    // area / volume
+    "mps", "kmph", "mph", "fps", "knot", // energy
+    "J", "Wh", "kWh", "cal", "BTU", // power
+    "W", "kW", "hp", // pressure
+    "Pa", "kPa", "bar", "atm", "psi", // frequency
+    "Hz", "kHz", "MHz", "GHz", "rpm", "bpm", // area / volume
     "m2", "m3",
 ];
 

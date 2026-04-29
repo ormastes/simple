@@ -268,21 +268,11 @@ pub extern "C" fn rt_cli_run_file(_path: RuntimeValue, _args: RuntimeValue, _gc_
 #[cfg(feature = "driver-hooks")]
 extern "C" {
     #[link_name = "rt_cli_run_file"]
-    fn __rt_cli_run_file_native(
-        path: RuntimeValue,
-        args: RuntimeValue,
-        gc_log: u8,
-        gc_off: u8,
-    ) -> i64;
+    fn __rt_cli_run_file_native(path: RuntimeValue, args: RuntimeValue, gc_log: u8, gc_off: u8) -> i64;
 }
 
 #[cfg(feature = "driver-hooks")]
-pub fn rt_cli_run_file(
-    path: RuntimeValue,
-    args: RuntimeValue,
-    gc_log: u8,
-    gc_off: u8,
-) -> i64 {
+pub fn rt_cli_run_file(path: RuntimeValue, args: RuntimeValue, gc_log: u8, gc_off: u8) -> i64 {
     // SAFETY: forwards to the externally-linked C ABI symbol provided by
     // `simple-native-all` when the `driver-hooks` feature is on.
     unsafe { __rt_cli_run_file_native(path, args, gc_log, gc_off) }

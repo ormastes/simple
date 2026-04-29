@@ -391,15 +391,21 @@ pub fn rt_smf_parse_relocs(args: &[Value]) -> Result<Value, CompileError> {
             return 0;
         }
         u64::from_le_bytes([
-            buf[off], buf[off+1], buf[off+2], buf[off+3],
-            buf[off+4], buf[off+5], buf[off+6], buf[off+7],
+            buf[off],
+            buf[off + 1],
+            buf[off + 2],
+            buf[off + 3],
+            buf[off + 4],
+            buf[off + 5],
+            buf[off + 6],
+            buf[off + 7],
         ])
     };
     let read_u32_le = |buf: &[u8], off: usize| -> u32 {
         if off + 4 > buf.len() {
             return 0;
         }
-        u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]])
+        u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
     };
 
     for i in 0..section_count {
@@ -485,15 +491,21 @@ pub fn rt_smf_relocs_from_path(args: &[Value]) -> Result<Value, CompileError> {
             return 0;
         }
         u64::from_le_bytes([
-            buf[off], buf[off+1], buf[off+2], buf[off+3],
-            buf[off+4], buf[off+5], buf[off+6], buf[off+7],
+            buf[off],
+            buf[off + 1],
+            buf[off + 2],
+            buf[off + 3],
+            buf[off + 4],
+            buf[off + 5],
+            buf[off + 6],
+            buf[off + 7],
         ])
     };
     let read_u32_le = |buf: &[u8], off: usize| -> u32 {
         if off + 4 > buf.len() {
             return 0;
         }
-        u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]])
+        u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
     };
 
     for i in 0..section_count {

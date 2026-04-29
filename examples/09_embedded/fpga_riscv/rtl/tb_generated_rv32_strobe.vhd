@@ -27,6 +27,9 @@ architecture sim of tb_generated_rv32_strobe is
     signal dmem_re    : std_logic;
     signal dmem_width : std_logic_vector(1 downto 0);
     signal dmem_wstrb : std_logic_vector(3 downto 0);
+    signal irq_software : std_logic := '0';
+    signal irq_timer    : std_logic := '0';
+    signal irq_external : std_logic := '0';
     signal debug_pc   : std_logic_vector(31 downto 0);
     signal semi_trigger : std_logic;
     signal semi_op    : std_logic_vector(31 downto 0);
@@ -61,6 +64,12 @@ begin
             dmem_re    => dmem_re,
             dmem_width => dmem_width,
             dmem_wstrb => dmem_wstrb,
+            irq_software => irq_software,
+            irq_timer  => irq_timer,
+            irq_external => irq_external,
+            mmu_dmem_l2_pte => (others => '0'),
+            mmu_dmem_l1_pte => (others => '0'),
+            mmu_dmem_l0_pte => (others => '0'),
             debug_pc   => debug_pc,
             semi_trigger => semi_trigger,
             semi_op    => semi_op,

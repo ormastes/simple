@@ -4,12 +4,7 @@
 //! `simple-runtime-abi`, which lets this crate avoid a normal dependency on
 //! the runtime implementation.
 
-use simple_runtime_abi::{
-    AbiVersion,
-    RUNTIME_SYMBOL_NAMES,
-    RuntimeSymbolProvider,
-    lookup_registered_static_runtime_symbol,
-};
+use simple_runtime_abi::{AbiVersion, RUNTIME_SYMBOL_NAMES, RuntimeSymbolProvider, lookup_registered_static_runtime_symbol};
 
 /// Provides runtime symbols via static linking (compiled into binary).
 pub struct StaticSymbolProvider;

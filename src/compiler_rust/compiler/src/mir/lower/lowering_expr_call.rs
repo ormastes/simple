@@ -129,9 +129,15 @@ impl<'a> MirLowerer<'a> {
                             let arg_ty = args.get(i).map(|a| a.ty).unwrap_or(TypeId::ANY);
                             let needs_box = matches!(
                                 arg_ty,
-                                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64
-                                | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
-                                | TypeId::BOOL
+                                TypeId::I8
+                                    | TypeId::I16
+                                    | TypeId::I32
+                                    | TypeId::I64
+                                    | TypeId::U8
+                                    | TypeId::U16
+                                    | TypeId::U32
+                                    | TypeId::U64
+                                    | TypeId::BOOL
                             );
                             let push_arg = if needs_box {
                                 self.with_func(|func, current_block| {

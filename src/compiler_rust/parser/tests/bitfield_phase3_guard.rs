@@ -30,11 +30,8 @@ fn parse_err(src: &str) -> Option<ParseError> {
 /// Helper: assert parsing fails with a SyntaxError whose message contains
 /// the expected substring.
 fn assert_syntax_error_contains(src: &str, needle: &str) {
-    let err = parse_err(src).unwrap_or_else(|| {
-        panic!(
-            "expected parse error containing {needle:?}, but parse succeeded for:\n{src}"
-        )
-    });
+    let err = parse_err(src)
+        .unwrap_or_else(|| panic!("expected parse error containing {needle:?}, but parse succeeded for:\n{src}"));
     let msg = match &err {
         ParseError::SyntaxError { message, .. } => message.clone(),
         other => format!("{other:?}"),

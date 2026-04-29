@@ -2,7 +2,7 @@
 
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
-use simple_common::target::Target;
+use simple_common::target::{Target, TargetCpu};
 
 use crate::mir::MirModule;
 use crate::optimizations::NativeOptimizationLevel;
@@ -42,11 +42,21 @@ impl Codegen {
 
     /// Create a new codegen for a specific target and optimization profile.
     pub fn for_target_with_opt_level(target: Target, opt_level: NativeOptimizationLevel) -> CodegenResult<Self> {
-        let settings = BackendSettings::aot_for_target(target).with_opt_level(match opt_level {
-            NativeOptimizationLevel::None => "none",
-            NativeOptimizationLevel::Basic => "speed_and_size",
-            NativeOptimizationLevel::Standard | NativeOptimizationLevel::Aggressive => "speed",
-        });
+        Self::for_target_with_opt_level_and_cpu(target, opt_level, TargetCpu::builtin_default_for_arch(target.arch))
+    }
+
+    pub fn for_target_with_opt_level_and_cpu(
+        target: Target,
+        opt_level: NativeOptimizationLevel,
+        cpu: TargetCpu,
+    ) -> CodegenResult<Self> {
+        let settings = BackendSettings::aot_for_target(target)
+            .with_opt_level(match opt_level {
+                NativeOptimizationLevel::None => "none",
+                NativeOptimizationLevel::Basic => "speed_and_size",
+                NativeOptimizationLevel::Standard | NativeOptimizationLevel::Aggressive => "speed",
+            })
+            .with_cpu(cpu);
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
         let builder = ObjectBuilder::new(isa, "simple_module", cranelift_module::default_libcall_names())
@@ -272,8 +282,7 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
         let kind = section.kind();
         let out_section = out.add_section(segment.as_bytes().to_vec(), name.as_bytes().to_vec(), kind);
         let data = section.data().unwrap_or(&[]);
-        out.section_mut(out_section)
-            .set_data(data.to_vec(), section.align());
+        out.section_mut(out_section).set_data(data.to_vec(), section.align());
         section_map.insert(section.index(), out_section);
     }
 

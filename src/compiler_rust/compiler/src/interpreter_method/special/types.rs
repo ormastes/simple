@@ -61,8 +61,21 @@ pub fn handle_unit_methods(
             // caller can dispatch to the existing builtin numeric path.
             if matches!(
                 target_suffix,
-                "int" | "i32" | "i64" | "i8" | "i16" | "u8" | "u16" | "u32" | "u64"
-                    | "float" | "f32" | "f64" | "bool" | "string" | "byte"
+                "int"
+                    | "i32"
+                    | "i64"
+                    | "i8"
+                    | "i16"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "float"
+                    | "f32"
+                    | "f64"
+                    | "bool"
+                    | "string"
+                    | "byte"
             ) {
                 return Ok(None);
             }

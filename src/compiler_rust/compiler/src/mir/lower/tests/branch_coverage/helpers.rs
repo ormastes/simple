@@ -30,7 +30,7 @@ pub(super) fn count_inst(mir: &MirModule, pred: impl Fn(&MirInst) -> bool) -> us
         .iter()
         .flat_map(|f| f.blocks.iter())
         .flat_map(|b| b.instructions.iter())
-        .filter(pred)
+        .filter(|inst| pred(inst))
         .count()
 }
 

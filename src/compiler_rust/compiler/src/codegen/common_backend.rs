@@ -14,7 +14,7 @@ use cranelift_module::{Linkage, Module};
 use target_lexicon::Triple;
 use thiserror::Error;
 
-use simple_common::target::{Target, TargetArch};
+use simple_common::target::{Target, TargetArch, TargetCpu};
 
 use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirModule};
@@ -98,6 +98,7 @@ pub struct BackendSettings {
     pub opt_level: &'static str,
     pub is_pic: bool,
     pub target: Target,
+    pub cpu: TargetCpu,
 }
 
 impl Default for BackendSettings {
@@ -106,6 +107,7 @@ impl Default for BackendSettings {
             opt_level: "speed",
             is_pic: false,
             target: Target::host(),
+            cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
         }
     }
 }
@@ -118,6 +120,7 @@ impl BackendSettings {
             // Enable PIC for compatibility with PIE executables and shared libraries
             is_pic: true,
             target: Target::host(),
+            cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
         }
     }
 
@@ -129,6 +132,7 @@ impl BackendSettings {
             // Disable PIC for baremetal/freestanding targets — no GOT, no dynamic linker.
             is_pic: !target.is_baremetal(),
             target,
+            cpu: TargetCpu::builtin_default_for_arch(target.arch),
         }
     }
 
@@ -138,6 +142,7 @@ impl BackendSettings {
             opt_level: "speed",
             is_pic: true,
             target: Target::host(),
+            cpu: TargetCpu::builtin_default_for_arch(Target::host().arch),
         }
     }
 
@@ -150,6 +155,11 @@ impl BackendSettings {
     /// Set the optimization level
     pub fn with_opt_level(mut self, level: &'static str) -> Self {
         self.opt_level = level;
+        self
+    }
+
+    pub fn with_cpu(mut self, cpu: TargetCpu) -> Self {
+        self.cpu = cpu;
         self
     }
 }
@@ -179,9 +189,6 @@ pub fn create_isa_and_flags(
 
     let flags = Flags::new(settings_builder);
 
-    // Use the full target (arch + OS) for correct object format.
-    // For native compilation, use Triple::host() which auto-detects MSVC vs GNU on Windows.
-    // For cross-compilation, parse the explicit triple from triple_str().
     let triple: Triple = if settings.target.is_host() {
         Triple::host()
     } else {
@@ -192,7 +199,7 @@ pub fn create_isa_and_flags(
             .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))?
     };
 
-    create_isa_from_triple(triple, flags)
+    create_isa_from_settings(triple, flags, &settings.target, &settings.cpu)
 }
 
 /// Helper to create ISA from a triple
@@ -206,6 +213,126 @@ fn create_isa_from_triple(
         .map_err(|e| BackendError::Compilation(e.to_string()))?;
 
     Ok((flags, isa))
+}
+
+fn create_isa_from_settings(
+    triple: Triple,
+    flags: settings::Flags,
+    target: &Target,
+    cpu: &TargetCpu,
+) -> Result<(settings::Flags, OwnedTargetIsa), BackendError> {
+    if matches!(target.arch, TargetArch::Arm | TargetArch::Riscv32) {
+        return Err(BackendError::UnsupportedTarget(format!(
+            "Cranelift native builds do not support hosted {} yet; use --backend llvm for this lane",
+            target.arch
+        )));
+    }
+
+    let mut isa_builder = if target.is_host() && matches!(cpu, TargetCpu::Native) {
+        cranelift_native::builder_with_options(true).map_err(|e| BackendError::Compilation(e.to_string()))?
+    } else {
+        cranelift_codegen::isa::lookup(triple).map_err(|e| BackendError::Compilation(e.to_string()))?
+    };
+
+    apply_cranelift_cpu_policy(&mut isa_builder, target, cpu)?;
+
+    let isa = isa_builder
+        .finish(flags.clone())
+        .map_err(|e| BackendError::Compilation(e.to_string()))?;
+
+    Ok((flags, isa))
+}
+
+fn apply_cranelift_cpu_policy(
+    isa_builder: &mut dyn cranelift_codegen::settings::Configurable,
+    target: &Target,
+    cpu: &TargetCpu,
+) -> BackendResult<()> {
+    match cpu {
+        TargetCpu::Default => Ok(()),
+        TargetCpu::Native => {
+            if target.is_host() {
+                cranelift_native::infer_native_flags(isa_builder).map_err(|e| BackendError::Compilation(e.to_string()))
+            } else {
+                Err(BackendError::Compilation(format!(
+                    "Cranelift backend cannot use --cpu native when targeting {}; native only works for host builds",
+                    target
+                )))
+            }
+        }
+        TargetCpu::X86_64V1 | TargetCpu::X86_64V2 | TargetCpu::X86_64V3 | TargetCpu::X86_64V4 => {
+            if target.arch != TargetArch::X86_64 {
+                return Err(BackendError::Compilation(format!(
+                    "CPU level {} only applies to x86_64 targets, not {}",
+                    cpu, target.arch
+                )));
+            }
+            enable_x86_64_level(isa_builder, cpu)
+        }
+        TargetCpu::Custom(value) => Err(BackendError::Compilation(format!(
+            "Cranelift backend does not accept free-form CPU '{}'; use default, native, or x86-64-v1..v4",
+            value
+        ))),
+    }
+}
+
+fn enable_x86_64_level(
+    isa_builder: &mut dyn cranelift_codegen::settings::Configurable,
+    cpu: &TargetCpu,
+) -> BackendResult<()> {
+    let enable = |name: &str, builder: &mut dyn cranelift_codegen::settings::Configurable| {
+        builder
+            .enable(name)
+            .map_err(|e| BackendError::Compilation(format!("failed to enable Cranelift feature {name}: {e}")))
+    };
+
+    match cpu {
+        TargetCpu::X86_64V1 => {}
+        TargetCpu::X86_64V2 => {
+            for feature in [
+                "has_cmpxchg16b",
+                "has_sse3",
+                "has_ssse3",
+                "has_sse41",
+                "has_sse42",
+                "has_popcnt",
+            ] {
+                enable(feature, isa_builder)?;
+            }
+        }
+        TargetCpu::X86_64V3 => {
+            for feature in [
+                "has_cmpxchg16b",
+                "has_sse3",
+                "has_ssse3",
+                "has_sse41",
+                "has_sse42",
+                "has_popcnt",
+                "has_avx",
+                "has_avx2",
+                "has_fma",
+                "has_bmi1",
+                "has_bmi2",
+                "has_lzcnt",
+            ] {
+                enable(feature, isa_builder)?;
+            }
+        }
+        TargetCpu::X86_64V4 => {
+            enable_x86_64_level(isa_builder, &TargetCpu::X86_64V3)?;
+            for feature in [
+                "has_avx512f",
+                "has_avx512dq",
+                "has_avx512vl",
+                "has_avx512vbmi",
+                "has_avx512bitalg",
+            ] {
+                enable(feature, isa_builder)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Create ISA and flags for the host target (backwards compatibility)
@@ -337,7 +464,10 @@ impl<M: Module> CodegenBackend<M> {
     /// Only declares functions appropriate for the given target (e.g., ARM-specific
     /// functions are excluded from x86_64 baremetal builds) to avoid spurious
     /// undefined-symbol link errors.
-    pub fn declare_runtime_functions(module: &mut M, target: &Target) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
+    pub fn declare_runtime_functions(
+        module: &mut M,
+        target: &Target,
+    ) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
         let call_conv = super::shared::platform_call_conv();
 
@@ -592,7 +722,10 @@ impl<M: Module> CodegenBackend<M> {
                 let use_hit = self.use_map.get(name.as_str());
                 let import_hit = self.import_map.get(name.as_str());
                 if use_hit.is_none() && import_hit.is_none() {
-                    eprintln!("[DEBUG declare_globals fallback] name={} module_prefix={:?}", name, self.module_prefix);
+                    eprintln!(
+                        "[DEBUG declare_globals fallback] name={} module_prefix={:?}",
+                        name, self.module_prefix
+                    );
                 }
                 let resolved_name = use_hit
                     .or(import_hit)

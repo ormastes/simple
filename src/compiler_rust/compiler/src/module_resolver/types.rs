@@ -9,7 +9,7 @@
 use simple_dependency_tracker::{graph::ImportGraph, symbol::ProjectSymbols};
 use simple_parser::ast::{Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, Visibility};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::CompileError;
 
@@ -198,76 +198,24 @@ impl ModuleResolver {
     }
 
     /// Create a resolver for single-file mode (no project)
-    pub fn single_file(file_path: &std::path::Path) -> Self {
-        let normalized_file_path = if file_path.is_absolute() {
-            file_path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(file_path))
-                .unwrap_or_else(|_| file_path.to_path_buf())
-        };
-        let parent = normalized_file_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf();
-        let mut project_root = parent.clone();
-        loop {
-            if project_root.join("src").is_dir() || project_root.join("Cargo.toml").is_file() {
-                break;
-            }
-            if !project_root.pop() {
-                project_root = parent.clone();
-                break;
-            }
-        }
+    pub fn single_file(file_path: &Path) -> Self {
+        Self::single_file_with_project_hint(file_path, None)
+    }
+
+    /// Create a resolver for single-file mode, optionally borrowing project context
+    /// from a separate hint path when the source file itself lives outside the project tree.
+    pub fn single_file_with_project_hint(file_path: &Path, project_hint: Option<&Path>) -> Self {
+        let normalized_file_path = normalize_input_path(file_path);
+        let parent = normalized_file_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let project_root = find_project_root(&normalized_file_path)
+            .or_else(|| project_hint.and_then(find_project_root))
+            .unwrap_or_else(|| parent.clone());
         let source_root = if project_root.join("src").is_dir() {
             project_root.join("src")
         } else {
             parent.clone()
         };
-
-        // Try to detect stdlib even in single-file mode
-        // Check multiple possible stdlib locations
-        let stdlib_candidates = [
-            "src/lib",
-            "src/std",
-            "src/std/src",
-            "src/lib/std/src",
-            "simple/std_lib/src",
-            "std_lib/src",
-        ];
-
-        let stdlib_root = {
-            // First try relative to current file
-            let mut found = None;
-            for candidate_path in &stdlib_candidates {
-                let candidate = project_root.join(candidate_path);
-                if candidate.exists() {
-                    found = Some(candidate);
-                    break;
-                }
-            }
-
-            // If not found, try parent directories
-            if found.is_none() {
-                let mut current = parent.clone();
-                'outer: for _ in 0..5 {
-                    for candidate_path in &stdlib_candidates {
-                        let candidate = current.join(candidate_path);
-                        if candidate.exists() {
-                            found = Some(candidate);
-                            break 'outer;
-                        }
-                    }
-                    if let Some(p) = current.parent() {
-                        current = p.to_path_buf();
-                    } else {
-                        break;
-                    }
-                }
-            }
-            found
-        };
+        let stdlib_root = detect_stdlib_root(&project_root, &parent);
 
         Self {
             type_root: project_root.join("src").join("type"),
@@ -336,4 +284,67 @@ impl ModuleResolver {
     pub fn project_symbols(&self) -> &ProjectSymbols {
         &self.project_symbols
     }
+}
+
+fn normalize_input_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn find_project_root(path: &Path) -> Option<PathBuf> {
+    let normalized = normalize_input_path(path);
+    let mut current = if normalized.is_dir() {
+        normalized
+    } else {
+        normalized.parent()?.to_path_buf()
+    };
+
+    loop {
+        if current.join("src").is_dir() || current.join("Cargo.toml").is_file() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn detect_stdlib_root(project_root: &Path, file_parent: &Path) -> Option<PathBuf> {
+    let stdlib_candidates = [
+        "src/lib",
+        "src/std",
+        "src/std/src",
+        "src/lib/std/src",
+        "simple/std_lib/src",
+        "std_lib/src",
+    ];
+
+    for candidate_path in &stdlib_candidates {
+        let candidate = project_root.join(candidate_path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let mut current = file_parent.to_path_buf();
+    for _ in 0..5 {
+        for candidate_path in &stdlib_candidates {
+            let candidate = current.join(candidate_path);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        if let Some(parent) = current.parent() {
+            current = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+
+    None
 }

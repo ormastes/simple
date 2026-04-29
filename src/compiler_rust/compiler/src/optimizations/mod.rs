@@ -188,10 +188,22 @@ mod tests {
 
     #[test]
     fn test_parse_native_optimization_level() {
-        assert_eq!(NativeOptimizationLevel::parse("none").unwrap(), NativeOptimizationLevel::None);
-        assert_eq!(NativeOptimizationLevel::parse("basic").unwrap(), NativeOptimizationLevel::Basic);
-        assert_eq!(NativeOptimizationLevel::parse("standard").unwrap(), NativeOptimizationLevel::Standard);
-        assert_eq!(NativeOptimizationLevel::parse("aggressive").unwrap(), NativeOptimizationLevel::Aggressive);
+        assert_eq!(
+            NativeOptimizationLevel::parse("none").unwrap(),
+            NativeOptimizationLevel::None
+        );
+        assert_eq!(
+            NativeOptimizationLevel::parse("basic").unwrap(),
+            NativeOptimizationLevel::Basic
+        );
+        assert_eq!(
+            NativeOptimizationLevel::parse("standard").unwrap(),
+            NativeOptimizationLevel::Standard
+        );
+        assert_eq!(
+            NativeOptimizationLevel::parse("aggressive").unwrap(),
+            NativeOptimizationLevel::Aggressive
+        );
     }
 
     #[test]

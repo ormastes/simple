@@ -303,7 +303,9 @@ fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, MathValue>) -> Resul
             }
         }
 
-        MathExpr::Slice { .. } => Err(CompileError::semantic("slice expression must appear inside subscript".to_string())),
+        MathExpr::Slice { .. } => Err(CompileError::semantic(
+            "slice expression must appear inside subscript".to_string(),
+        )),
 
         MathExpr::Group(inner) => eval_with_env(inner, env),
 
@@ -497,7 +499,10 @@ fn index_tensor_axis(tensor: &Tensor, i: i64) -> Result<MathValue, CompileError>
     let idx = i as usize;
     if tensor.ndim() == 1 {
         if idx >= tensor.shape[0] {
-            return Err(crate::error::factory::tensor_1d_index_out_of_bounds(idx, tensor.shape[0]));
+            return Err(crate::error::factory::tensor_1d_index_out_of_bounds(
+                idx,
+                tensor.shape[0],
+            ));
         }
         Ok(MathValue::Float(tensor.data[idx]))
     } else {
@@ -538,10 +543,18 @@ fn slice_tensor_2d(
     col_index: &MathExpr,
     env: &mut HashMap<String, MathValue>,
 ) -> Result<MathValue, CompileError> {
-    let MathExpr::Slice { start: row_start, end: row_end } = row_index else {
+    let MathExpr::Slice {
+        start: row_start,
+        end: row_end,
+    } = row_index
+    else {
         return Err(CompileError::semantic("2D slicing requires row slice".to_string()));
     };
-    let MathExpr::Slice { start: col_start, end: col_end } = col_index else {
+    let MathExpr::Slice {
+        start: col_start,
+        end: col_end,
+    } = col_index
+    else {
         return Err(CompileError::semantic("2D slicing requires col slice".to_string()));
     };
     let rs = eval_slice_bound(row_start, env, 0)?;
@@ -557,16 +570,24 @@ fn slice_tensor_2d(
     Ok(MathValue::Tensor(Tensor::new(data, vec![re - rs, ce - cs])?))
 }
 
-fn slice_tensor_2d_column(
-    tensor: &Tensor,
-    row_index: &MathExpr,
-    col: i64,
-) -> Result<MathValue, CompileError> {
+fn slice_tensor_2d_column(tensor: &Tensor, row_index: &MathExpr, col: i64) -> Result<MathValue, CompileError> {
     let MathExpr::Slice { start, end } = row_index else {
         return Err(CompileError::semantic("column slicing requires row slice".to_string()));
     };
-    let rs = start.as_ref().map(|e| match e.as_ref() { MathExpr::Int(i) => *i as usize, _ => 0 }).unwrap_or(0);
-    let re = end.as_ref().map(|e| match e.as_ref() { MathExpr::Int(i) => *i as usize, _ => tensor.shape[0] }).unwrap_or(tensor.shape[0]);
+    let rs = start
+        .as_ref()
+        .map(|e| match e.as_ref() {
+            MathExpr::Int(i) => *i as usize,
+            _ => 0,
+        })
+        .unwrap_or(0);
+    let re = end
+        .as_ref()
+        .map(|e| match e.as_ref() {
+            MathExpr::Int(i) => *i as usize,
+            _ => tensor.shape[0],
+        })
+        .unwrap_or(tensor.shape[0]);
     let c = col as usize;
     let mut data = Vec::new();
     for r in rs..re {

@@ -3,6 +3,7 @@
 //! This crate provides the main compilation pipeline for the Simple language,
 //! including interpretation, type checking, and code generation.
 
+use simple_common::target::NativeCodegenBackend;
 
 pub mod repl_runner;
 pub mod mock_helper;
@@ -189,3 +190,64 @@ pub use lsp_mcp::{
     LspMcpTools, Position as LspPosition, Range as LspRange, ReferenceContext, ReferenceLocation,
     SymbolInfo as LspSymbolInfo, SymbolKind as LspSymbolKind,
 };
+
+const CRANELIFT_ONLY_NATIVE_BACKENDS: &[NativeCodegenBackend] = &[NativeCodegenBackend::Cranelift];
+const LLVM_AND_CRANELIFT_NATIVE_BACKENDS: &[NativeCodegenBackend] =
+    &[NativeCodegenBackend::Llvm, NativeCodegenBackend::Cranelift];
+
+pub fn is_native_codegen_backend_available(backend: NativeCodegenBackend) -> bool {
+    match backend {
+        NativeCodegenBackend::Cranelift => true,
+        NativeCodegenBackend::Llvm => cfg!(feature = "llvm"),
+    }
+}
+
+pub fn default_native_codegen_backend() -> NativeCodegenBackend {
+    if is_native_codegen_backend_available(NativeCodegenBackend::Llvm) {
+        NativeCodegenBackend::Llvm
+    } else {
+        NativeCodegenBackend::Cranelift
+    }
+}
+
+pub fn available_native_codegen_backends() -> &'static [NativeCodegenBackend] {
+    if cfg!(feature = "llvm") {
+        LLVM_AND_CRANELIFT_NATIVE_BACKENDS
+    } else {
+        CRANELIFT_ONLY_NATIVE_BACKENDS
+    }
+}
+
+#[cfg(test)]
+mod native_backend_tests {
+    use super::{available_native_codegen_backends, default_native_codegen_backend, is_native_codegen_backend_available};
+    use simple_common::target::NativeCodegenBackend;
+
+    #[test]
+    fn test_cranelift_is_always_available() {
+        assert!(is_native_codegen_backend_available(NativeCodegenBackend::Cranelift));
+    }
+
+    #[test]
+    fn test_default_native_codegen_backend_is_available() {
+        assert!(is_native_codegen_backend_available(default_native_codegen_backend()));
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn test_llvm_build_reports_both_native_backends() {
+        assert_eq!(
+            available_native_codegen_backends(),
+            &[NativeCodegenBackend::Llvm, NativeCodegenBackend::Cranelift]
+        );
+        assert_eq!(default_native_codegen_backend(), NativeCodegenBackend::Llvm);
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    #[test]
+    fn test_non_llvm_build_reports_cranelift_only() {
+        assert_eq!(available_native_codegen_backends(), &[NativeCodegenBackend::Cranelift]);
+        assert_eq!(default_native_codegen_backend(), NativeCodegenBackend::Cranelift);
+        assert!(!is_native_codegen_backend_available(NativeCodegenBackend::Llvm));
+    }
+}

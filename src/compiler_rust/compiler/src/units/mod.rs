@@ -14,6 +14,6 @@
 pub mod registry;
 
 pub use registry::{
-    convert, dimensions_match, ensure_loaded, lookup, lookup_by_dimensions, populate_thread_local_state,
-    UnitEntry, UnitRegistry,
+    convert, dimensions_match, ensure_loaded, lookup, lookup_by_dimensions, populate_thread_local_state, UnitEntry,
+    UnitRegistry,
 };

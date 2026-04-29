@@ -61,7 +61,14 @@ pub fn compile_condition_probe<M: Module>(
 
     let decision_id_val = builder.ins().iconst(types::I64, decision_id as i64);
     let condition_id_val = builder.ins().iconst(types::I32, condition_id as i64);
-    call_runtime_3_void(ctx, builder, "rt_condition_probe", decision_id_val, condition_id_val, result_val);
+    call_runtime_3_void(
+        ctx,
+        builder,
+        "rt_condition_probe",
+        decision_id_val,
+        condition_id_val,
+        result_val,
+    );
 
     Ok(())
 }

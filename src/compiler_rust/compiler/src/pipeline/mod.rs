@@ -651,7 +651,10 @@ main = 0
             }
             Err(CompileError::SemanticWithContext(ref p)) => {
                 assert!(p.message.contains("#1035"), "Error should reference #1035");
-                assert!(p.message.contains("runtime"), "Error should mention runtime interceptors");
+                assert!(
+                    p.message.contains("runtime"),
+                    "Error should mention runtime interceptors"
+                );
             }
             _ => panic!("Expected semantic error with #1035 reference"),
         }

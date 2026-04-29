@@ -46,7 +46,9 @@ pub struct UnitRegistry {
 
 impl UnitRegistry {
     pub fn new() -> Self {
-        UnitRegistry { entries: HashMap::new() }
+        UnitRegistry {
+            entries: HashMap::new(),
+        }
     }
 
     pub fn lookup(&self, symbol: &str) -> Option<&UnitEntry> {
@@ -112,14 +114,9 @@ pub fn convert(value: f64, from: &str, to: &str) -> Result<f64, String> {
     let from_entry = reg
         .lookup(from)
         .ok_or_else(|| format!("unit '{}' not registered", from))?;
-    let to_entry = reg
-        .lookup(to)
-        .ok_or_else(|| format!("unit '{}' not registered", to))?;
+    let to_entry = reg.lookup(to).ok_or_else(|| format!("unit '{}' not registered", to))?;
     if !dimensions_eq(&from_entry.dimensions, &to_entry.dimensions) {
-        return Err(format!(
-            "cannot convert '{}' to '{}': dimension mismatch",
-            from, to
-        ));
+        return Err(format!("cannot convert '{}' to '{}': dimension mismatch", from, to));
     }
     if to_entry.scale_to_base == 0.0 {
         return Err(format!("unit '{}' has zero scale_to_base", to));
@@ -232,9 +229,7 @@ pub fn populate_thread_local_state(reg: &UnitRegistry) {
         if entry.dimensions.len() == 1 && (entry.scale_to_base - 1.0).abs() < f64::EPSILON {
             // This is the canonical base unit for its family.
             let family = entry.kind.to_ascii_lowercase();
-            base_symbol_to_family
-                .entry(entry.symbol.clone())
-                .or_insert(family);
+            base_symbol_to_family.entry(entry.symbol.clone()).or_insert(family);
         }
     }
 
@@ -451,7 +446,7 @@ fn fold_composite_dimensions(entry: &UnitEntry, reg: &UnitRegistry) -> HashMap<S
                     *dims.entry(b.clone()).or_insert(0) += e;
                 }
             } else if !sym.is_empty() {
-                *dims.entry(sym, ).or_insert(0) += 1;
+                *dims.entry(sym).or_insert(0) += 1;
             }
         }
         for sym in den {
@@ -460,7 +455,7 @@ fn fold_composite_dimensions(entry: &UnitEntry, reg: &UnitRegistry) -> HashMap<S
                     *dims.entry(b.clone()).or_insert(0) -= e;
                 }
             } else if !sym.is_empty() {
-                *dims.entry(sym, ).or_insert(0) -= 1;
+                *dims.entry(sym).or_insert(0) -= 1;
             }
         }
     } else if !entry.base_unit.is_empty() {

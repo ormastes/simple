@@ -167,11 +167,12 @@ impl WebCompiler {
         // Compile to wasm32-unknown-unknown
         let target = Target::new_wasm(TargetArch::Wasm32, WasmRuntime::Browser);
 
-        match self.pipeline.compile_source_to_memory_for_target(&combined_code, target) {
+        match self
+            .pipeline
+            .compile_source_to_memory_for_target(&combined_code, target)
+        {
             Ok(bytes) => Ok(bytes),
-            Err(CompileError::Codegen(message))
-                if message.contains("32-bit targets require the LLVM backend") =>
-            {
+            Err(CompileError::Codegen(message)) if message.contains("32-bit targets require the LLVM backend") => {
                 // Default-feature builds cannot emit real wasm, but SUI
                 // compilation should still succeed for hydration/template tests.
                 Ok(self.minimal_wasm_module())

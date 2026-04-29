@@ -70,12 +70,30 @@ fn request_shb(source_path: text, config: WatcherConfig) -> Result<text, text>:
 
     Err("SHB not ready after watcher response: {source_path}")
 
-fn request_smf(source_path: text, options_hash: i64, config: WatcherConfig) -> Result<text, text>:
+fn request_smf(
+    source_path: text,
+    options_hash: i64,
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text],
+    config: WatcherConfig
+) -> Result<text, text>:
     if not is_watcher_running(config.lock_path):
         return Err("watcher not running")
 
     var wr = watcher_request_new(source_path, WatcherRequestKind.Smf)
     wr.options_hash = options_hash
+    wr.backend = backend
+    wr.opt_level = opt_level
+    wr.release = release
+    wr.debug_info = debug_info
+    wr.gc_off = gc_off
+    wr.profile = profile
+    wr.allowed_families = allowed_families
     val dreq = watcher_request_to_daemon(wr)
     val dconfig = watcher_config_to_daemon(config)
 
@@ -124,10 +142,10 @@ fn get_or_generate_shb(source_path: text, config: WatcherConfig) -> ShbModuleInt
 
     iface
 
-fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, allowed_families: [text]) -> Result<text, text>:
+fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text]) -> Result<text, text>:
     use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
 
-    val options_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off, allowed_families)
+    val options_hash = compile_options_hash_compute(backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
     val config = watcher_config_default()
 
     val check = check_smf_freshness(source_path, config.smf_dir, options_hash)
@@ -136,14 +154,25 @@ fn get_or_generate_smf(source_path: text, output: text, backend: text, opt_level
         return Ok(cached_path)
 
     if is_watcher_running(config.lock_path):
-        val result = request_smf(source_path, options_hash.hash, config)
+        val result = request_smf(
+            source_path,
+            options_hash.hash,
+            backend,
+            opt_level,
+            release,
+            debug_info,
+            gc_off,
+            profile,
+            allowed_families,
+            config
+        )
         if result.is_ok():
             return result
 
     # Inline fallback
-    use driver.{compile_to_smf}
+    use compiler.driver.driver_api_compile_single.{compile_to_smf_with_options}
     val smf_output = if output != "": output else: source_to_cache_path(source_path, config.smf_dir, ".smf")
-    compile_to_smf(source_path, smf_output)
+    compile_to_smf_with_options(source_path, smf_output, backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
 
 # ============================================================================
 # Watcher Lifecycle

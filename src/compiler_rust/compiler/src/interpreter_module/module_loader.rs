@@ -541,9 +541,7 @@ pub fn load_and_merge_module(
     // Many __init__.spl files use bare exports (export X, Y, Z) where the symbols
     // come from sibling files (mod.spl, or other .spl files in the same directory).
     // Without preloading these siblings, bare exports resolve to nothing.
-    let preloaded_env: Option<HashMap<String, Value>> = if module_path
-        .file_name()
-        .is_some_and(|f| f == "__init__.spl")
+    let preloaded_env: Option<HashMap<String, Value>> = if module_path.file_name().is_some_and(|f| f == "__init__.spl")
     {
         let has_bare_exports = filtered_items
             .iter()
@@ -863,10 +861,7 @@ mod tests {
         let mut functions = HashMap::new();
         let mut classes = HashMap::new();
         let mut enums = HashMap::new();
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("..");
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("..");
         let current_file = repo_root.join("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
 
         let value = load_and_merge_module(
@@ -898,10 +893,7 @@ mod tests {
         let mut functions = HashMap::new();
         let mut classes = HashMap::new();
         let mut enums = HashMap::new();
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("..");
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("..");
         let current_file = repo_root.join("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
 
         let value = load_and_merge_module(

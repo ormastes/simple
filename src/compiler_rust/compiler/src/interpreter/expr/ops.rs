@@ -368,18 +368,13 @@ pub(super) fn eval_op_expr(
             // re-wrap the int/float result back into the newtype. Comparison ops
             // (==, !=, <, >, <=, >=) return Bool and never re-wrap.
             let newtype_wrap_class: Option<String> = match (&left_val, &right_val) {
-                (
-                    Value::Object { class: lc, fields: lf },
-                    Value::Object { class: rc, fields: rf },
-                ) if lc == rc
-                    && lf.len() == 1
-                    && lf.contains_key("value")
-                    && rf.len() == 1
-                    && rf.contains_key("value")
-                    && matches!(
-                        op,
-                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-                    ) =>
+                (Value::Object { class: lc, fields: lf }, Value::Object { class: rc, fields: rf })
+                    if lc == rc
+                        && lf.len() == 1
+                        && lf.contains_key("value")
+                        && rf.len() == 1
+                        && rf.contains_key("value")
+                        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod) =>
                 {
                     Some(lc.clone())
                 }

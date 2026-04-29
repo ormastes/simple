@@ -3,6 +3,7 @@
 /// Provides bridge from Simple interpreter to LLVM native code generation.
 use crate::error::CompileError;
 use crate::linker::NativeBinaryOptions;
+use crate::optimizations::NativeOptimizationLevel;
 use crate::pipeline::CompilerPipeline;
 use crate::value::Value;
 use std::path::Path;
@@ -69,13 +70,15 @@ pub fn rt_compile_to_llvm_ir(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Compile Simple source to native executable using LLVM backend
 ///
-/// Callable from Simple as: `rt_compile_to_native(source_path, output_path)`
+/// Callable from Simple as:
+/// - `rt_compile_to_native(source_path, output_path)`
+/// - `rt_compile_to_native_with_opt(source_path, output_path, opt_level)`
 ///
 /// Returns: (success: bool, error_message: text)
 pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 {
+    if args.len() != 2 && args.len() != 3 {
         return Err(CompileError::runtime(
-            "rt_compile_to_native requires 2 arguments (source_path, output_path)",
+            "rt_compile_to_native requires 2 or 3 arguments (source_path, output_path, opt_level?)",
         ));
     }
 
@@ -115,6 +118,18 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
 
+    let opt_level = if args.len() == 3 {
+        match &args[2] {
+            Value::Str(s) => match NativeOptimizationLevel::parse(s) {
+                Ok(level) => level,
+                Err(err) => return Ok(Value::Tuple(vec![Value::Bool(false), Value::Str(err)])),
+            },
+            _ => return Err(CompileError::runtime("opt_level must be a string")),
+        }
+    } else {
+        NativeOptimizationLevel::default_for_native_executable()
+    };
+
     // Prefer LLVM backend for native binaries when available, but respect explicit overrides.
     #[cfg(feature = "llvm")]
     let previous_backend = if env::var("SIMPLE_BACKEND").is_err() {
@@ -134,7 +149,10 @@ pub fn rt_compile_to_native(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let options = NativeBinaryOptions::new().output(&output_path);
+    let options = NativeBinaryOptions::new()
+        .output(&output_path)
+        .opt_level(opt_level)
+        .layout_optimize(opt_level.enables_layout_optimize());
     let result = pipeline.compile_file_to_native_binary(&source_path, &output_path, Some(options));
 
     // Restore previous backend override
@@ -323,6 +341,32 @@ mod tests {
         // Verify rt_compile_to_native returns a well-formed (bool, text) tuple.
         // Compilation may fail in some environments (e.g., missing codegen backend),
         // so we check structure rather than requiring success.
+        match result {
+            Value::Tuple(values) => {
+                assert_eq!(values.len(), 2);
+                assert!(matches!(values[0], Value::Bool(_)), "First element should be bool");
+                assert!(matches!(values[1], Value::Str(_)), "Second element should be string");
+            }
+            _ => panic!("Expected tuple result"),
+        }
+    }
+
+    #[test]
+    fn test_compile_to_native_accepts_opt_level_argument() {
+        let tmp_source = std::env::temp_dir().join("simple_test_native_opt_ok.spl");
+        let tmp_bin = std::env::temp_dir().join("simple_test_native_opt_ok.bin");
+        std::fs::write(&tmp_source, "fn main() -> i32:\n    return 0\n").unwrap();
+
+        let args = vec![
+            Value::Str(tmp_source.to_string_lossy().into()),
+            Value::Str(tmp_bin.to_string_lossy().into()),
+            Value::Str("basic".into()),
+        ];
+        let result = rt_compile_to_native(&args).unwrap();
+
+        let _ = std::fs::remove_file(&tmp_source);
+        let _ = std::fs::remove_file(&tmp_bin);
+
         match result {
             Value::Tuple(values) => {
                 assert_eq!(values.len(), 2);

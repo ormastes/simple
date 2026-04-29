@@ -4,7 +4,7 @@ use crate::error::CompileError;
 use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirModule};
 use crate::optimizations::NativeOptimizationLevel;
-use simple_common::target::Target;
+use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
@@ -27,6 +27,7 @@ use std::cell::RefCell;
 pub struct LlvmBackend {
     pub(super) target: Target,
     pub(super) opt_level: NativeOptimizationLevel,
+    pub(super) cpu: TargetCpu,
     /// Enable coverage instrumentation
     pub(super) coverage_enabled: bool,
     #[cfg(feature = "llvm")]
@@ -63,9 +64,17 @@ impl LlvmBackend {
 
     /// Create a new LLVM backend for the given target and optimization profile.
     pub fn new_with_opt_level(target: Target, opt_level: NativeOptimizationLevel) -> Result<Self, CompileError> {
+        Self::new_with_opt_level_and_cpu(target, opt_level, TargetCpu::builtin_default_for_arch(target.arch))
+    }
+
+    pub fn new_with_opt_level_and_cpu(
+        target: Target,
+        opt_level: NativeOptimizationLevel,
+        cpu: TargetCpu,
+    ) -> Result<Self, CompileError> {
         #[cfg(not(feature = "llvm"))]
         {
-            let _ = (target, opt_level); // Suppress unused warning when feature disabled
+            let _ = (target, opt_level, cpu); // Suppress unused warning when feature disabled
             Err(crate::error::factory::llvm_feature_required())
         }
 
@@ -75,6 +84,7 @@ impl LlvmBackend {
             Ok(Self {
                 target,
                 opt_level,
+                cpu,
                 coverage_enabled: false,
                 context,
                 module: RefCell::new(None),
@@ -110,6 +120,10 @@ impl LlvmBackend {
     /// Get the target for this backend
     pub fn target(&self) -> &Target {
         &self.target
+    }
+
+    pub fn cpu(&self) -> &TargetCpu {
+        &self.cpu
     }
 
     #[cfg(feature = "llvm")]
@@ -204,7 +218,7 @@ impl LlvmBackend {
 
     /// Get the LLVM target triple string for this target
     pub fn get_target_triple(&self) -> String {
-        use simple_common::target::{TargetArch, TargetOS, WasmRuntime};
+        use simple_common::target::WasmRuntime;
 
         let arch_str = match self.target.arch {
             TargetArch::X86_64 => "x86_64",
@@ -483,10 +497,23 @@ impl LlvmBackend {
             _ => "",
         };
 
+        let cpu_name = self
+            .cpu
+            .llvm_cpu_name(self.target.arch)
+            .unwrap_or(match self.target.arch {
+                TargetArch::X86_64 => "x86-64-v3",
+                TargetArch::Aarch64 => "generic",
+                TargetArch::X86 => "i686",
+                TargetArch::Arm => "generic",
+                TargetArch::Riscv64 => "generic-rv64",
+                TargetArch::Riscv32 => "generic-rv32",
+                TargetArch::Wasm32 | TargetArch::Wasm64 => "generic",
+            });
+
         let target_machine = target
             .create_target_machine(
                 &target_triple,
-                "generic",
+                cpu_name,
                 features,
                 match self.opt_level {
                     NativeOptimizationLevel::None => OptimizationLevel::None,

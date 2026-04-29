@@ -1339,7 +1339,7 @@ pub(crate) fn call_extern_function(
         // Native Compilation & Execution (4 functions)
         // ====================================================================
         "rt_compile_to_llvm_ir" => native_ffi::rt_compile_to_llvm_ir(&evaluated),
-        "rt_compile_to_native" => native_ffi::rt_compile_to_native(&evaluated),
+        "rt_compile_to_native" | "rt_compile_to_native_with_opt" => native_ffi::rt_compile_to_native(&evaluated),
         "rt_execute_native" => native_ffi::rt_execute_native(&evaluated),
 
         // ====================================================================

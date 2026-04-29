@@ -301,7 +301,9 @@ impl From<&Terminator> for SerializableMirTerminator {
                 out.then_block = Some(then_block.0);
                 out.else_block = Some(else_block.0);
             }
-            Terminator::Switch { discriminant, default, .. } => {
+            Terminator::Switch {
+                discriminant, default, ..
+            } => {
                 out.cond = Some(vreg_id(*discriminant));
                 out.target = Some(default.0);
             }

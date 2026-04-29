@@ -167,48 +167,38 @@ impl<'a, M: Module> InstrContext<'a, M> {
             let leaked: &'static str = Box::leak(k.clone().into_boxed_str());
             static_map.insert(leaked, *v);
         }
-        let runtime_funcs: &'static HashMap<&'static str, cranelift_module::FuncId> =
-            Box::leak(Box::new(static_map));
+        let runtime_funcs: &'static HashMap<&'static str, cranelift_module::FuncId> = Box::leak(Box::new(static_map));
 
         // Leak auxiliary maps so we can take &'a mut references
         let func_ids: &'a mut std::collections::BTreeMap<String, cranelift_module::FuncId> =
             Box::leak(Box::new(std::collections::BTreeMap::new()));
         let global_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =
             Box::leak(Box::new(std::collections::BTreeMap::new()));
-        let vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value> =
-            Box::leak(Box::new(HashMap::new()));
-        let local_addr_map: &'a mut HashMap<VReg, usize> =
-            Box::leak(Box::new(HashMap::new()));
-        let variables: &'static HashMap<usize, cranelift_frontend::Variable> =
-            Box::leak(Box::new(HashMap::new()));
-        let extra_variables: &'a mut HashMap<usize, cranelift_frontend::Variable> =
-            Box::leak(Box::new(HashMap::new()));
-        let vreg_from_local: &'a mut HashMap<VReg, usize> =
-            Box::leak(Box::new(HashMap::new()));
-        let blocks: &'static HashMap<BlockId, cranelift_codegen::ir::Block> =
-            Box::leak(Box::new(HashMap::new()));
-        let generator_state_map: &'static Option<
-            HashMap<BlockId, crate::mir::GeneratorState>,
-        > = Box::leak(Box::new(None));
-        let async_state_map: &'static Option<HashMap<BlockId, crate::mir::AsyncState>> =
+        let vreg_values: &'a mut HashMap<VReg, cranelift_codegen::ir::Value> = Box::leak(Box::new(HashMap::new()));
+        let local_addr_map: &'a mut HashMap<VReg, usize> = Box::leak(Box::new(HashMap::new()));
+        let variables: &'static HashMap<usize, cranelift_frontend::Variable> = Box::leak(Box::new(HashMap::new()));
+        let extra_variables: &'a mut HashMap<usize, cranelift_frontend::Variable> = Box::leak(Box::new(HashMap::new()));
+        let vreg_from_local: &'a mut HashMap<VReg, usize> = Box::leak(Box::new(HashMap::new()));
+        let blocks: &'static HashMap<BlockId, cranelift_codegen::ir::Block> = Box::leak(Box::new(HashMap::new()));
+        let generator_state_map: &'static Option<HashMap<BlockId, crate::mir::GeneratorState>> =
             Box::leak(Box::new(None));
+        let async_state_map: &'static Option<HashMap<BlockId, crate::mir::AsyncState>> = Box::leak(Box::new(None));
         let import_map: &'static std::sync::Arc<std::collections::HashMap<String, String>> =
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
         let use_map: &'static std::collections::HashMap<String, String> =
             Box::leak(Box::new(std::collections::HashMap::new()));
-        let vtable_data_ids: &'static std::collections::BTreeMap<
-            String,
-            cranelift_module::DataId,
-        > = Box::leak(Box::new(std::collections::BTreeMap::new()));
-        let vtable_type_ids: &'static std::collections::BTreeMap<
-            TypeId,
-            cranelift_module::DataId,
-        > = Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let vtable_data_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =
+            Box::leak(Box::new(std::collections::BTreeMap::new()));
+        let vtable_type_ids: &'static std::collections::BTreeMap<TypeId, cranelift_module::DataId> =
+            Box::leak(Box::new(std::collections::BTreeMap::new()));
         let vreg_types: &'a mut HashMap<VReg, TypeId> = Box::leak(Box::new(HashMap::new()));
 
         // Minimal dummy MirFunction
-        let func: &'static MirFunction =
-            Box::leak(Box::new(MirFunction::new("__test__".to_string(), TypeId::I64, Visibility::Private)));
+        let func: &'static MirFunction = Box::leak(Box::new(MirFunction::new(
+            "__test__".to_string(),
+            TypeId::I64,
+            Visibility::Private,
+        )));
 
         // Dummy entry block (block 0)
         let entry_block = cranelift_codegen::ir::Block::with_number(0).unwrap();
@@ -1202,14 +1192,10 @@ pub fn compile_instruction<M: Module>(
                 // bit-pattern as i64 so the subsequent `ishl … 3` is well-typed
                 // and the value round-trips through UnboxFloat-style consumers
                 // that re-bitcast i64 → f64.
-                val = builder
-                    .ins()
-                    .bitcast(types::I64, MemFlags::new(), val);
+                val = builder.ins().bitcast(types::I64, MemFlags::new(), val);
             } else if val_type == types::F32 {
                 let promoted = builder.ins().fpromote(types::F64, val);
-                val = builder
-                    .ins()
-                    .bitcast(types::I64, MemFlags::new(), promoted);
+                val = builder.ins().bitcast(types::I64, MemFlags::new(), promoted);
             }
             let three = builder.ins().iconst(types::I64, 3);
             let boxed = builder.ins().ishl(val, three);

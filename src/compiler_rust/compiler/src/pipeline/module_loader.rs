@@ -342,7 +342,9 @@ fn should_flatten_nested_import(use_stmt: &UseStmt, source: &str) -> bool {
 
     match &use_stmt.target {
         ImportTarget::Group(_) => true,
-        ImportTarget::Glob => source_snippet_for_span(source, use_stmt.span).is_some_and(|snippet| snippet.contains('*')),
+        ImportTarget::Glob => {
+            source_snippet_for_span(source, use_stmt.span).is_some_and(|snippet| snippet.contains('*'))
+        }
         ImportTarget::Single(_) | ImportTarget::Aliased { .. } => false,
     }
 }
@@ -365,7 +367,11 @@ fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -
         let enum_pat = format!("enum {}", name);
         let trait_pat = format!("trait {}", name);
         let let_pat = format!("let {}", name);
+        let val_pat = format!("val {}", name);
+        let var_pat = format!("var {}", name);
         let const_pat = format!("const {}", name);
+        let export_pat = format!("export {}", name);
+        let export_comma_pat = format!(", {}", name);
         source.contains(&fn_pat)
             || source.contains(&extern_pat)
             || source.contains(&type_pat)
@@ -374,7 +380,11 @@ fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -
             || source.contains(&enum_pat)
             || source.contains(&trait_pat)
             || source.contains(&let_pat)
+            || source.contains(&val_pat)
+            || source.contains(&var_pat)
             || source.contains(&const_pat)
+            || source.contains(&export_pat)
+            || source.contains(&export_comma_pat)
     })
 }
 
@@ -1556,6 +1566,32 @@ mod tests {
 
         assert!(has_run);
         assert!(has_helper);
+    }
+
+    #[test]
+    fn symbol_heuristic_matches_val_var_and_exported_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let val_file = temp.path().join("val_target.spl");
+        let var_file = temp.path().join("var_target.spl");
+        let export_file = temp.path().join("export_target.spl");
+
+        fs::write(&val_file, "val TARGET_DEVICE: i32 = 1\n").unwrap();
+        fs::write(&var_file, "var g_state: i32 = 0\n").unwrap();
+        fs::write(
+            &export_file,
+            "fn helper():\n    pass\n\nexport helper, TARGET_DEVICE, TARGET_HOST_FILE\n",
+        )
+        .unwrap();
+
+        assert!(file_might_define_requested_symbol(
+            &val_file,
+            &["TARGET_DEVICE".to_string()]
+        ));
+        assert!(file_might_define_requested_symbol(&var_file, &["g_state".to_string()]));
+        assert!(file_might_define_requested_symbol(
+            &export_file,
+            &["TARGET_DEVICE".to_string(), "TARGET_HOST_FILE".to_string()]
+        ));
     }
 
     #[test]

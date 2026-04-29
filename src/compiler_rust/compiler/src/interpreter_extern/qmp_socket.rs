@@ -224,7 +224,10 @@ pub fn rt_unix_socket_listen(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
     #[cfg(not(unix))]
-    { let _ = args; Ok(Value::Int(NEG_EIO)) }
+    {
+        let _ = args;
+        Ok(Value::Int(NEG_EIO))
+    }
 }
 
 /// `rt_unix_socket_accept(fd: i64) -> i64`
@@ -258,7 +261,10 @@ pub fn rt_unix_socket_accept(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
     #[cfg(not(unix))]
-    { let _ = args; Ok(Value::Int(NEG_EIO)) }
+    {
+        let _ = args;
+        Ok(Value::Int(NEG_EIO))
+    }
 }
 
 /// `rt_unix_socket_send(fd: i64, data: [u8]) -> i64`
@@ -290,7 +296,10 @@ pub fn rt_unix_socket_send(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
     #[cfg(not(unix))]
-    { let _ = args; Ok(Value::Int(NEG_EIO)) }
+    {
+        let _ = args;
+        Ok(Value::Int(NEG_EIO))
+    }
 }
 
 /// `rt_unix_socket_recv(fd: i64, max_len: i64) -> [u8]`
@@ -325,7 +334,10 @@ pub fn rt_unix_socket_recv(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
     #[cfg(not(unix))]
-    { let _ = args; Ok(Value::Str(String::new())) }
+    {
+        let _ = args;
+        Ok(Value::Str(String::new()))
+    }
 }
 
 /// `rt_unix_socket_close(fd: i64) -> i32`
@@ -355,5 +367,8 @@ pub fn rt_unix_socket_close(args: &[Value]) -> Result<Value, CompileError> {
         Ok(Value::Int(NEG_EBADF))
     }
     #[cfg(not(unix))]
-    { let _ = args; Ok(Value::Int(NEG_EBADF)) }
+    {
+        let _ = args;
+        Ok(Value::Int(NEG_EBADF))
+    }
 }

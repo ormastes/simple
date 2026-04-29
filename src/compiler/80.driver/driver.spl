@@ -873,9 +873,21 @@ class CompilerDriver:
                 if smf_result.is_success():
                     extern fn rt_hash_text(s: text) -> i64
                     extern fn rt_file_read_text(path: text) -> text
+                    val smf_opt_level = compileoptions_effective_mir_opt_level(self.ctx.options)
                     val src = rt_file_read_text(source_path) ?? ""
                     val src_hash = rt_hash_text(src)
-                    update_smf_manifest_entry(source_path, smf_cache_path, src_hash, "cranelift")
+                    update_smf_manifest_entry(
+                        source_path,
+                        smf_cache_path,
+                        src_hash,
+                        self.ctx.options.backend,
+                        smf_opt_level,
+                        self.ctx.options.release,
+                        self.ctx.options.debug_info,
+                        self.ctx.options.gc_off,
+                        self.ctx.options.profile,
+                        self.ctx.options.allowed_families
+                    )
                 return CompileResult.Success(output)
             case _:
                 # Native (default)
@@ -1050,23 +1062,14 @@ class CompilerDriver:
 
     fn get_optimization_config() -> OptimizationConfig:
         """Get optimization config from compiler options."""
-        # Check for explicit optimization level
-        if self.ctx.options.opt_level.?:
-            val level = self.ctx.options.opt_level ?? 0
-            if level == 0:
-                return optimizationconfig_debug()
-            elif level == 1:
-                return optimizationconfig_size()
-            elif level == 2:
-                return optimizationconfig_speed()
-            elif level >= 3:
-                return optimizationconfig_aggressive()
-
-        # Check for release mode or optimize flag
-        if self.ctx.options.release or self.ctx.options.optimize:
-            optimizationconfig_speed()
-        else:
-            optimizationconfig_debug()
+        val level = compileoptions_effective_mir_opt_level(self.ctx.options)
+        if level <= 0:
+            return optimizationconfig_debug()
+        elif level == 1:
+            return optimizationconfig_size()
+        elif level == 2:
+            return optimizationconfig_speed()
+        optimizationconfig_aggressive()
 
 # Top-level wrapper providing a stable symbol for cross-module calls.
 # Method calls across modules can import the wrong symbol name; this gives

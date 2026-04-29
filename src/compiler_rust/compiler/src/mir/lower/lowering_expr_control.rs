@@ -17,10 +17,7 @@ const SWITCH_MAX_SPAN: i64 = 1024;
 ///
 /// Returns `None` if any node in the chain doesn't match the pattern, so the
 /// caller falls back to the existing `lower_expr` path.
-fn try_collect_int_match<'a>(
-    body: &'a HirExpr,
-    local_idx: usize,
-) -> Option<(Vec<(i64, &'a HirExpr)>, &'a HirExpr)> {
+fn try_collect_int_match<'a>(body: &'a HirExpr, local_idx: usize) -> Option<(Vec<(i64, &'a HirExpr)>, &'a HirExpr)> {
     let mut cases: Vec<(i64, &'a HirExpr)> = Vec::new();
     let mut node = body;
     loop {
@@ -31,14 +28,15 @@ fn try_collect_int_match<'a>(
         } = &node.kind
         else {
             // End of chain — current node is the default arm.
-            return if cases.is_empty() {
-                None
-            } else {
-                Some((cases, node))
-            };
+            return if cases.is_empty() { None } else { Some((cases, node)) };
         };
         let else_b = else_branch.as_ref()?;
-        let HirExprKind::Binary { op: BinOp::Eq, left, right } = &condition.kind else {
+        let HirExprKind::Binary {
+            op: BinOp::Eq,
+            left,
+            right,
+        } = &condition.kind
+        else {
             return None;
         };
         // Accept Local(idx) == Integer(k) in either operand order.
@@ -237,10 +235,7 @@ impl<'a> MirLowerer<'a> {
         let default_id = self.with_func(|func, _| func.new_block())?;
         let case_blocks: Vec<_> = cases
             .iter()
-            .map(|(k, _)| {
-                self.with_func(|func, _| func.new_block())
-                    .map(|b| (*k, b))
-            })
+            .map(|(k, _)| self.with_func(|func, _| func.new_block()).map(|b| (*k, b)))
             .collect::<MirLowerResult<Vec<_>>>()?;
         self.with_func(|func, current_block| {
             let block = func.block_mut(current_block).unwrap();

@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use simple_common::target::{LinkerFlavor, Target, TargetArch, TargetOS};
+use simple_common::target::{LinkerFlavor, NativeCodegenBackend, Target, TargetArch, TargetCpu, TargetOS};
 
+use crate::default_native_codegen_backend;
 use crate::linker::native::NativeLinker;
+use crate::optimizations::NativeOptimizationLevel;
 
 pub(super) fn asm_ret_instruction(target: &Target) -> &'static str {
     simple_common::platform::asm_helpers::asm_ret_instruction(target)
@@ -65,6 +67,9 @@ pub(super) fn detect_nm_command(target: &Target) -> (String, Vec<String>) {
 pub struct NativeBinaryOptions {
     pub output: PathBuf,
     pub target: Target,
+    pub opt_level: NativeOptimizationLevel,
+    pub backend: Option<NativeCodegenBackend>,
+    pub cpu: TargetCpu,
     pub layout_optimize: bool,
     pub layout_profile: Option<PathBuf>,
     pub strip: bool,
@@ -104,6 +109,9 @@ impl Default for NativeBinaryOptions {
         Self {
             output: PathBuf::from("a.out"),
             target,
+            opt_level: NativeOptimizationLevel::Standard,
+            backend: None,
+            cpu: TargetCpu::builtin_default_for_arch(target.arch),
             layout_optimize: false,
             layout_profile: None,
             strip: false,
@@ -386,8 +394,31 @@ impl NativeBinaryOptions {
         Self::default()
     }
 
+    pub fn for_native_executable() -> Self {
+        let opt_level = NativeOptimizationLevel::default_for_native_executable();
+        Self::default()
+            .opt_level(opt_level)
+            .backend(default_native_codegen_backend())
+            .layout_optimize(opt_level.enables_layout_optimize())
+    }
+
     pub fn output(mut self, path: impl Into<PathBuf>) -> Self {
         self.output = path.into();
+        self
+    }
+
+    pub fn opt_level(mut self, level: NativeOptimizationLevel) -> Self {
+        self.opt_level = level;
+        self
+    }
+
+    pub fn backend(mut self, backend: NativeCodegenBackend) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
+    pub fn cpu(mut self, cpu: TargetCpu) -> Self {
+        self.cpu = cpu;
         self
     }
 

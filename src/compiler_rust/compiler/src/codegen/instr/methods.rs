@@ -6,8 +6,8 @@ use cranelift_module::{Linkage, Module};
 
 use super::super::shared::platform_call_conv;
 use super::helpers::{
-    adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3,
-    declare_named_bytes, get_vreg_or_default,
+    adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, declare_named_bytes,
+    get_vreg_or_default,
 };
 use super::{InstrContext, InstrResult};
 use crate::hir::TypeId;
@@ -32,14 +32,7 @@ fn wrap_value<M: Module>(
             builder.inst_results(call)[0]
         }
         Some(
-            TypeId::I8
-            | TypeId::I16
-            | TypeId::I32
-            | TypeId::I64
-            | TypeId::U8
-            | TypeId::U16
-            | TypeId::U32
-            | TypeId::U64,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64,
         ) => {
             let mut sig = Signature::new(platform_call_conv());
             sig.params.push(AbiParam::new(types::I64));

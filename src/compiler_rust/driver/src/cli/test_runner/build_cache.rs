@@ -139,8 +139,8 @@ impl BuildCache {
     }
 
     fn compile_test_to_native_via_entry_closure(&self, source: &Path, output: &Path) -> Result<(), String> {
-        let project =
-            ProjectContext::detect(source).map_err(|e| format!("Failed to detect project for {}: {}", source.display(), e))?;
+        let project = ProjectContext::detect(source)
+            .map_err(|e| format!("Failed to detect project for {}: {}", source.display(), e))?;
 
         let mut config = NativeBuildConfig {
             entry_closure: true,

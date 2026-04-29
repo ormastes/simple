@@ -185,8 +185,8 @@ fn init_cuda() -> CudaResult<()> {
         #[cfg(feature = "cuda")]
         {
             unsafe {
-            let err = cuInit(0);
-            if err != 0 {
+                let err = cuInit(0);
+                if err != 0 {
                     Err(std::mem::transmute(err))
                 } else {
                     Ok(())

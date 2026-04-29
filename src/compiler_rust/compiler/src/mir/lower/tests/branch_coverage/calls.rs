@@ -112,10 +112,7 @@ fn for_loop_struct_field_access_lowers_to_field_get() {
         "for-loop r.line must not emit a Call to a function named 'line'"
     );
     assert!(
-        !has_inst(&mir, |i| matches!(
-            i,
-            MirInst::MethodCallVirtual { .. }
-        )),
+        !has_inst(&mir, |i| matches!(i, MirInst::MethodCallVirtual { .. })),
         "for-loop r.line must not emit a virtual method dispatch — receiver type is statically known"
     );
 }

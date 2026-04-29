@@ -354,7 +354,10 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                         }
                     }
                 } else if other.starts_with("--log") {
-                    eprintln!("error: unknown log option '{}'; expected --log or --log=<on|off>", other);
+                    eprintln!(
+                        "error: unknown log option '{}'; expected --log or --log=<on|off>",
+                        other
+                    );
                     return 1;
                 } else if let Some(val) = other.strip_prefix("--runtime-bundle=") {
                     runtime_bundle = val.to_string();

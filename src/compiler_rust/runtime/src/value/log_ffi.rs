@@ -42,7 +42,10 @@ pub extern "C" fn scope_levels_dot_has(scope: RuntimeValue) -> bool {
         let slice = std::slice::from_raw_parts(scope_ptr, scope_len as usize);
         String::from_utf8_lossy(slice).to_string()
     };
-    scope_levels().lock().map(|levels| levels.contains_key(&scope)).unwrap_or(false)
+    scope_levels()
+        .lock()
+        .map(|levels| levels.contains_key(&scope))
+        .unwrap_or(false)
 }
 
 // ============================================================================

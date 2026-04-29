@@ -117,9 +117,7 @@ pub fn is_pure_lvalue(expr: &Expr) -> bool {
         Expr::Identifier(_) | Expr::Path(_) => true,
         Expr::FieldAccess { receiver, .. } => is_pure_lvalue(receiver),
         Expr::TupleIndex { receiver, .. } => is_pure_lvalue(receiver),
-        Expr::Index { receiver, index } => {
-            is_pure_lvalue(receiver) && is_pure_index(index)
-        }
+        Expr::Index { receiver, index } => is_pure_lvalue(receiver) && is_pure_index(index),
         _ => false,
     }
 }
@@ -142,12 +140,9 @@ fn is_pure_index(expr: &Expr) -> bool {
         | Expr::Path(_) => true,
         Expr::FieldAccess { receiver, .. } => is_pure_lvalue(receiver),
         Expr::TupleIndex { receiver, .. } => is_pure_lvalue(receiver),
-        Expr::Index { receiver, index } => {
-            is_pure_lvalue(receiver) && is_pure_index(index)
-        }
+        Expr::Index { receiver, index } => is_pure_lvalue(receiver) && is_pure_index(index),
         Expr::Range { start, end, .. } => {
-            start.as_ref().is_none_or(|s| is_pure_index(s))
-                && end.as_ref().is_none_or(|e| is_pure_index(e))
+            start.as_ref().is_none_or(|s| is_pure_index(s)) && end.as_ref().is_none_or(|e| is_pure_index(e))
         }
         _ => false,
     }
@@ -204,13 +199,7 @@ pub fn augmented_assign_binop(op: AssignOp) -> Option<BinOp> {
 /// would observe the side effect multiple times. That case is explicitly
 /// deferred — see the file-level comment in `bitfield.rs` and the
 /// task-tracking doc.
-pub fn build_bits_augmented_value(
-    target_lvalue: Expr,
-    lo: Expr,
-    hi: Expr,
-    binop: BinOp,
-    rhs: Expr,
-) -> Expr {
+pub fn build_bits_augmented_value(target_lvalue: Expr, lo: Expr, hi: Expr, binop: BinOp, rhs: Expr) -> Expr {
     // Compute the post-op field value: `((target >> lo) & mask) <op> rhs`.
     let current_field = build_bits_read(target_lvalue.clone(), lo.clone(), hi.clone());
     let new_field = bin(binop, current_field, rhs);

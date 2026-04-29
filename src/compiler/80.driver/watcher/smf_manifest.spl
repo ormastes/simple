@@ -27,6 +27,12 @@ struct SmfManifestEntry:
     source_hash: i64
     compiled_at: i64
     backend: text       # "cranelift" or "llvm"
+    opt_level: i64
+    release: bool
+    debug_info: bool
+    gc_off: bool
+    profile: text
+    allowed_families: [text]
 
 struct SmfManifest:
     version: i64
@@ -39,18 +45,35 @@ struct SmfManifest:
 
 fn smf_manifest_new() -> SmfManifest:
     SmfManifest(
-        version: 1,
+        version: 3,
         entries: {},
         updated_at: rt_time_now_unix_micros()
     )
 
-fn smf_manifest_entry_new(source_path: text, smf_path: text, source_hash: i64, backend: text) -> SmfManifestEntry:
+fn smf_manifest_entry_new(
+    source_path: text,
+    smf_path: text,
+    source_hash: i64,
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text]
+) -> SmfManifestEntry:
     SmfManifestEntry(
         source_path: source_path,
         smf_path: smf_path,
         source_hash: source_hash,
         compiled_at: rt_time_now_unix_micros(),
-        backend: backend
+        backend: backend,
+        opt_level: opt_level,
+        release: release,
+        debug_info: debug_info,
+        gc_off: gc_off,
+        profile: profile,
+        allowed_families: allowed_families
     )
 
 # ============================================================================
@@ -101,10 +124,11 @@ fn smf_manifest_to_sdn(manifest: SmfManifest) -> text:
     ]
 
     if manifest.entries.len() > 0:
-        lines = lines + ["entries |source_path, smf_path, source_hash, compiled_at, backend|"]
+        lines = lines + ["entries |source_path, smf_path, source_hash, compiled_at, backend, opt_level, release, debug_info, gc_off, profile, allowed_families|"]
         for key in manifest.entries.keys():
             val e = manifest.entries[key]
-            lines = lines + ["    \"{e.source_path}\", \"{e.smf_path}\", {e.source_hash}, {e.compiled_at}, \"{e.backend}\""]
+            val allowed_families = e.allowed_families.join(";")
+            lines = lines + ["    \"{e.source_path}\", \"{e.smf_path}\", {e.source_hash}, {e.compiled_at}, \"{e.backend}\", {e.opt_level}, {bool_to_sdn_int(e.release)}, {bool_to_sdn_int(e.debug_info)}, {bool_to_sdn_int(e.gc_off)}, \"{e.profile}\", \"{allowed_families}\""]
 
     lines.join("\n")
 
@@ -138,7 +162,7 @@ fn smf_manifest_from_sdn(content: text) -> SmfManifest:
     SmfManifest(version: version, entries: entries, updated_at: updated_at)
 
 fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
-    """Parse a single SDN table row: "source", "smf", hash, time, "backend" """
+    """Parse a single SDN table row."""
     val parts = line.split(", ")
     if parts.len() < 5:
         return nil
@@ -148,13 +172,26 @@ fn parse_manifest_entry_line(line: text) -> SmfManifestEntry?:
     val source_hash = parts[2].trim().to_i64() ?? 0
     val compiled_at = parts[3].trim().to_i64() ?? 0
     val backend = parts[4].trim().replace("\"", "")
+    val opt_level = if parts.len() > 5: parts[5].trim().to_i64() ?? 0 else: 0
+    val release = if parts.len() > 6: parse_manifest_bool(parts[6].trim()) else: false
+    val debug_info = if parts.len() > 7: parse_manifest_bool(parts[7].trim()) else: true
+    val gc_off = if parts.len() > 8: parse_manifest_bool(parts[8].trim()) else: false
+    val profile = if parts.len() > 9: parts[9].trim().replace("\"", "") else: "dev"
+    val allowed_families_text = if parts.len() > 10: parts[10].trim().replace("\"", "") else: ""
+    val allowed_families = if allowed_families_text == "": [] else: allowed_families_text.split(";")
 
     Some(SmfManifestEntry(
         source_path: source_path,
         smf_path: smf_path,
         source_hash: source_hash,
         compiled_at: compiled_at,
-        backend: backend
+        backend: backend,
+        opt_level: opt_level,
+        release: release,
+        debug_info: debug_info,
+        gc_off: gc_off,
+        profile: profile,
+        allowed_families: allowed_families
     ))
 
 # ============================================================================
@@ -194,10 +231,32 @@ fn save_smf_manifest_default(manifest: SmfManifest) -> bool:
 # Convenience: update + save in one call
 # ============================================================================
 
-fn update_smf_manifest_entry(source_path: text, smf_path: text, source_hash: i64, backend: text) -> bool:
+fn update_smf_manifest_entry(
+    source_path: text,
+    smf_path: text,
+    source_hash: i64,
+    backend: text,
+    opt_level: i64,
+    release: bool,
+    debug_info: bool,
+    gc_off: bool,
+    profile: text,
+    allowed_families: [text]
+) -> bool:
     """Load manifest, update entry, save. Convenience for single-entry updates."""
     var manifest = load_smf_manifest_default()
-    val entry = smf_manifest_entry_new(source_path, smf_path, source_hash, backend)
+    val entry = smf_manifest_entry_new(
+        source_path,
+        smf_path,
+        source_hash,
+        backend,
+        opt_level,
+        release,
+        debug_info,
+        gc_off,
+        profile,
+        allowed_families
+    )
     manifest = smf_manifest_update(manifest, entry)
     save_smf_manifest_default(manifest)
 
@@ -211,3 +270,9 @@ fn path_dir(path: text) -> text:
     if last_slash >= 0:
         return path[0:last_slash]
     "."
+
+fn bool_to_sdn_int(value: bool) -> i64:
+    if value: 1 else: 0
+
+fn parse_manifest_bool(value: text) -> bool:
+    value == "1" or value == "true"

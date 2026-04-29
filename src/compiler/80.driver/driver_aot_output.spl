@@ -15,7 +15,7 @@ use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptio
 use compiler.driver.smf_writer.{generate_smf_with_templates, generate_smf_with_options, Target, build_smf_with_elf_embedded, build_smf_with_relocations, SmfBuildOptions, SmfDependencyEntry}
 use compiler.driver.smf_binary_helpers.{u32_to_bytes}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
-use driver_types.{CompileResult, CompileOptions, OutputFormat}
+use driver_types.{CompileResult, CompileOptions, OutputFormat, compileoptions_effective_mir_opt_level}
 use compiler.driver.driver.{CompilerDriver}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind}
@@ -41,11 +41,22 @@ fn driver_log_info(log: Logger, message: text):
     if log.level >= 4:
         print "[INFO] {message}"
 
+fn driver_effective_native_opt_level(ctx: any, is_release: bool) -> i64:
+    if ctx.options.opt_level.?:
+        return ctx.options.opt_level ?? 0
+    if is_release:
+        return 3
+    0
+
+fn driver_effective_mir_opt_level(ctx: any) -> i64:
+    compileoptions_effective_mir_opt_level(ctx.options)
+
 impl CompilerDriver:
     me compile_to_native(output: text) -> CompileResult:
         val log = self.ctx.logger
         val backend_name = self.ctx.options.backend
         val is_release = self.ctx.options.release
+        val driver_opt_level = driver_effective_native_opt_level(self.ctx, is_release)
         print "[NATIVE] backend_name={backend_name}, is_release={is_release}"
         val effective_backend = get_effective_backend_name(backend_name, is_release)
         print "[NATIVE] effective_backend={effective_backend}"
@@ -101,7 +112,7 @@ impl CompilerDriver:
                 builder.add_unit(name, [])
 
             val build_result = builder.build(\name:
-                _compile_one_module(self.ctx, backend_name, is_release, output, name)
+                _compile_one_module(self.ctx, backend_name, is_release, driver_opt_level, output, name)
             )
             cache_miss_count = build_result.stats.completed + build_result.stats.failed
 
@@ -140,7 +151,8 @@ impl CompilerDriver:
                 debug: self.ctx.options.debug_info,
                 verbose: self.ctx.options.verbose,
                 pie: true,
-                bare_metal: false
+                bare_metal: false,
+                opt_level: driver_opt_level
             )
             print "[NATIVE] calling link_llvm_native..."
             match link_llvm_native(object_files, output, llvm_opts):
@@ -177,13 +189,14 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         """Compile all MIR modules to a single C++20 source file."""
         val log = self.ctx.logger
         val is_release = self.ctx.options.release
+        val driver_opt_level = driver_effective_mir_opt_level(self.ctx)
         driver_log_debug(log, "AOT C: generating C++20 to {output}")
 
         var all_c_source = ""
         for name in self.ctx.mir_modules.keys():
             driver_log_trace(log, "translating module: {name}")
             val mir_module = self.ctx.mir_modules[name]
-            val compiled = compile_module_with_backend("c", mir_module, is_release)
+            val compiled = compile_module_with_backend("c", mir_module, is_release, driver_opt_level)
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("C codegen error in {name}: {err}")
@@ -200,6 +213,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         """Compile MIR modules to per-module C++20 files with CMake infrastructure."""
         val log = self.ctx.logger
         val is_release = self.ctx.options.release
+        val driver_opt_level = driver_effective_mir_opt_level(self.ctx)
         driver_log_debug(log, "AOT C (multi-file): generating C++20 to {output_dir}/")
 
         # Create root output directory
@@ -211,7 +225,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         for name in self.ctx.mir_modules.keys():
             driver_log_trace(log, "translating module: {name}")
             val mir_module = self.ctx.mir_modules[name]
-            val compiled = compile_module_with_backend("c", mir_module, is_release)
+            val compiled = compile_module_with_backend("c", mir_module, is_release, driver_opt_level)
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("C codegen error in {name}: {err}")
@@ -253,6 +267,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         """Compile all MIR modules to PTX assembly (CUDA backend)."""
         val log = self.ctx.logger
         val is_release = self.ctx.options.release
+        val driver_opt_level = driver_effective_mir_opt_level(self.ctx)
         driver_log_debug(log, "AOT CUDA: generating PTX to {output}")
 
         var all_ptx = ""
@@ -260,7 +275,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         for name in keys:
             driver_log_trace(log, "translating module to PTX: {name}")
             val mir_module = self.ctx.mir_modules[name]
-            val compiled = compile_module_with_backend("cuda", mir_module, is_release)
+            val compiled = compile_module_with_backend("cuda", mir_module, is_release, driver_opt_level)
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("CUDA compile error in {name}: {err}")
@@ -277,6 +292,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         """Compile all MIR modules to VHDL source (VHDL backend)."""
         val log = self.ctx.logger
         val is_release = self.ctx.options.release
+        val driver_opt_level = driver_effective_mir_opt_level(self.ctx)
         driver_log_debug(log, "AOT VHDL: generating VHDL to {output}")
 
         var all_vhdl = ""
@@ -284,7 +300,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         for name in keys:
             driver_log_trace(log, "translating module to VHDL: {name}")
             val mir_module = self.ctx.mir_modules[name]
-            val compiled = compile_module_with_backend("vhdl", mir_module, is_release)
+            val compiled = compile_module_with_backend("vhdl", mir_module, is_release, driver_opt_level)
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("VHDL compile error in {name}: {err}")
@@ -348,13 +364,14 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
         val log = self.ctx.logger
         val backend_name = self.ctx.options.backend
         val is_release = self.ctx.options.release
+        val driver_opt_level = driver_effective_mir_opt_level(self.ctx)
 
         var all_object_bytes: [u8] = []
 
         for name in self.ctx.mir_modules.keys():
             driver_log_trace(log, "compiling module for SMF: {name}")
             val mir_module = self.ctx.mir_modules[name]
-            val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+            val compiled = compile_module_with_backend(backend_name, mir_module, is_release, driver_opt_level)
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("AOT compile error in {name}: {err}")
@@ -402,11 +419,11 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
 # Single-Module Compilation Helper (for ParallelBuilder)
 # ============================================================================
 
-fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, output_base: text, name: text) -> Result<text, text>:
+fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text) -> Result<text, text>:
     """Compile a single module by name, write object file, return path."""
     print "[NATIVE] compiling module: {name}"
     val mir_module = ctx.mir_modules[name]
-    val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+    val compiled = compile_module_with_backend(backend_name, mir_module, is_release, opt_level)
 
     if compiled.is_err():
         val err = compiled.unwrap_err()

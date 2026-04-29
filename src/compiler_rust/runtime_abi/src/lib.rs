@@ -2,11 +2,7 @@
 mod runtime_symbols;
 
 pub use runtime_symbols::{
-    AbiVersion,
-    RUNTIME_SYMBOL_NAMES,
-    RuntimeSymbolProvider,
-    RuntimeSymbolTier,
-    runtime_symbols_for_baremetal,
+    AbiVersion, RUNTIME_SYMBOL_NAMES, RuntimeSymbolProvider, RuntimeSymbolTier, runtime_symbols_for_baremetal,
     symbol_tier_of,
 };
 
@@ -43,10 +39,7 @@ pub fn register_static_runtime_symbols(
 }
 
 pub fn registered_static_runtime_symbols() -> &'static [RuntimeSymbolEntry] {
-    REGISTERED_STATIC_RUNTIME_SYMBOLS
-        .get()
-        .copied()
-        .unwrap_or(&[])
+    REGISTERED_STATIC_RUNTIME_SYMBOLS.get().copied().unwrap_or(&[])
 }
 
 pub fn lookup_registered_static_runtime_symbol(name: &str) -> Option<*const u8> {

@@ -55,8 +55,7 @@ fn stmt_expr_kind(stmt: &HirStmt) -> Option<&HirExprKind> {
 /// HirFunction has `body: Vec<HirStmt>`; there is no `return_expr` field —
 /// a trailing return is represented as `HirStmt::Return(Some(_))` inside body.
 fn call_arg_count(module: &HirModule, fn_name: &str) -> usize {
-    let func = find_hir_function(module, fn_name)
-        .unwrap_or_else(|| panic!("function '{}' not found in HIR", fn_name));
+    let func = find_hir_function(module, fn_name).unwrap_or_else(|| panic!("function '{}' not found in HIR", fn_name));
     for stmt in &func.body {
         if let Some(kind) = stmt_expr_kind(stmt) {
             match kind {
@@ -206,11 +205,11 @@ main = method_caller()
     let module = lower(src);
     // The len() call is arity-0; push(4) is arity-1.  We check the HIR
     // contains at least one method call node with arg count 1.
-    let func = find_hir_function(&module, "method_caller")
-        .expect("method_caller not found");
-    let has_one_arg_method_call = func.body.iter().any(|stmt| {
-        matches!(stmt_expr_kind(stmt), Some(HirExprKind::MethodCall { args, .. }) if args.len() == 1)
-    });
+    let func = find_hir_function(&module, "method_caller").expect("method_caller not found");
+    let has_one_arg_method_call = func
+        .body
+        .iter()
+        .any(|stmt| matches!(stmt_expr_kind(stmt), Some(HirExprKind::MethodCall { args, .. }) if args.len() == 1));
     assert!(
         has_one_arg_method_call,
         "push(4) method call must produce 1-arg MethodCall HIR node"
@@ -228,8 +227,7 @@ fn zero_arg_method() -> i64:
 main = zero_arg_method()
 "#;
     let module = lower(src);
-    let func = find_hir_function(&module, "zero_arg_method")
-        .expect("zero_arg_method not found");
+    let func = find_hir_function(&module, "zero_arg_method").expect("zero_arg_method not found");
     // Walk body; len() may lower as MethodCall with 0 args or BuiltinCall with 1 arg.
     // HirFunction has no return_expr field; trailing return is HirStmt::Return in body.
     let has_zero_or_one_arg_call = func.body.iter().any(|stmt| {
@@ -310,10 +308,7 @@ main = caller_named_one()
 "#;
     let module = lower(src);
     let arg_count = call_arg_count(&module, "caller_named_one");
-    assert_eq!(
-        arg_count, 1,
-        "single named-arg call must produce 1 HIR argument"
-    );
+    assert_eq!(arg_count, 1, "single named-arg call must produce 1 HIR argument");
 }
 
 // ============================================================================
@@ -357,7 +352,8 @@ main = bad_inner()
                     ) = stmt_expr_kind(stmt)
                     {
                         assert_eq!(
-                            args.len(), 2,
+                            args.len(),
+                            2,
                             "lower_call_args must not swallow args: got {} instead of 2",
                             args.len()
                         );
@@ -386,8 +382,7 @@ main = 0
     // If lower_builtin_call now delegates to lower_call_args, and lower_call_args
     // is correct, this must still produce exactly 1 argument in the BuiltinCall node.
     let module = lower(src_builtin);
-    let func = find_hir_function(&module, "use_builtin")
-        .expect("use_builtin not found");
+    let func = find_hir_function(&module, "use_builtin").expect("use_builtin not found");
     // HirFunction has no return_expr field; trailing return is HirStmt::Return in body.
     let builtin_call_arg_counts: Vec<usize> = func
         .body
@@ -484,12 +479,7 @@ fn d1_all_seven_call_sites_arg_count_parity() {
                 // mod.rs:386 (zero-arg len) may lower as a builtin with receiver
                 // counted differently; we relax: count must be 0 or 1.
                 if case.label.contains("mod.rs:386") {
-                    assert!(
-                        count <= 1,
-                        "[{}] expected ≤1 args, got {}",
-                        case.label,
-                        count
-                    );
+                    assert!(count <= 1, "[{}] expected ≤1 args, got {}", case.label, count);
                 } else {
                     assert_eq!(
                         count, case.expected_args,

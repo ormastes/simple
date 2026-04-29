@@ -263,6 +263,17 @@ impl CompilerPipeline {
         ast_module: &simple_parser::ast::Module,
         source_file: &Path,
     ) -> Result<mir::MirModule, CompileError> {
+        self.type_check_and_lower_with_context_and_project_hint(ast_module, source_file, None)
+    }
+
+    /// Type check and lower AST to MIR with module resolution support and an optional
+    /// external project hint used for native single-file probes outside the repo tree.
+    pub(super) fn type_check_and_lower_with_context_and_project_hint(
+        &mut self,
+        ast_module: &simple_parser::ast::Module,
+        source_file: &Path,
+        project_hint: Option<&Path>,
+    ) -> Result<mir::MirModule, CompileError> {
         // Clear previous verification violations
         self.verification_violations.clear();
 
@@ -272,7 +283,8 @@ impl CompilerPipeline {
         }
 
         // Lower AST to HIR with module resolution support (using lenient mode for bootstrap)
-        let hir_module = hir::lower_with_context_lenient(ast_module, source_file).map_err(convert_lower_error)?;
+        let hir_module = hir::lower_with_context_lenient_and_project_hint(ast_module, source_file, project_hint)
+            .map_err(convert_lower_error)?;
 
         // Process HIR to MIR using common logic
         self.process_hir_to_mir(hir_module)
@@ -288,6 +300,18 @@ impl CompilerPipeline {
         ast_module: &simple_parser::ast::Module,
         source_file: &Path,
     ) -> Result<mir::MirModule, CompileError> {
+        self.type_check_and_lower_with_context_strict_and_project_hint(ast_module, source_file, None)
+    }
+
+    /// Strict lowering variant with an optional external project hint used for
+    /// temp native probes compiled outside the repo tree.
+    #[allow(dead_code)] // reason: reachable via FFI or future entry point; not yet wired
+    pub(super) fn type_check_and_lower_with_context_strict_and_project_hint(
+        &mut self,
+        ast_module: &simple_parser::ast::Module,
+        source_file: &Path,
+        project_hint: Option<&Path>,
+    ) -> Result<mir::MirModule, CompileError> {
         // Clear previous verification violations
         self.verification_violations.clear();
 
@@ -297,7 +321,8 @@ impl CompilerPipeline {
         }
 
         // Lower AST to HIR with module resolution support (strict mode)
-        let hir_module = hir::lower_with_context(ast_module, source_file).map_err(convert_lower_error)?;
+        let hir_module = hir::lower_with_context_and_project_hint(ast_module, source_file, project_hint)
+            .map_err(convert_lower_error)?;
 
         // Process HIR to MIR using common logic
         self.process_hir_to_mir(hir_module)
