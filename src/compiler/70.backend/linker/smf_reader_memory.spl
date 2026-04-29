@@ -323,7 +323,9 @@ extern fn rt_smf_parse_relocs(data: [u8], sections_off: i64, section_count: i64,
 
 """Parse SMF header from byte array.
 
-Byte layout matches the canonical packed SMF v1.1 header (128 bytes).
+Byte layout matches the Rust #[repr(C)] SmfHeader (128 bytes).
+repr(C) inserts 4 bytes of padding between section_count (u32) and
+section_table_offset (u64) to satisfy u64's 8-byte alignment requirement.
 
   0- 3  magic[4]              'SMF\\0'
   4      version_major
@@ -335,22 +337,24 @@ Byte layout matches the canonical packed SMF v1.1 header (128 bytes).
   13     compression_level
   14-15  reserved_compression[2]
   16-19  section_count (u32 LE)
-  20-27  section_table_offset (u64 LE)
-  28-35  symbol_table_offset (u64 LE)
-  36-39  symbol_count (u32 LE)
-  40-43  exported_count (u32 LE)
-  44-51  entry_point (u64 LE)
-  52-55  stub_size (u32 LE)
-  56-59  smf_data_offset (u32 LE)
-  60-67  module_hash (u64 LE)
-  68-75  source_hash (u64 LE)
-  76     app_type
-  77-78  window_width (u16 LE)
-  79-80  window_height (u16 LE)
-  81     prefetch_hint
-  82     prefetch_file_count
-  83-87  reserved_hints[5]
-  88-127 reserved[40]
+  20-23  [padding — 4 bytes, repr(C) alignment for next u64]
+  24-31  section_table_offset (u64 LE)
+  32-39  symbol_table_offset (u64 LE)
+  40-43  symbol_count (u32 LE)
+  44-47  exported_count (u32 LE)
+  48-55  entry_point (u64 LE)
+  56-59  stub_size (u32 LE)
+  60-63  smf_data_offset (u32 LE)
+  64-71  module_hash (u64 LE)
+  72-79  source_hash (u64 LE)
+  80     app_type
+  81     [padding — 1 byte, align window_width u16]
+  82-83  window_width (u16 LE)
+  84-85  window_height (u16 LE)
+  86     prefetch_hint
+  87     prefetch_file_count
+  88-92  reserved[5]
+  93-127 [padding to 128 bytes]
   Total: 128 bytes
 """
 fn parse_header_from_bytes(data: [u8]) -> Result<SmfHeader, text>:
@@ -400,24 +404,25 @@ fn parse_header_from_bytes(data: [u8]) -> Result<SmfHeader, text>:
     # Parse section count (bytes 16-19, little endian u32)
     val section_count = bytes_to_u32(header_bytes, 16)
 
-    # Parse section table offset (bytes 20-27, little endian u64)
-    val section_table_offset = bytes_to_u64(header_bytes, 20)
+    # Parse section table offset (bytes 24-31, little endian u64)
+    # Note: bytes 20-23 are repr(C) padding to align u64 to 8-byte boundary
+    val section_table_offset = bytes_to_u64(header_bytes, 24)
 
-    # Parse symbol table offset (bytes 28-35, little endian u64)
-    val symbol_table_offset = bytes_to_u64(header_bytes, 28)
+    # Parse symbol table offset (bytes 32-39, little endian u64)
+    val symbol_table_offset = bytes_to_u64(header_bytes, 32)
 
-    # Parse symbol count (bytes 36-39, little endian u32)
-    val symbol_count = bytes_to_u32(header_bytes, 36)
+    # Parse symbol count (bytes 40-43, little endian u32)
+    val symbol_count = bytes_to_u32(header_bytes, 40)
 
-    # Parse exported count (bytes 40-43, little endian u32)
-    val exported_count = bytes_to_u32(header_bytes, 40)
+    # Parse exported count (bytes 44-47, little endian u32)
+    val exported_count = bytes_to_u32(header_bytes, 44)
 
-    # Parse entry point (bytes 44-51, little endian u64)
-    val entry_point = bytes_to_u64(header_bytes, 44)
+    # Parse entry point (bytes 48-55, little endian u64)
+    val entry_point = bytes_to_u64(header_bytes, 48)
 
-    # Parse stub metadata (bytes 52-59)
-    val stub_size = bytes_to_u32(header_bytes, 52) as i64
-    val smf_data_offset = bytes_to_u32(header_bytes, 56) as i64
+    # Parse stub metadata (bytes 56-63)
+    val stub_size = bytes_to_u32(header_bytes, 56) as i64
+    val smf_data_offset = bytes_to_u32(header_bytes, 60) as i64
     val section_table_file_offset = smf_payload_offset_value(
         section_table_offset as i64,
         smf_data_offset

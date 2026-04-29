@@ -39,7 +39,7 @@ class LibSpec:
 fn trim_parens(text_value: text) -> text:
     val start = text_value.find("(")
     val end = text_value.rfind(")")
-    if start == nil or end == nil or end <= start:
+    if start < 0 or end < 0 or end <= start:
         ""
     else:
         text_value.substring(start + 1, end)
@@ -51,7 +51,7 @@ fn split_args(text_value: text) -> [text]:
     for ch in text_value:
         if ch == "," and depth == 0:
             if current.trim() != "":
-                parts.push(current.trim())
+                parts = parts.push(current.trim())
             current = ""
         else:
             if ch == "[":
@@ -60,16 +60,16 @@ fn split_args(text_value: text) -> [text]:
                 depth = depth - 1
             current = current + ch
     if current.trim() != "":
-        parts.push(current.trim())
+        parts = parts.push(current.trim())
     parts
 
 fn parse_quoted(text_value: text) -> text:
     val first = text_value.find("\"")
-    if first == nil:
+    if first < 0:
         return ""
     val rest = text_value.substring(first + 1)
     val second = rest.find("\"")
-    if second == nil:
+    if second < 0:
         return ""
     rest.substring(0, second)
 
@@ -89,24 +89,24 @@ fn parse_lib_annotation(line: text) -> LibSpec:
         elif item.starts_with("features:"):
             val feature_text = item.substring(item.find("[") + 1, item.rfind("]"))
             for feature in split_args(feature_text):
-                lib_features.push(parse_quoted(feature))
+                lib_features = lib_features.push(parse_quoted(feature))
     LibSpec.create(lib_lang, lib_name, lib_version, lib_features, "", [])
 
 fn parse_params(line: text) -> [ParamSpec]:
     val open = line.find("(")
     val close = line.rfind(")")
     var params: [ParamSpec] = []
-    if open == nil or close == nil or close <= open:
+    if open < 0 or close < 0 or close <= open:
         return params
     val inner = line.substring(open + 1, close)
     if inner.trim() == "":
         return params
     for item in split_args(inner):
         val colon = item.find(":")
-        if colon != nil:
+        if colon >= 0:
             val name = item.substring(0, colon).trim()
             val type_name = item.substring(colon + 1).trim()
-            params.push(ParamSpec.create(name, type_name))
+            params = params.push(ParamSpec.create(name, type_name))
     params
 
 fn parse_method_line(line: text) -> MethodSpec:
@@ -122,29 +122,53 @@ fn parse_method_line(line: text) -> MethodSpec:
     elif trimmed.starts_with("fn "):
         rest = trimmed.substring(3)
     val name_end = rest.find("(")
+    if name_end < 0:
+        return MethodSpec.create("", kind, "", [])
     val name = rest.substring(0, name_end).trim()
     val params = parse_params(rest)
     var return_type = ""
     val arrow = rest.find("->")
-    if arrow != nil:
+    if arrow >= 0:
         return_type = rest.substring(arrow + 2).trim()
     MethodSpec.create(name, kind, return_type, params)
 
 fn parse_lib_externs(source: text, file: text) -> [LibSpec]:
     var specs: [LibSpec] = []
-    var current: LibSpec = nil
-    for raw_line in source.split("\n"):
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val raw_line = lines[i]
         val line = raw_line.trim()
-        if line == "":
-            continue
         if line.starts_with("@Lib("):
-            current = parse_lib_annotation(line)
-        elif line.starts_with("extern class ") and current != nil:
-            val class_name = line.substring(13).trim().replace(":", "")
-            current.class_name = class_name
-            specs.push(current)
-        elif current != nil and raw_line.starts_with("    "):
-            current.methods.push(parse_method_line(line))
+            var current = parse_lib_annotation(line)
+            var j = i + 1
+            while j < lines.len() and lines[j].trim() == "":
+                j = j + 1
+            if j < lines.len():
+                val class_line = lines[j].trim()
+                if class_line.starts_with("extern class "):
+                    val class_tail = class_line.substring(13)
+                    val class_trimmed = class_tail.trim()
+                    current.class_name = class_trimmed.replace(":", "")
+                    var methods: [MethodSpec] = []
+                    var k = j + 1
+                    while k < lines.len():
+                        val method_raw = lines[k]
+                        val method_line = method_raw.trim()
+                        if method_line == "":
+                            k = k + 1
+                            continue
+                        if not method_raw.starts_with("    ") and not method_raw.starts_with("\t"):
+                            break
+                        val method = parse_method_line(method_line)
+                        if method.name != "":
+                            methods = methods.push(method)
+                        k = k + 1
+                    current.methods = methods
+                    specs = specs.push(current)
+                    i = k
+                    continue
+        i = i + 1
     specs
 
 fn check_spec(actual: text, expected: text):

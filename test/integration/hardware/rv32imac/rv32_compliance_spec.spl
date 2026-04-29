@@ -16,14 +16,12 @@ Compiles test programs, loads into simulation ROM, and compares signatures.
 # @feature rv32imac
 # tag: only-compiled, vhdl, slow
 
-import std.spec
+use std.spec.*
 
-use hardware.rv32imac.core.rv32_execute.alu_execute
-use hardware.rv32imac.core.rv32_decode.*
-use hardware.rv32imac.ext.rv32_muldiv.muldiv_execute
-use hardware.rv32imac.ext.rv32_atomics.{ReservationSet, amo_execute, AmoOp}
-use hardware.rv32imac.pkg.rv32_types_pkg.*
-use hardware.rv32imac.pkg.rv32_isa_pkg.*
+use hardware.rv64gc.core.rv64_execute.alu_execute
+use hardware.rv64gc.ext.rv64_muldiv.muldiv_execute
+use hardware.rv64gc.ext.rv64_atomics.{ReservationSet64, amo_execute}
+use hardware.riscv_common.pkg.riscv_types_pkg.{AluOp, MulDivOp, AmoOp}
 
 describe "RV32I Compliance":
     """
@@ -63,27 +61,27 @@ describe "RV32M Compliance":
     """
 
     it "MUL: rd = (rs1 * rs2)[31:0]":
-        expect(muldiv_execute(AluOp.Mul, 7, 6)).to_equal(42)
+        expect(muldiv_execute(MulDivOp.Mul, 7, 6)).to_equal(42)
 
     it "MUL: handles overflow":
-        expect(muldiv_execute(AluOp.Mul, 0x80000000, 2)).to_equal(0)
+        expect(muldiv_execute(MulDivOp.Mul, 0x80000000, 2) and 0xFFFFFFFF).to_equal(0)
 
     it "DIV: rd = rs1 / rs2 (signed)":
-        expect(muldiv_execute(AluOp.Div, 20, 3)).to_equal(6)
+        expect(muldiv_execute(MulDivOp.Div, 20, 3)).to_equal(6)
 
     it "DIV: division by zero returns all ones":
         # Use var to prevent const-evaluator from folding 42/0
         var zero = 0
-        expect(muldiv_execute(AluOp.Div, 42, zero)).to_equal(0xFFFFFFFF)
+        expect(muldiv_execute(MulDivOp.Div, 42, zero) and 0xFFFFFFFF).to_equal(0xFFFFFFFF)
 
     it "DIVU: unsigned division":
-        expect(muldiv_execute(AluOp.Divu, 20, 3)).to_equal(6)
+        expect(muldiv_execute(MulDivOp.Divu, 20, 3)).to_equal(6)
 
     it "REM: remainder":
-        expect(muldiv_execute(AluOp.Rem, 20, 3)).to_equal(2)
+        expect(muldiv_execute(MulDivOp.Rem, 20, 3)).to_equal(2)
 
     it "REMU: unsigned remainder":
-        expect(muldiv_execute(AluOp.Remu, 20, 3)).to_equal(2)
+        expect(muldiv_execute(MulDivOp.Remu, 20, 3)).to_equal(2)
 
 describe "RV32A Compliance":
     """
@@ -98,7 +96,7 @@ describe "RV32A Compliance":
         **When:** LR then SC to same address
         **Then:** SC succeeds (returns true)
         """
-        var rs = ReservationSet.create()
+        var rs = ReservationSet64.create()
         rs.reserve(0x80000100)
         val success = rs.check_and_clear(0x80000100)
         expect(success).to_equal(true)
@@ -109,17 +107,17 @@ describe "RV32A Compliance":
         **When:** Intervening store to same address, then SC
         **Then:** SC fails (returns false)
         """
-        var rs = ReservationSet.create()
+        var rs = ReservationSet64.create()
         rs.reserve(0x80000100)
-        rs.invalidate_if_match(0x80000100)
+        rs.invalidate()
         val success = rs.check_and_clear(0x80000100)
         expect(success).to_equal(false)
 
     it "AMOADD computes correctly":
-        expect(amo_execute(AmoOp.AmoAdd, 100, 50)).to_equal(150)
+        expect(amo_execute(AmoOp.Add, 100, 50).new_value).to_equal(150)
 
     it "AMOSWAP returns rs2":
-        expect(amo_execute(AmoOp.AmoSwap, 100, 200)).to_equal(200)
+        expect(amo_execute(AmoOp.Swap, 100, 200).new_value).to_equal(200)
 
     it "AMOAND computes correctly":
-        expect(amo_execute(AmoOp.AmoAnd, 0xFF00, 0x0FF0)).to_equal(0x0F00)
+        expect(amo_execute(AmoOp.And, 0xFF00, 0x0FF0).new_value).to_equal(0x0F00)

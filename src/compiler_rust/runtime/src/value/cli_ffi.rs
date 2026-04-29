@@ -259,10 +259,23 @@ pub extern "C" fn rt_cli_run_file(_path: RuntimeValue, _args: RuntimeValue, _gc_
 }
 
 // Under `driver-hooks`, `simple-native-all` provides the real `#[no_mangle]`
-// `rt_cli_run_file` C symbol. Cast the untyped address from the runtime symbol
-// table to the correct function-pointer type; avoids a second typed extern
-// declaration of the same C symbol (which would clash with the address-only
-// declaration in the generated runtime_symbol_entries.rs).
+// `rt_cli_run_file` C symbol. We still need a Rust-callable identifier in
+// `simple_runtime::value` so static_provider can take its address. Declare the
+// extern symbol by a unique internal name linked to the real C symbol, then
+// re-expose it as a plain Rust wrapper (no `#[no_mangle]`, so it does not
+// collide with the native_all definition at link time; no `extern "C"` on the
+// wrapper avoids clashing_extern_declarations with the stub above).
+#[cfg(feature = "driver-hooks")]
+extern "C" {
+    #[link_name = "rt_cli_run_file"]
+    fn __rt_cli_run_file_native(
+        path: RuntimeValue,
+        args: RuntimeValue,
+        gc_log: u8,
+        gc_off: u8,
+    ) -> i64;
+}
+
 #[cfg(feature = "driver-hooks")]
 pub fn rt_cli_run_file(
     path: RuntimeValue,
@@ -270,12 +283,9 @@ pub fn rt_cli_run_file(
     gc_log: u8,
     gc_off: u8,
 ) -> i64 {
-    extern "C" { fn rt_cli_run_file(); }
-    type Fn = unsafe extern "C" fn(RuntimeValue, RuntimeValue, u8, u8) -> i64;
-    // SAFETY: `simple-native-all` exports `rt_cli_run_file` with this exact
-    // ABI; the cast is safe because the real symbol has the typed signature.
-    let f: Fn = unsafe { std::mem::transmute(rt_cli_run_file as unsafe extern "C" fn()) };
-    unsafe { f(path, args, gc_log, gc_off) }
+    // SAFETY: forwards to the externally-linked C ABI symbol provided by
+    // `simple-native-all` when the `driver-hooks` feature is on.
+    unsafe { __rt_cli_run_file_native(path, args, gc_log, gc_off) }
 }
 
 #[no_mangle]

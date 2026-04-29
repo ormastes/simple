@@ -74,6 +74,8 @@ struct PartitionLayout:
     root_size_sectors: u64
     total_sectors: u64
 
+var _image_builder_rootfs_backend: text = "fat32"
+
 class ImageBuilder:
     config: ImageConfig
     layout: PartitionLayout
@@ -143,8 +145,11 @@ impl ImageBuilder:
         write_text("{rootfs_root}/etc/rc.conf", _rc_conf_template())
         write_text("{rootfs_root}/etc/pkg/repos.sdn", _pkg_repo_template())
         write_text("{rootfs_root}/etc/shell/profile.sdn", "shell = \"/bin/shell\"\n")
+        write_text("{rootfs_root}/etc/rootfs.sdn", _rootfs_backend_payload(_image_builder_rootfs_backend))
         write_text("{rootfs_root}/sbin/init", _init_payload())
         write_text("{rootfs_root}/boot/kernel.elf", _kernel_payload(self.config.kernel_path, self.config.arch))
+        _ensure_dir("{rootfs_root}/SYS")
+        write_text("{rootfs_root}/SYS/ROOTFS.CFG", _rootfs_boot_marker_payload(_image_builder_rootfs_backend))
 
         var manifest = ""
         manifest = manifest + _manifest_file("/etc/hostname", "system-config", "simpleos-core")
@@ -152,8 +157,10 @@ impl ImageBuilder:
         manifest = manifest + _manifest_file("/etc/rc.conf", "system-config", "simpleos-core")
         manifest = manifest + _manifest_file("/etc/pkg/repos.sdn", "pkg-config", "simpleos-tools")
         manifest = manifest + _manifest_file("/etc/shell/profile.sdn", "shell-config", "simpleos-shell")
+        manifest = manifest + _manifest_file("/etc/rootfs.sdn", "rootfs-config", "simpleos-core")
         manifest = manifest + _manifest_file("/sbin/init", "runtime-init", "simpleos-core")
         manifest = manifest + _manifest_file("/boot/kernel.elf", "runtime-kernel", "simpleos-kernel")
+        manifest = manifest + _manifest_file("/SYS/ROOTFS.CFG", "rootfs-boot-marker", "simpleos-core")
 
         val packages = list_all_packages(self.config.arch)
         for pkg in packages:
@@ -237,6 +244,27 @@ fn build_usb_installer_image(
         package_dir: package_dir,
         include_installer: true
     )
+    _image_builder_rootfs_backend = "fat32"
+    ImageBuilder.new(config).build()
+
+fn build_usb_installer_image_with_rootfs(
+    arch: PkgArch,
+    kernel_path: text,
+    package_dir: text,
+    output_path: text,
+    size_mb: u64,
+    rootfs_backend: text
+) -> Result<text, text>:
+    val config = ImageConfig(
+        arch: arch,
+        output_path: output_path,
+        image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+        kernel_path: kernel_path,
+        bootloader_config: _installer_bootloader_config(arch),
+        package_dir: package_dir,
+        include_installer: true
+    )
+    _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
     ImageBuilder.new(config).build()
 
 fn build_install_image(
@@ -255,6 +283,27 @@ fn build_install_image(
         package_dir: package_dir,
         include_installer: false
     )
+    _image_builder_rootfs_backend = "fat32"
+    ImageBuilder.new(config).build()
+
+fn build_install_image_with_rootfs(
+    arch: PkgArch,
+    kernel_path: text,
+    package_dir: text,
+    output_path: text,
+    size_mb: u64,
+    rootfs_backend: text
+) -> Result<text, text>:
+    val config = ImageConfig(
+        arch: arch,
+        output_path: output_path,
+        image_size_mb: if size_mb > 0: size_mb else: DEFAULT_IMAGE_SIZE_MB,
+        kernel_path: kernel_path,
+        bootloader_config: "",
+        package_dir: package_dir,
+        include_installer: false
+    )
+    _image_builder_rootfs_backend = _normalized_rootfs_backend(rootfs_backend)
     ImageBuilder.new(config).build()
 
 fn _print_image_usage():
@@ -266,6 +315,7 @@ fn _print_image_usage():
     print "  --size=SIZE       Image size in MB (default: 512)"
     print "  --kernel=PATH     Path to kernel ELF binary"
     print "  --packages=DIR    Directory containing .spk packages"
+    print "  --rootfs=NAME     Runtime rootfs backend marker (fat32, dbfs, nvfs)"
     print "  --installer       Build install-media artifact"
     print "  -h                Show this help"
 
@@ -284,6 +334,7 @@ fn run_image_builder(args: [text]) -> i32:
     var kernel = ""
     var packages = ""
     var installer = false
+    var rootfs_backend = "fat32"
 
     var i = 1
     while i < args.len():
@@ -298,6 +349,8 @@ fn run_image_builder(args: [text]) -> i32:
             kernel = arg.slice(9, arg.len())
         else if arg.starts_with("--packages="):
             packages = arg.slice(11, arg.len())
+        else if arg.starts_with("--rootfs="):
+            rootfs_backend = arg.slice(9, arg.len())
         else if arg == "--installer":
             installer = true
         i = i + 1
@@ -309,9 +362,9 @@ fn run_image_builder(args: [text]) -> i32:
     val arch = arch_result.unwrap()
 
     val result = if installer:
-        build_usb_installer_image(arch, kernel, packages, output, size_mb)
+        build_usb_installer_image_with_rootfs(arch, kernel, packages, output, size_mb, rootfs_backend)
     else:
-        build_install_image(arch, kernel, packages, output, size_mb)
+        build_install_image_with_rootfs(arch, kernel, packages, output, size_mb, rootfs_backend)
 
     if val Ok(path) = result:
         print "Artifact created: {path}"
@@ -437,10 +490,13 @@ fn _toolset_payload() -> text:
     out
 
 fn _manifest_header(config: ImageConfig, layout: PartitionLayout) -> text:
+    val kind = if config.include_installer: "installer-dvd" else: "disk-image"
+    val rootfs_backend = _normalized_rootfs_backend(_image_builder_rootfs_backend)
     var out = "[artifact]\n"
     out = out + "arch = \"{pkg_arch_to_text(config.arch)}\"\n"
     out = out + "output = \"{config.output_path}\"\n"
-    out = out + "kind = \"{if config.include_installer: "installer-dvd" else: "disk-image"}\"\n"
+    out = out + "kind = \"{kind}\"\n"
+    out = out + "rootfs_backend = \"{rootfs_backend}\"\n"
     out = out + "image_size_mb = {config.image_size_mb}\n"
     out = out + "efi_start_sector = {layout.efi_start_sector}\n"
     out = out + "efi_size_sectors = {layout.efi_size_sectors}\n"
@@ -478,6 +534,30 @@ fn _fstab_template() -> text:
     var out = "# SimpleOS filesystem table\n"
     out = out + "/dev/root / auto defaults 0 1\n"
     out = out + "/dev/efi /boot/efi fat32 defaults 0 2\n"
+    out
+
+fn _normalized_rootfs_backend(rootfs_backend: text) -> text:
+    if rootfs_backend == "" or rootfs_backend == "fat32":
+        return "fat32"
+    if rootfs_backend == "dbfs":
+        return "dbfs"
+    if rootfs_backend == "nvfs":
+        return "nvfs"
+    "fat32"
+
+fn _rootfs_backend_payload(rootfs_backend: text) -> text:
+    val backend = _normalized_rootfs_backend(rootfs_backend)
+    var out = "[rootfs]\n"
+    out = out + "backend = \"{backend}\"\n"
+    out = out + "carrier = \"fat32\"\n"
+    out = out + "boot_mode = \"fat32-carrier\"\n"
+    out
+
+fn _rootfs_boot_marker_payload(rootfs_backend: text) -> text:
+    val backend = _normalized_rootfs_backend(rootfs_backend)
+    var out = "rootfs_backend={backend}\n"
+    out = out + "rootfs_carrier=fat32\n"
+    out = out + "rootfs_boot_mode=fat32-carrier\n"
     out
 
 fn _rc_conf_template() -> text:

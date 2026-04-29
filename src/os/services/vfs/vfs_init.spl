@@ -25,11 +25,13 @@ use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.types.{Path, MountOptions, OpenFlags}
 use os.kernel.types.fs_types.{FileFlags}
 use common.string_core.{str_char_at}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
 
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn serial_println(msg: text)
 extern fn unsafe_addr_of(ref: any) -> u64
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 val SYS_ALLOC_DMA: u64 = 84
 
@@ -239,6 +241,7 @@ var g_nvme: NvmeDriver = NvmeDriver.new()
 var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
 var g_root_fat32: Fat32Core? = nil
+var g_root_nvfs_posix: NvfsPosixDriver? = nil
 var g_vfs_initialized: bool = false
 # M1 mount table — wired at boot after NVMe init succeeds (see vfs_boot_init).
 var g_mount_table: MountTable = MountTable.new()
@@ -499,6 +502,114 @@ fn g_vfs_root_path(name: text) -> text:
         name
     else:
         "/" + name
+
+fn _vfs_text_to_bytes(text_value: text) -> [u8]:
+    rt_text_to_bytes(text_value)
+
+fn _vfs_bytes_to_text(buf: [u8], count: i64) -> text:
+    var result: text = ""
+    var i: i64 = 0
+    while i < count and i < buf.len():
+        result = result + buf[i as i32].chr()
+        i = i + 1
+    result
+
+pub fn _clear_vfs_rootfs_for_test():
+    """Reset rootfs-related globals so hosted driver tests start clean."""
+    g_root_fat32 = nil
+    g_root_nvfs_posix = nil
+    g_mount_table = MountTable.new()
+    g_vfs_selected_file = ""
+
+pub fn _mount_hosted_rootfs_for_test(driver: DriverInstance) -> bool:
+    """Mount a hosted driver at `/` for SimpleOS rootfs helper tests."""
+    _clear_vfs_rootfs_for_test()
+    match driver:
+        case NvfsPosix(d):
+            g_root_nvfs_posix = Some(d)
+        case _:
+            val mount_r = g_mount_table.mount("/", driver, MountOptions.default())
+            if mount_r.is_err():
+                return false
+    g_vfs_initialized = true
+    true
+
+fn _g_vfs_root_nvfs_posix_read_file_bytes(path: text) -> [u8]:
+    if g_root_nvfs_posix == nil:
+        return []
+    var driver = g_root_nvfs_posix.unwrap()
+    val relpath = Path(raw: path)
+    val stat_r = driver.stat(relpath)
+    if stat_r.is_err():
+        g_root_nvfs_posix = Some(driver)
+        return []
+    val size = stat_r.unwrap().size.to_i64()
+    if size <= 0:
+        g_root_nvfs_posix = Some(driver)
+        return []
+    val open_r = driver.open(relpath, OpenFlags.read_only())
+    if open_r.is_err():
+        g_root_nvfs_posix = Some(driver)
+        return []
+    val handle = open_r.unwrap()
+    var buf: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        buf.push(0)
+        i = i + 1
+    val read_r = driver.read(handle, 0, buf)
+    driver.close(handle)
+    g_root_nvfs_posix = Some(driver)
+    if read_r.is_err():
+        return []
+    val n = read_r.unwrap()
+    if n.to_i32() == buf.len():
+        return _clone_bytes(buf)
+    var out: [u8] = []
+    var j: i32 = 0
+    while j < n.to_i32():
+        out.push(buf[j])
+        j = j + 1
+    out
+
+fn _g_vfs_root_nvfs_posix_read_file_text(path: text) -> text:
+    val bytes = _g_vfs_root_nvfs_posix_read_file_bytes(path)
+    if bytes.len() <= 0:
+        return ""
+    _vfs_bytes_to_text(bytes, bytes.len())
+
+fn _g_vfs_root_nvfs_posix_file_size(path: text) -> i64:
+    if g_root_nvfs_posix == nil:
+        return -1
+    val driver = g_root_nvfs_posix.unwrap()
+    val stat_r = driver.stat(Path(raw: path))
+    g_root_nvfs_posix = Some(driver)
+    if stat_r.is_err():
+        return -1
+    stat_r.unwrap().size.to_i64()
+
+fn _g_vfs_root_nvfs_posix_file_exists(path: text) -> bool:
+    _g_vfs_root_nvfs_posix_file_size(path) >= 0
+
+fn _g_vfs_root_nvfs_posix_write_file_text(path: text, content: text) -> bool:
+    if g_root_nvfs_posix == nil:
+        return false
+    var driver = g_root_nvfs_posix.unwrap()
+    val relpath = Path(raw: path)
+    val open_r = driver.open(relpath, OpenFlags.write_only().with_append().with_create())
+    if open_r.is_err():
+        g_root_nvfs_posix = Some(driver)
+        return false
+    val handle = open_r.unwrap()
+    val trunc_r = driver.ftruncate(handle, 0)
+    if trunc_r.is_err():
+        driver.close(handle)
+        g_root_nvfs_posix = Some(driver)
+        return false
+    val write_r = driver.write(handle, 0, _vfs_text_to_bytes(content))
+    driver.close(handle)
+    g_root_nvfs_posix = Some(driver)
+    write_r.is_ok()
 
 fn g_vfs_known_app_id(path: text) -> u64:
     if path == "/sys/apps/browser_demo":
@@ -862,6 +973,33 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
         val root_cached = _cached_lazy_exec_bytes(root_name)
         if root_cached.len() > 0:
             return root_cached
+    val mounted_bytes = g_vfs_read_file_bytes(name)
+    if mounted_bytes.len() > 0:
+        return mounted_bytes
+    if root_name != name:
+        val mounted_root_bytes = g_vfs_read_file_bytes(root_name)
+        if mounted_root_bytes.len() > 0:
+            return mounted_root_bytes
+    val alias_name = _vfs_exec_disk_alias(name)
+    if alias_name != name:
+        val mounted_alias_bytes = g_vfs_read_file_bytes(alias_name)
+        if mounted_alias_bytes.len() > 0:
+            return mounted_alias_bytes
+    val root_alias = _vfs_exec_disk_alias(root_name)
+    if root_name != name and root_alias != root_name:
+        val mounted_root_alias_bytes = g_vfs_read_file_bytes(root_alias)
+        if mounted_root_alias_bytes.len() > 0:
+            return mounted_root_alias_bytes
+    val root_disk_alias = _vfs_exec_root_disk_alias(name)
+    if root_disk_alias != name:
+        val mounted_root_disk_bytes = g_vfs_read_file_bytes(root_disk_alias)
+        if mounted_root_disk_bytes.len() > 0:
+            return mounted_root_disk_bytes
+    val root_disk_alias_root = _vfs_exec_root_disk_alias(root_name)
+    if root_name != name and root_disk_alias_root != root_name:
+        val mounted_root_disk_root_bytes = g_vfs_read_file_bytes(root_disk_alias_root)
+        if mounted_root_disk_root_bytes.len() > 0:
+            return mounted_root_disk_root_bytes
     val direct_path_bytes = g_vfs_read_fat32_path_bytes(name)
     if direct_path_bytes.len() > 0:
         val direct_cached = _cache_exec_bytes_if_valid(name, name, direct_path_bytes)
@@ -873,7 +1011,6 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
             val root_cached_bytes = _cache_exec_bytes_if_valid(root_name, root_name, root_path_bytes)
             if root_cached_bytes.len() > 0:
                 return root_cached_bytes
-    val root_disk_alias = _vfs_exec_root_disk_alias(name)
     if root_disk_alias != name:
         val root_disk_cached = _cached_lazy_exec_bytes(root_disk_alias)
         if root_disk_cached.len() > 0:
@@ -883,7 +1020,6 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
             val root_disk_cached_bytes = _cache_exec_bytes_if_valid(root_disk_alias, root_disk_alias, root_disk_bytes)
             if root_disk_cached_bytes.len() > 0:
                 return root_disk_cached_bytes
-    val root_disk_alias_root = _vfs_exec_root_disk_alias(root_name)
     if root_name != name and root_disk_alias_root != root_name:
         val root_disk_root_cached = _cached_lazy_exec_bytes(root_disk_alias_root)
         if root_disk_root_cached.len() > 0:
@@ -893,7 +1029,6 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
             val root_disk_root_cached_bytes = _cache_exec_bytes_if_valid(root_disk_alias_root, root_disk_alias_root, root_disk_root_bytes)
             if root_disk_root_cached_bytes.len() > 0:
                 return root_disk_root_cached_bytes
-    val alias_name = _vfs_exec_disk_alias(name)
     if alias_name != name:
         val alias_cached = _cached_lazy_exec_bytes(alias_name)
         if alias_cached.len() > 0:
@@ -903,7 +1038,6 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
             val alias_cached_bytes = _cache_exec_bytes_if_valid(alias_name, alias_name, alias_bytes)
             if alias_cached_bytes.len() > 0:
                 return alias_cached_bytes
-    val root_alias = _vfs_exec_disk_alias(root_name)
     if root_name != name and root_alias != root_name:
         val root_alias_cached = _cached_lazy_exec_bytes(root_alias)
         if root_alias_cached.len() > 0:
@@ -913,10 +1047,7 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
             val root_alias_cached_bytes = _cache_exec_bytes_if_valid(root_alias, root_alias, root_alias_bytes)
             if root_alias_cached_bytes.len() > 0:
                 return root_alias_cached_bytes
-
-    if alias_name != name or root_disk_alias != name or root_disk_alias_root != root_name:
-        return []
-    g_vfs_read_file_bytes(name)
+    []
 
 fn _clone_bytes(buf: [u8]) -> [u8]:
     var out: [u8] = []
@@ -953,7 +1084,7 @@ fn g_vfs_root_read_file_text(driver: Fat32Core, path: text) -> text:
     var result: text = ""
     var i: i32 = 0
     while i < data.len():
-        result = result + data[i].to_char()
+        result = result + data[i].chr()
         i = i + 1
     result
 
@@ -1014,11 +1145,7 @@ fn g_vfs_root_write_file_text(driver: Fat32Core, path: text, content: text) -> b
     if open_r.is_err():
         return false
     val handle = open_r.unwrap()
-    var buf: [u8] = []
-    var i: i32 = 0
-    while i < content.len():
-        buf.push(str_char_at(content, i.to_i64()).to_u8())
-        i = i + 1
+    val buf = _vfs_text_to_bytes(content)
     val write_r = driver.write(handle, buf)
     driver.close(handle)
     write_r.is_ok()
@@ -1027,7 +1154,7 @@ fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> text:
     """Dispatch read-whole-file-as-text to the correct concrete driver.
 
     Reads up to 65536 bytes. Returns empty string on any error.
-    All four DriverInstance arms are covered to satisfy exhaustive match.
+    Hosted DBFS/NVFS roots use this same surface in unit tests.
     """
     match driver:
         case Fat32(d):
@@ -1049,12 +1176,7 @@ fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> text:
             if n <= 0:
                 return ""
             # Build text from byte array (UTF-8 assumption, ASCII path in FAT32)
-            var result: text = ""
-            var j: i32 = 0
-            while j < n.to_i32():
-                result = result + buf[j].to_char()
-                j = j + 1
-            result
+            _vfs_bytes_to_text(buf, n)
         case Nvfs(d):
             val flags = OpenFlags.read_only()
             val open_r = d.open(relpath, flags)
@@ -1079,16 +1201,65 @@ fn g_vfs_dispatch_read_file_text(driver: DriverInstance, relpath: Path) -> text:
             if read_r.is_err():
                 return ""
             val n = read_r.unwrap()
-            var result: text = ""
-            var j: i32 = 0
-            while j < n.to_i32():
-                result = result + buf[j].to_char()
-                j = j + 1
-            result
-        case NvfsPosix(_):
-            ""
-        case RamFs(_):
-            ""
+            _vfs_bytes_to_text(buf, n)
+        case NvfsPosix(d):
+            val flags = OpenFlags.read_only()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return ""
+            val handle = open_r.unwrap()
+            val stat_r = d.fstat(handle)
+            if stat_r.is_err():
+                d.close(handle)
+                return ""
+            val size = stat_r.unwrap().size.to_i64()
+            if size <= 0:
+                d.close(handle)
+                return ""
+            var buf: [u8] = []
+            var i: i64 = 0
+            while i < size:
+                buf.push(0)
+                i = i + 1
+            val read_r = d.read(handle, 0, buf)
+            d.close(handle)
+            if read_r.is_err():
+                return ""
+            _vfs_bytes_to_text(buf, read_r.unwrap())
+        case RamFs(d):
+            val flags = OpenFlags.read_only()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return ""
+            val handle = open_r.unwrap()
+            var buf: [u8] = []
+            var i: i32 = 0
+            while i < 65536:
+                buf.push(0)
+                i = i + 1
+            val read_r = d.read(handle, 0, buf)
+            d.close(handle)
+            if read_r.is_err():
+                return ""
+            _vfs_bytes_to_text(buf, read_r.unwrap())
+        case DbFs(d):
+            val open_r = d.open_path(relpath, OpenFlags.read_only())
+            if open_r.is_err():
+                return ""
+            val handle = open_r.unwrap()
+            val stat_r = d.stat_path(relpath)
+            if stat_r.is_err():
+                d.close_handle(handle)
+                return ""
+            val size = stat_r.unwrap().size
+            if size <= 0:
+                d.close_handle(handle)
+                return ""
+            val read_r = d.read_handle(handle, size)
+            d.close_handle(handle)
+            if read_r.is_err():
+                return ""
+            read_r.unwrap()
 
 fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> [u8]:
     """Dispatch read-whole-file-as-bytes to the correct concrete driver.
@@ -1162,10 +1333,80 @@ fn g_vfs_dispatch_read_file_bytes(driver: DriverInstance, relpath: Path) -> [u8]
                 out.push(buf[j])
                 j = j + 1
             out
-        case NvfsPosix(_):
-            []
-        case RamFs(_):
-            []
+        case NvfsPosix(d):
+            val stat_r = d.stat(relpath)
+            if stat_r.is_err():
+                return []
+            val size = stat_r.unwrap().size.to_i64()
+            if size <= 0:
+                return []
+            val open_r = d.open(relpath, OpenFlags.read_only())
+            if open_r.is_err():
+                return []
+            val handle = open_r.unwrap()
+            var buf: [u8] = []
+            var i: i64 = 0
+            while i < size:
+                buf.push(0)
+                i = i + 1
+            val read_r = d.read(handle, 0, buf)
+            d.close(handle)
+            if read_r.is_err():
+                return []
+            val n = read_r.unwrap()
+            if n.to_i32() == buf.len():
+                return _clone_bytes(buf)
+            var out: [u8] = []
+            var j: i32 = 0
+            while j < n.to_i32():
+                out.push(buf[j])
+                j = j + 1
+            out
+        case RamFs(d):
+            val stat_r = d.stat(relpath)
+            if stat_r.is_err():
+                return []
+            val size = stat_r.unwrap().size.to_i64()
+            if size <= 0:
+                return []
+            val open_r = d.open(relpath, OpenFlags.read_only())
+            if open_r.is_err():
+                return []
+            val handle = open_r.unwrap()
+            var buf: [u8] = []
+            var i: i64 = 0
+            while i < size:
+                buf.push(0)
+                i = i + 1
+            val read_r = d.read(handle, 0, buf)
+            d.close(handle)
+            if read_r.is_err():
+                return []
+            val n = read_r.unwrap()
+            if n.to_i32() == buf.len():
+                return _clone_bytes(buf)
+            var out: [u8] = []
+            var j: i32 = 0
+            while j < n.to_i32():
+                out.push(buf[j])
+                j = j + 1
+            out
+        case DbFs(d):
+            val stat_r = d.stat_path(relpath)
+            if stat_r.is_err():
+                return []
+            val size = stat_r.unwrap().size
+            if size <= 0:
+                return []
+            val open_r = d.open_path(relpath, OpenFlags.read_only())
+            if open_r.is_err():
+                return []
+            val handle = open_r.unwrap()
+            val read_r = d.read_handle(handle, size)
+            d.close_handle(handle)
+            if read_r.is_err():
+                return []
+            _vfs_text_to_bytes(read_r.unwrap())
 
 fn g_vfs_dispatch_file_size(driver: DriverInstance, relpath: Path) -> i64:
     """Dispatch stat → size to the concrete driver. Returns -1 on error."""
@@ -1180,10 +1421,21 @@ fn g_vfs_dispatch_file_size(driver: DriverInstance, relpath: Path) -> i64:
             if r.is_err():
                 return -1
             r.unwrap().size.to_i64()
-        case NvfsPosix(_):
-            -1
-        case RamFs(_):
-            -1
+        case NvfsPosix(d):
+            val r = d.stat(relpath)
+            if r.is_err():
+                return -1
+            r.unwrap().size.to_i64()
+        case RamFs(d):
+            val r = d.stat(relpath)
+            if r.is_err():
+                return -1
+            r.unwrap().size.to_i64()
+        case DbFs(d):
+            val r = d.stat_path(relpath)
+            if r.is_err():
+                return -1
+            r.unwrap().size
 
 fn g_vfs_dispatch_file_exists(driver: DriverInstance, relpath: Path) -> bool:
     """Dispatch stat → exists to the concrete driver."""
@@ -1192,10 +1444,12 @@ fn g_vfs_dispatch_file_exists(driver: DriverInstance, relpath: Path) -> bool:
             d.stat(relpath).is_ok()
         case Nvfs(d):
             d.stat(relpath).is_ok()
-        case NvfsPosix(_):
-            false
-        case RamFs(_):
-            false
+        case NvfsPosix(d):
+            d.stat(relpath).is_ok()
+        case RamFs(d):
+            d.stat(relpath).is_ok()
+        case DbFs(d):
+            d.stat_path(relpath).is_ok()
 
 pub fn g_vfs_read_file_text(name: text) -> text:
     """Read an entire file as text via the mount table.
@@ -1206,6 +1460,8 @@ pub fn g_vfs_read_file_text(name: text) -> text:
     """
     if g_root_fat32 != nil:
         return g_vfs_root_read_file_text(g_root_fat32.unwrap(), g_vfs_root_path(name))
+    if g_root_nvfs_posix != nil:
+        return _g_vfs_root_nvfs_posix_read_file_text(g_vfs_root_path(name))
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
     if not entry_opt.?:
@@ -1245,6 +1501,8 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
             val root_alias_path_bytes = g_vfs_root_read_file_bytes(g_root_fat32.unwrap(), root_alias_first)
             if root_alias_path_bytes.len() > 0:
                 return _clone_bytes(root_alias_path_bytes)
+    if g_root_nvfs_posix != nil:
+        return _g_vfs_root_nvfs_posix_read_file_bytes(g_vfs_root_path(name))
     val abs_first = g_vfs_abs_path(name)
     val entry_first_opt = g_mount_table.lookup(abs_first)
     if entry_first_opt.?:
@@ -1322,6 +1580,8 @@ pub fn g_vfs_file_size(name: text) -> i64:
             val root_alias_path_size = g_vfs_root_file_size(g_root_fat32.unwrap(), root_alias_first)
             if root_alias_path_size >= 0:
                 return root_alias_path_size
+    if g_root_nvfs_posix != nil:
+        return _g_vfs_root_nvfs_posix_file_size(g_vfs_root_path(name))
     val abs_first = g_vfs_abs_path(name)
     val entry_first_opt = g_mount_table.lookup(abs_first)
     if entry_first_opt.?:
@@ -1421,6 +1681,8 @@ pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
     """
     if g_root_fat32 != nil:
         return g_vfs_root_write_file_text(driver: g_root_fat32.unwrap(), path: g_vfs_root_path(name), content: content)
+    if g_root_nvfs_posix != nil:
+        return _g_vfs_root_nvfs_posix_write_file_text(g_vfs_root_path(name), content)
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
     if not entry_opt.?:
@@ -1440,8 +1702,8 @@ pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
 fn g_vfs_dispatch_write_file_text(driver: DriverInstance, relpath: Path, content: text) -> bool:
     """Dispatch write-whole-file-as-text to the correct concrete driver.
 
-    All four DriverInstance arms are covered to satisfy exhaustive match.
-    Only Fat32 is implemented; others return false (not yet supported).
+    Hosted DBFS and NvfsPosix support this so SimpleOS helper tests can share
+    the same rootfs contract as FAT32.
     """
     match driver:
         case Fat32(d):
@@ -1450,11 +1712,7 @@ fn g_vfs_dispatch_write_file_text(driver: DriverInstance, relpath: Path, content
             if open_r.is_err():
                 return false
             val handle = open_r.unwrap()
-            var buf: [u8] = []
-            var i: i32 = 0
-            while i < content.len():
-                buf.push(str_char_at(content, i.to_i64()).to_u8())
-                i = i + 1
+            val buf = _vfs_text_to_bytes(content)
             val write_r = d.write(handle, 0, buf)
             d.close(handle)
             write_r.is_ok()
@@ -1464,18 +1722,42 @@ fn g_vfs_dispatch_write_file_text(driver: DriverInstance, relpath: Path, content
             if open_r.is_err():
                 return false
             val handle = open_r.unwrap()
-            var buf: [u8] = []
-            var i: i32 = 0
-            while i < content.len():
-                buf.push(str_char_at(content, i.to_i64()).to_u8())
-                i = i + 1
+            val buf = _vfs_text_to_bytes(content)
             val write_r = d.write(handle, 0, buf)
             d.close(handle)
             write_r.is_ok()
-        case NvfsPosix(_):
-            false
-        case RamFs(_):
-            false
+        case NvfsPosix(d):
+            val flags = OpenFlags.write_only().with_append().with_create()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return false
+            val handle = open_r.unwrap()
+            val trunc_r = d.ftruncate(handle, 0)
+            if trunc_r.is_err():
+                d.close(handle)
+                return false
+            val buf = _vfs_text_to_bytes(content)
+            val write_r = d.write(handle, 0, buf)
+            d.close(handle)
+            write_r.is_ok()
+        case RamFs(d):
+            val flags = OpenFlags.read_write().with_create()
+            val open_r = d.open(relpath, flags)
+            if open_r.is_err():
+                return false
+            val handle = open_r.unwrap()
+            val buf = _vfs_text_to_bytes(content)
+            val write_r = d.write(handle, 0, buf)
+            d.close(handle)
+            write_r.is_ok()
+        case DbFs(d):
+            val open_r = d.open_path(relpath, OpenFlags.create_write())
+            if open_r.is_err():
+                return false
+            val handle = open_r.unwrap()
+            val write_r = d.write_handle(handle, content)
+            d.close_handle(handle)
+            write_r.is_ok()
 
 pub fn g_vfs_file_exists(name: text) -> bool:
     """Check file existence via the mount table.
@@ -1493,6 +1775,8 @@ pub fn g_vfs_file_exists(name: text) -> bool:
         val root_alias_first = _vfs_exec_disk_alias(root_name_first)
         if root_alias_first != root_name_first and g_vfs_root_file_exists(g_root_fat32.unwrap(), root_alias_first):
             return true
+    if g_root_nvfs_posix != nil:
+        return _g_vfs_root_nvfs_posix_file_exists(g_vfs_root_path(name))
     val abs_first = g_vfs_abs_path(name)
     val entry_first_opt = g_mount_table.lookup(abs_first)
     if entry_first_opt.?:

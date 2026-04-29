@@ -5,11 +5,19 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let source = manifest_dir.join("../common/src/runtime_symbols.rs");
     let content = fs::read_to_string(&source).expect("read runtime_symbols.rs");
     let runtime_src = manifest_dir.join("src");
+
+    // Symbols provided by simple-native-all (not the runtime stub) when driver-hooks is active.
+    // Under driver-hooks, the runtime stub is cfg-gated out; the real C symbol lives in native_all.
+    // We still emit the symbol-table entry, but use a #[link_name] alias so that simple-driver
+    // (which does NOT link native_all) compiles without an unresolved-symbol error.
+    let driver_hooks = env::var_os("CARGO_FEATURE_DRIVER_HOOKS").is_some();
+    const DRIVER_HOOK_SYMBOLS: &[&str] = &["rt_cli_run_file"];
 
     let mut seen = HashSet::new();
     let mut symbols = Vec::new();
@@ -44,6 +52,11 @@ fn main() {
     generated.push_str("    unsafe extern \"C\" {\n");
     for symbol in &symbols {
         if runtime_defines_symbol(&runtime_src, symbol) {
+            if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
+                // Under driver-hooks, native_all owns the real C symbol; skip the unconditional
+                // link-name reference here to avoid an unresolved-symbol error in simple-driver.
+                continue;
+            }
             generated.push_str(&format!("        pub fn {symbol}();\n"));
         }
     }
@@ -52,6 +65,11 @@ fn main() {
     generated.push_str("pub static RUNTIME_SYMBOL_ENTRIES: &[RuntimeSymbolEntry] = &[\n");
     for symbol in &symbols {
         if runtime_defines_symbol(&runtime_src, symbol) {
+            if driver_hooks && DRIVER_HOOK_SYMBOLS.contains(&symbol.as_str()) {
+                // Omit from the static table; native_all registers the real symbol separately
+                // when it links in (it owns the #[no_mangle] definition).
+                continue;
+            }
             generated.push_str(&format!(
                 "    RuntimeSymbolEntry::new(\"{symbol}\", exported_symbols::{symbol} as *const u8),\n"
             ));

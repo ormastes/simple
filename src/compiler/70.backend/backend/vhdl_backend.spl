@@ -74,7 +74,7 @@ class VhdlBackend:
     active_local_memory_type_names: Dict<i64, text>
 
     static fn empty_span() -> Span:
-        Span(start: 0, end_pos: 0, line: 1, col: 1)
+        Span(start: 0, end: 0, line: 1, col: 1)
 
     static fn create(target: CodegenTarget, options: CompileOptions) -> VhdlBackend:
         """Create VHDL backend with default options (unresolved types)."""
@@ -116,14 +116,15 @@ class VhdlBackend:
             active_local_memory_type_names: {}
         )
 
-    fn compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
+    me compile(module: MirModule) -> Result<VhdlCompiledModule, CompileError>:
         """Compile MIR module to VHDL."""
         val builder = VhdlBuilder.create(module.name)
         self.active_type_defs = {}
         self.active_function_by_name = {}
         self.active_helper_name_by_source = {}
         for symbol in module.types.keys():
-            self.active_type_defs = self.active_type_defs.set(symbol.id, module.types[symbol])
+            val type_def = module.types[symbol]
+            self.active_type_defs = self.active_type_defs.set(type_def.symbol.id, type_def)
         for symbol in module.functions.keys():
             val func = module.functions[symbol]
             self.active_function_by_name = self.active_function_by_name.set(func.name, func)
@@ -199,7 +200,7 @@ class VhdlBackend:
                 return true
         false
 
-    fn prepare_helper_subprograms(module: MirModule) -> Result<(), CompileError>:
+    me prepare_helper_subprograms(module: MirModule) -> Result<(), CompileError>:
         var used: Dict<text, text> = {}
         self.active_helper_name_by_source = {}
         for symbol in module.functions.keys():
@@ -371,7 +372,7 @@ class VhdlBackend:
                 case VhdlProcess(_, body_block):
                     val block = blocks.get(body_block.id)
                     if block.?:
-                        self.validate_block_supported_before_emit(block.unwrap(), blocks, false)
+                        self.validate_block_supported_before_emit(block, blocks, false)
                     else:
                         Err(self.backend_error("VHDL process references unknown block BB{body_block.id}"))
                 case Call(_, func, _):
@@ -395,7 +396,7 @@ class VhdlBackend:
     fn unsupported_vhdl_helper_instruction_error(inst: MirInst) -> CompileError:
         match inst.kind:
             case Load(_, _) | Store(_, _) | Alloc(_, _) | GetElementPtr(_, _, _):
-                self.backend_error_at("Synthesizable VHDL backend does not support pointer or memory instruction in helper subprogram: {inst.kind}", inst.span)
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer or memory instruction in helper subprogram: {inst.kind}", Some(inst.span))
             case CallIndirect(_, _, _, _):
                 self.backend_error("Unsupported VHDL helper subprogram indirect call behavior: {inst.kind}; helpers must use direct planned calls")
             case VhdlProcess(_, _) | VhdlPortMap(_, _, _) | VhdlSignalAssign(_, _, _) | VhdlVarAssign(_, _):
@@ -408,13 +409,13 @@ class VhdlBackend:
     fn unsupported_vhdl_instruction_error(inst: MirInst) -> CompileError:
         match inst.kind:
             case Alloc(_, _):
-                self.backend_error_at("Synthesizable VHDL backend does not support pointer Alloc storage allocation", inst.span)
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Alloc storage allocation", Some(inst.span))
             case Load(_, _):
-                self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", inst.span)
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", Some(inst.span))
             case Store(_, _):
-                self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", inst.span)
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", Some(inst.span))
             case GetElementPtr(_, _, _):
-                self.backend_error_at("Synthesizable VHDL backend does not support pointer GetElementPtr lowering", inst.span)
+                self.backend_error_at("Synthesizable VHDL backend does not support pointer GetElementPtr lowering", Some(inst.span))
             case CallIndirect(_, _, _, _):
                 self.backend_error("Synthesizable VHDL backend does not support CallIndirect lowering")
             case CheckedBinOp(_, _, _, _):
@@ -438,7 +439,7 @@ class VhdlBackend:
             case _:
                 self.backend_error("Synthesizable VHDL backend does not support MIR instruction: {inst.kind}")
 
-    fn compile_package_into(builder: VhdlBuilder, module: MirModule) -> Result<(), CompileError>:
+    me compile_package_into(builder: VhdlBuilder, module: MirModule) -> Result<(), CompileError>:
         """Compile type and constant definitions into a VHDL package."""
         builder.emit_package_begin(module.name)
 
@@ -562,7 +563,7 @@ class VhdlBackend:
         builder.emit_type_decl(type_def.name, self.type_mapper.map_record(record_fields))
         Ok(())
 
-    fn prepare_tuple_types_for_module(module: MirModule):
+    me prepare_tuple_types_for_module(module: MirModule):
         self.active_tuple_type_names = {}
         self.active_tuple_type_shapes = {}
         self.active_tuple_type_order = []
@@ -583,7 +584,7 @@ class VhdlBackend:
             for local in func.locals:
                 self.register_tuple_types_in_type(local.type_)
 
-    fn register_tuple_types_in_type_def(type_def: MirTypeDef):
+    me register_tuple_types_in_type_def(type_def: MirTypeDef):
         match type_def.kind:
             case Struct(fields):
                 for field in fields:
@@ -596,7 +597,7 @@ class VhdlBackend:
                 for member in members:
                     self.register_tuple_types_in_type(member)
 
-    fn register_tuple_types_in_type(ty: MirType):
+    me register_tuple_types_in_type(ty: MirType):
         match ty.kind:
             case Tuple(elements):
                 for element in elements:
@@ -803,16 +804,14 @@ class VhdlBackend:
                 false
 
     fn helper_function_by_name(name: text) -> Result<MirFunction, CompileError>:
-        val found = self.active_function_by_name.get(name)
-        if found.?:
-            Ok(found.unwrap())
+        if self.active_function_by_name.has(name):
+            Ok(self.active_function_by_name[name])
         else:
             Err(self.backend_error("VHDL helper subprogram `{name}` was planned but no function body is available"))
 
     fn helper_vhdl_name(func: MirFunction) -> Result<text, CompileError>:
-        val found = self.active_helper_name_by_source.get(func.name)
-        if found.?:
-            Ok(found.unwrap())
+        if self.active_helper_name_by_source.has(func.name):
+            Ok(self.active_helper_name_by_source[func.name])
         else:
             Err(self.backend_error("Function `{func.name}` is not a planned VHDL helper subprogram"))
 
@@ -1026,7 +1025,7 @@ class VhdlBackend:
     fn compile_helper_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
         match inst.kind:
             case Const(dest, value, ty):
-                val value_result = self.const_value_to_vhdl_at(value, ty, inst.span)
+                val value_result = self.const_value_to_vhdl_at(value, ty, Some(inst.span))
                 if value_result.is_err():
                     return Err(value_result.unwrap_err())
                 self.emit_helper_dest_assign(builder, dest, value_result.unwrap())
@@ -1075,7 +1074,7 @@ class VhdlBackend:
                 val dest_type = self.local_type(dest)
                 if dest_type.is_err():
                     return Err(dest_type.unwrap_err())
-                val expr = self.aggregate_to_vhdl_helper(kind, operands, dest_type.unwrap(), inst.span)
+                val expr = self.aggregate_to_vhdl_helper(kind, operands, dest_type.unwrap(), Some(inst.span))
                 if expr.is_err():
                     return Err(expr.unwrap_err())
                 self.emit_helper_dest_assign(builder, dest, expr.unwrap())
@@ -1142,7 +1141,7 @@ class VhdlBackend:
             builder.emit_signal_assign("result_out", value_name)
         Ok(())
 
-    fn compile_function(builder: VhdlBuilder, func: MirFunction) -> Result<VhdlEntity, CompileError>:
+    me compile_function(builder: VhdlBuilder, func: MirFunction) -> Result<VhdlEntity, CompileError>:
         """Compile a function as a VHDL entity/architecture pair."""
         val entity_name = func.name
         self.active_local_names = {}
@@ -1270,7 +1269,7 @@ class VhdlBackend:
     fn memory_template_error(code: text, message: text) -> CompileError:
         self.backend_error("{code}: {message}")
 
-    fn emit_local_signal_declaration(builder: VhdlBuilder, local: MirLocal, span: Span?) -> Result<(), CompileError>:
+    me emit_local_signal_declaration(builder: VhdlBuilder, local: MirLocal, span: Span?) -> Result<(), CompileError>:
         val name = self.default_local_name(local)
         match local.type_.kind:
             case Array(element, size):
@@ -1305,23 +1304,20 @@ class VhdlBackend:
         Ok(())
 
     fn local_object_type_to_vhdl(local: MirLocal, span: Span?) -> Result<text, CompileError>:
-        val memory_type_name = self.active_local_memory_type_names.get(local.id.id)
-        if memory_type_name.?:
-            Ok(memory_type_name.unwrap())
+        if self.active_local_memory_type_names.has(local.id.id):
+            Ok(self.active_local_memory_type_names[local.id.id])
         else:
             self.mir_type_to_vhdl_at(local.type_, span)
 
     fn local_to_vhdl(local: LocalId) -> Result<text, CompileError>:
-        val found = self.active_local_names.get(local.id)
-        if found.?:
-            Ok(found.unwrap())
+        if self.active_local_names.has(local.id):
+            Ok(self.active_local_names[local.id])
         else:
             Err(self.backend_error("No active VHDL name for local {local.id}"))
 
     fn local_type(local: LocalId) -> Result<MirType, CompileError>:
-        val found = self.active_local_types.get(local.id)
-        if found.?:
-            Ok(found.unwrap())
+        if self.active_local_types.has(local.id):
+            Ok(self.active_local_types[local.id])
         else:
             Err(self.backend_error("No active MIR type for local {local.id}"))
 
@@ -1340,16 +1336,14 @@ class VhdlBackend:
             case Const(_, ty): Ok(ty)
 
     fn type_def_by_symbol(symbol: SymbolId) -> Result<MirTypeDef, CompileError>:
-        val found = self.active_type_defs.get(symbol.id)
-        if found.?:
-            Ok(found.unwrap())
+        if self.active_type_defs.has(symbol.id):
+            Ok(self.active_type_defs[symbol.id])
         else:
             Err(self.backend_error("No active VHDL type definition for symbol {symbol.id}"))
 
     fn block_by_id(id: BlockId) -> Result<MirBlock, CompileError>:
-        val found = self.active_blocks.get(id.id)
-        if found.?:
-            Ok(found.unwrap())
+        if self.active_blocks.has(id.id):
+            Ok(self.active_blocks[id.id])
         else:
             Err(self.backend_error("VHDL process references unknown block BB{id.id}"))
 
@@ -1373,10 +1367,9 @@ class VhdlBackend:
         for prior in seen:
             if prior == id.id:
                 return false
-        val block = self.active_blocks.get(id.id)
-        if not block.?:
+        if not self.active_blocks.has(id.id):
             return false
-        val current = block.unwrap()
+        val current = self.active_blocks[id.id]
         if current.instructions.len() > 0:
             return true
         var next_seen = seen
@@ -1429,9 +1422,8 @@ class VhdlBackend:
                 self.const_value_to_vhdl(value, ty)
 
     fn local_kind(local: LocalId) -> Result<LocalKind, CompileError>:
-        val found = self.active_local_kinds.get(local.id)
-        if found.?:
-            Ok(found.unwrap())
+        if self.active_local_kinds.has(local.id):
+            Ok(self.active_local_kinds[local.id])
         else:
             Err(self.backend_error("No active MIR local kind for local {local.id}"))
 
@@ -1555,7 +1547,7 @@ class VhdlBackend:
     fn compile_process_instruction(builder: VhdlBuilder, inst: MirInst) -> Result<(), CompileError>:
         match inst.kind:
             case Const(dest, value, ty):
-                val value_result = self.const_value_to_vhdl_at(value, ty, inst.span)
+                val value_result = self.const_value_to_vhdl_at(value, ty, Some(inst.span))
                 if value_result.is_err():
                     return Err(value_result.unwrap_err())
                 self.emit_process_dest_assign(builder, dest, value_result.unwrap())
@@ -1567,10 +1559,10 @@ class VhdlBackend:
                 self.emit_process_dest_assign(builder, dest, value_result.unwrap())
 
             case Load(dest, ptr):
-                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", inst.span))
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", Some(inst.span)))
 
             case Store(ptr, value):
-                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", inst.span))
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", Some(inst.span)))
 
             case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
                 val left_name_result = self.process_operand_to_vhdl(left)
@@ -1606,7 +1598,7 @@ class VhdlBackend:
                 val dest_type_result = self.local_type(dest)
                 if dest_type_result.is_err():
                     return Err(dest_type_result.unwrap_err())
-                val aggregate_result = self.aggregate_to_vhdl_process(kind, operands, dest_type_result.unwrap(), inst.span)
+                val aggregate_result = self.aggregate_to_vhdl_process(kind, operands, dest_type_result.unwrap(), Some(inst.span))
                 if aggregate_result.is_err():
                     return Err(aggregate_result.unwrap_err())
                 self.emit_process_dest_assign(builder, dest, aggregate_result.unwrap())
@@ -1716,9 +1708,8 @@ class VhdlBackend:
 
     fn mark_return_chain_handled(id: BlockId, handled: Dict<i64, bool>) -> Dict<i64, bool>:
         var next_handled = handled.set(id.id, true)
-        val block = self.active_blocks.get(id.id)
-        if block.?:
-            match block.unwrap().terminator:
+        if self.active_blocks.has(id.id):
+            match self.active_blocks[id.id].terminator:
                 case Goto(target):
                     if not next_handled.get(target.id).?:
                         next_handled = self.mark_return_chain_handled(target, next_handled)
@@ -1800,7 +1791,7 @@ class VhdlBackend:
                 val dest_name_result = self.local_to_vhdl(dest)
                 if dest_name_result.is_err():
                     return Err(dest_name_result.unwrap_err())
-                val vhdl_value_result = self.const_value_to_vhdl_at(value, ty, inst.span)
+                val vhdl_value_result = self.const_value_to_vhdl_at(value, ty, Some(inst.span))
                 if vhdl_value_result.is_err():
                     return Err(vhdl_value_result.unwrap_err())
                 val dest_name = dest_name_result.unwrap()
@@ -1819,10 +1810,10 @@ class VhdlBackend:
                 builder.emit_signal_assign(dest_name, src_name)
 
             case Load(dest, ptr):
-                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", inst.span))
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Load lowering", Some(inst.span)))
 
             case Store(ptr, value):
-                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", inst.span))
+                return Err(self.backend_error_at("Synthesizable VHDL backend does not support pointer Store lowering", Some(inst.span)))
 
             case BinOp(dest, op, left, right) | CheckedBinOp(dest, op, left, right):
                 val dest_name_result = self.local_to_vhdl(dest)
@@ -1869,7 +1860,7 @@ class VhdlBackend:
                 val dest_type_result = self.local_type(dest)
                 if dest_type_result.is_err():
                     return Err(dest_type_result.unwrap_err())
-                val aggregate_result = self.aggregate_to_vhdl(kind, operands, dest_type_result.unwrap(), inst.span)
+                val aggregate_result = self.aggregate_to_vhdl(kind, operands, dest_type_result.unwrap(), Some(inst.span))
                 if aggregate_result.is_err():
                     return Err(aggregate_result.unwrap_err())
                 builder.emit_signal_assign(dest_name_result.unwrap(), aggregate_result.unwrap())
@@ -2837,12 +2828,13 @@ impl HardwareCodegen for VhdlBackend:
             case Err(e):
                 Err(e)
 
-    fn compile_package(module: MirModule) -> Result<text, CompileError>:
+    me compile_package(module: MirModule) -> Result<text, CompileError>:
         val builder = VhdlBuilder.create(module.name)
         builder.emit_library_header()
         self.active_type_defs = {}
         for symbol in module.types.keys():
-            self.active_type_defs = self.active_type_defs.set(symbol.id, module.types[symbol])
+            val type_def = module.types[symbol]
+            self.active_type_defs = self.active_type_defs.set(type_def.symbol.id, type_def)
         self.prepare_tuple_types_for_module(module)
         val result = self.compile_package_into(builder, module)
         if result.is_err():
