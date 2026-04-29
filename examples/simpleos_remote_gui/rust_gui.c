@@ -8,8 +8,14 @@
 #define TOOLCHAIN_NAME "Rust"
 #define TOOLCHAIN_VERSION_PATH "/SYS/RUSTVER.TXT"
 #define TOOLCHAIN_MANIFEST_PATH "/SYS/RUSTMAN.TXT"
-#define TOOLCHAIN_PRIMARY_PATH "/usr/bin/rustc"
-#define TOOLCHAIN_SECONDARY_PATH "/usr/bin/cargo"
+#define TOOLCHAIN_PRIMARY_PATH "/sys/apps/rust"
+#define TOOLCHAIN_SECONDARY_PATH "/usr/share/simpleos/toolchain/rust/Cargo.toml"
+#define TOOLCHAIN_CAPABILITY_PRIMARY "local-source-inspection"
+#define TOOLCHAIN_CAPABILITY_PRIMARY_PROOF "/usr/share/simpleos/toolchain/rust/hello.rs"
+#define TOOLCHAIN_CAPABILITY_SECONDARY "package-layout-inspection"
+#define TOOLCHAIN_CAPABILITY_SECONDARY_PROOF "/usr/share/simpleos/toolchain/rust/Cargo.toml"
+#define TOOLCHAIN_CAPABILITY_PIPELINE "build-pipeline-step"
+#define TOOLCHAIN_CAPABILITY_PIPELINE_PROOF "/usr/share/simpleos/toolchain/rust/pipeline.step"
 
 #include "toolchain_panel_runtime.c"
 

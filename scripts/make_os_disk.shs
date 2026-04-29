@@ -565,9 +565,9 @@ stage_simpleos_toolchain_payloads() {
         "$TMPDIR/usr/lib/rustlib/x86_64-unknown-simpleos/target.json" || return 1
     cp "src/os/toolchain/rust/cargo_config.toml" "$TMPDIR/etc/cargo/config.toml" || return 1
 
-    CMAKE_VERSION_LINE="simple_cmake native wrapper 0.1.0"
-    LLVM_VERSION_LINE="$("$LLVM_CLANG" --version | sed -n '1p')"
-    RUST_VERSION_LINE="$("$RUST_RUSTC" --version | sed -n '1p')"
+    CMAKE_VERSION_LINE="simple_cmake developer export 0.1.0"
+    LLVM_VERSION_LINE="SimpleOS LLVM standalone app v1"
+    RUST_VERSION_LINE="SimpleOS Rust standalone app v1"
     CARGO_VERSION_LINE="$("$RUST_CARGO" --version | sed -n '1p')"
     NINJA_VERSION_LINE="$("$NINJA_BIN" --version | sed -n '1p')"
     RUSTLIB_FILE_COUNT="$(find "$RUST_RUSTLIB_DIR"/lib -maxdepth 1 -type f 2>/dev/null | wc -l | awk '{print $1}')"
@@ -580,9 +580,9 @@ stage_simpleos_toolchain_payloads() {
 
     cat > "$TMPDIR/SYS/CMAKEMAN.TXT" <<EOF
 payload=cmake
-mode=native-wrapper
-lane=x86_64-simpleos
-status=report-and-gate
+mode=developer-export
+lane=x86_64-uefi-hardware
+status=optional
 generator=Ninja
 version=$CMAKE_VERSION_LINE
 /usr/bin/cmake
@@ -591,45 +591,45 @@ EOF
 
     cat > "$TMPDIR/SYS/LLVMMAN.TXT" <<EOF
 payload=llvm
-mode=native-wrapper
-lane=x86_64-simpleos
-status=guest-exec
+title=LLVM
+entry_app=/sys/apps/llvm
+mode=native-filesystem-app
+lane=x86_64-uefi-hardware
+status=standalone-required
 version=$LLVM_VERSION_LINE
-/usr/bin/clang
-/usr/bin/clang-20
-/usr/bin/lld
-/usr/bin/ld.lld
-/usr/bin/llvm-ar
-/usr/bin/llvm-nm
-/usr/bin/llvm-ranlib
-/usr/bin/llvm-objdump
-/usr/bin/llvm-objcopy
-/usr/bin/llvm-strip
-/usr/include
-/usr/lib
+capability_primary=local-ir-inspection
+proof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll
+capability_secondary=object-assembly-inspection
+proof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s
+capability_pipeline=compile-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step
+developer_export=/usr/bin/clang
 EOF
 
     cat > "$TMPDIR/SYS/RUSTMAN.TXT" <<EOF
 payload=rust
-mode=native-wrapper
-lane=x86_64-simpleos
-status=report-and-gate
+title=Rust
+entry_app=/sys/apps/rust
+mode=native-filesystem-app
+lane=x86_64-uefi-hardware
+status=standalone-required
 rustc=$RUST_VERSION_LINE
 cargo=$CARGO_VERSION_LINE
 rustlib_files=$RUSTLIB_FILE_COUNT
-/usr/bin/rustc
-/usr/bin/cargo
-/usr/bin/cargo-simpleos
-/usr/lib/rustlib/x86_64-unknown-simpleos/lib
-/usr/lib/rustlib/x86_64-unknown-simpleos/target.json
-/etc/cargo/config.toml
+capability_primary=local-source-inspection
+proof_primary=/usr/share/simpleos/toolchain/rust/hello.rs
+capability_secondary=package-layout-inspection
+proof_secondary=/usr/share/simpleos/toolchain/rust/Cargo.toml
+capability_pipeline=build-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step
+developer_export=/usr/bin/rustc
 EOF
 
     cat > "$TMPDIR/SYS/NINJAMAN.TXT" <<EOF
 payload=ninja
-mode=native-wrapper
-lane=x86_64-simpleos
-status=report-and-gate
+mode=developer-export
+lane=x86_64-uefi-hardware
+status=optional
 version=$NINJA_VERSION_LINE
 /usr/bin/ninja
 examples/ninja/simple_ninja.spl
@@ -637,11 +637,50 @@ EOF
 
     cat > "$TMPDIR/SYS/TOOLSET.SDN" <<EOF
 [toolchain]
-lane = "x86_64-simpleos"
-cmake = "/usr/bin/cmake status=report-and-gate"
-llvm = "/sys/apps/llvm -> /usr/bin/clang status=guest-exec"
-rust = "/sys/apps/rust -> /usr/bin/rustc status=report-and-gate"
-ninja = "/usr/bin/ninja status=report-and-gate"
+lane = "x86_64-uefi-hardware"
+llvm = "/sys/apps/llvm status=standalone-required"
+rust = "/sys/apps/rust status=standalone-required"
+cmake = "/usr/bin/cmake status=optional"
+ninja = "/usr/bin/ninja status=optional"
+EOF
+
+    mkdir -p "$TMPDIR/usr/share/simpleos/toolchain/llvm" "$TMPDIR/usr/share/simpleos/toolchain/rust"
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/llvm/hello.ll" <<EOF
+; SimpleOS staged LLVM IR
+source_filename = "hello.simple"
+define i32 @main() {
+entry:
+  ret i32 0
+}
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/llvm/hello.s" <<EOF
+; SimpleOS staged x86_64 assembly
+_start:
+    xor %eax, %eax
+    ret
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/llvm/pipeline.step" <<EOF
+pipeline=compile-pipeline-step
+input=/work/hello.simple
+output=/work/hello.ll
+next=/sys/apps/simple_loader
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/rust/hello.rs" <<EOF
+fn main() {
+    println!("hello from simpleos");
+}
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/rust/Cargo.toml" <<EOF
+[package]
+name = "hello-simpleos"
+version = "0.1.0"
+edition = "2021"
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/rust/pipeline.step" <<EOF
+pipeline=build-pipeline-step
+input=/work/Cargo.toml
+output=/work/target/hello
+next=/sys/apps/simple_loader
 EOF
 
     echo "[make_os_disk] Staged x86_64 CMake/Ninja/LLVM/Rust guest payloads under /usr and /SYS"

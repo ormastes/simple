@@ -23,6 +23,30 @@
 #define TOOLCHAIN_SECONDARY_PATH ""
 #endif
 
+#ifndef TOOLCHAIN_CAPABILITY_PRIMARY
+#define TOOLCHAIN_CAPABILITY_PRIMARY "local-inspection"
+#endif
+
+#ifndef TOOLCHAIN_CAPABILITY_PRIMARY_PROOF
+#define TOOLCHAIN_CAPABILITY_PRIMARY_PROOF "/SYS/CAPABILITY-PRIMARY.TXT"
+#endif
+
+#ifndef TOOLCHAIN_CAPABILITY_SECONDARY
+#define TOOLCHAIN_CAPABILITY_SECONDARY "asset-inspection"
+#endif
+
+#ifndef TOOLCHAIN_CAPABILITY_SECONDARY_PROOF
+#define TOOLCHAIN_CAPABILITY_SECONDARY_PROOF "/SYS/CAPABILITY-SECONDARY.TXT"
+#endif
+
+#ifndef TOOLCHAIN_CAPABILITY_PIPELINE
+#define TOOLCHAIN_CAPABILITY_PIPELINE "pipeline-step"
+#endif
+
+#ifndef TOOLCHAIN_CAPABILITY_PIPELINE_PROOF
+#define TOOLCHAIN_CAPABILITY_PIPELINE_PROOF "/SYS/CAPABILITY-PIPELINE.TXT"
+#endif
+
 static int _toolchain_file_exists(const char *path) {
     return path != NULL && path[0] != '\0' && access(path, F_OK) == 0;
 }
@@ -112,11 +136,14 @@ static void _toolchain_read_manifest_value(const char *path, const char *key, ch
 }
 
 static const char *toolchain_runtime_content(int argc, char **argv) {
-    static char content[1600];
+    static char content[2048];
     char version[256];
     char lane[128];
     char mode[128];
     char status[128];
+    const int has_cap_primary = _toolchain_file_exists(TOOLCHAIN_CAPABILITY_PRIMARY_PROOF);
+    const int has_cap_secondary = _toolchain_file_exists(TOOLCHAIN_CAPABILITY_SECONDARY_PROOF);
+    const int has_cap_pipeline = _toolchain_file_exists(TOOLCHAIN_CAPABILITY_PIPELINE_PROOF);
     const int has_primary = _toolchain_file_exists(TOOLCHAIN_PRIMARY_PATH);
     const int has_secondary = (TOOLCHAIN_SECONDARY_PATH[0] == '\0') || _toolchain_file_exists(TOOLCHAIN_SECONDARY_PATH);
     (void)argc;
@@ -142,7 +169,7 @@ static const char *toolchain_runtime_content(int argc, char **argv) {
     snprintf(
         content,
         sizeof(content),
-        "%s\n\n[Filesystem Payload]\nprimary: %s (%s)\nsecondary: %s (%s)\nmanifest: %s\n\n[Wrapper]\nlane: %s\nmode: %s\nstatus: %s\n\n[Version]\n%s",
+        "%s\n\n[Filesystem Payload]\nprimary: %s (%s)\nsecondary: %s (%s)\nmanifest: %s\n\n[Standalone Contract]\nlane: %s\nmode: %s\nstatus: %s\n\n[Capabilities]\n%s -> %s (%s)\n%s -> %s (%s)\n%s -> %s (%s)\n\n[Version]\n%s",
         TOOLCHAIN_NAME,
         TOOLCHAIN_PRIMARY_PATH,
         has_primary ? "present" : "missing",
@@ -152,6 +179,15 @@ static const char *toolchain_runtime_content(int argc, char **argv) {
         lane,
         mode,
         status,
+        TOOLCHAIN_CAPABILITY_PRIMARY,
+        TOOLCHAIN_CAPABILITY_PRIMARY_PROOF,
+        has_cap_primary ? "present" : "missing",
+        TOOLCHAIN_CAPABILITY_SECONDARY,
+        TOOLCHAIN_CAPABILITY_SECONDARY_PROOF,
+        has_cap_secondary ? "present" : "missing",
+        TOOLCHAIN_CAPABILITY_PIPELINE,
+        TOOLCHAIN_CAPABILITY_PIPELINE_PROOF,
+        has_cap_pipeline ? "present" : "missing",
         version
     );
     return content;
@@ -160,6 +196,7 @@ static const char *toolchain_runtime_content(int argc, char **argv) {
 static int toolchain_pre_window_hook(const char *app_id) {
     char version[256];
     char lane[128];
+    char mode[128];
     char status[128];
     if (!_toolchain_file_exists(TOOLCHAIN_PRIMARY_PATH)) {
         printf("[desktop-e2e] toolchain-launch:fail app=%s reason=missing-primary path=%s\n", app_id, TOOLCHAIN_PRIMARY_PATH);
@@ -175,6 +212,7 @@ static int toolchain_pre_window_hook(const char *app_id) {
     }
     _toolchain_read_first_line(TOOLCHAIN_VERSION_PATH, version, sizeof(version));
     _toolchain_read_manifest_value(TOOLCHAIN_MANIFEST_PATH, "lane", lane, sizeof(lane));
+    _toolchain_read_manifest_value(TOOLCHAIN_MANIFEST_PATH, "mode", mode, sizeof(mode));
     _toolchain_read_manifest_value(TOOLCHAIN_MANIFEST_PATH, "status", status, sizeof(status));
     if (version[0] == '\0') {
         printf("[desktop-e2e] toolchain-launch:fail app=%s reason=missing-version path=%s\n", app_id, TOOLCHAIN_VERSION_PATH);
@@ -183,15 +221,37 @@ static int toolchain_pre_window_hook(const char *app_id) {
     if (lane[0] == '\0') {
         snprintf(lane, sizeof(lane), "unknown");
     }
+    if (mode[0] == '\0') {
+        snprintf(mode, sizeof(mode), "unknown");
+    }
     if (status[0] == '\0') {
         snprintf(status, sizeof(status), "unknown");
     }
-    if (TOOLCHAIN_SECONDARY_PATH[0] != '\0') {
-        printf("[desktop-e2e] toolchain-launch:ok app=%s mode=native-wrapper lane=%s status=%s tool=%s aux=%s version=%s manifest=%s\n",
-               app_id, lane, status, TOOLCHAIN_PRIMARY_PATH, TOOLCHAIN_SECONDARY_PATH, version, TOOLCHAIN_MANIFEST_PATH);
+    printf("[desktop-e2e] native-toolchain-launch:ok app=%s lane=%s mode=%s status=%s tool=%s manifest=%s version=%s\n",
+           app_id, lane, mode, status, TOOLCHAIN_PRIMARY_PATH, TOOLCHAIN_MANIFEST_PATH, version);
+    if (_toolchain_file_exists(TOOLCHAIN_CAPABILITY_PRIMARY_PROOF)) {
+        printf("[desktop-e2e] native-capability:ok app=%s capability=%s proof=%s\n",
+               app_id, TOOLCHAIN_CAPABILITY_PRIMARY, TOOLCHAIN_CAPABILITY_PRIMARY_PROOF);
     } else {
-        printf("[desktop-e2e] toolchain-launch:ok app=%s mode=native-wrapper lane=%s status=%s tool=%s version=%s manifest=%s\n",
-               app_id, lane, status, TOOLCHAIN_PRIMARY_PATH, version, TOOLCHAIN_MANIFEST_PATH);
+        printf("[desktop-e2e] native-capability:fail app=%s capability=%s proof=%s\n",
+               app_id, TOOLCHAIN_CAPABILITY_PRIMARY, TOOLCHAIN_CAPABILITY_PRIMARY_PROOF);
+        return 25;
+    }
+    if (_toolchain_file_exists(TOOLCHAIN_CAPABILITY_SECONDARY_PROOF)) {
+        printf("[desktop-e2e] native-capability:ok app=%s capability=%s proof=%s\n",
+               app_id, TOOLCHAIN_CAPABILITY_SECONDARY, TOOLCHAIN_CAPABILITY_SECONDARY_PROOF);
+    } else {
+        printf("[desktop-e2e] native-capability:fail app=%s capability=%s proof=%s\n",
+               app_id, TOOLCHAIN_CAPABILITY_SECONDARY, TOOLCHAIN_CAPABILITY_SECONDARY_PROOF);
+        return 26;
+    }
+    if (_toolchain_file_exists(TOOLCHAIN_CAPABILITY_PIPELINE_PROOF)) {
+        printf("[desktop-e2e] native-capability:ok app=%s capability=%s proof=%s\n",
+               app_id, TOOLCHAIN_CAPABILITY_PIPELINE, TOOLCHAIN_CAPABILITY_PIPELINE_PROOF);
+    } else {
+        printf("[desktop-e2e] native-capability:fail app=%s capability=%s proof=%s\n",
+               app_id, TOOLCHAIN_CAPABILITY_PIPELINE, TOOLCHAIN_CAPABILITY_PIPELINE_PROOF);
+        return 27;
     }
     return 0;
 }
