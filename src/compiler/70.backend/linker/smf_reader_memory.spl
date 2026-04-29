@@ -53,6 +53,39 @@ struct SmfFlags:
     has_stub: bool
 
 # ============================================================================
+# SMF Relocation Types (defined before SmfReaderMemory so the parser knows
+# SmfRelocList is a struct when it appears in read_relocations return type)
+# ============================================================================
+
+"""Relocation entry read from an SMF Reloc section."""
+struct SmfRelocEntry:
+    offset: i64
+    symbol_index: i64
+    reloc_type: i32        # Wire values: 1=Abs64, 2=Rel32, 3=PltRel32, 4=GotRel32
+    addend: i64
+
+"""Lazy relocation list — wraps flat [i64] from rt_smf_parse_relocs / rt_smf_relocs_from_path.
+
+Avoids materializing 139k+ SmfRelocEntry structs in interpreter mode.
+Use .len() to get the count and .at(i) to decode one entry on demand.
+"""
+struct SmfRelocList:
+    flat: [i64]
+
+impl SmfRelocList:
+    fn len() -> i64:
+        self.flat.len() / 4
+
+    fn at(i: i64) -> SmfRelocEntry:
+        val base = i * 4
+        SmfRelocEntry(
+            offset: self.flat[base],
+            symbol_index: self.flat[base + 1],
+            reloc_type: self.flat[base + 2] as i32,
+            addend: self.flat[base + 3]
+        )
+
+# ============================================================================
 # In-Memory SMF Reader
 # ============================================================================
 
@@ -66,7 +99,7 @@ even for 8 MB SMFs with tens of thousands of symbols inside the interpreter.
 For read_relocations() performance, prefer from_path() over from_data() when the
 source file path is available. This enables rt_smf_relocs_from_path, which reads
 the file natively in Rust without materializing the full [u8] array in the
-interpreter (avoids 8M+ Value→u8 conversions that cause 120s+ timeouts).
+interpreter (avoids 8M+ Value->u8 conversions that cause 120s+ timeouts).
 """
 struct SmfReaderMemory:
     data: [u8]               # Complete SMF file data
@@ -318,15 +351,16 @@ impl SmfReaderMemory:
     callers doing only .len() or .at(i) don't pay the cost of 139k struct allocations.
     """
     fn read_relocations() -> Result<SmfRelocList, text>:
-        val flat = if self.source_path != "":
-            rt_smf_relocs_from_path(
+        var flat: [i64] = []
+        if self.source_path != "":
+            flat = rt_smf_relocs_from_path(
                 self.source_path,
                 self.sections_offset,
                 self.header.section_count as i64,
                 self.header.smf_data_offset
             )
         else:
-            rt_smf_parse_relocs(
+            flat = rt_smf_parse_relocs(
                 self.data,
                 self.sections_offset,
                 self.header.section_count as i64,
@@ -335,36 +369,8 @@ impl SmfReaderMemory:
         Ok(SmfRelocList(flat: flat))
 
 # ============================================================================
-# SMF Relocation Entry (read-side)
+# Reloc Rust Externs
 # ============================================================================
-
-"""Relocation entry read from an SMF Reloc section."""
-struct SmfRelocEntry:
-    offset: i64
-    symbol_index: i64
-    reloc_type: i32        # Wire values: 1=Abs64, 2=Rel32, 3=PltRel32, 4=GotRel32
-    addend: i64
-
-"""Lazy relocation list — wraps flat [i64] from rt_smf_parse_relocs / rt_smf_relocs_from_path.
-
-Avoids materializing 139k+ SmfRelocEntry structs in interpreter mode.
-Use .len() to get the count and .at(i) to decode one entry on demand.
-"""
-struct SmfRelocList:
-    flat: [i64]
-
-impl SmfRelocList:
-    fn len() -> i64:
-        self.flat.len() / 4
-
-    fn at(i: i64) -> SmfRelocEntry:
-        val base = i * 4
-        SmfRelocEntry(
-            offset: self.flat[base],
-            symbol_index: self.flat[base + 1],
-            reloc_type: self.flat[base + 2] as i32,
-            addend: self.flat[base + 3]
-        )
 
 # Native Rust extern: parses SMF Reloc section (type 5) from in-memory [u8].
 # Returns flat [i64] with 4 values per entry: [offset, sym_idx, type, addend, ...].
