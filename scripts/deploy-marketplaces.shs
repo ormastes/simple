@@ -15,8 +15,9 @@
 #
 # Prerequisites:
 #   npm login                        (npm)
-#   mcp-publisher login github       (MCP Registry)
+#   mcp-publisher login github       (MCP Registry — auto-runs if $GITHUB_TOKEN is set)
 #   gh auth login                    (GitHub Release + Gemini + Claude + Codex)
+#                                    OR set $GITHUB_TOKEN / $GH_TOKEN in env (gh CLI honors both)
 #   bin/simple build --release       (platform binaries)
 #   sh scripts/check-core-runtime-smoke.shs <runtime>      (compiler/core/lib changes)
 #   SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.shs
@@ -103,13 +104,43 @@ check_npm_auth() {
 }
 
 check_gh_auth() {
+    # gh CLI auto-honors $GH_TOKEN / $GITHUB_TOKEN; treat either as authenticated.
+    if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ]; then
+        ok "gh authenticated via \$GITHUB_TOKEN/\$GH_TOKEN"
+        return 0
+    fi
     if gh auth status >/dev/null 2>&1; then
         ok "gh authenticated"
         return 0
     else
-        fail "gh not authenticated — run: gh auth login"
+        fail "gh not authenticated — run: gh auth login OR set \$GITHUB_TOKEN in env"
         return 1
     fi
+}
+
+# Refresh the mcp-publisher JWT non-interactively when $GITHUB_TOKEN is set.
+# Falls back to the existing token (which mcp-publisher reports as expired/invalid
+# during publish) so the user can still run `mcp-publisher login github` manually.
+ensure_mcp_publisher_login() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        info "Refreshing mcp-publisher JWT via \$GITHUB_TOKEN..."
+        if "${MCP_PUBLISHER:-mcp-publisher}" login github -token "$GITHUB_TOKEN" >/dev/null 2>&1; then
+            ok "mcp-publisher logged in (\$GITHUB_TOKEN)"
+            return 0
+        fi
+        warn "mcp-publisher login via \$GITHUB_TOKEN failed; relying on existing token"
+        return 1
+    fi
+    if [ -n "${GH_TOKEN:-}" ]; then
+        info "Refreshing mcp-publisher JWT via \$GH_TOKEN..."
+        if "${MCP_PUBLISHER:-mcp-publisher}" login github -token "$GH_TOKEN" >/dev/null 2>&1; then
+            ok "mcp-publisher logged in (\$GH_TOKEN)"
+            return 0
+        fi
+        warn "mcp-publisher login via \$GH_TOKEN failed; relying on existing token"
+        return 1
+    fi
+    return 0
 }
 
 check_repo_public() {
@@ -261,6 +292,7 @@ deploy_mcp_registry() {
         return 0
     fi
 
+    ensure_mcp_publisher_login || true
     "${MCP_PUBLISHER:-mcp-publisher}" publish "$PROJECT_ROOT/tools/mcp-registry/server.json"
 
     ok "Registered on MCP Registry"
