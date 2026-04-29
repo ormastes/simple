@@ -118,6 +118,53 @@ check_gh_auth() {
     fi
 }
 
+# Verify the MCP registry indexed a server at the expected version as `isLatest`.
+# Uses /v0/servers/<name>/versions (NOT /v0/servers?search=…, which returns ALL
+# historical versions oldest-first and tempts callers to pick [0] and trust it).
+#
+# Returns 0 on match, non-zero otherwise. Prints diagnostic on mismatch so the
+# operator can spot a publisher-side success that didn't actually index.
+verify_mcp_registry_published() {
+    name="$1"
+    expected="$2"
+
+    actual=$(node - "$name" <<'NODE' 2>/dev/null
+const https = require('https');
+// MUST URL-encode the server name: it contains a literal '/'
+// (e.g. io.github.ormastes/simple-mcp-server). Without encoding, the slash
+// is interpreted as a path separator and the registry returns HTTP 404.
+const name = process.argv[2];
+const url = `https://registry.modelcontextprotocol.io/v0/servers/${encodeURIComponent(name)}/versions`;
+https.get(url, { headers: { 'User-Agent': 'simple-deploy-marketplaces' } }, r => {
+  let b = '';
+  r.on('data', c => b += c);
+  r.on('end', () => {
+    if (r.statusCode !== 200) { console.log('HTTP_' + r.statusCode); return; }
+    try {
+      const j = JSON.parse(b);
+      const entries = j.servers || j.versions || [];
+      const latest = entries.find(x =>
+        x && x._meta &&
+        x._meta['io.modelcontextprotocol.registry/official'] &&
+        x._meta['io.modelcontextprotocol.registry/official'].isLatest
+      );
+      if (!latest) { console.log('NO_ISLATEST'); return; }
+      console.log((latest.server && latest.server.version) || latest.version || 'NO_VERSION');
+    } catch (e) { console.log('PARSE_ERROR:' + e.message); }
+  });
+}).on('error', e => console.log('NETWORK_ERROR:' + e.message));
+NODE
+)
+
+    if [ "$actual" = "$expected" ]; then
+        ok "MCP registry confirms ${name} = ${expected} (isLatest)"
+        return 0
+    fi
+    inspect_url="https://registry.modelcontextprotocol.io/v0/servers/$(node -e "console.log(encodeURIComponent('$name'))")/versions"
+    fail "MCP registry mismatch for ${name}: expected ${expected}, got '${actual}' (inspect: ${inspect_url})"
+    return 1
+}
+
 # Refresh the mcp-publisher JWT non-interactively when $GITHUB_TOKEN is set.
 # Falls back to the existing token (which mcp-publisher reports as expired/invalid
 # during publish) so the user can still run `mcp-publisher login github` manually.
@@ -294,6 +341,15 @@ deploy_mcp_registry() {
 
     ensure_mcp_publisher_login || true
     "${MCP_PUBLISHER:-mcp-publisher}" publish "$PROJECT_ROOT/tools/mcp-registry/server.json"
+
+    # Trust-but-verify: mcp-publisher's "✓ Successfully published" only confirms
+    # that the API accepted the submission. The registry has indexed it correctly
+    # only when /v0/servers/<name>/versions reports our version as `isLatest`.
+    server_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$PROJECT_ROOT/tools/mcp-registry/server.json','utf8')).name)")
+    if ! verify_mcp_registry_published "$server_name" "$VERSION"; then
+        fail "mcp-publisher claimed success but registry did not index ${server_name}@${VERSION} as latest"
+        return 1
+    fi
 
     ok "Registered on MCP Registry"
     info "Check: https://registry.modelcontextprotocol.io/servers/${NPM_PACKAGE}"
