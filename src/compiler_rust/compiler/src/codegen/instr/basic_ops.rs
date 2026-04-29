@@ -177,3 +177,200 @@ pub fn compile_spread<M: Module>(
     ctx.vreg_values.insert(dest, source_val);
     Ok(())
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use crate::codegen::Codegen;
+    use crate::hir::TypeId;
+    use crate::mir::{BlockId, MirFunction, MirInst, MirModule, Terminator};
+    use simple_parser::ast::Visibility;
+
+    /// Helper: build a single-function MIR module and AOT-compile it.
+    /// The `build` closure pushes instructions into block 0 and returns the
+    /// VReg to use as the return value.  Compilation exercises the Cranelift
+    /// verifier — if any instruction emits invalid IR (e.g. `ireduce` on an
+    /// f32 operand) `aot_ok` returns false.
+    fn aot_ok(name: &str, build: impl FnOnce(&mut MirFunction) -> crate::mir::VReg) -> bool {
+        let mut func = MirFunction::new(name.to_string(), TypeId::I64, Visibility::Public);
+        let ret = build(&mut func);
+        func.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(ret));
+        let mut module = MirModule::new();
+        module.functions.push(func);
+        Codegen::new()
+            .expect("Codegen::new failed")
+            .compile_module(&module)
+            .is_ok()
+    }
+
+    /// Regression test for the ireduce-on-f32 verifier failure.
+    ///
+    /// Pattern:  `ConstFloat` produces an f64 Cranelift value; a `Cast F64→F32`
+    /// narrows it to f32.  Then a second `Cast` whose *HIR annotation* says
+    /// `U32 → U32` (as MIR lowering incorrectly stamps when a float-producing
+    /// expression chain is annotated with the surrounding integer type) arrives
+    /// with an f32 operand.
+    ///
+    /// Bug (HEAD): `is_from_float` is false (annotation says U32), so the code
+    /// falls into the int→int branch and emits `ireduce.i32 <f32-value>` —
+    /// the Cranelift verifier rejects this.
+    ///
+    /// Fix (working tree): the `actual_src_ty` check detects the real f32 and
+    /// routes through `fcvt_to_uint.i64` + `ireduce.i32`, which is valid IR.
+    #[test]
+    fn cast_f32_value_annotated_as_u32_compiles() {
+        assert!(
+            aot_ok("cast_f32_as_u32", |f| {
+                let vreg_f64 = f.new_vreg();
+                let vreg_f32 = f.new_vreg();
+                // This vreg holds an f32 Cranelift value, but the subsequent
+                // Cast annotation will claim it is U32 (the MIR bug scenario).
+                let vreg_u32_wrong_ann = f.new_vreg();
+                // Coerce to i64 for the function return (which is I64)
+                let vreg_ret = f.new_vreg();
+
+                let block = f.block_mut(BlockId(0)).unwrap();
+                // Step 1: produce an f64 constant
+                block.instructions.push(MirInst::ConstFloat {
+                    dest: vreg_f64,
+                    value: 0.7,
+                });
+                // Step 2: demote to f32  (annotation correct: F64→F32)
+                block.instructions.push(MirInst::Cast {
+                    dest: vreg_f32,
+                    source: vreg_f64,
+                    from_ty: TypeId::F64,
+                    to_ty: TypeId::F32,
+                });
+                // Step 3: Cast annotated as U32→U32 but ACTUAL VALUE is f32.
+                // This is the exact MIR lowering mistake that triggered the
+                // ireduce-on-f32 verifier failure in _apply_opacity.
+                block.instructions.push(MirInst::Cast {
+                    dest: vreg_u32_wrong_ann,
+                    source: vreg_f32,
+                    from_ty: TypeId::U32, // wrong annotation — real value is f32
+                    to_ty: TypeId::U32,
+                });
+                // Step 4: Cast the result to I64 for the I64 return slot.
+                block.instructions.push(MirInst::Cast {
+                    dest: vreg_ret,
+                    source: vreg_u32_wrong_ann,
+                    from_ty: TypeId::U32,
+                    to_ty: TypeId::I64,
+                });
+                vreg_ret
+            }),
+            "ireduce on f32 operand must not reach the verifier"
+        );
+    }
+
+    /// Complementary: Cast annotated as I32→I32 but actual value is f32
+    /// (signed variant of the same bug — `fcvt_to_sint` path).
+    #[test]
+    fn cast_f32_value_annotated_as_i32_compiles() {
+        assert!(
+            aot_ok("cast_f32_as_i32", |f| {
+                let vreg_f64 = f.new_vreg();
+                let vreg_f32 = f.new_vreg();
+                let vreg_i32_wrong_ann = f.new_vreg();
+                let vreg_ret = f.new_vreg();
+
+                let block = f.block_mut(BlockId(0)).unwrap();
+                block.instructions.push(MirInst::ConstFloat {
+                    dest: vreg_f64,
+                    value: 1.5,
+                });
+                block.instructions.push(MirInst::Cast {
+                    dest: vreg_f32,
+                    source: vreg_f64,
+                    from_ty: TypeId::F64,
+                    to_ty: TypeId::F32,
+                });
+                // Bug scenario: annotated I32→I32 but holds f32
+                block.instructions.push(MirInst::Cast {
+                    dest: vreg_i32_wrong_ann,
+                    source: vreg_f32,
+                    from_ty: TypeId::I32, // wrong annotation
+                    to_ty: TypeId::I32,
+                });
+                block.instructions.push(MirInst::Cast {
+                    dest: vreg_ret,
+                    source: vreg_i32_wrong_ann,
+                    from_ty: TypeId::I32,
+                    to_ty: TypeId::I64,
+                });
+                vreg_ret
+            }),
+            "ireduce on f32 operand (signed path) must not reach the verifier"
+        );
+    }
+
+    /// Sanity: correct Cast F32→U32 (annotation matches actual type) also compiles.
+    #[test]
+    fn cast_f32_to_u32_correct_annotation_compiles() {
+        assert!(aot_ok("cast_f32_u32_correct", |f| {
+            let vreg_f64 = f.new_vreg();
+            let vreg_f32 = f.new_vreg();
+            let vreg_u32 = f.new_vreg();
+            let vreg_ret = f.new_vreg();
+
+            let block = f.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstFloat { dest: vreg_f64, value: 255.9 });
+            block.instructions.push(MirInst::Cast {
+                dest: vreg_f32,
+                source: vreg_f64,
+                from_ty: TypeId::F64,
+                to_ty: TypeId::F32,
+            });
+            block.instructions.push(MirInst::Cast {
+                dest: vreg_u32,
+                source: vreg_f32,
+                from_ty: TypeId::F32, // correct annotation
+                to_ty: TypeId::U32,
+            });
+            block.instructions.push(MirInst::Cast {
+                dest: vreg_ret,
+                source: vreg_u32,
+                from_ty: TypeId::U32,
+                to_ty: TypeId::I64,
+            });
+            vreg_ret
+        }));
+    }
+
+    /// Sanity: correct Cast F32→I32 (annotation matches actual type) also compiles.
+    #[test]
+    fn cast_f32_to_i32_correct_annotation_compiles() {
+        assert!(aot_ok("cast_f32_i32_correct", |f| {
+            let vreg_f64 = f.new_vreg();
+            let vreg_f32 = f.new_vreg();
+            let vreg_i32 = f.new_vreg();
+            let vreg_ret = f.new_vreg();
+
+            let block = f.block_mut(BlockId(0)).unwrap();
+            block.instructions.push(MirInst::ConstFloat { dest: vreg_f64, value: -3.7 });
+            block.instructions.push(MirInst::Cast {
+                dest: vreg_f32,
+                source: vreg_f64,
+                from_ty: TypeId::F64,
+                to_ty: TypeId::F32,
+            });
+            block.instructions.push(MirInst::Cast {
+                dest: vreg_i32,
+                source: vreg_f32,
+                from_ty: TypeId::F32, // correct annotation
+                to_ty: TypeId::I32,
+            });
+            block.instructions.push(MirInst::Cast {
+                dest: vreg_ret,
+                source: vreg_i32,
+                from_ty: TypeId::I32,
+                to_ty: TypeId::I64,
+            });
+            vreg_ret
+        }));
+    }
+}

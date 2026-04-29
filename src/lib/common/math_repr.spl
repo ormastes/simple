@@ -340,6 +340,339 @@ class ParseState:
     me advance():
         self.pos = self.pos + 1
 
+class MathParser:
+    tags: [text]
+    vals: [text]
+    lefts: [i64]
+    rights: [i64]
+    extras: [[i64]]
+    tk_kinds: [text]
+    tk_vals: [text]
+    pos: i64
+    root: i64
+
+    static fn create() -> MathParser:
+        MathParser(
+            tags: [], vals: [], lefts: [], rights: [], extras: [],
+            tk_kinds: [], tk_vals: [], pos: 0, root: -1
+        )
+
+    me reset():
+        self.tags.clear()
+        self.vals.clear()
+        self.lefts.clear()
+        self.rights.clear()
+        self.extras.clear()
+        self.tk_kinds.clear()
+        self.tk_vals.clear()
+        self.pos = 0
+        self.root = -1
+
+    me mk(tag: text, tval: text, left: i64, right: i64) -> i64:
+        val idx = self.tags.len()
+        self.tags.push(tag)
+        self.vals.push(tval)
+        self.lefts.push(left)
+        self.rights.push(right)
+        self.extras.push([])
+        idx
+
+    me mk_call(name: text, args: [i64]) -> i64:
+        val idx = self.tags.len()
+        self.tags.push("call")
+        self.vals.push(name)
+        self.lefts.push(-1)
+        self.rights.push(-1)
+        self.extras.push(args)
+        idx
+
+    me tokenize(source: text):
+        self.tk_kinds.clear()
+        self.tk_vals.clear()
+        var i = 0
+        val slen = source.len()
+        for _loop in 0..10000:
+            if i >= slen:
+                break
+            val ch = _char_at(source, i)
+            if ch == " " or ch == "\t":
+                i = i + 1
+            elif _is_digit(ch):
+                var num_parts: [text] = []
+                for _inner in 0..1000:
+                    if i >= slen:
+                        break
+                    val c2 = _char_at(source, i)
+                    if _is_digit(c2) or c2 == ".":
+                        num_parts.push(c2)
+                        i = i + 1
+                    else:
+                        break
+                self.tk_kinds.push("num")
+                self.tk_vals.push(num_parts.join(""))
+            elif _is_alpha(ch):
+                var id_parts: [text] = []
+                for _inner in 0..1000:
+                    if i >= slen:
+                        break
+                    val c2 = _char_at(source, i)
+                    if _is_alnum(c2):
+                        id_parts.push(c2)
+                        i = i + 1
+                    else:
+                        break
+                self.tk_kinds.push("id")
+                self.tk_vals.push(id_parts.join(""))
+            elif ch == ".":
+                if i + 1 < slen:
+                    val next = _char_at(source, i + 1)
+                    if next == ".":
+                        self.tk_kinds.push("op")
+                        self.tk_vals.push("..")
+                        i = i + 2
+                    else:
+                        self.tk_kinds.push("op")
+                        self.tk_vals.push(".")
+                        i = i + 1
+                else:
+                    self.tk_kinds.push("op")
+                    self.tk_vals.push(".")
+                    i = i + 1
+            elif ch == "+":
+                self.tk_kinds.push("op")
+                self.tk_vals.push("+")
+                i = i + 1
+            elif ch == "-":
+                self.tk_kinds.push("op")
+                self.tk_vals.push("-")
+                i = i + 1
+            elif ch == "*":
+                self.tk_kinds.push("op")
+                self.tk_vals.push("*")
+                i = i + 1
+            elif ch == "/":
+                self.tk_kinds.push("op")
+                self.tk_vals.push("/")
+                i = i + 1
+            elif ch == "^":
+                self.tk_kinds.push("op")
+                self.tk_vals.push("^")
+                i = i + 1
+            elif ch == "'":
+                self.tk_kinds.push("op")
+                self.tk_vals.push("'")
+                i = i + 1
+            elif ch == "(":
+                self.tk_kinds.push("lparen")
+                self.tk_vals.push("(")
+                i = i + 1
+            elif ch == ")":
+                self.tk_kinds.push("rparen")
+                self.tk_vals.push(")")
+                i = i + 1
+            elif ch == "[":
+                self.tk_kinds.push("lbracket")
+                self.tk_vals.push("[")
+                i = i + 1
+            elif ch == "]":
+                self.tk_kinds.push("rbracket")
+                self.tk_vals.push("]")
+                i = i + 1
+            elif ch == ",":
+                self.tk_kinds.push("comma")
+                self.tk_vals.push(",")
+                i = i + 1
+            else:
+                i = i + 1
+        self.tk_kinds.push("eof")
+        self.tk_vals.push("")
+
+    fn peek_kind() -> text:
+        if self.pos >= self.tk_kinds.len():
+            return "eof"
+        self.tk_kinds[self.pos]
+
+    fn peek_val() -> text:
+        if self.pos >= self.tk_vals.len():
+            return ""
+        self.tk_vals[self.pos]
+
+    me advance():
+        self.pos = self.pos + 1
+
+    fn can_start_expr() -> bool:
+        val pk = self.peek_kind()
+        if pk == "num": return true
+        if pk == "id": return true
+        if pk == "lparen": return true
+        false
+
+    fn can_implicit_mul() -> bool:
+        if not self.can_start_expr():
+            return false
+        val pk = self.peek_kind()
+        if pk == "id": return true
+        if pk == "lparen": return true
+        false
+
+    me parse_expr() -> i64:
+        self.parse_add()
+
+    me parse_add() -> i64:
+        var left = self.parse_mul()
+        for _loop in 0..1000:
+            val pk = self.peek_kind()
+            val pv = self.peek_val()
+            if pk == "op" and pv == "+":
+                self.advance()
+                val right = self.parse_mul()
+                left = self.mk("add", "+", left, right)
+            elif pk == "op" and pv == "-":
+                self.advance()
+                val right = self.parse_mul()
+                left = self.mk("sub", "-", left, right)
+            else:
+                break
+        left
+
+    me parse_mul() -> i64:
+        var left = self.parse_unary()
+        for _loop in 0..1000:
+            val pk = self.peek_kind()
+            val pv = self.peek_val()
+            if pk == "op" and pv == "*":
+                self.advance()
+                val right = self.parse_unary()
+                left = self.mk("mul", "*", left, right)
+            elif pk == "op" and pv == "/":
+                self.advance()
+                val right = self.parse_unary()
+                left = self.mk("div", "/", left, right)
+            elif self.can_implicit_mul():
+                val right = self.parse_unary()
+                left = self.mk("mul", "", left, right)
+            else:
+                break
+        left
+
+    me parse_unary() -> i64:
+        val pk = self.peek_kind()
+        val pv = self.peek_val()
+        if pk == "op" and pv == "-":
+            self.advance()
+            val operand = self.parse_unary()
+            return self.mk("neg", "-", operand, -1)
+        self.parse_pow()
+
+    me parse_pow() -> i64:
+        var base = self.parse_postfix()
+        val pk = self.peek_kind()
+        val pv = self.peek_val()
+        if pk == "op" and pv == "^":
+            self.advance()
+            val exp = self.parse_unary()
+            base = self.mk("pow", "^", base, exp)
+        base
+
+    me parse_postfix() -> i64:
+        var node = self.parse_primary()
+        for _loop in 0..100:
+            if self.peek_kind() == "lbracket":
+                self.advance()
+                val idx = self.parse_expr()
+                if self.peek_kind() == "rbracket":
+                    self.advance()
+                node = self.mk("subscript", "", node, idx)
+            elif self.peek_kind() == "op" and self.peek_val() == "'":
+                self.advance()
+                node = self.mk("transpose", "'", node, -1)
+            else:
+                break
+        node
+
+    me parse_primary() -> i64:
+        val pk = self.peek_kind()
+        val pv = self.peek_val()
+
+        if pk == "num":
+            self.advance()
+            return self.mk("num", pv, -1, -1)
+
+        if pk == "id":
+            self.advance()
+            val name = pv
+            if name == "frac" and self.peek_kind() == "lparen":
+                return self.parse_frac_call()
+            if name == "sum" and self.peek_kind() == "lparen":
+                return self.parse_sum_call(name)
+            if name == "int" and self.peek_kind() == "lparen":
+                return self.parse_sum_call(name)
+            if self.peek_kind() == "lparen":
+                self.advance()
+                var args: [i64] = []
+                if self.peek_kind() != "rparen":
+                    args.push(self.parse_expr())
+                    for _loop in 0..100:
+                        if self.peek_kind() == "comma":
+                            self.advance()
+                            args.push(self.parse_expr())
+                        else:
+                            break
+                if self.peek_kind() == "rparen":
+                    self.advance()
+                return self.mk_call(name, args)
+            return self.mk("id", name, -1, -1)
+
+        if pk == "lparen":
+            self.advance()
+            val inner = self.parse_expr()
+            if self.peek_kind() == "rparen":
+                self.advance()
+            return self.mk("group", "", inner, -1)
+
+        self.advance()
+        self.mk("id", "?", -1, -1)
+
+    me parse_frac_call() -> i64:
+        self.advance()
+        val num = self.parse_expr()
+        if self.peek_kind() == "comma":
+            self.advance()
+        val den = self.parse_expr()
+        if self.peek_kind() == "rparen":
+            self.advance()
+        self.mk("frac", "frac", num, den)
+
+    me parse_sum_call(kind: text) -> i64:
+        self.advance()
+        val var_name = self.peek_val()
+        self.advance()
+        if self.peek_kind() == "comma":
+            self.advance()
+        val from_val = self.parse_expr()
+        if self.peek_kind() == "op" and self.peek_val() == "..":
+            self.advance()
+        val to_val = self.parse_expr()
+        if self.peek_kind() == "rparen":
+            self.advance()
+        val body = self.parse_unary()
+        val idx = self.tags.len()
+        var tag = "sum_expr"
+        if kind == "int":
+            tag = "int_expr"
+        self.tags.push(tag)
+        self.vals.push(var_name)
+        self.lefts.push(body)
+        self.rights.push(-1)
+        self.extras.push([from_val, to_val])
+        idx
+
+    me parse_source(source: text):
+        self.reset()
+        self.tokenize(source)
+        self.pos = 0
+        self.root = self.parse_expr()
+
 # reason: positional math_repr API
 fn _tokenize(source: text, tk_kinds: [text], tk_vals: [text]):
     tk_kinds.clear()
@@ -788,71 +1121,36 @@ fn _render_md(idx: i64, tags: [text], vals: [text], lefts: [i64], rights: [i64],
     "$" + _render_latex(idx, tags, vals, lefts, rights, extras) + "$"
 
 pub fn to_text(source: text) -> text:
-    var tags: [text] = []
-    var vals: [text] = []
-    var lefts: [i64] = []
-    var rights: [i64] = []
-    var extras: [[i64]] = []
-    var tk_kinds: [text] = []
-    var tk_vals: [text] = []
-    var parse_state = ParseState(pos: 0, root: -1)
-    _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state.root < 0:
+    var parser = MathParser.create()
+    parser.parse_source(source)
+    if parser.tags.len() == 0 or parser.root < 0:
         return source
-    _render_text(parse_state.root, tags, vals, lefts, rights, extras)
+    _render_text(parser.root, parser.tags, parser.vals, parser.lefts, parser.rights, parser.extras)
 
 pub fn to_debug(source: text) -> text:
-    var tags: [text] = []
-    var vals: [text] = []
-    var lefts: [i64] = []
-    var rights: [i64] = []
-    var extras: [[i64]] = []
-    var tk_kinds: [text] = []
-    var tk_vals: [text] = []
-    var parse_state = ParseState(pos: 0, root: -1)
-    _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state.root < 0:
+    var parser = MathParser.create()
+    parser.parse_source(source)
+    if parser.tags.len() == 0 or parser.root < 0:
         return source
-    _render_debug(parse_state.root, tags, vals, lefts, rights, extras)
+    _render_debug(parser.root, parser.tags, parser.vals, parser.lefts, parser.rights, parser.extras)
 
 pub fn to_pretty(source: text) -> text:
-    var tags: [text] = []
-    var vals: [text] = []
-    var lefts: [i64] = []
-    var rights: [i64] = []
-    var extras: [[i64]] = []
-    var tk_kinds: [text] = []
-    var tk_vals: [text] = []
-    var parse_state = ParseState(pos: 0, root: -1)
-    _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state.root < 0:
+    var parser = MathParser.create()
+    parser.parse_source(source)
+    if parser.tags.len() == 0 or parser.root < 0:
         return source
-    _render_pretty(parse_state.root, tags, vals, lefts, rights, extras)
+    _render_pretty(parser.root, parser.tags, parser.vals, parser.lefts, parser.rights, parser.extras)
 
 pub fn to_md(source: text) -> text:
-    var tags: [text] = []
-    var vals: [text] = []
-    var lefts: [i64] = []
-    var rights: [i64] = []
-    var extras: [[i64]] = []
-    var tk_kinds: [text] = []
-    var tk_vals: [text] = []
-    var parse_state = ParseState(pos: 0, root: -1)
-    _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state.root < 0:
+    var parser = MathParser.create()
+    parser.parse_source(source)
+    if parser.tags.len() == 0 or parser.root < 0:
         return "$" + source + "$"
-    _render_md(parse_state.root, tags, vals, lefts, rights, extras)
+    _render_md(parser.root, parser.tags, parser.vals, parser.lefts, parser.rights, parser.extras)
 
 pub fn render_latex_raw(source: text) -> text:
-    var tags: [text] = []
-    var vals: [text] = []
-    var lefts: [i64] = []
-    var rights: [i64] = []
-    var extras: [[i64]] = []
-    var tk_kinds: [text] = []
-    var tk_vals: [text] = []
-    var parse_state = ParseState(pos: 0, root: -1)
-    _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state.root < 0:
+    var parser = MathParser.create()
+    parser.parse_source(source)
+    if parser.tags.len() == 0 or parser.root < 0:
         return source
-    _render_latex(parse_state.root, tags, vals, lefts, rights, extras)
+    _render_latex(parser.root, parser.tags, parser.vals, parser.lefts, parser.rights, parser.extras)

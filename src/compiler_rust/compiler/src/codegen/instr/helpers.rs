@@ -338,7 +338,7 @@ pub fn declare_uniform_i64_import<M: Module>(
     _builder: &mut FunctionBuilder,
     name: &str,
     n_params: usize,
-) -> Result<cranelift_module::FuncId, cranelift_module::ModuleError> {
+) -> Result<cranelift_module::FuncId, Box<cranelift_module::ModuleError>> {
     use cranelift_codegen::ir::{AbiParam, Signature};
     use cranelift_module::Linkage;
 
@@ -350,7 +350,7 @@ pub fn declare_uniform_i64_import<M: Module>(
         sig.params.push(AbiParam::new(types::I64));
     }
     sig.returns.push(AbiParam::new(types::I64));
-    let result = ctx.module.declare_function(name, Linkage::Import, &sig);
+    let result = ctx.module.declare_function(name, Linkage::Import, &sig).map_err(Box::new);
     if let Ok(id) = &result {
         ctx.func_ids.insert(name.to_string(), *id);
     }
