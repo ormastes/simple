@@ -583,9 +583,13 @@ main = 0
         assert!(result.is_err(), "Release mode should reject test profile");
 
         match result {
-            Err(CompileError::Semantic(msg)) | Err(CompileError::SemanticWithContext { message: msg, .. }) => {
+            Err(CompileError::Semantic(ref msg)) => {
                 assert!(msg.contains("#1034"), "Error should reference #1034");
                 assert!(msg.contains("test"), "Error should mention test profile");
+            }
+            Err(CompileError::SemanticWithContext(ref p)) => {
+                assert!(p.message.contains("#1034"), "Error should reference #1034");
+                assert!(p.message.contains("test"), "Error should mention test profile");
             }
             _ => panic!("Expected semantic error with #1034 reference"),
         }
@@ -641,9 +645,13 @@ main = 0
         assert!(result.is_err(), "Release mode should reject runtime AOP");
 
         match result {
-            Err(CompileError::SemanticWithContext { message: msg, .. }) | Err(CompileError::Semantic(msg)) => {
+            Err(CompileError::Semantic(ref msg)) => {
                 assert!(msg.contains("#1035"), "Error should reference #1035");
                 assert!(msg.contains("runtime"), "Error should mention runtime interceptors");
+            }
+            Err(CompileError::SemanticWithContext(ref p)) => {
+                assert!(p.message.contains("#1035"), "Error should reference #1035");
+                assert!(p.message.contains("runtime"), "Error should mention runtime interceptors");
             }
             _ => panic!("Expected semantic error with #1035 reference"),
         }

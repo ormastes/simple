@@ -334,7 +334,7 @@ pub(crate) fn evaluate_expr(
                         }
                         Some(ResultVariant::Err) => {
                             // Return the Err as a TryError that should be propagated
-                            Err(CompileError::TryError(val))
+                            Err(CompileError::TryError(Box::new(val)))
                         }
                         None => {
                             let ctx = ErrorContext::new()
@@ -362,7 +362,7 @@ pub(crate) fn evaluate_expr(
                         }
                         Some(OptionVariant::None) => {
                             // Return None as a TryError
-                            Err(CompileError::TryError(val))
+                            Err(CompileError::TryError(Box::new(val)))
                         }
                         None => {
                             let ctx = ErrorContext::new()
@@ -456,7 +456,7 @@ pub(crate) fn evaluate_expr(
                 Ok(unwrapped)
             } else {
                 // Return the None/Err as a TryError to propagate
-                Err(CompileError::TryError(val))
+                Err(CompileError::TryError(Box::new(val)))
             }
         }
         // Null coalescing: expr ?? default
@@ -581,7 +581,7 @@ pub(crate) fn evaluate_expr(
                         variant: enum_names::NONE.to_string(),
                         payload: None,
                     };
-                    Err(CompileError::TryError(none_val))
+                    Err(CompileError::TryError(Box::new(none_val)))
                 }
             }
         }

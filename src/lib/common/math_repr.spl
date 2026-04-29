@@ -291,7 +291,7 @@ fn _latex_greek(name: text) -> text:
 
 fn _reset(
     tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]],
-    tk_kinds: [text], tk_vals: [text], parse_state: [i64]
+    tk_kinds: [text], tk_vals: [text], parse_state: ParseState
 ):
     tags.clear()
     vals.clear()
@@ -300,8 +300,8 @@ fn _reset(
     extras.clear()
     tk_kinds.clear()
     tk_vals.clear()
-    parse_state[0] = 0
-    parse_state[1] = -1
+    parse_state.pos = 0
+    parse_state.root = -1
 
 # reason: positional math_repr API
 fn _mk(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tag: text, tval: text, left: i64, right: i64) -> i64:
@@ -322,6 +322,23 @@ fn _mk_call(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i
     rights.push(-1)
     extras.push(args)
     idx
+
+class ParseState:
+    pos: i64
+    root: i64
+
+    fn peek_kind(tk_kinds: [text]) -> text:
+        if self.pos >= tk_kinds.len():
+            return "eof"
+        tk_kinds[self.pos]
+
+    fn peek_val(tk_vals: [text]) -> text:
+        if self.pos >= tk_vals.len():
+            return ""
+        tk_vals[self.pos]
+
+    me advance():
+        self.pos = self.pos + 1
 
 # reason: positional math_repr API
 fn _tokenize(source: text, tk_kinds: [text], tk_vals: [text]):
@@ -425,27 +442,23 @@ fn _tokenize(source: text, tk_kinds: [text], tk_vals: [text]):
     tk_kinds.push("eof")
     tk_vals.push("")
 
-fn _peek_kind(tk_kinds: [text], parse_state: [i64]) -> text:
-    if parse_state[0] >= tk_kinds.len():
-        return "eof"
-    tk_kinds[parse_state[0]]
+fn _peek_kind(tk_kinds: [text], parse_state: ParseState) -> text:
+    parse_state.peek_kind(tk_kinds)
 
-fn _peek_val(tk_vals: [text], parse_state: [i64]) -> text:
-    if parse_state[0] >= tk_vals.len():
-        return ""
-    tk_vals[parse_state[0]]
+fn _peek_val(tk_vals: [text], parse_state: ParseState) -> text:
+    parse_state.peek_val(tk_vals)
 
-fn _advance(parse_state: [i64]):
-    parse_state[0] = parse_state[0] + 1
+fn _advance(parse_state: ParseState):
+    parse_state.advance()
 
-fn _can_start_expr(tk_kinds: [text], parse_state: [i64]) -> bool:
+fn _can_start_expr(tk_kinds: [text], parse_state: ParseState) -> bool:
     val pk = _peek_kind(tk_kinds, parse_state)
     if pk == "num": return true
     if pk == "id": return true
     if pk == "lparen": return true
     false
 
-fn _can_implicit_mul(tk_kinds: [text], parse_state: [i64]) -> bool:
+fn _can_implicit_mul(tk_kinds: [text], parse_state: ParseState) -> bool:
     if not _can_start_expr(tk_kinds, parse_state):
         return false
     val pk = _peek_kind(tk_kinds, parse_state)
@@ -454,11 +467,11 @@ fn _can_implicit_mul(tk_kinds: [text], parse_state: [i64]) -> bool:
     false
 
 # reason: positional math_repr API
-fn _parse_expr(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]) -> i64:
+fn _parse_expr(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState) -> i64:
     _parse_add(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
 
 # reason: positional math_repr API
-fn _parse_add(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]) -> i64:
+fn _parse_add(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState) -> i64:
     var left = _parse_mul(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
     for _loop in 0..1000:
         val pk = _peek_kind(tk_kinds, parse_state)
@@ -476,7 +489,7 @@ fn _parse_add(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [
     left
 
 # reason: positional math_repr API
-fn _parse_mul(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]) -> i64:
+fn _parse_mul(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState) -> i64:
     var left = _parse_unary(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
     for _loop in 0..1000:
         val pk = _peek_kind(tk_kinds, parse_state)
@@ -497,7 +510,7 @@ fn _parse_mul(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [
     left
 
 # reason: positional math_repr API
-fn _parse_unary(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]) -> i64:
+fn _parse_unary(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState) -> i64:
     val pk = _peek_kind(tk_kinds, parse_state)
     val pv = _peek_val(tk_vals, parse_state)
     if pk == "op" and pv == "-":
@@ -507,7 +520,7 @@ fn _parse_unary(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras:
     _parse_pow(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
 
 # reason: positional math_repr API
-fn _parse_pow(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]) -> i64:
+fn _parse_pow(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState) -> i64:
     var base = _parse_postfix(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
     val pk = _peek_kind(tk_kinds, parse_state)
     val pv = _peek_val(tk_vals, parse_state)
@@ -518,7 +531,7 @@ fn _parse_pow(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [
     base
 
 # reason: positional math_repr API
-fn _parse_postfix(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]) -> i64:
+fn _parse_postfix(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState) -> i64:
     var node = _parse_primary(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
     for _loop in 0..100:
         if _peek_kind(tk_kinds, parse_state) == "lbracket":
@@ -535,7 +548,7 @@ fn _parse_postfix(tags: [text], vals: [text], lefts: [i64], rights: [i64], extra
     node
 
 # reason: positional math_repr API
-fn _parse_primary(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]) -> i64:
+fn _parse_primary(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState) -> i64:
     val pk = _peek_kind(tk_kinds, parse_state)
     val pv = _peek_val(tk_vals, parse_state)
 
@@ -579,7 +592,7 @@ fn _parse_primary(tags: [text], vals: [text], lefts: [i64], rights: [i64], extra
     _mk(tags, vals, lefts, rights, extras, "id", "?", -1, -1)
 
 # reason: positional math_repr API
-fn _parse_frac_call(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]) -> i64:
+fn _parse_frac_call(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState) -> i64:
     _advance(parse_state)
     val num = _parse_expr(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
     if _peek_kind(tk_kinds, parse_state) == "comma":
@@ -590,7 +603,7 @@ fn _parse_frac_call(tags: [text], vals: [text], lefts: [i64], rights: [i64], ext
     _mk(tags, vals, lefts, rights, extras, "frac", "frac", num, den)
 
 # reason: positional math_repr API
-fn _parse_sum_call(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64], kind: text) -> i64:
+fn _parse_sum_call(tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState, kind: text) -> i64:
     _advance(parse_state)
     val var_name = _peek_val(tk_vals, parse_state)
     _advance(parse_state)
@@ -615,11 +628,11 @@ fn _parse_sum_call(tags: [text], vals: [text], lefts: [i64], rights: [i64], extr
     idx
 
 # reason: positional math_repr API
-fn _parse_source(source: text, tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: [i64]):
+fn _parse_source(source: text, tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]], tk_kinds: [text], tk_vals: [text], parse_state: ParseState):
     _reset(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
     _tokenize(source, tk_kinds, tk_vals)
-    parse_state[0] = 0
-    parse_state[1] = _parse_expr(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
+    parse_state.pos = 0
+    parse_state.root = _parse_expr(tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
 
 # reason: positional math_repr API
 fn _render_text(idx: i64, tags: [text], vals: [text], lefts: [i64], rights: [i64], extras: [[i64]]) -> text:
@@ -782,11 +795,11 @@ pub fn to_text(source: text) -> text:
     var extras: [[i64]] = []
     var tk_kinds: [text] = []
     var tk_vals: [text] = []
-    var parse_state: [i64] = [0, -1]
+    var parse_state = ParseState(pos: 0, root: -1)
     _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state[1] < 0:
+    if tags.len() == 0 or parse_state.root < 0:
         return source
-    _render_text(parse_state[1], tags, vals, lefts, rights, extras)
+    _render_text(parse_state.root, tags, vals, lefts, rights, extras)
 
 pub fn to_debug(source: text) -> text:
     var tags: [text] = []
@@ -796,11 +809,11 @@ pub fn to_debug(source: text) -> text:
     var extras: [[i64]] = []
     var tk_kinds: [text] = []
     var tk_vals: [text] = []
-    var parse_state: [i64] = [0, -1]
+    var parse_state = ParseState(pos: 0, root: -1)
     _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state[1] < 0:
+    if tags.len() == 0 or parse_state.root < 0:
         return source
-    _render_debug(parse_state[1], tags, vals, lefts, rights, extras)
+    _render_debug(parse_state.root, tags, vals, lefts, rights, extras)
 
 pub fn to_pretty(source: text) -> text:
     var tags: [text] = []
@@ -810,11 +823,11 @@ pub fn to_pretty(source: text) -> text:
     var extras: [[i64]] = []
     var tk_kinds: [text] = []
     var tk_vals: [text] = []
-    var parse_state: [i64] = [0, -1]
+    var parse_state = ParseState(pos: 0, root: -1)
     _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state[1] < 0:
+    if tags.len() == 0 or parse_state.root < 0:
         return source
-    _render_pretty(parse_state[1], tags, vals, lefts, rights, extras)
+    _render_pretty(parse_state.root, tags, vals, lefts, rights, extras)
 
 pub fn to_md(source: text) -> text:
     var tags: [text] = []
@@ -824,11 +837,11 @@ pub fn to_md(source: text) -> text:
     var extras: [[i64]] = []
     var tk_kinds: [text] = []
     var tk_vals: [text] = []
-    var parse_state: [i64] = [0, -1]
+    var parse_state = ParseState(pos: 0, root: -1)
     _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state[1] < 0:
+    if tags.len() == 0 or parse_state.root < 0:
         return "$" + source + "$"
-    _render_md(parse_state[1], tags, vals, lefts, rights, extras)
+    _render_md(parse_state.root, tags, vals, lefts, rights, extras)
 
 pub fn render_latex_raw(source: text) -> text:
     var tags: [text] = []
@@ -838,8 +851,8 @@ pub fn render_latex_raw(source: text) -> text:
     var extras: [[i64]] = []
     var tk_kinds: [text] = []
     var tk_vals: [text] = []
-    var parse_state: [i64] = [0, -1]
+    var parse_state = ParseState(pos: 0, root: -1)
     _parse_source(source, tags, vals, lefts, rights, extras, tk_kinds, tk_vals, parse_state)
-    if tags.len() == 0 or parse_state[1] < 0:
+    if tags.len() == 0 or parse_state.root < 0:
         return source
-    _render_latex(parse_state[1], tags, vals, lefts, rights, extras)
+    _render_latex(parse_state.root, tags, vals, lefts, rights, extras)

@@ -57,12 +57,20 @@ struct SmfFlags:
 # In-Memory SMF Reader
 # ============================================================================
 
-"""SMF reader that works with in-memory byte array."""
+"""SMF reader that works with in-memory byte array.
+
+Performance: the heavy symbol table + name parsing is done lazily on the first
+call to lookup_symbol / exported_symbols. Header-only consumers (read_relocations,
+get_header, has_elf_object) never trigger it. This keeps from_data O(header_size)
+even for 8 MB SMFs with tens of thousands of symbols inside the interpreter.
+"""
 struct SmfReaderMemory:
     data: [u8]               # Complete SMF file data
     header: SmfHeader        # Parsed header
-    symbols: Dict<text, SmfSymbol>  # Symbol table
-    string_table: [u8]       # String table for names
+    symbols: Dict<text, SmfSymbol>  # Symbol table (populated lazily)
+    symbols_parsed: bool     # True once symbols dict has been parsed
+    string_table_offset: i64 # Absolute offset of string table inside `data`
+    string_table_end: i64    # Absolute end offset of string table inside `data`
     sections_offset: i64     # Offset to section table
     symbols_offset: i64      # Offset to symbol table
 
@@ -95,30 +103,53 @@ impl SmfReaderMemory:
         # Read symbol table offset
         val symbols_offset = header.symbol_table_offset as i64
 
-        # Parse string table (needed for symbol names)
-        val string_table = extract_string_table(data, header)?
+        # Locate string table bounds (does not allocate / copy).
+        val str_bounds = locate_string_table(data, header)?
+        val (str_off, str_end) = str_bounds
 
-        # Parse symbol table
-        val symbols = parse_symbol_table(data, header, string_table)?
+        # Symbol table is parsed lazily on first lookup_symbol / exported_symbols.
+        val empty_symbols: Dict<text, SmfSymbol> = {}
 
         Ok(SmfReaderMemory(
             data: data,
             header: header,
-            symbols: symbols,
-            string_table: string_table,
+            symbols: empty_symbols,
+            symbols_parsed: false,
+            string_table_offset: str_off,
+            string_table_end: str_end,
             sections_offset: sections_offset,
             symbols_offset: symbols_offset
         ))
 
+    """Parse the symbol dict on demand (idempotent)."""
+    me ensure_symbols_parsed():
+        if self.symbols_parsed:
+            return
+        val parsed_result = parse_symbol_table_inplace(
+            self.data,
+            self.header,
+            self.string_table_offset,
+            self.string_table_end
+        )
+        match parsed_result:
+            Ok(parsed):
+                self.symbols = parsed
+                self.symbols_parsed = true
+            Err(_):
+                # Leave dict empty on error — callers will see a missing symbol.
+                self.symbols_parsed = true
+
     """Look up a symbol by name."""
-    fn lookup_symbol(name: text) -> Result<SmfSymbol, text>:
+    me lookup_symbol(name: text) -> Result<SmfSymbol, text>:
+        self.ensure_symbols_parsed()
         if self.symbols.has(name):
             Ok(self.symbols[name])
         else:
             Err("Symbol not found: {name}")
 
     """Get all exported symbols."""
-    fn exported_symbols() -> [SmfSymbol]:
+    me exported_symbols() -> [SmfSymbol]:
+        self.ensure_symbols_parsed()
         var result: [SmfSymbol] = []
         # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
         for name in self.symbols.keys():
@@ -464,7 +495,116 @@ fn smf_payload_offset_value(offset: i64, smf_data_offset: i64) -> i64:
 fn smf_payload_file_offset(header: SmfHeader, offset: i64) -> i64:
     smf_payload_offset_value(offset, header.smf_data_offset)
 
-"""Extract string table from SMF data."""
+"""Locate the string-table byte range inside `data`, without copying.
+
+Returns (start_offset, end_offset) or an error. Used by from_data so that
+header-only consumers don't pay an O(strtab_size) copy in interpreter mode.
+"""
+fn locate_string_table(data: [u8], header: SmfHeader) -> Result<(i64, i64), text>:
+    val section_entry_size = 56
+    val section_count = header.section_count as i64
+    val sections_off = header.section_table_offset
+
+    var i = 0
+    while i < section_count:
+        val entry_off = sections_off + i * section_entry_size
+        val entry_end = entry_off + section_entry_size
+        if entry_end > data.len():
+            i = i + 1
+            continue
+        val sec_type = data[entry_off] as i32
+        if sec_type == 6:
+            val str_offset_raw = bytes_to_u64(data, entry_off + 8) as i64
+            val str_offset = smf_payload_file_offset(header, str_offset_raw)
+            val str_size = bytes_to_u64(data, entry_off + 16) as i64
+            val str_end = str_offset + str_size
+            if str_end > data.len():
+                return Err("String table section extends beyond data")
+            return Ok((str_offset, str_end))
+        i = i + 1
+
+    # Fallback: implicit string table immediately follows symbol table.
+    val symbol_entry_size = 56
+    val sym_table_off = header.symbol_table_offset
+    val sym_count = header.symbol_count as i64
+    val str_start = sym_table_off + sym_count * symbol_entry_size
+    var str_end_fallback = data.len()
+    if header.header_offset > str_start:
+        str_end_fallback = header.header_offset
+    if str_start > data.len():
+        return Err("String table offset beyond data (sym_table={sym_table_off}, sym_count={sym_count})")
+    Ok((str_start, str_end_fallback))
+
+"""Read a null-terminated string directly from `data`, no intermediate copy.
+
+`abs_offset` is the absolute byte offset inside `data` where the name starts.
+`stop_at` is an exclusive upper bound (typically the string-table end).
+"""
+fn read_string_at(data: [u8], abs_offset: i64, stop_at: i64) -> text:
+    var name_bytes: [u8] = []
+    var pos = abs_offset
+    val limit = if stop_at < data.len(): stop_at else: data.len()
+    while pos < limit:
+        val byte = data[pos]
+        if byte == 0:
+            return rt_bytes_to_text(name_bytes)
+        name_bytes.push(byte)
+        pos = pos + 1
+    rt_bytes_to_text(name_bytes)
+
+"""Parse the symbol dict using raw data + string-table bounds (no copy)."""
+fn parse_symbol_table_inplace(
+    data: [u8],
+    header: SmfHeader,
+    str_off: i64,
+    str_end: i64
+) -> Result<Dict<text, SmfSymbol>, text>:
+    var symbols: Dict<text, SmfSymbol> = {}
+    val symbol_entry_size = 56
+    val sym_table_off = header.symbol_table_offset
+    val sym_count = header.symbol_count as i64
+
+    var i = 0
+    while i < sym_count:
+        val entry_off = sym_table_off + i * symbol_entry_size
+        val entry_end = entry_off + symbol_entry_size
+        if entry_end > data.len():
+            return Err("Symbol entry {i} extends beyond data")
+
+        val name_offset = bytes_to_u32(data, entry_off)
+        val sym_type = data[entry_off + 8]
+        val binding_raw = data[entry_off + 9]
+        val flags_raw = data[entry_off + 11]
+        val value = bytes_to_u64(data, entry_off + 16)
+        val size = bytes_to_u64(data, entry_off + 24)
+        val tpl_param_count = data[entry_off + 40]
+        val tpl_offset = bytes_to_u64(data, entry_off + 48)
+
+        val abs_name_offset = str_off + (name_offset as i64)
+        val name = read_string_at(data, abs_name_offset, str_end)
+
+        val section_idx = derive_section_index(sym_type)
+        val binding = parse_binding(binding_raw)
+        val sym_ty = parse_sym_type(sym_type)
+        val is_generic = (flags_raw & 0x10) != 0
+
+        val symbol = SmfSymbol(
+            name: name,
+            section_index: section_idx,
+            offset: value as i64,
+            size: size as i64,
+            ty: sym_ty,
+            binding: binding,
+            is_generic_template: is_generic,
+            template_param_count: tpl_param_count as i32,
+            template_offset: tpl_offset as i64
+        )
+        symbols[name] = symbol
+        i = i + 1
+
+    Ok(symbols)
+
+"""Extract string table from SMF data (legacy; kept for callers that copy)."""
 fn extract_string_table(data: [u8], header: SmfHeader) -> Result<[u8], text>:
     val section_entry_size = 56
     val section_count = header.section_count as i64

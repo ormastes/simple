@@ -52,7 +52,7 @@ macro_rules! extract_block_result {
             Ok((crate::interpreter::Control::Return(v), _)) => v,
             Ok((_, Some(v))) => v,
             Ok((_, None)) => Value::Nil,
-            Err(crate::error::CompileError::TryError(val)) => val,
+            Err(crate::error::CompileError::TryError(val)) => *val,
             Err(e) => return Err(e),
         }
     };

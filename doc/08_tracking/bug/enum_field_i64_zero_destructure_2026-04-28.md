@@ -97,7 +97,7 @@ Fix order matters:
 
 3. **`lowering_expr_call.rs` ~lines 115–130**: Insert `MirInst::BoxInt` before each `rt_array_push` call for integer-typed enum construction args (mirrors what `lower_assign_stmt` does for regular assignments).
 
-### Fix attempt (2026-04-28) — INCOMPLETE
+### Fix attempt (2026-04-28) — INCOMPLETE (Fixes #1 and #3 only)
 
 Fixes #1 and #3 were applied in tree:
 - `stmt_lowering.rs:893-896` — `payload_expr_ty = TypeId::ANY` when `payload_patterns.len() > 1`.
@@ -107,21 +107,21 @@ Verification: rebuilt with `cargo build`, force-rebuilt the QEMU kernel, switche
 
 Reverted D4 to compact-API; live gate restored to 36/0.
 
-**The bug is deeper than the traced 4-step path.** Possible additional sources:
-- Step 2 (`lowering_expr_builtin.rs` `rt_enum_payload` UnboxInt) may still trigger something else even when `expr_ty=ANY` (e.g., the `tagged_vregs` insertion at line 33 with downstream Store/Load propagation).
-- The runtime `rt_array_push_handle` may not actually preserve tagging across the array slot despite the comment.
-- `rt_index_get`'s `ENCODE_INT(idx)` may interact unexpectedly with our BoxInt'd values during lookup.
-- A separate path in MIR lowering may still insert `UnboxInt` between construction and destructuring.
+**Root cause identified:** `tagged_vregs.insert(raw_result)` at `lowering_expr_builtin.rs:33` was unconditional. When `expr_ty=ANY` (multi-field, after Fix #1), this poisoned the wrapper-array heap pointer as a "tagged scalar". Downstream `lowering_stmt.rs:384-409` then saw the "tagged" vreg with integer target type and emitted `UnboxInt` on the heap pointer, producing `DECODE_INT(3)=0` (NIL_VALUE path).
 
-A future investigation should probe between each step empirically (print intermediate VReg values during run) instead of only static-tracing.
+### Fix #2 (2026-04-29) — COMPLETE
 
-The live gate is green via the `rt_tls13_record_decrypt_compact` workaround. The compiler partial fix remains in tree; reverting it is unnecessary because it doesn't regress anything (live gate is 36/0 with the workaround).
+Removed the unconditional `self.tagged_vregs.insert(raw_result)` from `lowering_expr_builtin.rs`. For single-field scalar paths (`needs_int_unbox`/`needs_float_unbox`), the raw_result is immediately `UnboxInt`/`UnboxFloat`'d and returned — tagged status was never needed downstream. For `ANY`/opaque multi-field array pointer paths, the insert was actively harmful.
 
-## Workaround in tree (2026-04-28)
+Commit: `33dc3f701647285abdda353a4a88ec95859fc8c2`
 
-For the TLS record-decrypt path, added a parallel API `rt_tls13_record_decrypt_compact` (C extern in `examples/simple_os/arch/x86_64/boot/baremetal_stubs.c`) that returns the content_type as byte[0] of a `[u8]` runtime array, with the data bytes following. Test code calls this directly via `rt_bytes_u8_at(res, 0)` to read content_type instead of going through the enum.
+Verification: rebuilt bootstrap profile (`cargo build --profile bootstrap -p simple-compiler -p simple-driver`), force-rebuilt QEMU kernel, switched D4 back to enum destructuring (`if val RecordResult.Ok(ct4, dt4) = dec4`). Result: **36 passed, 0 failed. D4 PASS. [ALL TESTS PASSED].**
 
-`src/os/tls13/record13.spl` keeps the `RecordResult` enum for hosted-mode and for callers that don't need the integer field. The `i64` field type was a probe — `u8` had the same bug.
+Workaround `rt_tls13_record_decrypt_compact` removed from D4; `tls_unit_entry.spl` now uses native enum destructuring throughout.
+
+## Workaround (removed 2026-04-29)
+
+The workaround `rt_tls13_record_decrypt_compact` was removed from D4 in `tls_unit_entry.spl` once Fix #2 confirmed the bug was fixed. The C extern remains in `baremetal_stubs.c` for reference but is no longer called by test code.
 
 ## Why root-cause fix matters
 

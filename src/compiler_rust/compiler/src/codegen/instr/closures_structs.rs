@@ -639,33 +639,72 @@ fn try_compile_builtin_method_call<M: Module>(
         } else {
             let src_ty = builder.func.dfg.value_type(receiver_val);
             let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
-            match to_ty {
-                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, receiver_val),
-                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, receiver_val),
-                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, receiver_val),
-                TypeId::U64 | TypeId::I64 => match src_ty {
-                    types::I8 | types::I16 | types::I32 => {
-                        if from_signed {
-                            builder.ins().sextend(types::I64, receiver_val)
+            // Defensive: MIR's `from_ty` is sometimes wrong when an
+            // expression chain returned a float but the result vreg kept its
+            // declared int type (e.g. `(a.to_f32() * opacity).to_u32()` in
+            // browser_engine `_apply_opacity`, where `a.to_f32() * opacity`
+            // is f32 at runtime but vreg_types still records the surrounding
+            // u32). Without this branch we'd dispatch a bare `ireduce.i32`
+            // on an f32 value and the verifier rejects it. Honor the
+            // cranelift value type so float→int casts always go through
+            // `fcvt_to_{sint,uint}`.
+            let actual_is_float = src_ty == types::F32 || src_ty == types::F64;
+            let to_is_int = matches!(
+                to_ty,
+                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64
+                    | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+            );
+            if actual_is_float && to_is_int {
+                let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+                let widened = if to_signed {
+                    builder.ins().fcvt_to_sint(types::I64, receiver_val)
+                } else {
+                    builder.ins().fcvt_to_uint(types::I64, receiver_val)
+                };
+                match to_ty {
+                    TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, widened),
+                    TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, widened),
+                    TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, widened),
+                    _ => widened, // I64/U64
+                }
+            } else if actual_is_float && matches!(to_ty, TypeId::F32 | TypeId::F64) {
+                // Float→float: promote/demote between F32 and F64.
+                if src_ty == types::F32 && to_ty == TypeId::F64 {
+                    builder.ins().fpromote(types::F64, receiver_val)
+                } else if src_ty == types::F64 && to_ty == TypeId::F32 {
+                    builder.ins().fdemote(types::F32, receiver_val)
+                } else {
+                    receiver_val
+                }
+            } else {
+                match to_ty {
+                    TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, receiver_val),
+                    TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, receiver_val),
+                    TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, receiver_val),
+                    TypeId::U64 | TypeId::I64 => match src_ty {
+                        types::I8 | types::I16 | types::I32 => {
+                            if from_signed {
+                                builder.ins().sextend(types::I64, receiver_val)
+                            } else {
+                                builder.ins().uextend(types::I64, receiver_val)
+                            }
+                        }
+                        _ => receiver_val,
+                    },
+                    TypeId::F32 | TypeId::F64 => {
+                        let float_val = if from_signed {
+                            builder.ins().fcvt_from_sint(types::F64, receiver_val)
                         } else {
-                            builder.ins().uextend(types::I64, receiver_val)
+                            builder.ins().fcvt_from_uint(types::F64, receiver_val)
+                        };
+                        if to_ty == TypeId::F32 {
+                            builder.ins().fdemote(types::F32, float_val)
+                        } else {
+                            float_val
                         }
                     }
                     _ => receiver_val,
-                },
-                TypeId::F32 | TypeId::F64 => {
-                    let float_val = if from_signed {
-                        builder.ins().fcvt_from_sint(types::F64, receiver_val)
-                    } else {
-                        builder.ins().fcvt_from_uint(types::F64, receiver_val)
-                    };
-                    if to_ty == TypeId::F32 {
-                        builder.ins().fdemote(types::F32, float_val)
-                    } else {
-                        float_val
-                    }
                 }
-                _ => receiver_val,
             }
         };
         return Ok(Some(converted));

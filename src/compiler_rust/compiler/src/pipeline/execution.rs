@@ -139,11 +139,13 @@ impl CompilerPipeline {
                     CompileError::Semantic(msg) => {
                         return Err(CompileError::Semantic(format!("{}: {}", source_path.display(), msg)))
                     }
-                    CompileError::SemanticWithContext { message, context } => {
-                        return Err(CompileError::SemanticWithContext {
-                            message: format!("{}: {}", source_path.display(), message),
-                            context,
-                        })
+                    CompileError::SemanticWithContext(payload) => {
+                        return Err(CompileError::SemanticWithContext(Box::new(
+                            crate::error::ContextualError {
+                                message: format!("{}: {}", source_path.display(), payload.message),
+                                context: payload.context,
+                            },
+                        )))
                     }
                     other => return Err(other),
                 }

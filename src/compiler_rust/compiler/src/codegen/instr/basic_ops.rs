@@ -40,8 +40,18 @@ pub fn compile_cast<M: Module>(
         None => return Err(format!("Cast: source vreg {:?} not found", source)),
     };
 
-    // Determine source and target types
-    let is_from_float = from_ty == TypeId::F64 || from_ty == TypeId::F32;
+    // Determine source and target types.
+    //
+    // Defensive: MIR lowering occasionally annotates a float-producing
+    // expression with an integer source type (e.g. `(a.to_f32() * opacity).to_u32()`
+    // in browser_engine `_apply_opacity`, where the multiplication's result vreg
+    // is left typed as i32/u32 even though codegen emitted `fmul` and the runtime
+    // value is f32). Honor the actual cranelift value type so we don't dispatch a
+    // bare `ireduce` on a float — the verifier rejects that with
+    // "ireduce.i32 vN: arg type f32 failed to satisfy type set".
+    let actual_src_ty = builder.func.dfg.value_type(src_val);
+    let actual_is_float = actual_src_ty == types::F32 || actual_src_ty == types::F64;
+    let is_from_float = from_ty == TypeId::F64 || from_ty == TypeId::F32 || actual_is_float;
     let is_to_float = to_ty == TypeId::F64 || to_ty == TypeId::F32;
     let to_int_width = match to_ty {
         TypeId::I8 | TypeId::U8 => Some(types::I8),

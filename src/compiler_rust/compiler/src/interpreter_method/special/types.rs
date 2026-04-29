@@ -22,7 +22,7 @@ macro_rules! extract_block_result {
             Ok((Control::Return(v), _)) => v,
             Ok((_, Some(v))) => v,
             Ok((_, None)) => Value::Nil,
-            Err(CompileError::TryError(val)) => val,
+            Err(CompileError::TryError(val)) => *val,
             Err(e) => return Err(e),
         }
     };

@@ -18,7 +18,7 @@ macro_rules! extract_block_result {
             Ok((Control::Return(v), _)) => v,
             Ok((_, Some(v))) => v,
             Ok((_, None)) => Value::Nil,
-            Err(CompileError::TryError(val)) => val,
+            Err(CompileError::TryError(val)) => *val,
             Err(e) => return Err(e),
         }
     };
@@ -137,7 +137,7 @@ pub fn exec_function_with_self_return(
         Ok((Control::Return(v), _)) => v,
         Ok((_, Some(v))) => v,
         Ok((_, None)) => Value::Nil,
-        Err(CompileError::TryError(val)) => val,
+        Err(CompileError::TryError(val)) => *val,
         Err(e) => return Err(e),
     };
 

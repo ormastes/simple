@@ -456,6 +456,21 @@ impl ErrorContext {
     }
 }
 
+/// Boxed payload for rich-context error variants.
+///
+/// Kept on the heap so that `CompileError` remains small (pointer-sized payload).
+#[derive(Debug, Clone)]
+pub struct ContextualError {
+    pub message: String,
+    pub context: ErrorContext,
+}
+
+impl std::fmt::Display for ContextualError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
 /// Compilation errors with optional rich context.
 #[derive(Error, Debug)]
 pub enum CompileError {
@@ -475,7 +490,7 @@ pub enum CompileError {
     Runtime(String),
     /// Error from ? operator that should be propagated as a return value
     #[error("try: early return")]
-    TryError(Value),
+    TryError(Box<Value>),
     /// Execution was interrupted by user (Ctrl-C)
     #[error("interrupted: execution stopped by user request")]
     InterruptedByUser,
@@ -500,18 +515,18 @@ pub enum CompileError {
     TimeoutExceeded { timeout_secs: u64 },
 
     // Rich variants with context (new API)
-    #[error("io: {message}")]
-    IoWithContext { message: String, context: ErrorContext },
-    #[error("parse: {message}")]
-    ParseWithContext { message: String, context: ErrorContext },
-    #[error("semantic: {message}")]
-    SemanticWithContext { message: String, context: ErrorContext },
-    #[error("codegen: {message}")]
-    CodegenWithContext { message: String, context: ErrorContext },
-    #[error("lint: {message}")]
-    LintWithContext { message: String, context: ErrorContext },
-    #[error("runtime: {message}")]
-    RuntimeWithContext { message: String, context: ErrorContext },
+    #[error("io: {}", _0.message)]
+    IoWithContext(Box<ContextualError>),
+    #[error("parse: {}", _0.message)]
+    ParseWithContext(Box<ContextualError>),
+    #[error("semantic: {}", _0.message)]
+    SemanticWithContext(Box<ContextualError>),
+    #[error("codegen: {}", _0.message)]
+    CodegenWithContext(Box<ContextualError>),
+    #[error("lint: {}", _0.message)]
+    LintWithContext(Box<ContextualError>),
+    #[error("runtime: {}", _0.message)]
+    RuntimeWithContext(Box<ContextualError>),
 }
 
 impl CompileError {
@@ -551,61 +566,61 @@ impl CompileError {
         let ctx = ErrorContext::new()
             .with_code(codes::CONTRACT_PRECONDITION_FAILED)
             .with_help("ensure the contract condition is satisfied before function call");
-        Self::RuntimeWithContext {
+        Self::RuntimeWithContext(Box::new(ContextualError {
             message: message.into(),
             context: ctx,
-        }
+        }))
     }
 
     /// Create a semantic error with context.
     pub fn semantic_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self::SemanticWithContext {
+        Self::SemanticWithContext(Box::new(ContextualError {
             message: message.into(),
             context,
-        }
+        }))
     }
 
     /// Create a runtime error with context.
     pub fn runtime_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self::RuntimeWithContext {
+        Self::RuntimeWithContext(Box::new(ContextualError {
             message: message.into(),
             context,
-        }
+        }))
     }
 
     /// Create a parse error with context.
     pub fn parse_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self::ParseWithContext {
+        Self::ParseWithContext(Box::new(ContextualError {
             message: message.into(),
             context,
-        }
+        }))
     }
 
     /// Create an I/O error with context.
     pub fn io_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self::IoWithContext {
+        Self::IoWithContext(Box::new(ContextualError {
             message: message.into(),
             context,
-        }
+        }))
     }
 
     /// Create a codegen error with context.
     pub fn codegen_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self::CodegenWithContext {
+        Self::CodegenWithContext(Box::new(ContextualError {
             message: message.into(),
             context,
-        }
+        }))
     }
 
     /// Get the error context if available.
     pub fn context(&self) -> Option<&ErrorContext> {
         match self {
-            Self::IoWithContext { context, .. } => Some(context),
-            Self::ParseWithContext { context, .. } => Some(context),
-            Self::SemanticWithContext { context, .. } => Some(context),
-            Self::CodegenWithContext { context, .. } => Some(context),
-            Self::LintWithContext { context, .. } => Some(context),
-            Self::RuntimeWithContext { context, .. } => Some(context),
+            Self::IoWithContext(p) => Some(&p.context),
+            Self::ParseWithContext(p) => Some(&p.context),
+            Self::SemanticWithContext(p) => Some(&p.context),
+            Self::CodegenWithContext(p) => Some(&p.context),
+            Self::LintWithContext(p) => Some(&p.context),
+            Self::RuntimeWithContext(p) => Some(&p.context),
             _ => None,
         }
     }
@@ -619,12 +634,12 @@ impl CompileError {
             Self::Codegen(msg) => msg,
             Self::Lint(msg) => msg,
             Self::Runtime(msg) => msg,
-            Self::IoWithContext { message, .. } => message,
-            Self::ParseWithContext { message, .. } => message,
-            Self::SemanticWithContext { message, .. } => message,
-            Self::CodegenWithContext { message, .. } => message,
-            Self::LintWithContext { message, .. } => message,
-            Self::RuntimeWithContext { message, .. } => message,
+            Self::IoWithContext(p) => &p.message,
+            Self::ParseWithContext(p) => &p.message,
+            Self::SemanticWithContext(p) => &p.message,
+            Self::CodegenWithContext(p) => &p.message,
+            Self::LintWithContext(p) => &p.message,
+            Self::RuntimeWithContext(p) => &p.message,
             Self::TryError(_) => "try: early return",
             Self::InterruptedByUser => "interrupted: execution stopped by user request",
             Self::GhostError(msg) => msg,
@@ -637,7 +652,7 @@ impl CompileError {
     /// Get the severity for this error type.
     fn severity(&self) -> Severity {
         match self {
-            Self::Lint(_) | Self::LintWithContext { .. } => Severity::Warning,
+            Self::Lint(_) | Self::LintWithContext(_) => Severity::Warning,
             _ => Severity::Error,
         }
     }

@@ -143,7 +143,7 @@ pub(crate) fn instantiate_class(
                     class: class_name.to_string(),
                     fields: Arc::new(fields),
                 })),
-                Err(CompileError::TryError(val)) => Ok(val),
+                Err(CompileError::TryError(val)) => Ok(*val),
                 Err(e) => Err(e),
             };
 
