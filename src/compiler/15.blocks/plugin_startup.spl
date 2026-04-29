@@ -1,0 +1,251 @@
+# Plugin Startup — Two-Phase Block Plugin Loader
+#
+# Phase 1 (index): called at compiler start; scans discovery paths for
+#   manifest files and builds an index.  No dlopen occurs.
+# Phase 2 (activate): called by std.plugin.use_plugin(name); performs
+#   dlopen + register_block for any block entries in the named plugin.
+#
+# Pure-Simple plugin files (no .so) are supported via a pre-registration
+# hook table.  A .spl plugin file calls register_simple_plugin(name, hook)
+# at module init; activate_plugin then fires the hook directly.
+#
+# For .so-based block plugins the manifest must list block class names in
+# the `functions` list prefixed with "block:" (e.g. "block:CsvBlockDef").
+# This avoids adding a new `blocks` field to PluginEntry (schema stability).
+#
+# Compiler-start wiring: frontend.spl calls run_plugin_startup() before
+# desugar_collections.
+
+use compiler.blocks.blocks.registry.{register_block, block_registry, is_block}
+use compiler.blocks.blocks.easy.{define_block}
+use compiler.blocks.modes.{LexerMode}
+
+# ============================================================================
+# Extern declarations (no new rt_* — all already whitelisted)
+# ============================================================================
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_home() -> text
+extern fn rt_dir_list(path: text) -> [text]
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+
+# ============================================================================
+# Manifest types (minimal — mirrors PluginEntry from app.plugin.registry
+# but declared locally to avoid a compiler -> app cycle)
+# ============================================================================
+
+struct StartupPluginEntry:
+    name: text
+    library: text
+    functions: [text]
+
+# ============================================================================
+# Pure-Simple plugin hook table
+# ============================================================================
+# A pure-Simple plugin file registers a setup hook by calling
+# register_simple_plugin("my-plugin", my_setup_fn) at module level.
+# activate_plugin looks up the hook and fires it; the hook is expected to
+# call register_block() for each block it provides and return true on success.
+
+var _simple_hooks: [text] = []
+var _simple_hook_fns: [fn() -> bool] = []
+
+fn register_simple_plugin(name: text, hook: fn() -> bool):
+    """Register a pure-Simple plugin setup hook.
+
+    Called by .spl plugin files at module level.  The hook is invoked when
+    user code calls activate_plugin(name).
+
+    Args:
+        name: Plugin name (must match the name used in activate_plugin calls)
+        hook: Function that registers block definitions and returns true on success
+    """
+    var i = 0
+    while i < _simple_hooks.len():
+        if _simple_hooks[i] == name:
+            # Already registered — update hook
+            _simple_hook_fns[i] = hook
+            return
+        i = i + 1
+    _simple_hooks = _simple_hooks + [name]
+    _simple_hook_fns = _simple_hook_fns + [hook]
+
+# ============================================================================
+# Indexed manifest entries (built by index_plugin_manifests)
+# ============================================================================
+
+var _indexed_entries: [StartupPluginEntry] = []
+var _indexed: bool = false
+
+# ============================================================================
+# Manifest parsing helpers (minimal SDN subset)
+# ============================================================================
+
+fn _strip_quotes(value: text) -> text:
+    var result = value.trim()
+    if result.starts_with("\"") and result.ends_with("\"") and result.len() >= 2:
+        result = result.substring(1, result.len() - 1)
+    result
+
+fn _parse_functions_list(line: text) -> [text]:
+    val start = line.find("[")
+    val end = line.rfind("]")
+    if start < 0 or end <= start:
+        return []
+    val inner = line.substring(start + 1, end).trim()
+    if inner == "":
+        return []
+    val parts = inner.split(",")
+    var out: [text] = []
+    for part in parts:
+        val fn_name = _strip_quotes(part.trim())
+        if fn_name != "":
+            out = out + [fn_name]
+    out
+
+fn _parse_manifest(content: text) -> [StartupPluginEntry]:
+    val lines = content.split("\n")
+    var entries: [StartupPluginEntry] = []
+    var cur_name = ""
+    var cur_library = ""
+    var cur_functions: [text] = []
+    var in_plugin = false
+
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#") or line == "plugins:":
+            continue
+        if line == "-":
+            if in_plugin and cur_name != "":
+                entries = entries + [StartupPluginEntry(name: cur_name, library: cur_library, functions: cur_functions)]
+            in_plugin = true
+            cur_name = ""
+            cur_library = ""
+            cur_functions = []
+            continue
+        if line.starts_with("name:"):
+            cur_name = _strip_quotes(line.substring(5).trim())
+        elif line.starts_with("library:"):
+            cur_library = _strip_quotes(line.substring(8).trim())
+        elif line.starts_with("functions:"):
+            cur_functions = _parse_functions_list(line)
+
+    if in_plugin and cur_name != "":
+        entries = entries + [StartupPluginEntry(name: cur_name, library: cur_library, functions: cur_functions)]
+    entries
+
+# ============================================================================
+# Discovery path helpers
+# ============================================================================
+
+fn _plugin_dirs() -> [text]:
+    var dirs: [text] = []
+    # Project-local plugins (registered first; project entries registered
+    # last win at lookup time because project dir is appended second)
+    dirs = dirs + [".simple-plugins"]
+    # User-global plugins
+    val home_dir = rt_env_home() ?? ""
+    if home_dir != "":
+        dirs = dirs + [home_dir + "/.simple/plugins"]
+    dirs
+
+fn _scan_dir(dir_path: text) -> [StartupPluginEntry]:
+    if not rt_file_exists(dir_path):
+        return []
+    val entries = rt_dir_list(dir_path) ?? []
+    var found: [StartupPluginEntry] = []
+    for filename in entries:
+        if filename.ends_with(".sdn"):
+            val full_path = dir_path + "/" + filename
+            val content = rt_file_read_text(full_path) ?? ""
+            if content != "":
+                val parsed = _parse_manifest(content)
+                for entry in parsed:
+                    found = found + [entry]
+    found
+
+# ============================================================================
+# Phase 1: index_plugin_manifests
+# ============================================================================
+
+fn index_plugin_manifests() -> [StartupPluginEntry]:
+    """Scan discovery paths and build an index of plugin manifests.
+
+    No dlopen occurs here.  Returns the list of indexed entries.
+    Called once at compiler start by run_plugin_startup().
+    """
+    var all: [StartupPluginEntry] = []
+    val dirs = _plugin_dirs()
+    for dir_path in dirs:
+        val dir_entries = _scan_dir(dir_path)
+        for entry in dir_entries:
+            all = all + [entry]
+    _indexed_entries = all
+    _indexed = true
+    all
+
+# ============================================================================
+# Phase 2: activate_plugin
+# ============================================================================
+
+fn activate_plugin(name: text) -> bool:
+    """Activate a named plugin: dlopen its library and register its blocks.
+
+    For pure-Simple plugins, fires the registered hook function.
+    For .so plugins, resolves block class names (functions prefixed "block:")
+    via dlsym — full BlockDefinition proxy construction is deferred to
+    R2-broader (requires a WFFI-callable constructor from the .so).
+
+    Returns false if the plugin is not found or activation fails.
+
+    # TODO [STATIC-NEXT-COMPATIBLE]: when sister C's RuleRegistry lands, also
+    # call compiler.blocks.sugar_registry.register_desugar_rule for any
+    # desugar_rules entries found in the manifest.
+    """
+    # 1. Try pure-Simple hook first
+    var i = 0
+    while i < _simple_hooks.len():
+        if _simple_hooks[i] == name:
+            return (_simple_hook_fns[i])()
+        i = i + 1
+
+    # 2. Fall through to manifest-indexed .so plugin
+    if not _indexed:
+        val _init = index_plugin_manifests()
+
+    var j = 0
+    while j < _indexed_entries.len():
+        val entry = _indexed_entries[j]
+        if entry.name == name:
+            if entry.library == "":
+                return false
+            if not rt_file_exists(entry.library):
+                return false
+            val handle = spl_dlopen(entry.library)
+            if handle == 0:
+                return false
+            # Register block entries: functions prefixed with "block:"
+            # Full BlockDefinition proxy via dlsym is deferred to R2-broader.
+            for fn_name in entry.functions:
+                if fn_name.starts_with("block:"):
+                    val _sym_ptr = spl_dlsym(handle, fn_name.substring(6))
+            return true
+        j = j + 1
+
+    false
+
+# ============================================================================
+# Compiler-start entry point
+# ============================================================================
+
+fn run_plugin_startup():
+    """Scan discovery paths and index manifests.
+
+    Called by frontend.spl once before desugar_collections.
+    Does not activate any plugins — activation is opt-in via activate_plugin.
+    Is a no-op if no discovery paths exist or contain manifests.
+    """
+    if not _indexed:
+        val _entries = index_plugin_manifests()
