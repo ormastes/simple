@@ -576,7 +576,12 @@ impl<M: Module> CodegenBackend<M> {
                 }
             }
 
-            let is_local = local_globals.contains(name);
+            // MIR's local_globals can over-eagerly include type-name references used
+            // as struct field types when those types are imported via `use ...{Name}`.
+            // If the module has an explicit use-clause for this name, trust that over
+            // local_globals — the symbol's defining module is elsewhere.
+            let use_says_imported = self.use_map.contains_key(name.as_str());
+            let is_local = local_globals.contains(name) && !use_says_imported;
 
             // Linkage strategy for globals in per-module compilation:
             // - Local globals: Preemptible + initialized data (if available)
