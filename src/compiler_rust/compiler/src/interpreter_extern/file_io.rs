@@ -364,7 +364,7 @@ pub fn rt_smf_parse_relocs(args: &[Value]) -> Result<Value, CompileError> {
     let data: Vec<u8> = data_vals
         .iter()
         .map(|v| match v {
-            Value::Int(n) => n as u8,
+            Value::Int(n) => *n as u8,
             _ => 0u8,
         })
         .collect();

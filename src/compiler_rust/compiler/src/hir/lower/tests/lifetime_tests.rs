@@ -19,11 +19,10 @@ fn lower_with_warnings(source: &str) -> Result<crate::hir::LoweringOutput, crate
 fn has_lifetime_error(source: &str) -> bool {
     let mut parser = Parser::new(source);
     let module = parser.parse().expect("parse failed");
-    match Lowerer::with_lenient_mode().lower_module_with_warnings(&module) {
-        Err(crate::hir::LowerError::LifetimeViolation(_)) => true,
-        Err(crate::hir::LowerError::LifetimeViolations(_)) => true,
-        _ => false,
-    }
+    matches!(
+        Lowerer::with_lenient_mode().lower_module_with_warnings(&module),
+        Err(crate::hir::LowerError::LifetimeViolation(_)) | Err(crate::hir::LowerError::LifetimeViolations(_))
+    )
 }
 
 #[test]

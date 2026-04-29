@@ -350,19 +350,17 @@ main = bad_inner()
             let func = find_hir_function(&module, "bad_inner");
             if let Some(f) = func {
                 for stmt in &f.body {
-                    if let Some(kind) = stmt_expr_kind(stmt) {
-                        match kind {
-                            HirExprKind::Call { args, .. }
-                            | HirExprKind::MethodCall { args, .. }
-                            | HirExprKind::BuiltinCall { args, .. } => {
-                                assert_eq!(
-                                    args.len(), 2,
-                                    "lower_call_args must not swallow args: got {} instead of 2",
-                                    args.len()
-                                );
-                            }
-                            _ => {}
-                        }
+                    if let Some(
+                        HirExprKind::Call { args, .. }
+                        | HirExprKind::MethodCall { args, .. }
+                        | HirExprKind::BuiltinCall { args, .. },
+                    ) = stmt_expr_kind(stmt)
+                    {
+                        assert_eq!(
+                            args.len(), 2,
+                            "lower_call_args must not swallow args: got {} instead of 2",
+                            args.len()
+                        );
                     }
                 }
             }
