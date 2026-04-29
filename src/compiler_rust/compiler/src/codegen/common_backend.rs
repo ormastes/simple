@@ -584,10 +584,13 @@ impl<M: Module> CodegenBackend<M> {
             if !is_local {
                 // Imported global: resolve the correct mangled name from the defining module
                 // via use_map (per-module imports) or import_map (global unique names).
-                let resolved_name = self
-                    .use_map
-                    .get(name.as_str())
-                    .or_else(|| self.import_map.get(name.as_str()))
+                let use_hit = self.use_map.get(name.as_str());
+                let import_hit = self.import_map.get(name.as_str());
+                if use_hit.is_none() && import_hit.is_none() {
+                    eprintln!("[DEBUG declare_globals fallback] name={} module_prefix={:?}", name, self.module_prefix);
+                }
+                let resolved_name = use_hit
+                    .or(import_hit)
                     .map(|s| self.sanitize_symbol(s))
                     .unwrap_or_else(|| self.mangle_name(name));
                 let data_id = self

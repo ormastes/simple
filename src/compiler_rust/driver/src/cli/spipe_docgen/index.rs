@@ -467,10 +467,8 @@ fn extract_summary_from_markdown(content: &str) -> Option<String> {
             continue;
         }
 
-        if in_overview || paragraph.is_empty() {
-            if !trimmed.starts_with("- ") && !trimmed.starts_with("* ") {
-                paragraph.push(trimmed.to_string());
-            }
+        if (in_overview || paragraph.is_empty()) && !trimmed.starts_with("- ") && !trimmed.starts_with("* ") {
+            paragraph.push(trimmed.to_string());
         }
     }
 

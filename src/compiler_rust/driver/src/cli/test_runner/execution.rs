@@ -355,6 +355,7 @@ pub(crate) fn artifact_dir_for_test(path: &Path) -> PathBuf {
     PathBuf::from("build/test-artifacts").join(relative)
 }
 
+#[allow(clippy::too_many_arguments)] // reason: all 8 fields are distinct test-result slots; a struct would be over-engineering for a single call site
 pub(crate) fn write_artifact_bundle(
     path: &Path,
     passed: usize,
@@ -474,7 +475,7 @@ pub fn run_test_file(path: &Path, options: &super::types::TestOptions) -> TestFi
     static TEST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = TEST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     #[cfg(target_os = "linux")]
-    if count % 50 == 0 {
+    if count.is_multiple_of(50) {
         unsafe {
             libc::malloc_trim(0);
         }

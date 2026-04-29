@@ -556,13 +556,7 @@ fn resolve_preferred_simple_binary() -> Option<PathBuf> {
     ];
     candidates.extend(platform_release_binary_candidates());
 
-    for candidate in candidates {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    candidates.into_iter().find(|candidate| candidate.exists())
 }
 
 fn platform_release_binary_candidates() -> Vec<PathBuf> {

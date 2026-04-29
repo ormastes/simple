@@ -3,7 +3,7 @@
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.http_server.response.{
-    build_html, build_json, build_text, build_error, serialize_response
+    build_html, build_json, build_text, serialize_response
 }
 use std.http_server.types.{HttpResponseData}
 use std.json.builder.{escape_json}
@@ -154,7 +154,7 @@ class SimplePortalServer:
                 return self._method_not_allowed(clean_path)
             return self._run_playground(body, headers)
 
-        self._finalize(build_error(404, "Not Found"), false, false)
+        self._finalize(_build_error(404, "Not Found"), false, false)
 
     fn _serve_index(head_only: bool) -> text:
         val index_path = "{self.app_root}/public/index.html"
@@ -168,7 +168,7 @@ class SimplePortalServer:
             return self._error("Static path traversal rejected", 404)
         val full_path = "{self.app_root}/public/{rel}"
         if not rt_file_exists(full_path):
-            return self._finalize(build_error(404, "Not Found"), false, false)
+            return self._finalize(_build_error(404, "Not Found"), false, false)
         val mime = _mime_type(full_path)
         val resp = if mime == "text/html":
             build_html(rt_file_read_text(full_path))
@@ -186,7 +186,7 @@ class SimplePortalServer:
             val payload3 = payload2 + "\"summary\":\"" + escape_json(page.summary) + "\","
             val payload4 = payload3 + "\"body\":\"" + escape_json(body) + "\"}"
             return self._finalize(build_json(payload4), head_only, false)
-        self._finalize(build_error(404, "Unknown page"), false, false)
+        self._finalize(_build_error(404, "Unknown page"), false, false)
 
     fn _serve_example(example_id: text, head_only: bool) -> text:
         if val example = portal_example_by_id(self.db, example_id):
@@ -198,14 +198,14 @@ class SimplePortalServer:
             val payload5 = payload4 + "\"summary\":\"" + escape_json(example.summary) + "\","
             val payload6 = payload5 + "\"source\":\"" + escape_json(source) + "\"}"
             return self._finalize(build_json(payload6), head_only, false)
-        self._finalize(build_error(404, "Unknown example"), false, false)
+        self._finalize(_build_error(404, "Unknown example"), false, false)
 
     fn _run_playground(body: text, headers: text) -> text:
         if not _authorized_run(headers, self.port, self.run_token):
-            return self._finalize(build_error(403, "Forbidden"), false, true)
+            return self._finalize(_build_error(403, "Forbidden"), false, true)
         val body_kind = _body_kind(body)
         if body_kind == "":
-            return self._finalize(build_error(400, "Missing example_id or source"), false, true)
+            return self._finalize(_build_error(400, "Missing example_id or source"), false, true)
         g_simple_portal_run_seq = g_simple_portal_run_seq + 1
         val audit_id = "run-" + g_simple_portal_run_seq.to_string()
         val envelope = _execution_envelope(body, body_kind, audit_id)
@@ -214,7 +214,7 @@ class SimplePortalServer:
         self._finalize(build_json(envelope), false, true)
 
     fn _method_not_allowed(clean_path: text) -> text:
-        var resp = build_error(405, "Method Not Allowed")
+        var resp = _build_error(405, "Method Not Allowed")
         val allow_header = if clean_path == "/api/playground/run":
             "POST"
         else:
@@ -223,7 +223,7 @@ class SimplePortalServer:
         self._finalize(resp, false, false)
 
     fn _error(message: text, status: i64) -> text:
-        self._finalize(build_error(status, message), false, false)
+        self._finalize(_build_error(status, message), false, false)
 
     fn _finalize(resp: HttpResponseData, head_only: bool, no_store: bool) -> text:
         var out = resp
@@ -257,6 +257,38 @@ fn _add_response_header(resp: HttpResponseData, name: text, value: text) -> Http
         body_length: resp.body_length,
         chunked: resp.chunked
     )
+
+fn _build_error(status: i64, message: text) -> HttpResponseData:
+    val reason = _status_reason(status)
+    val body = "<html><head><title>{status} {reason}</title></head>" +
+               "<body><h1>{status} {reason}</h1><p>{message}</p>" +
+               "<hr><p>SimpleServer</p></body></html>"
+    HttpResponseData(
+        status: status,
+        reason: reason,
+        headers: [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Server", "SimpleServer"),
+            ("Connection", "close")
+        ],
+        body: body,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _status_reason(status: i64) -> text:
+    match status:
+        200: "OK"
+        202: "Accepted"
+        400: "Bad Request"
+        403: "Forbidden"
+        404: "Not Found"
+        405: "Method Not Allowed"
+        413: "Request Entity Too Large"
+        500: "Internal Server Error"
+        _: "Error"
 
 fn _parse_request_line(request_line: text) -> (text, text):
     var method = ""

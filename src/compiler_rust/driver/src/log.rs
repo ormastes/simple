@@ -24,7 +24,7 @@ pub fn init_dual(log_dir: Option<&std::path::Path>, filter: Option<&str>) -> std
     let log_dir = resolve_log_dir(log_dir)?;
 
     let file_appender = std::panic::catch_unwind(|| tracing_appender::rolling::daily(&log_dir, "simple.log"))
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "failed to initialize rolling log appender"))?;
+        .map_err(|_| std::io::Error::other("failed to initialize rolling log appender"))?;
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     // Leak the guard to keep the file writer alive for program lifetime

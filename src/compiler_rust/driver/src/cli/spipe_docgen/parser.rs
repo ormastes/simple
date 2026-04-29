@@ -43,8 +43,8 @@ pub fn parse_spipe_file(path: &Path) -> Result<SspecDoc, Box<dyn std::error::Err
             if feature_title.is_none() {
                 for cl in &comment_doc_lines {
                     let cl_trimmed = cl.trim();
-                    if cl_trimmed.starts_with("# ") {
-                        feature_title = Some(cl_trimmed[2..].trim().to_string());
+                    if let Some(stripped) = cl_trimmed.strip_prefix("# ") {
+                        feature_title = Some(stripped.trim().to_string());
                         break;
                     }
                 }

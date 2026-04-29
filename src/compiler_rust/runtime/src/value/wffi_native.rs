@@ -90,11 +90,11 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
 
     let n = nargs as usize;
     let mut raw_args: [i64; 8] = [0; 8];
-    for i in 0..n.min(8) {
+    for (i, slot) in raw_args.iter_mut().enumerate().take(n.min(8)) {
         let val = rt_array_get(args_rv, i as i64);
         // The array elements are RuntimeValues containing the raw i64 values.
         // Extract the underlying u64 and reinterpret as i64.
-        raw_args[i] = val.0 as i64;
+        *slot = val.0 as i64;
     }
 
     type Fn0 = unsafe extern "C" fn() -> i64;

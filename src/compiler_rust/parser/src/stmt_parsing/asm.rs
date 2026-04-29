@@ -223,7 +223,7 @@ impl<'a> Parser<'a> {
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .map(|line| {
-                let line = line.trim_end_matches(|ch| ch == ';' || ch == ',').trim();
+                let line = line.trim_end_matches([';', ',']).trim();
                 if line.len() >= 2
                     && ((line.starts_with('"') && line.ends_with('"'))
                         || (line.starts_with('\'') && line.ends_with('\'')))

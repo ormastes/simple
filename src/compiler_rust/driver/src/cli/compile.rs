@@ -442,9 +442,8 @@ fn next_function_name(text: &str) -> Option<String> {
 }
 
 fn parse_named_integer(attr: &str, key: &str) -> Option<u64> {
-    let marker = format!("{key}");
-    let key_pos = attr.find(&marker)?;
-    let after_key = &attr[key_pos + marker.len()..];
+    let key_pos = attr.find(key)?;
+    let after_key = &attr[key_pos + key.len()..];
     let eq_pos = after_key.find('=')?;
     let value = after_key[eq_pos + 1..].trim_start();
     let end = value
@@ -454,9 +453,8 @@ fn parse_named_integer(attr: &str, key: &str) -> Option<u64> {
 }
 
 fn parse_named_string(attr: &str, key: &str) -> Option<String> {
-    let marker = format!("{key}");
-    let key_pos = attr.find(&marker)?;
-    let after_key = &attr[key_pos + marker.len()..];
+    let key_pos = attr.find(key)?;
+    let after_key = &attr[key_pos + key.len()..];
     let eq_pos = after_key.find('=')?;
     let value = after_key[eq_pos + 1..].trim_start();
     let value = value.strip_prefix('"')?;

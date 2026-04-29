@@ -146,8 +146,8 @@ fn is_pure_index(expr: &Expr) -> bool {
             is_pure_lvalue(receiver) && is_pure_index(index)
         }
         Expr::Range { start, end, .. } => {
-            start.as_ref().map_or(true, |s| is_pure_index(s))
-                && end.as_ref().map_or(true, |e| is_pure_index(e))
+            start.as_ref().is_none_or(|s| is_pure_index(s))
+                && end.as_ref().is_none_or(|e| is_pure_index(e))
         }
         _ => false,
     }

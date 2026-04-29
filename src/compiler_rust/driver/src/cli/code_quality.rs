@@ -584,7 +584,7 @@ fn collect_ui_typed_api_diagnostics(path: &Path, source: &str) -> Vec<Diagnostic
                 let before = &trimmed[..call_pos];
                 let is_method_call = before.ends_with('.') || before.ends_with("self.");
                 let is_standalone =
-                    call_pos == 0 || !before.chars().last().map_or(false, |c| c.is_alphanumeric() || c == '_');
+                    call_pos == 0 || !before.chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_');
                 if is_method_call || is_standalone {
                     let after_paren = &trimmed[call_pos + 6..];
                     // Find third arg (skip two commas)

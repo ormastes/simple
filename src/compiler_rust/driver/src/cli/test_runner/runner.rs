@@ -1434,7 +1434,7 @@ fn handle_run_management_with_db(options: &TestOptions, db_path: &Path) -> TestR
     // Cleanup stale/dead runs before listing so stale "running" entries do not
     // survive indefinitely in the visible output.
     if options.cleanup_runs || options.list_runs {
-        match cleanup_stale_runs(&db_path, 2) {
+        match cleanup_stale_runs(db_path, 2) {
             // 2 hours = stale
             Ok(cleaned) => {
                 if options.cleanup_runs && !quiet {
@@ -1458,7 +1458,7 @@ fn handle_run_management_with_db(options: &TestOptions, db_path: &Path) -> TestR
 
     // Prune old runs (if requested)
     if let Some(keep_count) = options.prune_runs {
-        match prune_old_runs(&db_path, keep_count) {
+        match prune_old_runs(db_path, keep_count) {
             Ok(deleted) => {
                 if !quiet {
                     if deleted == 0 {

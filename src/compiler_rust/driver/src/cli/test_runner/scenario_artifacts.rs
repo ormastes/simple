@@ -231,7 +231,7 @@ fn spec_relative_dir(source_path: &Path) -> PathBuf {
     let mut relative_parts: Vec<String> = Vec::new();
     let mut found_test_root = false;
 
-    while let Some(component) = components.next() {
+    for component in components {
         let part = component.as_os_str().to_string_lossy();
         if found_test_root {
             relative_parts.push(part.to_string());
