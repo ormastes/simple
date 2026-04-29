@@ -2,11 +2,23 @@
 # Test Helper Utilities
 # Common utilities for writing tests more easily
 
+# Domain wrappers for testing primitives
+pub class Microseconds:
+    pub value: i64
+
+pub class Seconds:
+    pub value: f64
+
+pub class ExpectedLen:
+    pub value: i32
+
+pub class CallCount:
+    pub value: i32
+
 # ============================================================================
 # Assertion Helpers
 # ============================================================================
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native FFI
 @allow(primitive_api, bare_bool)
 
 pub fn assert_eq<T>(actual: T, expected: T, message: text):
@@ -37,8 +49,6 @@ pub fn assert_ne<T>(actual: T, unexpected: T, message: text):
     if actual == unexpected:
         panic("{message}: expected not {unexpected}, but got {actual}")
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native FFI
-@allow(primitive_api)
 pub fn assert_true(condition: bool, message: text):
     """Assert that condition is true.
 
@@ -52,8 +62,6 @@ pub fn assert_true(condition: bool, message: text):
     if not condition:
         panic("{message}: expected true, got false")
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native FFI
-@allow(primitive_api)
 pub fn assert_false(condition: bool, message: text):
     """Assert that condition is false.
 
@@ -139,9 +147,7 @@ pub fn assert_empty<T>(collection: List<T>, message: text):
     if collection.len() > 0:
         panic("{message}: expected empty, got {collection.len()} items")
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native FFI
-@allow(primitive_api)
-pub fn assert_len<T>(collection: List<T>, expected_len: i32, message: text):
+pub fn assert_len<T>(collection: List<T>, expected_len: ExpectedLen, message: text):
     """Assert collection has specific length.
 
     Args:
@@ -150,11 +156,11 @@ pub fn assert_len<T>(collection: List<T>, expected_len: i32, message: text):
         message: Error message if wrong length
 
     Example:
-        assert_len(results, 5, "Should have 5 results")
+        assert_len(results, ExpectedLen(value: 5), "Should have 5 results")
     """
     val actual_len = collection.len()
-    if actual_len != expected_len:
-        panic("{message}: expected length {expected_len}, got {actual_len}")
+    if actual_len != expected_len.value:
+        panic("{message}: expected length {expected_len.value}, got {actual_len}")
 
 # ============================================================================
 # Result Assertions
@@ -200,9 +206,7 @@ pub fn assert_err<T, E>(result: Result<T, E>, message: text) -> E:
 
 use time
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native FFI
-@allow(primitive_api)
-pub fn measure_time<T>(action: fn() -> T) -> (T, i64):
+pub fn measure_time<T>(action: fn() -> T) -> (T, Microseconds):
     """Measure execution time of an action.
 
     Args:
@@ -213,16 +217,14 @@ pub fn measure_time<T>(action: fn() -> T) -> (T, i64):
 
     Example:
         val (result, elapsed) = measure_time(\: expensive_operation())
-        print "Took {elapsed}μs"
+        print "Took {elapsed.value}μs"
     """
     val start = time.now_micros()
     val result = action()
     val elapsed = time.now_micros() - start
-    (result, elapsed)
+    (result, Microseconds(value: elapsed))
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native FFI
-@allow(primitive_api)
-pub fn assert_fast<T>(action: fn() -> T, max_micros: i64, message: text) -> T:
+pub fn assert_fast<T>(action: fn() -> T, max_micros: Microseconds, message: text) -> T:
     """Assert that an action completes within time limit.
 
     Args:
@@ -234,16 +236,14 @@ pub fn assert_fast<T>(action: fn() -> T, max_micros: i64, message: text) -> T:
         The action result
 
     Example:
-        val result = assert_fast(\: quick_lookup(), 1000, "Should be under 1ms")
+        val result = assert_fast(\: quick_lookup(), Microseconds(value: 1000), "Should be under 1ms")
     """
     val (result, elapsed) = measure_time(action)
-    if elapsed > max_micros:
-        panic("{message}: took {elapsed}μs, limit was {max_micros}μs")
+    if elapsed.value > max_micros.value:
+        panic("{message}: took {elapsed.value}μs, limit was {max_micros.value}μs")
     result
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native FFI
-@allow(primitive_api)
-pub fn with_timeout<T>(action: fn() -> T, timeout_seconds: f64, message: text) -> T:
+pub fn with_timeout<T>(action: fn() -> T, timeout_seconds: Seconds, message: text) -> T:
     """Execute action with a timeout (soft check - measures after completion).
 
     Args:
@@ -258,13 +258,13 @@ pub fn with_timeout<T>(action: fn() -> T, timeout_seconds: f64, message: text) -
           For hard timeouts, use async/concurrent primitives.
 
     Example:
-        val result = with_timeout(\: fetch_data(), 5.0, "Should complete within 5s")
+        val result = with_timeout(\: fetch_data(), Seconds(value: 5.0), "Should complete within 5s")
     """
-    val max_micros = (timeout_seconds * 1000000.0) as i64
+    val max_micros = (timeout_seconds.value * 1000000.0) as i64
     val (result, elapsed) = measure_time(action)
-    if elapsed > max_micros:
-        val elapsed_sec = (elapsed as f64) / 1000000.0
-        panic("{message}: took {elapsed_sec}s, timeout was {timeout_seconds}s")
+    if elapsed.value > max_micros:
+        val elapsed_sec = (elapsed.value as f64) / 1000000.0
+        panic("{message}: took {elapsed_sec}s, timeout was {timeout_seconds.value}s")
     result
 
 # ============================================================================
@@ -301,9 +301,7 @@ pub fn with_cleanup<T, R>(setup: fn() -> T, teardown: fn(T), test: fn(T) -> R) -
 # Note: For creating test doubles, use `testing.mocking.create_mock()` directly.
 # These helpers work with any object that has the call tracking interface.
 
-# reason: stdlib primitive boundary — changing signature breaks all callers and native FFI
-@allow(primitive_api)
-pub fn assert_called(mock_fn, expected_count: i32):
+pub fn assert_called(mock_fn, expected_count: CallCount):
     """Assert mock was called expected number of times.
 
     Args:
@@ -311,11 +309,11 @@ pub fn assert_called(mock_fn, expected_count: i32):
         expected_count: Expected number of calls
 
     Example:
-        assert_called(save_mock, 3)
+        assert_called(save_mock, CallCount(value: 3))
     """
     val actual = mock_fn.call_count()
-    if actual != expected_count:
-        panic("Expected {expected_count} calls, got {actual}")
+    if actual != expected_count.value:
+        panic("Expected {expected_count.value} calls, got {actual}")
 
 pub fn assert_called_with(mock_fn, expected_args: List<text>):
     """Assert mock was called with specific arguments (checks last call).
