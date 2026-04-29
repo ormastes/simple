@@ -247,26 +247,58 @@ fn ring_backend_new(capacity: i64) -> RingBackend:
     _g_ring_registry.push(rb)
     rb
 
+fn _ring_backend_index(self_ptr: i64) -> i64:
+    val idx = self_ptr - 1
+    if idx < 0 or idx >= _g_ring_registry.len():
+        return -1
+    idx
+
 fn _ring_backend_lookup(self_ptr: i64) -> RingBackend:
-    _g_ring_registry[self_ptr - 1]
+    val idx = _ring_backend_index(self_ptr)
+    if idx < 0:
+        return RingBackend(
+            capacity: 0,
+            entries: [],
+            ops: LogBackendOps.new(0, 1, "ring")
+        )
+    _g_ring_registry[idx]
 
 fn ring_backend_clear(rb: RingBackend):
-    rb.entries = []
+    val idx = _ring_backend_index(rb.ops.self_ptr)
+    if idx < 0:
+        return
+    val current = _g_ring_registry[idx]
+    _g_ring_registry[idx] = RingBackend(
+        capacity: current.capacity,
+        entries: [],
+        ops: current.ops
+    )
 
 fn ring_backend_count(rb: RingBackend) -> i64:
-    rb.entries.len()
+    val idx = _ring_backend_index(rb.ops.self_ptr)
+    if idx < 0:
+        return rb.entries.len()
+    _g_ring_registry[idx].entries.len()
 
 fn ring_backend_subsys_at(rb: RingBackend, idx: i64) -> i64:
-    rb.entries[idx].subsys
+    val backend_idx = _ring_backend_index(rb.ops.self_ptr)
+    if backend_idx < 0:
+        return rb.entries[idx].subsys
+    _g_ring_registry[backend_idx].entries[idx].subsys
 
 fn ring_backend_seq_at(rb: RingBackend, idx: i64) -> i64:
-    rb.entries[idx].p0
+    val backend_idx = _ring_backend_index(rb.ops.self_ptr)
+    if backend_idx < 0:
+        return rb.entries[idx].p0
+    _g_ring_registry[backend_idx].entries[idx].p0
 
 fn ring_backend_first_at_subsys(rb: RingBackend, subsys: i64) -> _RingBackendRecord:
+    val backend_idx = _ring_backend_index(rb.ops.self_ptr)
+    val entries = if backend_idx >= 0: _g_ring_registry[backend_idx].entries else rb.entries
     var i = 0
-    while i < rb.entries.len():
-        if rb.entries[i].subsys == subsys:
-            return rb.entries[i]
+    while i < entries.len():
+        if entries[i].subsys == subsys:
+            return entries[i]
         i = i + 1
     _RingBackendRecord.new(-1, -1, -1)
 
@@ -410,8 +442,13 @@ fn _dispatch_to_backends(level: i64, subsys: i64, p0: i64):
     while i < MAX_BACKENDS:
         if _g_backends[i].active:
             if _g_backends[i].kind == 1:
-                val rb = _ring_backend_lookup(_g_backends[i].self_ptr)
-                rb.entries.push(_RingBackendRecord.new(subsys, level, p0))
+                val rb_idx = _ring_backend_index(_g_backends[i].self_ptr)
+                if rb_idx >= 0:
+                    var rb = _g_ring_registry[rb_idx]
+                    var entries = rb.entries
+                    entries.push(_RingBackendRecord.new(subsys, level, p0))
+                    rb.entries = entries
+                    _g_ring_registry[rb_idx] = rb
         i = i + 1
 
 fn log_dispatch_record(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i64):

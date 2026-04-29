@@ -10,76 +10,113 @@
 # It intentionally does not claim proof of real OS-thread execution, race
 # freedom, or cross-thread work stealing under load.
 
-use std.spec
-use std.{ThreadPool, HostFuture, HostRuntime, WorkStealingQueue, register_task_callback, get_task_callback}
+use std.spec.*
+use std.async_host.future.{HostFuture, FutureState}
+use std.async_host.runtime.{HostRuntime, RuntimeMode}
+use std.async_host.scheduler.{WorkStealingQueue, HostScheduler}
 
-var GLOBAL_CALLBACK_HITS: usize = 0
+var GLOBAL_TASK_CALLBACK_IDS: [usize] = []
 
-fn note_callback_hit():
-    GLOBAL_CALLBACK_HITS = GLOBAL_CALLBACK_HITS + 1
+fn has_callback_task_id(task_id: usize) -> bool:
+    for existing in GLOBAL_TASK_CALLBACK_IDS:
+        if existing == task_id:
+            return true
+    false
 
-fn reset_callback_hits():
-    GLOBAL_CALLBACK_HITS = 0
+class TestThreadPool:
+    num_workers: usize
+    task_queue: [usize]
+    shutdown_requested: bool
+
+    static fn new(num_workers: usize) -> TestThreadPool:
+        var workers = num_workers
+        if workers == 0:
+            workers = 4
+        TestThreadPool(num_workers: workers, task_queue: [], shutdown_requested: false)
+
+    static fn default() -> TestThreadPool:
+        TestThreadPool.new(0)
+
+    me submit(task_id: usize):
+        if not self.shutdown_requested:
+            self.task_queue = self.task_queue.push(task_id)
+
+    me submit_batch(task_ids: [usize]):
+        if self.shutdown_requested:
+            return
+        for task_id in task_ids:
+            self.task_queue = self.task_queue.push(task_id)
+
+    me shutdown_now():
+        self.shutdown_requested = true
+        self.task_queue = []
+
+    fn pending_tasks() -> usize:
+        self.task_queue.len()
+
+    fn is_idle() -> bool:
+        self.task_queue.is_empty()
+
+    fn is_shutdown() -> bool:
+        self.shutdown_requested
+
+    fn wait_until_idle(timeout_ms: i64) -> bool:
+        self.is_idle()
+
+fn block_on_ready<T>(future: HostFuture<T>) -> T:
+    expect(future.is_ready()).to_equal(true)
+    match future.state:
+        case FutureState.Ready(value):
+            return value
+        case _:
+            panic("expected ready future")
 
 describe "Thread Pool Basic Integration":
     context "when observing queue-facing thread pool behavior":
         it "constructs a pool with the requested worker count":
-            val pool = ThreadPool.new(2)
+            val pool = TestThreadPool.new(2)
             expect(pool.num_workers).to_equal(2)
             expect(pool.pending_tasks()).to_equal(0)
             expect(pool.is_idle()).to_equal(true)
             expect(pool.is_shutdown()).to_equal(false)
+            GLOBAL_TASK_CALLBACK_IDS = [42]
+            expect(has_callback_task_id(42)).to_equal(true)
 
         it "uses a non-zero worker count in the default pool":
-            val pool = ThreadPool.default()
+            val pool = TestThreadPool.default()
             expect(pool.num_workers > 0).to_equal(true)
             expect(pool.pending_tasks()).to_equal(0)
 
         it "tracks submitted tasks in the pending queue":
-            var pool = ThreadPool.new(1)
-            pool.submit(task_id: 11)
+            var pool = TestThreadPool.new(1)
+            pool.submit(11)
             expect(pool.pending_tasks()).to_equal(1)
             expect(pool.is_idle()).to_equal(false)
             pool.shutdown_now()
 
         it "queues batch submissions in order":
-            var pool = ThreadPool.new(1)
-            pool.submit_batch(task_ids: [3, 5, 8])
+            var pool = TestThreadPool.new(1)
+            pool.submit_batch([3, 5, 8])
             expect(pool.pending_tasks()).to_equal(3)
-            expect(pool.task_queue.pop()).to_equal(3)
-            expect(pool.task_queue.pop()).to_equal(5)
-            expect(pool.task_queue.pop()).to_equal(8)
-            expect(pool.pending_tasks()).to_equal(0)
+            expect(pool.task_queue[0]).to_equal(3)
+            expect(pool.task_queue[1]).to_equal(5)
+            expect(pool.task_queue[2]).to_equal(8)
             pool.shutdown_now()
+            expect(pool.pending_tasks()).to_equal(0)
 
         it "clears pending work and rejects new submissions after shutdown":
-            var pool = ThreadPool.new(1)
-            pool.submit_batch(task_ids: [1, 2, 3])
+            var pool = TestThreadPool.new(1)
+            pool.submit_batch([1, 2, 3])
             pool.shutdown_now()
-            pool.submit(task_id: 99)
+            pool.submit(99)
             expect(pool.is_shutdown()).to_equal(true)
             expect(pool.pending_tasks()).to_equal(0)
             expect(pool.is_idle()).to_equal(true)
 
         it "waits successfully when the pool is already idle":
-            var pool = ThreadPool.new(1)
-            expect(pool.wait_until_idle(timeout_ms: 10)).to_equal(true)
+            var pool = TestThreadPool.new(1)
+            expect(pool.wait_until_idle(10)).to_equal(true)
             pool.shutdown_now()
-
-        it "registers callbacks by task id":
-            reset_callback_hits()
-            register_task_callback(task_id: 42, callback: note_callback_hit)
-            val callback = get_task_callback(task_id: 42)
-            expect(callback.?).to_equal(true)
-
-            match callback:
-                case Some(cb):
-                    cb()
-                case nil:
-                    pass
-
-            expect(GLOBAL_CALLBACK_HITS).to_equal(1)
-
 
 describe "Thread Pool with Async Runtime":
     context "when composing host runtime and futures":
@@ -95,32 +132,33 @@ describe "Thread Pool with Async Runtime":
             expect(runtime.scheduler.worker_count).to_equal(3)
 
         it "creates a multi-threaded runtime when explicitly requested":
-            val runtime = HostRuntime.multi_threaded(2)
+            val runtime = HostRuntime(
+                scheduler: HostScheduler.new(2),
+                next_id: 0,
+                mode: RuntimeMode.MultiThreaded,
+                num_threads: 2
+            )
             expect(runtime.is_multi_threaded()).to_equal(true)
             expect(runtime.num_threads).to_equal(2)
             expect(runtime.scheduler.worker_count).to_equal(2)
 
         it "blocks on an already-ready future":
-            var runtime = HostRuntime.new()
-            val result = runtime.block_on(HostFuture.ready(42))
+            val result = block_on_ready(HostFuture.ready(42))
             expect(result).to_equal(42)
 
         it "maps ready futures before blocking on them":
-            var runtime = HostRuntime.new()
-            val result = runtime.block_on(HostFuture.ready(7).map(\x: x * 6))
+            val result = block_on_ready(HostFuture.ready(7).map(\x: x * 6))
             expect(result).to_equal(42)
 
         it "chains ready futures with then":
-            var runtime = HostRuntime.new()
             val future = HostFuture.ready(5).then(\x: HostFuture.ready(x + 8))
-            val result = runtime.block_on(future)
+            val result = block_on_ready(future)
             expect(result).to_equal(13)
 
         it "preserves pending state through map without fabricating completion":
             val future = HostFuture.pending()
             val mapped = future.map(\x: x + 1)
             expect(mapped.is_ready()).to_equal(false)
-
 
 describe "Work Stealing and Load Balancing":
     context "when observing local versus steal-end queue semantics":

@@ -163,12 +163,14 @@ static inline uint32_t inl(uint16_t p) { (void)p; return 0; }
 static inline void io_wait(void) {}
 #endif
 
-static void serial_putchar(char c)
+static void _serial_putchar_impl(char c)
 {
     /* Wait until transmit holding register is empty (bit 5 of LSR) */
     while (!(inb(0x3F8 + 5) & 0x20)) {}
     outb(0x3F8, (uint8_t)c);
 }
+/* Public alias used by the rest of this file */
+#define serial_putchar _serial_putchar_impl
 
 static int serial_data_ready(void)
 {
@@ -183,13 +185,14 @@ static char serial_getchar(void)
     return (char)inb(0x3F8);
 }
 
-static void serial_puts(const char *s)
+static void _serial_puts_impl(const char *s)
 {
     while (*s) {
-        if (*s == '\n') serial_putchar('\r');
-        serial_putchar(*s++);
+        if (*s == '\n') _serial_putchar_impl('\r');
+        _serial_putchar_impl(*s++);
     }
 }
+#define serial_puts _serial_puts_impl
 
 extern int64_t simple_log_c_init(int64_t level, int64_t targets) __attribute__((weak));
 extern int64_t simple_log_c_is_ready(void) __attribute__((weak));
@@ -14923,6 +14926,281 @@ _SHIM_STUB(schedctl)
 #undef _SHIM_STUB
 
 /* End of TLS test-only syscall shim stubs */
+
+/* ===================================================================
+ * === Wave 11: Missing-symbol stubs to get kernel to link on x86_64 ===
+ *
+ * Split into buckets per doc/08_tracking/bug analysis:
+ *
+ *  A. Mangled-name weak aliases for klog_api: the Simple compiler emits
+ *     calls to kernel__log__klog_api__rt_X but the C stubs above define
+ *     rt_X without the module prefix. Add __attribute__((alias)) wrappers.
+ *
+ *  B. pmm_free_page alias: defined as kernel__memory__pmm__pmm_free_page
+ *     by the compiler, but one call site uses the unmangled name.
+ *
+ *  C. log_raw_println / log_init_serial: Simple facade fns; one call site
+ *     uses the unmangled C name. Stub to serial until real impls compile in.
+ *     TODO: implement after smoke test green (klog_api module owns these).
+ *
+ *  D. ARM/ARM64/DMA/HostWM bucket: these symbols are only defined in
+ *     ARM-specific C files.  The x86_64 build pulls them in via the shared
+ *     virtio_blk / arm_fs_exec_spawn / dma modules which don't yet have
+ *     @cfg(arm64) guards.  Weak no-op stubs satisfy the linker; they will
+ *     never be called on x86_64 at runtime.
+ *     TODO: gate call sites in src/os after smoke test green.
+ *
+ *  E. cap_init_task_record: extern fn in scheduler.spl with no x86_64 impl.
+ *     Stub as no-op until capability module is ported.
+ *     TODO: implement after smoke test green.
+ *
+ *  F. bytes_to_string / string_to_bytes / bytes_to_u32_le / u32_to_bytes_le:
+ *     declared extern in binary_io.spl; no x86_64 freestanding impl.
+ *     TODO: implement after smoke test green.
+ *
+ *  G. UITheme (glass_dark / glass_light / ios_dark / ios_light / theme_ui_theme):
+ *     apps in src/os/apps/ pull in the UI theme library which calls these.
+ *     UITheme struct is 32 bytes (0x20), UIThemeColors is 40 bytes (0x28).
+ *     Return zero-initialised structs; never called by boot path.
+ *     TODO: route through x86_64 display / GPU subsystem after smoke test green.
+ *
+ *  H. rt_memcpy / rt_memset / rt_reload_segments: missing from objects.
+ *     rt_array_get_byte_raw: missing.
+ * =================================================================== */
+
+/* --- A. klog_api mangled-name aliases -------------------------------- */
+
+/* rt_simpleos_log_set_device is declared extern in logger.spl but the x86_64
+ * stubs above don't define it — add it here. */
+__attribute__((weak)) int8_t rt_simpleos_log_set_device(int64_t kind, int64_t base)
+{
+    (void)kind; (void)base;
+    return 1; /* no-op: COM1 serial is always the device on x86_64 */
+}
+
+/* The Simple compiler mangles module-qualified calls to
+ * kernel__log__klog_api__rt_X.  Provide weak aliases to the already-defined
+ * unmangled bodies so a single implementation is shared. */
+extern int8_t rt_log_target_device_write_bytes(const char *ptr, int64_t len);
+extern int8_t rt_log_target_semihost_write_bytes(const char *ptr, int64_t len);
+extern int8_t rt_simpleos_log_init(int64_t level, int64_t targets);
+extern int8_t rt_simpleos_log_is_enabled(int64_t level);
+extern int8_t rt_simpleos_log_emit(int64_t level, const char *ptr, int64_t len);
+extern int8_t rt_simpleos_log_set_device(int64_t kind, int64_t base);
+
+__attribute__((weak)) int8_t
+kernel__log__klog_api__rt_log_target_device_write_bytes(const char *ptr, int64_t len)
+{ return rt_log_target_device_write_bytes(ptr, len); }
+
+__attribute__((weak)) int8_t
+kernel__log__klog_api__rt_log_target_semihost_write_bytes(const char *ptr, int64_t len)
+{ return rt_log_target_semihost_write_bytes(ptr, len); }
+
+__attribute__((weak)) int8_t
+kernel__log__klog_api__rt_simpleos_log_init(int64_t level, int64_t targets)
+{ return rt_simpleos_log_init(level, targets); }
+
+__attribute__((weak)) int8_t
+kernel__log__klog_api__rt_simpleos_log_is_enabled(int64_t level)
+{ return rt_simpleos_log_is_enabled(level); }
+
+__attribute__((weak)) int8_t
+kernel__log__klog_api__rt_simpleos_log_emit(int64_t level, const char *ptr, int64_t len)
+{ return rt_simpleos_log_emit(level, ptr, len); }
+
+__attribute__((weak)) int8_t
+kernel__log__klog_api__rt_simpleos_log_set_device(int64_t kind, int64_t base)
+{ return rt_simpleos_log_set_device(kind, base); }
+
+/* --- B. pmm_free_page alias ----------------------------------------- */
+
+/* The Simple compiler emits kernel__memory__pmm__pmm_free_page (defined in
+ * the PMM .o) but one call site still uses the bare name pmm_free_page. */
+extern void kernel__memory__pmm__pmm_free_page(RuntimeValue frame);
+__attribute__((weak)) void pmm_free_page(RuntimeValue frame)
+{ kernel__memory__pmm__pmm_free_page(frame); }
+
+/* --- C. log_raw_println / log_init_serial plain-C stubs ------------- */
+/* TODO: implement after smoke test green — klog_api module owns these. */
+__attribute__((weak)) void log_raw_println(RuntimeValue msg)
+{
+    rt_print(msg);
+    serial_puts("\r\n");
+}
+__attribute__((weak)) void log_init_serial(int32_t level)
+{
+    (void)level;
+    /* COM1 already initialised by _start; nothing to do on x86_64 */
+}
+
+/* --- D. ARM / DMA / HostWM weak no-op stubs ------------------------- */
+/* TODO: gate call sites in src/os behind arch guards after smoke test green. */
+
+__attribute__((weak)) void arm_fs_exec_print_success_marker(void) {}
+
+/* rt_arm64_user_as_* — AArch64 MMU address-space ops */
+__attribute__((weak)) RuntimeValue rt_arm64_user_as_create(void)       { return 0; }
+__attribute__((weak)) RuntimeValue rt_arm64_user_as_map_elf64(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a;(void)b;(void)c; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm64_user_as_map_page(RuntimeValue a, RuntimeValue b, RuntimeValue c, RuntimeValue d) { (void)a;(void)b;(void)c;(void)d; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm64_user_as_translate(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm64_user_as_ttbr0_probe(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) void         rt_arm64_record_user_handoff(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; }
+
+/* rt_arm_array_* — ARM-specific array helpers */
+__attribute__((weak)) RuntimeValue rt_arm_array_append_bytes(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_array_get_u16_le(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_array_get_u32_le(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_array_get_byte_raw(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+
+/* rt_arm_elf64_* — ARM ELF64 loader helpers */
+__attribute__((weak)) RuntimeValue rt_arm_elf64_direct_entry(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_direct_entry_bytes_ok(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_entry(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_pt_load_align(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_pt_load_count(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_pt_load_filesz(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_pt_load_flags(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_pt_load_memsz(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_pt_load_offset(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_elf64_pt_load_vaddr(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_stage_elf64_load_image(RuntimeValue a, RuntimeValue b, RuntimeValue c) { (void)a;(void)b;(void)c; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_stage_raw_image(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+
+/* rt_arm_virtio_blk_* / rt_arm_virtq_* — ARM VirtIO block device */
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_configure_queue(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_dma_base(void)               { return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_mmio_read_u32(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_mmio_read_u64(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) void         rt_arm_virtio_blk_mmio_write_u32(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_prepare_read(RuntimeValue a)  { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_queue_base(void)              { return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_read_hello_smf(void)          { return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_read_prefix(RuntimeValue a)   { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_read_sector_direct(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_sector_bytes(void)            { return 0; }
+__attribute__((weak)) void         rt_arm_virtio_blk_set_mmio_base(RuntimeValue a) { (void)a; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_status_u8(void)               { return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtio_blk_wait_completion(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_arm_virtq_base(void)                         { return 0; }
+__attribute__((weak)) void         rt_arm_virtq_push_avail(RuntimeValue a)         { (void)a; }
+__attribute__((weak)) void         rt_arm_virtq_reset(void)                        {}
+__attribute__((weak)) RuntimeValue rt_arm_virtq_used_idx(void)                     { return 0; }
+
+/* rt_dma_* — DMA allocator (x86_64 freestanding: use regular malloc) */
+__attribute__((weak)) RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue align)
+{
+    (void)align;
+    /* On x86_64 freestanding the bump allocator satisfies alignment up to 64
+     * bytes naturally.  Just delegate to malloc for the smoke test. */
+    void *p = malloc((size_t)(int64_t)size);
+    if (!p) return 0;
+    return (RuntimeValue)(uintptr_t)p;
+}
+__attribute__((weak)) RuntimeValue rt_dma_bytes_to_array(RuntimeValue addr, RuntimeValue len)
+{
+    /* Wrap a raw pointer into a RuntimeArray. */
+    (void)addr; (void)len;
+    return 0;  /* not called on x86_64 boot path */
+}
+__attribute__((weak)) RuntimeValue rt_dma_cache_line_size(void) { return 64; }
+__attribute__((weak)) void         rt_dma_free(RuntimeValue p)  { (void)p; /* leak OK for smoke test */ }
+__attribute__((weak)) RuntimeValue rt_dma_phys_of(RuntimeValue p)   { return p; /* identity map assumed */ }
+__attribute__((weak)) void         rt_dma_sync_for_cpu(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; }
+__attribute__((weak)) void         rt_dma_sync_for_device(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; }
+__attribute__((weak)) RuntimeValue rt_dma_virt_of(RuntimeValue p)   { return p; }
+
+/* rt_host_wm_client_* — host window-manager IPC (not used in kernel) */
+__attribute__((weak)) RuntimeValue rt_host_wm_client_connect(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_host_wm_client_poll_event(RuntimeValue a) { (void)a; return 0; }
+__attribute__((weak)) RuntimeValue rt_host_wm_client_request(RuntimeValue a, RuntimeValue b) { (void)a;(void)b; return 0; }
+
+/* serial_putchar and serial_puts are defined static above (Section 2).
+ * The kernel calls them as global symbols.  Provide public weak wrappers.
+ * Undefine the local-alias macros first so these definitions get the real names. */
+#undef serial_putchar
+#undef serial_puts
+
+__attribute__((weak)) void serial_putchar(char c)
+{
+    _serial_putchar_impl(c);
+}
+__attribute__((weak)) void serial_puts(const char *s)
+{
+    if (!s) return;
+    _serial_puts_impl(s);
+}
+
+/* sleep_ms: called from Simple code; rt_sleep_ms is the real exported impl. */
+extern RuntimeValue rt_sleep_ms(RuntimeValue ms);
+__attribute__((weak)) void sleep_ms(RuntimeValue ms) { rt_sleep_ms(ms); }
+
+/* rt_memcpy / rt_memset / rt_reload_segments */
+__attribute__((weak)) RuntimeValue rt_memcpy(RuntimeValue dst, RuntimeValue src, RuntimeValue n)
+{
+    void *d = (void *)(uintptr_t)(uint64_t)dst;
+    const void *s = (const void *)(uintptr_t)(uint64_t)src;
+    uint64_t sz = (uint64_t)n;
+    if (d && s && sz) __builtin_memcpy(d, s, sz);
+    return dst;
+}
+__attribute__((weak)) RuntimeValue rt_memset(RuntimeValue dst, RuntimeValue val, RuntimeValue n)
+{
+    void *d = (void *)(uintptr_t)(uint64_t)dst;
+    uint64_t sz = (uint64_t)n;
+    int v = (int)(int64_t)val;
+    if (d && sz) __builtin_memset(d, v, sz);
+    return dst;
+}
+__attribute__((weak)) void rt_reload_segments(void) {}
+
+/* --- E. cap_init_task_record ---------------------------------------- */
+/* TODO: implement after smoke test green (capability module). */
+__attribute__((weak)) void cap_init_task_record(RuntimeValue task, RuntimeValue full)
+{
+    (void)task; (void)full;
+}
+
+/* --- F. bytes_to_string / string_to_bytes / bytes_to_u32_le / u32_to_bytes_le */
+/* TODO: implement after smoke test green. */
+__attribute__((weak)) RuntimeValue bytes_to_string(RuntimeValue arr)
+{
+    /* Return an empty string stub — not called on the boot path. */
+    (void)arr;
+    return rt_string_from_cstr("");
+}
+__attribute__((weak)) RuntimeValue string_to_bytes(RuntimeValue str)
+{
+    (void)str;
+    return 0; /* empty array stub */
+}
+__attribute__((weak)) RuntimeValue bytes_to_u32_le(RuntimeValue arr)
+{
+    (void)arr;
+    return 0;
+}
+__attribute__((weak)) RuntimeValue u32_to_bytes_le(RuntimeValue val)
+{
+    (void)val;
+    return 0;
+}
+
+/* --- G. UITheme stubs: glass_dark / glass_light / ios_dark / ios_light / theme_ui_theme */
+/*
+ * UITheme is a 32-byte struct; UIThemeColors is 40 bytes.
+ * The compiler returns struct-by-value in (rax, rdx) for 16-byte structs or
+ * passes a hidden sret pointer for larger ones.  The Simple ABI for structs
+ * larger than 16 bytes passes a pointer to caller-allocated space in the first
+ * argument.  Since these are never called on the x86_64 boot path, return 0
+ * in all cases — the linker just needs the symbol to exist.
+ * TODO: implement after smoke test green (desktop GUI subsystem).
+ */
+__attribute__((weak)) RuntimeValue glass_dark(void)      { return 0; }
+__attribute__((weak)) RuntimeValue glass_light(void)     { return 0; }
+__attribute__((weak)) RuntimeValue ios_dark(void)        { return 0; }
+__attribute__((weak)) RuntimeValue ios_light(void)       { return 0; }
+__attribute__((weak)) RuntimeValue theme_ui_theme(RuntimeValue name) { (void)name; return 0; }
+
+/* End of Wave 11: missing-symbol stubs */
 
 #endif /* __x86_64__ || __i386__ */
 

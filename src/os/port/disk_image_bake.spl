@@ -76,8 +76,8 @@ fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text
 
 fn _host_tool_available(tool: text) -> bool:
     """Return true if `tool` is on the host PATH (via `which`)."""
-    val (_, _, exit_code) = process.run("which", [tool])
-    exit_code == 0
+    val result = process.run("which", [tool])
+    result.exit_code == 0
 
 fn _fat83_to_filename(name83: text) -> text:
     """Convert FAT 8.3 raw field (11 chars, space-padded) to a dotted filename.
@@ -127,16 +127,16 @@ fn _bake_via_mkfs_fat(out_disk: text, payloads: [PayloadEntry], size_mb: u64) ->
 
     # Invoke the shell helper: sh scripts/bake_disk_via_mkfs.shs <img> <mb> <staging_dir>
     val mb_str = size_mb.to_text()
-    val (stdout, stderr, exit_code) = process.run("sh", [
+    val bake_result = process.run("sh", [
         "scripts/bake_disk_via_mkfs.shs",
         out_disk,
         mb_str,
         staging,
     ])
-    if exit_code != 0:
-        return Err("bake: bake_disk_via_mkfs.shs failed (exit=" + exit_code.to_text() + "): " + stderr)
-    if stdout.length > 0:
-        print stdout
+    if bake_result.exit_code != 0:
+        return Err("bake: bake_disk_via_mkfs.shs failed (exit=" + bake_result.exit_code.to_text() + "): " + bake_result.stderr)
+    if bake_result.stdout.length > 0:
+        print bake_result.stdout
     Ok(())
 
 fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
@@ -197,12 +197,28 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
                 case Err(_):
                     print "bake: rustc_static load failed (skipped)"
         if io.file_exists(simple_path):
-            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/sys/apps/simple"):
+            val simple_size = io.file_size(simple_path)
+            # Root entry /SIMPLSTC.SMF — vfs_init reader reads this path at boot.
+            match _load_payload(simple_path, "SIMPLSTCSMF"):
                 case Ok(e):
-                    print "bake: loaded simple (" + io.file_size(simple_path).to_text() + " bytes)"
+                    print "bake: loaded simple -> /SIMPLSTC.SMF (" + simple_size.to_text() + " bytes)"
                     payloads.push(e)
                 case Err(_):
-                    print "bake: simple load failed (skipped)"
+                    print "bake: simple root entry failed (skipped)"
+            # /sys/apps/simple — legacy mount-probe path.
+            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/sys/apps/simple"):
+                case Ok(e):
+                    print "bake: loaded simple -> /sys/apps/simple"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: simple /sys/apps entry failed (skipped)"
+            # /usr/bin/simple — shell PATH lookup (PATH=/usr/bin:/sys/apps).
+            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/usr/bin/simple"):
+                case Ok(e):
+                    print "bake: loaded simple -> /usr/bin/simple"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: simple /usr/bin entry failed (skipped)"
     else:
         print "bake: toolchain skipped (touch build/os/.bake_include_toolchain to embed)"
 

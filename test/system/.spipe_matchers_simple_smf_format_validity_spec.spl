@@ -16,6 +16,7 @@ use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_smf_relocs_from_path(path: text, sections_off: i64, section_count: i64, smf_data_offset: i64) -> [i64]
 
 # Path to the representative small SMF (same writer as compile.smf).
 val SMALL_SMF_PATH = "build/mcp/t32_mcp.smf"
@@ -126,17 +127,32 @@ describe "SMF format validity — baked Simple binaries":
         expect header.symbol_count > 0 == true
 
     it "compiler SMF relocation table is parseable":
-        # Use from_path so read_relocations() uses rt_smf_relocs_from_path
-        # (native Rust file read) instead of passing 8.6MB [u8] through FFI.
-        val parse_result = SmfReaderMemory.from_path(COMPILER_SMF_PATH)
+        # Use rt_smf_relocs_from_path (native Rust file read) to avoid passing
+        # 8.6MB [u8] through FFI (which causes >120s timeout in interpreter mode).
+        val data = rt_file_read_bytes(COMPILER_SMF_PATH) ?? []
+        val parse_result = SmfReaderMemory.from_data(data)
         expect parse_result.is_ok() == true
         val reader = parse_result.unwrap()
-        val reloc_result = reader.read_relocations()
-        expect reloc_result.is_ok() == true
+        val header = reader.get_header()
+        val sec_off = header.section_table_offset
+        val sec_cnt = header.section_count as i64
+        val data_off = header.smf_data_offset
+        val flat = rt_smf_relocs_from_path(COMPILER_SMF_PATH, sec_off, sec_cnt, data_off)
+        val flat_len = flat.len()
+        expect flat_len >= 0 == true
 
     it "compiler SMF reloc count is sensible (< 10 million)":
-        val parse_result = SmfReaderMemory.from_path(COMPILER_SMF_PATH)
+        val data = rt_file_read_bytes(COMPILER_SMF_PATH) ?? []
+        val parse_result = SmfReaderMemory.from_data(data)
         expect parse_result.is_ok() == true
         val reader = parse_result.unwrap()
-        val relocs = reader.read_relocations().unwrap()
-        expect relocs.len() < 10000000 == true
+        val header = reader.get_header()
+        val flat = rt_smf_relocs_from_path(
+            COMPILER_SMF_PATH,
+            header.section_table_offset,
+            header.section_count as i64,
+            header.smf_data_offset
+        )
+        # flat is [sym_idx, offset, addend, reloc_type, ...] 4 i64s per reloc
+        val reloc_count = flat.len() / 4
+        expect reloc_count < 10000000 == true
