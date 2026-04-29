@@ -1,0 +1,215 @@
+"""
+# RISC-V FPGA Linux Preparation Tests
+
+Truthfulness and orchestration tests for the shared RV32/RV64 Linux pipeline.
+"""
+
+use std.spec.*
+
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
+use hardware.riscv_common.pkg.riscv_generated_core_pkg.RiscvProofLane
+
+describe "RISC-V FPGA Linux board profile":
+    it "allows the generic Xilinx profile for prepare-only generation":
+        val profile = XilinxBoardProfile.generic()
+        expect profile.name == "xilinx_generic"
+        expect profile.is_generic() == true
+        expect profile.validate_for_prepare().len() == 0
+
+    it "blocks hardware boot until the exact part and memory are known":
+        val profile = XilinxBoardProfile.generic()
+        val errors = profile.validate_for_hardware_boot()
+        expect (errors).contains("xilinx part must be selected before hardware boot")
+        expect (errors).contains("memory_size_bytes must be set before hardware boot")
+
+describe "RISC-V FPGA Linux lanes":
+    it "defines RV64 as a repo-native QEMU virt Linux contract lane":
+        val lane = RiscvFpgaLane.rv64_default()
+        expect lane.xlen.to_text() == "rv64"
+        expect lane.readiness_status() == RiscvReadinessStatus.Contract
+        expect lane.proof_lane() == RiscvProofLane.GeneratedRv64Linux
+        expect lane.xlen.linux_policy() == "repo-native-rv64-linux"
+        expect lane.platform_profile.name == "qemu_virt_rv64"
+        expect lane.linux_profile.abi.to_text() == "lp64d"
+        expect lane.linux_profile.mmu_mode.to_text() == "sv39"
+        expect (lane.required_soc_blocks()).contains("opensbi-handoff")
+        expect (lane.required_soc_blocks()).contains("generated-core-shell")
+        expect (lane.proof_acceptance_markers()).contains("OpenSBI")
+        expect lane.hardware_source_contract_errors().len() == 0
+
+    it "defines RV32 as a repo-native generated-core baremetal proof lane":
+        val lane = RiscvFpgaLane.rv32_default()
+        expect lane.xlen.to_text() == "rv32"
+        expect lane.readiness_status() == RiscvReadinessStatus.Contract
+        expect lane.proof_lane() == RiscvProofLane.GeneratedRv32Baremetal
+        expect lane.xlen.linux_policy() == "repo-native-rv32-linux"
+        expect lane.linux_profile.abi.to_text() == "ilp32d"
+        expect lane.platform_profile.name == "qemu_virt_rv32"
+        expect lane.linux_profile.mmu_mode.to_text() == "sv32"
+        expect (lane.required_soc_blocks()).contains("semihost-shell-service")
+        expect (lane.required_soc_blocks()).contains("mailbox-shell-service")
+        expect (lane.proof_acceptance_markers()).contains("mailbox-sentinel")
+
+    it "requires validation plus boot artifacts before Linux boot claims":
+        val lane = RiscvFpgaLane.rv32_default()
+        val errors = lane.validate_for_linux_boot()
+        expect (errors).contains("rv32 readiness must be qemu-boot-validated, rtl-linux-validated, or fpga-validated before claiming Linux boot")
+        expect (errors).contains("kernel_image is required")
+        expect (errors).contains("initrd_rootfs is required")
+        expect (errors).contains("dtb is required")
+        expect (errors).contains("OpenSBI or U-Boot firmware is required")
+        expect (errors).contains("rv32 toolchain prefix must be configured")
+
+    it "does not accept configured RV64 artifacts before readiness advances beyond contract":
+        val lane = RiscvFpgaLane(
+            xlen: RiscvFpgaLane.rv64_default().xlen,
+            top_module: "simple_rv64gc_core",
+            rtl_dir: "build/fpga/rv64/rtl",
+            rtl_sim_backend: "ghdl-vhdl-2008",
+            bootrom_path: "build/fpga/rv64/bootrom.bin",
+            readiness: RiscvReadinessStatus.Contract,
+            linux_profile: RiscvFpgaLane.rv64_default().linux_profile,
+            platform_profile: RiscvFpgaLane.rv64_default().platform_profile,
+            scope_note: "repo-native RV64GC Linux contract lane",
+            linux: LinuxArtifactSet(
+                kernel_image: "linux/arch/riscv/boot/Image",
+                rootfs_image: "rootfs/rv64.cpio",
+                opensbi_image: "opensbi/build/platform/generic/firmware/fw_payload.bin",
+                uboot_image: "",
+                dtb_path: "build/fpga/rv64/simple.dtb",
+                toolchain_prefix: "riscv64-linux-gnu-"
+            )
+        )
+        expect (lane.validate_for_linux_boot()).contains("rv64 readiness must be qemu-boot-validated, rtl-linux-validated, or fpga-validated before claiming Linux boot")
+
+describe "RISC-V FPGA Linux manifest":
+    it "defaults to dual repo-native RV32/RV64 lanes":
+        val manifest = create_default_riscv_fpga_linux_manifest()
+        expect manifest.board.name == "xilinx_generic"
+        expect manifest.lanes.len() == 2
+        expect manifest.validate_for_prepare().len() == 0
+        expect (manifest.readiness_summary()).contains("rv32:contract:qemu_virt_rv32:simple_rv32gc_core:generated_rv32_baremetal")
+        expect (manifest.readiness_summary()).contains("rv64:contract:qemu_virt_rv64:simple_rv64gc_core:generated_rv64_linux")
+
+    it "generates a deterministic Vivado TCL plan from both lanes":
+        val manifest = create_default_riscv_fpga_linux_manifest()
+        val tcl = manifest.vivado_tcl_plan()
+        expect (tcl).contains("create_project simple_riscv_fpga")
+        expect (tcl).contains("-part BOARD_PART_TBD")
+        expect (tcl).contains("add_files constraints/xilinx_generic.xdc")
+        expect (tcl).contains("add_files build/fpga/rv32/rtl")
+        expect (tcl).contains("add_files build/fpga/rv64/rtl")
+        expect (tcl).contains("set_property top simple_rv64gc_core")
+
+describe "RISC-V FPGA Linux RTL generation":
+    it "emits dual-architecture bundles by default":
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_rv64_fpga_rtl_spec")
+        expect result.is_ok() == true
+
+        val rv32_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv32/rtl/simple_rv32gc_core.spl")
+        val rv64_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core.spl")
+        val rv64_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core_pkg.vhd")
+        val rv64_core = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core.vhd")
+        val manifest_text = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/riscv_fpga_rtl_manifest.sdn")
+
+        expect rv32_source != "" == true
+        expect rv64_source != "" == true
+        expect rv64_pkg != "" == true
+        expect rv64_core != "" == true
+        expect manifest_text != "" == true
+        expect (rv32_source).contains("bitfield Rv32Instruction(u32):")
+        expect (rv32_source).contains("platform: qemu_virt_rv32")
+        expect (rv32_source).contains("proof_lane: generated_rv32_baremetal")
+        expect (rv32_source).contains("scope: repo-native RV32GC generated-core baremetal lane")
+        expect (rv64_source).contains("bitfield Rv64Instruction(u32):")
+        expect (rv64_source).contains("platform: qemu_virt_rv64")
+        expect (rv64_source).contains("proof_lane: generated_rv64_linux")
+        expect (rv64_source).contains("scope: repo-native RV64GC generated-core Linux lane")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_writeback")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_i_immediate")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_upper_immediate")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_execute_control")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_execute_datapath")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_branch_datapath")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_control_flow_datapath")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_memory_access_control")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_dispatch_class")
+        expect (rv64_source).contains("fn simple_rv64gc_core_decode_trap_halt_control")
+        expect (rv64_source).contains("bitfield RiscvDispatchClass(u32):")
+        expect (rv64_source).contains("bitfield RiscvTrapHaltControl(u32):")
+        expect (rv64_source).contains("control.continue_exec = 1 as u32")
+        expect (rv64_source).contains("if addr_i(0) = '1' then")
+        expect (rv64_source).contains("if addr_i(1 downto 0) /= \"00\" then")
+        expect (rv64_source).contains("if addr_i(2 downto 0) /= \"000\" then")
+        expect (rv64_source).contains("bitfield RiscvExecuteDatapath(u32):")
+        expect (rv64_source).contains("bitfield RiscvExecuteDatapathEncoding(u32):")
+        expect (rv64_source).contains("bitfield RiscvBranchDatapath(u32):")
+        expect (rv64_source).contains("bitfield RiscvBranchDatapathEncoding(u32):")
+        expect (rv64_source).contains("bitfield RiscvControlFlowDatapath(u32):")
+        expect (rv64_source).contains("bitfield RiscvControlFlowDatapathEncoding(u32):")
+        expect (rv64_pkg).contains("constant XLEN : natural := 64")
+        expect (rv64_core).contains("-- proof-lane: generated_rv64_linux shell=none")
+        expect (rv64_core).contains("-- readiness: contract linux-boot-validated=false")
+        expect (rv64_core).contains("dmem_re       : out std_logic;")
+        expect (rv64_core).contains("dmem_width    : out std_logic_vector(1 downto 0);")
+        expect (rv64_core).contains("dmem_wstrb    : out std_logic_vector((XLEN / 8) - 1 downto 0);")
+        expect (rv64_core).contains("dmem_re <= dmem_re_reg;")
+        expect (rv64_core).contains("dmem_width <= dmem_width_reg;")
+        expect (rv64_core).contains("dmem_wstrb <= dmem_wstrb_reg;")
+        expect (rv64_core).contains("dmem_re_reg <= '1';")
+        expect (rv64_core).contains("dmem_width_reg <= \"00\";")
+        expect (rv64_core).contains("dmem_width_reg <= \"01\";")
+        expect (rv64_core).contains("dmem_width_reg <= \"10\";")
+        expect (rv64_core).contains("dmem_width_reg <= \"11\";")
+        expect (rv64_core).contains("dmem_wstrb_reg <= (others => '0');")
+        expect (rv64_core).contains("dmem_wdata_reg <= std_logic_vector(shift_left(unsigned(regs(rs2_i)), to_integer(unsigned(addr_i(2 downto 0))) * 8));")
+        expect (rv64_core).contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(1, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0)))));")
+        expect (rv64_core).contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(3, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0)))));")
+        expect (rv64_core).contains("shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)")
+        expect (rv64_core).contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(15, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0)))));")
+        expect (rv64_core).contains("dmem_wstrb_reg <= std_logic_vector(to_unsigned(15, XLEN / 8));")
+        expect (rv64_core).contains("dmem_wstrb_reg <= (others => '1');")
+        expect (rv64_core).contains("-- source-map: RiscvIImmediateEncoding.value => imem_rdata(31 downto 20)")
+        expect (rv64_core).contains("-- source-map: RiscvUpperImmediateEncoding.high20 => imem_rdata(31 downto 12)")
+        expect (rv64_core).contains("-- source-map: RiscvExecuteControlEncoding.funct3 => imem_rdata(14 downto 12)")
+        expect (rv64_core).contains("-- source-map: RiscvExecuteControlEncoding.bit30 => imem_rdata(30 downto 30)")
+        expect (rv64_core).contains("-- source-map: RiscvExecuteDatapathEncoding.opcode => imem_rdata(6 downto 0)")
+        expect (rv64_core).contains("-- source-map: RiscvExecuteDatapathEncoding.funct3 => imem_rdata(14 downto 12)")
+        expect (rv64_core).contains("-- source-map: RiscvExecuteDatapathEncoding.bit30 => imem_rdata(30 downto 30)")
+        expect (rv64_core).contains("-- source-map: RiscvBranchDatapathEncoding.opcode => imem_rdata(6 downto 0)")
+        expect (rv64_core).contains("-- source-map: RiscvBranchDatapathEncoding.funct3 => imem_rdata(14 downto 12)")
+        expect (rv64_core).contains("-- source-map: RiscvControlFlowDatapathEncoding.opcode => imem_rdata(6 downto 0)")
+        expect (rv64_core).contains("-- source-map: RiscvMemoryAccessControlEncoding.funct3 => imem_rdata(14 downto 12)")
+        expect (rv64_core).contains("-- source-map: RiscvDispatchClassEncoding.opcode => imem_rdata(6 downto 0)")
+        expect (rv64_core).contains("-- source-map: RiscvTrapHaltControlEncoding.opcode => imem_rdata(6 downto 0)")
+        expect (rv64_core).contains("variable decode_execute_datapath_bits : std_logic_vector(31 downto 0);")
+        expect (rv64_core).contains("variable decode_branch_datapath_bits : std_logic_vector(31 downto 0);")
+        expect (rv64_core).contains("variable decode_control_flow_datapath_bits : std_logic_vector(31 downto 0);")
+        expect (rv64_core).contains("variable decode_dispatch_class_bits : std_logic_vector(31 downto 0);")
+        expect (rv64_core).contains("variable decode_trap_halt_control_bits : std_logic_vector(31 downto 0);")
+        expect (rv64_core).contains("decode_execute_alu_op := decode_execute_datapath_bits(4 downto 1);")
+        expect (rv64_core).contains("decode_execute_is_reg := decode_execute_datapath_bits(0);")
+        expect (rv64_core).contains("decode_branch_op := decode_branch_datapath_bits(2 downto 0);")
+        expect (rv64_core).contains("decode_next_pc_op := decode_control_flow_datapath_bits(1 downto 0);")
+        expect (rv64_core).contains("decode_writes_link := decode_control_flow_datapath_bits(2);")
+        expect (rv64_core).contains("decode_dispatch_class := decode_dispatch_class_bits(3 downto 0);")
+        expect (rv64_core).contains("decode_continue_exec := decode_trap_halt_control_bits(0);")
+        expect (rv64_core).contains("decode_should_trap := decode_trap_halt_control_bits(1);")
+        expect (rv64_core).contains("decode_should_halt := decode_trap_halt_control_bits(2);")
+        expect (rv64_core).contains("case decode_execute_alu_op is")
+        expect (rv64_core).contains("case decode_branch_op is")
+        expect (rv64_core).contains("case decode_dispatch_class is")
+        expect (rv64_core).contains("if decode_next_pc_op = \"01\" and branch_taken then")
+        val has_handwritten_funct3_case = rv64_core.contains("case decode_funct3 is")
+        expect has_handwritten_funct3_case == false
+        val has_handwritten_opcode_case = rv64_core.contains("case imem_rdata(6 downto 0) is")
+        expect has_handwritten_opcode_case == false
+        expect (manifest_text).contains("platform = \"qemu_virt_rv32\"")
+        expect (manifest_text).contains("platform = \"qemu_virt_rv64\"")
+        expect (manifest_text).contains("proof_lane = \"generated_rv32_baremetal\"")
+        expect (manifest_text).contains("proof_lane = \"generated_rv64_linux\"")
+        expect (manifest_text).contains("shell_contract = \"generated_rv32_baremetal shell=semihost+mailbox\"")
+        expect (manifest_text).contains("abi = \"ilp32d\"")
+        expect (manifest_text).contains("abi = \"lp64d\"")
+        expect (manifest_text).contains("firmware_mode = \"supervisor\"")
+        expect (manifest_text).contains("arch = \"rv32\"")

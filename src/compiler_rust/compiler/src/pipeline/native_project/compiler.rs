@@ -53,6 +53,7 @@ impl NativeProjectBuilder {
         let temp_dir = temp_dir.to_path_buf();
         let total = entries.len();
         let no_mangle = self.config.no_mangle;
+        let opt_level = self.config.opt_level;
         let canonical_entry = canonical_entry.clone();
         let imports = imports.clone();
 
@@ -73,6 +74,7 @@ impl NativeProjectBuilder {
                     file_timeout,
                     stack_size,
                     no_mangle,
+                    opt_level,
                     is_entry,
                     imports.clone(),
                 ) {
@@ -119,6 +121,7 @@ impl NativeProjectBuilder {
                     self.config.file_timeout,
                     self.config.stack_size,
                     self.config.no_mangle,
+                    self.config.opt_level,
                     is_entry,
                     imports.clone(),
                 ) {
@@ -149,6 +152,7 @@ pub(crate) fn compile_file_to_object(
     source_root: &Path,
     source_dirs: &[PathBuf],
     no_mangle: bool,
+    opt_level: crate::optimizations::NativeOptimizationLevel,
     is_entry: bool,
     imports: &ModuleImports,
 ) -> Result<Vec<u8>, String> {
@@ -277,8 +281,8 @@ pub(crate) fn compile_file_to_object(
                 }
             }
 
-            let mut llvm =
-                LlvmBackend::new(effective_target()).map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
+            let mut llvm = LlvmBackend::new_with_opt_level(effective_target(), opt_level)
+                .map_err(|e| format!("{}: llvm init: {e}", file_path.display()))?;
             llvm.set_import_map(imports.import_map.clone());
             llvm.set_use_map(use_map.clone());
             let obj = llvm
@@ -303,8 +307,8 @@ pub(crate) fn compile_file_to_object(
     }
 
     // Cranelift backend (default)
-    let mut codegen =
-        Codegen::for_target(effective_target()).map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
+    let mut codegen = Codegen::for_target_with_opt_level(effective_target(), opt_level)
+        .map_err(|e| format!("{}: codegen init: {e}", file_path.display()))?;
     codegen.set_entry_module(is_entry);
     codegen.set_import_map(imports.import_map.clone());
     codegen.set_ambiguous_names(imports.ambiguous_names.clone());
@@ -332,6 +336,7 @@ pub(crate) fn compile_file_safe(
     timeout_secs: u64,
     stack_size: usize,
     no_mangle: bool,
+    opt_level: crate::optimizations::NativeOptimizationLevel,
     is_entry: bool,
     imports: ModuleImports,
 ) -> Result<Vec<u8>, String> {
@@ -354,6 +359,7 @@ pub(crate) fn compile_file_safe(
                     &source_root,
                     &source_dirs,
                     no_mangle,
+                    opt_level,
                     is_entry,
                     &imports,
                 )
@@ -366,6 +372,7 @@ pub(crate) fn compile_file_safe(
                         &source_root,
                         &source_dirs,
                         no_mangle,
+                        opt_level,
                         is_entry,
                         &imports,
                     )

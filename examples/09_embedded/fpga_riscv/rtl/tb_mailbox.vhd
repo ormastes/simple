@@ -137,6 +137,7 @@ begin
         variable ch_val   : integer;
         variable out_line : line;
         variable sentinel : std_logic_vector(31 downto 0);
+        variable last_seq_id : std_logic_vector(31 downto 0) := (others => '0');
         constant SENTINEL_IDX : integer := 16#8000# / 4;  -- 0x80008000 relative to RAM base
     begin
         reset_n <= '0';
@@ -148,7 +149,8 @@ begin
             cycles := cycles + 1;
 
             -- Check if trigger was just written with magic value
-            if mb_trigger = MB_TRIGGER_MAGIC then
+            if mb_trigger = MB_TRIGGER_MAGIC and mb_seq_id /= last_seq_id then
+                last_seq_id := mb_seq_id;
                 -- Dispatch based on command
                 if mb_cmd = MB_CMD_PUTC then
                     ch_val := to_integer(unsigned(mb_arg0(7 downto 0)));
@@ -172,8 +174,6 @@ begin
                            " value=" & integer'image(to_integer(unsigned(mb_arg1)));
                 end if;
 
-                -- Clear trigger after processing
-                mb_trigger <= (others => '0');
             end if;
         end loop;
 

@@ -5,6 +5,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use simple_common::target::Target;
 
 use crate::mir::MirModule;
+use crate::optimizations::NativeOptimizationLevel;
 
 use super::common_backend::{create_isa_and_flags, BackendError, BackendResult, BackendSettings, CodegenBackend};
 
@@ -28,6 +29,24 @@ impl Codegen {
     /// This enables cross-compilation to different architectures.
     pub fn for_target(target: Target) -> CodegenResult<Self> {
         let settings = BackendSettings::aot_for_target(target);
+        let (_flags, isa) = create_isa_and_flags(&settings)?;
+
+        let builder = ObjectBuilder::new(isa, "simple_module", cranelift_module::default_libcall_names())
+            .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+
+        let module = ObjectModule::new(builder);
+        let backend = CodegenBackend::with_module_and_target(module, target)?;
+
+        Ok(Self { backend })
+    }
+
+    /// Create a new codegen for a specific target and optimization profile.
+    pub fn for_target_with_opt_level(target: Target, opt_level: NativeOptimizationLevel) -> CodegenResult<Self> {
+        let settings = BackendSettings::aot_for_target(target).with_opt_level(match opt_level {
+            NativeOptimizationLevel::None => "none",
+            NativeOptimizationLevel::Basic => "speed_and_size",
+            NativeOptimizationLevel::Standard | NativeOptimizationLevel::Aggressive => "speed",
+        });
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
         let builder = ObjectBuilder::new(isa, "simple_module", cranelift_module::default_libcall_names())

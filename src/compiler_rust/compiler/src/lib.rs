@@ -50,6 +50,7 @@ pub mod mir;
 pub mod mock;
 pub mod module_resolver;
 pub mod monomorphize;
+pub mod optimizations;
 pub mod parallel;
 pub mod pattern_analysis;
 pub mod pipeline;

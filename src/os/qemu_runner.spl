@@ -42,6 +42,7 @@ extern fn rt_time_now_unix_micros() -> i64
 # (x86_64 desktop wrapper) while still bounding stuck subprocesses. Override with
 # SIMPLE_OS_BUILD_TIMEOUT_MS at runtime when tracing regressions.
 val _OS_BUILD_DEFAULT_TIMEOUT_MS: i64 = 900000
+val _OS_BUILD_DEFAULT_LOG_MODE: text = "on"
 
 fn _parse_timeout_ms(raw: text, default_ms: i64) -> i64:
     """Parse a positive integer ms value from env, falling back to default on empty/bad input."""
@@ -70,6 +71,17 @@ fn _os_build_timeout_ms() -> i64:
     """
     val raw = rt_env_get("SIMPLE_OS_BUILD_TIMEOUT_MS") ?? ""
     _parse_timeout_ms(raw, _OS_BUILD_DEFAULT_TIMEOUT_MS)
+
+fn _normalize_os_log_mode(raw: text) -> text:
+    if raw == "off":
+        return "off"
+    if raw == "on":
+        return "on"
+    _OS_BUILD_DEFAULT_LOG_MODE
+
+fn _os_build_log_mode() -> text:
+    val raw = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    _normalize_os_log_mode(raw)
 
 fn _os_build_backend_for_target(target: OsTarget) -> text:
     """Resolve native-build backend for a concrete OS target.
@@ -493,12 +505,16 @@ pub fn os_native_build_env_prefix(target: OsTarget, objcopy_prefix: text) -> tex
 fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
     """Build the argv passed to `simple native-build` for an OS target."""
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
+    val log_mode = _os_build_log_mode()
     var args: [text] = ["native-build"]
     for source in _build_sources(target):
         args.push("--source")
         args.push(source)
     args.push("--backend")
     args.push(backend_name)
+    args.push("--opt-level=aggressive")
+    args.push("--log")
+    args.push(log_mode)
     if _is_arm_fs_exec_target(target) or _is_riscv_fs_exec_target(target):
         args.push("--timeout")
         args.push("180")
@@ -531,21 +547,36 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val arch_label = arch_display_name(target.arch)
     val timeout_ms = _os_build_timeout_ms()
     val build_marker = if _is_ssh_live_target(target): _ssh_live_build_marker_value(backend) else: ""
+    val log_mode = _os_build_log_mode()
+    val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+    val old_lib = rt_env_get("SIMPLE_LIB") ?? ""
+    val old_boot_minimal = rt_env_get("SIMPLE_BOOT_MINIMAL") ?? ""
+    val old_stub_env = rt_env_get("SIMPLE_ALLOW_FREESTANDING_STUBS") ?? ""
+    val old_log_mode = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    val old_path = rt_env_get("PATH") ?? ""
+    val old_build_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
     if not _prepare_build_output(target, build_marker):
+        _cleanup_generated_build_helpers(build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         print "[build][{arch_label}] phase=prepare FAILED output={target.output}"
         return false
 
     val backend_name = if backend == "llvm": "llvm" else: "cranelift"
-    print "[build][{arch_label}] phase=plan entry={target.entry} target={target.target_triple} backend={backend_name}"
+    print "[build][{arch_label}] phase=plan entry={target.entry} target={target.target_triple} backend={backend_name} log={log_mode}"
     val args = os_native_build_args(target, backend_name)
     val objcopy_prefix = _objcopy_path_prefix()
     if _needs_elf32_wrap(target) and objcopy_prefix == "":
         print "[build][{arch_label}] phase=tooling FAILED: llvm-objcopy not found for {target.entry}"
+        _cleanup_generated_build_helpers(build_marker)
         return false
 
     val simple_bin = _find_simple_binary()
     val env_prefix = _build_env_prefix(target, objcopy_prefix)
-    _apply_build_env(target, objcopy_prefix)
+    if not _apply_build_env(target, objcopy_prefix):
+        print "[build][{arch_label}] phase=env FAILED could not export build environment"
+        _cleanup_generated_build_helpers(build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
+        return false
     val started_ms = _now_ms()
     print "[build][{arch_label}] phase=spawn timeout_ms={timeout_ms}"
     if env_prefix != "":
@@ -560,13 +591,18 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
             print "[build][{arch_label}] stdout tail:\n{_tail_lines(stdout, 20)}"
         if stderr != "":
             print "[build][{arch_label}] stderr tail:\n{_tail_lines(stderr, 40)}"
+        _cleanup_generated_build_helpers(build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
     if not rt_file_exists(target.output):
         print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
+        _cleanup_generated_build_helpers(build_marker)
+        _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         return false
     if build_marker != "":
         print "[build][{arch_label}] phase=artifact OK marker={build_marker}"
+    _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
     true
 
 fn _objcopy_path_prefix() -> text:
@@ -628,24 +664,24 @@ fn _find_simple_binary() -> text:
 
 fn _build_sources(target: OsTarget) -> [text]:
     if _is_ssh_live_target(target):
-        return ["src/os", "src/lib", "examples/simple_os", "build/os/generated"]
+        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_x86_64_kernel_target(target):
-        return ["src/os", "src/lib", "examples/simple_os"]
+        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_browser_wrapper_target(target):
-        return ["src/os", "src/lib", "examples/simple_os"]
+        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_desktop_wrapper_target(target):
-        return ["src/os", "src/lib", "examples/simple_os"]
+        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_gui_engine2d_wrapper_target(target):
-        return ["src/os", "src/lib", "examples/simple_os"]
+        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_js_browser_runtime_probe_target(target):
-        return ["src/os", "src/lib", "examples/simple_os"]
+        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_fs_wrapper_target(target):
-        return ["src/os", "src/lib", "examples/simple_os"]
+        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_riscv64_fs_exec_target(target):
-        return ["examples/simple_os/arch/riscv64"]
+        return ["build/os/generated", "examples/simple_os/arch/riscv64"]
     if _is_riscv32_fs_exec_target(target):
-        return ["examples/simple_os/arch/riscv32"]
-    ["src", "examples"]
+        return ["build/os/generated", "examples/simple_os/arch/riscv32"]
+    ["build/os/generated", "src", "examples"]
 
 fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     var envs: [text] = []
@@ -660,6 +696,7 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
         envs.push("SIMPLE_BOOT_MINIMAL=1")
     if _needs_freestanding_stub_env(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
+    envs.push("SIMPLE_OS_LOG_MODE={_os_build_log_mode()}")
     if objcopy_prefix != "":
         envs.push("PATH=\"{objcopy_prefix}:$PATH\"")
     envs.join(" ")
@@ -677,15 +714,38 @@ fn _ssh_live_build_marker_source(marker: text) -> text:
     "pub fn ssh_live_build_marker() -> text:\n" +
         "    \"" + marker + "\"\n"
 
+fn _simpleos_log_config_path() -> text:
+    "build/os/generated/generated/simpleos_log_config.spl"
+
+fn _legacy_simpleos_log_config_path() -> text:
+    "build/os/generated/lib/simpleos_log_config.spl"
+
+fn _simpleos_log_config_source(enabled: bool) -> text:
+    val default_value = if enabled: "true" else: "false"
+    "val SIMPLEOS_LOG_COMPILED: bool = {default_value}\n" +
+        "\n" +
+        "fn simpleos_log_compile_enabled() -> bool:\n" +
+        "    SIMPLEOS_LOG_COMPILED\n" +
+        "\n" +
+        "fn simpleos_log_compile_mode_name() -> text:\n" +
+        "    if SIMPLEOS_LOG_COMPILED:\n" +
+        "        return \"on\"\n" +
+        "    \"off\"\n"
+
 fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
     if rt_file_exists(target.output):
         if not rt_file_delete(target.output):
             print "[build] could not remove stale artifact: {target.output}"
             return false
+    if rt_file_exists(_legacy_simpleos_log_config_path()):
+        rt_file_delete(_legacy_simpleos_log_config_path())
+    if not rt_dir_create_all("build/os/generated/generated"):
+        print "[build] could not create build/os/generated/generated"
+        return false
+    if not rt_file_write_text(_simpleos_log_config_path(), _simpleos_log_config_source(_os_build_log_mode() == "on")):
+        print "[build] could not write SimpleOS log compile config"
+        return false
     if _is_ssh_live_target(target):
-        if not rt_dir_create_all("build/os/generated"):
-            print "[build] could not create build/os/generated"
-            return false
         if not rt_file_write_text(_ssh_live_build_marker_path(), _ssh_live_build_marker_source(build_marker)):
             print "[build] could not write SSH live build marker"
             return false
@@ -694,25 +754,54 @@ fn _prepare_build_output(target: OsTarget, build_marker: text) -> bool:
             return false
     true
 
-fn _apply_build_env(target: OsTarget, objcopy_prefix: text):
+fn _cleanup_generated_build_helpers(build_marker: text):
+    if rt_file_exists(_simpleos_log_config_path()):
+        rt_file_delete(_simpleos_log_config_path())
+    if build_marker != "" and rt_file_exists(_ssh_live_build_marker_path()):
+        rt_file_delete(_ssh_live_build_marker_path())
+    if build_marker != "":
+        rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", "")
+
+fn _restore_build_env(old_bootstrap: text, old_lib: text, old_boot_minimal: text, old_stub_env: text, old_log_mode: text, old_path: text, old_build_marker: text):
+    rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+    rt_env_set("SIMPLE_LIB", old_lib)
+    rt_env_set("SIMPLE_BOOT_MINIMAL", old_boot_minimal)
+    rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", old_stub_env)
+    rt_env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+    rt_env_set("PATH", old_path)
+    rt_env_set("SIMPLE_SSH_LIVE_BUILD_MARKER", old_build_marker)
+
+fn _apply_build_env(target: OsTarget, objcopy_prefix: text) -> bool:
     val cwd = rt_env_cwd()
     if _is_x86_64_kernel_target(target) or _uses_baremetal_wrapper_profile(target):
-        rt_env_set("SIMPLE_BOOTSTRAP", "1")
-        rt_env_set("SIMPLE_LIB", "{cwd}/src")
+        if not rt_env_set("SIMPLE_BOOTSTRAP", "1"):
+            return false
+        if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
+            return false
     if _is_arm_fs_exec_target(target):
-        rt_env_set("SIMPLE_BOOT_MINIMAL", "1")
-        rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1")
-        rt_env_set("SIMPLE_LIB", "{cwd}/src")
+        if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
+            return false
+        if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
+            return false
+        if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
+            return false
     if _is_riscv_fs_exec_target(target):
-        rt_env_set("SIMPLE_BOOT_MINIMAL", "1")
+        if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
+            return false
     if _needs_freestanding_stub_env(target):
-        rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1")
+        if not rt_env_set("SIMPLE_ALLOW_FREESTANDING_STUBS", "1"):
+            return false
+    if not rt_env_set("SIMPLE_OS_LOG_MODE", _os_build_log_mode()):
+        return false
     if objcopy_prefix != "":
         val old_path = rt_env_get("PATH") ?? ""
         if old_path == "":
-            rt_env_set("PATH", objcopy_prefix)
+            if not rt_env_set("PATH", objcopy_prefix):
+                return false
         else:
-            rt_env_set("PATH", "{objcopy_prefix}:{old_path}")
+            if not rt_env_set("PATH", "{objcopy_prefix}:{old_path}"):
+                return false
+    true
 
 fn _needs_elf32_wrap(target: OsTarget) -> bool:
     _uses_baremetal_wrapper_profile(target)

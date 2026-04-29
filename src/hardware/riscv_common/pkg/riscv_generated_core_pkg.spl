@@ -1,0 +1,171 @@
+"""
+# RISC-V Generated Core Contracts
+
+Shared proof-lane and shell-seam contracts for the incremental migration from
+handwritten/external RTL to repo-native generated RISC-V cores.
+"""
+
+enum RiscvProofLane:
+    ReferenceExternalRv32Linux
+    ReferenceExternalRv64Linux
+    GeneratedRv32Baremetal
+    GeneratedRv64Linux
+    GeneratedRv32Linux
+
+impl RiscvProofLane:
+    fn to_text() -> text:
+        match self:
+            ReferenceExternalRv32Linux: "reference_external_rv32_linux"
+            ReferenceExternalRv64Linux: "reference_external_rv64_linux"
+            GeneratedRv32Baremetal: "generated_rv32_baremetal"
+            GeneratedRv64Linux: "generated_rv64_linux"
+            GeneratedRv32Linux: "generated_rv32_linux"
+
+    fn is_external_reference() -> bool:
+        self == RiscvProofLane.ReferenceExternalRv32Linux or self == RiscvProofLane.ReferenceExternalRv64Linux
+
+    fn requires_linux_boot() -> bool:
+        self == RiscvProofLane.ReferenceExternalRv32Linux or
+            self == RiscvProofLane.ReferenceExternalRv64Linux or
+            self == RiscvProofLane.GeneratedRv64Linux or
+            self == RiscvProofLane.GeneratedRv32Linux
+
+struct GeneratedInstructionFetch:
+    addr: i64
+    valid: bool
+    ready: bool
+    rdata: i64
+    fault: bool
+
+impl GeneratedInstructionFetch:
+    static fn empty() -> GeneratedInstructionFetch:
+        GeneratedInstructionFetch(addr: 0, valid: false, ready: false, rdata: 0, fault: false)
+
+struct GeneratedMemoryAccess:
+    addr: i64
+    re: bool
+    we: bool
+    width_bytes: i64
+    wstrb_mask: i64
+    wdata: i64
+    rdata: i64
+    misaligned: bool
+    fault: bool
+
+impl GeneratedMemoryAccess:
+    static fn empty() -> GeneratedMemoryAccess:
+        GeneratedMemoryAccess(
+            addr: 0,
+            re: false,
+            we: false,
+            width_bytes: 4,
+            wstrb_mask: 0,
+            wdata: 0,
+            rdata: 0,
+            misaligned: false,
+            fault: false
+        )
+
+struct GeneratedTrapStatus:
+    trap: bool
+    halt: bool
+    cause: i64
+    tval: i64
+    privilege_return_target: i64
+    unsupported: bool
+
+impl GeneratedTrapStatus:
+    static fn empty() -> GeneratedTrapStatus:
+        GeneratedTrapStatus(
+            trap: false,
+            halt: false,
+            cause: 0,
+            tval: 0,
+            privilege_return_target: 0,
+            unsupported: false
+        )
+
+struct GeneratedBootContract:
+    reset_vector: i64
+    opensbi_fw_jump: bool
+    kernel_entry: i64
+    dtb_addr: i64
+    hartid_register: text
+    dtb_register: text
+
+impl GeneratedBootContract:
+    static fn baremetal(reset_vector: i64) -> GeneratedBootContract:
+        GeneratedBootContract(
+            reset_vector: reset_vector,
+            opensbi_fw_jump: false,
+            kernel_entry: reset_vector,
+            dtb_addr: 0,
+            hartid_register: "",
+            dtb_register: ""
+        )
+
+    static fn fw_jump(reset_vector: i64, kernel_entry: i64, dtb_addr: i64) -> GeneratedBootContract:
+        GeneratedBootContract(
+            reset_vector: reset_vector,
+            opensbi_fw_jump: true,
+            kernel_entry: kernel_entry,
+            dtb_addr: dtb_addr,
+            hartid_register: "a0",
+            dtb_register: "a1"
+        )
+
+struct GeneratedCoreShellContract:
+    xlen_bits: i64
+    proof_lane: RiscvProofLane
+    fetch: GeneratedInstructionFetch
+    data: GeneratedMemoryAccess
+    trap_status: GeneratedTrapStatus
+    interrupt_inputs: [text]
+    debug_outputs: [text]
+    semihost_shell_service: bool
+    mailbox_shell_service: bool
+    boot: GeneratedBootContract
+
+impl GeneratedCoreShellContract:
+    static fn rv32_baremetal() -> GeneratedCoreShellContract:
+        GeneratedCoreShellContract(
+            xlen_bits: 32,
+            proof_lane: RiscvProofLane.GeneratedRv32Baremetal,
+            fetch: GeneratedInstructionFetch.empty(),
+            data: GeneratedMemoryAccess.empty(),
+            trap_status: GeneratedTrapStatus.empty(),
+            interrupt_inputs: ["machine_software", "machine_timer", "machine_external"],
+            debug_outputs: ["halt", "trap", "semihost_trigger", "semihost_op", "semihost_param", "mailbox_mmio"],
+            semihost_shell_service: true,
+            mailbox_shell_service: true,
+            boot: GeneratedBootContract.baremetal(0x80000000)
+        )
+
+    static fn rv64_linux() -> GeneratedCoreShellContract:
+        GeneratedCoreShellContract(
+            xlen_bits: 64,
+            proof_lane: RiscvProofLane.GeneratedRv64Linux,
+            fetch: GeneratedInstructionFetch.empty(),
+            data: GeneratedMemoryAccess.empty(),
+            trap_status: GeneratedTrapStatus.empty(),
+            interrupt_inputs: ["machine_software", "machine_timer", "machine_external", "supervisor_external"],
+            debug_outputs: ["halt", "trap", "uart16550_tx", "debug_mailbox"],
+            semihost_shell_service: false,
+            mailbox_shell_service: false,
+            boot: GeneratedBootContract.fw_jump(0x80000000, 0x80200000, 0x88000000)
+        )
+
+    fn shell_services_summary() -> text:
+        var parts: [text] = []
+        if self.semihost_shell_service:
+            parts.push("semihost")
+        if self.mailbox_shell_service:
+            parts.push("mailbox")
+        if parts.len() == 0:
+            return "none"
+        parts.join("+")
+
+    fn acceptance_markers() -> [text]:
+        if self.proof_lane.requires_linux_boot():
+            return ["OpenSBI", "Linux version", "OF: fdt", "Freeing unused kernel memory", "init started"]
+        ["semihost-exit-0", "mailbox-sentinel", "ghdl-synth"]

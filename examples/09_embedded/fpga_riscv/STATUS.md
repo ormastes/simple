@@ -27,6 +27,10 @@
 
 ## RV32I CPU Design
 
+This status applies to the handwritten VHDL lane in `examples/09_embedded/fpga_riscv`.
+It should not be read as proof that the repo-native generated RV32/RV64 lanes are
+already runnable CPUs.
+
 ### Architecture
 - **ISA:** RV32I (base integer, single-cycle)
 - **Features:** Full ALU, branch unit, register file (32x32), instruction decoder

@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::optimizations::NativeOptimizationLevel;
+
 /// Safe canonicalize that avoids `libc::realpath` which segfaults in
 /// self-hosted Cranelift-compiled binaries.  Falls back to manual
 /// absolute-path resolution when the stdlib call fails or when running
@@ -154,6 +156,8 @@ pub struct NativeBuildConfig {
     pub target: Option<simple_common::target::Target>,
     /// Linker script path for freestanding/OS targets.
     pub linker_script: Option<PathBuf>,
+    /// Optimization profile for native executable builds.
+    pub opt_level: NativeOptimizationLevel,
 }
 
 impl Default for NativeBuildConfig {
@@ -175,6 +179,7 @@ impl Default for NativeBuildConfig {
             entry_closure: false,
             target: None,
             linker_script: None,
+            opt_level: NativeOptimizationLevel::default_for_native_executable(),
         }
     }
 }

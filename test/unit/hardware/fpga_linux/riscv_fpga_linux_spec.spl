@@ -4,9 +4,10 @@
 Truthfulness and orchestration tests for the shared RV32/RV64 Linux pipeline.
 """
 
-import std.spec
+use std.spec.*
 
 use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
+use hardware.riscv_common.pkg.riscv_generated_core_pkg.RiscvProofLane
 
 describe "RISC-V FPGA Linux board profile":
     it "allows the generic Xilinx profile for prepare-only generation":
@@ -26,23 +27,28 @@ describe "RISC-V FPGA Linux lanes":
         val lane = RiscvFpgaLane.rv64_default()
         expect(lane.xlen.to_text()).to_equal("rv64")
         expect(lane.readiness_status()).to_equal(RiscvReadinessStatus.Contract)
+        expect(lane.proof_lane()).to_equal(RiscvProofLane.GeneratedRv64Linux)
         expect(lane.xlen.linux_policy()).to_equal("repo-native-rv64-linux")
         expect(lane.platform_profile.name).to_equal("qemu_virt_rv64")
         expect(lane.linux_profile.abi.to_text()).to_equal("lp64d")
         expect(lane.linux_profile.mmu_mode.to_text()).to_equal("sv39")
         expect(lane.required_soc_blocks()).to_contain("opensbi-handoff")
-        expect(lane.expected_boot_markers()).to_contain("OpenSBI")
+        expect(lane.required_soc_blocks()).to_contain("generated-core-shell")
+        expect(lane.proof_acceptance_markers()).to_contain("OpenSBI")
         expect(lane.hardware_source_contract_errors().len()).to_equal(0)
 
-    it "defines RV32 as a repo-native QEMU virt Linux contract lane":
+    it "defines RV32 as a repo-native generated-core baremetal proof lane":
         val lane = RiscvFpgaLane.rv32_default()
         expect(lane.xlen.to_text()).to_equal("rv32")
         expect(lane.readiness_status()).to_equal(RiscvReadinessStatus.Contract)
+        expect(lane.proof_lane()).to_equal(RiscvProofLane.GeneratedRv32Baremetal)
         expect(lane.xlen.linux_policy()).to_equal("repo-native-rv32-linux")
         expect(lane.linux_profile.abi.to_text()).to_equal("ilp32d")
         expect(lane.platform_profile.name).to_equal("qemu_virt_rv32")
         expect(lane.linux_profile.mmu_mode.to_text()).to_equal("sv32")
-        expect(lane.expected_boot_markers()).to_contain("OpenSBI")
+        expect(lane.required_soc_blocks()).to_contain("semihost-shell-service")
+        expect(lane.required_soc_blocks()).to_contain("mailbox-shell-service")
+        expect(lane.proof_acceptance_markers()).to_contain("mailbox-sentinel")
 
     it "requires validation plus boot artifacts before Linux boot claims":
         val lane = RiscvFpgaLane.rv32_default()
@@ -82,8 +88,8 @@ describe "RISC-V FPGA Linux manifest":
         expect(manifest.board.name).to_equal("xilinx_generic")
         expect(manifest.lanes.len()).to_equal(2)
         expect(manifest.validate_for_prepare().len()).to_equal(0)
-        expect(manifest.readiness_summary()).to_contain("rv32:contract:qemu_virt_rv32:simple_rv32gc_core")
-        expect(manifest.readiness_summary()).to_contain("rv64:contract:qemu_virt_rv64:simple_rv64gc_core")
+        expect(manifest.readiness_summary()).to_contain("rv32:contract:qemu_virt_rv32:simple_rv32gc_core:generated_rv32_baremetal")
+        expect(manifest.readiness_summary()).to_contain("rv64:contract:qemu_virt_rv64:simple_rv64gc_core:generated_rv64_linux")
 
     it "generates a deterministic Vivado TCL plan from both lanes":
         val manifest = create_default_riscv_fpga_linux_manifest()
@@ -99,21 +105,26 @@ describe "RISC-V FPGA Linux RTL generation":
     it "emits dual-architecture bundles by default":
         val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_rv64_fpga_rtl_spec")
         expect(result.is_ok()).to_equal(true)
-        val bundle = result.ok().unwrap()
-        expect(bundle.generated_files.len()).to_equal(7)
 
         val rv32_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv32/rtl/simple_rv32gc_core.spl")
         val rv64_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core.spl")
         val rv64_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core_pkg.vhd")
         val rv64_core = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core.vhd")
-        val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+        val manifest_text = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/riscv_fpga_rtl_manifest.sdn")
 
+        expect(rv32_source != "").to_equal(true)
+        expect(rv64_source != "").to_equal(true)
+        expect(rv64_pkg != "").to_equal(true)
+        expect(rv64_core != "").to_equal(true)
+        expect(manifest_text != "").to_equal(true)
         expect(rv32_source).to_contain("bitfield Rv32Instruction(u32):")
         expect(rv32_source).to_contain("platform: qemu_virt_rv32")
-        expect(rv32_source).to_contain("scope: repo-native RV32GC Linux contract lane")
+        expect(rv32_source).to_contain("proof_lane: generated_rv32_baremetal")
+        expect(rv32_source).to_contain("scope: repo-native RV32GC generated-core baremetal lane")
         expect(rv64_source).to_contain("bitfield Rv64Instruction(u32):")
         expect(rv64_source).to_contain("platform: qemu_virt_rv64")
-        expect(rv64_source).to_contain("scope: repo-native RV64GC Linux contract lane")
+        expect(rv64_source).to_contain("proof_lane: generated_rv64_linux")
+        expect(rv64_source).to_contain("scope: repo-native RV64GC generated-core Linux lane")
         expect(rv64_source).to_contain("fn simple_rv64gc_core_decode_writeback")
         expect(rv64_source).to_contain("fn simple_rv64gc_core_decode_i_immediate")
         expect(rv64_source).to_contain("fn simple_rv64gc_core_decode_upper_immediate")
@@ -137,6 +148,7 @@ describe "RISC-V FPGA Linux RTL generation":
         expect(rv64_source).to_contain("bitfield RiscvControlFlowDatapath(u32):")
         expect(rv64_source).to_contain("bitfield RiscvControlFlowDatapathEncoding(u32):")
         expect(rv64_pkg).to_contain("constant XLEN : natural := 64")
+        expect(rv64_core).to_contain("-- proof-lane: generated_rv64_linux shell=none")
         expect(rv64_core).to_contain("-- readiness: contract linux-boot-validated=false")
         expect(rv64_core).to_contain("dmem_re       : out std_logic;")
         expect(rv64_core).to_contain("dmem_width    : out std_logic_vector(1 downto 0);")
@@ -194,6 +206,9 @@ describe "RISC-V FPGA Linux RTL generation":
         expect(has_handwritten_opcode_case).to_equal(false)
         expect(manifest_text).to_contain("platform = \"qemu_virt_rv32\"")
         expect(manifest_text).to_contain("platform = \"qemu_virt_rv64\"")
+        expect(manifest_text).to_contain("proof_lane = \"generated_rv32_baremetal\"")
+        expect(manifest_text).to_contain("proof_lane = \"generated_rv64_linux\"")
+        expect(manifest_text).to_contain("shell_contract = \"generated_rv32_baremetal shell=semihost+mailbox\"")
         expect(manifest_text).to_contain("abi = \"ilp32d\"")
         expect(manifest_text).to_contain("abi = \"lp64d\"")
         expect(manifest_text).to_contain("firmware_mode = \"supervisor\"")

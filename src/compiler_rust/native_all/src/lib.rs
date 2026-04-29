@@ -26,6 +26,7 @@ extern crate spl_hosted_runtime;
 
 use std::path::PathBuf;
 
+use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_runtime::value::{
     rt_array_get, rt_array_len, rt_string_data, rt_string_len, rt_tuple_new, rt_tuple_set, RuntimeValue,
@@ -87,6 +88,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut entry_closure = false;
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
+    let mut log_mode = "on".to_string();
+    let mut opt_level = NativeOptimizationLevel::default_for_native_executable();
 
     // Parse arguments — skip binary name and "native-build" command prefix.
     // The args may come as ["native-build", ...] or ["path/to/simple", "native-build", ...].
@@ -119,11 +122,18 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --cache-dir <dir>   Cache directory");
                 println!("  --no-mangle         Disable name mangling");
                 println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
+                println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
+                println!("  --list-optimizations Print implemented optimization groups and levels");
                 println!("  --runtime-bundle <mode> Runtime libs to link: auto (default), runtime, or all");
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
                 println!("  --target <triple>   Cross-compilation target (e.g. x86_64-unknown-none)");
                 println!("  --linker-script <f> Linker script for freestanding/OS targets");
+                println!("  --log <on|off>      Compile normal SimpleOS logging in or out");
+                return 0;
+            }
+            "--list-optimizations" => {
+                println!("{}", format_optimization_guide());
                 return 0;
             }
             "--source" => {
@@ -261,6 +271,40 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     return 1;
                 }
             }
+            "--opt-level" => {
+                if i + 1 < args_vec.len() {
+                    match NativeOptimizationLevel::parse(&args_vec[i + 1]) {
+                        Ok(level) => opt_level = level,
+                        Err(err) => {
+                            eprintln!("error: {}", err);
+                            return 1;
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("error: --opt-level requires a value");
+                    return 1;
+                }
+            }
+            "--log" => {
+                if i + 1 < args_vec.len() {
+                    if args_vec[i + 1].starts_with('-') {
+                        eprintln!("error: --log requires a value (on or off)");
+                        return 1;
+                    }
+                    match args_vec[i + 1].as_str() {
+                        "on" | "off" => log_mode = args_vec[i + 1].clone(),
+                        other => {
+                            eprintln!("error: --log requires 'on' or 'off' (got '{}')", other);
+                            return 1;
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("error: --log requires a value (on or off)");
+                    return 1;
+                }
+            }
             other => {
                 // Handle --key=value forms for flags that take values
                 if let Some(val) = other.strip_prefix("--backend=") {
@@ -293,6 +337,25 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     target_triple = Some(val.to_string());
                 } else if let Some(val) = other.strip_prefix("--linker-script=") {
                     linker_script = Some(PathBuf::from(val));
+                } else if let Some(val) = other.strip_prefix("--opt-level=") {
+                    match NativeOptimizationLevel::parse(val) {
+                        Ok(level) => opt_level = level,
+                        Err(err) => {
+                            eprintln!("error: {}", err);
+                            return 1;
+                        }
+                    }
+                } else if let Some(val) = other.strip_prefix("--log=") {
+                    match val {
+                        "on" | "off" => log_mode = val.to_string(),
+                        _ => {
+                            eprintln!("error: --log requires 'on' or 'off' (got '{}')", val);
+                            return 1;
+                        }
+                    }
+                } else if other.starts_with("--log") {
+                    eprintln!("error: unknown log option '{}'; expected --log or --log=<on|off>", other);
+                    return 1;
                 } else if let Some(val) = other.strip_prefix("--runtime-bundle=") {
                     runtime_bundle = val.to_string();
                 } else if other.starts_with("--") {
@@ -358,6 +421,8 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         if let Some(ref ls) = linker_script {
             eprintln!("  Linker script: {}", ls.display());
         }
+        eprintln!("  Log mode: {}", log_mode);
+        eprintln!("  Opt level: {}", opt_level.as_str());
     }
 
     // Set runtime path override before building (works in C-compiled binaries)
@@ -386,6 +451,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         runtime_bundle,
         entry_closure,
         linker_script,
+        opt_level,
         ..Default::default()
     };
 
@@ -417,6 +483,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     if backend != "cranelift" {
         std::env::set_var("SIMPLE_BACKEND", &backend);
     }
+    std::env::set_var("SIMPLE_OS_LOG_MODE", &log_mode);
 
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {

@@ -16,6 +16,8 @@
 use os.qemu_runner.{get_target, get_all_targets, arch_from_name,
     build_os, run_os, run_os_debug_gui, test_os, test_all_architectures, arch_display_name,
     get_scenario, build_scenario, run_scenario, test_scenario}
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
 
 # ===========================================================================
 # Argument Parsing
@@ -25,13 +27,17 @@ fn parse_arch_arg(args: [text]) -> text:
     """Extract --arch=<name> or --target=<name> from args. Returns 'x86_64' as default."""
     for arg in args:
         if arg.starts_with("--arch="):
-            return arg[7:]
+            val value = arg[7:]
+            return if value == "": "__missing_arch__" else: value
         if arg.starts_with("--target="):
-            return arg[9:]
+            val value = arg[9:]
+            return if value == "": "__missing_arch__" else: value
     # Check two-arg form: --arch <value>
     var i = 0
-    while i < args.len() - 1:
+    while i < args.len():
         if args[i] == "--arch" or args[i] == "--target":
+            if i + 1 >= args.len():
+                return "__missing_arch__"
             return args[i + 1]
         i = i + 1
     "x86_64"
@@ -47,12 +53,58 @@ fn parse_scenario_arg(args: [text]) -> text:
     """Extract --scenario=<name> or --scenario <name> from args."""
     for arg in args:
         if arg.starts_with("--scenario="):
-            return arg[11:]
+            val value = arg[11:]
+            return if value == "": "__missing_scenario__" else: value
     var i = 0
-    while i < args.len() - 1:
+    while i < args.len():
         if args[i] == "--scenario":
+            if i + 1 >= args.len():
+                return "__missing_scenario__"
             return args[i + 1]
         i = i + 1
+    ""
+
+fn parse_log_arg(args: [text]) -> text:
+    var mode = "on"
+    var seen = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--log="):
+            val value = arg[6:]
+            if value == "":
+                return "__missing__"
+            if value != "on" and value != "off":
+                return "__invalid__:{value}"
+            mode = value
+            seen = true
+        elif arg == "--log":
+            if i + 1 >= args.len():
+                return "__missing__"
+            val value = args[i + 1]
+            if value.starts_with("-"):
+                return "__missing__"
+            if value != "on" and value != "off":
+                return "__invalid__:{value}"
+            mode = value
+            seen = true
+            i = i + 1
+        elif arg.starts_with("--log"):
+            return "__invalid_option__:{arg}"
+        i = i + 1
+    if seen:
+        return mode
+    "on"
+
+fn _log_arg_error(log_mode: text) -> text:
+    if log_mode == "__missing__":
+        return "Error: --log requires a value ('on' or 'off')"
+    if log_mode.starts_with("__invalid_option__:"):
+        val arg = log_mode[19:]
+        return "Error: invalid log option '{arg}' (expected --log or --log=<on|off>)"
+    if log_mode.starts_with("__invalid__:"):
+        val value = log_mode[12:]
+        return "Error: invalid --log value '{value}' (expected 'on' or 'off')"
     ""
 
 # ===========================================================================
@@ -77,6 +129,7 @@ fn print_os_help():
     print "  --all              Test all architectures (with 'test' command)"
     print "  --scenario=<name>  Named QEMU scenario (for run/test/build)"
     print "  --debug-gui        Keep GUI targets windowed while exposing serial logs"
+    print "  --log=<on|off>     Compile normal OS logging in or out (default: on)"
     print ""
     print "Architectures:"
     print "  x86_64   x86_32   riscv64   riscv32   arm64   arm32"
@@ -97,93 +150,183 @@ fn print_os_targets():
     print ""
     print "Default: x86_64"
 
+fn _export_os_log_mode(log_mode: text) -> bool:
+    if rt_env_set("SIMPLE_OS_LOG_MODE", log_mode):
+        return true
+    print "Error: could not export SIMPLE_OS_LOG_MODE={log_mode}"
+    false
+
+fn _restore_os_log_mode(old_log_mode: text):
+    rt_env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+
+fn _arch_arg_error(arch_name: text) -> text:
+    if arch_name == "__missing_arch__":
+        return "Error: --arch/--target requires a value"
+    ""
+
+fn _scenario_arg_error(scenario_name: text) -> text:
+    if scenario_name == "__missing_scenario__":
+        return "Error: --scenario requires a value"
+    ""
+
 # ===========================================================================
 # Command Dispatch
 # ===========================================================================
 
 fn handle_os_build(args: [text]) -> i64:
     """Handle `os build` — compile the OS kernel for the specified architecture."""
+    val log_mode = parse_log_arg(args)
+    val log_error = _log_arg_error(log_mode)
+    if log_error != "":
+        print log_error
+        return 1
+    val old_log_mode = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    if not _export_os_log_mode(log_mode):
+        return 1
     val scenario_name = parse_scenario_arg(args)
+    val scenario_error = _scenario_arg_error(scenario_name)
+    if scenario_error != "":
+        _restore_os_log_mode(old_log_mode)
+        print scenario_error
+        return 1
     if scenario_name != "":
         val scenario = get_scenario(scenario_name)
         if scenario == nil:
+            _restore_os_log_mode(old_log_mode)
             print "Error: unknown scenario '{scenario_name}'"
             return 1
         val ok = build_scenario(scenario)
+        _restore_os_log_mode(old_log_mode)
         return if ok: 0 else: 1
 
     val arch_name = parse_arch_arg(args)
+    val arch_error = _arch_arg_error(arch_name)
+    if arch_error != "":
+        _restore_os_log_mode(old_log_mode)
+        print arch_error
+        return 1
     val arch = arch_from_name(arch_name)
     if arch.?:
         val target = get_target(arch)
         val ok = build_os(target)
+        _restore_os_log_mode(old_log_mode)
         if ok: 0 else: 1
     else:
+        _restore_os_log_mode(old_log_mode)
         print "Error: unknown architecture '{arch_name}'"
         print "Run 'simple os targets' for supported architectures."
         1
 
 fn handle_os_run(args: [text]) -> i64:
     """Handle `os run` — build and run the OS in QEMU."""
+    val log_mode = parse_log_arg(args)
+    val log_error = _log_arg_error(log_mode)
+    if log_error != "":
+        print log_error
+        return 1
+    val old_log_mode = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    if not _export_os_log_mode(log_mode):
+        return 1
     val scenario_name = parse_scenario_arg(args)
+    val scenario_error = _scenario_arg_error(scenario_name)
+    if scenario_error != "":
+        _restore_os_log_mode(old_log_mode)
+        print scenario_error
+        return 1
     if scenario_name != "":
         val scenario = get_scenario(scenario_name)
         if scenario == nil:
+            _restore_os_log_mode(old_log_mode)
             print "Error: unknown scenario '{scenario_name}'"
             return 1
         val built = build_scenario(scenario)
         if not built:
+            _restore_os_log_mode(old_log_mode)
             print "Error: build failed for scenario {scenario_name}"
             return 1
         val ok = run_scenario(scenario)
+        _restore_os_log_mode(old_log_mode)
         return if ok: 0 else: 1
 
     val arch_name = parse_arch_arg(args)
+    val arch_error = _arch_arg_error(arch_name)
+    if arch_error != "":
+        _restore_os_log_mode(old_log_mode)
+        print arch_error
+        return 1
     val debug_gui = has_flag(args, "--debug-gui")
     val arch = arch_from_name(arch_name)
     if arch.?:
         val target = get_target(arch)
         val built = build_os(target)
         if not built:
+            _restore_os_log_mode(old_log_mode)
             print "Error: build failed for {arch_display_name(target.arch)}"
             return 1
         val ok = if debug_gui: run_os_debug_gui(target) else: run_os(target)
+        _restore_os_log_mode(old_log_mode)
         if ok: 0 else: 1
     else:
+        _restore_os_log_mode(old_log_mode)
         print "Error: unknown architecture '{arch_name}'"
         print "Run 'simple os targets' for supported architectures."
         1
 
 fn handle_os_test(args: [text]) -> i64:
     """Handle `os test` — build and smoke-test the OS boot."""
+    val log_mode = parse_log_arg(args)
+    val log_error = _log_arg_error(log_mode)
+    if log_error != "":
+        print log_error
+        return 1
+    val old_log_mode = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    if not _export_os_log_mode(log_mode):
+        return 1
     if has_flag(args, "--all"):
         val ok = test_all_architectures()
+        _restore_os_log_mode(old_log_mode)
         if ok: 0 else: 1
     else:
         val scenario_name = parse_scenario_arg(args)
+        val scenario_error = _scenario_arg_error(scenario_name)
+        if scenario_error != "":
+            _restore_os_log_mode(old_log_mode)
+            print scenario_error
+            return 1
         if scenario_name != "":
             val scenario = get_scenario(scenario_name)
             if scenario == nil:
+                _restore_os_log_mode(old_log_mode)
                 print "Error: unknown scenario '{scenario_name}'"
                 return 1
             val built = build_scenario(scenario)
             if not built:
+                _restore_os_log_mode(old_log_mode)
                 print "Error: build failed for scenario {scenario_name}"
                 return 1
             val ok = test_scenario(scenario, scenario_test_timeout_ms(scenario))
+            _restore_os_log_mode(old_log_mode)
             return if ok: 0 else: 1
 
         val arch_name = parse_arch_arg(args)
+        val arch_error = _arch_arg_error(arch_name)
+        if arch_error != "":
+            _restore_os_log_mode(old_log_mode)
+            print arch_error
+            return 1
         val arch = arch_from_name(arch_name)
         if arch.?:
             val target = get_target(arch)
             val built = build_os(target)
             if not built:
+                _restore_os_log_mode(old_log_mode)
                 print "Error: build failed for {arch_display_name(target.arch)}"
                 return 1
             val ok = test_os(target, 10000)
+            _restore_os_log_mode(old_log_mode)
             if ok: 0 else: 1
         else:
+            _restore_os_log_mode(old_log_mode)
             print "Error: unknown architecture '{arch_name}'"
             print "Run 'simple os targets' for supported architectures."
             1

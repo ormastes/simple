@@ -294,13 +294,13 @@ fn collect_all_sources(source_file: text, source: text, verbose: bool) -> text:
 # Compilation Pipeline
 # ============================================================================
 
-fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool, backend: text) -> i64:
+fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool, backend: text, release: bool, opt_level: i64, use_lto: bool, march_target: text) -> i64:
     # LLVM backends: MIR -> LLVM -> .o -> linker (all handled by driver)
     if backend == "llvm" or backend == "llvm-lib":
         if verbose:
             info("compile", "Compiling {source_file} to native binary via {backend} backend...")
-        _cli_eprint("[DEBUG] Calling aot_native_file_with_backend({source_file}, {output_file}, {backend})")
-        val llvm_result = aot_native_file_with_backend(source_file, output_file, backend)
+        _cli_eprint("[DEBUG] Calling aot_native_file_with_backend({source_file}, {output_file}, {backend}, {release}, {opt_level})")
+        val llvm_result = aot_native_file_with_backend(source_file, output_file, backend, release, opt_level)
         _cli_eprint("[DEBUG] aot_native_file_with_backend returned: {llvm_result}")
         match llvm_result:
             case CompileResult.Success(_):
@@ -346,6 +346,16 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
 
     # Step 3: Build compile command
     val san_flags = if sanitize then "-fsanitize=address,leak -fno-omit-frame-pointer -g " else ""
+    val opt_flags = if opt_level <= 0:
+        "-O0 "
+    elif opt_level == 1:
+        "-O1 "
+    elif opt_level == 2:
+        "-O2 "
+    else:
+        "-O3 "
+    val lto_flags = if use_lto then "-flto=thin " else: ""
+    val march_flags = if march_target != "" then "-march={march_target} " else: ""
     val platform = detect_platform()
     val hardening_flags = native_link_hardening_flags(platform)
 
@@ -376,7 +386,7 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         linked_native_lib_path = strip_native_all_constructors(native_lib_path, platform, verbose)
         native_lib_flags = " {linked_native_lib_path} -lstdc++ -lm"
 
-    val clang_cmd = "{cc} -std=gnu11 {san_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags}{hardening_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
+    val clang_cmd = "{cc} -std=gnu11 {opt_flags}{lto_flags}{march_flags}{san_flags}{mold_link}-I src/runtime/ -x c '{temp_cpp}' {rt_sources}{native_lib_flags}{hardening_flags} -o '{output_file}' -lpthread -ldl -lm 2>&1"
     if verbose:
         debug("compile", "Compiling: {cc} -std=c++20 ...")
 
@@ -455,9 +465,9 @@ fn link_objects(obj_files: [text], output_file: text, verbose: bool, cc: text) -
         return false
     true
 
-fn compile_native_linked(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool, backend: text) -> i64:
+fn compile_native_linked(source_file: text, output_file: text, verbose: bool, compiler_override: text, sanitize: bool, backend: text, release: bool, opt_level: i64, use_lto: bool, march_target: text) -> i64:
     # Delegate to compile_native — MIR C backend handles all modules in one pass
-    compile_native(source_file, output_file, verbose, compiler_override, sanitize, backend)
+    compile_native(source_file, output_file, verbose, compiler_override, sanitize, backend, release, opt_level, use_lto, march_target)
 
 # ============================================================================
 # Generate C Only (for cross-compilation workflows)
@@ -516,6 +526,7 @@ fn main() -> i64:
 
     if args.len() <= arg_idx + 1:
         print "Usage: native.spl <source.spl> <output> [--verbose] [--linked] [--gen-c-only] [--compiler=X]"
+        print "       [--release] [--opt-level=<none|basic|standard|aggressive>] [--lto] [--march=<target>]"
         return 1
 
     val source_file = args[arg_idx]
@@ -526,7 +537,11 @@ fn main() -> i64:
     var compiler_override = ""
     var sanitize = false
     var backend = ""
-    for ai in range(4, args.len()):
+    var release = true
+    var opt_level = 3
+    var use_lto = false
+    var march_target = ""
+    for ai in range(arg_idx + 2, args.len()):
         if args[ai] == "--verbose":
             verbose = true
         if args[ai] == "--linked":
@@ -535,13 +550,33 @@ fn main() -> i64:
             gen_c_only = true
         if args[ai] == "--sanitize":
             sanitize = true
+        if args[ai] == "--release":
+            release = true
+        if args[ai] == "--lto":
+            use_lto = true
         if args[ai].starts_with("--compiler="):
             compiler_override = args[ai].substring(11)
         if args[ai].starts_with("--backend="):
             backend = args[ai].substring(10)
+        if args[ai].starts_with("--march="):
+            march_target = args[ai].substring(8)
+        if args[ai].starts_with("--opt-level="):
+            val opt_text = args[ai].substring(12)
+            if opt_text == "none":
+                opt_level = 0
+                release = false
+            elif opt_text == "basic":
+                opt_level = 1
+            elif opt_text == "standard":
+                opt_level = 2
+            elif opt_text == "aggressive":
+                opt_level = 3
+            else:
+                print "Unknown --opt-level value: {opt_text}"
+                return 1
 
     if gen_c_only:
         return compile_gen_c_only(source_file, output_file, verbose)
     if use_linked:
-        return compile_native_linked(source_file, output_file, verbose, compiler_override, sanitize, backend)
-    compile_native(source_file, output_file, verbose, compiler_override, sanitize, backend)
+        return compile_native_linked(source_file, output_file, verbose, compiler_override, sanitize, backend, release, opt_level, use_lto, march_target)
+    return compile_native(source_file, output_file, verbose, compiler_override, sanitize, backend, release, opt_level, use_lto, march_target)

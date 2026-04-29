@@ -23,6 +23,7 @@
 
 use std::path::PathBuf;
 
+use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 
 pub fn handle_native_build(args: &[String]) -> i32 {
@@ -43,6 +44,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut entry_closure = false;
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
+    let mut opt_level = NativeOptimizationLevel::default_for_native_executable();
 
     // Parse arguments
     let mut i = 1; // Skip "native-build"
@@ -50,6 +52,10 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         match args[i].as_str() {
             "--help" | "-h" => {
                 print_help();
+                return 0;
+            }
+            "--list-optimizations" => {
+                println!("{}", format_optimization_guide());
                 return 0;
             }
             "--source" => {
@@ -207,6 +213,31 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 linker_script = Some(PathBuf::from(other.strip_prefix("--linker-script=").unwrap_or("")));
                 i += 1;
             }
+            "--opt-level" => {
+                if i + 1 < args.len() {
+                    match NativeOptimizationLevel::parse(&args[i + 1]) {
+                        Ok(level) => opt_level = level,
+                        Err(err) => {
+                            eprintln!("error: {}", err);
+                            return 1;
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("error: --opt-level requires a value");
+                    return 1;
+                }
+            }
+            other if other.starts_with("--opt-level=") => {
+                match NativeOptimizationLevel::parse(other.strip_prefix("--opt-level=").unwrap_or("")) {
+                    Ok(level) => opt_level = level,
+                    Err(err) => {
+                        eprintln!("error: {}", err);
+                        return 1;
+                    }
+                }
+                i += 1;
+            }
             other => {
                 // Treat as source directory
                 source_dirs.push(PathBuf::from(other));
@@ -266,6 +297,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         }
         eprintln!("  Runtime bundle: {}", runtime_bundle);
         eprintln!("  Entry closure: {}", entry_closure);
+        eprintln!("  Opt level: {}", opt_level.as_str());
     }
 
     // Set runtime path override before building
@@ -311,6 +343,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         entry_closure,
         target,
         linker_script,
+        opt_level,
         ..Default::default()
     };
     if !backend.is_empty() {
@@ -396,6 +429,8 @@ fn print_help() {
     println!("  --cache-dir <dir>   Cache directory for incremental builds");
     println!("  --no-mangle         Disable name mangling (enabled by default)");
     println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
+    println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
+    println!("  --list-optimizations Print implemented optimization groups and levels");
     println!("  --runtime-bundle <mode> Runtime libs to link (auto, runtime, all)");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");

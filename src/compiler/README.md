@@ -30,7 +30,7 @@ build/bootstrap/simple_stage2 native-build \
 | Layer | Purpose |
 |-------|---------|
 | `00.common/` | Error types, config, effects, visibility, diagnostics, registry |
-| `10.frontend/` | Lexer, parser, AST, treesitter, desugar, parser types |
+| `10.frontend/` | Lexer, parser, AST, treesitter, desugar, syntax optimization grouping, parser types |
 | `15.blocks/` | Block definition system |
 | `20.hir/` | HIR types, definitions, lowering |
 | `25.traits/` | Trait definition, impl, solver, coherence |

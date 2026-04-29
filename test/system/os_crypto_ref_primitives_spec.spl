@@ -43,6 +43,8 @@ use os.crypto.poly1305.{poly1305_mac}
 use os.crypto.chacha20_poly1305.{chacha20_poly1305_encrypt, chacha20_poly1305_decrypt, Chacha20Poly1305Result}
 use test.system.os_crypto_ref_helpers.{hex_to_bytes, bytes_to_hex}
 
+val RFC8439_CT_TAG_HEX: text = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b61161ae10b594f09e26a7e902ecbd0600691"
+
 # ============================================================================
 # Helpers
 # ============================================================================
@@ -417,6 +419,41 @@ describe "OS Crypto Ref: ChaCha20-Poly1305 AEAD":
         val pt = _sunscreen_pt()
         val out = chacha20_poly1305_encrypt(key, nonce, pt, aad)
         expect(out[3]).to_equal(0x34)
+
+    it "ChaCha20-Poly1305 RFC 8439 §2.8.2: full ciphertext and tag match the canonical vector":
+        var key: [u8] = [
+            0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,
+            0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+            0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,
+            0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f
+        ]
+        var nonce: [u8] = [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47]
+        var aad: [u8] = [0x50,0x51,0x52,0x53,0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7]
+        val pt = _sunscreen_pt()
+        val out = chacha20_poly1305_encrypt(key, nonce, pt, aad)
+        expect(bytes_to_hex(out)).to_equal(RFC8439_CT_TAG_HEX)
+
+    it "ChaCha20-Poly1305 rejects an all-zero tag for the RFC 8439 vector":
+        var key: [u8] = [
+            0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,
+            0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+            0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,
+            0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f
+        ]
+        var nonce: [u8] = [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47]
+        var aad: [u8] = [0x50,0x51,0x52,0x53,0xc0,0xc1,0xc2,0xc3,0xc4,0xc5,0xc6,0xc7]
+        val out = hex_to_bytes(RFC8439_CT_TAG_HEX)
+        val ciphertext = out.slice(0, out.len() - 16)
+        val zero_tag = [
+            0x00u8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+        ]
+        val dec = chacha20_poly1305_decrypt(key, nonce, ciphertext, aad, zero_tag)
+        match dec:
+            case Chacha20Poly1305Result.Err(msg):
+                expect(msg).to_equal("authentication tag mismatch")
+            case Chacha20Poly1305Result.Ok(data):
+                expect(bytes_to_hex(data)).to_equal("unexpected-success")
 
     it "ChaCha20-Poly1305 different keys produce different outputs":
         var key1: [u8] = [

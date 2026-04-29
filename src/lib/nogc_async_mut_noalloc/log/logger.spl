@@ -35,10 +35,10 @@ extern fn rt_string_data(value: text) -> i64
 extern fn rt_string_len(value: text) -> i64
 extern fn rt_string_new(data: i64, len: i64) -> text
 extern fn rt_simpleos_log_init(level: i64, targets: i64) -> bool
-extern fn rt_simpleos_log_is_enabled(level: i64) -> bool
 extern fn rt_simpleos_log_emit(level: i64, msg_ptr: i64, msg_len: i64) -> bool
 extern fn rt_simpleos_log_set_device(kind: i64, base: i64) -> bool
 extern fn rt_log_target_device_write_bytes(ptr: i64, len: i64) -> bool
+use generated.simpleos_log_config.{simpleos_log_compile_enabled}
 
 # ============================================================================
 # Initialization
@@ -137,10 +137,12 @@ fn log_init_from_config(cfg: text):
 fn log_set_level(level: i32):
     """Change minimum log level at runtime."""
     g_log_level = level
+    rt_simpleos_log_init(g_log_level.to_i64(), g_log_targets.to_i64())
 
 fn log_set_targets(targets: i32):
     """Change active log targets at runtime."""
     g_log_targets = targets
+    rt_simpleos_log_init(g_log_level.to_i64(), g_log_targets.to_i64())
 
 # ============================================================================
 # Level Name Helper
@@ -156,19 +158,92 @@ fn log_level_name(level: i32) -> text:
     if level == LOG_FATAL: return "FATAL"
     "UNKNOWN"
 
+fn _log_compile_allows(level: i32) -> bool:
+    if simpleos_log_compile_enabled():
+        return true
+    level >= LOG_FATAL
+
+fn _log_policy_allows(min_level: i32, level: i32) -> bool:
+    if not _log_compile_allows(level):
+        return false
+    if level == LOG_OFF:
+        return false
+    if level == LOG_FATAL:
+        return true
+    if level < LOG_TRACE or level > LOG_FATAL:
+        return false
+    level >= min_level
+
+fn _log_runtime_enabled(level: i32) -> bool:
+    _log_policy_allows(g_log_level, level)
+
+fn _log_emit_or_dispatch(level: i32, formatted: text) -> i64:
+    if rt_simpleos_log_emit(level.to_i64(), rt_string_data(formatted), rt_string_len(formatted)):
+        return 1
+    log_dispatch(level, formatted)
+    1
+
+fn _looks_like_facility_token(token: text) -> bool:
+    if token == "":
+        return false
+    val first = token.char_at(0)
+    val first_ok = (first >= "a" and first <= "z") or (first >= "0" and first <= "9")
+    if not first_ok:
+        return false
+    var has_alnum = false
+    var i = 0
+    while i < token.len():
+        val ch = token.char_at(i)
+        val lower = ch >= "a" and ch <= "z"
+        val digit = ch >= "0" and ch <= "9"
+        val punct = ch == "_" or ch == "-" or ch == "."
+        if lower or digit:
+            has_alnum = true
+        if not lower and not digit and not punct:
+            return false
+        i = i + 1
+    has_alnum
+
+fn _normalize_prefixed_message(msg: text) -> text:
+    if not msg.starts_with("["):
+        return msg
+    val n = msg.len()
+    var idx = 0
+    var collected: [text] = []
+    while idx < n and msg.char_at(idx) == "[":
+        val rest = msg.slice(idx, n)
+        val close_rel = rest.find("]")
+        if close_rel < 0:
+            return msg
+        val close_idx = idx + close_rel
+        if close_idx <= idx + 1:
+            return msg
+        val token = msg.slice(idx + 1, close_idx)
+        if not _looks_like_facility_token(token):
+            return msg
+        collected.push(token)
+        idx = close_idx + 1
+        while idx < n and msg.char_at(idx) == " ":
+            idx = idx + 1
+    if collected.len() <= 1:
+        return msg
+    val body = if idx < n: msg.slice(idx, n) else: ""
+    if body == "":
+        return "[" + collected.join(".") + "]"
+    "[" + collected.join(".") + "] " + body
+
 # ============================================================================
 # Text-Based Log Functions
 # ============================================================================
 
 fn log_at(level: i32, msg: text):
     """Log a message at the given level. Checks level filter first."""
-    if not rt_simpleos_log_is_enabled(level.to_i64()):
+    if not _log_runtime_enabled(level):
         return
+    val normalized = _normalize_prefixed_message(msg)
     val prefix = log_level_name(level)
-    val formatted = "[{prefix}] {msg}"
-    if rt_simpleos_log_emit(level.to_i64(), rt_string_data(formatted), rt_string_len(formatted)):
-        return
-    log_dispatch(level, formatted)
+    val formatted = "[{prefix}] {normalized}"
+    _log_emit_or_dispatch(level, formatted)
 
 fn log_trace(msg: text):
     """Log at TRACE level."""
@@ -235,24 +310,23 @@ fn noalloc_log_init(level: i32, targets: i32):
 
 @export("C", name: "noalloc_log_debug")
 fn noalloc_log_debug(msg: text):
-    val formatted = "[DEBUG] {msg}"
-    if rt_simpleos_log_is_enabled(LOG_DEBUG.to_i64()):
-        if rt_simpleos_log_emit(LOG_DEBUG.to_i64(), rt_string_data(formatted), rt_string_len(formatted)):
-            return
-    log_dispatch(LOG_DEBUG, formatted)
+    if not _log_runtime_enabled(LOG_DEBUG):
+        return
+    val formatted = "[DEBUG] {_normalize_prefixed_message(msg)}"
+    _log_emit_or_dispatch(LOG_DEBUG, formatted)
 
 @export("C", name: "noalloc_log_error")
 fn noalloc_log_error(msg: text):
-    val formatted = "[ERROR] {msg}"
-    if rt_simpleos_log_is_enabled(LOG_ERROR.to_i64()):
-        if rt_simpleos_log_emit(LOG_ERROR.to_i64(), rt_string_data(formatted), rt_string_len(formatted)):
-            return
-    log_dispatch(LOG_ERROR, formatted)
+    if not _log_runtime_enabled(LOG_ERROR):
+        return
+    val formatted = "[ERROR] {_normalize_prefixed_message(msg)}"
+    _log_emit_or_dispatch(LOG_ERROR, formatted)
 
 @export("C", name: "simple_log_c_init")
 fn simple_log_c_init(level: i64, targets: i64) -> i64:
     g_log_level = level.to_i32()
     g_log_targets = targets.to_i32()
+    rt_simpleos_log_init(level, targets)
     1
 
 @export("C", name: "simple_log_c_is_ready")
@@ -261,14 +335,16 @@ fn simple_log_c_is_ready() -> i64:
 
 @export("C", name: "simple_log_c_enabled")
 fn simple_log_c_enabled(level: i64) -> i64:
-    if level.to_i32() < g_log_level:
+    if not _log_runtime_enabled(level.to_i32()):
         return 0
     1
 
 @export("C", name: "simple_log_c_write")
 fn simple_log_c_write(level: i64, msg_ptr: i64, msg_len: i64) -> i64:
+    if not _log_runtime_enabled(level.to_i32()):
+        return 0
     val msg = rt_string_new(msg_ptr, msg_len)
-    log_dispatch(level.to_i32(), msg)
+    _log_emit_or_dispatch(level.to_i32(), msg)
     1
 
 # ============================================================================
@@ -277,7 +353,7 @@ fn simple_log_c_write(level: i64, msg_ptr: i64, msg_len: i64) -> i64:
 
 fn log_at_h(level: i32, handle: i32):
     """Log interned string at the given level."""
-    if level < g_log_level:
+    if not _log_runtime_enabled(level):
         return
     log_dispatch_h(level, handle)
 
@@ -311,37 +387,37 @@ fn log_fatal_h(handle: i32):
 
 fn log_info_h1(handle: i32, p0: i32):
     """Log interned string at INFO level with 1 parameter."""
-    if LOG_INFO < g_log_level:
+    if not _log_runtime_enabled(LOG_INFO):
         return
     log_dispatch_h1(LOG_INFO, handle, p0)
 
 fn log_warn_h1(handle: i32, p0: i32):
     """Log interned string at WARN level with 1 parameter."""
-    if LOG_WARN < g_log_level:
+    if not _log_runtime_enabled(LOG_WARN):
         return
     log_dispatch_h1(LOG_WARN, handle, p0)
 
 fn log_error_h1(handle: i32, p0: i32):
     """Log interned string at ERROR level with 1 parameter."""
-    if LOG_ERROR < g_log_level:
+    if not _log_runtime_enabled(LOG_ERROR):
         return
     log_dispatch_h1(LOG_ERROR, handle, p0)
 
 fn log_info_h2(handle: i32, p0: i32, p1: i32):
     """Log interned string at INFO level with 2 parameters."""
-    if LOG_INFO < g_log_level:
+    if not _log_runtime_enabled(LOG_INFO):
         return
     log_dispatch_h2(LOG_INFO, handle, p0, p1)
 
 fn log_warn_h2(handle: i32, p0: i32, p1: i32):
     """Log interned string at WARN level with 2 parameters."""
-    if LOG_WARN < g_log_level:
+    if not _log_runtime_enabled(LOG_WARN):
         return
     log_dispatch_h2(LOG_WARN, handle, p0, p1)
 
 fn log_error_h2(handle: i32, p0: i32, p1: i32):
     """Log interned string at ERROR level with 2 parameters."""
-    if LOG_ERROR < g_log_level:
+    if not _log_runtime_enabled(LOG_ERROR):
         return
     log_dispatch_h2(LOG_ERROR, handle, p0, p1)
 

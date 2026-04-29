@@ -6,6 +6,7 @@ use crate::runner::Runner;
 use crate::CompileOptions;
 use simple_common::smf::{SectionType, SmfHeader, SmfSection, SECTION_FLAG_READ};
 use simple_common::target::{Target, TargetArch};
+use simple_compiler::optimizations::NativeOptimizationLevel;
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -598,6 +599,7 @@ pub fn compile_file_native(
     output: Option<PathBuf>,
     target: Option<Target>,
     linker: Option<simple_compiler::linker::NativeLinker>,
+    opt_level: NativeOptimizationLevel,
     layout_optimize: bool,
     strip: bool,
     pie: bool,
@@ -643,15 +645,17 @@ pub fn compile_file_native(
             return 1;
         }
     };
+    pipeline.set_build_mode(opt_level.build_mode());
 
     // Use compile_file_to_native_binary which properly resolves imports
     match pipeline.compile_file_to_native_binary(source, &out_path, Some(options)) {
         Ok(result) => {
             println!(
-                "Compiled {} -> {} ({} bytes)",
+                "Compiled {} -> {} ({} bytes, opt-level={})",
                 source.display(),
                 result.output.display(),
-                result.size
+                result.size,
+                opt_level.as_str()
             );
             0
         }

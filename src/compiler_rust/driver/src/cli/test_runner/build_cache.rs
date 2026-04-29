@@ -146,6 +146,7 @@ impl BuildCache {
             entry_closure: true,
             incremental: false,
             clean: false,
+            opt_level: simple_compiler::optimizations::NativeOptimizationLevel::default_for_native_executable(),
             ..Default::default()
         };
 

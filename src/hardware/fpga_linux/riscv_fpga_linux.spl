@@ -11,6 +11,7 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
 use hardware.riscv_common.pkg.riscv_linux_pkg.{RiscvLinuxProfile, RiscvPlatformProfile, Rv32LinuxBootArtifacts, Rv64LinuxBootArtifacts}
+use hardware.riscv_common.pkg.riscv_generated_core_pkg.{RiscvProofLane, GeneratedCoreShellContract}
 use hardware.rv32gc.top.rv32_machine.{qemu_virt_rv32_platform_profile, rv32_qemu_virt_linux_profile}
 use hardware.rv64gc.top.rv64_machine.{qemu_virt_rv64_platform_profile, rv64_qemu_virt_linux_profile}
 
@@ -182,7 +183,7 @@ impl RiscvFpgaLane:
             readiness: RiscvReadinessStatus.Contract,
             linux_profile: rv64_qemu_virt_linux_profile(),
             platform_profile: platform,
-            scope_note: "repo-native RV64GC Linux contract lane",
+            scope_note: "repo-native RV64GC generated-core Linux lane",
             linux: LinuxArtifactSet.empty()
         )
 
@@ -197,9 +198,19 @@ impl RiscvFpgaLane:
             readiness: RiscvReadinessStatus.Contract,
             linux_profile: rv32_qemu_virt_linux_profile(),
             platform_profile: platform,
-            scope_note: "repo-native RV32GC Linux contract lane",
+            scope_note: "repo-native RV32GC generated-core baremetal lane",
             linux: LinuxArtifactSet.empty()
         )
+
+    fn proof_lane() -> RiscvProofLane:
+        if self.xlen == RiscvXlen.Rv32:
+            return RiscvProofLane.GeneratedRv32Baremetal
+        RiscvProofLane.GeneratedRv64Linux
+
+    fn generated_core_shell_contract() -> GeneratedCoreShellContract:
+        if self.xlen == RiscvXlen.Rv32:
+            return GeneratedCoreShellContract.rv32_baremetal()
+        GeneratedCoreShellContract.rv64_linux()
 
     fn expected_boot_markers() -> [text]:
         var markers: [text] = []
@@ -211,8 +222,21 @@ impl RiscvFpgaLane:
         markers.push("init started")
         markers
 
+    fn proof_acceptance_markers() -> [text]:
+        self.generated_core_shell_contract().acceptance_markers()
+
     fn required_soc_blocks() -> [text]:
-        self.platform_profile.required_soc_blocks()
+        var blocks = self.platform_profile.required_soc_blocks()
+        blocks.push("generated-core-shell")
+        if self.generated_core_shell_contract().semihost_shell_service:
+            blocks.push("semihost-shell-service")
+        if self.generated_core_shell_contract().mailbox_shell_service:
+            blocks.push("mailbox-shell-service")
+        blocks
+
+    fn proof_lane_summary() -> text:
+        val shell = self.generated_core_shell_contract()
+        "{self.proof_lane().to_text()} shell={shell.shell_services_summary()}"
 
     fn validate_for_prepare() -> [text]:
         var errors: [text] = []
@@ -280,6 +304,11 @@ impl RiscvFpgaLane:
             return "80000000"
         "0000000080000000"
 
+    fn stack_pointer_hex() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return "00000FFC"
+        "0000000000000FFC"
+
     fn boot_stride_decimal() -> text:
         if self.xlen == RiscvXlen.Rv32:
             return "4"
@@ -292,6 +321,7 @@ impl RiscvFpgaLane:
             "current bundle writes this next to RTL so backend work can replace the\n" +
             "temporary emitter without inventing a RISC-V-specific bitfield language.\n" +
             "platform: {self.platform_profile.name}\n" +
+            "proof_lane: {self.proof_lane().to_text()}\n" +
             "scope: {self.scope_note}\n" +
             "\"\"\"\n\n"
 
@@ -770,7 +800,7 @@ impl RiscvFpgaLane:
             self.hardware_source_top_level_contract(bitfield_name)
 
     fn hardware_source_contract_errors() -> [text]:
-        val source = self.hardware_source_spl()
+        val source = self.hardware_source_spl() + "\n" + self.core_vhdl()
         var errors: [text] = []
         if not source.contains("bitfield {self.instruction_bitfield_name()}(u32):"):
             errors.push("{self.xlen.to_text()} hardware source must define instruction bitfield")
@@ -1020,11 +1050,11 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must extract load lanes through address-derived bus shifts")
         if not source.contains("dmem_wstrb_reg <= (others => '0');"):
             errors.push("{self.xlen.to_text()} hardware source must clear write strobes when idle")
-        if not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(1, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0))))))") and not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(1, XLEN / 8), to_integer(unsigned(addr_i(1 downto 0))))))"):
+        if not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(1, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0)))));") and not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(1, XLEN / 8), to_integer(unsigned(addr_i(1 downto 0)))));"):
             errors.push("{self.xlen.to_text()} hardware source must drive byte store strobes from address lane bits")
-        if not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(3, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0))))))") and not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(3, XLEN / 8), to_integer(unsigned(addr_i(1 downto 0))))))"):
+        if not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(3, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0)))));") and not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(3, XLEN / 8), to_integer(unsigned(addr_i(1 downto 0)))));"):
             errors.push("{self.xlen.to_text()} hardware source must drive halfword store strobes from address lane bits")
-        if not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(15, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0))))))") or not source.contains("dmem_wstrb_reg <= std_logic_vector(to_unsigned(15, XLEN / 8));") or not source.contains("dmem_wstrb_reg <= (others => '1');"):
+        if not source.contains("dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(15, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0)))));") or not source.contains("dmem_wstrb_reg <= std_logic_vector(to_unsigned(15, XLEN / 8));") or not source.contains("dmem_wstrb_reg <= (others => '1');"):
             errors.push("{self.xlen.to_text()} hardware source must drive word and doubleword store strobes for supported widths")
         if not source.contains("val jump_inst = RiscvJumpEncoding.new(imem_rdata)"):
             errors.push("{self.xlen.to_text()} hardware source must read jump immediate pieces through the jump layout bitfield")
@@ -1079,6 +1109,7 @@ impl RiscvFpgaLane:
             "-- source-map: RiscvJumpEncoding.bit20 => imem_rdata(31 downto 31)\n" +
             "-- source-map: RiscvDispatchClassEncoding.opcode => imem_rdata(6 downto 0)\n" +
             "-- source-map: RiscvTrapHaltControlEncoding.opcode => imem_rdata(6 downto 0)\n" +
+            "-- proof-lane: {self.proof_lane().to_text()} shell={self.generated_core_shell_contract().shell_services_summary()}\n" +
             "-- readiness: {self.readiness_status().to_text()} linux-boot-validated={self.readiness_is_boot_validated()}\n\n"
 
     fn package_vhdl() -> text:
@@ -1132,6 +1163,27 @@ impl RiscvFpgaLane:
             "        variable decode_continue_exec : std_logic;\n" +
             "        variable decode_should_trap : std_logic;\n" +
             "        variable decode_should_halt : std_logic;\n"
+
+    fn core_vhdl_semihost_region() -> text:
+        "                if imem_rdata = x\"01F01013\" and semi_phase_reg = 0 then\n" +
+            "                    semi_phase_reg <= 1;\n" +
+            "                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                elsif imem_rdata = x\"00100073\" and semi_phase_reg = 1 then\n" +
+            "                    semi_phase_reg <= 2;\n" +
+            "                    semi_op_reg <= regs(10);\n" +
+            "                    semi_param_reg <= regs(11);\n" +
+            "                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                elsif imem_rdata = x\"40705013\" and semi_phase_reg = 2 then\n" +
+            "                    semi_phase_reg <= 0;\n" +
+            "                    semi_trigger_reg <= '1';\n" +
+            "                    if semi_op_reg = std_logic_vector(to_unsigned(16#18#, XLEN)) then\n" +
+            "                        halt_reg <= '1';\n" +
+            "                    else\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                    end if;\n" +
+            "                elsif imem_rdata(6 downto 0) = \"1110011\" and semi_phase_reg = 0 then\n" +
+            "                    halt_reg <= '1';\n" +
+            "                else\n"
 
     fn core_vhdl_decode_staging_region() -> text:
         "                decode_writeback_bits := imem_rdata;\n" +
@@ -1189,51 +1241,51 @@ impl RiscvFpgaLane:
             "                    when \"0011\" =>\n" +
             "                        decode_writeback_bits := imem_rdata(31 downto 12) & imem_rdata(19 downto 15) & imem_rdata(6 downto 0);\n" +
             "                        decode_i_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 20);\n" +
-            "                        decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0000\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0000\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"001\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0010\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0010\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"010\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0011\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0011\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"011\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0100\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0100\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"100\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0101\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0101\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"101\" and imem_rdata(30 downto 30) = \"0\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0110\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0110\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"101\" and imem_rdata(30 downto 30) = \"1\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0111\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0111\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"110\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"1000\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"1000\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"111\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"1001\" & '0';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"1001\" & '0';\n" +
             "                        end if;\n" +
             "                    when \"0100\" =>\n" +
-            "                        decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" and imem_rdata(31 downto 25) = \"0000000\" then\n" +
             "                            decode_writeback_bits := imem_rdata(31 downto 12) & imem_rdata(24 downto 20) & imem_rdata(6 downto 0);\n" +
             "                        end if;\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" and imem_rdata(30 downto 30) = \"0\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0000\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0000\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"000\" and imem_rdata(30 downto 30) = \"1\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0001\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0001\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"001\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0010\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0010\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"010\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0011\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0011\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"011\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0100\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0100\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"100\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0101\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0101\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"101\" and imem_rdata(30 downto 30) = \"0\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0110\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0110\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"101\" and imem_rdata(30 downto 30) = \"1\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"0111\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0111\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"110\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"1000\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"1000\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"111\" then\n" +
-            "                            decode_execute_datapath_bits := \"00000000000000000000000000000\" & \"1001\" & '1';\n" +
+            "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"1001\" & '1';\n" +
             "                        end if;\n" +
             "                    when \"0101\" =>\n" +
             "                        decode_i_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 20);\n" +
@@ -1243,7 +1295,7 @@ impl RiscvFpgaLane:
             "                        decode_memory_access_control_bits := \"00000000000000000000000000000\" & imem_rdata(14 downto 12);\n" +
             "                    when \"0111\" =>\n" +
             "                        decode_branch_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 31) & imem_rdata(7 downto 7) & imem_rdata(30 downto 25) & imem_rdata(11 downto 8);\n" +
-            "                        decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" then\n" +
             "                            decode_branch_datapath_bits := \"00000000000000000000000000000\" & \"000\";\n" +
             "                        elsif imem_rdata(14 downto 12) = \"001\" then\n" +
@@ -1265,9 +1317,9 @@ impl RiscvFpgaLane:
             "                        decode_control_flow_datapath_bits := \"00000000000000000000000000000\" & '1' & \"11\";\n" +
             "                    when others => null;\n" +
             "                end case;\n" +
-            "                decode_writeback_rd_i := to_integer(unsigned(decode_writeback_bits(11 downto 7)));\n" +
+            "                decode_writeback_rd_i := rd_i;\n" +
             "                imm_i := resize(signed(decode_i_immediate_bits(11 downto 0)), XLEN);\n" +
-            "                imm_u := std_logic_vector(resize(signed(decode_upper_immediate_bits(31 downto 12) & \"000000000000\"), XLEN));\n" +
+            "                imm_u := std_logic_vector(resize(signed(decode_upper_immediate_bits), XLEN));\n" +
             "                branch_i := resize(signed(decode_branch_immediate_bits(11) & decode_branch_immediate_bits(10) & decode_branch_immediate_bits(9 downto 4) & decode_branch_immediate_bits(3 downto 0) & '0'), XLEN);\n" +
             "                jump_i := resize(signed(decode_jump_immediate_bits(19) & decode_jump_immediate_bits(18 downto 11) & decode_jump_immediate_bits(10) & decode_jump_immediate_bits(9 downto 0) & '0'), XLEN);\n" +
             "                branch_taken := false;\n" +
@@ -1360,85 +1412,65 @@ impl RiscvFpgaLane:
             "                                addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
             "                                dmem_addr_reg <= std_logic_vector(addr_i);\n" +
             "                                dmem_re_reg <= '1';\n" +
+            "                                load_pending_reg <= '0';\n" +
             "                                case decode_memory_funct3 is\n" +
             "                                    when \"000\" =>\n" +
             "                                        dmem_width_reg <= \"00\";\n" +
-            "                                        if XLEN = 64 then\n" +
-            "                                            if rd_i /= 0 then\n" +
-            "                                                regs(rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8))(7 downto 0)), XLEN));\n" +
-            "                                            end if;\n" +
-            "                                        elif rd_i /= 0 then\n" +
-            "                                            regs(rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8))(7 downto 0)), XLEN));\n" +
-            "                                        end if;\n" +
+            "                                        load_pending_reg <= '1';\n" +
             "                                    when \"001\" =>\n" +
             "                                        dmem_width_reg <= \"01\";\n" +
             "                                        if addr_i(0) = '1' then\n" +
             "                                            trap_reg <= '1';\n" +
-            "                                        elif XLEN = 64 then\n" +
-            "                                            if rd_i /= 0 then\n" +
-            "                                                regs(rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8))(15 downto 0)), XLEN));\n" +
-            "                                            end if;\n" +
-            "                                        elif rd_i /= 0 then\n" +
-            "                                            regs(rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8))(15 downto 0)), XLEN));\n" +
+            "                                        else\n" +
+            "                                            load_pending_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"010\" =>\n" +
             "                                        dmem_width_reg <= \"10\";\n" +
             "                                        if addr_i(1 downto 0) /= \"00\" then\n" +
             "                                            trap_reg <= '1';\n" +
-            "                                        elif XLEN = 64 then\n" +
-            "                                            if rd_i /= 0 then\n" +
-            "                                                regs(rd_i) <= std_logic_vector(resize(signed(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8))(31 downto 0)), XLEN));\n" +
-            "                                            end if;\n" +
-            "                                        elif rd_i /= 0 then\n" +
-            "                                            regs(rd_i) <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                                        else\n" +
+            "                                            load_pending_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"011\" =>\n" +
             "                                        dmem_width_reg <= \"11\";\n" +
             "                                        if XLEN = 64 then\n" +
             "                                            if addr_i(2 downto 0) /= \"000\" then\n" +
             "                                                trap_reg <= '1';\n" +
-            "                                            elif rd_i /= 0 then\n" +
-            "                                                regs(rd_i) <= dmem_rdata;\n" +
+            "                                            else\n" +
+            "                                                load_pending_reg <= '1';\n" +
             "                                            end if;\n" +
             "                                        else\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"100\" =>\n" +
             "                                        dmem_width_reg <= \"00\";\n" +
-            "                                        if XLEN = 64 then\n" +
-            "                                            if rd_i /= 0 then\n" +
-            "                                                regs(rd_i) <= std_logic_vector(resize(unsigned(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8))(7 downto 0)), XLEN));\n" +
-            "                                            end if;\n" +
-            "                                        elif rd_i /= 0 then\n" +
-            "                                            regs(rd_i) <= std_logic_vector(resize(unsigned(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8))(7 downto 0)), XLEN));\n" +
-            "                                        end if;\n" +
+            "                                        load_pending_reg <= '1';\n" +
             "                                    when \"101\" =>\n" +
             "                                        dmem_width_reg <= \"01\";\n" +
             "                                        if addr_i(0) = '1' then\n" +
             "                                            trap_reg <= '1';\n" +
-            "                                        elif XLEN = 64 then\n" +
-            "                                            if rd_i /= 0 then\n" +
-            "                                                regs(rd_i) <= std_logic_vector(resize(unsigned(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8))(15 downto 0)), XLEN));\n" +
-            "                                            end if;\n" +
-            "                                        elif rd_i /= 0 then\n" +
-            "                                            regs(rd_i) <= std_logic_vector(resize(unsigned(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8))(15 downto 0)), XLEN));\n" +
+            "                                        else\n" +
+            "                                            load_pending_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"110\" =>\n" +
             "                                        dmem_width_reg <= \"10\";\n" +
             "                                        if XLEN = 64 then\n" +
             "                                            if addr_i(1 downto 0) /= \"00\" then\n" +
             "                                                trap_reg <= '1';\n" +
-            "                                            elif rd_i /= 0 then\n" +
-            "                                                regs(rd_i) <= std_logic_vector(resize(unsigned(std_logic_vector(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8))(31 downto 0)), XLEN));\n" +
+            "                                            else\n" +
+            "                                                load_pending_reg <= '1';\n" +
             "                                            end if;\n" +
             "                                        else\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when others => trap_reg <= '1';\n" +
             "                                end case;\n" +
+            "                                load_pending_rd_reg <= rd_i;\n" +
+            "                                load_pending_addr_reg <= std_logic_vector(addr_i);\n" +
+            "                                load_pending_funct3_reg <= decode_memory_funct3;\n" +
             "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
             "                            when \"0110\" =>\n" +
-            "                                imm_i := resize(signed(decode_store_immediate_bits(11 downto 5) & decode_store_immediate_bits(4 downto 0)), XLEN);\n" +
+            "                                imm_i := resize(signed(decode_store_immediate_bits(11 downto 0)), XLEN);\n" +
             "                                addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
             "                                dmem_addr_reg <= std_logic_vector(addr_i);\n" +
             "                                case decode_memory_funct3 is\n" +
@@ -1456,7 +1488,7 @@ impl RiscvFpgaLane:
             "                                        dmem_width_reg <= \"01\";\n" +
             "                                        if addr_i(0) = '1' then\n" +
             "                                            trap_reg <= '1';\n" +
-            "                                        elif XLEN = 64 then\n" +
+            "                                        elsif XLEN = 64 then\n" +
             "                                            dmem_wdata_reg <= std_logic_vector(shift_left(unsigned(regs(rs2_i)), to_integer(unsigned(addr_i(2 downto 0))) * 8));\n" +
             "                                            dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(3, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0)))));\n" +
             "                                            dmem_we_reg <= '1';\n" +
@@ -1469,11 +1501,11 @@ impl RiscvFpgaLane:
             "                                        dmem_width_reg <= \"10\";\n" +
             "                                        if addr_i(1 downto 0) /= \"00\" then\n" +
             "                                            trap_reg <= '1';\n" +
-            "                                        elif XLEN = 64 then\n" +
+            "                                        elsif XLEN = 64 then\n" +
             "                                            dmem_wdata_reg <= std_logic_vector(shift_left(unsigned(regs(rs2_i)), to_integer(unsigned(addr_i(2 downto 0))) * 8));\n" +
             "                                            dmem_wstrb_reg <= std_logic_vector(shift_left(to_unsigned(15, XLEN / 8), to_integer(unsigned(addr_i(2 downto 0)))));\n" +
             "                                            dmem_we_reg <= '1';\n" +
-            "                                        elif XLEN = 32 then\n" +
+            "                                        elsif XLEN = 32 then\n" +
             "                                            dmem_wdata_reg <= regs(rs2_i);\n" +
             "                                            dmem_wstrb_reg <= std_logic_vector(to_unsigned(15, XLEN / 8));\n" +
             "                                            dmem_we_reg <= '1';\n" +
@@ -1545,7 +1577,33 @@ impl RiscvFpgaLane:
             "                    elsif decode_should_trap = '1' then\n" +
             "                        trap_reg <= '1';\n" +
             "                    end if;\n" +
+            "                    semi_phase_reg <= 0;\n" +
             "                    regs(0) <= (others => '0');\n"
+
+    fn core_vhdl_semihost_port_lines() -> text:
+        "        semi_trigger  : out std_logic;\n" +
+            "        semi_op       : out xword_t;\n" +
+            "        semi_param    : out xword_t;\n"
+
+    fn core_vhdl_semihost_signal_lines() -> text:
+        "    signal semi_phase_reg : integer range 0 to 2 := 0;\n" +
+            "    signal semi_trigger_reg : std_logic := '0';\n" +
+            "    signal semi_op_reg : xword_t := (others => '0');\n" +
+            "    signal semi_param_reg : xword_t := (others => '0');\n"
+
+    fn core_vhdl_semihost_reset_lines() -> text:
+        "            semi_phase_reg <= 0;\n" +
+            "            semi_trigger_reg <= '0';\n" +
+            "            semi_op_reg <= (others => '0');\n" +
+            "            semi_param_reg <= (others => '0');\n"
+
+    fn core_vhdl_semihost_default_lines() -> text:
+        "            semi_trigger_reg <= '0';\n"
+
+    fn core_vhdl_semihost_output_lines() -> text:
+        "    semi_trigger <= semi_trigger_reg;\n" +
+            "    semi_op <= semi_op_reg;\n" +
+            "    semi_param <= semi_param_reg;\n"
 
     fn core_vhdl() -> text:
         val package_name = self.package_name()
@@ -1569,6 +1627,7 @@ impl RiscvFpgaLane:
             "        dmem_width    : out std_logic_vector(1 downto 0);\n" +
             "        dmem_wstrb    : out std_logic_vector((XLEN / 8) - 1 downto 0);\n" +
             "        debug_pc      : out xword_t;\n" +
+            self.core_vhdl_semihost_port_lines() +
             "        trap          : out std_logic;\n" +
             "        halt          : out std_logic\n" +
             "    );\n" +
@@ -1576,7 +1635,7 @@ impl RiscvFpgaLane:
             "architecture rtl of {top} is\n" +
             "    type reg_file_t is array (0 to 31) of xword_t;\n" +
             "    signal pc_reg : xword_t := RESET_VECTOR;\n" +
-            "    signal regs : reg_file_t := (others => (others => '0'));\n" +
+            "    signal regs : reg_file_t := (2 => x\"{self.stack_pointer_hex()}\", others => (others => '0'));\n" +
             "    signal dmem_addr_reg : xword_t := (others => '0');\n" +
             "    signal dmem_wdata_reg : xword_t := (others => '0');\n" +
             "    signal dmem_we_reg : std_logic := '0';\n" +
@@ -1585,6 +1644,11 @@ impl RiscvFpgaLane:
             "    signal dmem_wstrb_reg : std_logic_vector((XLEN / 8) - 1 downto 0) := (others => '0');\n" +
             "    signal trap_reg : std_logic := '0';\n" +
             "    signal halt_reg : std_logic := '0';\n" +
+            self.core_vhdl_semihost_signal_lines() +
+            "    signal load_pending_reg : std_logic := '0';\n" +
+            "    signal load_pending_rd_reg : integer range 0 to 31 := 0;\n" +
+            "    signal load_pending_addr_reg : xword_t := (others => '0');\n" +
+            "    signal load_pending_funct3_reg : std_logic_vector(2 downto 0) := (others => '0');\n" +
             "begin\n" +
             "    imem_addr <= pc_reg;\n" +
             "    dmem_addr <= dmem_addr_reg;\n" +
@@ -1594,6 +1658,7 @@ impl RiscvFpgaLane:
             "    dmem_width <= dmem_width_reg;\n" +
             "    dmem_wstrb <= dmem_wstrb_reg;\n" +
             "    debug_pc <= pc_reg;\n" +
+            self.core_vhdl_semihost_output_lines() +
             "    trap <= trap_reg;\n" +
             "    halt <= halt_reg;\n\n" +
             "    process(clk, reset_n)\n" +
@@ -1601,7 +1666,7 @@ impl RiscvFpgaLane:
             "    begin\n" +
             "        if reset_n = '0' then\n" +
             "            pc_reg <= RESET_VECTOR;\n" +
-            "            regs <= (others => (others => '0'));\n" +
+            "            regs <= (2 => x\"{self.stack_pointer_hex()}\", others => (others => '0'));\n" +
             "            dmem_addr_reg <= (others => '0');\n" +
             "            dmem_wdata_reg <= (others => '0');\n" +
             "            dmem_we_reg <= '0';\n" +
@@ -1610,12 +1675,70 @@ impl RiscvFpgaLane:
             "            dmem_wstrb_reg <= (others => '0');\n" +
             "            trap_reg <= '0';\n" +
             "            halt_reg <= '0';\n" +
+            self.core_vhdl_semihost_reset_lines() +
+            "            load_pending_reg <= '0';\n" +
+            "            load_pending_rd_reg <= 0;\n" +
+            "            load_pending_addr_reg <= (others => '0');\n" +
+            "            load_pending_funct3_reg <= (others => '0');\n" +
             "        elsif rising_edge(clk) then\n" +
             "            dmem_we_reg <= '0';\n" +
             "            dmem_re_reg <= '0';\n" +
             "            dmem_width_reg <= \"10\";\n" +
             "            dmem_wstrb_reg <= (others => '0');\n" +
-            "            if halt_reg = '0' and trap_reg = '0' then\n" +
+            self.core_vhdl_semihost_default_lines() +
+            "            if load_pending_reg = '1' then\n" +
+            "                addr_i := unsigned(load_pending_addr_reg);\n" +
+            "                case load_pending_funct3_reg is\n" +
+            "                    when \"000\" =>\n" +
+            "                        if XLEN = 64 then\n" +
+            "                            if load_pending_rd_reg /= 0 then\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                            end if;\n" +
+            "                        elsif load_pending_rd_reg /= 0 then\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                        end if;\n" +
+            "                    when \"001\" =>\n" +
+            "                        if load_pending_rd_reg /= 0 then\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                        end if;\n" +
+            "                    when \"010\" =>\n" +
+            "                        if load_pending_rd_reg /= 0 then\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                        end if;\n" +
+            "                    when \"011\" =>\n" +
+            "                        if XLEN = 64 then\n" +
+            "                            if load_pending_rd_reg /= 0 then\n" +
+            "                                regs(load_pending_rd_reg) <= dmem_rdata;\n" +
+            "                            end if;\n" +
+            "                        else\n" +
+            "                            trap_reg <= '1';\n" +
+            "                        end if;\n" +
+            "                    when \"100\" =>\n" +
+            "                        if XLEN = 64 then\n" +
+            "                            if load_pending_rd_reg /= 0 then\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                            end if;\n" +
+            "                        elsif load_pending_rd_reg /= 0 then\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                        end if;\n" +
+            "                    when \"101\" =>\n" +
+            "                        if load_pending_rd_reg /= 0 then\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                        end if;\n" +
+            "                    when \"110\" =>\n" +
+            "                        if XLEN = 64 then\n" +
+            "                            if load_pending_rd_reg /= 0 then\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(31 downto 0), XLEN));\n" +
+            "                            end if;\n" +
+            "                        else\n" +
+            "                            trap_reg <= '1';\n" +
+            "                        end if;\n" +
+            "                    when others => trap_reg <= '1';\n" +
+            "                end case;\n" +
+            "                load_pending_reg <= '0';\n" +
+            "                regs(0) <= (others => '0');\n" +
+            "            elsif halt_reg = '0' and trap_reg = '0' then\n" +
+            self.core_vhdl_semihost_region() +
             "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
             "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
             "                rs2_i := to_integer(unsigned(imem_rdata(24 downto 20)));\n" +
@@ -1623,6 +1746,7 @@ impl RiscvFpgaLane:
             "                if decode_continue_exec = '1' then\n" +
             self.core_vhdl_execute_load_store_region() +
             self.core_vhdl_control_region() +
+            "                end if;\n" +
             "            end if;\n" +
             "        end if;\n" +
             "    end process;\n" +
@@ -1673,7 +1797,7 @@ impl FpgaPrepareManifest:
     fn readiness_summary() -> text:
         var out = "board={self.board.name} part={self.board.part} lanes={self.lanes.len()}"
         for lane in self.lanes:
-            out = out + " {lane.xlen.to_text()}:{lane.readiness_status().to_text()}:{lane.platform_profile.name}:{lane.top_module}"
+            out = out + " {lane.xlen.to_text()}:{lane.readiness_status().to_text()}:{lane.platform_profile.name}:{lane.top_module}:{lane.proof_lane().to_text()}"
         out
 
     fn rtl_manifest_text(root_dir: text) -> text:
@@ -1693,8 +1817,10 @@ impl FpgaPrepareManifest:
             out = out + "package_file = \"{lane_dir}/{lane.package_name()}.vhd\"\n"
             out = out + "core_file = \"{lane_dir}/{lane.top_module}.vhd\"\n"
             out = out + "readiness = \"{lane.readiness_status().to_text()}\"\n"
+            out = out + "proof_lane = \"{lane.proof_lane().to_text()}\"\n"
             out = out + "platform = \"{lane.platform_profile.name}\"\n"
             out = out + "scope = \"{lane.scope_note}\"\n"
+            out = out + "shell_contract = \"{lane.proof_lane_summary()}\"\n"
             out = out + "linux_policy = \"{lane.xlen.linux_policy()}\"\n"
             out = out + "abi = \"{lane.linux_profile.abi.to_text()}\"\n"
             out = out + "mmu = \"{lane.linux_profile.mmu_mode.to_text()}\"\n"

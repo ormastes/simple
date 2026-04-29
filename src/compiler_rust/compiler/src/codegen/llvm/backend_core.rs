@@ -3,6 +3,7 @@ use crate::codegen::backend_trait::NativeBackend;
 use crate::error::CompileError;
 use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirModule};
+use crate::optimizations::NativeOptimizationLevel;
 use simple_common::target::Target;
 
 #[cfg(feature = "llvm")]
@@ -25,6 +26,7 @@ use std::cell::RefCell;
 /// LLVM-based code generator
 pub struct LlvmBackend {
     pub(super) target: Target,
+    pub(super) opt_level: NativeOptimizationLevel,
     /// Enable coverage instrumentation
     pub(super) coverage_enabled: bool,
     #[cfg(feature = "llvm")]
@@ -56,9 +58,14 @@ impl std::fmt::Debug for LlvmBackend {
 impl LlvmBackend {
     /// Create a new LLVM backend for the given target
     pub fn new(target: Target) -> Result<Self, CompileError> {
+        Self::new_with_opt_level(target, NativeOptimizationLevel::Standard)
+    }
+
+    /// Create a new LLVM backend for the given target and optimization profile.
+    pub fn new_with_opt_level(target: Target, opt_level: NativeOptimizationLevel) -> Result<Self, CompileError> {
         #[cfg(not(feature = "llvm"))]
         {
-            let _ = target; // Suppress unused warning when feature disabled
+            let _ = (target, opt_level); // Suppress unused warning when feature disabled
             Err(crate::error::factory::llvm_feature_required())
         }
 
@@ -67,6 +74,7 @@ impl LlvmBackend {
             let context = Box::leak(Box::new(Context::create()));
             Ok(Self {
                 target,
+                opt_level,
                 coverage_enabled: false,
                 context,
                 module: RefCell::new(None),
@@ -480,7 +488,12 @@ impl LlvmBackend {
                 &target_triple,
                 "generic",
                 features,
-                OptimizationLevel::Default,
+                match self.opt_level {
+                    NativeOptimizationLevel::None => OptimizationLevel::None,
+                    NativeOptimizationLevel::Basic => OptimizationLevel::Less,
+                    NativeOptimizationLevel::Standard => OptimizationLevel::Default,
+                    NativeOptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
+                },
                 reloc_mode,
                 code_model,
             )

@@ -1,6 +1,12 @@
 # FPGA RISC-V CPU Project
 
-RV32I single-cycle CPU with semihosting, targeting ZedBoard (Zynq-7020) and GHDL simulation.
+Handwritten RV32I single-cycle CPU with semihosting, targeting ZedBoard (Zynq-7020) and GHDL simulation.
+
+This directory is the current in-repo runnable RTL CPU lane. It is not generated from
+Simple today. Repo-native generated RV32/RV64 work lives under `src/hardware/` as
+contract/orchestration code, while Linux-capable RTL proof currently comes from
+explicit external reference lanes (`reference_external_rv32_linux`,
+`reference_external_rv64_linux`).
 
 ## Quick Start
 

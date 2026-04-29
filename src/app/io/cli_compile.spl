@@ -4,7 +4,7 @@
 # Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
 
 # Helpers from cli_ops.spl
-use app.io.cli_ops.{rt_cli_handle_compile, rt_env_get, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl, _cli_driver_binary}
+use app.io.cli_ops.{rt_cli_handle_compile, rt_env_get, env_set, _cli_eprint, _cli_dir_create_impl, _cli_file_write_impl, _cli_file_copy_impl, _cli_process_run, _cli_shell, _cli_shell_bool, _cli_file_exists_impl, _cli_file_read_impl, _cli_driver_binary}
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver.{CompilerDriver, aot_file, aot_c_file, aot_cuda_file, aot_vhdl_file, compile_to_smf}
@@ -17,7 +17,7 @@ extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_met
 extern fn rt_native_build(args: [text]) -> i64
 
 # Pure Simple compiler implementation (no Rust FFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -53,9 +53,10 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     options.output_file = out
     options.verbose = verbose
     options.low_memory = low_memory
-    if release:
+    if release or opt_level > 0:
         options.release = true
         options.optimize = true
+        options.opt_level = opt_level
     if backend != "" and backend != "auto":
         options.backend = backend
 
@@ -88,7 +89,7 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         source_file.replace(".spl", ".lsm")
     val smf_out = out + ".smf.tmp"
 
-    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory)
+    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2)
     if compile_status != 0:
         return compile_status
 
@@ -152,6 +153,8 @@ fn cli_compile(args: [text]) -> i64:
     var emit_c: bool = false
     var low_memory: bool = false
     var driver_mode: text = ""
+    var opt_level: i64 = 0
+    var optimization_requested: bool = false
 
     var i = 0
     if args.len() > 0 and args[0] == "compile":
@@ -176,7 +179,9 @@ fn cli_compile(args: [text]) -> i64:
             print "  --coverage            Enable coverage instrumentation"
             print "  --coverage-output=<p> Coverage output file path"
             print "  --release             Release build (optimized, prefers LLVM)"
-            print "  --release-optimized   Max optimization: -O2 + x86-64-v3 + ThinLTO"
+            print "  --release-optimized   Max optimization: -O3 + x86-64-v3 + ThinLTO"
+            print "  --opt-level=<level>   Optimization level: none, basic, standard, aggressive"
+            print "  --list-optimizations  Print implemented optimization groups and levels"
             print "  --lto                 Enable ThinLTO (+2-3% speed)"
             print "  --march=<target>      CPU target: native, x86-64-v2, x86-64-v3, x86-64-v4"
             print "  --pgo-generate        Build instrumented binary for PGO"
@@ -200,6 +205,30 @@ fn cli_compile(args: [text]) -> i64:
             print "  simple compile --native -o hello hello.spl"
             print "  simple compile --target=baremetal-x86 --emit=llvm-ir kernel.spl"
             print "  simple compile --backend=vhdl -o counter.vhd counter.spl"
+            return 0
+        elif arg == "--list-optimizations":
+            print "Simple optimization guide"
+            print "========================="
+            print "Native executable default profile: aggressive"
+            print "  Applied when building an executable without an explicit --opt-level."
+            print "Native profile mapping:"
+            print "  none       -> debug build mode, layout optimization disabled"
+            print "  basic      -> release build mode, layout optimization disabled"
+            print "  standard   -> release build mode, layout optimization disabled"
+            print "  aggressive -> release build mode, layout optimization enabled"
+            print ""
+            print "Implemented optimization inventory:"
+            print "  - [syntax] async desugar (basic, inventory-only)"
+            print "  - [syntax] placeholder lambda rewrite (basic, inventory-only)"
+            print "  - [syntax] collection pattern desugar (basic, inventory-only)"
+            print "  - [mir] constant folding (basic, inventory-only)"
+            print "  - [mir] copy propagation (basic, inventory-only)"
+            print "  - [mir] dead code elimination (basic, inventory-only)"
+            print "  - [mir] global value numbering (standard, inventory-only)"
+            print "  - [mir] common subexpression elimination (standard, inventory-only)"
+            print "  - [mir] inlining and loop pipeline (aggressive, inventory-only)"
+            print "  - [native] release build mode (basic, native-default)"
+            print "  - [native] 4KB layout optimization (aggressive, native-default)"
             return 0
         elif arg.starts_with("--target="):
             target = arg.substring(9)
@@ -234,11 +263,34 @@ fn cli_compile(args: [text]) -> i64:
                 return 1
         elif arg == "--release":
             release = true
+            if opt_level < 2:
+                opt_level = 2
+            optimization_requested = true
         elif arg == "--release-optimized":
             release_optimized = true
             release = true
             use_lto = true
             march_target = "x86-64-v3"
+            opt_level = 3
+            optimization_requested = true
+        elif arg.starts_with("--opt-level="):
+            val level = arg.substring(12)
+            if level == "none" or level == "0":
+                opt_level = 0
+            elif level == "basic" or level == "1":
+                opt_level = 1
+                release = true
+            elif level == "standard" or level == "2" or level == "speed":
+                opt_level = 2
+                release = true
+            elif level == "aggressive" or level == "3" or level == "max":
+                opt_level = 3
+                release = true
+            else:
+                _cli_eprint("Error: Unknown optimization level: {level}")
+                _cli_eprint("Valid levels: none, basic, standard, aggressive")
+                return 1
+            optimization_requested = true
         elif arg == "--lto":
             use_lto = true
         elif arg.starts_with("--march="):
@@ -308,13 +360,16 @@ fn cli_compile(args: [text]) -> i64:
 
     # LLVM and native compilation — route through Pure Simple driver or native pipeline
     if backend == "llvm" or backend == "llvm-lib" or backend == "llvmlib" or emit == "native":
+        if not optimization_requested:
+            opt_level = 3
+            release = true
         var out = output_file
         if out == "":
             out = source_file.replace(".spl", "")
         # Use Pure Simple compiler driver for all LLVM backends
         if backend == "llvm-lib" or backend == "llvmlib":
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory)
-        return compile_native(source_file, out, verbose, "", false, backend)
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level)
+        return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
         return compile_baremetal(source_file, target, emit, output_file, verbose)
@@ -335,7 +390,7 @@ fn cli_compile(args: [text]) -> i64:
         return cli_compile_via_runtime(args)
 
     # Use Pure Simple compiler driver for all compilation
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:
@@ -673,9 +728,46 @@ fn cli_native_build(args: [text]) -> i64:
     # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
     var backend = ""
     var backend_explicit = false
+    var log_mode = "on"
     var i = 0
     while i < args.len():
         val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            print "Simple Native Build"
+            print ""
+            print "Usage: simple native-build [options] [source-dirs...]"
+            print ""
+            print "Options:"
+            print "  --source <dir>       Source directory to compile (repeatable)"
+            print "  -o <path>            Output binary path"
+            print "  --entry <file>       Entry file"
+            print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
+            print "  --release            Release build (standard optimization profile)"
+            print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
+            print "  --opt-level=<level>  Optimization level: none, basic, standard, aggressive"
+            print "  --list-optimizations Print implemented optimization groups and levels"
+            print "  --strip              Strip symbols from output"
+            print "  --entry-closure      Compile only modules reachable from --entry"
+            print "  --log <on|off>       Compile normal SimpleOS logging in or out"
+            print "  --verbose, -v        Verbose output"
+            return 0
+        elif arg == "--list-optimizations":
+            print "Simple optimization guide"
+            print "========================="
+            print "Native executable default profile: aggressive"
+            print "  Applied when building an executable without an explicit --opt-level."
+            print "Native profile mapping:"
+            print "  none       -> debug build mode, layout optimization disabled"
+            print "  basic      -> release build mode, layout optimization disabled"
+            print "  standard   -> release build mode, layout optimization disabled"
+            print "  aggressive -> release build mode, layout optimization enabled"
+            print ""
+            print "Implemented optimization inventory:"
+            print "  - [syntax] async desugar (basic, inventory-only)"
+            print "  - [syntax] placeholder lambda rewrite (basic, inventory-only)"
+            print "  - [mir] constant fold (standard, planned inventory)"
+            print "  - [layout] native layout optimize (aggressive, Rust native path)"
+            return 0
         if arg.starts_with("--backend="):
             backend = arg.substring(10)
             backend_explicit = true
@@ -683,6 +775,31 @@ fn cli_native_build(args: [text]) -> i64:
             i = i + 1
             backend = args[i]
             backend_explicit = true
+        elif arg.starts_with("--log="):
+            val mode = arg.substring(6)
+            if mode == "":
+                _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                return 1
+            if mode != "on" and mode != "off":
+                _cli_eprint("Error: invalid --log value '{mode}' (expected 'on' or 'off')")
+                return 1
+            log_mode = mode
+        elif arg == "--log":
+            if i + 1 >= args.len():
+                _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                return 1
+            i = i + 1
+            val mode = args[i]
+            if mode.starts_with("-"):
+                _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                return 1
+            if mode != "on" and mode != "off":
+                _cli_eprint("Error: invalid --log value '{mode}' (expected 'on' or 'off')")
+                return 1
+            log_mode = mode
+        elif arg.starts_with("--log"):
+            _cli_eprint("Error: invalid log option '{arg}' (expected --log or --log=<on|off>)")
+            return 1
         i = i + 1
 
     if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib"):
@@ -694,6 +811,9 @@ fn cli_native_build(args: [text]) -> i64:
         var strip = false
         var emit_smf = false
         var source_dirs: [text] = []
+        var release = true
+        var opt_level = 3
+        var optimization_requested = false
         var j = 0
         # Skip "native-build" command name
         if args.len() > 0 and args[0] == "native-build":
@@ -724,6 +844,30 @@ fn cli_native_build(args: [text]) -> i64:
                 strip = true
             elif a == "--emit-smf":
                 emit_smf = true
+            elif a == "--release":
+                release = true
+                if opt_level < 2:
+                    opt_level = 2
+                optimization_requested = true
+            elif a == "--release-optimized":
+                release = true
+                opt_level = 3
+                optimization_requested = true
+            elif a.starts_with("--opt-level="):
+                val opt_text = a.substring(12)
+                if opt_text == "none":
+                    opt_level = 0
+                    release = false
+                elif opt_text == "basic":
+                    opt_level = 1
+                elif opt_text == "standard":
+                    opt_level = 2
+                elif opt_text == "aggressive":
+                    opt_level = 3
+                else:
+                    _cli_eprint("Error: invalid --opt-level value '{opt_text}'")
+                    return 1
+                optimization_requested = true
             elif a == "--no-mangle":
                 pass  # Accepted but not used in llvm-lib path
             elif a == "--clean":
@@ -732,6 +876,29 @@ fn cli_native_build(args: [text]) -> i64:
                 if a == "--backend" and j + 1 < args.len():
                     j = j + 1
                 # Already handled above
+            elif a.starts_with("--log="):
+                val mode = a.substring(6)
+                if mode == "":
+                    _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                    return 1
+                if mode != "on" and mode != "off":
+                    _cli_eprint("Error: invalid --log value '{mode}' (expected 'on' or 'off')")
+                    return 1
+            elif a == "--log":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                    return 1
+                j = j + 1
+                val mode = args[j]
+                if mode.starts_with("-"):
+                    _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                    return 1
+                if mode != "on" and mode != "off":
+                    _cli_eprint("Error: invalid --log value '{mode}' (expected 'on' or 'off')")
+                    return 1
+            elif a.starts_with("--log"):
+                _cli_eprint("Error: invalid log option '{a}' (expected --log or --log=<on|off>)")
+                return 1
             elif not a.starts_with("-") and entry_point == "":
                 entry_point = a
             j = j + 1
@@ -746,6 +913,13 @@ fn cli_native_build(args: [text]) -> i64:
             _cli_eprint("[native-build] Entry: {entry_point}, Output: {output}")
             if source_dirs.len() > 0:
                 _cli_eprint("[native-build] Source dirs: {source_dirs}")
+        val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
+        if not env_set("SIMPLE_OS_LOG_MODE", log_mode):
+            _cli_eprint("Error: could not export SIMPLE_OS_LOG_MODE={log_mode}")
+            return 1
+        if not optimization_requested:
+            release = true
+            opt_level = 3
 
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
@@ -757,21 +931,23 @@ fn cli_native_build(args: [text]) -> i64:
             options.output_file = Some(output)
             options.output_format = OutputFormat.Both
             options.backend = "llvm-lib"
-            options.release = true
-            options.optimize = true
-            options.opt_level = 3
+            options.release = release
+            options.optimize = opt_level > 0
+            options.opt_level = opt_level
             val driver = CompilerDriver.create(options)
             CompilerDriver.run_compile(driver)
         elif source_dirs.len() > 0:
-            aot_native_project_with_backend(source_dirs, entry_point, output, "llvm-lib", strip)
+            aot_native_project_with_backend(source_dirs, entry_point, output, "llvm-lib", strip, release, opt_level)
         else:
-            aot_native_file_with_backend(entry_point, output, "llvm-lib")
+            aot_native_file_with_backend(entry_point, output, "llvm-lib", release, opt_level)
         match result:
             case CompileResult.Success(_):
+                env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 if verbose:
                     _cli_eprint("[native-build] Build successful: {output}")
                 return 0
             case _:
+                env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
                 val errors = result.get_errors()
                 for err in errors:
                     _cli_eprint("error: {err}")

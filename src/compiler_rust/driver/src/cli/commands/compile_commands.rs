@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use simple_common::target::Target;
 use simple_compiler::linker::NativeLinker;
+use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use crate::cli::compile::{
     compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_ptx, compile_file_to_vhdl,
     list_linkers, list_targets,
@@ -11,6 +12,10 @@ use crate::CompileOptions;
 
 /// Handle 'compile' command - compile source to SMF or native binary
 pub fn handle_compile(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--list-optimizations") {
+        println!("{}", format_optimization_guide());
+        return 0;
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_compile_help(false);
         return 0;
@@ -90,8 +95,16 @@ pub fn handle_compile(args: &[String]) -> i32 {
         let options = CompileOptions::from_args(args);
         compile_dynamic_driver_library(&source, output, target, snapshot, options)
     } else if native {
+        let opt_level = match parse_opt_level_flag(args) {
+            Ok(level) => level.unwrap_or_else(NativeOptimizationLevel::default_for_native_executable),
+            Err(err) => {
+                eprintln!("error: {}", err);
+                return 1;
+            }
+        };
+
         // Parse native binary options
-        let layout_optimize = args.iter().any(|a| a == "--layout-optimize");
+        let layout_optimize = args.iter().any(|a| a == "--layout-optimize") || opt_level.enables_layout_optimize();
         let strip = args.iter().any(|a| a == "--strip");
         let pie = !args.iter().any(|a| a == "--no-pie");
         let shared = args.iter().any(|a| a == "--shared");
@@ -102,6 +115,7 @@ pub fn handle_compile(args: &[String]) -> i32 {
             output,
             target,
             linker,
+            opt_level,
             layout_optimize,
             strip,
             pie,
@@ -163,6 +177,26 @@ fn parse_linker_flag(args: &[String]) -> Result<Option<NativeLinker>, String> {
         .transpose()
 }
 
+fn parse_opt_level_flag(args: &[String]) -> Result<Option<NativeOptimizationLevel>, String> {
+    args.iter()
+        .enumerate()
+        .find_map(|(idx, arg)| {
+            if arg == "--opt-level" {
+                Some(
+                    args.get(idx + 1)
+                        .cloned()
+                        .ok_or_else(|| "--opt-level requires a value".to_string()),
+                )
+            } else {
+                arg.strip_prefix("--opt-level=")
+                    .map(|value| Ok(value.to_string()))
+            }
+        })
+        .transpose()?
+        .map(|value| NativeOptimizationLevel::parse(&value))
+        .transpose()
+}
+
 fn parse_source_arg(args: &[String]) -> Option<PathBuf> {
     let mut skip_next = false;
     args.iter().skip(1).find_map(|arg| {
@@ -172,7 +206,7 @@ fn parse_source_arg(args: &[String]) -> Option<PathBuf> {
         }
         if matches!(
             arg.as_str(),
-            "-o" | "--output" | "--target" | "--linker" | "--driver-mode"
+            "-o" | "--output" | "--target" | "--linker" | "--driver-mode" | "--opt-level"
         ) {
             skip_next = true;
             return None;
@@ -205,19 +239,22 @@ fn print_compile_help(show_error: bool) {
         eprintln!("error: compile requires a source file");
     }
     eprintln!(
-        "Usage: simple compile <source.spl> [-o <output>] [--native] [--driver-mode=dynamic] [--backend=<name>] [--target <target>] [--linker <name>] [--snapshot]"
+        "Usage: simple compile <source.spl> [-o <output>] [--native] [--driver-mode=dynamic] [--backend=<name>] [--target <target>] [--linker <name>] [--opt-level <level>] [--snapshot]"
     );
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -o <output>         Output file (default: source.smf or source for --native)");
     eprintln!("  --native            Compile to standalone native binary (ELF/PE)");
+    eprintln!("  --list-optimizations  Print implemented optimization groups and levels");
     eprintln!("  --driver-mode=dynamic  Package the compiled driver SMF as a loadable .lsm archive");
     eprintln!("  --backend=<name>    Backend: cuda/ptx (generate PTX output), vhdl (Simple frontend only)");
     eprintln!("  --target <target>   Target triple or arch (x86_64, aarch64, wasm32-wasi, etc.)");
     eprintln!("  --target=<target>   Same as above");
     eprintln!("  --linker <name>     Native linker to use (mold, lld, ld)");
     eprintln!("  --linker=<name>     Same as above");
-    eprintln!("  --layout-optimize   Enable 4KB page layout optimization");
+    eprintln!("  --opt-level <level> Native optimization level: none, basic, standard, aggressive");
+    eprintln!("                     Default for --native: aggressive");
+    eprintln!("  --layout-optimize   Force-enable 4KB page layout optimization");
     eprintln!("  --strip             Strip symbols from output");
     eprintln!("  --pie               Create position-independent executable (default)");
     eprintln!("  --no-pie            Disable position-independent executable");
@@ -282,6 +319,41 @@ mod tests {
             "-o".to_string(),
             "out.smf".to_string(),
             "--snapshot".to_string(),
+            "test.spl".to_string(),
+        ];
+        let source = parse_source_arg(&args);
+        assert_eq!(source, Some(PathBuf::from("test.spl")));
+    }
+
+    #[test]
+    fn test_parse_opt_level_equals_form() {
+        let args = vec![
+            "compile".to_string(),
+            "test.spl".to_string(),
+            "--opt-level=aggressive".to_string(),
+        ];
+        let level = parse_opt_level_flag(&args).unwrap();
+        assert_eq!(level, Some(NativeOptimizationLevel::Aggressive));
+    }
+
+    #[test]
+    fn test_parse_opt_level_split_form() {
+        let args = vec![
+            "compile".to_string(),
+            "test.spl".to_string(),
+            "--opt-level".to_string(),
+            "basic".to_string(),
+        ];
+        let level = parse_opt_level_flag(&args).unwrap();
+        assert_eq!(level, Some(NativeOptimizationLevel::Basic));
+    }
+
+    #[test]
+    fn test_parse_source_arg_skips_opt_level_value() {
+        let args = vec![
+            "compile".to_string(),
+            "--opt-level".to_string(),
+            "aggressive".to_string(),
             "test.spl".to_string(),
         ];
         let source = parse_source_arg(&args);
