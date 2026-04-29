@@ -96,17 +96,20 @@ Option (1) is most surgical. Option (2) is most principled but touches more code
 
 This root cause is in `src/compiler_rust/compiler/src/interpreter_extern/` (outside the `interpreter/` sub-directory scope of the original task). A partial fix limited to `interpreter/expr/calls.rs` (FieldAccess coercion using class-def type info) would only resolve test 1 and would leave tests 2 and 3 broken. The correct fix is the missing extern handler entry above.
 
-## Workaround
+## Fix (Path #1 — landed 2026-04-29)
 
-None known. The test failures are blocking but reproducibly localized to the interpreter's class-field method-dispatch path. Native-mode test runner has its own wrapper-parser bug per memory `feedback_sspec_compile_pipeline.md`, so we can't run these specs in compile mode either.
+**Files changed:**
+- `src/compiler_rust/compiler/src/interpreter_extern/ffi_array.rs` — added `rt_array_new_with_cap_fn` (returns `Value::array(vec![])`) and `rt_bytes_u8_at_fn` (indexes into `Value::Array` by position).
+- `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` — updated `rt_array_new_with_cap` entry to use `rt_array_new_with_cap_fn` (was mistakenly routing to `rt_array_new_fn` which returned `Value::Int`); added `rt_bytes_u8_at` entry using `rt_bytes_u8_at_fn`.
 
-## Why root-cause fix matters
+**Why this works:** Arrays created via `_byte_buf()` are now `Value::Array(Arc<Vec<Value>>)`, so all Simple-land method calls (`.len()`, `.push()`) dispatch through `handle_array_methods` in `interpreter_method/collections.rs` which operates on the Vec directly. The `rt_bytes_u8_at` handler extracts the integer element at the given index from the Vec.
 
-- Blocks interpreter-mode testing of any pure-Simple module that returns user-defined classes containing `[u8]` or array fields.
-- TLS AC-6 regression suite cannot be fully validated until either this is fixed or a working native-mode test path lands.
+**All 3 tests pass** (`parses CertificateRequest signature_algorithms`, `builds an empty client Certificate message`, `builds a non-empty client CertificateVerify message`). No regression in `os_tls_spec.spl`.
+
+**Note:** The old release binary at `target/release/simple` (Apr 28 09:52) is stale. The fix is in `target/debug/simple`. A release rebuild is needed before `bin/simple test` will use the fixed binary automatically.
 
 ## Investigation pointers (superseded)
 
 ~~Look at the interpreter's static type-checker — specifically the field-access path that resolves `obj.field_name` types.~~
 
-Root cause is confirmed upstream: `rt_array_new_with_cap` has no interpreter extern handler, so dynamic FFI returns a raw `Value::Int` pointer instead of `Value::Array`. Fix the extern table first.
+Root cause is confirmed upstream: `rt_array_new_with_cap` had no interpreter extern handler (well, it routed to `rt_array_new_fn` which returned `Value::Int`), so dynamic FFI returned a raw `Value::Int` pointer instead of `Value::Array`. Fixed by adding proper interpreter-native handlers.
