@@ -62,6 +62,11 @@ Performance: the heavy symbol table + name parsing is done lazily on the first
 call to lookup_symbol / exported_symbols. Header-only consumers (read_relocations,
 get_header, has_elf_object) never trigger it. This keeps from_data O(header_size)
 even for 8 MB SMFs with tens of thousands of symbols inside the interpreter.
+
+For read_relocations() performance, prefer from_path() over from_data() when the
+source file path is available. This enables rt_smf_relocs_from_path, which reads
+the file natively in Rust without materializing the full [u8] array in the
+interpreter (avoids 8M+ Value→u8 conversions that cause 120s+ timeouts).
 """
 struct SmfReaderMemory:
     data: [u8]               # Complete SMF file data
@@ -72,6 +77,7 @@ struct SmfReaderMemory:
     string_table_end: i64    # Absolute end offset of string table inside `data`
     sections_offset: i64     # Offset to section table
     symbols_offset: i64      # Offset to symbol table
+    source_path: text        # File path if loaded from disk; "" if from raw bytes
 
 impl SmfReaderMemory:
     """Create reader from byte array.
@@ -117,7 +123,32 @@ impl SmfReaderMemory:
             string_table_offset: str_off,
             string_table_end: str_end,
             sections_offset: sections_offset,
-            symbols_offset: symbols_offset
+            symbols_offset: symbols_offset,
+            source_path: ""
+        ))
+
+    """Create reader from a file path.
+
+    Reads the file bytes and parses the header, identical to from_data but also
+    stores the path so that read_relocations() can use rt_smf_relocs_from_path
+    (native Rust file read) instead of passing the full [u8] array through the
+    interpreter FFI boundary — critical for >1 MB SMF files in interpreter mode.
+    """
+    static fn from_path(path: text) -> Result<SmfReaderMemory, text>:
+        val data = rt_file_read_bytes(path)
+        if data.len() == 0:
+            return Err("Failed to read SMF file: {path}")
+        val result = SmfReaderMemory.from_data(data)?
+        Ok(SmfReaderMemory(
+            data: result.data,
+            header: result.header,
+            symbols: result.symbols,
+            symbols_parsed: result.symbols_parsed,
+            string_table_offset: result.string_table_offset,
+            string_table_end: result.string_table_end,
+            sections_offset: result.sections_offset,
+            symbols_offset: result.symbols_offset,
+            source_path: path
         ))
 
     """Parse the symbol dict on demand (idempotent)."""
@@ -275,31 +306,33 @@ impl SmfReaderMemory:
     Each entry is 24 bytes: offset(8) | sym_idx(4) | type(1) | pad(3) | addend(8).
     Returns empty list for old SMF files without relocation sections.
 
-    Delegates to rt_smf_parse_relocs (Rust native) which pre-allocates the
-    full result array in O(N) C-side, bypassing the O(N^2) interpreter push
-    loop that makes 100k+ reloc tables (compile.smf has ~139k) time out.
-    The flat [i64] result is decoded: 4 values per entry [offset, sym_idx, type, addend].
+    Fast path (source_path != ""): uses rt_smf_relocs_from_path which reads
+    the file natively in Rust — no [u8] array traversal in the interpreter.
+    This is essential for large SMF files (8+ MB) in interpreter mode.
+
+    Slow path (source_path == ""): uses rt_smf_parse_relocs which converts
+    the full [u8] array through the FFI boundary — acceptable only for small
+    files or when running in compiled mode.
+
+    Returns SmfRelocList (a lazy wrapper around the flat [i64] result) so that
+    callers doing only .len() or .at(i) don't pay the cost of 139k struct allocations.
     """
-    fn read_relocations() -> Result<[SmfRelocEntry], text>:
-        val flat = rt_smf_parse_relocs(
-            self.data,
-            self.sections_offset,
-            self.header.section_count as i64,
-            self.header.smf_data_offset
-        )
-        val entry_count = flat.len() / 4
-        var relocs: [SmfRelocEntry] = []
-        var j = 0
-        while j < entry_count:
-            val base = j * 4
-            relocs.push(SmfRelocEntry(
-                offset: flat[base],
-                symbol_index: flat[base + 1],
-                reloc_type: flat[base + 2] as i32,
-                addend: flat[base + 3]
-            ))
-            j = j + 1
-        Ok(relocs)
+    fn read_relocations() -> Result<SmfRelocList, text>:
+        val flat = if self.source_path != "":
+            rt_smf_relocs_from_path(
+                self.source_path,
+                self.sections_offset,
+                self.header.section_count as i64,
+                self.header.smf_data_offset
+            )
+        else:
+            rt_smf_parse_relocs(
+                self.data,
+                self.sections_offset,
+                self.header.section_count as i64,
+                self.header.smf_data_offset
+            )
+        Ok(SmfRelocList(flat: flat))
 
 # ============================================================================
 # SMF Relocation Entry (read-side)
@@ -312,10 +345,40 @@ struct SmfRelocEntry:
     reloc_type: i32        # Wire values: 1=Abs64, 2=Rel32, 3=PltRel32, 4=GotRel32
     addend: i64
 
-# Native Rust extern: parses SMF Reloc section (type 5) at native speed.
+"""Lazy relocation list — wraps flat [i64] from rt_smf_parse_relocs / rt_smf_relocs_from_path.
+
+Avoids materializing 139k+ SmfRelocEntry structs in interpreter mode.
+Use .len() to get the count and .at(i) to decode one entry on demand.
+"""
+struct SmfRelocList:
+    flat: [i64]
+
+impl SmfRelocList:
+    fn len() -> i64:
+        self.flat.len() / 4
+
+    fn at(i: i64) -> SmfRelocEntry:
+        val base = i * 4
+        SmfRelocEntry(
+            offset: self.flat[base],
+            symbol_index: self.flat[base + 1],
+            reloc_type: self.flat[base + 2] as i32,
+            addend: self.flat[base + 3]
+        )
+
+# Native Rust extern: parses SMF Reloc section (type 5) from in-memory [u8].
 # Returns flat [i64] with 4 values per entry: [offset, sym_idx, type, addend, ...].
 # Pre-allocates the entire result Vec in Rust (O(N)), bypassing O(N^2) interpreter push.
+# WARNING: slow in interpreter mode for large files (8M+ Value→u8 conversions).
+# Use rt_smf_relocs_from_path instead when the source file path is available.
 extern fn rt_smf_parse_relocs(data: [u8], sections_off: i64, section_count: i64, smf_data_offset: i64) -> [i64]
+
+# Native Rust extern: parses SMF Reloc section (type 5) by reading file at path.
+# Returns flat [i64] with 4 values per entry: [offset, sym_idx, type, addend, ...].
+# Fast path: reads file natively in Rust, no [u8] materialization in the interpreter.
+# Critical for large (>1 MB) SMF files in interpreter mode.
+extern fn rt_smf_relocs_from_path(path: text, sections_off: i64, section_count: i64, smf_data_offset: i64) -> [i64]
+extern fn rt_file_read_bytes(path: text) -> [u8]
 
 # ============================================================================
 # Parsing Functions

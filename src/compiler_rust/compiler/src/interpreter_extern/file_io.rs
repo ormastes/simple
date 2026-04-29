@@ -442,6 +442,99 @@ pub fn rt_smf_parse_relocs(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::array(vec![]))
 }
 
+/// Parse SMF relocation entries by reading the file at a given path.
+///
+/// Signature (Simple side):
+///   extern fn rt_smf_relocs_from_path(path: text, sections_off: i64,
+///                                      section_count: i64, smf_data_offset: i64) -> [i64]
+///
+/// Returns a flat [i64] array: 4 elements per reloc entry in order
+///   [offset, symbol_index, reloc_type, addend, ...]
+///
+/// This bypasses the O(N) Value→u8 conversion that makes rt_smf_parse_relocs
+/// time out in interpreter mode for large (>1 MB) SMF files.
+pub fn rt_smf_relocs_from_path(args: &[Value]) -> Result<Value, CompileError> {
+    let path = match args.first() {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Ok(Value::array(vec![])),
+    };
+    let sections_off = match args.get(1) {
+        Some(Value::Int(n)) => *n as usize,
+        _ => return Ok(Value::array(vec![])),
+    };
+    let section_count = match args.get(2) {
+        Some(Value::Int(n)) => *n as usize,
+        _ => return Ok(Value::array(vec![])),
+    };
+    let smf_data_offset = match args.get(3) {
+        Some(Value::Int(n)) => *n as usize,
+        _ => return Ok(Value::array(vec![])),
+    };
+
+    let data = match std::fs::read(&*path) {
+        Ok(d) => d,
+        Err(_) => return Ok(Value::array(vec![])),
+    };
+
+    let section_entry_size: usize = 56;
+    let reloc_entry_size: usize = 24;
+    let data_len = data.len();
+
+    let read_u64_le = |buf: &[u8], off: usize| -> u64 {
+        if off + 8 > buf.len() {
+            return 0;
+        }
+        u64::from_le_bytes([
+            buf[off], buf[off+1], buf[off+2], buf[off+3],
+            buf[off+4], buf[off+5], buf[off+6], buf[off+7],
+        ])
+    };
+    let read_u32_le = |buf: &[u8], off: usize| -> u32 {
+        if off + 4 > buf.len() {
+            return 0;
+        }
+        u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]])
+    };
+
+    for i in 0..section_count {
+        let entry_off = sections_off + i * section_entry_size;
+        let entry_end = entry_off + section_entry_size;
+        if entry_end > data_len {
+            continue;
+        }
+        let sec_type = data[entry_off] as u32;
+        if sec_type != 5 {
+            continue;
+        }
+        // Found RelTab section (type 5)
+        let sec_offset_raw = read_u64_le(&data, entry_off + 8) as usize;
+        let sec_offset = if smf_data_offset > 0 {
+            smf_data_offset + sec_offset_raw
+        } else {
+            sec_offset_raw
+        };
+        let sec_size = read_u64_le(&data, entry_off + 16) as usize;
+        if sec_offset + sec_size > data_len {
+            return Ok(Value::array(vec![]));
+        }
+        let entry_count = sec_size / reloc_entry_size;
+        let mut result: Vec<Value> = Vec::with_capacity(entry_count * 4);
+        for j in 0..entry_count {
+            let e_off = sec_offset + j * reloc_entry_size;
+            let r_offset = read_u64_le(&data, e_off) as i64;
+            let r_sym_idx = read_u32_le(&data, e_off + 8) as i64;
+            let r_type = data[e_off + 12] as i64;
+            let r_addend = read_u64_le(&data, e_off + 16) as i64;
+            result.push(Value::Int(r_offset));
+            result.push(Value::Int(r_sym_idx));
+            result.push(Value::Int(r_type));
+            result.push(Value::Int(r_addend));
+        }
+        return Ok(Value::array(result));
+    }
+    Ok(Value::array(vec![]))
+}
+
 /// Create a byte array from a raw memory pointer
 pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
     let ptr = match args.first() {

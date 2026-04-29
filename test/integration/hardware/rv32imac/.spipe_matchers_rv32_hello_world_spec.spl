@@ -16,12 +16,13 @@ Tests the full pipeline from instruction fetch to UART character output.
 # @feature rv32imac
 # tag: only-compiled, vhdl, slow
 
-import std.spec
+use std.spec.*
 
-use hardware.rv32imac.periph.rv32_uart.Rv32UartModel
-use hardware.rv32imac.periph.rv32_timer.Rv32TimerModel
-use hardware.rv32imac.mem.rv32_sram.Rv32Sram
-use hardware.rv32imac.top.rv32_soc_top.{BusTarget, decode_bus_target, ADDR_ROM_BASE, ADDR_SRAM_BASE, ADDR_UART_BASE, ADDR_TIMER_BASE}
+use hardware.rv32gc.periph.rv32_uart.{Rv32Uart, UART_LSR, UART_THR}
+use hardware.rv32gc.periph.rv32_clint.Rv32Clint
+use hardware.rv32gc.mem.rv32_ram.Rv32Ram
+use hardware.rv32gc.mem.rv32_bus.Rv32Bus
+use hardware.riscv_common.pkg.riscv_linux_pkg.RiscvPlatformProfile
 
 # ============================================================================
 # UART Model Tests
@@ -40,8 +41,8 @@ describe "RV32 UART Model":
         **When:** Reading LSR
         **Then:** TX empty and TX idle bits are set
         """
-        val uart = Rv32UartModel.create(868)
-        val lsr = uart.read_lsr()
+        val uart = Rv32Uart.create()
+        val lsr = uart.read_reg(UART_LSR)
         expect (lsr and 0x60) == 0x60
 
     it "buffers transmitted bytes":
@@ -50,13 +51,12 @@ describe "RV32 UART Model":
         **When:** Writing to THR
         **Then:** Byte appears in TX output buffer
         """
-        var uart = Rv32UartModel.create(868)
-        uart.write_thr(0x48)  # 'H'
-        uart.write_thr(0x65)  # 'e'
-        val output = uart.get_tx_output()
-        expect output.len() == 2
-        expect output[0] == 0x48
-        expect output[1] == 0x65
+        var uart = Rv32Uart.create()
+        uart.write_reg(UART_THR, 0x48)  # 'H'
+        uart.write_reg(UART_THR, 0x65)  # 'e'
+        expect uart.tx_count == 2
+        expect uart.consume_tx() == 0x48
+        expect uart.consume_tx() == 0x65
 
 # ============================================================================
 # Timer Model Tests
@@ -68,22 +68,22 @@ describe "RV32 Timer Model":
     """
 
     it "increments mtime on tick":
-        var timer = Rv32TimerModel.create()
+        var timer = Rv32Clint.create(1)
         timer.tick()
         timer.tick()
         timer.tick()
-        expect timer.read_reg(0x00) == 3
+        expect timer.read(0xBFF8) == 3
 
     it "generates interrupt when mtime >= mtimecmp":
-        var timer = Rv32TimerModel.create()
-        timer.set_mtimecmp(5)
+        var timer = Rv32Clint.create(1)
+        timer.write(0x4000, 5)
         timer.tick()
         timer.tick()
-        expect timer.interrupt_pending() == false
+        expect timer.get_mtip(0) == false
         timer.tick()
         timer.tick()
         timer.tick()
-        expect timer.interrupt_pending() == true
+        expect timer.get_mtip(0) == true
 
 # ============================================================================
 # SRAM Model Tests
@@ -95,15 +95,15 @@ describe "RV32 SRAM Model":
     """
 
     it "reads back written data":
-        var sram = Rv32Sram.create(4)
-        sram.write_word(0, 0xDEADBEEF, 0xF)
-        expect sram.read_word(0) == 0xDEADBEEF
+        var sram = Rv32Ram.create(16)
+        sram.write32(0, 0xDEADBEEF)
+        expect sram.read32(0).value == 0xDEADBEEF
 
     it "supports byte-enable writes":
-        var sram = Rv32Sram.create(4)
-        sram.write_word(0, 0x12345678, 0xF)
-        sram.write_word(0, 0x000000AA, 0x1)  # Write only byte 0
-        expect sram.read_word(0) and 0xFF == 0xAA
+        var sram = Rv32Ram.create(16)
+        sram.write32(0, 0x12345678)
+        sram.write8(0, 0xAA)
+        expect sram.read32(0).value and 0xFF == 0xAA
 
 # ============================================================================
 # Bus Decode Tests
@@ -115,13 +115,26 @@ describe "RV32 Bus Address Decode":
     """
 
     it "routes ROM addresses correctly":
-        expect decode_bus_target(0x00001000) == BusTarget.Rom == true
+        val bus = Rv32Bus.create(0x1000, 1)
+        expect bus.read32(0x00001000).fault == true
 
     it "routes SRAM addresses correctly":
-        expect decode_bus_target(0x80000100) == BusTarget.Sram == true
+        val bus = Rv32Bus.create(0x1000, 1)
+        expect bus.write32(0x80000100, 0xABCD1234).fault == false
+        expect bus.read32(0x80000100).value == 0xABCD1234
 
     it "routes UART addresses correctly":
-        expect decode_bus_target(0x10000000) == BusTarget.Uart == true
+        val bus = Rv32Bus.create(0x1000, 1)
+        val platform = RiscvPlatformProfile.qemu_virt_rv32()
+        expect bus.write8(platform.uart_base, 0x41).fault == false
+        expect bus.uart.consume_tx() == 0x41
 
     it "routes Timer addresses correctly":
-        expect decode_bus_target(0x02000000) == BusTarget.Timer == true
+        val bus = Rv32Bus.create(0x1000, 1)
+        val platform = RiscvPlatformProfile.qemu_virt_rv32()
+        bus.write32(platform.clint_base + 0x4000, 3)
+        bus.tick()
+        bus.tick()
+        expect bus.clint.get_mtip(0) == false
+        bus.tick()
+        expect bus.clint.get_mtip(0) == true

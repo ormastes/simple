@@ -838,6 +838,7 @@ pub(crate) fn call_extern_function(
         "rt_bytes_alloc" => file_io::rt_bytes_alloc(&evaluated),
         "rt_u32_alloc_filled" => file_io::rt_u32_alloc_filled(&evaluated),
         "rt_smf_parse_relocs" => file_io::rt_smf_parse_relocs(&evaluated),
+        "rt_smf_relocs_from_path" => file_io::rt_smf_relocs_from_path(&evaluated),
         "rt_bytes_from_raw" => file_io::rt_bytes_from_raw(&evaluated),
         "rt_file_write_bytes" => file_io::rt_file_write_bytes(&evaluated),
         "rt_file_truncate" => file_io::rt_file_truncate(&evaluated),
