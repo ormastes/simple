@@ -5,7 +5,6 @@ use std::fs;
 use tempfile::TempDir;
 
 /// Create a temporary test project directory with src/ subdirectory
-
 pub fn create_test_project() -> TempDir {
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("src");
