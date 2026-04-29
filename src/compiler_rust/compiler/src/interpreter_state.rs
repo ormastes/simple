@@ -174,6 +174,7 @@ thread_local! {
     /// Trait implementations registry.
     /// Key is (trait_name, type_name), value is the list of methods implementing the trait.
     /// This enables trait method dispatch for types implementing traits.
+    #[allow(clippy::type_complexity)] // reason: (trait, type) → Vec<FunctionDef> is the trait dispatch index; a type alias would obscure the structure
     pub(crate) static TRAIT_IMPLS: RefCell<HashMap<(String, String), Vec<Arc<simple_parser::ast::FunctionDef>>>> = RefCell::new(HashMap::new());
 
     /// Trait definitions registry.

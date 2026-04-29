@@ -512,6 +512,7 @@ thread_local! {
     /// During registry build we stash composite numerator/denominator lists
     /// keyed by symbol so the second pass can fold dimensions without
     /// re-parsing. Cleared after build.
+    #[allow(clippy::type_complexity)] // reason: (numerator parts, denominator parts) tuple is the natural unit parse structure
     static PARSED_PARTS: RefCell<HashMap<String, (Vec<String>, Vec<String>)>> = RefCell::new(HashMap::new());
 }
 

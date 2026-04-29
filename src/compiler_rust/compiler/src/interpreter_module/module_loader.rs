@@ -177,7 +177,7 @@ fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt)
     match &use_stmt.target {
         ImportTarget::Group(_) | ImportTarget::Glob => {
             if module_path.extension().is_some_and(|ext| ext == "spl")
-                && module_path.file_name().map_or(true, |name| name != "__init__.spl")
+                && module_path.file_name().is_none_or(|name| name != "__init__.spl")
             {
                 let package_init = module_path.with_extension("").join("__init__.spl");
                 if package_init.exists() && package_init.is_file() {

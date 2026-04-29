@@ -1191,6 +1191,25 @@ pub fn compile_instruction<M: Module>(
                 } else {
                     val = builder.ins().uextend(types::I64, val);
                 }
+            } else if val_type == types::F64 {
+                // Defensive: MIR lowering should have emitted BoxFloat for an f64
+                // VReg, but in practice float VRegs (e.g. result of `fmul` from
+                // float multiplication) sometimes flow into BoxInt — for example
+                // when a float literal is passed to a method whose lowering only
+                // inserts BoxInt. Without this branch cranelift emits an
+                // `ishl.f64` and the verifier rejects the function (observed in
+                // browser_engine `_apply_opacity`). Bitcast preserves the
+                // bit-pattern as i64 so the subsequent `ishl … 3` is well-typed
+                // and the value round-trips through UnboxFloat-style consumers
+                // that re-bitcast i64 → f64.
+                val = builder
+                    .ins()
+                    .bitcast(types::I64, MemFlags::new(), val);
+            } else if val_type == types::F32 {
+                let promoted = builder.ins().fpromote(types::F64, val);
+                val = builder
+                    .ins()
+                    .bitcast(types::I64, MemFlags::new(), promoted);
             }
             let three = builder.ins().iconst(types::I64, 3);
             let boxed = builder.ins().ishl(val, three);
