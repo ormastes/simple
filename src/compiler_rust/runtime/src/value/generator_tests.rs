@@ -56,7 +56,7 @@ extern "C" fn slot_based_generator(gen: RuntimeValue) -> RuntimeValue {
             rt_generator_set_state(gen, 1);
             RuntimeValue::from_int(0)
         }
-        1 | 2 | 3 => {
+        1..=3 => {
             // Increment counter and yield
             let counter = rt_generator_load_slot(gen, 0);
             let new_val = counter.as_int() + 1;

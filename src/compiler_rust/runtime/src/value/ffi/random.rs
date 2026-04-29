@@ -145,7 +145,7 @@ mod tests {
         rt_random_seed(42);
         for _ in 0..100 {
             let val = rt_random_randint(1, 10);
-            assert!(val >= 1 && val <= 10, "Value {} out of range [1, 10]", val);
+            assert!((1..=10).contains(&val), "Value {} out of range [1, 10]", val);
         }
     }
 
@@ -154,7 +154,7 @@ mod tests {
         rt_random_seed(42);
         for _ in 0..100 {
             let val = rt_random_random();
-            assert!(val >= 0.0 && val < 1.0, "Value {} out of range [0.0, 1.0)", val);
+            assert!((0.0..1.0).contains(&val), "Value {} out of range [0.0, 1.0)", val);
         }
     }
 
@@ -163,7 +163,7 @@ mod tests {
         rt_random_seed(42);
         for _ in 0..100 {
             let val = rt_random_uniform(5.0, 10.0);
-            assert!(val >= 5.0 && val < 10.0, "Value {} out of range [5.0, 10.0)", val);
+            assert!((5.0..10.0).contains(&val), "Value {} out of range [5.0, 10.0)", val);
         }
     }
 

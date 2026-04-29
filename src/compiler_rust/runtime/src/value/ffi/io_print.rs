@@ -603,7 +603,7 @@ fn apply_alignment(s: &str, spec: &FormatSpec<'_>) -> String {
 
     match align {
         '>' => {
-            let pad: String = std::iter::repeat(fill).take(padding).collect();
+            let pad: String = std::iter::repeat_n(fill, padding).collect();
             // For zero-padding, insert zeros after the sign
             if fill == '0' && (s.starts_with('+') || s.starts_with('-') || s.starts_with(' ')) {
                 let (sign, rest) = s.split_at(1);
@@ -613,19 +613,19 @@ fn apply_alignment(s: &str, spec: &FormatSpec<'_>) -> String {
             }
         }
         '<' => {
-            let pad: String = std::iter::repeat(fill).take(padding).collect();
+            let pad: String = std::iter::repeat_n(fill, padding).collect();
             format!("{}{}", s, pad)
         }
         '^' => {
             let left_pad = padding / 2;
             let right_pad = padding - left_pad;
-            let left: String = std::iter::repeat(fill).take(left_pad).collect();
-            let right: String = std::iter::repeat(fill).take(right_pad).collect();
+            let left: String = std::iter::repeat_n(fill, left_pad).collect();
+            let right: String = std::iter::repeat_n(fill, right_pad).collect();
             format!("{}{}{}", left, s, right)
         }
         '=' => {
             // Pad between sign and digits
-            let pad: String = std::iter::repeat(fill).take(padding).collect();
+            let pad: String = std::iter::repeat_n(fill, padding).collect();
             if s.starts_with('+') || s.starts_with('-') || s.starts_with(' ') {
                 let (sign, rest) = s.split_at(1);
                 format!("{}{}{}", sign, pad, rest)
@@ -658,7 +658,7 @@ fn add_int_thousands_separator(s: &str, sep: char) -> String {
     let mut result = String::new();
     let chars: Vec<char> = digits.chars().collect();
     for (i, ch) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i) % 3 == 0 {
+        if i > 0 && (chars.len() - i).is_multiple_of(3) {
             result.push(sep);
         }
         result.push(*ch);

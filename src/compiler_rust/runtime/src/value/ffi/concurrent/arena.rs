@@ -278,7 +278,7 @@ mod tests {
 
             let ptr = rt_arena_alloc(handle, 32, align);
             assert_ne!(ptr, 0);
-            assert_eq!(ptr % (align as i64), 0);
+            assert_eq!(ptr % align, 0);
         }
 
         rt_arena_free(handle);

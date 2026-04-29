@@ -214,6 +214,16 @@ pub(crate) fn build_import_map(
                         }
                     }
                     simple_parser::ast::Node::Class(c) => {
+                        // Register the bare type name so cross-module imports of the
+                        // class type resolve to the defining module's mangled symbol
+                        // (e.g. "VfsManager" → "services__vfs__vfs__VfsManager").
+                        // Without this, declare_globals falls back to mangle_name() which
+                        // uses the *importing* file's prefix, producing wrong references.
+                        let type_mangled = format!("{}__{}", prefix, c.name);
+                        raw_to_mangled.entry(c.name.clone()).or_default().push(type_mangled.clone());
+                        // Class type globals are data objects (type descriptors / vtable anchors),
+                        // not function symbols — mark them so declare_globals uses the data path.
+                        data_exports.insert(type_mangled);
                         if !c.fields.is_empty() {
                             let fields: Vec<(String, String)> = c
                                 .fields
@@ -267,6 +277,11 @@ pub(crate) fn build_import_map(
                         data_exports.insert(mangled);
                     }
                     simple_parser::ast::Node::Struct(s) => {
+                        // Register the bare struct type name so cross-module imports
+                        // resolve to the defining module's symbol, not the importer's.
+                        let type_mangled = format!("{}__{}", prefix, s.name);
+                        raw_to_mangled.entry(s.name.clone()).or_default().push(type_mangled.clone());
+                        data_exports.insert(type_mangled);
                         if !s.fields.is_empty() {
                             let fields: Vec<(String, String)> = s
                                 .fields
@@ -288,6 +303,11 @@ pub(crate) fn build_import_map(
                         }
                     }
                     simple_parser::ast::Node::Enum(e) => {
+                        // Register the bare enum type name so cross-module imports
+                        // resolve to the defining module's symbol, not the importer's.
+                        let type_mangled = format!("{}__{}", prefix, e.name);
+                        raw_to_mangled.entry(e.name.clone()).or_default().push(type_mangled.clone());
+                        data_exports.insert(type_mangled);
                         for m in &e.methods {
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", e.name, m.name);

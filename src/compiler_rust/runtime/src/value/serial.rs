@@ -247,7 +247,7 @@ pub extern "C" fn rt_serial_relay(serial_fd: i64) -> RuntimeValue {
             let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
             if ret < 0 {
                 let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                if errno == libc::EINTR as i32 {
+                if errno == libc::EINTR {
                     continue;
                 }
                 eprintln!("rt_serial_relay: poll error: {}", std::io::Error::last_os_error());

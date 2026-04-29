@@ -324,7 +324,7 @@ fn test_vm_comparison() {
     vm.load_bytecode(&code);
 
     let result = vm.execute().expect("Execution failed");
-    assert_eq!(result.as_bool(), true);
+    assert!(result.as_bool());
 }
 
 #[test]
@@ -461,7 +461,7 @@ fn test_vm_logical_operations() {
     vm.load_bytecode(&code);
 
     let result = vm.execute().expect("Execution failed");
-    assert_eq!(result.as_bool(), false);
+    assert!(!result.as_bool());
 }
 
 #[test]
@@ -610,7 +610,7 @@ fn test_vm_is_some() {
     let mut vm = BytecodeVM::new();
     vm.load_bytecode(&code);
     let result = vm.execute().expect("Execution failed");
-    assert_eq!(result.as_bool(), true);
+    assert!(result.as_bool());
 }
 
 #[test]
@@ -630,7 +630,7 @@ fn test_vm_is_some_nil() {
     let mut vm = BytecodeVM::new();
     vm.load_bytecode(&code);
     let result = vm.execute().expect("Execution failed");
-    assert_eq!(result.as_bool(), false);
+    assert!(!result.as_bool());
 }
 
 // =============================================================================
@@ -865,7 +865,7 @@ fn test_vm_stress_large_stack() {
         encoder.emit_i64(i as i64);
     }
     encoder.emit_opcode(RET);
-    encoder.emit_u16((count - 1) as u16);
+    encoder.emit_u16(((count - 1)));
 
     let code = encoder.finish();
     let mut vm = BytecodeVM::new();

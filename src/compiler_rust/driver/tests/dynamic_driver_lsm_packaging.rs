@@ -1,6 +1,6 @@
 use std::fs;
 
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::tempdir;
 
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
@@ -22,7 +22,7 @@ fn driver_init():
     )
     .expect("write source");
 
-    let mut cmd = Command::cargo_bin("simple").expect("simple binary");
+    let mut cmd = cargo_bin_cmd!("simple");
     let assert = cmd
         .arg("compile")
         .arg("--driver-mode=dynamic")
@@ -51,7 +51,7 @@ fn compile_driver_mode_space_form_does_not_treat_dynamic_as_source() {
     let output = dir.path().join("plain.lsm");
     fs::write(&source, "fn main():\n    return 0\n").expect("write source");
 
-    let mut cmd = Command::cargo_bin("simple").expect("simple binary");
+    let mut cmd = cargo_bin_cmd!("simple");
     cmd.arg("compile")
         .arg("--driver-mode")
         .arg("dynamic")

@@ -341,12 +341,11 @@ unsafe fn rv_to_display(value: i64) -> String {
     if rv.is_heap() {
         let ptr = rv.as_heap_ptr();
         const MIN_HEAP_ADDR: usize = 0x100000;
-        if !ptr.is_null() && (ptr as usize) >= MIN_HEAP_ADDR {
-            if (*ptr).object_type == crate::value::heap::HeapObjectType::String {
+        if !ptr.is_null() && (ptr as usize) >= MIN_HEAP_ADDR
+            && (*ptr).object_type == crate::value::heap::HeapObjectType::String {
                 let str_ptr = ptr as *const super::collections::RuntimeString;
                 return (*str_ptr).as_str().to_string();
             }
-        }
         // Likely a raw untagged integer or invalid pointer — fall through.
     }
     // Native codegen integers arrive untagged; print the raw signed value

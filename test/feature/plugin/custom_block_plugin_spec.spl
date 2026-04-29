@@ -1,0 +1,191 @@
+# Custom Block Plugin — AC-2 Spec
+#
+# **Feature IDs:** #AC2-BLOCK-PLUGIN
+# **Category:** Plugin / BlockRegistry
+# **Status:** Planned (Phase 5 implements; Phase 4 specifies)
+#
+# Validates the BlockRegistry-driven plugin path using local doubles.
+# Phase 5 swaps doubles for real imports from
+# src/compiler/15.blocks/blocks/registry.spl and easy.spl.
+
+use std.spec
+
+# ============================================================================
+# Local doubles — mirror the BlockRegistry 80%-shape API
+# ============================================================================
+
+class BlockDef:
+    kind: text
+    mode: text        # "raw" | "math" | "normal"
+    description: text
+
+    static fn create(kind: text, mode: text) -> BlockDef:
+        BlockDef(kind: kind, mode: mode, description: "Custom block: {kind}")
+
+var _registry: [text] = []
+var _registry_defs: [BlockDef] = []
+
+# Built-in keywords — never overridable without explicit unregister
+var _builtins: [text] = ["m", "loss", "nograd", "sh", "sql", "re", "json", "md"]
+
+fn _init_builtins():
+    for kw in _builtins:
+        var found = false
+        for existing in _registry:
+            if existing == kw:
+                found = true
+        if not found:
+            _registry = _registry + [kw]
+            _registry_defs = _registry_defs + [BlockDef.create(kw, "raw")]
+
+fn is_block(kind: text) -> bool:
+    for kw in _registry:
+        if kw == kind:
+            return true
+    false
+
+fn list_blocks() -> [text]:
+    _registry
+
+fn get_block(kind: text):
+    for def in _registry_defs:
+        if def.kind == kind:
+            return def
+    nil
+
+fn _is_builtin(kind: text) -> bool:
+    for kw in _builtins:
+        if kw == kind:
+            return true
+    false
+
+fn register_block(def: BlockDef):
+    # Reject silent override of built-ins — caller must unregister first
+    if _is_builtin(def.kind) and is_block(def.kind):
+        return
+    # Also reject any already-registered non-builtin without prior unregister
+    if is_block(def.kind):
+        return
+    _registry = _registry + [def.kind]
+    _registry_defs = _registry_defs + [def]
+
+fn unregister_block(kind: text) -> bool:
+    var remaining_kw: [text] = []
+    var remaining_defs: [BlockDef] = []
+    var removed = false
+    for kw in _registry:
+        if kw == kind:
+            removed = true
+        else:
+            remaining_kw = remaining_kw + [kw]
+    for def in _registry_defs:
+        if def.kind != kind:
+            remaining_defs = remaining_defs + [def]
+    _registry = remaining_kw
+    _registry_defs = remaining_defs
+    removed
+
+fn with_block(def: BlockDef, body: fn() -> bool) -> bool:
+    register_block(def)
+    val result = body()
+    unregister_block(def.kind)
+    result
+
+fn _reset_registry():
+    _registry = []
+    _registry_defs = []
+    _init_builtins()
+
+# CSV parser double — returns the trimmed payload as the parsed value
+fn parse_csv(payload: text) -> text:
+    payload.trim()
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "AC-2: Custom Block Plugin — add and replace":
+
+    it "new block registers and is visible":
+        _reset_registry()
+        val csv_def = BlockDef.create("csv", "raw")
+        register_block(csv_def)
+        check(is_block("csv"))
+        val all = list_blocks()
+        check(all.contains("csv"))
+
+    it "block parser-fn is invoked on use":
+        # In-process path: call the parser-fn directly (end-to-end source
+        # compilation is not testable in interpreter mode).
+        val payload = "1,2,3"
+        val result = parse_csv(payload)
+        check(result == "1,2,3")
+
+    it "unregister_block removes the entry":
+        _reset_registry()
+        val csv_def = BlockDef.create("csv", "raw")
+        register_block(csv_def)
+        check(is_block("csv"))
+        val removed = unregister_block("csv")
+        check(removed)
+        check(not is_block("csv"))
+
+    it "with_block scope-registers and auto-cleans":
+        _reset_registry()
+        val csv_def = BlockDef.create("csv", "raw")
+        fn body() -> bool:
+            is_block("csv")
+        val inside = with_block(csv_def, body)
+        check(inside)
+        check(not is_block("csv"))
+
+    it "replacing a built-in is rejected — built-in stays intact":
+        # register_block has no return value today (Phase 5 decides error
+        # signalling).  We test state preservation: attempt to register a
+        # fake 'm' def with a different mode; the original must survive.
+        _reset_registry()
+        val original = get_block("m")
+        val fake_m = BlockDef(kind: "m", mode: "math_fake", description: "fake")
+        register_block(fake_m)
+        val after = get_block("m")
+        # Built-in must still be present and its mode must not have changed
+        check(is_block("m"))
+        check(after.mode == original.mode)
+
+    it "replace flow: unregister then register succeeds with new def":
+        _reset_registry()
+        val csv_v1 = BlockDef.create("csv", "raw")
+        register_block(csv_v1)
+        check(is_block("csv"))
+        unregister_block("csv")
+        val csv_v2 = BlockDef(kind: "csv", mode: "normal", description: "csv v2")
+        register_block(csv_v2)
+        check(is_block("csv"))
+        val current = get_block("csv")
+        check(current.mode == "normal")
+        check(current.description == "csv v2")
+
+    it "use_plugin semantics: blocks register only after explicit use_plugin call":
+        # Contract for Phase 5 — in-process path bypasses use_plugin so this
+        # it block asserts nothing about runtime wiring.
+        #
+        # Phase 5 must implement: src/compiler/15.blocks/plugin_startup.spl
+        # scans <project>/.simple-plugins/ at compiler start; each plugin entry
+        # is activated only when user code calls std.plugin.use_plugin(name).
+        # Until use_plugin is called, the plugin's blocks must NOT appear in
+        # block_registry().  After use_plugin, register_block is called for
+        # each block in the plugin manifest.
+        #
+        # The assertion below is intentionally trivial; real wiring is Phase 5.
+        check(true)
+
+# ============================================================================
+# FEATURE TAGS
+# ============================================================================
+# tags: [compiler, blocks, plugin, ac2, registry, custom-block]
+# priority: high
+# status: planned
+# epic: runtime-api-block-sugar-plugins

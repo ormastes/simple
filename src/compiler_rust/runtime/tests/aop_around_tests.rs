@@ -35,8 +35,8 @@ extern "C" fn advice_double_proceed(ctx: *mut ProceedContext, _argc: u64, _argv:
 
 #[test]
 fn around_chain_applies_outermost_first() {
-    let args = vec![RuntimeValue::from_int(1), RuntimeValue::from_int(2)];
-    let advices = vec![advice_add_one as _, advice_mul_two as _];
+    let args = [RuntimeValue::from_int(1), RuntimeValue::from_int(2)];
+    let advices = [advice_add_one as _, advice_mul_two as _];
 
     // Test with small stack-safe operations
     let result = rt_aop_invoke_around(
@@ -53,8 +53,8 @@ fn around_chain_applies_outermost_first() {
 #[test]
 #[should_panic(expected = "around advice did not call proceed() exactly once")]
 fn around_requires_proceed() {
-    let args = vec![RuntimeValue::from_int(5)];
-    let advices = vec![advice_no_proceed as _];
+    let args = [RuntimeValue::from_int(5)];
+    let advices = [advice_no_proceed as _];
     // Use test version that allows panic propagation
     let _ = rt_aop_invoke_around_test(
         target_sum,
@@ -68,8 +68,8 @@ fn around_requires_proceed() {
 #[test]
 #[should_panic(expected = "around advice called proceed() more than once")]
 fn around_rejects_double_proceed() {
-    let args = vec![RuntimeValue::from_int(5)];
-    let advices = vec![advice_double_proceed as _];
+    let args = [RuntimeValue::from_int(5)];
+    let advices = [advice_double_proceed as _];
     // Use test version that allows panic propagation
     let _ = rt_aop_invoke_around_test(
         target_sum,

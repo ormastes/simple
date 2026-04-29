@@ -286,10 +286,10 @@ mod tests {
     #[test]
     fn test_atomic_bool_basic() {
         let handle = rt_atomic_bool_new(false);
-        assert_eq!(rt_atomic_bool_load(handle), false);
+        assert!(!rt_atomic_bool_load(handle));
 
         rt_atomic_bool_store(handle, true);
-        assert_eq!(rt_atomic_bool_load(handle), true);
+        assert!(rt_atomic_bool_load(handle));
 
         rt_atomic_bool_free(handle);
     }
@@ -299,12 +299,12 @@ mod tests {
         let handle = rt_atomic_bool_new(false);
 
         let old = rt_atomic_bool_swap(handle, true);
-        assert_eq!(old, false);
-        assert_eq!(rt_atomic_bool_load(handle), true);
+        assert!(!old);
+        assert!(rt_atomic_bool_load(handle));
 
         let old = rt_atomic_bool_swap(handle, false);
-        assert_eq!(old, true);
-        assert_eq!(rt_atomic_bool_load(handle), false);
+        assert!(old);
+        assert!(!rt_atomic_bool_load(handle));
 
         rt_atomic_bool_free(handle);
     }
@@ -406,16 +406,16 @@ mod tests {
         let handle = rt_atomic_flag_new();
 
         // First test_and_set should return false (was clear)
-        assert_eq!(rt_atomic_flag_test_and_set(handle), false);
+        assert!(!rt_atomic_flag_test_and_set(handle));
 
         // Second test_and_set should return true (was set)
-        assert_eq!(rt_atomic_flag_test_and_set(handle), true);
+        assert!(rt_atomic_flag_test_and_set(handle));
 
         // Clear the flag
         rt_atomic_flag_clear(handle);
 
         // After clear, test_and_set should return false again
-        assert_eq!(rt_atomic_flag_test_and_set(handle), false);
+        assert!(!rt_atomic_flag_test_and_set(handle));
 
         rt_atomic_flag_free(handle);
     }
@@ -425,7 +425,7 @@ mod tests {
         let handle = rt_once_new();
 
         // Initially not completed
-        assert_eq!(rt_once_is_completed(handle), false);
+        assert!(!rt_once_is_completed(handle));
 
         // Call once (stub implementation doesn't actually call)
         rt_once_call(handle, 0);
@@ -439,9 +439,9 @@ mod tests {
     #[test]
     fn test_atomic_bool_invalid_handle() {
         // Operations on invalid handle should not panic
-        assert_eq!(rt_atomic_bool_load(99999), false);
+        assert!(!rt_atomic_bool_load(99999));
         rt_atomic_bool_store(99999, true);
-        assert_eq!(rt_atomic_bool_swap(99999, true), false);
+        assert!(!rt_atomic_bool_swap(99999, true));
         rt_atomic_bool_free(99999);
     }
 
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(rt_atomic_int_load(99999), 0);
         rt_atomic_int_store(99999, 42);
         assert_eq!(rt_atomic_int_swap(99999, 42), 0);
-        assert_eq!(rt_atomic_int_compare_exchange(99999, 0, 1), false);
+        assert!(!rt_atomic_int_compare_exchange(99999, 0, 1));
         assert_eq!(rt_atomic_int_fetch_add(99999, 1), 0);
         rt_atomic_int_free(99999);
     }
@@ -463,9 +463,9 @@ mod tests {
         let h2 = rt_atomic_bool_new(true);
         let h3 = rt_atomic_bool_new(false);
 
-        assert_eq!(rt_atomic_bool_load(h1), false);
-        assert_eq!(rt_atomic_bool_load(h2), true);
-        assert_eq!(rt_atomic_bool_load(h3), false);
+        assert!(!rt_atomic_bool_load(h1));
+        assert!(rt_atomic_bool_load(h2));
+        assert!(!rt_atomic_bool_load(h3));
 
         rt_atomic_bool_free(h1);
         rt_atomic_bool_free(h2);

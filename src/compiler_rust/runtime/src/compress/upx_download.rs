@@ -392,7 +392,7 @@ mod tests {
         let result = find_upx_in_path();
         // Don't assert - just check it doesn't panic
         if let Some(path) = result {
-            assert!(path.to_string_lossy().len() > 0);
+            assert!(!path.to_string_lossy().is_empty());
         }
     }
 

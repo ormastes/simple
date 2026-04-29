@@ -134,12 +134,12 @@ mod tests {
     fn test_bool_creation_and_extraction() {
         let val_true = rt_value_bool(true);
         assert!(rt_value_is_bool(val_true));
-        assert_eq!(rt_value_as_bool(val_true), true);
+        assert!(rt_value_as_bool(val_true));
         assert!(rt_value_truthy(val_true));
 
         let val_false = rt_value_bool(false);
         assert!(rt_value_is_bool(val_false));
-        assert_eq!(rt_value_as_bool(val_false), false);
+        assert!(!rt_value_as_bool(val_false));
         assert!(!rt_value_truthy(val_false));
     }
 

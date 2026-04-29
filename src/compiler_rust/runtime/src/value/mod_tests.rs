@@ -27,8 +27,8 @@ fn test_bool_roundtrip() {
 
     assert!(t.is_bool());
     assert!(f.is_bool());
-    assert_eq!(t.as_bool(), true);
-    assert_eq!(f.as_bool(), false);
+    assert!(t.as_bool());
+    assert!(!f.as_bool());
     assert_eq!(t, RuntimeValue::TRUE);
     assert_eq!(f, RuntimeValue::FALSE);
 }
@@ -121,7 +121,7 @@ fn test_default() {
 fn test_ffi_functions() {
     assert_eq!(rt_value_as_int(rt_value_int(42)), 42);
     assert!((rt_value_as_float(rt_value_float(3.15)) - 3.15).abs() < 1e-10);
-    assert_eq!(rt_value_as_bool(rt_value_bool(true)), true);
+    assert!(rt_value_as_bool(rt_value_bool(true)));
     assert!(rt_value_is_nil(rt_value_nil()));
     assert!(rt_value_truthy(rt_value_int(1)));
     assert!(!rt_value_truthy(rt_value_int(0)));
