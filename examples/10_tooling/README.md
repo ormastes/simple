@@ -19,8 +19,9 @@ Compiler backend selection and modes:
 - **unified_execution.spl** - Unified execution model
 
 ## Libraries (`libraries/`)
-Working with SMF (Simple Module Format) libraries:
 - **create_sample_library.spl** - Create a library
+- **external_compression/** - Optional native zlib bridge built with CMake and loaded from compiled Simple code
+- **lib_smf/** - Bundle and load SMF libraries
 - **link_with_libraries.spl** - Link against libraries
 - **load_from_library.spl** - Dynamic library loading
 - **test_lib_with_objects.spl** - Library with object files

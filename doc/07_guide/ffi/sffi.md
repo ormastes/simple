@@ -129,6 +129,10 @@ fn main():
     t.free()
 ```
 
+For the maintained optional host-library workflow, including explicit bridge
+discovery and runtime loading, see `doc/07_guide/ffi/external_native_libraries.md`
+and `examples/10_tooling/libraries/external_compression/`.
+
 ---
 
 ## Common Patterns

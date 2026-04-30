@@ -14,6 +14,7 @@ pub enum PackageError {
     InvalidStub,
     InvalidSettlement,
     CompressionError(String),
+    IncompatibleVariant(String),
     MissingManifest,
 }
 
@@ -24,6 +25,7 @@ impl std::fmt::Display for PackageError {
             PackageError::InvalidStub => write!(f, "Invalid executable stub"),
             PackageError::InvalidSettlement => write!(f, "Invalid settlement data"),
             PackageError::CompressionError(msg) => write!(f, "Compression error: {}", msg),
+            PackageError::IncompatibleVariant(msg) => write!(f, "Incompatible package variant: {}", msg),
             PackageError::MissingManifest => write!(f, "Missing package manifest"),
         }
     }

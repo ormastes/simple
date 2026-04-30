@@ -326,6 +326,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_index_of", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_find", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_rfind", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_utf8_count_codepoints", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_utf8_validate", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_utf8_find_invalid", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_text_count_codepoints", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aes_encrypt_block_with_expanded", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aes_decrypt_block_with_expanded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cstring_to_text", &[I64], &[I64]),
     // =========================================================================

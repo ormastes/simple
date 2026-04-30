@@ -258,24 +258,39 @@ pub extern "C" fn rt_cli_run_file(_path: RuntimeValue, _args: RuntimeValue, _gc_
     not_implemented("rt_cli_run_file")
 }
 
-// Under `driver-hooks`, `simple-native-all` provides the real `#[no_mangle]`
-// `rt_cli_run_file` C symbol. We still need a Rust-callable identifier in
-// `simple_runtime::value` so static_provider can take its address. Declare the
-// extern symbol by a unique internal name linked to the real C symbol, then
-// re-expose it as a plain Rust wrapper (no `#[no_mangle]`, so it does not
-// collide with the native_all definition at link time; no `extern "C"` on the
-// wrapper avoids clashing_extern_declarations with the stub above).
-#[cfg(feature = "driver-hooks")]
-extern "C" {
-    #[link_name = "rt_cli_run_file"]
-    fn __rt_cli_run_file_native(path: RuntimeValue, args: RuntimeValue, gc_log: u8, gc_off: u8) -> i64;
-}
-
 #[cfg(feature = "driver-hooks")]
 pub fn rt_cli_run_file(path: RuntimeValue, args: RuntimeValue, gc_log: u8, gc_off: u8) -> i64 {
-    // SAFETY: forwards to the externally-linked C ABI symbol provided by
-    // `simple-native-all` when the `driver-hooks` feature is on.
-    unsafe { __rt_cli_run_file_native(path, args, gc_log, gc_off) }
+    type RunFileFn = unsafe extern "C" fn(RuntimeValue, RuntimeValue, u8, u8) -> i64;
+
+    #[cfg(unix)]
+    fn lookup_run_file() -> Option<RunFileFn> {
+        use std::sync::OnceLock;
+
+        static RUN_FILE: OnceLock<Option<RunFileFn>> = OnceLock::new();
+        *RUN_FILE.get_or_init(|| unsafe {
+            let lib = libloading::os::unix::Library::this();
+            lib.get::<RunFileFn>(b"rt_cli_run_file").ok().map(|symbol| *symbol)
+        })
+    }
+
+    #[cfg(windows)]
+    fn lookup_run_file() -> Option<RunFileFn> {
+        use std::sync::OnceLock;
+
+        static RUN_FILE: OnceLock<Option<RunFileFn>> = OnceLock::new();
+        *RUN_FILE.get_or_init(|| unsafe {
+            let lib = libloading::os::windows::Library::this().ok()?;
+            lib.get::<RunFileFn>(b"rt_cli_run_file").ok().map(|symbol| *symbol)
+        })
+    }
+
+    let Some(run_file) = lookup_run_file() else {
+        return not_implemented("rt_cli_run_file");
+    };
+
+    // SAFETY: the symbol is resolved from the current process image and is
+    // expected to match the shared C ABI used by simple-native-all.
+    unsafe { run_file(path, args, gc_log, gc_off) }
 }
 
 #[no_mangle]

@@ -9,6 +9,7 @@ use simple_compiler::{default_native_codegen_backend, is_native_codegen_backend_
 use crate::cli::compile::{
     compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_ptx, compile_file_to_vhdl,
     list_linkers, list_targets,
+    NativeStripMode,
 };
 use crate::CompileOptions;
 
@@ -120,7 +121,6 @@ pub fn handle_compile(args: &[String]) -> i32 {
 
         // Parse native binary options
         let layout_optimize = args.iter().any(|a| a == "--layout-optimize") || opt_level.enables_layout_optimize();
-        let strip = args.iter().any(|a| a == "--strip");
         let pie = !args.iter().any(|a| a == "--no-pie");
         let shared = args.iter().any(|a| a == "--shared");
         let generate_map = args.iter().any(|a| a == "--map");
@@ -132,6 +132,7 @@ pub fn handle_compile(args: &[String]) -> i32 {
                 return 1;
             }
         };
+        let strip_mode = resolve_native_strip_mode(args, resolved.target, shared);
 
         compile_file_native(
             &source,
@@ -142,7 +143,7 @@ pub fn handle_compile(args: &[String]) -> i32 {
             linker,
             opt_level,
             layout_optimize,
-            strip,
+            strip_mode,
             pie,
             shared,
             generate_map,
@@ -276,6 +277,20 @@ fn parse_source_arg(args: &[String]) -> Option<PathBuf> {
         }
         Some(PathBuf::from(arg))
     })
+}
+
+fn resolve_native_strip_mode(args: &[String], target: Target, shared: bool) -> NativeStripMode {
+    if args.iter().any(|a| a == "--no-strip") {
+        return NativeStripMode::None;
+    }
+    if args.iter().any(|a| a == "--strip") {
+        return NativeStripMode::All;
+    }
+    if target == Target::host() && !shared {
+        NativeStripMode::Debug
+    } else {
+        NativeStripMode::None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -438,7 +453,8 @@ fn print_compile_help(show_error: bool) {
     eprintln!("  --opt-level <level> Native optimization level: none, basic, standard, aggressive");
     eprintln!("                     Default for --native: aggressive");
     eprintln!("  --layout-optimize   Force-enable 4KB page layout optimization");
-    eprintln!("  --strip             Strip symbols from output");
+    eprintln!("  --strip             Strip all symbols from output");
+    eprintln!("  --no-strip          Keep debug info and symbols (default only overrides host --native auto-strip)");
     eprintln!("  --pie               Create position-independent executable (default)");
     eprintln!("  --no-pie            Disable position-independent executable");
     eprintln!("  --shared            Create shared library (.so/.dll)");
@@ -723,5 +739,64 @@ backend = "llvm"
         ];
         let source = parse_source_arg(&args);
         assert_eq!(source, Some(PathBuf::from("test.spl")));
+    }
+
+    #[test]
+    fn test_parse_source_arg_ignores_no_strip_flag() {
+        let args = vec![
+            "compile".to_string(),
+            "--no-strip".to_string(),
+            "test.spl".to_string(),
+        ];
+        let source = parse_source_arg(&args);
+        assert_eq!(source, Some(PathBuf::from("test.spl")));
+    }
+
+    #[test]
+    fn test_resolve_native_strip_mode_defaults_to_debug_strip_for_host_executables() {
+        let mode = resolve_native_strip_mode(&["compile".to_string()], Target::host(), false);
+        assert_eq!(mode, NativeStripMode::Debug);
+    }
+
+    #[test]
+    fn test_resolve_native_strip_mode_honors_no_strip() {
+        let mode = resolve_native_strip_mode(
+            &["compile".to_string(), "--no-strip".to_string()],
+            Target::host(),
+            false,
+        );
+        assert_eq!(mode, NativeStripMode::None);
+    }
+
+    #[test]
+    fn test_resolve_native_strip_mode_honors_explicit_strip() {
+        let mode = resolve_native_strip_mode(
+            &["compile".to_string(), "--strip".to_string()],
+            Target::host(),
+            false,
+        );
+        assert_eq!(mode, NativeStripMode::All);
+    }
+
+    #[test]
+    fn test_resolve_native_strip_mode_no_strip_wins_over_strip() {
+        let mode = resolve_native_strip_mode(
+            &["compile".to_string(), "--strip".to_string(), "--no-strip".to_string()],
+            Target::host(),
+            false,
+        );
+        assert_eq!(mode, NativeStripMode::None);
+    }
+
+    #[test]
+    fn test_resolve_native_strip_mode_does_not_auto_strip_shared_or_cross_targets() {
+        let shared = resolve_native_strip_mode(&["compile".to_string()], Target::host(), true);
+        let cross = resolve_native_strip_mode(
+            &["compile".to_string()],
+            Target::parse("aarch64").expect("target"),
+            false,
+        );
+        assert_eq!(shared, NativeStripMode::None);
+        assert_eq!(cross, NativeStripMode::None);
     }
 }

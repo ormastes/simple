@@ -1,9 +1,18 @@
 //! Collection types: Array, Tuple, String and their FFI functions.
 //! Dict FFI functions are in the dict module.
 
+use std::cmp::Ordering;
+use std::sync::OnceLock;
+
+use super::byte_kernels::{
+    avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
+    scalar_byte_rfind, scalar_byte_split_ranges,
+};
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
 use super::heap::{get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
+use super::primitive_sort;
+use simple_simd::{detect_profile, SimdTier};
 
 // ============================================================================
 // Helper macros to reduce FFI boilerplate
@@ -48,6 +57,73 @@ fn fnv1a_hash(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+// ============================================================================
+// Hybrid dispatch providers for hot primitive/byte kernels
+// ============================================================================
+
+type ArraySortKernel = fn(&mut [RuntimeValue]);
+type ByteFindKernel = fn(&[u8], &[u8], usize) -> Option<usize>;
+type ByteRfindKernel = fn(&[u8], &[u8]) -> Option<usize>;
+type ByteSplitKernel = fn(&str, &str) -> Vec<(usize, usize)>;
+
+struct CollectionProviders {
+    array_sort: ArraySortKernel,
+    byte_find: ByteFindKernel,
+    byte_rfind: ByteRfindKernel,
+    byte_split: ByteSplitKernel,
+    simd_tier: SimdTier,
+}
+
+fn collection_providers() -> &'static CollectionProviders {
+    static PROVIDERS: OnceLock<CollectionProviders> = OnceLock::new();
+    PROVIDERS.get_or_init(|| match detect_profile() {
+        SimdTier::X86_64Avx2 => CollectionProviders {
+            array_sort: scalar_array_sort,
+            byte_find: avx2_byte_find,
+            byte_rfind: avx2_byte_rfind,
+            byte_split: avx2_byte_split_ranges,
+            simd_tier: SimdTier::X86_64Avx2,
+        },
+        SimdTier::Aarch64Neon => CollectionProviders {
+            array_sort: scalar_array_sort,
+            byte_find: neon_byte_find,
+            byte_rfind: neon_byte_rfind,
+            byte_split: neon_byte_split_ranges,
+            simd_tier: SimdTier::Aarch64Neon,
+        },
+        tier => CollectionProviders {
+            array_sort: scalar_array_sort,
+            byte_find: scalar_byte_find,
+            byte_rfind: scalar_byte_rfind,
+            byte_split: scalar_byte_split_ranges,
+            simd_tier: tier,
+        },
+    })
+}
+
+#[inline]
+fn compare_runtime_values(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
+    match (a.is_int(), b.is_int(), a.is_float(), b.is_float()) {
+        (true, true, _, _) => a.as_int().cmp(&b.as_int()),
+        (_, _, true, true) => a.as_float().partial_cmp(&b.as_float()).unwrap_or(Ordering::Equal),
+        (true, false, _, true) => Ordering::Less,
+        (false, true, true, _) => Ordering::Greater,
+        _ => Ordering::Equal,
+    }
+}
+
+fn scalar_array_sort(values: &mut [RuntimeValue]) {
+    values.sort_by(compare_runtime_values);
+}
+
+fn avx2_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
+    byte_split_ranges_for_tier(SimdTier::X86_64Avx2, haystack, delimiter)
+}
+
+fn neon_byte_split_ranges(haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {
+    byte_split_ranges_for_tier(SimdTier::Aarch64Neon, haystack, delimiter)
 }
 
 // ============================================================================
@@ -765,15 +841,10 @@ pub extern "C" fn rt_text_find(haystack: RuntimeValue, needle: RuntimeValue, sta
     unsafe {
         let hay = std::slice::from_raw_parts(hay_ptr, hay_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_ptr, needle_len as usize);
-        let limit = (hay_len - needle_len) as usize;
-        let start_idx = start as usize;
-        for i in start_idx..=limit {
-            if &hay[i..i + needle_len as usize] == needle_bytes {
-                return i as i64;
-            }
-        }
+        (collection_providers().byte_find)(hay, needle_bytes, start as usize)
+            .map(|idx| idx as i64)
+            .unwrap_or(-1)
     }
-    -1
 }
 
 /// Create a string from a null-terminated C string
@@ -816,22 +887,18 @@ pub extern "C" fn rt_string_split(string: RuntimeValue, delimiter: RuntimeValue)
         return rt_array_new(0);
     }
 
-    // Pre-count splits to allocate with correct capacity
-    let split_count = unsafe {
-        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
-        let d = std::str::from_utf8_unchecked(std::slice::from_raw_parts(del_data, del_len as usize));
-        s.split(d).count() as u64
-    };
-    let result = rt_array_new(split_count);
     unsafe {
         let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len as usize));
         let d = std::str::from_utf8_unchecked(std::slice::from_raw_parts(del_data, del_len as usize));
-        for part in s.split(d) {
+        let parts = (collection_providers().byte_split)(s, d);
+        let result = rt_array_new(parts.len() as u64);
+        for (start, end) in parts {
+            let part = &s[start..end];
             let part_rv = rt_string_new(part.as_ptr(), part.len() as u64);
             rt_array_push(result, part_rv);
         }
+        result
     }
-    result
 }
 
 /// Replace all occurrences of a pattern in a string
@@ -1001,12 +1068,9 @@ pub extern "C" fn rt_string_find(string: RuntimeValue, needle: RuntimeValue) -> 
     unsafe {
         let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
-        for i in 0..=(str_len - needle_len) as usize {
-            if &haystack[i..i + needle_len as usize] == needle_bytes {
-                return i as i64;
-            }
-        }
-        -1
+        (collection_providers().byte_find)(haystack, needle_bytes, 0)
+            .map(|idx| idx as i64)
+            .unwrap_or(-1)
     }
 }
 
@@ -1039,17 +1103,9 @@ pub extern "C" fn rt_string_rfind(string: RuntimeValue, needle: RuntimeValue) ->
     unsafe {
         let haystack = std::slice::from_raw_parts(str_data, str_len as usize);
         let needle_bytes = std::slice::from_raw_parts(needle_data, needle_len as usize);
-        let mut i = (str_len - needle_len) as usize;
-        loop {
-            if &haystack[i..i + needle_len as usize] == needle_bytes {
-                return i as i64;
-            }
-            if i == 0 {
-                break;
-            }
-            i -= 1;
-        }
-        -1
+        (collection_providers().byte_rfind)(haystack, needle_bytes)
+            .map(|idx| idx as i64)
+            .unwrap_or(-1)
     }
 }
 
@@ -1338,19 +1394,11 @@ pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         let slice = (*arr).as_mut_slice();
-        slice.sort_by(|a, b| {
-            // Compare by type first, then by value
-            match (a.is_int(), b.is_int(), a.is_float(), b.is_float()) {
-                (true, true, _, _) => a.as_int().cmp(&b.as_int()),
-                (_, _, true, true) => a
-                    .as_float()
-                    .partial_cmp(&b.as_float())
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                (true, false, _, true) => std::cmp::Ordering::Less, // int < float
-                (false, true, true, _) => std::cmp::Ordering::Greater, // float > int
-                _ => std::cmp::Ordering::Equal,                     // Other types: keep order
-            }
-        });
+        let providers = collection_providers();
+        let report = primitive_sort::sort_runtime_values(slice, providers.simd_tier);
+        if report.fallback.is_some() {
+            (providers.array_sort)(slice);
+        }
         true
     }
 }

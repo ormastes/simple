@@ -447,7 +447,7 @@ pub fn web_build(source: &PathBuf, options: WebBuildOptions) -> i32 {
             "   WASM:     {}/{}.wasm ({} KB)",
             options.output_dir.display(),
             options.module_name,
-            result.client_binary.len() / 1024
+            final_size / 1024
         );
         println!(
             "   Manifest: {}/{}.manifest.json",

@@ -147,10 +147,15 @@ mod tests {
 
     #[test]
     fn test_options_with_multiple_libraries() {
-        let options = NativeBinaryOptions::new().library("pthread").library("dl").library("m");
+        let options = NativeBinaryOptions::new()
+            .library("pthread")
+            .library("dl")
+            .library("m")
+            .library("m");
         assert!(options.libraries.contains(&"pthread".to_string()));
         assert!(options.libraries.contains(&"dl".to_string()));
         assert!(options.libraries.contains(&"m".to_string()));
+        assert_eq!(options.libraries.iter().filter(|lib| lib.as_str() == "m").count(), 1);
     }
 
     #[test]
@@ -160,10 +165,12 @@ mod tests {
 
         let options = NativeBinaryOptions::new()
             .library_path(path1.clone())
+            .library_path(path1.clone())
             .library_path(path2.clone());
 
         assert!(options.library_paths.contains(&path1));
         assert!(options.library_paths.contains(&path2));
+        assert_eq!(options.library_paths.iter().filter(|path| *path == &path1).count(), 1);
     }
 
     #[test]
@@ -205,6 +212,62 @@ mod tests {
     }
 
     #[test]
+    fn test_target_rebuilds_builtin_cpu_default_for_new_arch() {
+        let options = NativeBinaryOptions::new().target(Target::new(TargetArch::Aarch64, TargetOS::Linux));
+        assert_eq!(options.cpu, TargetCpu::builtin_default_for_arch(TargetArch::Aarch64));
+    }
+
+    #[test]
+    fn test_target_preserves_explicit_cpu_override() {
+        let options = NativeBinaryOptions::new()
+            .cpu(TargetCpu::Native)
+            .target(Target::new(TargetArch::Aarch64, TargetOS::Linux));
+        assert_eq!(options.cpu, TargetCpu::Native);
+    }
+
+    #[test]
+    fn test_target_preserves_custom_libraries_and_paths() {
+        let custom_path = std::path::PathBuf::from("/tmp/simple-custom-lib");
+        let options = NativeBinaryOptions::new()
+            .library("custom_runtime")
+            .library_path(custom_path.clone())
+            .target(Target::new(TargetArch::Aarch64, TargetOS::Linux));
+
+        assert!(options.libraries.contains(&"custom_runtime".to_string()));
+        assert!(options.library_paths.contains(&custom_path));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn test_target_rebuilds_library_paths_for_cross_target() {
+        let options = NativeBinaryOptions::new().target(Target::new(TargetArch::Aarch64, TargetOS::Linux));
+        assert!(
+            !options
+                .library_paths
+                .iter()
+                .any(|path| path.to_string_lossy().contains("x86_64-linux-gnu")),
+            "cross target library paths should not retain host x86_64 directories: {:?}",
+            options.library_paths
+        );
+        assert!(
+            options
+                .library_paths
+                .iter()
+                .any(|path| path.to_string_lossy().contains("aarch64-linux-gnu")),
+            "cross target library paths should include aarch64 search dirs when present: {:?}",
+            options.library_paths
+        );
+        assert!(
+            !options
+                .library_paths
+                .iter()
+                .any(|path| path.to_string_lossy().contains("src/compiler_rust/target/debug")),
+            "cross target library paths should not inject host runtime archives: {:?}",
+            options.library_paths
+        );
+    }
+
+    #[test]
     fn test_for_native_executable_defaults_to_available_backend_and_arch_cpu_policy() {
         let options = NativeBinaryOptions::for_native_executable();
         assert_eq!(options.backend, Some(crate::default_native_codegen_backend()));
@@ -237,6 +300,19 @@ mod tests {
         assert!(!builder.options.pie);
         assert!(builder.options.libraries.contains(&"pthread".to_string()));
         assert!(builder.options.verbose);
+    }
+
+    #[test]
+    fn test_builder_target_refreshes_option_defaults() {
+        let builder = NativeBinaryBuilder::new(vec![]).target(Target::new(TargetArch::Aarch64, TargetOS::Linux));
+        assert_eq!(
+            builder.options.target,
+            Target::new(TargetArch::Aarch64, TargetOS::Linux)
+        );
+        assert_eq!(
+            builder.options.cpu,
+            TargetCpu::builtin_default_for_arch(TargetArch::Aarch64)
+        );
     }
 
     #[test]
@@ -289,6 +365,8 @@ mod tests {
         assert!(libs.contains(&"m".to_string()));
         assert!(libs.contains(&"gcc_s".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
+        assert!(libs.contains(&"simple_native_all".to_string()));
+        assert!(!libs.contains(&"lzma".to_string()));
     }
 
     #[test]
@@ -297,6 +375,7 @@ mod tests {
         let libs = NativeBinaryOptions::default_libraries_for_target(&target);
         assert!(libs.contains(&"System".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
+        assert!(libs.contains(&"simple_native_all".to_string()));
         assert!(!libs.contains(&"c".to_string()));
         assert!(!libs.contains(&"pthread".to_string()));
         assert!(!libs.contains(&"dl".to_string()));
@@ -312,6 +391,7 @@ mod tests {
         assert!(libs.contains(&"ws2_32".to_string()));
         assert!(libs.contains(&"advapi32".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
+        assert!(libs.contains(&"simple_native_all".to_string()));
     }
 
     #[test]
@@ -323,6 +403,7 @@ mod tests {
         assert!(libs.contains(&"m".to_string()));
         assert!(libs.contains(&"execinfo".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
+        assert!(libs.contains(&"simple_native_all".to_string()));
     }
 
     #[test]
@@ -448,6 +529,34 @@ mod tests {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         assert!(!paths.is_empty());
         let _ = paths;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_library_paths_for_linux_cross_targets_include_gcc_cross_dirs_when_present() {
+        let aarch64 = Target::new(TargetArch::Aarch64, TargetOS::Linux);
+        let aarch64_paths = NativeBinaryOptions::detect_library_paths_for_target(&aarch64);
+        if std::path::Path::new("/usr/lib/gcc-cross/aarch64-linux-gnu").exists() {
+            assert!(
+                aarch64_paths
+                    .iter()
+                    .any(|path| path.to_string_lossy().contains("/usr/lib/gcc-cross/aarch64-linux-gnu/")),
+                "expected aarch64 gcc-cross search path in {:?}",
+                aarch64_paths
+            );
+        }
+
+        let riscv64 = Target::new(TargetArch::Riscv64, TargetOS::Linux);
+        let riscv64_paths = NativeBinaryOptions::detect_library_paths_for_target(&riscv64);
+        if std::path::Path::new("/usr/lib/gcc-cross/riscv64-linux-gnu").exists() {
+            assert!(
+                riscv64_paths
+                    .iter()
+                    .any(|path| path.to_string_lossy().contains("/usr/lib/gcc-cross/riscv64-linux-gnu/")),
+                "expected riscv64 gcc-cross search path in {:?}",
+                riscv64_paths
+            );
+        }
     }
 
     #[test]

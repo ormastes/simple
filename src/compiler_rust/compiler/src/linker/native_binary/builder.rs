@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use simple_common::target::TargetOS;
+use simple_common::target::{Target, TargetOS};
 
 use crate::linker::error::{LinkerError, LinkerResult};
 use crate::linker::layout::LayoutOptimizer;
@@ -18,6 +18,29 @@ pub struct NativeBinaryBuilder {
 }
 
 impl NativeBinaryBuilder {
+    fn has_target_runtime_bundle(&self) -> bool {
+        let runtime_name = NativeBinaryOptions::static_lib_name("simple_runtime", &self.options.target);
+        let native_all_name = NativeBinaryOptions::static_lib_name("simple_native_all", &self.options.target);
+        self.options.library_paths.iter().any(|dir| {
+            let runtime = dir.join(&runtime_name);
+            let native_all = dir.join(&native_all_name);
+            runtime.exists() && native_all.exists()
+        })
+    }
+
+    fn ensure_cross_target_runtime_bundle(&self) -> LinkerResult<()> {
+        if self.options.shared || self.options.target == Target::host() || self.has_target_runtime_bundle() {
+            return Ok(());
+        }
+
+        Err(LinkerError::LinkFailed(format!(
+            "missing target runtime/sysroot for {}: no target-built {} and {} were found in library search paths; build the runtime bundle for this target or set SIMPLE_RUNTIME_PATH to a directory containing them",
+            self.options.target.triple_str(),
+            NativeBinaryOptions::static_lib_name("simple_runtime", &self.options.target),
+            NativeBinaryOptions::static_lib_name("simple_native_all", &self.options.target),
+        )))
+    }
+
     pub fn new(object_code: Vec<u8>) -> Self {
         Self {
             object_code,
@@ -31,7 +54,11 @@ impl NativeBinaryBuilder {
         self
     }
 
-    impl_target_method!(options);
+    pub fn target(mut self, target: simple_common::target::Target) -> Self {
+        self.options = self.options.target(target);
+        self
+    }
+
     impl_layout_methods!(options);
     impl_bool_flag_methods!(options);
     impl_linker_builder_methods!(options);
@@ -83,6 +110,8 @@ impl NativeBinaryBuilder {
                 eprintln!("{}", String::from_utf8_lossy(&output.stdout));
             }
         }
+
+        self.ensure_cross_target_runtime_bundle()?;
 
         let crt_files = if self.options.shared {
             Vec::new()

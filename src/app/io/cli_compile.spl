@@ -18,6 +18,48 @@ use compiler.mir_opt.{mir_optimization_inventory_lines}
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 extern fn rt_native_build(args: [text]) -> i64
 
+fn cli_native_default_opt_level() -> i64:
+    3
+
+fn cli_parse_opt_level(level: text) -> i64?:
+    if level == "none" or level == "0":
+        return Some(0)
+    if level == "basic" or level == "1":
+        return Some(1)
+    if level == "standard" or level == "2" or level == "speed":
+        return Some(2)
+    if level == "aggressive" or level == "3" or level == "max":
+        return Some(3)
+    nil
+
+fn cli_print_shared_opt_level_help():
+    print "  --opt-level=<level>  Optimization level: none, basic, standard, aggressive"
+
+fn cli_print_shared_optimization_inventory(command: text):
+    print "Simple optimization guide"
+    print "========================="
+    print "Native executable default profile: aggressive"
+    print "  Applied when building an executable without an explicit --opt-level."
+    print "Native profile mapping:"
+    print "  none       -> debug build mode, layout optimization disabled"
+    print "  basic      -> release build mode, layout optimization disabled"
+    print "  standard   -> release build mode, layout optimization disabled"
+    print "  aggressive -> release build mode, layout optimization enabled"
+    print ""
+    print "Implemented optimization inventory:"
+    print "  - [syntax] async desugar (basic, inventory-only)"
+    print "  - [syntax] placeholder lambda rewrite (basic, inventory-only)"
+    print "  - [syntax] collection pattern desugar (basic, inventory-only)"
+    for line in mir_optimization_inventory_lines():
+        print line
+    print "  - [native] release build mode (basic, native-default)"
+    print "  - [native] 4KB layout optimization (aggressive, native-default)"
+    if command == "compile":
+        print ""
+        print "Entry-point notes:"
+        print "  - Native executable builds default to aggressive on native backends."
+        print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
+
 # Pure Simple compiler implementation (no Rust FFI dependency)
 fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text) -> i64:
     var out = output_file
@@ -128,6 +170,29 @@ fn cli_compile_uses_simple_driver(args: [text]) -> bool:
         i = i + 1
     false
 
+fn cli_validate_opt_level_args(args: [text]) -> i64:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--opt-level="):
+            val level = arg.substring(12)
+            if cli_parse_opt_level(level).is_none():
+                _cli_eprint("Error: Unknown optimization level: {level}")
+                _cli_eprint("Valid levels: none, basic, standard, aggressive")
+                return 1
+        elif arg == "--opt-level":
+            if i + 1 >= args.len():
+                _cli_eprint("Error: --opt-level requires an argument")
+                return 1
+            i = i + 1
+            val level = args[i]
+            if cli_parse_opt_level(level).is_none():
+                _cli_eprint("Error: Unknown optimization level: {level}")
+                _cli_eprint("Valid levels: none, basic, standard, aggressive")
+                return 1
+        i = i + 1
+    0
+
 fn cli_compile_via_runtime(args: [text]) -> i64:
     val exit_code = rt_cli_handle_compile(args)
     if exit_code == 3:
@@ -137,6 +202,9 @@ fn cli_compile_via_runtime(args: [text]) -> i64:
     exit_code
 
 fn cli_compile(args: [text]) -> i64:
+    val opt_level_validation = cli_validate_opt_level_args(args)
+    if opt_level_validation != 0:
+        return opt_level_validation
     if not cli_compile_uses_simple_driver(args):
         return cli_compile_via_runtime(args)
 
@@ -184,7 +252,7 @@ fn cli_compile(args: [text]) -> i64:
             print "  --coverage-output=<p> Coverage output file path"
             print "  --release             Release build (optimized, prefers LLVM)"
             print "  --release-optimized   Max optimization: -O3 + x86-64-v3 + ThinLTO"
-            print "  --opt-level=<level>   Optimization level: none, basic, standard, aggressive"
+            cli_print_shared_opt_level_help()
             print "  --profile=<name>      Compile profile: dev, test, prod"
             print "  --list-optimizations  Print implemented optimization groups and levels"
             print "  --lto                 Enable ThinLTO (+2-3% speed)"
@@ -212,24 +280,7 @@ fn cli_compile(args: [text]) -> i64:
             print "  simple compile --backend=vhdl -o counter.vhd counter.spl"
             return 0
         elif arg == "--list-optimizations":
-            print "Simple optimization guide"
-            print "========================="
-            print "Native executable default profile: aggressive"
-            print "  Applied when building an executable without an explicit --opt-level."
-            print "Native profile mapping:"
-            print "  none       -> debug build mode, layout optimization disabled"
-            print "  basic      -> release build mode, layout optimization disabled"
-            print "  standard   -> release build mode, layout optimization disabled"
-            print "  aggressive -> release build mode, layout optimization enabled"
-            print ""
-            print "Implemented optimization inventory:"
-            print "  - [syntax] async desugar (basic, inventory-only)"
-            print "  - [syntax] placeholder lambda rewrite (basic, inventory-only)"
-            print "  - [syntax] collection pattern desugar (basic, inventory-only)"
-            for line in mir_optimization_inventory_lines():
-                print line
-            print "  - [native] release build mode (basic, native-default)"
-            print "  - [native] 4KB layout optimization (aggressive, native-default)"
+            cli_print_shared_optimization_inventory("compile")
             return 0
         elif arg.starts_with("--target="):
             target = arg.substring(9)
@@ -278,21 +329,14 @@ fn cli_compile(args: [text]) -> i64:
             optimization_requested = true
         elif arg.starts_with("--opt-level="):
             val level = arg.substring(12)
-            if level == "none" or level == "0":
-                opt_level = 0
-            elif level == "basic" or level == "1":
-                opt_level = 1
-                release = true
-            elif level == "standard" or level == "2" or level == "speed":
-                opt_level = 2
-                release = true
-            elif level == "aggressive" or level == "3" or level == "max":
-                opt_level = 3
-                release = true
-            else:
+            val parsed_level = cli_parse_opt_level(level)
+            if parsed_level.is_none():
                 _cli_eprint("Error: Unknown optimization level: {level}")
                 _cli_eprint("Valid levels: none, basic, standard, aggressive")
                 return 1
+            opt_level = parsed_level.unwrap()
+            if opt_level > 0:
+                release = true
             optimization_requested = true
         elif arg.starts_with("--profile="):
             profile = arg.substring(10)
@@ -381,7 +425,7 @@ fn cli_compile(args: [text]) -> i64:
     # LLVM and native compilation — route through Pure Simple driver or native pipeline
     if backend == "llvm" or backend == "llvm-lib" or backend == "llvmlib" or emit == "native":
         if not optimization_requested:
-            opt_level = 3
+            opt_level = cli_native_default_opt_level()
             release = true
         var out = output_file
         if out == "":
@@ -764,7 +808,7 @@ fn cli_native_build(args: [text]) -> i64:
             print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
             print "  --release            Release build (standard optimization profile)"
             print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
-            print "  --opt-level=<level>  Optimization level: none, basic, standard, aggressive"
+            cli_print_shared_opt_level_help()
             print "  --list-optimizations Print implemented optimization groups and levels"
             print "  --strip              Strip symbols from output"
             print "  --entry-closure      Compile only modules reachable from --entry"
@@ -772,22 +816,7 @@ fn cli_native_build(args: [text]) -> i64:
             print "  --verbose, -v        Verbose output"
             return 0
         elif arg == "--list-optimizations":
-            print "Simple optimization guide"
-            print "========================="
-            print "Native executable default profile: aggressive"
-            print "  Applied when building an executable without an explicit --opt-level."
-            print "Native profile mapping:"
-            print "  none       -> debug build mode, layout optimization disabled"
-            print "  basic      -> release build mode, layout optimization disabled"
-            print "  standard   -> release build mode, layout optimization disabled"
-            print "  aggressive -> release build mode, layout optimization enabled"
-            print ""
-            print "Implemented optimization inventory:"
-            print "  - [syntax] async desugar (basic, inventory-only)"
-            print "  - [syntax] placeholder lambda rewrite (basic, inventory-only)"
-            for line in mir_optimization_inventory_lines():
-                print line
-            print "  - [layout] native layout optimize (aggressive, Rust native path)"
+            cli_print_shared_optimization_inventory("native-build")
             return 0
         if arg.starts_with("--backend="):
             backend = arg.substring(10)
@@ -833,7 +862,7 @@ fn cli_native_build(args: [text]) -> i64:
         var emit_smf = false
         var source_dirs: [text] = []
         var release = true
-        var opt_level = 3
+        var opt_level = cli_native_default_opt_level()
         var optimization_requested = false
         var j = 0
         # Skip "native-build" command name
@@ -872,22 +901,16 @@ fn cli_native_build(args: [text]) -> i64:
                 optimization_requested = true
             elif a == "--release-optimized":
                 release = true
-                opt_level = 3
+                opt_level = cli_native_default_opt_level()
                 optimization_requested = true
             elif a.starts_with("--opt-level="):
                 val opt_text = a.substring(12)
-                if opt_text == "none":
-                    opt_level = 0
-                    release = false
-                elif opt_text == "basic":
-                    opt_level = 1
-                elif opt_text == "standard":
-                    opt_level = 2
-                elif opt_text == "aggressive":
-                    opt_level = 3
-                else:
+                val parsed_level = cli_parse_opt_level(opt_text)
+                if parsed_level.is_none():
                     _cli_eprint("Error: invalid --opt-level value '{opt_text}'")
                     return 1
+                opt_level = parsed_level.unwrap()
+                release = opt_level > 0
                 optimization_requested = true
             elif a == "--no-mangle":
                 pass  # Accepted but not used in llvm-lib path
@@ -940,7 +963,7 @@ fn cli_native_build(args: [text]) -> i64:
             return 1
         if not optimization_requested:
             release = true
-            opt_level = 3
+            opt_level = cli_native_default_opt_level()
 
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file

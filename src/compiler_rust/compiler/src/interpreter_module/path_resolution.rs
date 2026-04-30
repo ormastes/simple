@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::trace;
 
 use crate::error::CompileError;
+use crate::stdlib_variant::{active_simd_tier_name, stdlib_root_candidates};
 
 fn normalize_base_dir(base_dir: &Path) -> PathBuf {
     if base_dir.is_absolute() {
@@ -59,6 +60,7 @@ fn compute_cache_key(parts: &[String], base_dir: &Path) -> u64 {
     let mut hasher = ahash::AHasher::default();
     parts.hash(&mut hasher);
     base_dir.hash(&mut hasher);
+    active_simd_tier_name().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -355,23 +357,28 @@ fn preferred_stdlib_variant(base_dir: &Path) -> Option<&'static str> {
 
 fn try_variant_stdlib_root(search_root: &Path, variant: &str, stdlib_parts: &[String]) -> Option<PathBuf> {
     for lib_root in ["src/lib", "src/std"] {
-        let variant_root = search_root.join(lib_root).join(variant);
-        if !variant_root.is_dir() {
+        let base_root = search_root.join(lib_root);
+        if !base_root.is_dir() {
             continue;
         }
+        for variant_root in stdlib_root_candidates(&base_root) {
+            if !variant_root.ends_with(variant) && !variant_root.to_string_lossy().contains(&format!("/{variant}/")) {
+                continue;
+            }
 
-        let relative: PathBuf = stdlib_parts.iter().collect();
+            let relative: PathBuf = stdlib_parts.iter().collect();
 
-        let mut init_path = variant_root.join(&relative);
-        init_path.push("__init__.spl");
-        if init_path.is_file() {
-            return Some(init_path);
-        }
+            let mut init_path = variant_root.join(&relative);
+            init_path.push("__init__.spl");
+            if init_path.is_file() {
+                return Some(init_path);
+            }
 
-        let mut file_path = variant_root.join(&relative);
-        file_path.set_extension("spl");
-        if file_path.is_file() {
-            return Some(file_path);
+            let mut file_path = variant_root.join(&relative);
+            file_path.set_extension("spl");
+            if file_path.is_file() {
+                return Some(file_path);
+            }
         }
     }
 
@@ -512,8 +519,26 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_base_dir, resolve_module_path};
+    use super::{compute_cache_key, normalize_base_dir, resolve_module_path};
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    fn simd_tier_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = simd_tier_env_lock().lock().unwrap();
+        let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+        std::env::set_var("SIMPLE_SIMD_TIER", value);
+        let result = f();
+        match previous.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+        result
+    }
 
     #[test]
     fn normalizes_relative_base_dirs_to_absolute_paths() {
@@ -591,6 +616,17 @@ mod tests {
             "resolved path was {:?}",
             resolved
         );
+    }
+
+    #[test]
+    fn cache_key_changes_with_simd_tier() {
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let base_dir = Path::new("/tmp/project/src");
+
+        let scalar = with_simd_tier_env("scalar", || compute_cache_key(&parts, base_dir));
+        let avx2 = with_simd_tier_env("x86_64_avx2", || compute_cache_key(&parts, base_dir));
+
+        assert_ne!(scalar, avx2);
     }
 }
 
@@ -735,52 +771,49 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
                     let stdlib_relative: PathBuf = stdlib_parts.iter().collect();
 
-                    if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
-                        let compat_init = stdlib_candidate.join("nogc_sync_mut").join("io").join("__init__.spl");
-                        if compat_init.exists() && compat_init.is_file() {
-                            return Ok(compat_init);
+                    for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
+                        if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
+                            let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
+                            if compat_init.exists() && compat_init.is_file() {
+                                return Ok(compat_init);
+                            }
                         }
-                    }
 
-                    // Try module.spl
-                    let mut stdlib_path = stdlib_candidate.join(&stdlib_relative);
-                    stdlib_path.set_extension("spl");
-                    if stdlib_path.exists() && stdlib_path.is_file() {
-                        return Ok(stdlib_path);
-                    }
-
-                    // Try __init__.spl in stdlib
-                    let mut stdlib_init_path = stdlib_candidate.join(&stdlib_relative);
-                    stdlib_init_path.push("__init__.spl");
-                    if stdlib_init_path.exists() && stdlib_init_path.is_file() {
-                        return Ok(stdlib_init_path);
-                    }
-
-                    // Search lib subdirectories (mirrors module_loader.spl strategy)
-                    for subdir in &[
-                        "nogc_async_mut",
-                        "nogc_sync_mut",
-                        "nogc_async_immut",
-                        "common",
-                        "gc_async_mut",
-                        "nogc_async_mut_noalloc",
-                    ] {
-                        // Also try __init__.spl in subdirectory
-                        let mut sub_init = stdlib_candidate.join(subdir).join(&stdlib_relative);
-                        sub_init.push("__init__.spl");
-                        if sub_init.exists() && sub_init.is_file() {
-                            return Ok(sub_init);
+                        let mut stdlib_path = stdlib_root.join(&stdlib_relative);
+                        stdlib_path.set_extension("spl");
+                        if stdlib_path.exists() && stdlib_path.is_file() {
+                            return Ok(stdlib_path);
                         }
-                        let mut sub_path = stdlib_candidate.join(subdir).join(&stdlib_relative);
-                        sub_path.set_extension("spl");
-                        if sub_path.exists() && sub_path.is_file() {
-                            return Ok(sub_path);
-                        }
-                    }
 
-                    // Try with numbered directory support in stdlib
-                    if let Some(found) = resolve_with_numbered_dirs(&stdlib_candidate, stdlib_parts) {
-                        return Ok(found);
+                        let mut stdlib_init_path = stdlib_root.join(&stdlib_relative);
+                        stdlib_init_path.push("__init__.spl");
+                        if stdlib_init_path.exists() && stdlib_init_path.is_file() {
+                            return Ok(stdlib_init_path);
+                        }
+
+                        for subdir in &[
+                            "nogc_async_mut",
+                            "nogc_sync_mut",
+                            "nogc_async_immut",
+                            "common",
+                            "gc_async_mut",
+                            "nogc_async_mut_noalloc",
+                        ] {
+                            let mut sub_init = stdlib_root.join(subdir).join(&stdlib_relative);
+                            sub_init.push("__init__.spl");
+                            if sub_init.exists() && sub_init.is_file() {
+                                return Ok(sub_init);
+                            }
+                            let mut sub_path = stdlib_root.join(subdir).join(&stdlib_relative);
+                            sub_path.set_extension("spl");
+                            if sub_path.exists() && sub_path.is_file() {
+                                return Ok(sub_path);
+                            }
+                        }
+
+                        if let Some(found) = resolve_with_numbered_dirs(&stdlib_root, stdlib_parts) {
+                            return Ok(found);
+                        }
                     }
                 }
             }

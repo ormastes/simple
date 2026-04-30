@@ -11,6 +11,7 @@ use simple_compiler::optimizations::NativeOptimizationLevel;
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Compile a source file to SMF format
 pub fn compile_file(
@@ -634,7 +635,7 @@ pub fn compile_file_native(
     linker: Option<simple_compiler::linker::NativeLinker>,
     opt_level: NativeOptimizationLevel,
     layout_optimize: bool,
-    strip: bool,
+    strip_mode: NativeStripMode,
     pie: bool,
     shared: bool,
     generate_map: bool,
@@ -656,7 +657,7 @@ pub fn compile_file_native(
         .output(&out_path)
         .opt_level(opt_level)
         .layout_optimize(layout_optimize)
-        .strip(strip)
+        .strip(strip_mode == NativeStripMode::All)
         .pie(pie)
         .shared(shared)
         .map(generate_map);
@@ -691,7 +692,15 @@ pub fn compile_file_native(
 
     // Use compile_file_to_native_binary which properly resolves imports
     match pipeline.compile_file_to_native_binary(source, &out_path, Some(options)) {
-        Ok(result) => {
+        Ok(mut result) => {
+            if strip_mode == NativeStripMode::Debug {
+                if let Err(err) = strip_debug_symbols(&result.output) {
+                    eprintln!("warning: {}", err);
+                }
+            }
+            if let Ok(metadata) = std::fs::metadata(&result.output) {
+                result.size = metadata.len();
+            }
             println!(
                 "Compiled {} -> {} ({} bytes, opt-level={})",
                 source.display(),
@@ -711,6 +720,38 @@ pub fn compile_file_native(
             1
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeStripMode {
+    None,
+    Debug,
+    All,
+}
+
+fn strip_debug_symbols(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let candidates: &[(&str, &[&str])] = &[("llvm-strip", &["--strip-debug"]), ("strip", &["-S"])];
+    #[cfg(target_os = "windows")]
+    let candidates: &[(&str, &[&str])] = &[("llvm-strip", &["--strip-debug"]), ("llvm-objcopy", &["--strip-debug"])];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let candidates: &[(&str, &[&str])] = &[("llvm-strip", &["--strip-debug"]), ("strip", &["--strip-debug"])];
+
+    let mut attempted = Vec::new();
+    for (tool, args) in candidates {
+        attempted.push(*tool);
+        match Command::new(tool).args(*args).arg(path).status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+
+    Err(format!(
+        "failed to strip debug info from {}: no supported strip tool succeeded ({})",
+        path.display(),
+        attempted.join(", ")
+    ))
 }
 
 /// Compile a source file to PTX (NVIDIA GPU assembly) output

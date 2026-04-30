@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 1 };
+    pub const CURRENT: Self = Self { major: 1, minor: 2 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -110,6 +110,8 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
 
     // Tier 4: Ext
     if name.starts_with("rt_vec_")
+        || name.starts_with("rt_simd_")
+        || name.starts_with("rt_aes_")
         || name.starts_with("rt_neighbor_load")
         || name.starts_with("rt_gpu_")
         || name.starts_with("rt_vk_")
@@ -199,6 +201,8 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_contains")
         || name.starts_with("rt_len")
         || name.starts_with("rt_string_")
+        || name.starts_with("rt_utf8_")
+        || name == "rt_text_count_codepoints"
         || name.starts_with("rt_to_string")
         || name.starts_with("rt_cstring_to_text")
         || name.starts_with("rt_object_")
@@ -296,6 +300,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_eq",
     "rt_string_starts_with",
     "rt_string_ends_with",
+    "rt_utf8_count_codepoints",
+    "rt_utf8_validate",
+    "rt_utf8_find_invalid",
+    "rt_text_count_codepoints",
     "rt_hash_text",
     // Regex operations
     "ffi_regex_is_match",
@@ -466,6 +474,15 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_decision_probe",
     "rt_condition_probe",
     "rt_path_probe",
+    "rt_simd_has_sse",
+    "rt_simd_has_avx",
+    "rt_simd_has_avx2",
+    "rt_simd_has_neon",
+    "rt_simd_has_rvv",
+    "rt_simd_detect_profile",
+    "rt_simd_profile_name",
+    "rt_aes_encrypt_block_with_expanded",
+    "rt_aes_decrypt_block_with_expanded",
     // Runtime configuration
     "rt_set_macro_trace",
     "rt_is_macro_trace_enabled",

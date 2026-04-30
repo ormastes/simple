@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use simple_common::target::Target;
+use simple_common::target::{LinkerFlavor, Target, TargetArch, TargetOS};
 
 use super::error::{LinkerError, LinkerResult};
 use super::native::{LinkOptions, NativeLinker};
@@ -234,6 +234,13 @@ impl LinkerBuilder {
             }
         };
 
+        if let Some(target) = self.target {
+            if let Some(emulation) = lld_gnu_emulation_flag(linker, &target) {
+                self.options.extra_flags.push("-m".to_string());
+                self.options.extra_flags.push(emulation.to_string());
+            }
+        }
+
         // Set up auto-map if needed
         if self.options.generate_map && self.options.map_file.is_none() {
             self.options.map_file = Some(output.with_extension("map"));
@@ -271,6 +278,18 @@ impl LinkerBuilder {
 impl Default for LinkerBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn lld_gnu_emulation_flag(linker: NativeLinker, target: &Target) -> Option<&'static str> {
+    if linker != NativeLinker::Lld || target.linker_flavor() != LinkerFlavor::Gnu {
+        return None;
+    }
+
+    match (target.os, target.arch) {
+        (TargetOS::Linux, TargetArch::Aarch64) => Some("aarch64linux"),
+        (TargetOS::Linux, TargetArch::Riscv64) => Some("elf64lriscv"),
+        _ => None,
     }
 }
 
@@ -395,6 +414,24 @@ mod tests {
         let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
         let builder = LinkerBuilder::new().target(windows);
         let _ = builder.get_linker();
+    }
+
+    #[test]
+    fn test_lld_gnu_emulation_flag_for_linux_aarch64() {
+        let target = Target::new(TargetArch::Aarch64, TargetOS::Linux);
+        assert_eq!(lld_gnu_emulation_flag(NativeLinker::Lld, &target), Some("aarch64linux"));
+    }
+
+    #[test]
+    fn test_lld_gnu_emulation_flag_for_linux_riscv64() {
+        let target = Target::new(TargetArch::Riscv64, TargetOS::Linux);
+        assert_eq!(lld_gnu_emulation_flag(NativeLinker::Lld, &target), Some("elf64lriscv"));
+    }
+
+    #[test]
+    fn test_lld_gnu_emulation_flag_not_added_for_linux_x86_64() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        assert_eq!(lld_gnu_emulation_flag(NativeLinker::Lld, &target), None);
     }
 
     #[test]

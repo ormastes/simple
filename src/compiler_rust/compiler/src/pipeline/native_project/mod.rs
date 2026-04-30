@@ -31,6 +31,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::optimizations::NativeOptimizationLevel;
+use crate::stdlib_variant::active_simd_tier_name;
 
 /// Safe canonicalize that avoids `libc::realpath` which segfaults in
 /// self-hosted Cranelift-compiled binaries.  Falls back to manual
@@ -783,6 +784,7 @@ pub(crate) fn object_cache_key(
     backend.hash(&mut hasher);
     no_mangle.hash(&mut hasher);
     module_prefix.hash(&mut hasher);
+    active_simd_tier_name().hash(&mut hasher);
     hasher.finish()
 }
 

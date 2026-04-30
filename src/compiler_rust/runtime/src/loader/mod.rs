@@ -64,7 +64,7 @@ pub use loader::{LoadError, ModuleLoader};
 pub use module::LoadedModule;
 pub use package::{
     extract_resource, list_resources, LoadedPackage, ManifestSection, PackageError, PackageOptions, PackageReader,
-    PackageTrailer, PackageWriter, ResourceEntry, SPK_MAGIC, SPK_VERSION,
+    PackageTrailer, PackageWriter, ResourceEntry, SPK_MAGIC, SPK_VERSION, VariantMetadata,
 };
 pub use registry::ModuleRegistry;
 pub use settlement::{

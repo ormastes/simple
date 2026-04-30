@@ -9,6 +9,7 @@ use simple_parser::error_recovery::{ErrorHint, ErrorHintLevel};
 use simple_parser::Parser;
 
 use crate::error::{codes, CompileError, ErrorContext};
+use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
 
 fn prefer_package_init_for_member_import(resolved: PathBuf, use_stmt: &UseStmt) -> PathBuf {
@@ -224,67 +225,69 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
             continue;
         }
 
-        if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
-            let compat_init = stdlib_candidate.join("nogc_sync_mut").join("io").join("__init__.spl");
-            if compat_init.exists() && compat_init.is_file() {
-                return Some(compat_init);
+        for stdlib_root in stdlib_root_candidates(&stdlib_candidate) {
+            if stdlib_parts.len() == 1 && stdlib_parts[0] == "io" {
+                let compat_init = stdlib_root.join("nogc_sync_mut").join("io").join("__init__.spl");
+                if compat_init.exists() && compat_init.is_file() {
+                    return Some(compat_init);
+                }
             }
-        }
 
-        let mut stdlib_path = stdlib_candidate.clone();
-        for part in &stdlib_parts {
-            stdlib_path = stdlib_path.join(part);
-        }
-        stdlib_path.set_extension("spl");
-        if stdlib_path.exists() && stdlib_path.is_file() {
-            return Some(prefer_package_init_for_member_import(stdlib_path, use_stmt));
-        }
-
-        let mut stdlib_init_path = stdlib_candidate.clone();
-        for part in &stdlib_parts {
-            stdlib_init_path = stdlib_init_path.join(part);
-        }
-        stdlib_init_path = stdlib_init_path.join("__init__");
-        stdlib_init_path.set_extension("spl");
-        if stdlib_init_path.exists() && stdlib_init_path.is_file() {
-            return Some(stdlib_init_path);
-        }
-
-        let mut stdlib_mod_path = stdlib_candidate.clone();
-        for part in &stdlib_parts {
-            stdlib_mod_path = stdlib_mod_path.join(part);
-        }
-        stdlib_mod_path = stdlib_mod_path.join("mod");
-        stdlib_mod_path.set_extension("spl");
-        if stdlib_mod_path.exists() && stdlib_mod_path.is_file() {
-            return Some(stdlib_mod_path);
-        }
-
-        for subdir in &[
-            "nogc_async_mut",
-            "nogc_sync_mut",
-            "nogc_async_immut",
-            "common",
-            "gc_async_mut",
-            "nogc_async_mut_noalloc",
-        ] {
-            let mut sub_init_path = stdlib_candidate.join(subdir);
+            let mut stdlib_path = stdlib_root.clone();
             for part in &stdlib_parts {
-                sub_init_path = sub_init_path.join(part);
+                stdlib_path = stdlib_path.join(part);
             }
-            sub_init_path = sub_init_path.join("__init__");
-            sub_init_path.set_extension("spl");
-            if sub_init_path.exists() && sub_init_path.is_file() {
-                return Some(sub_init_path);
+            stdlib_path.set_extension("spl");
+            if stdlib_path.exists() && stdlib_path.is_file() {
+                return Some(prefer_package_init_for_member_import(stdlib_path, use_stmt));
             }
 
-            let mut sub_path = stdlib_candidate.join(subdir);
+            let mut stdlib_init_path = stdlib_root.clone();
             for part in &stdlib_parts {
-                sub_path = sub_path.join(part);
+                stdlib_init_path = stdlib_init_path.join(part);
             }
-            sub_path.set_extension("spl");
-            if sub_path.exists() && sub_path.is_file() {
-                return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
+            stdlib_init_path = stdlib_init_path.join("__init__");
+            stdlib_init_path.set_extension("spl");
+            if stdlib_init_path.exists() && stdlib_init_path.is_file() {
+                return Some(stdlib_init_path);
+            }
+
+            let mut stdlib_mod_path = stdlib_root.clone();
+            for part in &stdlib_parts {
+                stdlib_mod_path = stdlib_mod_path.join(part);
+            }
+            stdlib_mod_path = stdlib_mod_path.join("mod");
+            stdlib_mod_path.set_extension("spl");
+            if stdlib_mod_path.exists() && stdlib_mod_path.is_file() {
+                return Some(stdlib_mod_path);
+            }
+
+            for subdir in &[
+                "nogc_async_mut",
+                "nogc_sync_mut",
+                "nogc_async_immut",
+                "common",
+                "gc_async_mut",
+                "nogc_async_mut_noalloc",
+            ] {
+                let mut sub_init_path = stdlib_root.join(subdir);
+                for part in &stdlib_parts {
+                    sub_init_path = sub_init_path.join(part);
+                }
+                sub_init_path = sub_init_path.join("__init__");
+                sub_init_path.set_extension("spl");
+                if sub_init_path.exists() && sub_init_path.is_file() {
+                    return Some(sub_init_path);
+                }
+
+                let mut sub_path = stdlib_root.join(subdir);
+                for part in &stdlib_parts {
+                    sub_path = sub_path.join(part);
+                }
+                sub_path.set_extension("spl");
+                if sub_path.exists() && sub_path.is_file() {
+                    return Some(prefer_package_init_for_member_import(sub_path, use_stmt));
+                }
             }
         }
     }

@@ -12,6 +12,7 @@
 
 use driver.*
 use app.io.mod (rt_debug_stack_trace_lines)
+use compiler.common.driver_core_types.{compileoptions_normalize_mir_optimization}
 
 fn format_runtime_error_message(msg: text) -> text:
     var message = "Runtime error: {msg}"
@@ -60,6 +61,10 @@ struct CliArgs:
         )
         args
 
+    fn apply_legacy_opt_level(level: i64):
+        self.opt_level = Some(level)
+        self.optimize = level > 0
+
     fn to_options(self) -> CompileOptions:
         var opts = CompileOptions.default()
         opts.mode = self.mode
@@ -72,7 +77,7 @@ struct CliArgs:
         opts.log_level = self.log_level
         opts.profile = self.profile
         opts.release = self.optimize or self.profile == "prod"
-        opts
+        compileoptions_normalize_mir_optimization(opts)
 
 # ------------------------------------------------------------------------------
 # Argument Parser
@@ -422,21 +427,24 @@ fn main() -> i32:
         elif arg == "-O" or arg == "--optimize":
             cli_args.optimize = true
         elif arg == "--O0":
-            cli_args.opt_level = Some(0)
+            cli_args.apply_legacy_opt_level(0)
         elif arg == "--O1":
-            cli_args.opt_level = Some(1)
-            cli_args.optimize = true
+            cli_args.apply_legacy_opt_level(1)
         elif arg == "--O2":
-            cli_args.opt_level = Some(2)
-            cli_args.optimize = true
+            cli_args.apply_legacy_opt_level(2)
         elif arg == "--O3":
-            cli_args.opt_level = Some(3)
-            cli_args.optimize = true
+            cli_args.apply_legacy_opt_level(3)
         elif arg.starts_with("--opt-level="):
             val level_str = arg.slice(12, arg.len())
             val parsed = level_str.parse_int()
-            if parsed.?:
-                cli_args.opt_level = Some(parsed.unwrap())
+            if not parsed.?:
+                print "Error: Invalid optimization level: {level_str}"
+                return 1
+            val level = parsed.unwrap()
+            if level < 0 or level > 3:
+                print "Error: Optimization level must be 0-3, got: {level_str}"
+                return 1
+            cli_args.apply_legacy_opt_level(level)
         elif arg == "-g" or arg == "--debug":
             cli_args.debug_info = true
         elif arg == "--no-debug":
@@ -491,17 +499,7 @@ fn main() -> i32:
     print "[boot] parsed args ok; files={cli_args.input_files.len()} optimize={cli_args.optimize}"
 
     # Build compile options from CLI args
-    var options = CompileOptions.default()
-    options.mode = cli_args.mode
-    options.input_files = cli_args.input_files
-    options.output_file = cli_args.output_file
-    options.optimize = cli_args.optimize
-    options.opt_level = cli_args.opt_level
-    options.release = cli_args.optimize or cli_args.profile == "prod"
-    options.debug_info = cli_args.debug_info
-    options.verbose = cli_args.verbose
-    options.log_level = cli_args.log_level
-    options.profile = cli_args.profile
+    val options = cli_args.to_options()
     val result = run_compile_entry(options)
 
     match result:

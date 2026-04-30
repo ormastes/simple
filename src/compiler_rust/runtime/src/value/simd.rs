@@ -3,9 +3,10 @@
 //! Provides FFI functions for vector reduction, lane access, element-wise math,
 //! and shuffle/blend operations on RuntimeValue arrays.
 
-use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, RuntimeArray};
+use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_string_new, RuntimeArray};
 use super::core::RuntimeValue;
 use super::heap::{get_typed_ptr, HeapObjectType};
+use simple_simd::{detect_profile, has_avx, has_avx2, has_neon, has_rvv, profile_name, SimdTier};
 
 // =============================================================================
 // Helper Functions
@@ -46,6 +47,59 @@ where
         rt_array_push(arr_val, elem);
     }
     arr_val
+}
+
+// =============================================================================
+// Capability Detection
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn rt_simd_has_sse() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        return std::is_x86_feature_detected!("sse");
+    }
+
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_has_avx() -> bool {
+    has_avx()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_has_avx2() -> bool {
+    has_avx2()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_has_neon() -> bool {
+    has_neon()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_has_rvv() -> bool {
+    has_rvv()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_detect_profile() -> i64 {
+    match detect_profile() {
+        SimdTier::Scalar => 0,
+        SimdTier::X86_64Avx2 => 1,
+        SimdTier::Aarch64Neon => 2,
+        SimdTier::Riscv64Rvv => 3,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_profile_name() -> RuntimeValue {
+    let name = profile_name();
+    rt_string_new(name.as_ptr(), name.len() as u64)
 }
 
 // =============================================================================
@@ -946,6 +1000,19 @@ fn compare_values(a: RuntimeValue, b: RuntimeValue) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::{rt_string_data, rt_string_len};
+    use simple_simd::{detect_profile, profile_name};
+
+    fn runtime_string_to_string(value: RuntimeValue) -> String {
+        let len = rt_string_len(value);
+        assert!(len >= 0, "expected runtime string, got {:?}", value);
+        let data = rt_string_data(value);
+        assert!(!data.is_null(), "runtime string data pointer was null");
+        unsafe {
+            let bytes = std::slice::from_raw_parts(data, len as usize);
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+    }
 
     #[test]
     fn test_vec_sum_empty() {
@@ -1047,5 +1114,23 @@ mod tests {
         assert_eq!(rt_vec_extract(arr, 0).as_int(), 10);
         assert_eq!(rt_vec_extract(arr, 1).as_int(), 20);
         assert_eq!(rt_vec_extract(arr, 2).as_int(), 30);
+    }
+
+    #[test]
+    fn test_simd_detect_profile_matches_simple_simd_encoding() {
+        let expected = match detect_profile() {
+            SimdTier::Scalar => 0,
+            SimdTier::X86_64Avx2 => 1,
+            SimdTier::Aarch64Neon => 2,
+            SimdTier::Riscv64Rvv => 3,
+        };
+
+        assert_eq!(rt_simd_detect_profile(), expected);
+    }
+
+    #[test]
+    fn test_simd_profile_name_matches_simple_simd_profile_name() {
+        let profile = rt_simd_profile_name();
+        assert_eq!(runtime_string_to_string(profile), profile_name());
     }
 }

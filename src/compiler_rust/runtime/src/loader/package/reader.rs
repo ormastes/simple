@@ -4,7 +4,11 @@ use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use simple_common::Target;
+use simple_simd::{detect_profile, SimdTier};
+
 use super::format::*;
+use super::simd_metadata::VariantMetadata;
 use super::writer::PackageError;
 
 /// Loaded package information.
@@ -18,6 +22,25 @@ pub struct LoadedPackage {
     pub manifest: Option<ManifestSection>,
     /// Extracted resources
     pub resources: Vec<ResourceEntry>,
+}
+
+impl LoadedPackage {
+    pub fn variant_metadata(&self) -> VariantMetadata {
+        self.manifest
+            .as_ref()
+            .map(ManifestSection::variant_metadata)
+            .unwrap_or_default()
+    }
+
+    pub fn validate_variant(&self, target_triple: Option<&str>, simd_tier: SimdTier) -> Result<(), PackageError> {
+        self.variant_metadata()
+            .validate_host(target_triple, simd_tier)
+            .map_err(PackageError::IncompatibleVariant)
+    }
+
+    pub fn validate_host_variant(&self) -> Result<(), PackageError> {
+        self.validate_variant(Some(Target::host().triple_str()), detect_profile())
+    }
 }
 
 /// Package reader for loading SPK packages.
@@ -39,6 +62,18 @@ impl PackageReader {
     pub fn load_from_bytes(&self, bytes: &[u8]) -> Result<LoadedPackage, PackageError> {
         let mut cursor = Cursor::new(bytes);
         self.load_from_reader(&mut cursor)
+    }
+
+    pub fn load_host_compatible<P: AsRef<Path>>(&self, path: P) -> Result<LoadedPackage, PackageError> {
+        let package = self.load(path)?;
+        package.validate_host_variant()?;
+        Ok(package)
+    }
+
+    pub fn load_host_compatible_from_bytes(&self, bytes: &[u8]) -> Result<LoadedPackage, PackageError> {
+        let package = self.load_from_bytes(bytes)?;
+        package.validate_host_variant()?;
+        Ok(package)
     }
 
     /// Load a package from any seekable reader.
@@ -372,6 +407,64 @@ pub fn list_resources<P: AsRef<Path>>(package_path: P) -> Result<Vec<String>, Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::writer::PackageWriter;
+    use std::io::Write;
+    use std::sync::Arc;
+
+    use crate::loader::memory::{ExecutableMemory, MemoryAllocator, Protection};
+    use crate::loader::settlement::{Settlement, SettlementConfig};
+    use simple_simd::SimdTier;
+    use tempfile::NamedTempFile;
+
+    struct MockAllocator;
+
+    impl MemoryAllocator for MockAllocator {
+        fn allocate(&self, size: usize, _alignment: usize) -> std::io::Result<ExecutableMemory> {
+            let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+            let ptr = unsafe { std::alloc::alloc(layout) };
+            if ptr.is_null() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "Allocation failed",
+                ))
+            } else {
+                Ok(ExecutableMemory {
+                    ptr,
+                    size,
+                    dealloc: |ptr, size| unsafe {
+                        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+                        std::alloc::dealloc(ptr, layout);
+                    },
+                })
+            }
+        }
+
+        fn protect(&self, _mem: &ExecutableMemory, _prot: Protection) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn free(&self, mem: ExecutableMemory) -> std::io::Result<()> {
+            drop(mem);
+            Ok(())
+        }
+    }
+
+    fn empty_settlement() -> Settlement {
+        let allocator = Arc::new(MockAllocator);
+        let config = SettlementConfig {
+            code_region_size: 64 * 1024,
+            data_region_size: 64 * 1024,
+            reloadable: true,
+            executable: false,
+        };
+        Settlement::new(config, allocator).unwrap()
+    }
+
+    fn build_package_bytes(manifest: ManifestSection) -> Vec<u8> {
+        PackageWriter::new()
+            .build_to_vec(&empty_settlement(), &manifest, &[])
+            .unwrap()
+    }
 
     #[test]
     fn test_simple_decompress_empty() {
@@ -435,5 +528,110 @@ mod tests {
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0].path, "test.txt");
         assert_eq!(resources[0].data, content);
+    }
+
+    #[test]
+    fn test_loaded_package_exposes_variant_metadata() {
+        let package = LoadedPackage {
+            trailer: PackageTrailer::new(),
+            settlement_data: Vec::new(),
+            manifest: Some(ManifestSection {
+                manifest_toml: "name = \"demo\"".to_string(),
+                lock_toml: None,
+                target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+                simd_tier: SimdTier::X86_64Avx2,
+            }),
+            resources: Vec::new(),
+        };
+
+        let metadata = package.variant_metadata();
+        assert_eq!(metadata.target_triple.as_deref(), Some("x86_64-unknown-linux-gnu"));
+        assert_eq!(metadata.simd_tier, SimdTier::X86_64Avx2);
+    }
+
+    #[test]
+    fn test_loaded_package_validate_variant_reports_mismatch() {
+        let package = LoadedPackage {
+            trailer: PackageTrailer::new(),
+            settlement_data: Vec::new(),
+            manifest: Some(ManifestSection {
+                manifest_toml: "name = \"demo\"".to_string(),
+                lock_toml: None,
+                target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+                simd_tier: SimdTier::X86_64Avx2,
+            }),
+            resources: Vec::new(),
+        };
+
+        let err = package
+            .validate_variant(Some("aarch64-unknown-linux-gnu"), SimdTier::X86_64Avx2)
+            .unwrap_err();
+        assert!(matches!(err, PackageError::IncompatibleVariant(_)));
+    }
+
+    #[test]
+    fn test_loaded_package_validate_variant_allows_unpinned_variant() {
+        let package = LoadedPackage {
+            trailer: PackageTrailer::new(),
+            settlement_data: Vec::new(),
+            manifest: Some(ManifestSection {
+                manifest_toml: "name = \"demo\"".to_string(),
+                lock_toml: None,
+                target_triple: None,
+                simd_tier: SimdTier::Scalar,
+            }),
+            resources: Vec::new(),
+        };
+
+        assert!(package
+            .validate_variant(Some("aarch64-unknown-linux-gnu"), SimdTier::X86_64Avx2)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_load_host_compatible_from_bytes_accepts_matching_variant() {
+        let reader = PackageReader::new();
+        let bytes = build_package_bytes(ManifestSection {
+            manifest_toml: "name = \"demo\"".to_string(),
+            lock_toml: None,
+            target_triple: Some(Target::host().triple_str().to_string()),
+            simd_tier: detect_profile(),
+        });
+
+        let package = reader.load_host_compatible_from_bytes(&bytes).unwrap();
+        assert_eq!(
+            package.variant_metadata().target_triple.as_deref(),
+            Some(Target::host().triple_str())
+        );
+    }
+
+    #[test]
+    fn test_load_host_compatible_from_bytes_rejects_mismatched_variant() {
+        let reader = PackageReader::new();
+        let bytes = build_package_bytes(ManifestSection {
+            manifest_toml: "name = \"demo\"".to_string(),
+            lock_toml: None,
+            target_triple: Some("definitely-not-the-host-triple".to_string()),
+            simd_tier: SimdTier::Scalar,
+        });
+
+        let err = reader.load_host_compatible_from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, PackageError::IncompatibleVariant(_)));
+    }
+
+    #[test]
+    fn test_load_host_compatible_reads_matching_variant_from_file() {
+        let reader = PackageReader::new();
+        let bytes = build_package_bytes(ManifestSection {
+            manifest_toml: "name = \"demo\"".to_string(),
+            lock_toml: None,
+            target_triple: Some(Target::host().triple_str().to_string()),
+            simd_tier: SimdTier::Scalar,
+        });
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+
+        let package = reader.load_host_compatible(file.path()).unwrap();
+        assert_eq!(package.variant_metadata().simd_tier, SimdTier::Scalar);
     }
 }

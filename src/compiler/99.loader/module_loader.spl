@@ -1,5 +1,9 @@
 #![allow(unnamed_duplicate_typed_args)]
 # Compatibility runtime module loader surface.
+#
+# This file preserves the older method/wrapper loader API re-exported by the
+# root `compiler.loader` package. Newer curated loader consumers should prefer
+# the `compiler.loader.runtime` package and its explicit surface.
 
 extern fn rt_file_exists(path: text) -> bool
 use compiler.loader.jit_instantiator.{JitInstantiator}
@@ -29,6 +33,26 @@ fn _name_in(list: [text], name: text) -> bool:
 fn _metadata_instantiation_symbols(self: ModuleLoader, path: text) -> [text]:
     loaded_metadata_instantiation_symbol_names(self.jit.loaded_metadata, path)
 
+fn _jit_cache_owner(self: ModuleLoader, sym_name: text, rec_cache) -> text:
+    if rec_cache.has("owner"):
+        return rec_cache["owner"]
+    val rec_opt = self.jit.exec_mapper.lookup(sym_name)
+    if rec_opt.?:
+        return rec_opt.unwrap().owner_id
+    "__jit__"
+
+fn _jit_cached_loaded_symbol(sym_name: text, rec_cache) -> LoadedSymbol:
+    val code = rec_cache["code"]
+    val addr = rec_cache["address"]
+    LoadedSymbol(
+        name: sym_name,
+        address: addr,
+        size: code.len() as i64,
+        ty: SymbolType.Function,
+        is_jit: true,
+        file_offset: 0
+    )
+
 fn _collect_unload_jit_symbols(self: ModuleLoader, path: text) -> [text]:
     var remove_jit: [text] = []
     for sym_name in _metadata_instantiation_symbols(self, path):
@@ -38,18 +62,33 @@ fn _collect_unload_jit_symbols(self: ModuleLoader, path: text) -> [text]:
     for item in self.jit.jit_cache:
         val sym_name = item[0]
         val rec_cache = item[1]
-        var owner = "__jit__"
-        if rec_cache.has("owner"):
-            owner = rec_cache["owner"]
-        else:
-            val rec_opt = self.jit.exec_mapper.lookup(sym_name)
-            if rec_opt.?:
-                owner = rec_opt.unwrap().owner_id
+        val owner = _jit_cache_owner(self, sym_name, rec_cache)
 
         if owner == path or (owner == "__jit__" and _symbol_matches_path(sym_name, path)):
             if not _name_in(remove_jit, sym_name):
                 remove_jit.push(sym_name)
     remove_jit
+
+me _moduleloader_unload_impl(self: ModuleLoader, path: text):
+    val remove_jit = _collect_unload_jit_symbols(self, path)
+    for sym_name in remove_jit:
+        self.jit.drop_cached_symbol(sym_name)
+
+    val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
+    val removed_symbols = owned_symbols + remove_jit
+    var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
+
+    for item in self.jit.jit_cache:
+        val sym_name = item[0]
+        val rec_cache = item[1]
+        val mapped_owner = _jit_cache_owner(self, sym_name, rec_cache)
+        rebuilt_globals[sym_name] = (mapped_owner, _jit_cached_loaded_symbol(sym_name, rec_cache))
+
+    self.global_symbols = rebuilt_globals
+    self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
+
+    if self.modules.has(path):
+        self.modules = self.modules.remove(path)
 
 enum SymbolType:
     Function
@@ -153,41 +192,7 @@ impl ModuleLoader:
     me unload(path: text):
         if not self.modules.has(path):
             return
-        val remove_jit = _collect_unload_jit_symbols(self, path)
-        for sym_name in remove_jit:
-            self.jit.drop_cached_symbol(sym_name)
-
-        val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
-        val removed_symbols = owned_symbols + remove_jit
-        var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
-
-        for item in self.jit.jit_cache:
-            val sym_name = item[0]
-            val rec_cache = item[1]
-            val code = rec_cache["code"]
-            val addr = rec_cache["address"]
-            var mapped_owner = "__jit__"
-            if rec_cache.has("owner"):
-                mapped_owner = rec_cache["owner"]
-            else:
-                val rec_opt = self.jit.exec_mapper.lookup(sym_name)
-                if rec_opt.?:
-                    mapped_owner = rec_opt.unwrap().owner_id
-            val sym = LoadedSymbol(
-                name: sym_name,
-                address: addr,
-                size: code.len() as i64,
-                ty: SymbolType.Function,
-                is_jit: true,
-                file_offset: 0
-            )
-            rebuilt_globals[sym_name] = (mapped_owner, sym)
-
-        self.global_symbols = rebuilt_globals
-        self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
-
-        if self.modules.has(path):
-            self.modules = self.modules.remove(path)
+        _moduleloader_unload_impl(self, path)
 
     me resolve_symbol(name: text) -> SymbolResult:
         if self.global_symbols.has(name):
@@ -197,24 +202,8 @@ impl ModuleLoader:
         if self.jit.jit_cache.has(name):
             val rec_cache = self.jit.jit_cache[name]
             val code = rec_cache["code"]
-            val addr = rec_cache["address"]
-
-            var owner = "__jit__"
-            if rec_cache.has("owner"):
-                owner = rec_cache["owner"]
-            else:
-                val rec = self.jit.exec_mapper.lookup(name)
-                if rec.?:
-                    owner = rec.unwrap().owner_id
-
-            val sym = LoadedSymbol(
-                name: name,
-                address: addr,
-                size: code.len() as i64,
-                ty: SymbolType.Function,
-                is_jit: true,
-                file_offset: 0
-            )
+            val owner = _jit_cache_owner(self, name, rec_cache)
+            val sym = _jit_cached_loaded_symbol(name, rec_cache)
             self.global_symbols[name] = (owner, sym)
             return SymbolResult.JitCompiled(symbol: sym, code: code)
 
@@ -304,41 +293,7 @@ me moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
 me moduleloader_unload(self: ModuleLoader, path: text):
     if not self.modules.has(path):
         return
-    val remove_jit = _collect_unload_jit_symbols(self, path)
-    for sym_name in remove_jit:
-        self.jit.drop_cached_symbol(sym_name)
-
-    val owned_symbols = owned_global_symbol_names(self.global_symbols, path)
-    val removed_symbols = owned_symbols + remove_jit
-    var rebuilt_globals: Dict<text, (text, LoadedSymbol)> = global_symbols_without_names(self.global_symbols, removed_symbols)
-
-    for item in self.jit.jit_cache:
-        val sym_name = item[0]
-        val rec_cache = item[1]
-        val code = rec_cache["code"]
-        val addr = rec_cache["address"]
-        var mapped_owner = "__jit__"
-        if rec_cache.has("owner"):
-            mapped_owner = rec_cache["owner"]
-        else:
-            val rec_opt = self.jit.exec_mapper.lookup(sym_name)
-            if rec_opt.?:
-                mapped_owner = rec_opt.unwrap().owner_id
-        val sym = LoadedSymbol(
-            name: sym_name,
-            address: addr,
-            size: code.len() as i64,
-            ty: SymbolType.Function,
-            is_jit: true,
-            file_offset: 0
-        )
-        rebuilt_globals[sym_name] = (mapped_owner, sym)
-
-    self.global_symbols = rebuilt_globals
-    self.jit.loaded_metadata = loaded_metadata_remove_path(self.jit.loaded_metadata, path)
-
-    if self.modules.has(path):
-        self.modules = self.modules.remove(path)
+    _moduleloader_unload_impl(self, path)
 
 me moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
     self.resolve_symbol(name)

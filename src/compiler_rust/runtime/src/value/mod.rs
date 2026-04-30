@@ -18,9 +18,11 @@
 //! - 100-111: Reserved for future use
 
 mod actors;
+pub mod aes;
 mod args;
 pub mod bdd_ffi;
 mod async_gen;
+mod byte_kernels;
 mod channels;
 pub mod cli_ffi;
 pub mod cargo_ffi;
@@ -53,6 +55,7 @@ pub mod monoio_future;
 pub mod net;
 mod objects;
 mod process;
+pub mod primitive_sort;
 mod pty;
 pub mod serial;
 // Always compile ratatui_tui module (it has stubs when feature is disabled)
@@ -61,6 +64,9 @@ pub mod screenshot_ffi;
 pub mod simd;
 mod sync;
 pub mod tags;
+mod utf8_kernels;
+#[cfg(feature = "bench-internals")]
+pub mod bench_support;
 #[cfg(feature = "pytorch")]
 pub mod torch;
 #[cfg(unix)]
@@ -73,6 +79,7 @@ pub use heap::{HeapHeader, HeapObjectType};
 // Re-export collection types
 pub use collections::{RuntimeArray, RuntimeString, RuntimeTuple};
 pub use dict::RuntimeDict;
+pub use aes::{rt_aes_decrypt_block_with_expanded, rt_aes_encrypt_block_with_expanded};
 
 // Re-export object types
 pub use objects::{RuntimeClosure, RuntimeEnum, RuntimeObject, RuntimeShared, RuntimeUnique, RuntimeWeak};
@@ -113,6 +120,7 @@ pub use collections::{
     rt_string_to_upper, rt_string_trim, rt_hash_text, rt_to_string, rt_tuple_get, rt_tuple_len, rt_tuple_new,
     rt_tuple_set,
 };
+pub use utf8_kernels::{rt_text_count_codepoints, rt_utf8_count_codepoints, rt_utf8_find_invalid, rt_utf8_validate};
 
 // Re-export dict FFI functions
 pub use dict::{
@@ -881,9 +889,10 @@ pub use file_io::{
 
 // Re-export SIMD vector operations
 pub use simd::{
-    rt_neighbor_load, rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_clamp, rt_vec_extract,
-    rt_vec_floor, rt_vec_fma, rt_vec_gather, rt_vec_load, rt_vec_masked_load, rt_vec_masked_store, rt_vec_max,
-    rt_vec_max_vec, rt_vec_min, rt_vec_min_vec, rt_vec_product, rt_vec_recip, rt_vec_round, rt_vec_scatter,
+    rt_neighbor_load, rt_simd_detect_profile, rt_simd_has_avx, rt_simd_has_avx2, rt_simd_has_neon, rt_simd_has_rvv,
+    rt_simd_has_sse, rt_simd_profile_name, rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_clamp,
+    rt_vec_extract, rt_vec_floor, rt_vec_fma, rt_vec_gather, rt_vec_load, rt_vec_masked_load, rt_vec_masked_store,
+    rt_vec_max, rt_vec_max_vec, rt_vec_min, rt_vec_min_vec, rt_vec_product, rt_vec_recip, rt_vec_round, rt_vec_scatter,
     rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_store, rt_vec_sum, rt_vec_with,
 };
 

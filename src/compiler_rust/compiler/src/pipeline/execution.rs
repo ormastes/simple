@@ -104,6 +104,34 @@ pub(super) fn native_single_file_project_hint(source_path: &Path) -> Option<Path
     find_project_root_hint(&cwd)
 }
 
+fn is_compiler_like_native_source(source_path: &Path) -> bool {
+    let path = source_path.to_string_lossy().replace('\\', "/");
+    path.contains("/src/compiler/")
+        || path.ends_with("/src/compiler")
+        || path.contains("/src/app/cli/")
+        || path.ends_with("/src/app/cli")
+}
+
+fn single_file_prefers_runtime_only(source_path: Option<&Path>, options: &crate::linker::NativeBinaryOptions) -> bool {
+    if options.target != Target::host() || options.shared {
+        return false;
+    }
+    if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").as_deref() == Ok("all") {
+        return false;
+    }
+    source_path.is_some_and(|path| !is_compiler_like_native_source(path))
+}
+
+fn filter_single_file_runtime_bundle(
+    source_path: Option<&Path>,
+    mut options: crate::linker::NativeBinaryOptions,
+) -> crate::linker::NativeBinaryOptions {
+    if single_file_prefers_runtime_only(source_path, &options) {
+        options.libraries.retain(|lib| lib != "simple_native_all");
+    }
+    options
+}
+
 /// Link a WASM object file into a complete WASM module using wasm-ld.
 ///
 /// LLVM emits WASM object files (.o) which are relocatable format.
@@ -719,32 +747,11 @@ impl CompilerPipeline {
         )?;
 
         // Build native binary
-        let mut builder = NativeBinaryBuilder::new(object_code)
-            .output(output)
-            .target(options.target)
-            .strip(options.strip)
-            .pie(options.pie)
-            .shared(options.shared)
-            .map(options.generate_map)
-            .verbose(options.verbose);
-
-        // Add libraries
-        for lib in &options.libraries {
-            builder = builder.library(lib);
-        }
-
-        // Add library paths
-        for path in &options.library_paths {
-            builder = builder.library_path(path);
-        }
-
-        // Set linker
-        if let Some(linker) = options.linker {
-            builder = builder.linker(linker);
-        }
+        let options = options.output(output);
+        let mut builder = NativeBinaryBuilder::new(object_code).options(options);
 
         // Set up layout optimizer if requested
-        if options.layout_optimize {
+        if builder.options.layout_optimize {
             let optimizer = LayoutOptimizer::new();
             builder = builder.with_layout_optimizer(optimizer);
         }
@@ -862,6 +869,7 @@ impl CompilerPipeline {
 
         // Get options
         let options = options.unwrap_or_else(|| NativeBinaryOptions::for_native_executable().output(output));
+        let options = filter_single_file_runtime_bundle(source_path, options);
 
         // Check for main function (not required for shared libraries)
         if !options.shared {
@@ -924,23 +932,82 @@ impl CompilerPipeline {
 
 #[cfg(test)]
 mod tests {
-    use super::native_single_file_project_hint;
+    use super::{
+        filter_single_file_runtime_bundle, find_project_root_hint, native_single_file_project_hint,
+        single_file_prefers_runtime_only,
+    };
+    use crate::linker::NativeBinaryOptions;
+    use simple_common::target::{Target, TargetArch, TargetOS};
 
     #[test]
     fn native_single_file_project_hint_only_applies_to_temp_sources() {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .canonicalize()
-            .expect("repo root");
+        let cwd_root = find_project_root_hint(&std::env::current_dir().expect("cwd")).expect("project root hint");
         let temp_source = std::env::temp_dir().join("simple_native_probe_hint_test.spl");
-        let external_dir = tempfile::tempdir().expect("external tempdir");
-        let external_source = external_dir.path().join("outside.spl");
+        let external_source = std::env::current_dir().expect("cwd").join("outside-project.spl");
 
         let temp_hint = native_single_file_project_hint(&temp_source);
         let external_hint = native_single_file_project_hint(&external_source);
 
-        assert_eq!(temp_hint.as_deref(), Some(repo_root.as_path()));
+        assert_eq!(temp_hint.as_deref(), Some(cwd_root.as_path()));
         assert!(external_hint.is_none());
+    }
+
+    #[test]
+    fn single_file_runtime_bundle_prefers_runtime_only_for_leaf_host_source() {
+        let options = NativeBinaryOptions::new().target(Target::host()).shared(false);
+        assert!(single_file_prefers_runtime_only(Some(std::path::Path::new("/tmp/demo.spl")), &options));
+    }
+
+    #[test]
+    fn single_file_runtime_bundle_keeps_native_all_for_compiler_like_sources() {
+        let options = NativeBinaryOptions::new().target(Target::host()).shared(false);
+        assert!(!single_file_prefers_runtime_only(
+            Some(std::path::Path::new("/work/src/compiler/80.driver/main.spl")),
+            &options
+        ));
+        assert!(!single_file_prefers_runtime_only(
+            Some(std::path::Path::new("/work/src/app/cli/main.spl")),
+            &options
+        ));
+    }
+
+    #[test]
+    fn single_file_runtime_bundle_removes_native_all_for_leaf_host_source() {
+        let options = NativeBinaryOptions::new()
+            .target(Target::host())
+            .shared(false)
+            .library("simple_native_all");
+        let filtered = filter_single_file_runtime_bundle(Some(std::path::Path::new("/tmp/demo.spl")), options);
+        assert!(!filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+        assert!(filtered.libraries.iter().any(|lib| lib == "simple_runtime"));
+    }
+
+    #[test]
+    fn single_file_runtime_bundle_keeps_native_all_for_cross_targets() {
+        let options = NativeBinaryOptions::new()
+            .target(Target::new(TargetArch::Aarch64, TargetOS::Linux))
+            .shared(false)
+            .library("simple_native_all");
+        let filtered = filter_single_file_runtime_bundle(Some(std::path::Path::new("/tmp/demo.spl")), options);
+        assert!(filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+    }
+
+    #[test]
+    fn single_file_runtime_bundle_keeps_native_all_when_env_requests_all() {
+        let previous = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").ok();
+        std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", "all");
+
+        let options = NativeBinaryOptions::new()
+            .target(Target::host())
+            .shared(false)
+            .library("simple_native_all");
+        let filtered = filter_single_file_runtime_bundle(Some(std::path::Path::new("/tmp/demo.spl")), options);
+
+        match previous {
+            Some(value) => std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", value),
+            None => std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE"),
+        }
+
+        assert!(filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
     }
 }

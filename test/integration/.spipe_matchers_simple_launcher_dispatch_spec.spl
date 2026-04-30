@@ -1,13 +1,13 @@
 """
 # Simple launcher dispatch regression spec
 
-Verifies `scripts/setup/bin_scripts/simple` keeps the shell-wrapper routing for
-launcher-only entrypoints while avoiding duplicated release/bootstrap logic.
+Verifies `bin/simple` keeps the shell-wrapper routing for launcher-only
+entrypoints and honors explicit runtime selection for test-path execution.
 """
 
 use std.spec
 
-val SOURCE_WRAPPER = "scripts/setup/bin_scripts/simple"
+val SOURCE_WRAPPER = "bin/simple"
 val TEST_ROOT = "/tmp/simple_launcher_dispatch_spec"
 
 extern fn rt_file_read_text(path: text) -> text
@@ -52,6 +52,13 @@ fn parent_dir(path: text) -> text:
 
 fn run_wrapper(root: text, args: [text]) -> (text, text, i64):
     rt_process_run(root + "/bin/simple", args)
+
+fn run_wrapper_with_simple_binary(root: text, simple_binary: text, args: [text]) -> (text, text, i64):
+    val joined_args = args.join(" ")
+    rt_process_run(
+        "/bin/sh",
+        ["-c", "SIMPLE_BINARY=\"" + simple_binary + "\" \"" + root + "/bin/simple\" " + joined_args]
+    )
 
 fn expect_arg(stdout: text, index: i64, value: text):
     expect (stdout).contains("arg{index}={value}\n")
@@ -129,3 +136,32 @@ describe "simple launcher dispatch":
         expect stdout.contains("arg1=run\n") == false
         expect_arg(stdout, 1, "check")
         expect_arg(stdout, 2, "src/app/cli/main.spl")
+
+    it "honors SIMPLE_BINARY for the test path":
+        val root = setup_repo_root("test_path_simple_binary")
+        make_fake_runtime(root + "/src/compiler_rust/target/debug/simple")
+        make_fake_runtime(root + "/src/compiler_rust/target/release/simple")
+
+        val (stdout, stderr, code) = run_wrapper_with_simple_binary(
+            root,
+            root + "/src/compiler_rust/target/debug/simple",
+            ["test", "test/unit/lib/common/simd_dispatch_facade_spec.spl"]
+        )
+
+        expect code == 0
+        expect stderr == ""
+        expect_arg(stdout, 1, "test")
+        expect_arg(stdout, 2, "test/unit/lib/common/simd_dispatch_facade_spec.spl")
+
+    it "prefers the release runtime for the test path when SIMPLE_BINARY is unset":
+        val root = setup_repo_root("test_path_release_default")
+        make_fake_runtime(root + "/src/compiler_rust/target/debug/simple")
+        make_fake_runtime(root + "/src/compiler_rust/target/release/simple")
+
+        val (stdout, stderr, code) = run_wrapper(root, ["test", "test/system/variant_api_parity_spec.spl"])
+
+        expect code == 0
+        expect stderr == ""
+        expect (stdout).contains("argv0=" + root + "/src/compiler_rust/target/release/simple\n")
+        expect_arg(stdout, 1, "test")
+        expect_arg(stdout, 2, "test/system/variant_api_parity_spec.spl")

@@ -134,9 +134,8 @@ pub fn load_bytecode_module<R: Read + Seek>(reader: &mut R) -> Result<LoadedByte
             return Err(LoadError::TruncatedSection);
         }
 
-        let entry: BytecodeFuncEntry = unsafe {
-            std::ptr::read(code_data[offset..].as_ptr() as *const BytecodeFuncEntry)
-        };
+        let entry: BytecodeFuncEntry =
+            unsafe { std::ptr::read(code_data[offset..].as_ptr() as *const BytecodeFuncEntry) };
 
         // Read function name from string table
         let name = read_string_at(&string_table, entry.name_offset as usize);

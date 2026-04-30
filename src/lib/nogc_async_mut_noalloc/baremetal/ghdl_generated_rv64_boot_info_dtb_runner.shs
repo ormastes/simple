@@ -1,0 +1,164 @@
+#!/bin/bash
+# GHDL runner for the generated RV64 compiled-payload boot-info DTB lane.
+#
+# Usage:
+#   ./ghdl_generated_rv64_boot_info_dtb_runner.shs \
+#       --payload-elf <payload.elf> [--fw-stub=path/to/fw_stub.s] [--timeout=30]
+#   ./ghdl_generated_rv64_boot_info_dtb_runner.shs \
+#       --payload-bin <payload.bin> [--fw-stub=path/to/fw_stub.s] [--timeout=30]
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+RTL_DIR="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/rtl"
+GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
+DEFAULT_FW_STUB="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_fw_jump_stub.s"
+TIMEOUT=30
+FW_STUB="$DEFAULT_FW_STUB"
+PAYLOAD=""
+PAYLOAD_KIND=""
+EXPECT_VALUE=""
+
+for arg in "$@"; do
+    if [ -n "$EXPECT_VALUE" ]; then
+        case "$EXPECT_VALUE" in
+            fw-stub) FW_STUB="$arg" ;;
+            payload-elf)
+                PAYLOAD="$arg"
+                PAYLOAD_KIND="elf"
+                ;;
+            payload-bin)
+                PAYLOAD="$arg"
+                PAYLOAD_KIND="bin"
+                ;;
+        esac
+        EXPECT_VALUE=""
+        continue
+    fi
+    case "$arg" in
+        --timeout=*) TIMEOUT="${arg#--timeout=}" ;;
+        --fw-stub) EXPECT_VALUE="fw-stub" ;;
+        --fw-stub=*) FW_STUB="${arg#--fw-stub=}" ;;
+        --payload-elf) EXPECT_VALUE="payload-elf" ;;
+        --payload-elf=*)
+            PAYLOAD="${arg#--payload-elf=}"
+            PAYLOAD_KIND="elf"
+            ;;
+        --payload-bin) EXPECT_VALUE="payload-bin" ;;
+        --payload-bin=*)
+            PAYLOAD="${arg#--payload-bin=}"
+            PAYLOAD_KIND="bin"
+            ;;
+        *)
+            if [ -z "$PAYLOAD" ]; then
+                PAYLOAD="$arg"
+            else
+                echo "Unexpected extra argument: $arg"
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+if [ -n "$EXPECT_VALUE" ]; then
+    echo "Error: Missing value for --$EXPECT_VALUE"
+    exit 1
+fi
+
+if [ -z "$PAYLOAD" ]; then
+    echo "Usage: $0 --payload-elf <payload.elf>|--payload-bin <payload.bin> [--fw-stub=path/to/fw_stub.s] [--timeout=N]"
+    exit 1
+fi
+
+if [ ! -f "$FW_STUB" ]; then
+    echo "Error: FW stub not found: $FW_STUB"
+    exit 1
+fi
+
+if [ ! -f "$PAYLOAD" ]; then
+    echo "Error: Payload not found: $PAYLOAD"
+    exit 1
+fi
+
+if [ -z "$PAYLOAD_KIND" ]; then
+    case "${PAYLOAD##*.}" in
+        elf) PAYLOAD_KIND="elf" ;;
+        bin) PAYLOAD_KIND="bin" ;;
+        *)
+            echo "Error: Could not infer payload type from $PAYLOAD"
+            echo "Use --payload-elf or --payload-bin."
+            exit 1
+            ;;
+    esac
+fi
+
+TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv64_boot_info_dtb_XXXXXX)
+trap "rm -rf $TMP_DIR" EXIT
+
+GEN_DIR="$TMP_DIR/generated"
+FW_BASE="$TMP_DIR/fw_stub"
+FW_ELF="$FW_BASE.elf"
+FW_BIN="$FW_BASE.bin"
+PAYLOAD_BIN="$TMP_DIR/payload.bin"
+TEST_PKG="$TMP_DIR/test_program.vhd"
+
+riscv64-linux-gnu-as -march=rv64i_zicsr -mabi=lp64 -o "$FW_BASE.o" "$FW_STUB"
+riscv64-linux-gnu-ld -m elf64lriscv -Ttext=0x80000000 --no-relax -o "$FW_ELF" "$FW_BASE.o"
+
+bin/simple run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
+riscv64-linux-gnu-objcopy -O binary "$FW_ELF" "$FW_BIN"
+
+if [ "$PAYLOAD_KIND" = "elf" ]; then
+    riscv64-linux-gnu-objcopy -O binary "$PAYLOAD" "$PAYLOAD_BIN"
+else
+    cp "$PAYLOAD" "$PAYLOAD_BIN"
+fi
+
+python3 -c "
+fw_data = open('$FW_BIN', 'rb').read()
+payload_data = open('$PAYLOAD_BIN', 'rb').read()
+print('library ieee;')
+print('use ieee.std_logic_1164.all;')
+print('package test_program is')
+print('    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);')
+print('    constant FW_SIZE_BYTES : integer := %d;' % len(fw_data))
+print('    constant FW_BYTES : byte_array_t(0 to %d) := (' % (len(fw_data)-1))
+for i, b in enumerate(fw_data):
+    comma = ',' if i < len(fw_data)-1 else ''
+    print('        x\"%02x\"%s' % (b, comma))
+print('    );')
+print('    constant PAYLOAD_SIZE_BYTES : integer := %d;' % len(payload_data))
+print('    constant PAYLOAD_BYTES : byte_array_t(0 to %d) := (' % (len(payload_data)-1))
+for i, b in enumerate(payload_data):
+    comma = ',' if i < len(payload_data)-1 else ''
+    print('        x\"%02x\"%s' % (b, comma))
+print('    );')
+print('end package test_program;')
+" > "$TEST_PKG"
+
+cd "$TMP_DIR"
+ghdl -a --std=08 \
+    "$GEN_DIR/rv64/rtl/simple_rv64i_core_pkg.vhd" \
+    "$GEN_DIR/rv64/rtl/simple_rv64gc_core.vhd" \
+    "$TEST_PKG" \
+    "$RTL_DIR/tb_generated_rv64_boot_info_dtb.vhd"
+ghdl -e --std=08 tb_generated_rv64_boot_info_dtb
+
+STOP_MS=$((TIMEOUT * 1000))
+OUTPUT=$(timeout "$TIMEOUT" ghdl -r --std=08 tb_generated_rv64_boot_info_dtb --stop-time="${STOP_MS}ms" 2>&1) || EXIT_STATUS=$?
+EXIT_STATUS=${EXIT_STATUS:-0}
+
+echo "$OUTPUT" | grep -E "CYCLES:|MAGIC_LOW32:|DONE_LOW32:|HART_ID_LOW32:|DTB_ADDR_LOW32:|DTB_ADDR_HEX32:|DTB_VALID_LOW32:|RAM_BASE_LOW32:|RAM_SIZE_LOW32:|SERIAL_BASE_LOW32:|SERIAL_MMIO_LOW32:|MAP_LEN_LOW32:|REGION[0-2]_(BASE|SIZE|KIND)_(LOW32|HEX32):|RAM_BASE_HEX32:|RAM_SIZE_HEX32:|SERIAL_BASE_HEX32:|DTB_PROBE_SEEN:|DTB_PROBE_ADDR_HEX32:|UART_BYTES_LOW32:|UART_MARKER_SEEN:|PRIV_MODE:|HALT_SEEN:|TRAP_SEEN:|PC_LOW32:|GENERATED_RV64_BOOT_INFO_DTB:" || true
+
+if [ "$EXIT_STATUS" = "124" ]; then
+    echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] TIMEOUT after ${TIMEOUT}s"
+    exit 124
+fi
+
+if echo "$OUTPUT" | grep -q "GENERATED_RV64_BOOT_INFO_DTB: PASS"; then
+    echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] PASS"
+    exit 0
+fi
+
+echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] FAIL"
+exit 1

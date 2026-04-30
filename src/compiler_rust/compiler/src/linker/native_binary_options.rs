@@ -108,30 +108,8 @@ pub struct NativeBinaryOptions {
 
 impl Default for NativeBinaryOptions {
     fn default() -> Self {
-        // Detect standard library paths for the current system
-        let mut library_paths = Self::detect_system_library_paths();
-
-        // Add Simple runtime library path from cargo target directory
-        if let Some(runtime_path) = Self::find_runtime_library_path() {
-            library_paths.insert(0, runtime_path);
-        } else {
-            // Fallback: try current working directory + target/debug
-            let cwd_debug = std::env::current_dir().ok().map(|p| p.join("target/debug"));
-            if let Some(path) = cwd_debug {
-                if path.join("libsimple_runtime.a").exists() {
-                    library_paths.insert(0, path);
-                }
-            }
-        }
-
-        // Add Simple compiler static library path so -lsimple_compiler resolves
-        if let Some(compiler_path) = Self::find_compiler_library_path() {
-            if !library_paths.contains(&compiler_path) {
-                library_paths.insert(0, compiler_path);
-            }
-        }
-
         let target = Target::host();
+        let library_paths = Self::default_library_paths_for_target(&target);
         let libraries = Self::default_libraries_for_target(&target);
 
         Self {
@@ -152,9 +130,44 @@ impl Default for NativeBinaryOptions {
 }
 
 impl NativeBinaryOptions {
+    fn push_front_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
+        if !paths.contains(&path) {
+            paths.insert(0, path);
+        }
+    }
+
+    fn extend_unique<T: PartialEq>(items: &mut Vec<T>, extra: impl IntoIterator<Item = T>) {
+        for item in extra {
+            if !items.contains(&item) {
+                items.push(item);
+            }
+        }
+    }
+
     /// Detect standard library paths for the target system.
     fn detect_system_library_paths() -> Vec<PathBuf> {
         Self::detect_library_paths_for_target(&Target::host())
+    }
+
+    fn default_library_paths_for_target(target: &Target) -> Vec<PathBuf> {
+        let mut library_paths = Self::detect_library_paths_for_target(target);
+
+        if let Some(runtime_path) = Self::find_runtime_library_path_for_target(target) {
+            Self::push_front_unique(&mut library_paths, runtime_path);
+        } else if *target == Target::host() {
+            let cwd_debug = std::env::current_dir().ok().map(|p| p.join("target/debug"));
+            if let Some(path) = cwd_debug.filter(|path| Self::runtime_lib_exists(path)) {
+                Self::push_front_unique(&mut library_paths, path);
+            }
+        }
+
+        if *target == Target::host() {
+            if let Some(compiler_path) = Self::find_compiler_library_path() {
+                Self::push_front_unique(&mut library_paths, compiler_path);
+            }
+        }
+
+        library_paths
     }
 
     /// Get default libraries for a specific target OS.
@@ -308,6 +321,10 @@ impl NativeBinaryOptions {
     /// 2. Adjacent to the current executable (for installed binaries)
     /// 3. Cargo target directory (for development)
     pub fn find_runtime_library_path() -> Option<PathBuf> {
+        Self::find_runtime_library_path_for_target(&Target::host())
+    }
+
+    pub fn find_runtime_library_path_for_target(target: &Target) -> Option<PathBuf> {
         // Check environment variable first (runtime)
         if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
             let p = PathBuf::from(&path);
@@ -322,6 +339,10 @@ impl NativeBinaryOptions {
             if p.exists() {
                 return Some(p);
             }
+        }
+
+        if *target != Target::host() {
+            return None;
         }
 
         // Check adjacent to current executable (e.g., /usr/lib/simple/)
@@ -477,8 +498,31 @@ impl NativeBinaryOptions {
         self
     }
 
+    /// Set target and refresh target-derived libraries, paths, and CPU defaults.
+    pub fn target(mut self, target: Target) -> Self {
+        let old_target = self.target;
+        let old_default_libraries = Self::default_libraries_for_target(&old_target);
+        let old_default_library_paths = Self::default_library_paths_for_target(&old_target);
+        let custom_libraries = self
+            .libraries
+            .into_iter()
+            .filter(|library| !old_default_libraries.contains(library))
+            .collect::<Vec<_>>();
+        let custom_library_paths = self
+            .library_paths
+            .into_iter()
+            .filter(|path| !old_default_library_paths.contains(path))
+            .collect::<Vec<_>>();
+
+        self.target = target;
+        self.libraries = Self::default_libraries_for_target(&self.target);
+        Self::extend_unique(&mut self.libraries, custom_libraries);
+        self.library_paths = Self::default_library_paths_for_target(&self.target);
+        Self::extend_unique(&mut self.library_paths, custom_library_paths);
+        self
+    }
+
     // Use macros for common builder methods
-    impl_target_method!(direct);
     impl_layout_methods!(direct);
     impl_bool_flag_methods!(direct);
     impl_linker_builder_methods!(direct);

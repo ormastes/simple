@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
     }
 
     // System libraries
-    cmd.args(["-lpthread", "-ldl", "-lm", "-llzma"]);
+    cmd.args(["-lpthread", "-ldl", "-lm"]);
 
     // Allow undefined symbols — many extern fn rt_* declarations reference
     // runtime functions (CUDA, GC, debugger hooks) not present in the library.

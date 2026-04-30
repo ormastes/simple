@@ -379,7 +379,8 @@ Error: unknown extern function: rt_torch_available
 
 ## Documentation
 
-- **SFFI Design:** `doc/design/sffi_external_library_pattern.md`
+- **SFFI Design:** `doc/05_design/sffi_external_library_pattern.md`
+- **External Native Libraries Guide:** `doc/07_guide/ffi/external_native_libraries.md`
 - **Wrapper Generator:** `doc/guide/sffi_gen_guide.md`
 - **PyTorch FFI Status:** `doc/report/pytorch_ffi_status_2026-02-09.md`
 - **GPU Configuration:** `doc/guide/apps/gpu.md`

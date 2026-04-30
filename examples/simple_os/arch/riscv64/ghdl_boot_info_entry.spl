@@ -1,0 +1,82 @@
+#![allow(unknown_attribute)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use os.kernel.arch.riscv64.boot_info.{Rv64Boot}
+use examples.simple_os.arch.riscv64.ghdl_boot_info_proof_layout.{
+    SLOT_DTB_ADDR, SLOT_DTB_VALID, SLOT_HART_ID, SLOT_MEMORY_MAP_LEN,
+    SLOT_RAM_BASE, SLOT_RAM_SIZE, SLOT_REGION0_BASE, SLOT_REGION0_KIND,
+    SLOT_REGION0_SIZE, SLOT_REGION1_BASE, SLOT_REGION1_KIND, SLOT_REGION1_SIZE,
+    SLOT_REGION2_BASE, SLOT_REGION2_KIND, SLOT_REGION2_SIZE, SLOT_SERIAL_BASE,
+    SLOT_SERIAL_IS_MMIO, proof_emit_marker, proof_finish, proof_init,
+    proof_store_bool, proof_store_u64
+}
+
+val KERNEL_LOAD_BASE: u64 = 0x80200000
+val KERNEL_LOAD_SIZE: u64 = 0x00200000
+val MEMORY_MAP_LEN: u64 = 3
+val REGION_KIND_USABLE: u64 = 1
+val REGION_KIND_RESERVED: u64 = 2
+val REGION_KIND_KERNEL: u64 = 8
+
+@section(".text.entry")
+@naked
+fn _start():
+    asm volatile:
+        "mv      s0, a0"
+        "mv      s1, a1"
+        "la      sp, _stack_top"
+        "la      t0, _sbss"
+        "la      t1, _ebss"
+        ".Lghdl_boot_info_bss_loop:"
+        "bgeu    t0, t1, .Lghdl_boot_info_bss_done"
+        "sd      zero, 0(t0)"
+        "addi    t0, t0, 8"
+        "j       .Lghdl_boot_info_bss_loop"
+        ".Lghdl_boot_info_bss_done:"
+        "mv      a0, s0"
+        "mv      a1, s1"
+        "call    simple_os__arch__riscv64__ghdl_boot_info_entry__boot_main"
+        "j       simple_os__arch__riscv64__ghdl_boot_info_entry___halt"
+
+fn _halt():
+    asm volatile:
+        "ebreak"
+        ".Lghdl_boot_info_halt:"
+        "wfi"
+        "j .Lghdl_boot_info_halt"
+
+fn _record_boot_regions():
+    val ram_base = Rv64Boot.ram_base()
+    val ram_size = Rv64Boot.ram_size()
+    val usable_base = KERNEL_LOAD_BASE + KERNEL_LOAD_SIZE
+    val usable_size = (ram_base + ram_size) - usable_base
+
+    proof_store_u64(SLOT_SERIAL_BASE, Rv64Boot.uart_base())
+    proof_store_bool(SLOT_SERIAL_IS_MMIO, true)
+    proof_store_u64(SLOT_MEMORY_MAP_LEN, MEMORY_MAP_LEN)
+
+    proof_store_u64(SLOT_REGION0_BASE, ram_base)
+    proof_store_u64(SLOT_REGION0_SIZE, KERNEL_LOAD_BASE - ram_base)
+    proof_store_u64(SLOT_REGION0_KIND, REGION_KIND_RESERVED)
+
+    proof_store_u64(SLOT_REGION1_BASE, KERNEL_LOAD_BASE)
+    proof_store_u64(SLOT_REGION1_SIZE, KERNEL_LOAD_SIZE)
+    proof_store_u64(SLOT_REGION1_KIND, REGION_KIND_KERNEL)
+
+    proof_store_u64(SLOT_REGION2_BASE, usable_base)
+    proof_store_u64(SLOT_REGION2_SIZE, usable_size)
+    proof_store_u64(SLOT_REGION2_KIND, REGION_KIND_USABLE)
+
+fn boot_main(hart_id: u64, dtb_addr: u64):
+    proof_init()
+    Rv64Boot.save_boot_args(hart_id, dtb_addr)
+    val _boot_info = Rv64Boot.parse_boot_info()
+    proof_store_u64(SLOT_HART_ID, Rv64Boot.hart_id())
+    proof_store_u64(SLOT_DTB_ADDR, Rv64Boot.dtb_address())
+    proof_store_bool(SLOT_DTB_VALID, Rv64Boot.dtb_valid())
+    proof_store_u64(SLOT_RAM_BASE, Rv64Boot.ram_base())
+    proof_store_u64(SLOT_RAM_SIZE, Rv64Boot.ram_size())
+    _record_boot_regions()
+    proof_emit_marker()
+    proof_finish()
+    _halt()

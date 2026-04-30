@@ -38,9 +38,7 @@
 use std::io::{self, Write};
 
 use super::header::{SmfHeader, SMF_MAGIC};
-use super::section::{
-    SectionType, SmfSection, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
-};
+use super::section::{SectionType, SmfSection, SECTION_FLAG_EXEC, SECTION_FLAG_READ};
 
 /// Bytecode section magic marker.
 pub const BYTECODE_MAGIC: &[u8; 4] = b"BCOD";
@@ -190,12 +188,8 @@ impl SmfBytecodeWriter {
 
         // Write function metadata table
         for entry in &func_entries {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    entry as *const BytecodeFuncEntry as *const u8,
-                    entry_size,
-                )
-            };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(entry as *const BytecodeFuncEntry as *const u8, entry_size) };
             section.extend_from_slice(bytes);
         }
 
@@ -228,8 +222,8 @@ impl SmfBytecodeWriter {
             magic: *SMF_MAGIC,
             version_major: 1,
             version_minor: 1,
-            platform: 0, // Any
-            arch: 0,     // x86_64
+            platform: 0,   // Any
+            arch: 0,       // x86_64
             flags: 0x0001, // SMF_FLAG_EXECUTABLE
             compression: 0,
             compression_level: 0,
@@ -307,9 +301,7 @@ fn section_name(name: &[u8]) -> [u8; 16] {
 
 /// Write a struct as raw bytes.
 fn write_struct<W: Write, T>(writer: &mut W, value: &T) -> io::Result<()> {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
-    };
+    let bytes = unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) };
     writer.write_all(bytes)
 }
 

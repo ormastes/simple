@@ -67,6 +67,7 @@ pub mod semantics;
 pub mod smf_builder;
 pub mod smf_writer;
 pub mod spec_coverage;
+pub mod stdlib_variant;
 pub mod symbol_analyzer;
 pub mod text_diff;
 pub mod trait_coherence;

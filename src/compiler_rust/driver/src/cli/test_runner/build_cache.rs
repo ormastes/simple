@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_compiler::{CompilerPipeline, ProjectContext};
+use simple_simd::detect_profile;
 
 /// Cache directory for compiled test artifacts
 const CACHE_DIR: &str = "tmp/test_cache";
@@ -61,6 +62,7 @@ impl BuildCache {
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         path.hash(&mut hasher);
+        detect_profile().as_str().hash(&mut hasher);
         let hash = hasher.finish();
         self.hash_cache.borrow_mut().insert(path.to_path_buf(), hash);
         self.content_cache.borrow_mut().insert(path.to_path_buf(), content);

@@ -1,0 +1,87 @@
+use compiler.loader.metadata_symbols.{metadata_instantiation_symbol_names, loaded_metadata_instantiation_symbol_names}
+use compiler.loader.jit_instantiator.{LoadedMetadata, InstantiationRecord}
+
+describe "Loader metadata symbol helpers":
+    """
+    # Loader metadata symbol helpers
+    Verifies extraction of mangled instantiation symbol names from
+    LoadedMetadata, including filtering by source file path and removal
+    of paths from the loaded-metadata map.
+    """
+    it "returns mangled names from metadata instantiations in order":
+        """Mangled names appear in the same order as InstantiationRecord entries."""
+        val metadata = LoadedMetadata(
+            possible: [],
+            instantiations: [
+                InstantiationRecord(
+                    id: 0,
+                    template_name: "Vec",
+                    type_args: "i64",
+                    mangled_name: "Vec$i64",
+                    from_file: "a.smf",
+                    from_loc: "a.smf:0:0",
+                    to_obj: "jit_obj",
+                    status: "jit_compiled"
+                ),
+                InstantiationRecord(
+                    id: 1,
+                    template_name: "Map",
+                    type_args: "text_i64",
+                    mangled_name: "Map$text_i64",
+                    from_file: "a.smf",
+                    from_loc: "a.smf:0:1",
+                    to_obj: "jit_obj",
+                    status: "jit_compiled"
+                )
+            ]
+        )
+
+        val names = metadata_instantiation_symbol_names(metadata)
+        expect names.len() == 2
+        expect names[0] == "Vec$i64"
+        expect names[1] == "Map$text_i64"
+
+    it "returns empty for metadata with no instantiations":
+        val metadata = LoadedMetadata(possible: [], instantiations: [])
+        val names = metadata_instantiation_symbol_names(metadata)
+        expect names.len() == 0
+
+    it "returns instantiation names for a specific loaded-metadata path":
+        val target = LoadedMetadata(
+            possible: [],
+            instantiations: [
+                InstantiationRecord(
+                    id: 0,
+                    template_name: "Hot",
+                    type_args: "reload",
+                    mangled_name: "hot_reload_fn",
+                    from_file: "target.smf",
+                    from_loc: "target.smf:0:0",
+                    to_obj: "jit_obj",
+                    status: "jit_compiled"
+                )
+            ]
+        )
+        val other = LoadedMetadata(possible: [], instantiations: [])
+        val all = {"target.smf": target, "other.smf": other}
+
+        val names = loaded_metadata_instantiation_symbol_names(all, "target.smf")
+        expect names.len() == 1
+        expect names[0] == "hot_reload_fn"
+
+    it "returns empty when the loaded-metadata path is absent":
+        val all = {}
+        val names = loaded_metadata_instantiation_symbol_names(all, "missing.smf")
+        expect names.len() == 0
+
+    it "removes a loaded-metadata path when present":
+        val metadata = LoadedMetadata(possible: [], instantiations: [])
+        val all = {"present.smf": metadata}
+        val updated = loaded_metadata_remove_path(all, "present.smf")
+        expect updated.has("present.smf") == false
+
+    it "leaves loaded metadata unchanged when path is absent":
+        val metadata = LoadedMetadata(possible: [], instantiations: [])
+        val all = {"present.smf": metadata}
+        val updated = loaded_metadata_remove_path(all, "missing.smf")
+        expect updated.has("present.smf") == true

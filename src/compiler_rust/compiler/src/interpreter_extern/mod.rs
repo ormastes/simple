@@ -59,6 +59,7 @@ pub mod concurrency;
 pub mod tui;
 pub mod repl;
 pub mod gpu;
+pub mod simd;
 pub mod diagram;
 pub mod memory;
 pub mod cli;
@@ -798,6 +799,23 @@ pub(crate) fn call_extern_function(
         // WebGPU Functions (stub — interpreter always returns false)
         // ====================================================================
         "rt_webgpu_compute_draw" => gpu::rt_webgpu_compute_draw_fn(&evaluated),
+
+        // ====================================================================
+        // SIMD Capability Functions (7 functions)
+        // ====================================================================
+        "rt_simd_has_sse" => simd::rt_simd_has_sse(&evaluated),
+        "rt_simd_has_avx" => simd::rt_simd_has_avx(&evaluated),
+        "rt_simd_has_avx2" => simd::rt_simd_has_avx2(&evaluated),
+        "rt_simd_has_neon" => simd::rt_simd_has_neon(&evaluated),
+        "rt_simd_has_rvv" => simd::rt_simd_has_rvv(&evaluated),
+        "rt_simd_detect_profile" => simd::rt_simd_detect_profile(&evaluated),
+        "rt_simd_profile_name" => simd::rt_simd_profile_name(&evaluated),
+        "rt_aes_encrypt_block_with_expanded" => simd::rt_aes_encrypt_block_with_expanded(&evaluated),
+        "rt_aes_decrypt_block_with_expanded" => simd::rt_aes_decrypt_block_with_expanded(&evaluated),
+        "rt_utf8_count_codepoints" => simd::rt_utf8_count_codepoints(&evaluated),
+        "rt_utf8_validate" => simd::rt_utf8_validate(&evaluated),
+        "rt_utf8_find_invalid" => simd::rt_utf8_find_invalid(&evaluated),
+        "rt_text_count_codepoints" => simd::rt_text_count_codepoints(&evaluated),
 
         // ====================================================================
         // Diagram FFI Functions (12 functions)

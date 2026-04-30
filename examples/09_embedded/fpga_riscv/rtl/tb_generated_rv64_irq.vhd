@@ -31,6 +31,7 @@ architecture sim of tb_generated_rv64_irq is
     signal irq_timer    : std_logic := '0';
     signal irq_external : std_logic := '0';
     signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');
+    signal debug_last_load_value : std_logic_vector(63 downto 0) := (others => '0');
     signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');
     signal trap       : std_logic := '0';
     signal halt       : std_logic := '0';
@@ -94,6 +95,7 @@ begin
             mmu_dmem_l1_pte => (others => '0'),
             mmu_dmem_l0_pte => (others => '0'),
             debug_priv_mode => debug_priv_mode,
+            debug_last_load_value => debug_last_load_value,
             debug_pc   => debug_pc,
             trap       => trap,
             halt       => halt

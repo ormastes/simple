@@ -1,6 +1,60 @@
-//! SIMD Feature Detection
+//! SIMD feature and profile detection.
 //!
-//! This module provides runtime detection of CPU SIMD capabilities.
+//! This module provides runtime detection of CPU SIMD capabilities together
+//! with one canonical tier model used by the stdlib, loader, and caches.
+
+use std::fmt;
+use std::str::FromStr;
+
+/// Canonical SIMD tier used across packaging, loader selection, and runtime
+/// capability reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SimdTier {
+    /// Baseline scalar implementation.
+    #[default]
+    Scalar,
+    /// x86_64 with AVX2.
+    X86_64Avx2,
+    /// AArch64 with NEON.
+    Aarch64Neon,
+    /// RISC-V 64 with vector extension.
+    Riscv64Rvv,
+}
+
+impl SimdTier {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::X86_64Avx2 => "x86_64_avx2",
+            Self::Aarch64Neon => "aarch64_neon",
+            Self::Riscv64Rvv => "riscv64_rvv",
+        }
+    }
+
+    pub const fn is_scalar(self) -> bool {
+        matches!(self, Self::Scalar)
+    }
+}
+
+impl fmt::Display for SimdTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SimdTier {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "scalar" => Ok(Self::Scalar),
+            "x86_64_avx2" => Ok(Self::X86_64Avx2),
+            "aarch64_neon" => Ok(Self::Aarch64Neon),
+            "riscv64_rvv" => Ok(Self::Riscv64Rvv),
+            _ => Err("unknown SIMD tier"),
+        }
+    }
+}
 
 /// SIMD feature flags.
 #[derive(Debug, Clone, Copy, Default)]
@@ -27,6 +81,8 @@ pub struct SimdFeatures {
     pub fma: bool,
     /// ARM NEON support.
     pub neon: bool,
+    /// RISC-V Vector extension support.
+    pub rvv: bool,
 }
 
 impl SimdFeatures {
@@ -45,6 +101,7 @@ impl SimdFeatures {
             avx512f: std::is_x86_feature_detected!("avx512f"),
             fma: std::is_x86_feature_detected!("fma"),
             neon: false,
+            rvv: false,
         }
     }
 
@@ -63,6 +120,7 @@ impl SimdFeatures {
             avx512f: false, // AVX-512 not available on 32-bit
             fma: std::is_x86_feature_detected!("fma"),
             neon: false,
+            rvv: false,
         }
     }
 
@@ -81,13 +139,51 @@ impl SimdFeatures {
             avx512f: false,
             fma: true,  // NEON includes FMA
             neon: true, // NEON is always available on AArch64
+            rvv: false,
+        }
+    }
+
+    /// Detect SIMD features at runtime (RISC-V 64).
+    #[cfg(target_arch = "riscv64")]
+    pub fn detect() -> Self {
+        SimdFeatures {
+            sse: false,
+            sse2: false,
+            sse3: false,
+            ssse3: false,
+            sse4_1: false,
+            sse4_2: false,
+            avx: false,
+            avx2: false,
+            avx512f: false,
+            fma: false,
+            neon: false,
+            rvv: cfg!(target_feature = "v"),
         }
     }
 
     /// Fallback for unsupported architectures.
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")))]
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
     pub fn detect() -> Self {
         SimdFeatures::default()
+    }
+
+    /// Get the canonical SIMD tier for this host.
+    pub fn detect_profile(&self) -> SimdTier {
+        if self.avx2 {
+            SimdTier::X86_64Avx2
+        } else if self.neon {
+            SimdTier::Aarch64Neon
+        } else if self.rvv {
+            SimdTier::Riscv64Rvv
+        } else {
+            SimdTier::Scalar
+        }
     }
 
     /// Check if any SIMD is available.
@@ -156,6 +252,16 @@ pub fn simd_available() -> bool {
     SimdFeatures::detect().has_simd()
 }
 
+/// Detect the canonical SIMD tier for the current host.
+pub fn detect_profile() -> SimdTier {
+    SimdFeatures::detect().detect_profile()
+}
+
+/// Get the canonical SIMD tier name for the current host.
+pub fn profile_name() -> &'static str {
+    detect_profile().as_str()
+}
+
 /// Check if AVX (256-bit) is available.
 pub fn has_avx() -> bool {
     SimdFeatures::detect().avx
@@ -179,6 +285,11 @@ pub fn has_fma() -> bool {
 /// Check if ARM NEON is available.
 pub fn has_neon() -> bool {
     SimdFeatures::detect().neon
+}
+
+/// Check if RISC-V vector support is available.
+pub fn has_rvv() -> bool {
+    SimdFeatures::detect().rvv
 }
 
 #[cfg(test)]
@@ -210,5 +321,28 @@ mod tests {
         // This should work on any supported platform
         let available = simd_available();
         println!("SIMD available: {}", available);
+    }
+
+    #[test]
+    fn test_profile_roundtrip() {
+        for value in ["scalar", "x86_64_avx2", "aarch64_neon", "riscv64_rvv"] {
+            let tier = SimdTier::from_str(value).expect("parse tier");
+            assert_eq!(tier.as_str(), value);
+        }
+    }
+
+    #[test]
+    fn test_detect_profile_matches_feature_flags() {
+        let features = SimdFeatures::detect();
+        let profile = features.detect_profile();
+        if features.avx2 {
+            assert_eq!(profile, SimdTier::X86_64Avx2);
+        } else if features.neon {
+            assert_eq!(profile, SimdTier::Aarch64Neon);
+        } else if features.rvv {
+            assert_eq!(profile, SimdTier::Riscv64Rvv);
+        } else {
+            assert_eq!(profile, SimdTier::Scalar);
+        }
     }
 }

@@ -527,6 +527,36 @@ impl LlvmBackend {
                     .build_conditional_branch(cond_i1, *then_bb, *else_bb)
                     .map_err(|e| crate::error::factory::llvm_build_failed("build_conditional_branch", &e))?;
             }
+            Terminator::Switch {
+                discriminant,
+                cases,
+                default,
+            } => {
+                let discriminant_val = vreg_map
+                    .get(discriminant)
+                    .ok_or_else(|| crate::error::factory::undefined_reference("discriminant", &discriminant))?;
+                let default_bb = llvm_blocks
+                    .get(default)
+                    .ok_or_else(|| crate::error::factory::undefined_reference("block", &default))?;
+
+                let disc_i64 = self
+                    .coerce_value_to_type(*discriminant_val, Some(self.runtime_int_type().into()), builder)?
+                    .into_int_value();
+
+                let llvm_cases: Vec<_> = cases
+                    .iter()
+                    .map(|(case_value, block_id)| {
+                        let target_bb = llvm_blocks
+                            .get(block_id)
+                            .ok_or_else(|| crate::error::factory::undefined_reference("block", block_id))?;
+                        Ok((self.runtime_int_type().const_int(*case_value as u64, true), *target_bb))
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?;
+
+                builder
+                    .build_switch(disc_i64, *default_bb, &llvm_cases)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("build_switch", &e))?;
+            }
             Terminator::Unreachable => {
                 builder
                     .build_unreachable()
@@ -680,5 +710,80 @@ impl LlvmBackend {
             // Types already match or close enough
             _ => Ok(val),
         }
+    }
+}
+
+#[cfg(all(test, feature = "llvm"))]
+mod tests {
+    use super::*;
+    use crate::mir::{BlockId, Terminator, VReg};
+    use simple_common::target::{Target, TargetArch, TargetOS};
+    use std::collections::HashMap;
+
+    #[test]
+    fn compile_switch_terminator_emits_llvm_switch() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("switch_terminator_test").unwrap();
+
+        let module_ref = backend.module.borrow();
+        let module = module_ref.as_ref().unwrap();
+        let function = module.add_function(
+            "switch_test",
+            backend.runtime_int_type().fn_type(&[], false),
+            None,
+        );
+
+        let entry = backend.context.append_basic_block(function, "entry");
+        let case_one = backend.context.append_basic_block(function, "case_one");
+        let case_two = backend.context.append_basic_block(function, "case_two");
+        let default = backend.context.append_basic_block(function, "default");
+
+        let mut blocks = HashMap::new();
+        blocks.insert(BlockId(0), entry);
+        blocks.insert(BlockId(1), case_one);
+        blocks.insert(BlockId(2), case_two);
+        blocks.insert(BlockId(3), default);
+
+        let builder_ref = backend.builder.borrow();
+        let builder = builder_ref.as_ref().unwrap();
+        builder.position_at_end(entry);
+
+        let mut vreg_map = HashMap::new();
+        vreg_map.insert(VReg(0), backend.runtime_int_type().const_int(2, false).into());
+
+        backend
+            .compile_terminator(
+                &Terminator::Switch {
+                    discriminant: VReg(0),
+                    cases: vec![(1, BlockId(1)), (2, BlockId(2))],
+                    default: BlockId(3),
+                },
+                &blocks,
+                &vreg_map,
+                builder,
+            )
+            .unwrap();
+
+        builder.position_at_end(case_one);
+        builder
+            .build_return(Some(&backend.runtime_int_type().const_int(11, false)))
+            .unwrap();
+        builder.position_at_end(case_two);
+        builder
+            .build_return(Some(&backend.runtime_int_type().const_int(22, false)))
+            .unwrap();
+        builder.position_at_end(default);
+        builder
+            .build_return(Some(&backend.runtime_int_type().const_int(33, false)))
+            .unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("switch i64 2"));
+        assert!(ir.contains("i64 1, label %case_one"));
+        assert!(ir.contains("i64 2, label %case_two"));
+        assert!(ir.contains("label %default"));
+
+        backend.verify().unwrap();
     }
 }

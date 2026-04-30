@@ -21,7 +21,8 @@ s_mode_entry:
     sfence.vma x0, x0
 
     li t1, 0x40000000
-    ld t3, 256(t1)
+    lw t3, 256(t1)
+    addi zero, zero, 0
     csrrw zero, satp, zero
     sd t3, 264(zero)
     ebreak

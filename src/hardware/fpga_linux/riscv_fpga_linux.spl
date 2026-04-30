@@ -309,6 +309,27 @@ impl RiscvFpgaLane:
             return "00000FFC"
         "0000000000000FFC"
 
+    fn boot_hartid_hex() -> text:
+        if self.xlen == RiscvXlen.Rv32:
+            return "00000000"
+        "0000000000000000"
+
+    fn boot_dtb_hex() -> text:
+        val boot = self.generated_core_shell_contract().boot
+        if not boot.opensbi_fw_jump:
+            if self.xlen == RiscvXlen.Rv32:
+                return "00000000"
+            return "0000000000000000"
+        if self.xlen == RiscvXlen.Rv32:
+            return "88000000"
+        "0000000088000000"
+
+    fn reg_file_init_hex() -> text:
+        val boot = self.generated_core_shell_contract().boot
+        if self.xlen == RiscvXlen.Rv64 and boot.opensbi_fw_jump:
+            return "(2 => x\"{self.stack_pointer_hex()}\", 10 => x\"{self.boot_hartid_hex()}\", 11 => x\"{self.boot_dtb_hex()}\", others => (others => '0'))"
+        "(2 => x\"{self.stack_pointer_hex()}\", others => (others => '0'))"
+
     fn sstatus_mask_hex() -> text:
         if self.xlen == RiscvXlen.Rv32:
             return "800DE133"
@@ -1058,7 +1079,7 @@ impl RiscvFpgaLane:
             errors.push("{self.xlen.to_text()} hardware source must drive dmem read-enable for loads")
         if not source.contains("dmem_width_reg <= \"00\";") or not source.contains("dmem_width_reg <= \"01\";") or not source.contains("dmem_width_reg <= \"10\";") or not source.contains("dmem_width_reg <= \"11\";"):
             errors.push("{self.xlen.to_text()} hardware source must drive byte/halfword/word/doubleword width codes")
-        if not source.contains("shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)") and not source.contains("shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)"):
+        if not source.contains("shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)") and not source.contains("shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)") and not source.contains("shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)") and not source.contains("shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)"):
             errors.push("{self.xlen.to_text()} hardware source must extract load lanes through address-derived bus shifts")
         if not source.contains("dmem_wstrb_reg <= (others => '0');"):
             errors.push("{self.xlen.to_text()} hardware source must clear write strobes when idle")
@@ -1177,6 +1198,7 @@ impl RiscvFpgaLane:
             "        variable decode_should_halt : std_logic;\n" +
             "        variable csr_old_val : xword_t;\n" +
             "        variable csr_new_val : xword_t;\n" +
+            "        variable mret_mpp_v : std_logic_vector(1 downto 0);\n" +
             "        variable translated_addr_v : xword_t;\n" +
             "        variable translated_fault_v : std_logic;\n"
 
@@ -1186,7 +1208,8 @@ impl RiscvFpgaLane:
         "        mmu_dmem_l2_pte : in  xword_t;\n" +
             "        mmu_dmem_l1_pte : in  xword_t;\n" +
             "        mmu_dmem_l0_pte : in  xword_t;\n" +
-            "        debug_priv_mode : out std_logic_vector(1 downto 0);\n"
+            "        debug_priv_mode : out std_logic_vector(1 downto 0);\n" +
+            "        debug_last_load_value : out xword_t;\n"
 
     fn core_vhdl_mmu_helper_lines() -> text:
         if self.xlen == RiscvXlen.Rv32:
@@ -1335,7 +1358,7 @@ impl RiscvFpgaLane:
             "                    when \"0011\" =>\n" +
             "                        decode_writeback_bits := imem_rdata(31 downto 12) & imem_rdata(19 downto 15) & imem_rdata(6 downto 0);\n" +
             "                        decode_i_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 20);\n" +
-            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 20) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" then\n" +
             "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0000\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"001\" then\n" +
@@ -1357,7 +1380,7 @@ impl RiscvFpgaLane:
             "                        end if;\n" +
             "                    when \"1100\" =>\n" +
             "                        decode_i_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 20);\n" +
-            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 20) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" then\n" +
             "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0000\" & '0';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"001\" then\n" +
@@ -1368,7 +1391,7 @@ impl RiscvFpgaLane:
             "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0111\" & '0';\n" +
             "                        end if;\n" +
             "                    when \"0100\" =>\n" +
-            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 20) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" and imem_rdata(31 downto 25) = \"0000000\" then\n" +
             "                            decode_writeback_bits := imem_rdata(31 downto 12) & imem_rdata(24 downto 20) & imem_rdata(6 downto 0);\n" +
             "                        end if;\n" +
@@ -1394,7 +1417,7 @@ impl RiscvFpgaLane:
             "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"1001\" & '1';\n" +
             "                        end if;\n" +
             "                    when \"1101\" =>\n" +
-            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 20) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" and imem_rdata(30 downto 30) = \"0\" then\n" +
             "                            decode_execute_datapath_bits := \"000000000000000000000000000\" & \"0000\" & '1';\n" +
             "                        elsif imem_rdata(14 downto 12) = \"000\" and imem_rdata(30 downto 30) = \"1\" then\n" +
@@ -1414,7 +1437,7 @@ impl RiscvFpgaLane:
             "                        decode_memory_access_control_bits := \"00000000000000000000000000000\" & imem_rdata(14 downto 12);\n" +
             "                    when \"0111\" =>\n" +
             "                        decode_branch_immediate_bits := \"00000000000000000000\" & imem_rdata(31 downto 31) & imem_rdata(7 downto 7) & imem_rdata(30 downto 25) & imem_rdata(11 downto 8);\n" +
-            "                        decode_execute_control_bits := \"000000000000000000000000000\" & imem_rdata(25 downto 25) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
+            "                        decode_execute_control_bits := \"0000000000000000000000\" & imem_rdata(25 downto 20) & imem_rdata(30 downto 30) & imem_rdata(14 downto 12);\n" +
             "                        if imem_rdata(14 downto 12) = \"000\" then\n" +
             "                            decode_branch_datapath_bits := \"00000000000000000000000000000\" & \"000\";\n" +
             "                        elsif imem_rdata(14 downto 12) = \"001\" then\n" +
@@ -1583,20 +1606,20 @@ impl RiscvFpgaLane:
             "                                case decode_memory_funct3 is\n" +
             "                                    when \"000\" =>\n" +
             "                                        dmem_width_reg <= \"00\";\n" +
-            "                                        load_pending_reg <= '1';\n" +
+            "                                        load_issue_reg <= '1';\n" +
             "                                    when \"001\" =>\n" +
             "                                        dmem_width_reg <= \"01\";\n" +
             "                                        if addr_i(0) = '1' then\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        else\n" +
-            "                                            load_pending_reg <= '1';\n" +
+            "                                            load_issue_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"010\" =>\n" +
             "                                        dmem_width_reg <= \"10\";\n" +
             "                                        if addr_i(1 downto 0) /= \"00\" then\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        else\n" +
-            "                                            load_pending_reg <= '1';\n" +
+            "                                            load_issue_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"011\" =>\n" +
             "                                        dmem_width_reg <= \"11\";\n" +
@@ -1604,20 +1627,20 @@ impl RiscvFpgaLane:
             "                                            if addr_i(2 downto 0) /= \"000\" then\n" +
             "                                                trap_reg <= '1';\n" +
             "                                            else\n" +
-            "                                                load_pending_reg <= '1';\n" +
+            "                                                load_issue_reg <= '1';\n" +
             "                                            end if;\n" +
             "                                        else\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"100\" =>\n" +
             "                                        dmem_width_reg <= \"00\";\n" +
-            "                                        load_pending_reg <= '1';\n" +
+            "                                        load_issue_reg <= '1';\n" +
             "                                    when \"101\" =>\n" +
             "                                        dmem_width_reg <= \"01\";\n" +
             "                                        if addr_i(0) = '1' then\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        else\n" +
-            "                                            load_pending_reg <= '1';\n" +
+            "                                            load_issue_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"110\" =>\n" +
             "                                        dmem_width_reg <= \"10\";\n" +
@@ -1625,7 +1648,7 @@ impl RiscvFpgaLane:
             "                                            if addr_i(1 downto 0) /= \"00\" then\n" +
             "                                                trap_reg <= '1';\n" +
             "                                            else\n" +
-            "                                                load_pending_reg <= '1';\n" +
+            "                                                load_issue_reg <= '1';\n" +
             "                                            end if;\n" +
             "                                        else\n" +
             "                                            trap_reg <= '1';\n" +
@@ -1787,10 +1810,11 @@ impl RiscvFpgaLane:
             "                                            pc_reg <= csr_mtvec_reg;\n" +
             "                                        end if;\n" +
             "                                    elsif imem_rdata = x\"30200073\" then\n" +
+            "                                        mret_mpp_v := csr_mstatus_reg(12 downto 11);\n" +
             "                                        csr_mstatus_reg(3) <= csr_mstatus_reg(7);\n" +
             "                                        csr_mstatus_reg(7) <= '1';\n" +
             "                                        csr_mstatus_reg(12 downto 11) <= \"00\";\n" +
-            "                                        priv_mode_reg <= csr_mstatus_reg(12 downto 11);\n" +
+            "                                        priv_mode_reg <= mret_mpp_v;\n" +
             "                                        pc_reg <= csr_mepc_reg;\n" +
             "                                    elsif imem_rdata = x\"10200073\" then\n" +
             "                                        csr_mstatus_reg(1) <= csr_mstatus_reg(5);\n" +
@@ -1939,7 +1963,9 @@ impl RiscvFpgaLane:
             "    signal csr_sepc_reg : xword_t := (others => '0');\n" +
             "    signal csr_scause_reg : xword_t := (others => '0');\n" +
             "    signal csr_stval_reg : xword_t := (others => '0');\n" +
-            "    signal csr_satp_reg : xword_t := (others => '0');\n"
+            "    signal csr_satp_reg : xword_t := (others => '0');\n" +
+            "    signal debug_last_load_value_reg : xword_t := (others => '0');\n" +
+            "    signal load_data_reg : xword_t := (others => '0');\n"
 
     fn core_vhdl_semihost_reset_lines() -> text:
         "            semi_phase_reg <= 0;\n" +
@@ -1961,7 +1987,9 @@ impl RiscvFpgaLane:
             "            csr_sepc_reg <= (others => '0');\n" +
             "            csr_scause_reg <= (others => '0');\n" +
             "            csr_stval_reg <= (others => '0');\n" +
-            "            csr_satp_reg <= (others => '0');\n"
+            "            csr_satp_reg <= (others => '0');\n" +
+            "            debug_last_load_value_reg <= (others => '0');\n" +
+            "            load_data_reg <= (others => '0');\n"
 
     fn core_vhdl_semihost_default_lines() -> text:
         "            semi_trigger_reg <= '0';\n"
@@ -1974,7 +2002,8 @@ impl RiscvFpgaLane:
     fn core_vhdl_mmu_output_lines() -> text:
         if self.xlen == RiscvXlen.Rv32:
             return ""
-        "    debug_priv_mode <= priv_mode_reg;\n"
+        "    debug_priv_mode <= priv_mode_reg;\n" +
+            "    debug_last_load_value <= debug_last_load_value_reg;\n"
 
     fn core_vhdl() -> text:
         val package_name = self.package_name()
@@ -2010,7 +2039,7 @@ impl RiscvFpgaLane:
             "architecture rtl of {top} is\n" +
             "    type reg_file_t is array (0 to 31) of xword_t;\n" +
             "    signal pc_reg : xword_t := RESET_VECTOR;\n" +
-            "    signal regs : reg_file_t := (2 => x\"{self.stack_pointer_hex()}\", others => (others => '0'));\n" +
+            "    signal regs : reg_file_t := {self.reg_file_init_hex()};\n" +
             "    signal dmem_addr_reg : xword_t := (others => '0');\n" +
             "    signal dmem_wdata_reg : xword_t := (others => '0');\n" +
             "    signal dmem_we_reg : std_logic := '0';\n" +
@@ -2020,6 +2049,7 @@ impl RiscvFpgaLane:
             "    signal trap_reg : std_logic := '0';\n" +
             "    signal halt_reg : std_logic := '0';\n" +
             self.core_vhdl_semihost_signal_lines() +
+            "    signal load_issue_reg : std_logic := '0';\n" +
             "    signal load_pending_reg : std_logic := '0';\n" +
             "    signal load_pending_rd_reg : integer range 0 to 31 := 0;\n" +
             "    signal load_pending_addr_reg : xword_t := (others => '0');\n" +
@@ -2043,7 +2073,7 @@ impl RiscvFpgaLane:
             "    begin\n" +
             "        if reset_n = '0' then\n" +
             "            pc_reg <= RESET_VECTOR;\n" +
-            "            regs <= (2 => x\"{self.stack_pointer_hex()}\", others => (others => '0'));\n" +
+            "            regs <= {self.reg_file_init_hex()};\n" +
             "            dmem_addr_reg <= (others => '0');\n" +
             "            dmem_wdata_reg <= (others => '0');\n" +
             "            dmem_we_reg <= '0';\n" +
@@ -2053,6 +2083,7 @@ impl RiscvFpgaLane:
             "            trap_reg <= '0';\n" +
             "            halt_reg <= '0';\n" +
             self.core_vhdl_semihost_reset_lines() +
+            "            load_issue_reg <= '0';\n" +
             "            load_pending_reg <= '0';\n" +
             "            load_pending_rd_reg <= 0;\n" +
             "            load_pending_addr_reg <= (others => '0');\n" +
@@ -2063,33 +2094,44 @@ impl RiscvFpgaLane:
             "            dmem_width_reg <= \"10\";\n" +
             "            dmem_wstrb_reg <= (others => '0');\n" +
             self.core_vhdl_semihost_default_lines() +
-            "            if load_pending_reg = '1' then\n" +
+            "            if load_issue_reg = '1' then\n" +
+            "                load_issue_reg <= '0';\n" +
+            "                load_pending_reg <= '1';\n" +
+            "                load_data_reg <= dmem_rdata;\n" +
+            "                regs(0) <= (others => '0');\n" +
+            "            elsif load_pending_reg = '1' then\n" +
             "                addr_i := unsigned(load_pending_addr_reg);\n" +
             "                case load_pending_funct3_reg is\n" +
             "                    when \"000\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"001\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"010\" =>\n" +
             "                        if load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(load_data_reg(31 downto 0)), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(load_data_reg(31 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"011\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= dmem_rdata;\n" +
+            "                                regs(load_pending_rd_reg) <= load_data_reg;\n" +
+            "                                debug_last_load_value_reg <= load_data_reg;\n" +
             "                            end if;\n" +
             "                        else\n" +
             "                            trap_reg <= '1';\n" +
@@ -2097,23 +2139,28 @@ impl RiscvFpgaLane:
             "                    when \"100\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"101\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"110\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(31 downto 0), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(31 downto 0), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(31 downto 0), XLEN));\n" +
             "                            end if;\n" +
             "                        else\n" +
             "                            trap_reg <= '1';\n" +

@@ -907,6 +907,7 @@ The current spec and guide material is organized under the numbered documentatio
 - [Capability Effects](doc/06_spec/capability_effects.md) - Capability/effect system
 - [Standard Library Guide](doc/07_guide/library/stdlib.md) - Stdlib structure and usage
 - [SFFI Guide](doc/07_guide/ffi/sffi.md) - Interop guidance
+- [External Native Libraries](doc/07_guide/ffi/external_native_libraries.md) - Optional host-library integration
 
 **Testing & Tooling:**
 - [Testing Guide](doc/07_guide/testing/testing.md) - Test runner and matchers

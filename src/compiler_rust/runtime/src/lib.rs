@@ -14,6 +14,7 @@ pub mod loader;
 pub mod aop;
 pub mod async_runtime;
 pub mod bytecode;
+#[cfg(feature = "packaging-compression")]
 pub mod compress;
 pub mod concurrency;
 pub mod concurrent;

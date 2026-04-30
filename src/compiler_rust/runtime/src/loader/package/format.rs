@@ -2,6 +2,10 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
+use simple_simd::SimdTier;
+
+use super::simd_metadata::VariantMetadata;
+
 /// Magic number for SPK format: "SPK1"
 pub const SPK_MAGIC: [u8; 4] = *b"SPK1";
 
@@ -159,6 +163,10 @@ pub struct ManifestSection {
     pub manifest_toml: String,
     /// simple.lock content (optional)
     pub lock_toml: Option<String>,
+    /// Optional target triple for this stdlib/package variant.
+    pub target_triple: Option<String>,
+    /// Canonical SIMD tier for this stdlib/package variant.
+    pub simd_tier: SimdTier,
 }
 
 impl ManifestSection {
@@ -179,6 +187,15 @@ impl ManifestSection {
         } else {
             data.extend_from_slice(&0u32.to_le_bytes());
         }
+
+        let target_triple = self.target_triple.as_deref().unwrap_or("");
+        let target_bytes = target_triple.as_bytes();
+        data.extend_from_slice(&(target_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(target_bytes);
+
+        let tier_bytes = self.simd_tier.as_str().as_bytes();
+        data.extend_from_slice(&(tier_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(tier_bytes);
 
         data
     }
@@ -207,6 +224,8 @@ impl ManifestSection {
             return Some(Self {
                 manifest_toml,
                 lock_toml: None,
+                target_triple: None,
+                simd_tier: SimdTier::Scalar,
             });
         }
 
@@ -218,12 +237,50 @@ impl ManifestSection {
         } else {
             None
         };
+        if lock_len > 0 {
+            offset += lock_len;
+        }
+
+        let target_triple = read_optional_string(bytes, &mut offset)?;
+        let simd_tier = read_required_string(bytes, &mut offset)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(SimdTier::Scalar);
 
         Some(Self {
             manifest_toml,
             lock_toml,
+            target_triple,
+            simd_tier,
         })
     }
+
+    pub fn variant_metadata(&self) -> VariantMetadata {
+        VariantMetadata {
+            target_triple: self.target_triple.clone(),
+            simd_tier: self.simd_tier,
+        }
+    }
+}
+
+fn read_optional_string(bytes: &[u8], offset: &mut usize) -> Option<Option<String>> {
+    if *offset + 4 > bytes.len() {
+        return Some(None);
+    }
+    let len = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().ok()?) as usize;
+    *offset += 4;
+    if len == 0 {
+        return Some(None);
+    }
+    if *offset + len > bytes.len() {
+        return None;
+    }
+    let value = String::from_utf8(bytes[*offset..*offset + len].to_vec()).ok()?;
+    *offset += len;
+    Some(Some(value))
+}
+
+fn read_required_string(bytes: &[u8], offset: &mut usize) -> Option<String> {
+    read_optional_string(bytes, offset)?.or_else(|| Some("scalar".to_string()))
 }
 
 /// Resource entry in the resources section.
@@ -300,6 +357,8 @@ mod tests {
         let section = ManifestSection {
             manifest_toml: "[package]\nname = \"test\"".to_string(),
             lock_toml: Some("[[package]]\nname = \"dep\"".to_string()),
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            simd_tier: SimdTier::X86_64Avx2,
         };
 
         let bytes = section.to_bytes();
@@ -307,6 +366,8 @@ mod tests {
 
         assert_eq!(restored.manifest_toml, section.manifest_toml);
         assert_eq!(restored.lock_toml, section.lock_toml);
+        assert_eq!(restored.target_triple, section.target_triple);
+        assert_eq!(restored.simd_tier, section.simd_tier);
     }
 
     #[test]
@@ -314,6 +375,8 @@ mod tests {
         let section = ManifestSection {
             manifest_toml: "[package]\nname = \"test\"".to_string(),
             lock_toml: None,
+            target_triple: None,
+            simd_tier: SimdTier::Scalar,
         };
 
         let bytes = section.to_bytes();
@@ -321,6 +384,44 @@ mod tests {
 
         assert_eq!(restored.manifest_toml, section.manifest_toml);
         assert!(restored.lock_toml.is_none());
+        assert_eq!(restored.simd_tier, SimdTier::Scalar);
+    }
+
+    #[test]
+    fn test_variant_metadata_validation() {
+        let section = ManifestSection {
+            manifest_toml: String::new(),
+            lock_toml: None,
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            simd_tier: SimdTier::X86_64Avx2,
+        };
+
+        let metadata = section.variant_metadata();
+        assert!(metadata
+            .validate_host(Some("x86_64-unknown-linux-gnu"), SimdTier::X86_64Avx2)
+            .is_ok());
+        assert!(metadata
+            .validate_host(Some("aarch64-unknown-linux-gnu"), SimdTier::X86_64Avx2)
+            .is_err());
+        assert!(metadata
+            .validate_host(Some("x86_64-unknown-linux-gnu"), SimdTier::Scalar)
+            .is_err());
+    }
+
+    #[test]
+    fn test_variant_metadata_validation_allows_unpinned_variants() {
+        let section = ManifestSection {
+            manifest_toml: String::new(),
+            lock_toml: None,
+            target_triple: None,
+            simd_tier: SimdTier::Scalar,
+        };
+
+        let metadata = section.variant_metadata();
+        assert!(metadata
+            .validate_host(Some("aarch64-unknown-linux-gnu"), SimdTier::X86_64Avx2)
+            .is_ok());
+        assert!(metadata.validate_host(None, SimdTier::Scalar).is_ok());
     }
 
     #[test]

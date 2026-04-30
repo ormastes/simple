@@ -192,3 +192,28 @@ with each step independently shippable and measurable.
 | Package FFI (sha2 user) | `src/compiler_rust/runtime/src/value/ffi/package.rs` |
 | Linker wrapper (self-hosted) | `src/compiler/70.backend/linker/linker_wrapper.spl` |
 | Rust seed linker | `src/compiler_rust/compiler/src/linker/native.rs` (line 684) |
+
+---
+
+## 7. Additional April 2026 Evidence
+
+During the cross-target native link-policy follow-up, a plain native compile on
+x86-64 Linux still produced an approximately **460 MB** unstripped executable.
+This was observed while validating that removing unconditional `-llzma` did not
+break standard native binaries.
+
+New finding:
+
+- `liblzma` was not only a linker-default policy issue. The runtime crate also
+  exposed `compress` unconditionally, which pulled `xz2` and `lzma-sys` into
+  the default runtime closure for ordinary native binaries.
+- The immediate fix is to keep compression support behind an explicit runtime
+  feature lane so normal native executables do not inherit `liblzma`.
+- The larger binary-size problem remains open and is consistent with the
+  dependency-anchoring analysis in Sections 1-5 above.
+
+Follow-up expectation:
+
+- keep `packaging-compression` optional in `src/compiler_rust/runtime/Cargo.toml`
+- verify the default runtime archive no longer references `lzma_*`
+- continue with Option B feature-gating for other heavy optional subsystems

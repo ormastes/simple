@@ -29,7 +29,10 @@ macro_rules! impl_linker_builder_methods {
     (options) => {
         /// Add a library to link against.
         pub fn library(mut self, name: impl Into<String>) -> Self {
-            self.options.libraries.push(name.into());
+            let name = name.into();
+            if !self.options.libraries.contains(&name) {
+                self.options.libraries.push(name);
+            }
             self
         }
 
@@ -39,13 +42,20 @@ macro_rules! impl_linker_builder_methods {
             I: IntoIterator<Item = S>,
             S: Into<String>,
         {
-            self.options.libraries.extend(names.into_iter().map(|s| s.into()));
+            for name in names.into_iter().map(|s| s.into()) {
+                if !self.options.libraries.contains(&name) {
+                    self.options.libraries.push(name);
+                }
+            }
             self
         }
 
         /// Add a library search path.
         pub fn library_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-            self.options.library_paths.push(path.into());
+            let path = path.into();
+            if !self.options.library_paths.contains(&path) {
+                self.options.library_paths.push(path);
+            }
             self
         }
 
@@ -55,9 +65,11 @@ macro_rules! impl_linker_builder_methods {
             I: IntoIterator<Item = P>,
             P: Into<std::path::PathBuf>,
         {
-            self.options
-                .library_paths
-                .extend(paths.into_iter().map(|p| p.into()));
+            for path in paths.into_iter().map(|p| p.into()) {
+                if !self.options.library_paths.contains(&path) {
+                    self.options.library_paths.push(path);
+                }
+            }
             self
         }
     };
@@ -66,7 +78,10 @@ macro_rules! impl_linker_builder_methods {
     (direct) => {
         /// Add a library to link against.
         pub fn library(mut self, name: impl Into<String>) -> Self {
-            self.libraries.push(name.into());
+            let name = name.into();
+            if !self.libraries.contains(&name) {
+                self.libraries.push(name);
+            }
             self
         }
 
@@ -76,13 +91,20 @@ macro_rules! impl_linker_builder_methods {
             I: IntoIterator<Item = S>,
             S: Into<String>,
         {
-            self.libraries.extend(names.into_iter().map(|s| s.into()));
+            for name in names.into_iter().map(|s| s.into()) {
+                if !self.libraries.contains(&name) {
+                    self.libraries.push(name);
+                }
+            }
             self
         }
 
         /// Add a library search path.
         pub fn library_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-            self.library_paths.push(path.into());
+            let path = path.into();
+            if !self.library_paths.contains(&path) {
+                self.library_paths.push(path);
+            }
             self
         }
 
@@ -92,7 +114,11 @@ macro_rules! impl_linker_builder_methods {
             I: IntoIterator<Item = P>,
             P: Into<std::path::PathBuf>,
         {
-            self.library_paths.extend(paths.into_iter().map(|p| p.into()));
+            for path in paths.into_iter().map(|p| p.into()) {
+                if !self.library_paths.contains(&path) {
+                    self.library_paths.push(path);
+                }
+            }
             self
         }
     };
@@ -291,5 +317,40 @@ mod tests {
         let opts = TestOptions::new().library("c").library_path("/usr/lib");
         assert_eq!(opts.libraries, vec!["c"]);
         assert_eq!(opts.library_paths, vec![std::path::PathBuf::from("/usr/lib")]);
+    }
+
+    #[test]
+    fn test_macro_deduplicates_libraries_and_paths() {
+        struct TestOptions {
+            libraries: Vec<String>,
+            library_paths: Vec<std::path::PathBuf>,
+        }
+
+        impl TestOptions {
+            fn new() -> Self {
+                Self {
+                    libraries: Vec::new(),
+                    library_paths: Vec::new(),
+                }
+            }
+
+            impl_linker_builder_methods!(direct);
+        }
+
+        let opts = TestOptions::new()
+            .library("c")
+            .library("c")
+            .libraries(["m", "m"])
+            .library_path("/usr/lib")
+            .library_path("/usr/lib")
+            .library_paths(["/usr/local/lib", "/usr/local/lib"]);
+        assert_eq!(opts.libraries, vec!["c", "m"]);
+        assert_eq!(
+            opts.library_paths,
+            vec![
+                std::path::PathBuf::from("/usr/lib"),
+                std::path::PathBuf::from("/usr/local/lib"),
+            ]
+        );
     }
 }

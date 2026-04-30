@@ -465,18 +465,12 @@ Numbered directories (`NN.name/`) strip the numeric prefix during module resolut
 # Directory structure:
 #   src/compiler/99.loader/loader/resource_lifecycle.spl
 #
-# Correct import (includes inner "loader" subdirectory):
-use compiler.loader.loader.resource_lifecycle.*
-#
-# Wrong import (skips inner subdirectory — file not found):
-use compiler.loader.resource_lifecycle.*
+# Preferred curated package import:
+use compiler.loader.runtime.{ResourceLifecycleManager, lifecycle_new}
 ```
 
-Resolution trace for `compiler.loader.loader.resource_lifecycle`:
-1. `compiler` → `src/compiler/` (direct match)
-2. `loader` → `src/compiler/99.loader/` (numbered dir match, strips `99.`)
-3. `loader` → `src/compiler/99.loader/loader/` (direct match — inner subdir)
-4. `resource_lifecycle` → `src/compiler/99.loader/loader/resource_lifecycle.spl`
+`compiler.loader.runtime` is the preferred public package-level facade for the
+curated runtime loader surface.
 
 Similarly for interpreter modules:
 ```

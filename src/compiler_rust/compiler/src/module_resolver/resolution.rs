@@ -15,6 +15,7 @@ use simple_parser::Parser;
 use std::path::{Path, PathBuf};
 
 use crate::error::{codes, CompileError, ErrorContext};
+use crate::stdlib_variant::stdlib_root_candidates;
 
 /// Find a numbered directory matching the pattern `NN.name` or `NNN.name`.
 ///
@@ -193,8 +194,12 @@ impl ModuleResolver {
                                         }
                                     }
                                 }
-                                if let Ok(resolved) = resolve_stdlib_from_root(self, &root, stdlib_segments, path) {
-                                    return Ok(resolved);
+                                for candidate in stdlib_root_candidates(&root) {
+                                    if let Ok(resolved) =
+                                        resolve_stdlib_from_root(self, &candidate, stdlib_segments, path)
+                                    {
+                                        return Ok(resolved);
+                                    }
                                 }
                             }
                         }

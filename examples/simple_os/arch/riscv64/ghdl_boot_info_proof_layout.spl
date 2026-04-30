@@ -1,0 +1,66 @@
+use os.kernel.boot.mmio.{mmio_write8, mmio_write64}
+use os.kernel.boot.ports.{BootMemoryRegion, MemoryRegionKind}
+
+val GHDL_BOOT_INFO_PROOF_BASE: u64 = 0x80600000
+val GHDL_BOOT_INFO_PROOF_STRIDE: u64 = 8
+
+val GHDL_BOOT_INFO_MAGIC: u64 = 0x42494F50524F4F46
+val GHDL_BOOT_INFO_DONE: u64 = 0x0000000000000001
+
+val SLOT_MAGIC: u64 = 0
+val SLOT_DONE: u64 = 1
+val SLOT_HART_ID: u64 = 2
+val SLOT_DTB_ADDR: u64 = 3
+val SLOT_DTB_VALID: u64 = 4
+val SLOT_RAM_BASE: u64 = 5
+val SLOT_RAM_SIZE: u64 = 6
+val SLOT_SERIAL_BASE: u64 = 7
+val SLOT_SERIAL_IS_MMIO: u64 = 8
+val SLOT_MEMORY_MAP_LEN: u64 = 9
+val SLOT_REGION0_BASE: u64 = 10
+val SLOT_REGION0_SIZE: u64 = 11
+val SLOT_REGION0_KIND: u64 = 12
+val SLOT_REGION1_BASE: u64 = 13
+val SLOT_REGION1_SIZE: u64 = 14
+val SLOT_REGION1_KIND: u64 = 15
+val SLOT_REGION2_BASE: u64 = 16
+val SLOT_REGION2_SIZE: u64 = 17
+val SLOT_REGION2_KIND: u64 = 18
+
+fn _slot_addr(slot: u64) -> u64:
+    GHDL_BOOT_INFO_PROOF_BASE + slot * GHDL_BOOT_INFO_PROOF_STRIDE
+
+fn proof_store_u64(slot: u64, value: u64):
+    mmio_write64(_slot_addr(slot), value)
+
+fn proof_store_bool(slot: u64, value: bool):
+    proof_store_u64(slot: slot, value: if value: 1 else: 0)
+
+fn proof_store_region(base_slot: u64, region: BootMemoryRegion):
+    proof_store_u64(slot: base_slot + 0, value: region.base.addr)
+    proof_store_u64(slot: base_slot + 1, value: region.size)
+    proof_store_u64(slot: base_slot + 2, value: memory_region_kind_code(region.kind))
+
+fn proof_emit_marker():
+    mmio_write8(0x10000000, 0x42)
+    mmio_write8(0x10000000, 0x49)
+    mmio_write8(0x10000000, 0x0D)
+    mmio_write8(0x10000000, 0x0A)
+
+fn proof_init():
+    proof_store_u64(slot: SLOT_MAGIC, value: GHDL_BOOT_INFO_MAGIC)
+    proof_store_u64(slot: SLOT_DONE, value: 0)
+
+fn proof_finish():
+    proof_store_u64(slot: SLOT_DONE, value: GHDL_BOOT_INFO_DONE)
+
+fn memory_region_kind_code(kind: MemoryRegionKind) -> u64:
+    match kind:
+        MemoryRegionKind.Usable: 1
+        MemoryRegionKind.Reserved: 2
+        MemoryRegionKind.AcpiReclaimable: 3
+        MemoryRegionKind.AcpiNvs: 4
+        MemoryRegionKind.BadMemory: 5
+        MemoryRegionKind.BootloaderReclaimable: 6
+        MemoryRegionKind.Framebuffer: 7
+        MemoryRegionKind.Kernel: 8

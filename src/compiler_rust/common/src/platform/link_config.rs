@@ -258,10 +258,10 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
             "dl".into(),
             "m".into(),
             "gcc_s".into(),
-            "lzma".into(),
             "simple_runtime".into(),
+            "simple_native_all".into(),
         ],
-        TargetOS::MacOS => vec!["System".into(), "simple_runtime".into()],
+        TargetOS::MacOS => vec!["System".into(), "simple_runtime".into(), "simple_native_all".into()],
         TargetOS::Windows => vec![
             "c".into(),
             "msvcrt".into(),
@@ -269,6 +269,7 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
             "ws2_32".into(),
             "advapi32".into(),
             "simple_runtime".into(),
+            "simple_native_all".into(),
         ],
         TargetOS::FreeBSD => vec![
             "c".into(),
@@ -276,6 +277,7 @@ pub fn default_libraries_for_target(target: &Target) -> Vec<String> {
             "m".into(),
             "execinfo".into(),
             "simple_runtime".into(),
+            "simple_native_all".into(),
         ],
         _ => vec!["c".into()],
     }

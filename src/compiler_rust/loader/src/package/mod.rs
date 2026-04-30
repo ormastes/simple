@@ -37,8 +37,10 @@
 
 mod format;
 mod reader;
+mod simd_metadata;
 mod writer;
 
 pub use format::*;
 pub use reader::*;
+pub use simd_metadata::*;
 pub use writer::*;

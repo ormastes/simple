@@ -21,15 +21,23 @@ typedef intptr_t RuntimeValue;
 #define VIRTIO_STATUS_FEATURES_OK 8U
 
 #define TAG_MASK    ((uintptr_t)0x7)
+#define TAG_INT     ((uintptr_t)0x0)
 #define TAG_HEAP    ((uintptr_t)0x1)
 #define TAG_SPECIAL ((uintptr_t)0x3)
 #define NIL_VALUE   ((RuntimeValue)TAG_SPECIAL)
+#define TRUE_VALUE  ENCODE_INT(1)
+#define FALSE_VALUE ENCODE_INT(0)
 
+#define ENCODE_INT(v) ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
+#define DECODE_INT(v) ((int64_t)((uint64_t)(v) >> 3))
 #define ENCODE_PTR(p) ((RuntimeValue)((uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v) ((void *)((uintptr_t)(v) & ~TAG_MASK))
+#define IS_INT(v)     (((uintptr_t)(v) & TAG_MASK) == TAG_INT)
 #define IS_HEAP(v)    (((uintptr_t)(v) & TAG_MASK) == TAG_HEAP)
 
 #define HEAP_STRING 1U
+#define HEAP_ARRAY  2U
+#define HEAP_ENUM   7U
 
 typedef struct {
     uint32_t type;
@@ -41,6 +49,20 @@ typedef struct {
     uint32_t len;
     char data[];
 } RuntimeString;
+
+typedef struct {
+    HeapHeader hdr;
+    uint64_t len;
+    uint64_t cap;
+    RuntimeValue *items;
+} RuntimeArray;
+
+typedef struct {
+    HeapHeader hdr;
+    uint32_t enum_id;
+    uint32_t discriminant;
+    RuntimeValue payload;
+} RuntimeEnum;
 
 static unsigned char g_heap[64 * 1024] __attribute__((aligned(16)));
 static uintptr_t g_heap_off = 0;
@@ -67,6 +89,60 @@ static void *rv_alloc(size_t size)
     return p;
 }
 
+static RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
+{
+    return (RuntimeValue *)((unsigned char *)a + sizeof(RuntimeArray));
+}
+
+static RuntimeValue *runtime_array_items(RuntimeArray *a)
+{
+    if (!a) return 0;
+    return a->items ? a->items : runtime_array_inline_items(a);
+}
+
+static uint64_t simpleos_raw_or_encoded_int(RuntimeValue v)
+{
+    return IS_INT(v) ? (uint64_t)DECODE_INT(v) : (uint64_t)v;
+}
+
+void *malloc(size_t size)
+{
+    return rv_alloc(size);
+}
+
+void free(void *ptr)
+{
+    (void)ptr;
+}
+
+void *calloc(size_t n, size_t size)
+{
+    size_t total = n * size;
+    void *ptr = rv_alloc(total);
+    if (ptr) {
+        unsigned char *bytes = (unsigned char *)ptr;
+        for (size_t i = 0; i < total; i++) bytes[i] = 0;
+    }
+    return ptr;
+}
+
+void *realloc(void *ptr, size_t size)
+{
+    void *next = rv_alloc(size);
+    if (!next || !ptr) return next;
+    unsigned char *dst = (unsigned char *)next;
+    const unsigned char *src = (const unsigned char *)ptr;
+    for (size_t i = 0; i < size; i++) dst[i] = src[i];
+    return next;
+}
+
+RuntimeValue rt_alloc(RuntimeValue sz)
+{
+    size_t bytes = (size_t)sz;
+    void *ptr = calloc(1, bytes);
+    return ptr ? (RuntimeValue)(uintptr_t)ptr : 0;
+}
+
 static void uart_putc(char c)
 {
     volatile uint8_t *uart = (volatile uint8_t *)UART_BASE;
@@ -87,7 +163,7 @@ static void uart_puts(const char *s)
 RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
 {
     uintptr_t len = (uintptr_t)len_val;
-    if (len == 0 || len > 4096U) return NIL_VALUE;
+    if (len > 4096U) return NIL_VALUE;
     RuntimeString *s = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + len + 1U);
     if (!s) return NIL_VALUE;
     s->hdr.type = HEAP_STRING;
@@ -99,6 +175,253 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     }
     s->data[len] = 0;
     return ENCODE_PTR(s);
+}
+
+static RuntimeValue rt_string_from_cstr(const char *cstr)
+{
+    uintptr_t len = 0;
+    while (cstr && cstr[len] != 0) len++;
+    return rt_string_new((RuntimeValue)(uintptr_t)cstr, (RuntimeValue)len);
+}
+
+RuntimeValue rt_string_concat(RuntimeValue a, RuntimeValue b)
+{
+    RuntimeString *sa = IS_HEAP(a) ? (RuntimeString *)DECODE_PTR(a) : 0;
+    RuntimeString *sb = IS_HEAP(b) ? (RuntimeString *)DECODE_PTR(b) : 0;
+    uintptr_t la = sa ? sa->len : 0;
+    uintptr_t lb = sb ? sb->len : 0;
+    RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + la + lb + 1U);
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + la + lb + 1U);
+    out->len = (uint32_t)(la + lb);
+    for (uintptr_t i = 0; i < la; i++) out->data[i] = sa->data[i];
+    for (uintptr_t i = 0; i < lb; i++) out->data[la + i] = sb->data[i];
+    out->data[la + lb] = 0;
+    return ENCODE_PTR(out);
+}
+
+RuntimeValue rt_value_to_string(RuntimeValue value)
+{
+    if (IS_HEAP(value)) {
+        HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+        if (hdr && hdr->type == HEAP_STRING) return value;
+        if (hdr && hdr->type == HEAP_ARRAY) return rt_string_from_cstr("<array>");
+        return rt_string_from_cstr("<object>");
+    }
+    if (value == NIL_VALUE) return rt_string_from_cstr("nil");
+
+    int64_t n = IS_INT(value) ? DECODE_INT(value) : (int64_t)value;
+    char buf[32];
+    uintptr_t pos = 0;
+    uint64_t raw = (uint64_t)(n < 0 ? -n : n);
+    if (n == 0) buf[pos++] = '0';
+    while (raw > 0 && pos < sizeof(buf)) {
+        buf[pos++] = (char)('0' + (raw % 10U));
+        raw /= 10U;
+    }
+    if (n < 0) buf[pos++] = '-';
+    RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + pos + 1U);
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + pos + 1U);
+    out->len = (uint32_t)pos;
+    for (uintptr_t i = 0; i < pos; i++) out->data[i] = buf[pos - 1U - i];
+    out->data[pos] = 0;
+    return ENCODE_PTR(out);
+}
+
+static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue value)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (a->len >= a->cap) return arr;
+    runtime_array_items(a)[a->len++] = value;
+    return arr;
+}
+
+RuntimeValue rt_array_new(RuntimeValue cap_val)
+{
+    uint64_t cap = simpleos_raw_or_encoded_int(cap_val);
+    if (cap == 0) cap = 16;
+    if (cap < 16) cap = 16;
+    RuntimeArray *a = (RuntimeArray *)rv_alloc(sizeof(RuntimeArray) + cap * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + cap * sizeof(RuntimeValue));
+    a->len = 0;
+    a->cap = cap;
+    a->items = runtime_array_inline_items(a);
+    for (uint64_t i = 0; i < cap; i++) a->items[i] = NIL_VALUE;
+    return ENCODE_PTR(a);
+}
+
+int8_t rt_array_push(RuntimeValue arr, RuntimeValue value)
+{
+    return rt_array_push_handle(arr, value) != NIL_VALUE;
+}
+
+RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    int64_t i = (int64_t)idx;
+    if (!a || a->hdr.type != HEAP_ARRAY || i < 0 || (uint64_t)i >= a->len) return NIL_VALUE;
+    return runtime_array_items(a)[i];
+}
+
+int8_t rt_array_set(RuntimeValue arr, RuntimeValue idx, RuntimeValue value)
+{
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    int64_t i = (int64_t)idx;
+    if (!a || a->hdr.type != HEAP_ARRAY || i < 0 || (uint64_t)i >= a->len) return 0;
+    runtime_array_items(a)[i] = value;
+    return 1;
+}
+
+RuntimeValue rt_array_len(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    return (!a || a->hdr.type != HEAP_ARRAY) ? 0 : (RuntimeValue)a->len;
+}
+
+RuntimeValue rt_tuple_new(RuntimeValue len_rv)
+{
+    uint64_t len = simpleos_raw_or_encoded_int(len_rv);
+    RuntimeArray *a = (RuntimeArray *)rv_alloc(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + len * sizeof(RuntimeValue));
+    a->len = len;
+    a->cap = len;
+    a->items = runtime_array_inline_items(a);
+    for (uint64_t i = 0; i < len; i++) a->items[i] = NIL_VALUE;
+    return ENCODE_PTR(a);
+}
+
+RuntimeValue rt_tuple_get(RuntimeValue tuple, RuntimeValue index)
+{
+    return rt_array_get(tuple, index);
+}
+
+RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue value)
+{
+    return rt_array_set(tuple, index, value);
+}
+
+uint8_t rt_mmio_read_u8(uint64_t addr)
+{
+    return *(volatile uint8_t *)(uintptr_t)addr;
+}
+
+uint16_t rt_mmio_read_u16(uint64_t addr)
+{
+    return *(volatile uint16_t *)(uintptr_t)addr;
+}
+
+uint32_t rt_mmio_read_u32(uint64_t addr)
+{
+    return *(volatile uint32_t *)(uintptr_t)addr;
+}
+
+uint64_t rt_mmio_read_u64(uint64_t addr)
+{
+    return *(volatile uint64_t *)(uintptr_t)addr;
+}
+
+void rt_mmio_write_u8(uint64_t addr, uint8_t value)
+{
+    *(volatile uint8_t *)(uintptr_t)addr = value;
+}
+
+void rt_mmio_write_u16(uint64_t addr, uint16_t value)
+{
+    *(volatile uint16_t *)(uintptr_t)addr = value;
+}
+
+void rt_mmio_write_u32(uint64_t addr, uint32_t value)
+{
+    *(volatile uint32_t *)(uintptr_t)addr = value;
+}
+
+void rt_mmio_write_u64(uint64_t addr, uint64_t value)
+{
+    *(volatile uint64_t *)(uintptr_t)addr = value;
+}
+
+RuntimeValue rt_len(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return 0;
+    HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+    if (!hdr) return 0;
+    if (hdr->type == HEAP_STRING) return (RuntimeValue)((RuntimeString *)hdr)->len;
+    if (hdr->type == HEAP_ARRAY) return (RuntimeValue)((RuntimeArray *)hdr)->len;
+    return 0;
+}
+
+RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
+{
+    if (!IS_INT(index)) return NIL_VALUE;
+    if (!IS_HEAP(value)) return NIL_VALUE;
+    HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+    if (!hdr) return NIL_VALUE;
+    if (hdr->type == HEAP_ARRAY) return rt_array_get(value, (RuntimeValue)DECODE_INT(index));
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_index_set(RuntimeValue value, RuntimeValue index, RuntimeValue item)
+{
+    if (!IS_INT(index)) return 0;
+    return rt_array_set(value, (RuntimeValue)DECODE_INT(index), item);
+}
+
+RuntimeValue rt_enum_new(RuntimeValue enum_id_rv, RuntimeValue disc_rv, RuntimeValue payload)
+{
+    RuntimeEnum *e = (RuntimeEnum *)rv_alloc(sizeof(RuntimeEnum));
+    if (!e) return NIL_VALUE;
+    e->hdr.type = HEAP_ENUM;
+    e->hdr.size = (uint32_t)sizeof(RuntimeEnum);
+    e->enum_id = (uint32_t)(int32_t)enum_id_rv;
+    e->discriminant = (uint32_t)(int32_t)disc_rv;
+    e->payload = payload;
+    return ENCODE_PTR(e);
+}
+
+RuntimeValue rt_enum_payload(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return value;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    return (!e || e->hdr.type != HEAP_ENUM) ? value : e->payload;
+}
+
+RuntimeValue rt_enum_check_discriminant(RuntimeValue value, RuntimeValue expected)
+{
+    if (!IS_HEAP(value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return 0;
+    return e->discriminant == (uint32_t)(int32_t)expected ? 1 : 0;
+}
+
+RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
+{
+    if (!IS_HEAP(str)) return NIL_VALUE;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    int64_t i = (int64_t)idx;
+    if (!s || s->hdr.type != HEAP_STRING || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
+    return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
+}
+
+RuntimeValue str_byte_at_impl(RuntimeValue str, RuntimeValue idx) __asm__("str.byte_at");
+RuntimeValue str_byte_at_impl(RuntimeValue str, RuntimeValue idx)
+{
+    if (!IS_HEAP(str)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    int64_t i = (int64_t)idx;
+    if (!s || s->hdr.type != HEAP_STRING || i < 0 || (uint32_t)i >= s->len) return 0;
+    return (RuntimeValue)(uint8_t)s->data[i];
 }
 
 RuntimeValue serial_println(RuntimeValue value)

@@ -35,11 +35,15 @@ impl NativeBinaryBuilder {
 
         builder = builder.object(obj_path);
 
-        let runtime_dir = NativeBinaryOptions::find_runtime_library_path().or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.join("target/debug"))
-                .filter(|p| p.join("libsimple_runtime.a").exists())
+        let runtime_dir = NativeBinaryOptions::find_runtime_library_path_for_target(&self.options.target).or_else(|| {
+            if self.options.target == simple_common::target::Target::host() {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.join("target/debug"))
+                    .filter(|p| p.join("libsimple_runtime.a").exists())
+            } else {
+                None
+            }
         });
 
         if let Some(runtime_dir) = &runtime_dir {

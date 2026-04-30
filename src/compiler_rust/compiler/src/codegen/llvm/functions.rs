@@ -242,6 +242,9 @@ impl LlvmBackend {
                 crate::mir::Terminator::Branch { cond, .. } => {
                     all_vregs.insert(*cond);
                 }
+                crate::mir::Terminator::Switch { discriminant, .. } => {
+                    all_vregs.insert(*discriminant);
+                }
                 _ => {}
             }
         }
@@ -357,6 +360,11 @@ impl LlvmBackend {
                             live_in.insert(*cond);
                         }
                     }
+                    crate::mir::Terminator::Switch { discriminant, .. } => {
+                        if !seen_defs.contains(discriminant) {
+                            live_in.insert(*discriminant);
+                        }
+                    }
                     _ => {}
                 }
 
@@ -449,6 +457,15 @@ impl LlvmBackend {
                         if let Some(&alloca) = vreg_allocas.get(cond) {
                             if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", cond.0)) {
                                 vreg_map.insert(*cond, val);
+                            }
+                        }
+                    }
+                }
+                crate::mir::Terminator::Switch { discriminant, .. } => {
+                    if !vreg_map.contains_key(discriminant) {
+                        if let Some(&alloca) = vreg_allocas.get(discriminant) {
+                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", discriminant.0)) {
+                                vreg_map.insert(*discriminant, val);
                             }
                         }
                     }

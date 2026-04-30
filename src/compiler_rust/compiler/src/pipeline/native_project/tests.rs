@@ -1,10 +1,28 @@
 //! Tests for native project builder.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use crate::codegen::common_backend::module_prefix_from_path;
 use crate::incremental::SourceInfo;
 use super::*;
+
+fn simd_tier_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
+    let _guard = simd_tier_env_lock().lock().unwrap();
+    let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+    std::env::set_var("SIMPLE_SIMD_TIER", value);
+    let result = f();
+    match previous.as_deref() {
+        Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+        None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+    }
+    result
+}
 
 #[test]
 fn debug_os_entry_closure() {
@@ -102,6 +120,18 @@ fn test_content_hash_matches_source_info() {
     info.update_from_content(content);
 
     assert_eq!(hash, info.content_hash);
+}
+
+#[test]
+fn test_object_cache_key_separates_simd_tiers() {
+    let scalar = with_simd_tier_env("scalar", || {
+        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+    });
+    let avx2 = with_simd_tier_env("x86_64_avx2", || {
+        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+    });
+
+    assert_ne!(scalar, avx2);
 }
 
 #[test]

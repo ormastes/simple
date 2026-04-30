@@ -36,6 +36,7 @@ architecture sim of tb_generated_rv64_sv39 is
     signal irq_timer    : std_logic := '0';
     signal irq_external : std_logic := '0';
     signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');
+    signal debug_last_load_value : std_logic_vector(63 downto 0) := (others => '0');
     signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');
     signal trap       : std_logic := '0';
     signal halt       : std_logic := '0';
@@ -114,6 +115,7 @@ begin
             mmu_dmem_l1_pte => MMU_L1_PTE,
             mmu_dmem_l0_pte => MMU_L0_PTE,
             debug_priv_mode => debug_priv_mode,
+            debug_last_load_value => debug_last_load_value,
             debug_pc   => debug_pc,
             trap       => trap,
             halt       => halt
@@ -191,10 +193,15 @@ begin
         report "LAST_WE_ADDR_HIGH32: " & integer'image(last_we_addr_high32);
         report "LAST_RE_ADDR_LOW16: " & integer'image(last_re_addr_low16);
         report "LAST_RE_ADDR_HIGH32: " & integer'image(last_re_addr_high32);
+        report "DEBUG_LAST_LOAD_LOW32: " & integer'image(word32_to_report_int(debug_last_load_value(31 downto 0)));
         report "LAST_WRITE_WORD_IDX: " & integer'image(last_write_word_idx);
         report "LAST_WRITE_LOW32: " & integer'image(word32_to_report_int(last_write_low32));
         report "LAST_WRITE_HIGH32: " & integer'image(word32_to_report_int(last_write_high32));
-        if halt = '1' and pass_value = 42 and fail_value = 42 then
+        if halt = '1'
+            and pass_value = 42
+            and safe_index(debug_priv_mode) = 1
+            and last_re_addr_low16 = 16#100#
+            and last_re_addr_high32 = 0 then
             report "GENERATED_RV64_SV39: PASS";
         else
             report "GENERATED_RV64_SV39: FAIL";

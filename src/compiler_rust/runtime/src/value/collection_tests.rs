@@ -45,8 +45,11 @@ use super::{
     rt_string_starts_with,
     rt_string_ends_with,
     rt_string_eq,
+    rt_string_find,
+    rt_string_rfind,
     rt_string_char_at,
     rt_string_split,
+    rt_text_find,
     rt_string_replace,
     rt_string_trim,
     rt_string_join,
@@ -1021,6 +1024,40 @@ fn test_string_split_empty() {
 
     let result = rt_string_split(s, delim);
     assert_eq!(rt_array_len(result), 1);
+}
+
+#[test]
+fn test_text_find_respects_start_and_empty_needle() {
+    let haystack = rt_string_new("prefix-needle-needle".as_ptr(), "prefix-needle-needle".len() as u64);
+    let needle = rt_string_new("needle".as_ptr(), 6);
+    assert_eq!(rt_text_find(haystack, needle, 0), 7);
+    assert_eq!(rt_text_find(haystack, needle, 8), 14);
+    assert_eq!(rt_text_find(haystack, needle, 30), -1);
+    let empty = rt_string_new("".as_ptr(), 0);
+    assert_eq!(rt_text_find(haystack, empty, 5), 5);
+}
+
+#[test]
+fn test_string_find_and_rfind_match_byte_indices() {
+    let haystack = rt_string_new("A€😀A€".as_ptr(), "A€😀A€".len() as u64);
+    let needle = rt_string_new("A€".as_ptr(), "A€".len() as u64);
+    assert_eq!(rt_string_find(haystack, needle), 0);
+    assert_eq!(rt_string_rfind(haystack, needle), 8);
+    let missing = rt_string_new("zzz".as_ptr(), 3);
+    assert_eq!(rt_string_find(haystack, missing), -1);
+    assert_eq!(rt_string_rfind(haystack, missing), -1);
+}
+
+#[test]
+fn test_string_split_empty_delimiter_uses_utf8_boundaries() {
+    let s = rt_string_new("A€😀".as_ptr(), "A€😀".len() as u64);
+    let delim = rt_string_new("".as_ptr(), 0);
+    let result = rt_string_split(s, delim);
+    assert_eq!(rt_array_len(result), 4);
+    assert_eq!(rt_string_len(rt_array_get(result, 0)), 1);
+    assert_eq!(rt_string_len(rt_array_get(result, 1)), "€".len() as i64);
+    assert_eq!(rt_string_len(rt_array_get(result, 2)), "😀".len() as i64);
+    assert_eq!(rt_string_len(rt_array_get(result, 3)), 0);
 }
 
 #[test]
