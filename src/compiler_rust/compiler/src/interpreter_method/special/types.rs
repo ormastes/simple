@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::interpreter_helpers::{
     eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then,
-    eval_result_map, eval_result_map_err, eval_result_or_else,
+    eval_result_map, eval_result_map_err, eval_result_or_else, OptionResultEvalContext,
 };
 use crate::interpreter::{
     eval_arg, evaluate_expr, exec_block_fn, Control, Enums, ImplMethods, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
@@ -342,52 +342,20 @@ pub fn handle_option_methods(
             return Ok(Some(Value::err(error)));
         }
         "map" => {
-            return Ok(Some(eval_option_map(
-                variant,
-                payload,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?));
+            let mut ctx = OptionResultEvalContext::new(env, functions, classes, enums, impl_methods);
+            return Ok(Some(eval_option_map(variant, payload, args, &mut ctx)?));
         }
         "and_then" => {
-            return Ok(Some(eval_option_and_then(
-                variant,
-                payload,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?));
+            let mut ctx = OptionResultEvalContext::new(env, functions, classes, enums, impl_methods);
+            return Ok(Some(eval_option_and_then(variant, payload, args, &mut ctx)?));
         }
         "or_else" => {
-            return Ok(Some(eval_option_or_else(
-                variant,
-                payload,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?));
+            let mut ctx = OptionResultEvalContext::new(env, functions, classes, enums, impl_methods);
+            return Ok(Some(eval_option_or_else(variant, payload, args, &mut ctx)?));
         }
         "filter" => {
-            return Ok(Some(eval_option_filter(
-                variant,
-                payload,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?));
+            let mut ctx = OptionResultEvalContext::new(env, functions, classes, enums, impl_methods);
+            return Ok(Some(eval_option_filter(variant, payload, args, &mut ctx)?));
         }
         "flatten" => {
             // Option<Option<T>> -> Option<T>
@@ -623,46 +591,22 @@ pub fn handle_result_methods(
                 impl_methods,
             )?))
         }
-        "map" => Ok(Some(eval_result_map(
-            variant,
-            payload,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?)),
-        "map_err" => Ok(Some(eval_result_map_err(
-            variant,
-            payload,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?)),
-        "and_then" => Ok(Some(eval_result_and_then(
-            variant,
-            payload,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?)),
-        "or_else" => Ok(Some(eval_result_or_else(
-            variant,
-            payload,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?)),
+        "map" => {
+            let mut ctx = OptionResultEvalContext::new(env, functions, classes, enums, impl_methods);
+            Ok(Some(eval_result_map(variant, payload, args, &mut ctx)?))
+        }
+        "map_err" => {
+            let mut ctx = OptionResultEvalContext::new(env, functions, classes, enums, impl_methods);
+            Ok(Some(eval_result_map_err(variant, payload, args, &mut ctx)?))
+        }
+        "and_then" => {
+            let mut ctx = OptionResultEvalContext::new(env, functions, classes, enums, impl_methods);
+            Ok(Some(eval_result_and_then(variant, payload, args, &mut ctx)?))
+        }
+        "or_else" => {
+            let mut ctx = OptionResultEvalContext::new(env, functions, classes, enums, impl_methods);
+            Ok(Some(eval_result_or_else(variant, payload, args, &mut ctx)?))
+        }
         "flatten" => {
             // Result<Result<T, E>, E> -> Result<T, E>
             if res_variant == Some(ResultVariant::Ok) {

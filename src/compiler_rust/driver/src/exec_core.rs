@@ -9,7 +9,7 @@ use tempfile::TempDir;
 
 use simple_common::gc::{GcAllocator, MemoryLimitConfig};
 use simple_common::target::Target;
-use simple_compiler::CompilerPipeline;
+use simple_compiler::{CompilerPipeline, SimdMode as CompilerSimdMode};
 use simple_runtime::loader::loader::ModuleLoader as SmfLoader;
 use simple_runtime::loader::LoadedModule;
 use simple_native_loader::{default_runtime_provider, RuntimeSymbolProvider};
@@ -366,6 +366,11 @@ impl ExecCore {
         if options.coverage {
             compiler.set_coverage_enabled(true);
         }
+        compiler.set_simd_mode(match options.simd_mode {
+            crate::compile_options::SimdMode::Off => CompilerSimdMode::Off,
+            crate::compile_options::SimdMode::Auto => CompilerSimdMode::Auto,
+            crate::compile_options::SimdMode::Report => CompilerSimdMode::Report,
+        });
 
         compiler
             .compile(path, out)

@@ -50,8 +50,7 @@ pub fn run_on(backend: Backend, src: &str, expected: i32) {
 }
 
 /// Run source on a single backend and assert expected stdout output.
-#[allow(dead_code)]
-pub fn run_on_stdout(backend: Backend, src: &str, expected: &str) {
+pub(crate) fn run_on_stdout(backend: Backend, src: &str, expected: &str) {
     let interpreter = Interpreter::new();
     let result = interpreter
         .run(
@@ -73,35 +72,6 @@ pub fn run_on_stdout(backend: Backend, src: &str, expected: &str) {
 }
 
 /// Run source on a single backend and assert it produces an error containing `err_substr`.
-#[allow(dead_code)]
-pub fn run_on_error(backend: Backend, src: &str, err_substr: &str) {
-    let interpreter = Interpreter::new();
-    match interpreter.run(
-        src,
-        RunConfig {
-            running_type: backend.running_type(),
-            in_memory: !matches!(backend, Backend::Aot),
-            timeout_ms: 30_000,
-            ..Default::default()
-        },
-    ) {
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains(err_substr),
-                "{:?}: expected error containing '{}', got: {}",
-                backend,
-                err_substr,
-                msg
-            );
-        }
-        Ok(_) => panic!(
-            "{:?}: expected error containing '{}', but execution succeeded",
-            backend, err_substr
-        ),
-    }
-}
-
 /// Generate one `#[test]` per backend.
 ///
 /// Usage:
@@ -143,7 +113,7 @@ macro_rules! backend_test {
 /// Code must have explicit type annotations (Rust-style).
 /// Note: AOT executable mode is not included because it doesn't support
 /// all features (arrays, complex indexing, etc.) yet.
-pub fn run_expect(src: &str, expected: i32) {
+pub(crate) fn run_expect(src: &str, expected: i32) {
     let interpreter = Interpreter::new();
     let result = interpreter
         .run(
@@ -162,26 +132,8 @@ pub fn run_expect(src: &str, expected: i32) {
 /// Helper to run source and assert expected exit code.
 /// Runs ALL three modes: interpreter, JIT, and AOT executable.
 /// Use this only for simple code that AOT can handle (no arrays, complex indexing).
-#[allow(dead_code)]
-pub fn run_expect_all(src: &str, expected: i32) {
-    let interpreter = Interpreter::new();
-    let result = interpreter
-        .run(
-            src,
-            RunConfig {
-                running_type: RunningType::All,
-                in_memory: true,
-                timeout_ms: 60_000, // AOT needs more time
-                ..Default::default()
-            },
-        )
-        .expect("run ok");
-    assert_eq!(result.exit_code, expected);
-}
-
 /// Like run_expect_all but returns false (skip) if AOT stub is unavailable.
-#[allow(dead_code)]
-pub fn run_expect_all_optional(src: &str, expected: i32) -> bool {
+pub(crate) fn run_expect_all_optional(src: &str, expected: i32) -> bool {
     let interpreter = Interpreter::new();
     match interpreter.run(
         src,
@@ -211,8 +163,7 @@ pub fn run_expect_all_optional(src: &str, expected: i32) -> bool {
 /// Helper to run source in interpreter-only mode.
 /// Use this for code without explicit type annotations.
 /// Interpreter can run any code, but compiler requires types.
-#[allow(dead_code)]
-pub fn run_expect_interp(src: &str, expected: i32) {
+pub(crate) fn run_expect_interp(src: &str, expected: i32) {
     let interpreter = Interpreter::new();
     let result = interpreter
         .run(
@@ -231,13 +182,7 @@ pub fn run_expect_interp(src: &str, expected: i32) {
 /// Helper for parity testing: runs both interpreter and native codegen paths,
 /// asserting they produce the same result as `expected`.
 /// Use this for Feature 103 tests that verify interpreter/codegen parity.
-#[allow(dead_code)]
-pub fn run_expect_parity(src: &str, expected: i32) {
-    run_expect(src, expected);
-}
-
 /// Run source with interpreter and return the result
-#[allow(dead_code)]
 fn run_interpreter(src: &str) -> Result<simple_driver::interpreter::RunResult, String> {
     let interpreter = Interpreter::new();
     interpreter.run(
@@ -254,8 +199,7 @@ fn run_interpreter(src: &str) -> Result<simple_driver::interpreter::RunResult, S
 /// Helper to run source and expect a compile error.
 /// The error message must contain `expected_error` substring.
 /// If compilation succeeds, the test fails.
-#[allow(dead_code)]
-pub fn run_expect_compile_error(src: &str, expected_error: &str) {
+pub(crate) fn run_expect_compile_error(src: &str, expected_error: &str) {
     match run_interpreter(src) {
         Err(e) => {
             let err_msg = e.to_string();
@@ -275,39 +219,10 @@ pub fn run_expect_compile_error(src: &str, expected_error: &str) {
 
 /// Helper to run source and expect a compile error at a specific line.
 /// If compilation succeeds, the test fails.
-#[allow(dead_code)]
-pub fn run_expect_compile_error_at(src: &str, expected_error: &str, line: usize) {
-    match run_interpreter(src) {
-        Err(e) => {
-            let err_msg = e.to_string();
-            assert!(
-                err_msg.contains(expected_error),
-                "Expected error containing '{}', got: {}",
-                expected_error,
-                err_msg
-            );
-            // Check line number if present in error
-            let line_str = format!("line {}", line);
-            let line_str2 = format!(":{}", line);
-            assert!(
-                err_msg.contains(&line_str) || err_msg.contains(&line_str2),
-                "Expected error at line {}, got: {}",
-                line,
-                err_msg
-            );
-        }
-        Ok(_) => panic!(
-            "Expected compile error containing '{}' at line {}, but compilation succeeded",
-            expected_error, line
-        ),
-    }
-}
-
 /// Helper to run source and expect a runtime error (halt/panic).
 /// The error message must contain `expected_error` substring.
 /// If execution succeeds without error, the test fails.
-#[allow(dead_code)]
-pub fn run_expect_runtime_error(src: &str, expected_error: &str) {
+pub(crate) fn run_expect_runtime_error(src: &str, expected_error: &str) {
     match run_interpreter(src) {
         Err(e) => {
             let err_msg = e.to_string();
@@ -327,41 +242,11 @@ pub fn run_expect_runtime_error(src: &str, expected_error: &str) {
 
 /// Helper to run source and expect any error (compile or runtime).
 /// If execution succeeds, the test fails.
-#[allow(dead_code)]
-pub fn run_expect_error(src: &str) {
-    assert!(
-        run_interpreter(src).is_err(),
-        "Expected an error, but execution succeeded"
-    );
-}
-
-/// Helper to run source and expect any error (compile or runtime).
-/// Also checks that the error contains the expected substring.
-#[allow(dead_code)]
-pub fn run_expect_any_error(src: &str, expected_error: &str) {
-    match run_interpreter(src) {
-        Err(e) => {
-            let err_msg = e.to_string();
-            assert!(
-                err_msg.contains(expected_error),
-                "Expected error containing '{}', got: {}",
-                expected_error,
-                err_msg
-            );
-        }
-        Ok(_) => panic!(
-            "Expected error containing '{}', but execution succeeded",
-            expected_error
-        ),
-    }
-}
-
 // ============================================================================
 // Output capture helpers
 // ============================================================================
 
 /// Run source with output capture and return the result.
-#[allow(dead_code)]
 fn run_with_capture(src: &str) -> Result<simple_driver::interpreter::RunResult, String> {
     let interpreter = Interpreter::new();
     interpreter.run(
@@ -378,40 +263,7 @@ fn run_with_capture(src: &str) -> Result<simple_driver::interpreter::RunResult, 
 
 /// Run source and assert expected stdout output.
 /// Uses interpreter mode with output capture.
-#[allow(dead_code)]
-pub fn run_expect_stdout(src: &str, expected_stdout: &str) {
-    let result = run_with_capture(src).expect("run ok");
-    assert_eq!(
-        result.stdout, expected_stdout,
-        "Expected stdout '{}', got '{}'",
-        expected_stdout, result.stdout
-    );
-}
-
-/// Run source and assert expected stdout output with expected exit code.
-#[allow(dead_code)]
-pub fn run_expect_output(src: &str, expected_stdout: &str, expected_exit: i32) {
-    let result = run_with_capture(src).expect("run ok");
-    assert_eq!(
-        result.stdout, expected_stdout,
-        "Expected stdout '{}', got '{}'",
-        expected_stdout, result.stdout
-    );
-    assert_eq!(
-        result.exit_code, expected_exit,
-        "Expected exit code {}, got {}",
-        expected_exit, result.exit_code
-    );
-}
-
-// ============================================================================
-// WASM execution helpers
-// ============================================================================
-
-/// Run source with WASM compilation and execution.
-/// Use this to test WASM compilation and runtime.
 #[cfg(feature = "wasm")]
-#[allow(dead_code)]
 fn run_wasm(src: &str) -> Result<simple_driver::interpreter::RunResult, String> {
     let interpreter = Interpreter::new();
     interpreter.run(
@@ -428,8 +280,7 @@ fn run_wasm(src: &str) -> Result<simple_driver::interpreter::RunResult, String> 
 /// Helper to run source via WASM and assert expected exit code.
 /// Use this for WASM-specific tests.
 #[cfg(feature = "wasm")]
-#[allow(dead_code)]
-pub fn run_expect_wasm(src: &str, expected: i32) {
+pub(crate) fn run_expect_wasm(src: &str, expected: i32) {
     let result = run_wasm(src).expect("wasm run ok");
     assert_eq!(
         result.exit_code, expected,
@@ -441,8 +292,7 @@ pub fn run_expect_wasm(src: &str, expected: i32) {
 /// Helper to run source via WASM with output capture.
 /// Captures stdout and asserts expected output.
 #[cfg(feature = "wasm")]
-#[allow(dead_code)]
-pub fn run_expect_wasm_output(src: &str, expected_stdout: &str) {
+pub(crate) fn run_expect_wasm_output(src: &str, expected_stdout: &str) {
     let interpreter = Interpreter::new();
     let result = interpreter
         .run(
@@ -467,8 +317,7 @@ pub fn run_expect_wasm_output(src: &str, expected_stdout: &str) {
 /// asserting all produce the same result.
 /// Use this to verify WASM execution matches other backends.
 #[cfg(feature = "wasm")]
-#[allow(dead_code)]
-pub fn run_expect_all_including_wasm(src: &str, expected: i32) {
+pub(crate) fn run_expect_all_including_wasm(src: &str, expected: i32) {
     // Run interpreter (in block scope to ensure GC context is dropped before next)
     let interp_result = {
         let result = run_interpreter(src).expect("interpreter ok");
@@ -527,92 +376,22 @@ pub fn run_expect_all_including_wasm(src: &str, expected: i32) {
 }
 
 /// Run source and assert stdout contains expected substring.
-#[allow(dead_code)]
-pub fn run_expect_stdout_contains(src: &str, expected: &str) {
-    let result = run_with_capture(src).expect("run ok");
-    assert!(
-        result.stdout.contains(expected),
-        "Expected stdout to contain '{}', got: '{}'",
-        expected,
-        result.stdout
-    );
-}
-
-/// Run source and assert stderr contains expected substring.
-#[allow(dead_code)]
-pub fn run_expect_stderr_contains(src: &str, expected: &str) {
-    let result = run_with_capture(src).expect("run ok");
-    assert!(
-        result.stderr.contains(expected),
-        "Expected stderr to contain '{}', got: '{}'",
-        expected,
-        result.stderr
-    );
-}
-
-/// Run source with stdin input and assert expected stdout.
-#[allow(dead_code)]
-pub fn run_with_io(src: &str, stdin: &str, expected_stdout: &str) {
-    let interpreter = Interpreter::new();
-    let result = interpreter
-        .run(
-            src,
-            RunConfig {
-                running_type: RunningType::Interpreter,
-                in_memory: true,
-                capture_output: true,
-                stdin: stdin.to_string(),
-                timeout_ms: 30_000,
-                ..Default::default()
-            },
-        )
-        .expect("run ok");
-    assert_eq!(
-        result.stdout, expected_stdout,
-        "Expected stdout '{}', got '{}'",
-        expected_stdout, result.stdout
-    );
-}
-
-/// Run source and return captured stdout (for more complex assertions).
-#[allow(dead_code)]
-pub fn run_get_stdout(src: &str) -> String {
-    run_with_capture(src).expect("run ok").stdout
-}
-
-/// Run source and return captured stderr (for more complex assertions).
-#[allow(dead_code)]
-pub fn run_get_stderr(src: &str) -> String {
-    run_with_capture(src).expect("run ok").stderr
-}
-
 // ============================================================================
 // Capability testing helpers
 // ============================================================================
 
 /// Parse source code to AST module
-#[allow(dead_code)]
-pub fn parse_source(source: &str) -> simple_parser::ast::Module {
+pub(crate) fn parse_source(source: &str) -> simple_parser::ast::Module {
     use simple_parser::Parser;
     let mut parser = Parser::new(source);
     parser.parse().expect("should parse")
 }
 
 /// Lower AST module to HIR
-#[allow(dead_code)]
-pub fn lower_module(
+pub(crate) fn lower_module(
     module: &simple_parser::ast::Module,
 ) -> Result<simple_compiler::hir::HirModule, simple_compiler::hir::LowerError> {
     use simple_compiler::hir::Lowerer;
     let lowerer = Lowerer::new();
     lowerer.lower_module(module)
-}
-
-/// Parse and lower in one step (common pattern in capability tests)
-#[allow(dead_code)]
-pub fn parse_and_lower_source(
-    source: &str,
-) -> Result<simple_compiler::hir::HirModule, simple_compiler::hir::LowerError> {
-    let module = parse_source(source);
-    lower_module(&module)
 }

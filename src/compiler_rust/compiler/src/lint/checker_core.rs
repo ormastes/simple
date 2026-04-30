@@ -27,6 +27,7 @@ pub(super) struct ParamInfo {
 pub(super) struct FunctionInfo {
     pub(super) params: Vec<ParamInfo>,
     pub(super) lint_unnamed_duplicate_typed_args: bool,
+    pub(super) named_call_rewrite_safe: bool,
 }
 
 /// Format a type for user-friendly display
@@ -436,6 +437,7 @@ impl LintChecker {
                             })
                             .collect(),
                         lint_unnamed_duplicate_typed_args: func.visibility.is_public(),
+                        named_call_rewrite_safe: true,
                     };
                     functions.insert(func.name.clone(), info);
                 }
@@ -455,6 +457,7 @@ impl LintChecker {
                                 .collect(),
                             lint_unnamed_duplicate_typed_args: c.visibility.is_public()
                                 && method.visibility.is_public(),
+                            named_call_rewrite_safe: false,
                         };
                         // Store as ClassName.method_name for method lookup
                         let key = format!("{}.{}", c.name, method.name);
@@ -478,6 +481,7 @@ impl LintChecker {
                                 .collect(),
                             lint_unnamed_duplicate_typed_args: s.visibility.is_public()
                                 && method.visibility.is_public(),
+                            named_call_rewrite_safe: false,
                         };
                         let key = format!("{}.{}", s.name, method.name);
                         functions.insert(key, info.clone());
@@ -498,6 +502,7 @@ impl LintChecker {
                                 })
                                 .collect(),
                             lint_unnamed_duplicate_typed_args: method.visibility.is_public(),
+                            named_call_rewrite_safe: false,
                         };
                         // Format target_type for key
                         let type_name = format!("{:?}", impl_block.target_type);

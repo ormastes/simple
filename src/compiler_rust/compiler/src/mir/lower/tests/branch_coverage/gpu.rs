@@ -5,7 +5,7 @@
 
 use super::super::common::*;
 use super::helpers::*;
-use crate::hir::{self, GpuIntrinsicKind, HirExpr, HirExprKind};
+use crate::hir::{self, GpuIntrinsicKind, HirExpr, HirExprKind, HirType, TypeRegistry};
 use crate::mir::lower::MirLowerer;
 use crate::mir::function::MirFunction;
 use crate::mir::{CallTarget, MirInst};
@@ -489,14 +489,24 @@ fn gpu_simd_select() {
 #[test]
 fn gpu_simd_load() {
     let mut lowerer = gpu_lowerer_setup();
-    let result = lowerer.lower_gpu_intrinsic(GpuIntrinsicKind::SimdLoad, &[gpu_dummy_expr(), gpu_dummy_expr()]);
+    let mut registry = TypeRegistry::new();
+    let simd_ty = registry.register(HirType::Simd {
+        lanes: 8,
+        element: hir::TypeId::F32,
+    });
+    lowerer.type_registry = Some(&registry);
+    let result = lowerer.lower_typed_gpu_intrinsic(
+        GpuIntrinsicKind::SimdLoad,
+        &[gpu_dummy_expr(), gpu_dummy_expr()],
+        simd_ty,
+    );
     assert!(result.is_ok());
     let func = lowerer.end_function().unwrap();
     assert!(func
         .blocks
         .iter()
         .flat_map(|b| &b.instructions)
-        .any(|i| matches!(i, MirInst::VecLoad { .. })));
+        .any(|i| matches!(i, MirInst::VecLoad { lanes: 8, .. })));
 }
 
 #[test]

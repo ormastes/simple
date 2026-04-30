@@ -6,13 +6,21 @@ Executable requirement trace for the dual-arch orchestration layer.
 
 import std.spec
 
-use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, create_riscv_fpga_linux_manifest_for_board, generate_default_riscv_fpga_rtl_bundle, generate_riscv_fpga_rtl_bundle_for_board, known_riscv_fpga_board_ids, read_generated_riscv_fpga_rtl_file}
 
 describe "REQ-RFL-001..003: board and lane contracts":
     it "keeps board validation separate from hardware boot validation":
         val profile = XilinxBoardProfile.generic()
         expect(profile.validate_for_prepare().len()).to_equal(0)
         expect(profile.validate_for_hardware_boot()).to_contain("xilinx part must be selected before hardware boot")
+
+    it "supports named board profiles for future multi-board growth":
+        expect(known_riscv_fpga_board_ids()).to_contain("xilinx_generic")
+        expect(known_riscv_fpga_board_ids()).to_contain("mlk_s02_100t")
+        val mlk = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+        expect(mlk.part).to_equal("xc7a100t-2ffg484i")
+        expect(mlk.clock_hz).to_equal(25000000)
+        expect(mlk.constraints_path).to_equal("examples/09_embedded/fpga_riscv/constraints/mlk_s02_100t.xdc")
 
     it "defines RV32 and RV64 as explicit Linux contract lanes":
         val rv64 = RiscvFpgaLane.rv64_default()
@@ -31,14 +39,25 @@ describe "REQ-RFL-004..006: deterministic dual-arch orchestration":
         expect(manifest.vivado_tcl_plan()).to_contain("add_files build/fpga/rv32/rtl")
         expect(manifest.vivado_tcl_plan()).to_contain("add_files build/fpga/rv64/rtl")
 
+    it "creates board-specific manifests without changing lane structure":
+        val manifest = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t").ok().unwrap()
+        expect(manifest.board.name).to_equal("mlk_s02_100t")
+        expect(manifest.board.part).to_equal("xc7a100t-2ffg484i")
+        expect(manifest.vivado_project_dir).to_equal("build/fpga/mlk_s02_100t/vivado")
+        expect(manifest.generated_dir).to_equal("build/fpga/mlk_s02_100t/generated")
+        expect(manifest.vivado_tcl_plan()).to_contain("examples/09_embedded/fpga_riscv/constraints/mlk_s02_100t.xdc")
+
     it "emits manifest metadata derived from the shared platform profiles":
         val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_riscv_fpga_system_spec")
         expect(result.is_ok()).to_equal(true)
         val bundle = result.ok().unwrap()
-        expect(bundle.generated_files.len()).to_equal(7)
+        expect(bundle.generated_files.len()).to_equal(10)
         val rv64_core = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.vhd")
         val rv64_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.spl")
         val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+        val vivado_plan_text = read_generated_riscv_fpga_rtl_file(bundle.vivado_plan_path)
+        val board_interface_text = read_generated_riscv_fpga_rtl_file(bundle.board_interface_contract_path)
+        val bundle_readme_text = read_generated_riscv_fpga_rtl_file(bundle.bundle_readme_path)
         expect(rv64_source).to_contain("fn simple_rv64gc_core_decode_i_immediate")
         expect(rv64_source).to_contain("fn simple_rv64gc_core_decode_upper_immediate")
         expect(rv64_source).to_contain("fn simple_rv64gc_core_decode_execute_datapath")
@@ -93,6 +112,36 @@ describe "REQ-RFL-004..006: deterministic dual-arch orchestration":
         expect(has_handwritten_opcode_case).to_equal(false)
         expect(manifest_text).to_contain("platform = \"qemu_virt_rv32\"")
         expect(manifest_text).to_contain("platform = \"qemu_virt_rv64\"")
+        expect(manifest_text).to_contain("board_id = \"xilinx_generic\"")
+        expect(manifest_text).to_contain("constraints_path = \"constraints/xilinx_generic.xdc\"")
+        expect(manifest_text).to_contain("programmer = \"hw_server\"")
         expect(manifest_text).to_contain("scope = \"repo-native RV32GC Linux contract lane\"")
         expect(manifest_text).to_contain("abi = \"lp64d\"")
         expect(manifest_text).to_contain("scope = \"repo-native RV64GC Linux contract lane\"")
+        expect(vivado_plan_text).to_contain("create_project simple_riscv_fpga")
+        expect(vivado_plan_text).to_contain("add_files constraints/xilinx_generic.xdc")
+        expect(board_interface_text).to_contain("board_id = \"xilinx_generic\"")
+        expect(board_interface_text).to_contain("clock = \"sys_clk\"")
+        expect(board_interface_text).to_contain("led_count = 8")
+        expect(bundle_readme_text).to_contain("Board: `xilinx_generic` (`BOARD_PART_TBD`)")
+        expect(bundle_readme_text).to_contain("logical board I/O contract: `board_interface_contract.sdn`")
+        expect(bundle_readme_text).to_contain("This bundle proves source and RTL artifact generation.")
+
+    it "emits board-specific metadata for mlk_s02_100t bundles":
+        val result = generate_riscv_fpga_rtl_bundle_for_board("/tmp/simple_riscv_fpga_system_spec_mlk", "mlk_s02_100t")
+        expect(result.is_ok()).to_equal(true)
+        val bundle = result.ok().unwrap()
+        val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+        val vivado_plan_text = read_generated_riscv_fpga_rtl_file(bundle.vivado_plan_path)
+        val board_interface_text = read_generated_riscv_fpga_rtl_file(bundle.board_interface_contract_path)
+        expect(manifest_text).to_contain("board = \"mlk_s02_100t\"")
+        expect(manifest_text).to_contain("part = \"xc7a100t-2ffg484i\"")
+        expect(manifest_text).to_contain("clock_hz = 25000000")
+        expect(manifest_text).to_contain("uart_baud = 115200")
+        expect(manifest_text).to_contain("constraints_path = \"examples/09_embedded/fpga_riscv/constraints/mlk_s02_100t.xdc\"")
+        expect(vivado_plan_text).to_contain("create_project simple_riscv_fpga build/fpga/mlk_s02_100t/vivado -part xc7a100t-2ffg484i")
+        expect(vivado_plan_text).to_contain("add_files examples/09_embedded/fpga_riscv/constraints/mlk_s02_100t.xdc")
+        expect(board_interface_text).to_contain("board_id = \"mlk_s02_100t\"")
+        expect(board_interface_text).to_contain("clock = \"clk25\"")
+        expect(board_interface_text).to_contain("uart_tx = \"uart_tx\"")
+        expect(board_interface_text).to_contain("button_count = 4")

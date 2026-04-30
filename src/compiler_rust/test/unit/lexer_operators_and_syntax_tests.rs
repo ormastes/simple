@@ -1,4 +1,3 @@
-#![allow(unused_imports, unused_variables)]
 //! Lexer unit tests - Part 2
 
 use simple_parser::lexer::Lexer;

@@ -819,10 +819,11 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_vec_load(&mut self, dest: VReg, array: VReg, offset: VReg) -> Result<(), String> {
+    fn emit_vec_load(&mut self, dest: VReg, array: VReg, offset: VReg, lanes: u32) -> Result<(), String> {
         let arr = self.get(array)?;
         let off = self.get(offset)?;
-        let result = self.call_runtime("rt_vec_load", &[arr, off])?;
+        let lanes = self.backend.runtime_int_type().const_int(lanes as u64, false).into();
+        let result = self.call_runtime("rt_vec_load", &[arr, off, lanes])?;
         self.set(dest, result);
         Ok(())
     }

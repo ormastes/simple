@@ -376,6 +376,7 @@ shared_test!(shared_vec_load, |f: &mut MirFunction| {
         dest,
         array: arr,
         offset: off,
+        lanes: 4,
     });
     dest
 });

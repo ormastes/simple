@@ -23,6 +23,7 @@ REQ-RV64-LINUX-RTL-004
 - `contract`
 - `rtl-generated`
 - `qemu-boot-validated`
+- `rtl-linux-validated`
 - `fpga-validated`
 
 REQ-RV64-LINUX-RTL-005
@@ -42,3 +43,9 @@ Native RV32/RV64 backend modules shall consume the shared RISC-V target contract
 
 REQ-RV64-LINUX-RTL-010
 System and unit tests shall trace the canonical RV64 Linux platform contract across hardware/orchestration and compiler/backend layers.
+
+REQ-RV64-LINUX-RTL-011
+The repo-native `generated_rv64_linux` lane shall remain distinct from the external `reference_external_rv64_linux` cross-check lane in manifests, summaries, and smoke results.
+
+REQ-RV64-LINUX-RTL-012
+`rtl-linux-validated` for `generated_rv64_linux` shall mean repo-native generated GHDL simulation observed Linux boot markers on UART, not only FW_JUMP/DTB/Sv39 handoff proofs.

@@ -2,8 +2,6 @@
 //! Tests manual memory management public functions
 //! Focus: Public function coverage for simple_common
 
-#![allow(unused_imports, unused_variables)]
-
 use simple_common::manual_mem::{HandlePool, ManualGc, Shared, Unique, WeakPtr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

@@ -304,6 +304,12 @@ pub(super) fn register_definitions(
                 // Also add to env so it's available in the module
                 env.insert(t.name.clone(), trait_type);
             }
+            Node::TypeAlias(t) => {
+                // Type aliases are a type-check-time feature, but the alias name still
+                // needs to exist so package re-exports don't warn spuriously.
+                exports.insert(t.name.clone(), Value::Nil);
+                env.insert(t.name.clone(), Value::Nil);
+            }
             _ => {}
         }
     }

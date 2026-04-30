@@ -8,8 +8,7 @@ use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizati
 use simple_compiler::{default_native_codegen_backend, is_native_codegen_backend_available};
 use crate::cli::compile::{
     compile_dynamic_driver_library, compile_file, compile_file_native, compile_file_to_ptx, compile_file_to_vhdl,
-    list_linkers, list_targets,
-    NativeStripMode,
+    list_linkers, list_targets, NativeStripMode,
 };
 use crate::CompileOptions;
 
@@ -464,6 +463,7 @@ fn print_compile_help(show_error: bool) {
     eprintln!("  --snapshot          Create JJ snapshot with build state");
     eprintln!("  --coverage          Enable coverage instrumentation (#674)");
     eprintln!("  --coverage-output=<path>  Output path for coverage report (default: coverage.sdn)");
+    eprintln!("  --simd=<mode>       SIMD mode: off, auto, report (default: auto)");
 }
 
 #[cfg(test)]
@@ -745,11 +745,7 @@ backend = "llvm"
 
     #[test]
     fn test_parse_source_arg_ignores_no_strip_flag() {
-        let args = vec![
-            "compile".to_string(),
-            "--no-strip".to_string(),
-            "test.spl".to_string(),
-        ];
+        let args = vec!["compile".to_string(), "--no-strip".to_string(), "test.spl".to_string()];
         let source = parse_source_arg(&args);
         assert_eq!(source, Some(PathBuf::from("test.spl")));
     }
@@ -772,11 +768,7 @@ backend = "llvm"
 
     #[test]
     fn test_resolve_native_strip_mode_honors_explicit_strip() {
-        let mode = resolve_native_strip_mode(
-            &["compile".to_string(), "--strip".to_string()],
-            Target::host(),
-            false,
-        );
+        let mode = resolve_native_strip_mode(&["compile".to_string(), "--strip".to_string()], Target::host(), false);
         assert_eq!(mode, NativeStripMode::All);
     }
 

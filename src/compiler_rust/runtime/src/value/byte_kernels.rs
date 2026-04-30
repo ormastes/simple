@@ -95,9 +95,9 @@ pub(crate) fn byte_split_ranges_for_tier(simd_tier: SimdTier, haystack: &str, de
     }
 
     let find_fn: fn(&[u8], &[u8], usize) -> Option<usize> = match simd_tier {
-        SimdTier::X86_64Avx2 => avx2_byte_find,
-        SimdTier::Aarch64Neon => neon_byte_find,
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => scalar_byte_find,
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_byte_find,
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_byte_find,
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_byte_find,
     };
 
     let mut ranges = Vec::new();
@@ -114,17 +114,17 @@ pub(crate) fn byte_split_ranges_for_tier(simd_tier: SimdTier, haystack: &str, de
 
 pub(crate) fn byte_find_for_tier(simd_tier: SimdTier, haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
     match simd_tier {
-        SimdTier::X86_64Avx2 => avx2_byte_find(haystack, needle, start),
-        SimdTier::Aarch64Neon => neon_byte_find(haystack, needle, start),
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => scalar_byte_find(haystack, needle, start),
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_byte_find(haystack, needle, start),
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_byte_find(haystack, needle, start),
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_byte_find(haystack, needle, start),
     }
 }
 
 pub(crate) fn byte_rfind_for_tier(simd_tier: SimdTier, haystack: &[u8], needle: &[u8]) -> Option<usize> {
     match simd_tier {
-        SimdTier::X86_64Avx2 => avx2_byte_rfind(haystack, needle),
-        SimdTier::Aarch64Neon => neon_byte_rfind(haystack, needle),
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => scalar_byte_rfind(haystack, needle),
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_byte_rfind(haystack, needle),
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_byte_rfind(haystack, needle),
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_byte_rfind(haystack, needle),
     }
 }
 

@@ -79,14 +79,14 @@ struct CollectionProviders {
 fn collection_providers() -> &'static CollectionProviders {
     static PROVIDERS: OnceLock<CollectionProviders> = OnceLock::new();
     PROVIDERS.get_or_init(|| match detect_profile() {
-        SimdTier::X86_64Avx2 => CollectionProviders {
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => CollectionProviders {
             array_sort: scalar_array_sort,
             byte_find: avx2_byte_find,
             byte_rfind: avx2_byte_rfind,
             byte_split: avx2_byte_split_ranges,
             simd_tier: SimdTier::X86_64Avx2,
         },
-        SimdTier::Aarch64Neon => CollectionProviders {
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => CollectionProviders {
             array_sort: scalar_array_sort,
             byte_find: neon_byte_find,
             byte_rfind: neon_byte_rfind,

@@ -1,0 +1,118 @@
+use compress.types.{CompressionError}
+
+val ZSTD_BITS_MAX_PEEK: i64 = 32
+val ZSTD_BITS_REFILL_LIMIT: i64 = 56
+
+struct ZstdBackwardBits:
+    data: [u8]
+    start: i64
+    byte_pos: i64
+    reservoir: u64
+    bits_in_reservoir: i64
+
+fn zstd_read_u32_le(data: [u8], pos: i64) -> Result<u32, CompressionError>:
+    if pos < 0 or pos + 4 > data.len():
+        return Err(CompressionError.TruncatedInput("zstd need 4 bytes"))
+    Ok(data[pos].to_u32() |
+        (data[pos + 1].to_u32() << 8) |
+        (data[pos + 2].to_u32() << 16) |
+        (data[pos + 3].to_u32() << 24))
+
+fn zstd_read_u64_le(data: [u8], pos: i64) -> Result<u64, CompressionError>:
+    if pos < 0 or pos + 8 > data.len():
+        return Err(CompressionError.TruncatedInput("zstd need 8 bytes"))
+    var value: u64 = 0u64
+    var shift: u64 = 0u64
+    var idx = pos
+    while shift < 64u64:
+        value = value | (data[idx].to_u64() << shift)
+        shift = shift + 8u64
+        idx = idx + 1
+    Ok(value)
+
+fn _zstd_low_bits_mask(count: i64) -> u64:
+    if count <= 0:
+        return 0u64
+    if count >= 64:
+        return 0xFFFFFFFFFFFFFFFFu64
+    (1u64 << count.to_u64()) - 1u64
+
+fn _zstd_highbit_index(value: u8) -> i64:
+    var idx = 0
+    var probe = value.to_u64()
+    while probe > 1u64:
+        probe = probe >> 1u64
+        idx = idx + 1
+    idx
+
+fn _zstd_validate_bit_count(count: i64) -> Result<(), CompressionError>:
+    if count < 0:
+        return Err(CompressionError.CorruptStream("zstd negative bit count"))
+    if count > ZSTD_BITS_MAX_PEEK:
+        return Err(CompressionError.UnsupportedFeature("zstd bit peek wider than 32 bits"))
+    Ok(())
+
+fn zstd_bits_init(data: [u8], start: i64, end: i64) -> Result<ZstdBackwardBits, CompressionError>:
+    if start < 0 or end < start or end > data.len():
+        return Err(CompressionError.CorruptStream("zstd bitstream range"))
+    if start == end:
+        return Err(CompressionError.TruncatedInput("zstd bitstream tail"))
+    val tail = data[end - 1]
+    if tail == 0u8:
+        return Err(CompressionError.CorruptStream("zstd bitstream end mark"))
+    val valid_bits = _zstd_highbit_index(tail)
+    val reservoir = tail.to_u64() & _zstd_low_bits_mask(valid_bits)
+    Ok(ZstdBackwardBits(
+        data: data,
+        start: start,
+        byte_pos: end - 2,
+        reservoir: reservoir,
+        bits_in_reservoir: valid_bits
+    ))
+
+fn zstd_bits_refill(state: ZstdBackwardBits) -> ZstdBackwardBits:
+    var next = state
+    while next.byte_pos >= next.start and next.bits_in_reservoir <= ZSTD_BITS_REFILL_LIMIT:
+        next.reservoir = next.reservoir | (next.data[next.byte_pos].to_u64() << next.bits_in_reservoir.to_u64())
+        next.bits_in_reservoir = next.bits_in_reservoir + 8
+        next.byte_pos = next.byte_pos - 1
+    next
+
+fn zstd_bits_remaining(state: ZstdBackwardBits) -> i64:
+    var bytes_left = 0
+    if state.byte_pos >= state.start:
+        bytes_left = state.byte_pos - state.start + 1
+    state.bits_in_reservoir + bytes_left * 8
+
+fn zstd_bits_peek(state: ZstdBackwardBits, count: i64) -> Result<u32, CompressionError>:
+    val count_ok = _zstd_validate_bit_count(count)
+    if count_ok.is_err():
+        return Err(count_ok.unwrap_err())
+    val ready = zstd_bits_refill(state)
+    if ready.bits_in_reservoir < count:
+        return Err(CompressionError.TruncatedInput("zstd bitstream bits"))
+    Ok((ready.reservoir & _zstd_low_bits_mask(count)).to_u32())
+
+fn zstd_bits_consume(state: ZstdBackwardBits, count: i64) -> Result<ZstdBackwardBits, CompressionError>:
+    val count_ok = _zstd_validate_bit_count(count)
+    if count_ok.is_err():
+        return Err(count_ok.unwrap_err())
+    val ready = zstd_bits_refill(state)
+    if ready.bits_in_reservoir < count:
+        return Err(CompressionError.TruncatedInput("zstd bitstream bits"))
+    Ok(ZstdBackwardBits(
+        data: ready.data,
+        start: ready.start,
+        byte_pos: ready.byte_pos,
+        reservoir: ready.reservoir >> count.to_u64(),
+        bits_in_reservoir: ready.bits_in_reservoir - count
+    ))
+
+fn zstd_bits_read(state: ZstdBackwardBits, count: i64) -> Result<(u32, ZstdBackwardBits), CompressionError>:
+    val peeked = zstd_bits_peek(state, count)
+    if peeked.is_err():
+        return Err(peeked.unwrap_err())
+    val next = zstd_bits_consume(state, count)
+    if next.is_err():
+        return Err(next.unwrap_err())
+    Ok((peeked.unwrap(), next.unwrap()))

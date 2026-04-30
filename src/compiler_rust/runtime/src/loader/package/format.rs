@@ -409,6 +409,21 @@ mod tests {
     }
 
     #[test]
+    fn test_variant_metadata_validation_allows_compatible_host_tier() {
+        let section = ManifestSection {
+            manifest_toml: String::new(),
+            lock_toml: None,
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            simd_tier: SimdTier::X86_64Sse2,
+        };
+
+        let metadata = section.variant_metadata();
+        assert!(metadata
+            .validate_host(Some("x86_64-unknown-linux-gnu"), SimdTier::X86_64Avx2)
+            .is_ok());
+    }
+
+    #[test]
     fn test_variant_metadata_validation_allows_unpinned_variants() {
         let section = ManifestSection {
             manifest_toml: String::new(),

@@ -34,7 +34,7 @@ pub mod todo_parser;
 pub mod unified_db;
 pub mod watcher;
 
-pub use compile_options::{CompileOptions, CompileProfiler};
+pub use compile_options::{CompileOptions, CompileProfiler, SimdMode};
 pub use early_startup::{parse_early_args, AppType, EarlyConfig, WindowHints};
 pub use gpu_init::{
     display_loading_indicator, start_gpu_init, GpuContext, GpuInitHandle, GpuInitPhase, GpuInitState, StartupEvent,

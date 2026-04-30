@@ -1,6 +1,16 @@
 # FPGA RISC-V CPU Project — Status Report
-**Date:** 2026-03-23
-**Target:** ZedBoard (Zynq-7020, XC7Z020-CLG484)
+**Date:** 2026-04-30
+**Target:** Historical ZedBoard bring-up assets plus GHDL-validated handwritten RV32I lane
+
+## Scope Note
+
+This file describes the handwritten VHDL lane in `examples/09_embedded/fpga_riscv`.
+It does not prove that the repo-native generated FPGA lanes are hardware-ready, and it does not imply verified support for `MLK-S02-100T` boards.
+
+Current truth:
+- GHDL simulation is the verified execution path.
+- ZedBoard Vivado and JTAG material remain historical board-specific assets.
+- Public hardware-lane status for FPGA JTAG is quarantined/excluded until a real execution proof exists.
 
 ## Hardware Setup
 
@@ -22,7 +32,7 @@
 
 ### JTAG Connection
 - Cable firmware: OK (v0x0406, CPLD v0x200D)
-- JTAG chain detection: **No target found** — ZedBoard needs power cycle or JTAG cable to J15
+- JTAG chain detection: **No target found** at the time of this historical check
 - Tools verified: `xc3sprog`, `urjtag`, `openFPGALoader`, `openocd` all installed
 
 ## RV32I CPU Design
@@ -73,7 +83,7 @@ $ ghdl -e --std=08 zedboard_top # Elaboration: OK
 
 ## Remaining Steps
 
-### Immediate (once ZedBoard is powered + JTAG detected)
+### Historical ZedBoard Follow-Up
 1. **Verify JTAG:** `detectchain -c xpc` → should show XC7Z020
 2. **Reload firmware if needed:** `fxload -t fx2lp -I /tmp/xilinx-xusb/xusbdfwu.hex -D /dev/bus/usb/001/XXX`
 
@@ -85,6 +95,16 @@ cd examples/09_embedded/fpga_riscv
 vivado -mode batch -source build.tcl     # Synthesize (~5-10 min)
 vivado -mode batch -source program.tcl   # Flash (~10 sec)
 ```
+
+### New Board Bring-Up
+
+For `MLK-S02-100T`, do not reuse the ZedBoard scripts and constraints unchanged. Follow `doc/07_guide/hardware/xilinx_fpga_board_bringup.md`, use `config/resources/boards/mlk_s02_100t.sdn` as the board facts baseline, and add a board-specific part, XDC, and proof path first.
+
+Current `MLK-S02-100T` repo scaffolds:
+- `constraints/mlk_s02_100t.xdc` — commented XDC template only
+- `rtl/mlk_s02_100t_wrapper_stub.vhd` — logical board wrapper stub only
+- `build_mlk_s02_100t.tcl` — Vivado project scaffold only
+- `program_mlk_s02_100t.tcl` — programming scaffold only
 
 ### Alternative: xpcu-xvcd + remote Vivado
 If Vivado is on another machine, use `xpcu-xvcd` as a virtual cable server:

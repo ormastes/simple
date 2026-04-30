@@ -22,3 +22,34 @@ fn test_lower_while_loop() {
     let func = &module.functions[0];
     assert!(matches!(func.body[1], HirStmt::While { .. }));
 }
+
+#[test]
+fn test_lower_simd_loop_metadata() {
+    let module = parse_and_lower(
+        "fn count() -> i64:\n    @simd\n    for i in 0..4:\n        pass\n    @simd\n    while false:\n        pass\n    @simd\n    loop:\n        break\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    assert!(matches!(
+        func.body[0],
+        HirStmt::For {
+            simd_requested: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        func.body[1],
+        HirStmt::While {
+            simd_requested: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        func.body[2],
+        HirStmt::Loop {
+            simd_requested: true,
+            ..
+        }
+    ));
+}

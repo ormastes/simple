@@ -669,7 +669,7 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::Loop { body } => {
+            HirStmt::Loop { body, .. } => {
                 // Create blocks
                 let (body_id, exit_id) = self.with_func(|func, current_block| {
                     let body_id = func.new_block();
@@ -763,6 +763,7 @@ impl<'a> MirLowerer<'a> {
                 pattern,
                 iterable,
                 body,
+                simd_requested: _simd_requested,
                 ..
             } => {
                 // Check if this is a range-based for loop (0..n or 0..=n)

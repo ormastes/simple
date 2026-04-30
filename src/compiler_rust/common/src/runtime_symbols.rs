@@ -111,6 +111,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
     // Tier 4: Ext
     if name.starts_with("rt_vec_")
         || name.starts_with("rt_simd_")
+        || name.starts_with("rt_numeric_")
         || name.starts_with("rt_aes_")
         || name.starts_with("rt_neighbor_load")
         || name.starts_with("rt_gpu_")
@@ -481,6 +482,19 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simd_has_rvv",
     "rt_simd_detect_profile",
     "rt_simd_profile_name",
+    "rt_numeric_active_simd_tier",
+    "rt_numeric_add_f32",
+    "rt_numeric_mul_f32",
+    "rt_numeric_fma_f32",
+    "rt_numeric_dot_f32",
+    "rt_numeric_sum_f32",
+    "rt_numeric_min_f32",
+    "rt_numeric_max_f32",
+    "rt_numeric_add_f64",
+    "rt_numeric_mul_f64",
+    "rt_numeric_fma_f64",
+    "rt_numeric_sum_f64",
+    "rt_numeric_dot_f64",
     "rt_aes_encrypt_block_with_expanded",
     "rt_aes_decrypt_block_with_expanded",
     // Runtime configuration

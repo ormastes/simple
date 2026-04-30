@@ -179,15 +179,13 @@ impl Lowerer {
                             | "atomic_compare_exchange" => return Ok(TypeId::I64),
                             _ => {}
                         }
-                    } else if recv_name == "f32x4"
-                        || recv_name == "f64x4"
-                        || recv_name == "i32x4"
-                        || recv_name == "i64x4"
-                    {
-                        // SIMD type static methods: f32x4.load(), f32x4.gather()
+                    } else if self.is_simd_static_type_name(recv_name) {
+                        // SIMD type static methods: f32x4.load(), f32x8.gather()
                         match method.as_str() {
                             "load" | "gather" | "load_masked" => {
-                                let simd_ty = self.register_simd_type(recv_name);
+                                let simd_ty = self
+                                    .resolve_simd_static_type(recv_name)
+                                    .ok_or_else(|| LowerError::CannotInferTypeFor(recv_name.clone()))?;
                                 return Ok(simd_ty);
                             }
                             _ => {}

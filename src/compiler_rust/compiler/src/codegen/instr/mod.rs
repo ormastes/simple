@@ -1027,8 +1027,13 @@ pub fn compile_instruction<M: Module>(
         }
 
         // SIMD load/store operations
-        MirInst::VecLoad { dest, array, offset } => {
-            compile_vec_load(ctx, builder, *dest, *array, *offset)?;
+        MirInst::VecLoad {
+            dest,
+            array,
+            offset,
+            lanes,
+        } => {
+            compile_vec_load(ctx, builder, *dest, *array, *offset, *lanes)?;
         }
 
         MirInst::VecStore { source, array, offset } => {

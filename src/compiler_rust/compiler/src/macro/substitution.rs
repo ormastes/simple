@@ -174,6 +174,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             pattern: stmt.pattern.clone(),
             iterable: substitute_expr_templates(&stmt.iterable, const_bindings),
             body: substitute_block_templates(&stmt.body, const_bindings),
+            simd_requested: stmt.simd_requested,
             is_suspend: stmt.is_suspend,
             auto_enumerate: stmt.auto_enumerate,
             invariants: stmt.invariants.clone(),
@@ -184,6 +185,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             condition: substitute_expr_templates(&stmt.condition, const_bindings),
             body: substitute_block_templates(&stmt.body, const_bindings),
             let_pattern: stmt.let_pattern.clone(),
+            simd_requested: stmt.simd_requested,
             is_suspend: stmt.is_suspend,
             invariants: stmt.invariants.clone(),
             label: stmt.label.clone(),
@@ -191,6 +193,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
         Node::Loop(stmt) => Node::Loop(LoopStmt {
             span: stmt.span,
             body: substitute_block_templates(&stmt.body, const_bindings),
+            simd_requested: stmt.simd_requested,
             label: stmt.label.clone(),
         }),
         Node::Context(stmt) => Node::Context(ContextStmt {

@@ -4,11 +4,53 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
+use crate::error_recovery::ErrorHint;
 use crate::token::{Span, TokenKind};
 
 use super::core::Parser;
 
 impl<'a> Parser<'a> {
+    fn mark_loop_simd_requested(&self, node: &mut Node) {
+        match node {
+            Node::For(stmt) => stmt.simd_requested = true,
+            Node::While(stmt) => stmt.simd_requested = true,
+            Node::Loop(stmt) => stmt.simd_requested = true,
+            _ => {}
+        }
+    }
+
+    fn parse_simd_annotated_loop(
+        &mut self,
+        decorator_span: Span,
+        decorator_count: usize,
+    ) -> Result<Node, ParseError> {
+        let message = if decorator_count == 1 {
+            "Loop-level @simd is accepted but ignored; loop SIMD lowering is not implemented yet.".to_string()
+        } else {
+            "Loop-level @simd annotations are accepted but ignored; loop SIMD lowering is not implemented yet."
+                .to_string()
+        };
+        self.error_hints.push(
+            ErrorHint::warning(message, decorator_span).with_help(
+                "The parser accepts `@simd` before `for`, `while`, and `loop`, but the compiler does not yet carry loop SIMD metadata into HIR/MIR lowering."
+                    .to_string(),
+            ),
+        );
+
+        let mut node = match &self.current.kind {
+            TokenKind::For => self.parse_for(),
+            TokenKind::While => self.parse_while(),
+            TokenKind::Loop => self.parse_loop(),
+            _ => Err(ParseError::unexpected_token(
+                "for, while, or loop after @simd",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            )),
+        }?;
+        self.mark_loop_simd_requested(&mut node);
+        Ok(node)
+    }
+
     pub(super) fn parse_pub_item_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let visibility = self.parse_visibility_modifier_after_pub()?;
         match &self.current.kind {
@@ -342,6 +384,23 @@ impl<'a> Parser<'a> {
                     decorators.push(decorator);
                     while self.check(&TokenKind::Newline) {
                         self.advance();
+                    }
+                }
+
+                let simd_decorator_span = decorators.first().and_then(|decorator| match &decorator.name {
+                    Expr::Identifier(name) if name == "simd" => Some(decorator.span),
+                    _ => None,
+                });
+                let all_simd_decorators = !decorators.is_empty()
+                    && decorators.iter().all(|decorator| {
+                        matches!(&decorator.name, Expr::Identifier(name) if name == "simd")
+                    });
+                if all_simd_decorators && attributes.is_empty() && effects.is_empty() {
+                    if matches!(self.current.kind, TokenKind::For | TokenKind::While | TokenKind::Loop) {
+                        return self.parse_simd_annotated_loop(
+                            simd_decorator_span.unwrap_or(self.current.span),
+                            decorators.len(),
+                        );
                     }
                 }
 

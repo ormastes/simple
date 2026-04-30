@@ -955,7 +955,10 @@ mod tests {
     #[test]
     fn single_file_runtime_bundle_prefers_runtime_only_for_leaf_host_source() {
         let options = NativeBinaryOptions::new().target(Target::host()).shared(false);
-        assert!(single_file_prefers_runtime_only(Some(std::path::Path::new("/tmp/demo.spl")), &options));
+        assert!(single_file_prefers_runtime_only(
+            Some(std::path::Path::new("/tmp/demo.spl")),
+            &options
+        ));
     }
 
     #[test]

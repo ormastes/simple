@@ -112,9 +112,9 @@ fn take_test_kernel() -> Option<TestKernelPath> {
 #[inline]
 pub const fn dispatch_for_tier(tier: SimdTier) -> PrimitiveSortDispatch {
     match tier {
-        SimdTier::X86_64Avx2 => PrimitiveSortDispatch::Avx2,
-        SimdTier::Aarch64Neon => PrimitiveSortDispatch::Neon,
-        SimdTier::Scalar | SimdTier::Riscv64Rvv => PrimitiveSortDispatch::Scalar,
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => PrimitiveSortDispatch::Avx2,
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => PrimitiveSortDispatch::Neon,
+        SimdTier::Scalar | SimdTier::Riscv64Rvv | SimdTier::Wasm128 => PrimitiveSortDispatch::Scalar,
     }
 }
 

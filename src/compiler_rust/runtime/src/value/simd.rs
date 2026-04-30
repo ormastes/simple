@@ -90,9 +90,14 @@ pub extern "C" fn rt_simd_has_rvv() -> bool {
 pub extern "C" fn rt_simd_detect_profile() -> i64 {
     match detect_profile() {
         SimdTier::Scalar => 0,
-        SimdTier::X86_64Avx2 => 1,
-        SimdTier::Aarch64Neon => 2,
-        SimdTier::Riscv64Rvv => 3,
+        SimdTier::X86_64Sse2 => 1,
+        SimdTier::X86_64Avx2 => 2,
+        SimdTier::X86_64Avx512 => 3,
+        SimdTier::Aarch64Neon => 4,
+        SimdTier::Aarch64Sve => 5,
+        SimdTier::Aarch64Sve2 => 6,
+        SimdTier::Riscv64Rvv => 7,
+        SimdTier::Wasm128 => 8,
     }
 }
 
@@ -528,11 +533,12 @@ pub extern "C" fn rt_vec_select(mask: RuntimeValue, if_true: RuntimeValue, if_fa
 /// # Parameters
 /// - `arr`: Source array
 /// - `offset`: Starting offset
+/// - `lanes`: Requested lane count
 ///
 /// # Returns
 /// New vector containing elements from arr[offset..]
 #[no_mangle]
-pub extern "C" fn rt_vec_load(arr: RuntimeValue, offset: i64) -> RuntimeValue {
+pub extern "C" fn rt_vec_load(arr: RuntimeValue, offset: i64, lanes: i64) -> RuntimeValue {
     let src = match get_array(arr) {
         Some(a) => a,
         None => return RuntimeValue::NIL,
@@ -545,8 +551,8 @@ pub extern "C" fn rt_vec_load(arr: RuntimeValue, offset: i64) -> RuntimeValue {
         return rt_array_new(0);
     }
 
-    // Load 4 elements (typical SIMD width) or remaining elements
-    let count = (src_len - start).min(4);
+    let requested_lanes = lanes.max(0) as usize;
+    let count = (src_len - start).min(requested_lanes);
     create_array_from_fn(count, |i| array_get_element(src, start + i))
 }
 
@@ -1117,12 +1123,37 @@ mod tests {
     }
 
     #[test]
+    fn test_vec_load_honors_requested_lane_count() {
+        let arr = rt_array_new(8);
+        for i in 1..=8 {
+            rt_array_push(arr, RuntimeValue::from_int(i));
+        }
+
+        let result = rt_vec_load(arr, 0, 8);
+        let loaded = get_array(result).expect("expected vector array");
+        assert_eq!(array_len(loaded), 8);
+        assert_eq!(array_get_element(loaded, 0).as_int(), 1);
+        assert_eq!(array_get_element(loaded, 7).as_int(), 8);
+
+        let tail = rt_vec_load(arr, 6, 8);
+        let tail_loaded = get_array(tail).expect("expected tail vector array");
+        assert_eq!(array_len(tail_loaded), 2);
+        assert_eq!(array_get_element(tail_loaded, 0).as_int(), 7);
+        assert_eq!(array_get_element(tail_loaded, 1).as_int(), 8);
+    }
+
+    #[test]
     fn test_simd_detect_profile_matches_simple_simd_encoding() {
         let expected = match detect_profile() {
             SimdTier::Scalar => 0,
-            SimdTier::X86_64Avx2 => 1,
-            SimdTier::Aarch64Neon => 2,
-            SimdTier::Riscv64Rvv => 3,
+            SimdTier::X86_64Sse2 => 1,
+            SimdTier::X86_64Avx2 => 2,
+            SimdTier::X86_64Avx512 => 3,
+            SimdTier::Aarch64Neon => 4,
+            SimdTier::Aarch64Sve => 5,
+            SimdTier::Aarch64Sve2 => 6,
+            SimdTier::Riscv64Rvv => 7,
+            SimdTier::Wasm128 => 8,
         };
 
         assert_eq!(rt_simd_detect_profile(), expected);

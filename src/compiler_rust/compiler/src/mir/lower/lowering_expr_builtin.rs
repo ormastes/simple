@@ -181,6 +181,40 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // Runtime numeric kernels that return a scalar pack the result as RuntimeValue.
+        // Unbox them when the HIR expects a native float.
+        if matches!(
+            name,
+            "rt_numeric_dot_f32"
+                | "rt_numeric_sum_f32"
+                | "rt_numeric_min_f32"
+                | "rt_numeric_max_f32"
+                | "rt_numeric_sum_f64"
+                | "rt_numeric_dot_f64"
+        ) && matches!(expr_ty, TypeId::F32 | TypeId::F64)
+        {
+            let mut arg_regs = Vec::new();
+            for arg in args {
+                arg_regs.push(self.lower_expr(arg)?);
+            }
+
+            return self.with_func(|func, current_block| {
+                let raw_result = func.new_vreg();
+                let unboxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(raw_result),
+                    target: CallTarget::from_name(name),
+                    args: arg_regs,
+                });
+                block.instructions.push(MirInst::UnboxFloat {
+                    dest: unboxed,
+                    value: raw_result,
+                });
+                unboxed
+            });
+        }
+
         // Special handling for print/println/eprint/eprintln - box numeric args
         if matches!(
             name,

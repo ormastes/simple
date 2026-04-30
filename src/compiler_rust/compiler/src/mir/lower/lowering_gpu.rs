@@ -4,7 +4,7 @@
 //! extracting GPU-specific arguments, and metadata extraction for AOP matching.
 
 use super::lowering_core::{MirLowerError, MirLowerResult, MirLowerer};
-use crate::hir::{GpuIntrinsicKind, HirExpr, HirExprKind, HirFunction, NeighborDirection};
+use crate::hir::{GpuIntrinsicKind, HirExpr, HirExprKind, HirFunction, HirType, NeighborDirection, TypeId};
 use crate::mir::instructions::{GpuAtomicOp, GpuMemoryScope, MirInst, VReg};
 
 /// Helper macro for GPU intrinsics with dimension argument
@@ -48,6 +48,14 @@ macro_rules! simd_binary_op {
 }
 
 impl<'a> MirLowerer<'a> {
+    pub(super) fn lower_gpu_intrinsic(
+        &mut self,
+        intrinsic: GpuIntrinsicKind,
+        args: &[HirExpr],
+    ) -> MirLowerResult<VReg> {
+        self.lower_typed_gpu_intrinsic(intrinsic, args, TypeId::VOID)
+    }
+
     fn emit_nil_vreg_in_current_block(&mut self) -> MirLowerResult<VReg> {
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
@@ -58,10 +66,11 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
-    pub(super) fn lower_gpu_intrinsic(
+    pub(super) fn lower_typed_gpu_intrinsic(
         &mut self,
         intrinsic: GpuIntrinsicKind,
         args: &[HirExpr],
+        result_ty: TypeId,
     ) -> MirLowerResult<VReg> {
         match intrinsic {
             GpuIntrinsicKind::GlobalId => gpu_dim_op!(self, args, GpuGlobalId),
@@ -198,10 +207,19 @@ impl<'a> MirLowerer<'a> {
                 // vec.load(array, offset) - load vector from array
                 let array = self.lower_expr(&args[0])?;
                 let offset = self.lower_expr(&args[1])?;
+                let lanes = match self.type_registry.and_then(|registry| registry.get(result_ty)) {
+                    Some(HirType::Simd { lanes, .. }) => *lanes,
+                    _ => 4,
+                };
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecLoad { dest, array, offset });
+                    block.instructions.push(MirInst::VecLoad {
+                        dest,
+                        array,
+                        offset,
+                        lanes,
+                    });
                     dest
                 })
             }

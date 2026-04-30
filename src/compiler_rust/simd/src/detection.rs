@@ -13,26 +13,98 @@ pub enum SimdTier {
     /// Baseline scalar implementation.
     #[default]
     Scalar,
+    /// x86_64 with SSE2.
+    X86_64Sse2,
     /// x86_64 with AVX2.
     X86_64Avx2,
+    /// x86_64 with AVX-512.
+    X86_64Avx512,
     /// AArch64 with NEON.
     Aarch64Neon,
+    /// AArch64 with SVE.
+    Aarch64Sve,
+    /// AArch64 with SVE2.
+    Aarch64Sve2,
     /// RISC-V 64 with vector extension.
     Riscv64Rvv,
+    /// WebAssembly SIMD128.
+    Wasm128,
 }
 
 impl SimdTier {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Scalar => "scalar",
+            Self::X86_64Sse2 => "x86_64_sse2",
             Self::X86_64Avx2 => "x86_64_avx2",
+            Self::X86_64Avx512 => "x86_64_avx512",
             Self::Aarch64Neon => "aarch64_neon",
+            Self::Aarch64Sve => "aarch64_sve",
+            Self::Aarch64Sve2 => "aarch64_sve2",
             Self::Riscv64Rvv => "riscv64_rvv",
+            Self::Wasm128 => "wasm128",
         }
     }
 
     pub const fn is_scalar(self) -> bool {
         matches!(self, Self::Scalar)
+    }
+
+    pub const fn family(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::X86_64Sse2 | Self::X86_64Avx2 | Self::X86_64Avx512 => "x86_64",
+            Self::Aarch64Neon | Self::Aarch64Sve | Self::Aarch64Sve2 => "aarch64",
+            Self::Riscv64Rvv => "riscv64",
+            Self::Wasm128 => "wasm",
+        }
+    }
+
+    pub fn compatible_with(self, host: SimdTier) -> bool {
+        if matches!(self, Self::Scalar) {
+            return true;
+        }
+        if self.family() != host.family() {
+            return false;
+        }
+        self.rank() <= host.rank()
+    }
+
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Scalar => 0,
+            Self::X86_64Sse2 => 1,
+            Self::X86_64Avx2 => 2,
+            Self::X86_64Avx512 => 3,
+            Self::Aarch64Neon => 1,
+            Self::Aarch64Sve => 2,
+            Self::Aarch64Sve2 => 3,
+            Self::Riscv64Rvv => 1,
+            Self::Wasm128 => 1,
+        }
+    }
+
+    pub fn compatible_fallbacks(self) -> &'static [SimdTier] {
+        match self {
+            Self::Scalar => &[Self::Scalar],
+            Self::X86_64Sse2 => &[Self::X86_64Sse2, Self::Scalar],
+            Self::X86_64Avx2 => &[Self::X86_64Avx2, Self::X86_64Sse2, Self::Scalar],
+            Self::X86_64Avx512 => &[Self::X86_64Avx512, Self::X86_64Avx2, Self::X86_64Sse2, Self::Scalar],
+            Self::Aarch64Neon => &[Self::Aarch64Neon, Self::Scalar],
+            Self::Aarch64Sve => &[Self::Aarch64Sve, Self::Aarch64Neon, Self::Scalar],
+            Self::Aarch64Sve2 => &[Self::Aarch64Sve2, Self::Aarch64Sve, Self::Aarch64Neon, Self::Scalar],
+            Self::Riscv64Rvv => &[Self::Riscv64Rvv, Self::Scalar],
+            Self::Wasm128 => &[Self::Wasm128, Self::Scalar],
+        }
+    }
+
+    pub fn best_available_implementation(self) -> SimdTier {
+        match self {
+            Self::X86_64Avx512 => Self::X86_64Avx2,
+            Self::Aarch64Sve | Self::Aarch64Sve2 => Self::Aarch64Neon,
+            Self::Wasm128 => Self::Scalar,
+            other => other,
+        }
     }
 }
 
@@ -48,9 +120,16 @@ impl FromStr for SimdTier {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim() {
             "scalar" => Ok(Self::Scalar),
+            "x86_64_sse2" | "sse2" => Ok(Self::X86_64Sse2),
+            "x86_64_avx512" | "avx512" => Ok(Self::X86_64Avx512),
             "x86_64_avx2" => Ok(Self::X86_64Avx2),
-            "aarch64_neon" => Ok(Self::Aarch64Neon),
+            "avx2" => Ok(Self::X86_64Avx2),
+            "aarch64_neon" | "neon" => Ok(Self::Aarch64Neon),
+            "aarch64_sve" | "sve" => Ok(Self::Aarch64Sve),
+            "aarch64_sve2" | "sve2" => Ok(Self::Aarch64Sve2),
             "riscv64_rvv" => Ok(Self::Riscv64Rvv),
+            "rvv" => Ok(Self::Riscv64Rvv),
+            "wasm128" | "wasm_simd128" => Ok(Self::Wasm128),
             _ => Err("unknown SIMD tier"),
         }
     }
@@ -81,8 +160,14 @@ pub struct SimdFeatures {
     pub fma: bool,
     /// ARM NEON support.
     pub neon: bool,
+    /// ARM SVE support.
+    pub sve: bool,
+    /// ARM SVE2 support.
+    pub sve2: bool,
     /// RISC-V Vector extension support.
     pub rvv: bool,
+    /// WebAssembly SIMD128 support.
+    pub wasm128: bool,
 }
 
 impl SimdFeatures {
@@ -101,7 +186,10 @@ impl SimdFeatures {
             avx512f: std::is_x86_feature_detected!("avx512f"),
             fma: std::is_x86_feature_detected!("fma"),
             neon: false,
+            sve: false,
+            sve2: false,
             rvv: false,
+            wasm128: false,
         }
     }
 
@@ -120,7 +208,10 @@ impl SimdFeatures {
             avx512f: false, // AVX-512 not available on 32-bit
             fma: std::is_x86_feature_detected!("fma"),
             neon: false,
+            sve: false,
+            sve2: false,
             rvv: false,
+            wasm128: false,
         }
     }
 
@@ -139,7 +230,10 @@ impl SimdFeatures {
             avx512f: false,
             fma: true,  // NEON includes FMA
             neon: true, // NEON is always available on AArch64
+            sve: cfg!(target_feature = "sve"),
+            sve2: cfg!(target_feature = "sve2"),
             rvv: false,
+            wasm128: false,
         }
     }
 
@@ -158,7 +252,32 @@ impl SimdFeatures {
             avx512f: false,
             fma: false,
             neon: false,
+            sve: false,
+            sve2: false,
             rvv: cfg!(target_feature = "v"),
+            wasm128: false,
+        }
+    }
+
+    /// Detect SIMD features at runtime (WASM).
+    #[cfg(target_arch = "wasm32")]
+    pub fn detect() -> Self {
+        SimdFeatures {
+            sse: false,
+            sse2: false,
+            sse3: false,
+            ssse3: false,
+            sse4_1: false,
+            sse4_2: false,
+            avx: false,
+            avx2: false,
+            avx512f: false,
+            fma: false,
+            neon: false,
+            sve: false,
+            sve2: false,
+            rvv: false,
+            wasm128: cfg!(target_feature = "simd128"),
         }
     }
 
@@ -167,7 +286,8 @@ impl SimdFeatures {
         target_arch = "x86_64",
         target_arch = "x86",
         target_arch = "aarch64",
-        target_arch = "riscv64"
+        target_arch = "riscv64",
+        target_arch = "wasm32"
     )))]
     pub fn detect() -> Self {
         SimdFeatures::default()
@@ -175,12 +295,22 @@ impl SimdFeatures {
 
     /// Get the canonical SIMD tier for this host.
     pub fn detect_profile(&self) -> SimdTier {
-        if self.avx2 {
+        if self.avx512f {
+            SimdTier::X86_64Avx512
+        } else if self.avx2 {
             SimdTier::X86_64Avx2
+        } else if self.sse2 {
+            SimdTier::X86_64Sse2
+        } else if self.sve2 {
+            SimdTier::Aarch64Sve2
+        } else if self.sve {
+            SimdTier::Aarch64Sve
         } else if self.neon {
             SimdTier::Aarch64Neon
         } else if self.rvv {
             SimdTier::Riscv64Rvv
+        } else if self.wasm128 {
+            SimdTier::Wasm128
         } else {
             SimdTier::Scalar
         }
@@ -188,7 +318,7 @@ impl SimdFeatures {
 
     /// Check if any SIMD is available.
     pub fn has_simd(&self) -> bool {
-        self.sse2 || self.neon
+        self.sse2 || self.neon || self.sve || self.sve2 || self.rvv || self.wasm128
     }
 
     /// Check if 256-bit vectors are available.
@@ -325,7 +455,17 @@ mod tests {
 
     #[test]
     fn test_profile_roundtrip() {
-        for value in ["scalar", "x86_64_avx2", "aarch64_neon", "riscv64_rvv"] {
+        for value in [
+            "scalar",
+            "x86_64_sse2",
+            "x86_64_avx2",
+            "x86_64_avx512",
+            "aarch64_neon",
+            "aarch64_sve",
+            "aarch64_sve2",
+            "riscv64_rvv",
+            "wasm128",
+        ] {
             let tier = SimdTier::from_str(value).expect("parse tier");
             assert_eq!(tier.as_str(), value);
         }
@@ -335,14 +475,57 @@ mod tests {
     fn test_detect_profile_matches_feature_flags() {
         let features = SimdFeatures::detect();
         let profile = features.detect_profile();
-        if features.avx2 {
+        if features.avx512f {
+            assert_eq!(profile, SimdTier::X86_64Avx512);
+        } else if features.avx2 {
             assert_eq!(profile, SimdTier::X86_64Avx2);
+        } else if features.sse2 {
+            assert_eq!(profile, SimdTier::X86_64Sse2);
+        } else if features.sve2 {
+            assert_eq!(profile, SimdTier::Aarch64Sve2);
+        } else if features.sve {
+            assert_eq!(profile, SimdTier::Aarch64Sve);
         } else if features.neon {
             assert_eq!(profile, SimdTier::Aarch64Neon);
         } else if features.rvv {
             assert_eq!(profile, SimdTier::Riscv64Rvv);
+        } else if features.wasm128 {
+            assert_eq!(profile, SimdTier::Wasm128);
         } else {
             assert_eq!(profile, SimdTier::Scalar);
         }
+    }
+
+    #[test]
+    fn test_compatibility_ordering() {
+        assert!(SimdTier::X86_64Sse2.compatible_with(SimdTier::X86_64Avx2));
+        assert!(SimdTier::X86_64Avx2.compatible_with(SimdTier::X86_64Avx512));
+        assert!(!SimdTier::X86_64Avx512.compatible_with(SimdTier::X86_64Avx2));
+        assert!(SimdTier::Aarch64Sve.compatible_with(SimdTier::Aarch64Sve2));
+        assert!(SimdTier::Aarch64Neon.compatible_with(SimdTier::Aarch64Sve2));
+        assert!(!SimdTier::Aarch64Neon.compatible_with(SimdTier::X86_64Avx2));
+        assert!(SimdTier::Scalar.compatible_with(SimdTier::Riscv64Rvv));
+    }
+
+    #[test]
+    fn test_fallback_ordering() {
+        assert_eq!(
+            SimdTier::X86_64Avx512.compatible_fallbacks(),
+            &[
+                SimdTier::X86_64Avx512,
+                SimdTier::X86_64Avx2,
+                SimdTier::X86_64Sse2,
+                SimdTier::Scalar,
+            ]
+        );
+        assert_eq!(
+            SimdTier::Aarch64Sve2.compatible_fallbacks(),
+            &[
+                SimdTier::Aarch64Sve2,
+                SimdTier::Aarch64Sve,
+                SimdTier::Aarch64Neon,
+                SimdTier::Scalar,
+            ]
+        );
     }
 }

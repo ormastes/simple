@@ -1,0 +1,217 @@
+use compress.types.{CompressionError}
+
+val ZSTD_HUF_MAX_BITS: i64 = 11
+val ZSTD_HUF_MAX_SYMBOLS: i64 = 256
+
+struct ZstdHufSymbolInfo:
+    symbol: i64
+    weight: i64
+    bits: i64
+
+struct ZstdHufCanonicalEntry:
+    symbol: i64
+    weight: i64
+    bits: i64
+    code: u32
+
+struct ZstdHufDecodeEntry:
+    symbol: i64
+    bits: i64
+
+fn _zstd_huf_is_power_of_two(value: i64) -> bool:
+    if value <= 0:
+        return false
+    (value & (value - 1)) == 0
+
+fn _zstd_huf_log2_exact(value: i64) -> i64:
+    var probe = value
+    var bits = 0
+    while probe > 1:
+        probe = probe >> 1
+        bits = bits + 1
+    bits
+
+fn _zstd_huf_next_power_of_two(value: i64) -> i64:
+    var target = 1
+    while target <= value:
+        target = target << 1
+    target
+
+fn _zstd_huf_validate_weight(weight: i64) -> Result<(), CompressionError>:
+    if weight < 0:
+        return Err(CompressionError.CorruptStream("zstd huf negative weight"))
+    if weight > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf weight exceeds 11 bits"))
+    Ok(())
+
+fn zstd_huf_complete_weights(partial_weights: [i64]) -> Result<[i64], CompressionError>:
+    if partial_weights.len() <= 0:
+        return Err(CompressionError.CorruptStream("zstd huf weights need at least one explicit symbol"))
+    if partial_weights.len() >= ZSTD_HUF_MAX_SYMBOLS:
+        return Err(CompressionError.CorruptStream("zstd huf partial weights exceed symbol bound"))
+    var sum = 0
+    var i = 0
+    while i < partial_weights.len():
+        val weight = partial_weights[i]
+        val valid = _zstd_huf_validate_weight(weight)
+        if valid.is_err():
+            return Err(valid.unwrap_err())
+        if weight > 0:
+            sum = sum + (1 << (weight - 1))
+        i = i + 1
+    val target = _zstd_huf_next_power_of_two(sum)
+    val remainder = target - sum
+    if remainder <= 0 or not _zstd_huf_is_power_of_two(remainder):
+        return Err(CompressionError.CorruptStream("zstd huf final weight cannot complete a power-of-two tree"))
+    val max_bits = _zstd_huf_log2_exact(target)
+    if max_bits <= 0 or max_bits > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf tree depth exceeds 11 bits"))
+    val last_weight = _zstd_huf_log2_exact(remainder) + 1
+    var complete = partial_weights
+    complete.push(last_weight)
+    val validated = zstd_huf_weights_to_symbols(complete)
+    if validated.is_err():
+        return Err(validated.unwrap_err())
+    Ok(complete)
+
+fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], CompressionError>:
+    if weights.len() < 2:
+        return Err(CompressionError.CorruptStream("zstd huf needs at least two present symbols"))
+    if weights.len() > ZSTD_HUF_MAX_SYMBOLS:
+        return Err(CompressionError.CorruptStream("zstd huf weights exceed symbol bound"))
+    var max_weight = 0
+    var non_zero = 0
+    var has_weight_one = false
+    var i = 0
+    while i < weights.len():
+        val weight = weights[i]
+        val valid = _zstd_huf_validate_weight(weight)
+        if valid.is_err():
+            return Err(valid.unwrap_err())
+        if weight > max_weight:
+            max_weight = weight
+        if weight > 0:
+            non_zero = non_zero + 1
+        if weight == 1:
+            has_weight_one = true
+        i = i + 1
+    if max_weight <= 0:
+        return Err(CompressionError.CorruptStream("zstd huf has no present symbols"))
+    if non_zero < 2:
+        return Err(CompressionError.CorruptStream("zstd huf needs at least two present symbols"))
+    if not has_weight_one:
+        return Err(CompressionError.CorruptStream("zstd huf requires at least one weight of 1"))
+    var remaining = 1 << max_weight
+    var symbols: [ZstdHufSymbolInfo] = []
+    i = 0
+    while i < weights.len():
+        val weight = weights[i]
+        var bits = 0
+        if weight > 0:
+            bits = max_weight + 1 - weight
+            remaining = remaining - (1 << (weight - 1))
+        symbols.push(ZstdHufSymbolInfo(symbol: i, weight: weight, bits: bits))
+        i = i + 1
+    if remaining < 0:
+        return Err(CompressionError.CorruptStream("zstd huf weights oversubscribed"))
+    if remaining > 0:
+        return Err(CompressionError.CorruptStream("zstd huf weights incomplete"))
+    Ok(symbols)
+
+fn _zstd_huf_sort_for_canonical(symbols: [ZstdHufSymbolInfo]) -> [ZstdHufSymbolInfo]:
+    var filtered: [ZstdHufSymbolInfo] = []
+    var i = 0
+    while i < symbols.len():
+        val symbol = symbols[i]
+        if symbol.weight > 0:
+            filtered.push(symbol)
+        i = i + 1
+    var result = filtered
+    val n = result.len()
+    i = 0
+    while i < n:
+        var j = 0
+        while j < n - 1 - i:
+            val left = result[j]
+            val right = result[j + 1]
+            var should_swap = false
+            if left.weight > right.weight:
+                should_swap = true
+            elif left.weight == right.weight and left.symbol > right.symbol:
+                should_swap = true
+            if should_swap:
+                result[j] = right
+                result[j + 1] = left
+            j = j + 1
+        i = i + 1
+    result
+
+fn zstd_huf_build_canonical_entries(weights: [i64]) -> Result<[ZstdHufCanonicalEntry], CompressionError>:
+    val symbols_res = zstd_huf_weights_to_symbols(weights)
+    if symbols_res.is_err():
+        return Err(symbols_res.unwrap_err())
+    val ordered = _zstd_huf_sort_for_canonical(symbols_res.unwrap())
+    var entries: [ZstdHufCanonicalEntry] = []
+    if ordered.len() == 0:
+        return Err(CompressionError.CorruptStream("zstd huf has no present symbols"))
+    var next_code: u32 = 0u32
+    var prev_bits = ordered[0].bits
+    var i = 0
+    while i < ordered.len():
+        val symbol = ordered[i]
+        if i > 0:
+            next_code = next_code + 1u32
+            if symbol.bits > prev_bits:
+                return Err(CompressionError.CorruptStream("zstd huf canonical order grew in bit length"))
+            if symbol.bits < prev_bits:
+                next_code = next_code >> (prev_bits - symbol.bits).to_u32()
+            prev_bits = symbol.bits
+        entries.push(ZstdHufCanonicalEntry(
+            symbol: symbol.symbol,
+            weight: symbol.weight,
+            bits: symbol.bits,
+            code: next_code
+        ))
+        i = i + 1
+    Ok(entries)
+
+fn zstd_huf_reverse_bits(value: u32, width: i64) -> u32:
+    var out: u32 = 0u32
+    var i = 0
+    while i < width:
+        out = out << 1u32
+        out = out | ((value >> i.to_u32()) & 1u32)
+        i = i + 1
+    out
+
+fn zstd_huf_expand_decode_table(entries: [ZstdHufCanonicalEntry], table_bits: i64) -> Result<[ZstdHufDecodeEntry], CompressionError>:
+    if table_bits <= 0 or table_bits > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf decode table width"))
+    val table_size = 1 << table_bits
+    var table: [ZstdHufDecodeEntry] = []
+    var slot = 0
+    while slot < table_size:
+        table.push(ZstdHufDecodeEntry(symbol: -1, bits: 0))
+        slot = slot + 1
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry.bits <= 0 or entry.bits > table_bits:
+            return Err(CompressionError.CorruptStream("zstd huf decode table entry width"))
+        val base = zstd_huf_reverse_bits(entry.code, entry.bits)
+        val fill_count = 1 << (table_bits - entry.bits)
+        var fill = 0
+        while fill < fill_count:
+            val slot_idx = (base | (fill.to_u32() << entry.bits.to_u32())).to_i64()
+            val current = table[slot_idx]
+            if current.bits != 0:
+                return Err(CompressionError.CorruptStream("zstd huf decode table collision"))
+            table[slot_idx] = ZstdHufDecodeEntry(symbol: entry.symbol, bits: entry.bits)
+            fill = fill + 1
+        i = i + 1
+    i = 0
+    while i < table.len():
+        if table[i].bits == 0:
+            return Err(CompressionError.CorruptStream("zstd huf decode table incomplete"))
+        i = i + 1
+    Ok(table)

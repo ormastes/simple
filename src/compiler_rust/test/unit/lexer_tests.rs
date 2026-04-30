@@ -1,4 +1,3 @@
-#![allow(unused_imports, dead_code, unused_variables)]
 //! Comprehensive lexer unit tests
 
 use simple_parser::lexer::Lexer;
@@ -19,8 +18,7 @@ fn tokenize_full(source: &str) -> Vec<Token> {
 
 #[test]
 fn test_lexer_new() {
-    let lexer = Lexer::new("test");
-    let _ = lexer; // Lexer should be created successfully
+    assert_eq!(Lexer::new("test").tokenize().len(), 2);
 }
 
 #[test]

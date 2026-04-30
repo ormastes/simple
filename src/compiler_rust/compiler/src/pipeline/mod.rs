@@ -26,7 +26,7 @@ mod lowering;
 mod parsing;
 
 // Re-export main types
-pub use core::CompilerPipeline;
+pub use core::{CompilerPipeline, SimdMode};
 pub use execution::{
     generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object, generate_smf_from_object_for_target,
 };
@@ -47,6 +47,7 @@ mod tests {
     use crate::lint::{LintConfig, LintLevel, LintName};
     use crate::mir::{self, ContractMode};
     use crate::monomorphize::monomorphize_module;
+    use crate::pipeline::SimdMode;
     use crate::CompileError;
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::path::Path;
@@ -713,5 +714,390 @@ main = 0
         // Should succeed when test profile has no bindings
         let result = pipeline.compile_source_to_memory(source);
         assert!(result.is_ok(), "Release mode should allow empty test profile");
+    }
+
+    #[test]
+    fn simd_report_collects_explicit_loop_requests() {
+        let source = "fn main() -> i64:\n    @simd\n    for i in 0..4:\n        pass\n    @simd\n    while false:\n        pass\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_simd_report_lines(&ast_module);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines.iter().any(|line| line.contains("explicit @simd on while-loop")));
+        assert!(lines.iter().all(|line| line.contains("not vectorized")));
+    }
+
+    #[test]
+    fn simd_report_ignores_unannotated_loops() {
+        let source = "fn main() -> i64:\n    for i in 0..4:\n        pass\n    while false:\n        pass\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_simd_report_lines(&ast_module);
+
+        assert!(lines.is_empty(), "unexpected SIMD report lines: {lines:?}");
+    }
+
+    #[test]
+    fn simd_report_detects_auto_vectorization_candidates() {
+        let source = "fn main() -> i64:\n    for i in 0..n:\n        out[i] = a[i] + b[i]\n    for j in 0..n:\n        prod[j] = x[j] * y[j]\n    for k in 0..n:\n        mix[k] = a[k] * b[k] + c[k]\n    for m in 0..n:\n        sum += vals[m]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_simd_report_lines(&ast_module);
+
+        assert!(lines.is_empty(), "unexpected AST-only report lines: {lines:?}");
+    }
+
+    #[test]
+    fn simd_report_explains_explicit_loop_failures() {
+        let source = "fn main() -> i64:\n    @simd\n    while false:\n        pass\n    @simd\n    for i, x in items:\n        out[i] = x\n    @simd\n    for j in items:\n        out[j] = src[j]\n    @simd\n    for k in 0..n:\n        a[k] = b[k]\n        c[k] = d[k]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_simd_report_lines(&ast_module);
+
+        assert!(lines.iter().any(|line| line.contains("while-loop; not vectorized: unsupported loop form")));
+    }
+
+    #[test]
+    fn simd_auto_warns_for_structurally_unsupported_explicit_loops() {
+        let source = "fn main() -> i64:\n    @simd\n    while false:\n        pass\n    @simd\n    for i, x in items:\n        out[i] = x\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let lines = pipeline.collect_explicit_simd_warning_lines(&ast_module);
+
+        assert!(lines.iter().any(|line| line.contains("explicit @simd on while-loop was not vectorized")));
+        assert!(lines.iter().any(|line| line.contains("explicit @simd on for-loop was not vectorized: unsupported index pattern")));
+    }
+
+    #[test]
+    fn simd_typed_report_detects_runtime_kernel_lowering_candidates() {
+        let source = "fn main() -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    for i in 0..4:\n        out[i] = a[i] + b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
+
+        assert!(lines.iter().any(|line| line.contains("vectorized via runtime kernel rt_numeric_add_f64")));
+    }
+
+    #[test]
+    fn simd_typed_report_explains_explicit_for_loop_failure() {
+        let source = "fn main(n: i64) -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    @simd\n    for i in 0..(n + 1):\n        out[i] = a[i] + b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("explicit @simd on for-loop; not vectorized: no typed runtime-kernel lowering available")));
+    }
+
+    #[test]
+    fn simd_auto_warns_for_typed_explicit_for_loop_failure() {
+        let source = "fn main(n: i64) -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    @simd\n    for i in 0..(n + 1):\n        out[i] = a[i] + b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let lines = pipeline.collect_typed_explicit_simd_warning_lines(&hir_module);
+
+        assert!(lines.iter().any(|line| {
+            line.contains("warning: function=main: explicit @simd on for-loop was not vectorized")
+                && line.contains("no typed runtime-kernel lowering available")
+        }));
+    }
+
+    #[test]
+    fn simd_auto_does_not_warn_for_explicit_loop_that_vectorizes() {
+        let source = "fn main() -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    @simd\n    for i in 0..4:\n        out[i] = a[i] + b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+
+        assert!(pipeline.collect_explicit_simd_warning_lines(&ast_module).is_empty());
+        assert!(pipeline.collect_typed_explicit_simd_warning_lines(&hir_module).is_empty());
+    }
+
+    #[test]
+    fn simd_auto_lowers_fixed_size_f64_map_add_to_runtime_kernel() {
+        let source = "fn main() -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    for i in 0..4:\n        out[i] = a[i] + b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_add_f64"))
+            }),
+            "expected rt_numeric_add_f64 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_auto_lowers_fixed_size_f64_map_mul_to_runtime_kernel() {
+        let source = "fn main() -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    for i in 0..4:\n        out[i] = a[i] * b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_mul_f64"))
+            }),
+            "expected rt_numeric_mul_f64 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_auto_lowers_fixed_size_f64_map_fma_to_runtime_kernel() {
+        let source = "fn main() -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    let c = [9.0, 10.0, 11.0, 12.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    for i in 0..4:\n        out[i] = a[i] * b[i] + c[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_fma_f64"))
+            }),
+            "expected rt_numeric_fma_f64 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_typed_report_detects_dynamic_len_bounded_runtime_kernel_candidate() {
+        let source = "fn main(a: [f64], b: [f64], out: [f64]) -> i64:\n    for i in 0..out.len():\n        out[i] = a[i] + b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
+
+        assert!(lines.iter().any(|line| line.contains("vectorized via runtime kernel rt_numeric_add_f64")));
+    }
+
+    #[test]
+    fn simd_auto_lowers_dynamic_len_bounded_f64_map_add_to_guarded_runtime_kernel() {
+        let source =
+            "fn main(a: [f64], b: [f64], out: [f64]) -> i64:\n    for i in 0..out.len():\n        out[i] = a[i] + b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_add_f64"))
+            }),
+            "expected guarded rt_numeric_add_f64 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_auto_lowers_dynamic_len_bounded_f32_reduction_to_guarded_runtime_kernel() {
+        let source = "fn main(vals: [f32]) -> f32:\n    var sum = 0.0f32\n    for i in 0..vals.len():\n        sum = sum + vals[i]\n    return sum\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_sum_f32"))
+            }),
+            "expected guarded rt_numeric_sum_f32 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_auto_lowers_dynamic_len_bounded_f64_reduction_to_guarded_runtime_kernel() {
+        let source = "fn main(vals: [f64]) -> f64:\n    var sum = 0.0\n    for i in 0..vals.len():\n        sum = sum + vals[i]\n    return sum\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_sum_f64"))
+            }),
+            "expected guarded rt_numeric_sum_f64 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_typed_report_detects_dynamic_len_bounded_dot_kernel_candidate() {
+        let source =
+            "fn main(a: [f64], b: [f64]) -> f64:\n    var sum = 0.0\n    for i in 0..a.len():\n        sum = sum + a[i] * b[i]\n    return sum\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
+
+        assert!(lines.iter().any(|line| line.contains("vectorized via runtime kernel rt_numeric_dot_f64")));
+    }
+
+    #[test]
+    fn simd_auto_lowers_dynamic_len_bounded_f64_dot_to_guarded_runtime_kernel() {
+        let source =
+            "fn main(a: [f64], b: [f64]) -> f64:\n    var sum = 0.0\n    for i in 0..a.len():\n        sum = sum + a[i] * b[i]\n    return sum\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_dot_f64"))
+            }),
+            "expected guarded rt_numeric_dot_f64 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_auto_lowers_dynamic_len_bounded_f32_dot_to_guarded_runtime_kernel() {
+        let source =
+            "fn main(a: [f32], b: [f32]) -> f32:\n    var sum = 0.0f32\n    for i in 0..a.len():\n        sum = sum + a[i] * b[i]\n    return sum\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_dot_f32"))
+            }),
+            "expected guarded rt_numeric_dot_f32 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_off_keeps_fixed_size_f64_map_add_as_scalar_loop() {
+        let source = "fn main() -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    for i in 0..4:\n        out[i] = a[i] + b[i]\n    return 0\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Off);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            !mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_add_f64"))
+            }),
+            "unexpected rt_numeric_add_f64 call in MIR"
+        );
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::BinOp { op, .. } if *op == hir::BinOp::Lt)
+            }),
+            "expected scalar range-loop compare in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_scalar_numeric_builtin_results_unbox_to_native_float() {
+        let array_ty = hir::HirType::Array {
+            element: hir::TypeId::F32,
+            size: Some(4),
+        };
+        let mut module = hir::HirModule::new();
+        let array_ty_id = module.types.register(array_ty);
+
+        let func = hir::HirFunction {
+            name: "main".to_string(),
+            span: None,
+            params: vec![],
+            locals: vec![hir::LocalVar {
+                name: "vals".to_string(),
+                ty: array_ty_id,
+                mutability: simple_parser::ast::Mutability::Immutable,
+                inject: false,
+                is_ghost: false,
+            }],
+            return_type: hir::TypeId::F32,
+            body: vec![hir::HirStmt::Return(Some(hir::HirExpr {
+                kind: hir::HirExprKind::BuiltinCall {
+                    name: "rt_numeric_sum_f32".to_string(),
+                    args: vec![hir::HirExpr {
+                        kind: hir::HirExprKind::Local(0),
+                        ty: array_ty_id,
+                    }],
+                },
+                ty: hir::TypeId::F32,
+            }))],
+            visibility: simple_parser::ast::Visibility::Private,
+            contract: None,
+            is_pure: false,
+            inject: false,
+            concurrency_mode: hir::ConcurrencyMode::Actor,
+            module_path: String::new(),
+            attributes: vec![],
+            effects: vec![],
+            layout_hint: None,
+            verification_mode: hir::VerificationMode::default(),
+            is_ghost: false,
+            is_sync: false,
+            has_suspension: false,
+        };
+        module.functions.push(func);
+
+        let mir_module = mir::lower_to_mir(&module).expect("mir lower");
+        assert!(mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(
+            |inst| matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_sum_f32"))
+        ));
+        assert!(mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(
+            |inst| matches!(inst, mir::MirInst::UnboxFloat { .. })
+        ));
     }
 }

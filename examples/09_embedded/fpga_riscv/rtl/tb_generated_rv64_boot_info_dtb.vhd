@@ -1,6 +1,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use std.textio.all;
 use work.test_program.all;
 use work.simple_rv64i_core_pkg.all;
 
@@ -13,6 +14,7 @@ end entity tb_generated_rv64_boot_info_dtb;
 architecture sim of tb_generated_rv64_boot_info_dtb is
     constant CLK_PERIOD : time := 10 ns;
     constant MEM_WORDS  : integer := 2621440;
+    constant PROGRESS_REPORT_INTERVAL : integer := 100000;
 
     constant MAGIC_ADDR_BITS        : std_logic_vector(63 downto 0) := x"0000000080600000";
     constant DONE_ADDR_BITS         : std_logic_vector(63 downto 0) := x"0000000080600008";
@@ -55,6 +57,8 @@ architecture sim of tb_generated_rv64_boot_info_dtb is
     constant REGION2_BASE_EXPECTED : std_logic_vector(63 downto 0) := x"0000000080400000";
     constant REGION2_SIZE_EXPECTED : std_logic_vector(63 downto 0) := x"0000000007C00000";
     constant REGION2_KIND_EXPECTED : std_logic_vector(63 downto 0) := x"0000000000000001";
+
+    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);
 
     constant DTB_SIZE_BYTES      : integer := 239;
     constant DTB_BYTES           : byte_array_t(0 to DTB_SIZE_BYTES - 1) := (
@@ -105,38 +109,112 @@ architecture sim of tb_generated_rv64_boot_info_dtb is
     signal irq_timer    : std_logic := '0';
     signal irq_external : std_logic := '0';
     signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');
+    signal debug_last_load_value : std_logic_vector(63 downto 0) := (others => '0');
     signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');
     signal trap       : std_logic := '0';
     signal halt       : std_logic := '0';
 
     type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(63 downto 0);
 
-    function init_mem return mem_t is
-        variable m : mem_t := (others => (others => '0'));
+    function hex_to_slv4(ch : character) return std_logic_vector is
+    begin
+        case ch is
+            when '0' => return "0000";
+            when '1' => return "0001";
+            when '2' => return "0010";
+            when '3' => return "0011";
+            when '4' => return "0100";
+            when '5' => return "0101";
+            when '6' => return "0110";
+            when '7' => return "0111";
+            when '8' => return "1000";
+            when '9' => return "1001";
+            when 'A' | 'a' => return "1010";
+            when 'B' | 'b' => return "1011";
+            when 'C' | 'c' => return "1100";
+            when 'D' | 'd' => return "1101";
+            when 'E' | 'e' => return "1110";
+            when others => return "1111";
+        end case;
+    end function;
+
+    function hex_to_byte(text_value : string) return std_logic_vector is
+        variable result : std_logic_vector(7 downto 0);
+    begin
+        result(7 downto 4) := hex_to_slv4(text_value(text_value'low));
+        result(3 downto 0) := hex_to_slv4(text_value(text_value'low + 1));
+        return result;
+    end function;
+
+    function hex_to_word64(text_value : string) return std_logic_vector is
+        variable result : std_logic_vector(63 downto 0);
+        variable high_bit : integer;
+    begin
+        for i in 0 to 15 loop
+            high_bit := 63 - (i * 4);
+            result(high_bit downto high_bit - 3) := hex_to_slv4(text_value(text_value'low + i));
+        end loop;
+        return result;
+    end function;
+
+    procedure load_preload_file(
+        label_name : in string;
+        path : in string;
+        base_offset : in integer;
+        variable mem_state : inout mem_t
+    ) is
+        file input_file : text open read_mode is path;
         variable word_idx : integer;
         variable byte_idx : integer;
+        variable bytes_loaded : integer := 0;
+        variable words_loaded : integer := 0;
+        variable row_len : integer;
         variable current_word : std_logic_vector(63 downto 0);
+        variable next_word : std_logic_vector(63 downto 0);
+        variable row : line;
     begin
-        for i in 0 to FW_SIZE_BYTES - 1 loop
-            word_idx := i / 8;
-            byte_idx := i mod 8;
-            if word_idx < MEM_WORDS then
-                current_word := m(word_idx);
-                current_word((byte_idx * 8) + 7 downto byte_idx * 8) := FW_BYTES(i);
-                m(word_idx) := current_word;
+        while not endfile(input_file) loop
+            readline(input_file, row);
+            row_len := row.all'length;
+            if row_len = 16 then
+                assert (base_offset mod 8) = 0
+                    report "word preload requires 8-byte aligned base offset for " & label_name
+                    severity failure;
+                word_idx := (base_offset / 8) + words_loaded;
+                if word_idx < MEM_WORDS then
+                    next_word := hex_to_word64(row.all(1 to 16));
+                    mem_state(word_idx) := next_word;
+                end if;
+                words_loaded := words_loaded + 1;
+                bytes_loaded := bytes_loaded + 8;
+                if (words_loaded mod PROGRESS_REPORT_INTERVAL) = 0 then
+                    report "PRELOAD_" & label_name & "_WORDS: " & integer'image(words_loaded);
+                    report "PRELOAD_" & label_name & "_BYTES: " & integer'image(bytes_loaded);
+                end if;
+            elsif row_len = 2 then
+                word_idx := (base_offset + bytes_loaded) / 8;
+                byte_idx := (base_offset + bytes_loaded) mod 8;
+                if word_idx < MEM_WORDS then
+                    current_word := mem_state(word_idx);
+                    current_word((byte_idx * 8) + 7 downto byte_idx * 8) := hex_to_byte(row.all(1 to 2));
+                    mem_state(word_idx) := current_word;
+                end if;
+                bytes_loaded := bytes_loaded + 1;
+                if (bytes_loaded mod PROGRESS_REPORT_INTERVAL) = 0 then
+                    report "PRELOAD_" & label_name & "_BYTES: " & integer'image(bytes_loaded);
+                end if;
+            elsif row_len /= 0 then
+                assert false
+                    report "unsupported preload line width for " & label_name & ": " & integer'image(row_len)
+                    severity failure;
             end if;
+            deallocate(row);
         end loop;
-        for i in 0 to PAYLOAD_SIZE_BYTES - 1 loop
-            word_idx := (16#200000# + i) / 8;
-            byte_idx := (16#200000# + i) mod 8;
-            if word_idx < MEM_WORDS then
-                current_word := m(word_idx);
-                current_word((byte_idx * 8) + 7 downto byte_idx * 8) := PAYLOAD_BYTES(i);
-                m(word_idx) := current_word;
-            end if;
-        end loop;
-        return m;
-    end function;
+        if words_loaded > 0 then
+            report "PRELOAD_" & label_name & "_DONE_WORDS: " & integer'image(words_loaded);
+        end if;
+        report "PRELOAD_" & label_name & "_DONE_BYTES: " & integer'image(bytes_loaded);
+    end procedure;
 
     function safe_index(bits : std_logic_vector) return integer is
     begin
@@ -186,6 +264,14 @@ architecture sim of tb_generated_rv64_boot_info_dtb is
         for i in 0 to 7 loop
             result(i + 1) := hex_char(bits(31 - (i * 4) downto 28 - (i * 4)));
         end loop;
+        return result;
+    end function;
+
+    function hex8(bits : std_logic_vector(7 downto 0)) return string is
+        variable result : string(1 to 2);
+    begin
+        result(1) := hex_char(bits(7 downto 4));
+        result(2) := hex_char(bits(3 downto 0));
         return result;
     end function;
 
@@ -251,7 +337,7 @@ architecture sim of tb_generated_rv64_boot_info_dtb is
         return result;
     end function;
 
-    signal mem : mem_t := init_mem;
+    signal mem : mem_t := (others => (others => '0'));
     signal uart_word : std_logic_vector(31 downto 0) := (others => '0');
     signal uart_marker_seen : boolean := false;
     signal dtb_probe_seen : boolean := false;
@@ -260,6 +346,20 @@ architecture sim of tb_generated_rv64_boot_info_dtb is
     signal dmem_write_addr : std_logic_vector(63 downto 0) := (others => '0');
     signal done : boolean := false;
 begin
+    preload_mem : process
+        variable preload : mem_t := (others => (others => '0'));
+    begin
+        report "PRELOAD_PROCESS_START";
+        report "PRELOAD_FW_START";
+        load_preload_file("FW", FW_HEX_PATH, 0, preload);
+        report "PRELOAD_PAYLOAD_START";
+        load_preload_file("PAYLOAD", PAYLOAD_HEX_PATH, 16#200000#, preload);
+        report "PRELOAD_MEM_ASSIGN";
+        mem <= preload;
+        report "PRELOAD_PROCESS_DONE";
+        wait;
+    end process;
+
     u_cpu : entity work.simple_rv64gc_core
         port map (
             clk        => clk,
@@ -280,7 +380,7 @@ begin
             mmu_dmem_l1_pte => (others => '0'),
             mmu_dmem_l0_pte => (others => '0'),
             debug_priv_mode => debug_priv_mode,
-            debug_last_load_value => open,
+            debug_last_load_value => debug_last_load_value,
             debug_pc   => debug_pc,
             trap       => trap,
             halt       => halt
@@ -302,14 +402,27 @@ begin
                     dtb_probe_addr <= dmem_addr;
                 end if;
             end if;
+            if dmem_re = '1' and now <= 1000 ns then
+                report "DMEM_READ_EVENT_ADDR_HEX32: " & hex32(dmem_addr(31 downto 0));
+                report "DMEM_READ_EVENT_DATA_HEX32: " & hex32(dmem_rdata(31 downto 0));
+            end if;
 
             if dmem_we = '1' and dmem_addr = UART_ADDR and dmem_wstrb(0) = '1' then
+                if now <= 1000 ns then
+                    report "DMEM_WRITE_EVENT_ADDR_HEX32: " & hex32(dmem_addr(31 downto 0));
+                    report "DMEM_WRITE_EVENT_DATA_HEX32: " & hex32(dmem_wdata(31 downto 0));
+                end if;
+                report "UART_CHAR_HEX8: " & hex8(dmem_wdata(7 downto 0));
                 next_uart_word := uart_word(23 downto 0) & dmem_wdata(7 downto 0);
                 uart_word <= next_uart_word;
                 if next_uart_word = UART_MARKER_WORD then
                     uart_marker_seen <= true;
                 end if;
             elsif dmem_we = '1' then
+                if now <= 1000 ns then
+                    report "DMEM_WRITE_EVENT_ADDR_HEX32: " & hex32(dmem_addr(31 downto 0));
+                    report "DMEM_WRITE_EVENT_DATA_HEX32: " & hex32(dmem_wdata(31 downto 0));
+                end if;
                 dmem_write_seen <= true;
                 dmem_write_addr <= dmem_addr;
                 word_idx := mem_index(dmem_addr);
@@ -341,6 +454,18 @@ begin
         while halt = '0' and trap = '0' and cycles < MAX_CYCLES loop
             wait for CLK_PERIOD;
             cycles := cycles + 1;
+            if cycles <= 80 then
+                report "HEARTBEAT_CYCLES: " & integer'image(cycles);
+                report "HEARTBEAT_PC_HEX32: " & hex32(debug_pc(31 downto 0));
+                report "HEARTBEAT_PRIV_MODE: " & integer'image(safe_index(debug_priv_mode));
+                report "HEARTBEAT_LAST_LOAD_HEX32: " & hex32(debug_last_load_value(31 downto 0));
+            elsif (cycles mod PROGRESS_REPORT_INTERVAL) = 0 then
+                report "PROGRESS_CYCLES: " & integer'image(cycles);
+                report "PROGRESS_PC_HEX32: " & hex32(debug_pc(31 downto 0));
+                report "PROGRESS_PRIV_MODE: " & integer'image(safe_index(debug_priv_mode));
+                report "PROGRESS_LAST_LOAD_HEX32: " & hex32(debug_last_load_value(31 downto 0));
+                report "PROGRESS_UART_WORD_HEX32: " & hex32(uart_word);
+            end if;
         end loop;
 
         report "CYCLES: " & integer'image(cycles);

@@ -728,11 +728,7 @@ mod tests {
 
         let module_ref = backend.module.borrow();
         let module = module_ref.as_ref().unwrap();
-        let function = module.add_function(
-            "switch_test",
-            backend.runtime_int_type().fn_type(&[], false),
-            None,
-        );
+        let function = module.add_function("switch_test", backend.runtime_int_type().fn_type(&[], false), None);
 
         let entry = backend.context.append_basic_block(function, "entry");
         let case_one = backend.context.append_basic_block(function, "case_one");

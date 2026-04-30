@@ -27,3 +27,14 @@ See `vhdl/README.md` for details.
 - **builder/** - VhdlBuilder API demos (programmatic VHDL generation)
 - **backend/** - Backend-generated examples (`--backend=vhdl`, pending Phase 3-4)
 - **simulation/** - Simulation fixtures and testbenches
+
+## Generated FPGA RTL
+
+For the current repo-native Simple-to-FPGA RTL generation path, see:
+- `doc/07_guide/hardware/simple_generated_fpga_rtl.md`
+
+That flow can now emit board-scoped bundles, including `mlk_s02_100t`, via:
+
+```bash
+bin/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl -- --board=mlk_s02_100t /tmp/mlk_s02_100t_bundle
+```

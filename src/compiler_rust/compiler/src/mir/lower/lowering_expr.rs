@@ -222,7 +222,7 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Deref(inner) => self.lower_deref_expr(inner),
             HirExprKind::ContractOld(inner) => self.lower_contract_old_expr(inner),
             HirExprKind::NeighborAccess { array, direction } => self.lower_neighbor_access_expr(array, direction),
-            HirExprKind::GpuIntrinsic { intrinsic, args } => self.lower_gpu_intrinsic(*intrinsic, args),
+            HirExprKind::GpuIntrinsic { intrinsic, args } => self.lower_typed_gpu_intrinsic(*intrinsic, args, expr_ty),
 
             HirExprKind::If {
                 condition,

@@ -820,6 +820,87 @@ fn test():
     }
 
     #[test]
+    fn test_unnamed_duplicate_typed_args_same_file_named_rewrite_fix() {
+        let code = r#"pub fn point(x: i64, y: i64) -> i64:
+    x + y
+
+fn test():
+    val result = point(3 + 1, 4 * 2)
+"#;
+        let diagnostics = check_code_in_file("duplicate_args_fix.spl", code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        assert_eq!(dup_warnings.len(), 2);
+
+        assert_eq!(dup_warnings[0].span.line, 4);
+        assert_eq!(dup_warnings[0].span.column, 24);
+        assert!(dup_warnings[0]
+            .suggestion
+            .as_deref()
+            .unwrap_or("")
+            .contains("automatic fix is available"));
+        let first_fix = dup_warnings[0].easy_fix.as_ref().expect("missing easy fix");
+        assert_eq!(first_fix.confidence, simple_common::diagnostic::FixConfidence::Safe);
+        assert_eq!(first_fix.replacements.len(), 1);
+        assert_eq!(first_fix.replacements[0].new_text, "x: 3 + 1");
+
+        assert_eq!(dup_warnings[1].span.line, 4);
+        assert_eq!(dup_warnings[1].span.column, 31);
+        let second_fix = dup_warnings[1].easy_fix.as_ref().expect("missing easy fix");
+        assert_eq!(second_fix.replacements.len(), 1);
+        assert_eq!(second_fix.replacements[0].new_text, "y: 4 * 2");
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_same_file_partial_named_rewrite_fix() {
+        let code = r#"pub fn point(x: i64, y: i64) -> i64:
+    x + y
+
+fn next_value() -> i64:
+    4
+
+fn test():
+    val result = point(x: 3, next_value())
+"#;
+        let diagnostics = check_code_in_file("duplicate_args_partial_fix.spl", code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        assert_eq!(dup_warnings.len(), 1);
+        assert_eq!(dup_warnings[0].span.line, 7);
+        assert_eq!(dup_warnings[0].span.column, 30);
+        let fix = dup_warnings[0].easy_fix.as_ref().expect("missing easy fix");
+        assert_eq!(fix.replacements[0].new_text, "y: next_value()");
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_wrong_label_has_no_easy_fix() {
+        let code = r#"pub fn transfer(src: text from, dst: text to) -> text:
+    dst
+
+fn test():
+    val result = transfer("a.txt" to, "b.txt" to)
+"#;
+        let diagnostics = check_code_in_file("duplicate_args_wrong_label.spl", code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        assert_eq!(dup_warnings.len(), 1);
+        assert_eq!(dup_warnings[0].span.line, 4);
+        assert_eq!(dup_warnings[0].span.column, 27);
+        assert!(dup_warnings[0].easy_fix.is_none());
+        assert!(!dup_warnings[0]
+            .suggestion
+            .as_deref()
+            .unwrap_or("")
+            .contains("automatic fix is available"));
+    }
+
+    #[test]
     fn test_unnamed_duplicate_typed_args_no_warn_in_test_like_file() {
         let code = r#"
 pub fn point(x: i64, y: i64) -> i64:
@@ -923,8 +1004,7 @@ pub use Binding
 pub use set_container
 "#;
         let module = parse_code(code);
-        let mut checker =
-            LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/compiler/di.spl")));
+        let mut checker = LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/compiler/di.spl")));
         checker.check_module(&module.items);
         let diagnostics = checker.take_diagnostics();
 
@@ -944,8 +1024,8 @@ pub use set_container
 pub use compiler.common.driver_core_types.*
 "#;
         let module = parse_code(code);
-        let mut checker = LintChecker::new()
-            .with_source_file(Some(std::path::PathBuf::from("src/compiler/driver_core_types.spl")));
+        let mut checker =
+            LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/compiler/driver_core_types.spl")));
         checker.check_module(&module.items);
         let diagnostics = checker.take_diagnostics();
 
@@ -969,8 +1049,8 @@ export use compiler.frontend.treesitter.{
 }
 "#;
         let module = parse_code(code);
-        let mut checker = LintChecker::new()
-            .with_source_file(Some(std::path::PathBuf::from("src/compiler/treesitter.spl")));
+        let mut checker =
+            LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/compiler/treesitter.spl")));
         checker.check_module(&module.items);
         let diagnostics = checker.take_diagnostics();
 
@@ -1597,14 +1677,8 @@ fn f5():
 
     #[test]
     fn test_unknown_decorator_and_unknown_attribute_lint_names() {
-        assert_eq!(
-            LintName::parse("unknown_decorator"),
-            Some(LintName::UnknownDecorator)
-        );
-        assert_eq!(
-            LintName::parse("unknown_attribute"),
-            Some(LintName::UnknownAttribute)
-        );
+        assert_eq!(LintName::parse("unknown_decorator"), Some(LintName::UnknownDecorator));
+        assert_eq!(LintName::parse("unknown_attribute"), Some(LintName::UnknownAttribute));
         assert_eq!(LintName::UnknownDecorator.as_str(), "unknown_decorator");
         assert_eq!(LintName::UnknownAttribute.as_str(), "unknown_attribute");
         assert_eq!(LintName::UnknownDecorator.default_level(), LintLevel::Warn);

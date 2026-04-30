@@ -32,6 +32,58 @@ fn test_simd_load() {
 }
 
 #[test]
+fn test_simd_load_wide_alias() {
+    let module = parse_and_lower(
+        "fn test_load_wide() -> i64:\n    let arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n    let v = f32x8.load(arr, 0)\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
+        if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
+            assert_eq!(*intrinsic, GpuIntrinsicKind::SimdLoad);
+            assert_eq!(args.len(), 2);
+            if let Some(HirType::Simd { lanes, element }) = module.types.get(value.ty) {
+                assert_eq!(*lanes, 8);
+                assert_eq!(*element, TypeId::F32);
+            } else {
+                panic!("Expected Simd type for load result, got {:?}", module.types.get(value.ty));
+            }
+        } else {
+            panic!("Expected GpuIntrinsic SimdLoad, got {:?}", value.kind);
+        }
+    } else {
+        panic!("Expected Let statement with value");
+    }
+}
+
+#[test]
+fn test_simd_load_named_alias() {
+    let module = parse_and_lower(
+        "type Wide = vec[8, f32]\nfn test_load_named_alias() -> i64:\n    let arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n    let v = Wide.load(arr, 0)\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
+        if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
+            assert_eq!(*intrinsic, GpuIntrinsicKind::SimdLoad);
+            assert_eq!(args.len(), 2);
+            if let Some(HirType::Simd { lanes, element }) = module.types.get(value.ty) {
+                assert_eq!(*lanes, 8);
+                assert_eq!(*element, TypeId::F32);
+            } else {
+                panic!("Expected Simd type for load result, got {:?}", module.types.get(value.ty));
+            }
+        } else {
+            panic!("Expected GpuIntrinsic SimdLoad, got {:?}", value.kind);
+        }
+    } else {
+        panic!("Expected Let statement with value");
+    }
+}
+
+#[test]
 fn test_simd_gather() {
     // Test f32x4.gather(arr, indices) static method
     let module = parse_and_lower(
@@ -45,6 +97,58 @@ fn test_simd_gather() {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdGather);
             assert_eq!(args.len(), 2); // array + indices
+        } else {
+            panic!("Expected GpuIntrinsic SimdGather, got {:?}", value.kind);
+        }
+    } else {
+        panic!("Expected Let statement with value");
+    }
+}
+
+#[test]
+fn test_simd_gather_wide_alias() {
+    let module = parse_and_lower(
+        "fn test_gather_wide() -> i64:\n    let arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n    let idx = [0, 1, 2, 3, 4, 5, 6, 7]\n    let v = f32x8.gather(arr, idx)\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[2] {
+        if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
+            assert_eq!(*intrinsic, GpuIntrinsicKind::SimdGather);
+            assert_eq!(args.len(), 2);
+            if let Some(HirType::Simd { lanes, element }) = module.types.get(value.ty) {
+                assert_eq!(*lanes, 8);
+                assert_eq!(*element, TypeId::F32);
+            } else {
+                panic!("Expected Simd type for gather result, got {:?}", module.types.get(value.ty));
+            }
+        } else {
+            panic!("Expected GpuIntrinsic SimdGather, got {:?}", value.kind);
+        }
+    } else {
+        panic!("Expected Let statement with value");
+    }
+}
+
+#[test]
+fn test_simd_gather_named_alias() {
+    let module = parse_and_lower(
+        "type Wide = vec[8, f32]\nfn test_gather_named_alias() -> i64:\n    let arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n    let idx = [0, 1, 2, 3, 4, 5, 6, 7]\n    let v = Wide.gather(arr, idx)\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[2] {
+        if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
+            assert_eq!(*intrinsic, GpuIntrinsicKind::SimdGather);
+            assert_eq!(args.len(), 2);
+            if let Some(HirType::Simd { lanes, element }) = module.types.get(value.ty) {
+                assert_eq!(*lanes, 8);
+                assert_eq!(*element, TypeId::F32);
+            } else {
+                panic!("Expected Simd type for gather result, got {:?}", module.types.get(value.ty));
+            }
         } else {
             panic!("Expected GpuIntrinsic SimdGather, got {:?}", value.kind);
         }
@@ -164,6 +268,63 @@ fn test_simd_masked_load() {
 }
 
 #[test]
+fn test_simd_masked_load_wide_alias() {
+    let module = parse_and_lower(
+        "fn test_masked_load_wide() -> i64:\n    let arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n    let mask = vec[true, false, true, false, true, false, true, false]\n    let v = f32x8.load_masked(arr, 0, mask, 0.0)\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[2] {
+        if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
+            assert_eq!(*intrinsic, GpuIntrinsicKind::SimdMaskedLoad);
+            assert_eq!(args.len(), 4);
+            if let Some(HirType::Simd { lanes, element }) = module.types.get(value.ty) {
+                assert_eq!(*lanes, 8);
+                assert_eq!(*element, TypeId::F32);
+            } else {
+                panic!(
+                    "Expected Simd type for masked load result, got {:?}",
+                    module.types.get(value.ty)
+                );
+            }
+        } else {
+            panic!("Expected GpuIntrinsic SimdMaskedLoad, got {:?}", value.kind);
+        }
+    } else {
+        panic!("Expected Let statement with value");
+    }
+}
+
+#[test]
+fn test_simd_masked_load_named_alias() {
+    let module = parse_and_lower(
+        "type Wide = vec[8, f32]\nfn test_masked_load_named_alias() -> i64:\n    let arr = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]\n    let mask = vec[true, false, true, false, true, false, true, false]\n    let v = Wide.load_masked(arr, 0, mask, 0.0)\n    return 0\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[2] {
+        if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
+            assert_eq!(*intrinsic, GpuIntrinsicKind::SimdMaskedLoad);
+            assert_eq!(args.len(), 4);
+            if let Some(HirType::Simd { lanes, element }) = module.types.get(value.ty) {
+                assert_eq!(*lanes, 8);
+                assert_eq!(*element, TypeId::F32);
+            } else {
+                panic!(
+                    "Expected Simd type for masked load result, got {:?}",
+                    module.types.get(value.ty)
+                );
+            }
+        } else {
+            panic!("Expected GpuIntrinsic SimdMaskedLoad, got {:?}", value.kind);
+        }
+    } else {
+        panic!("Expected Let statement with value");
+    }
+}
+
 fn test_simd_masked_store() {
     // Test v.store_masked(arr, offset, mask) instance method
     let module = parse_and_lower(

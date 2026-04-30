@@ -339,7 +339,7 @@ impl CodegenEmitter for MirInterpreterEmitter {
         self.set(dest, 0);
         Ok(())
     }
-    fn emit_vec_load(&mut self, dest: VReg, _array: VReg, _offset: VReg) -> Result<(), Self::Error> {
+    fn emit_vec_load(&mut self, dest: VReg, _array: VReg, _offset: VReg, _lanes: u32) -> Result<(), Self::Error> {
         self.set(dest, 0);
         Ok(())
     }

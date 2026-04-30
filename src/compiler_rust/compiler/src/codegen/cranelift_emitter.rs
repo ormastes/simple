@@ -253,8 +253,8 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         super::instr::collections::compile_vec_select(self.ctx, self.builder, dest, mask, if_true, if_false);
         Ok(())
     }
-    fn emit_vec_load(&mut self, dest: VReg, array: VReg, offset: VReg) -> Result<(), String> {
-        super::instr::simd_stubs::compile_vec_load(self.ctx, self.builder, dest, array, offset)
+    fn emit_vec_load(&mut self, dest: VReg, array: VReg, offset: VReg, lanes: u32) -> Result<(), String> {
+        super::instr::simd_stubs::compile_vec_load(self.ctx, self.builder, dest, array, offset, lanes)
     }
     fn emit_vec_store(&mut self, source: VReg, array: VReg, offset: VReg) -> Result<(), String> {
         super::instr::simd_stubs::compile_vec_store(self.ctx, self.builder, source, array, offset)

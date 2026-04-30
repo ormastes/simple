@@ -632,6 +632,7 @@ impl<'a> ExprTranslator<'a> {
                 HirStmt::While {
                     condition,
                     body,
+                    simd_requested: _simd_requested,
                     invariants,
                 } => {
                     let lean_cond = self.translate(condition)?;
@@ -659,6 +660,7 @@ impl<'a> ExprTranslator<'a> {
                     pattern,
                     iterable,
                     body,
+                    simd_requested: _simd_requested,
                     invariants,
                 } => {
                     let lean_iterable = self.translate(iterable)?;

@@ -133,6 +133,24 @@ fn locally_defined_names(items: &[Node]) -> Vec<String> {
     names
 }
 
+fn unresolved_bare_export_names(items: &[Node]) -> Vec<String> {
+    let local_names = locally_defined_names(items);
+    let mut names = Vec::new();
+    for item in items {
+        if let Node::ExportUseStmt(export_stmt) = item {
+            if export_stmt.path.segments.is_empty() {
+                for name in export_target_names(&export_stmt.target) {
+                    if !local_names.iter().any(|local| local == &name) && !names.iter().any(|seen| seen == &name)
+                    {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
 fn export_target_names(target: &ImportTarget) -> Vec<String> {
     match target {
         ImportTarget::Single(name) => vec![name.clone()],
@@ -551,13 +569,19 @@ pub fn load_and_merge_module(
             if let Some(dir) = parent_dir {
                 let mut merged_exports: HashMap<String, Value> = HashMap::new();
                 // Collect sibling .spl files (not __init__.spl itself)
-                let requested_names = requested_names.clone().map(|names| {
-                    let local_names = locally_defined_names(&filtered_items);
-                    names
-                        .into_iter()
-                        .filter(|name| !local_names.iter().any(|local| local == name))
-                        .collect::<Vec<_>>()
-                });
+                let requested_names = requested_names
+                    .clone()
+                    .map(|names| {
+                        let local_names = locally_defined_names(&filtered_items);
+                        names
+                            .into_iter()
+                            .filter(|name| !local_names.iter().any(|local| local == name))
+                            .collect::<Vec<_>>()
+                    })
+                    .or_else(|| {
+                        let names = unresolved_bare_export_names(&filtered_items);
+                        if names.is_empty() { None } else { Some(names) }
+                    });
                 if requested_names.as_ref().is_some_and(|names| names.is_empty()) {
                     None
                 } else if let Ok(entries) = fs::read_dir(dir) {
@@ -595,9 +619,10 @@ pub fn load_and_merge_module(
                             _ => a.cmp(b),
                         }
                     });
-                    // Cap sibling preload count to prevent unbounded memory growth (BUG-3)
+                    // Cap only fully unfiltered scans. Name-targeted preloads are already bounded
+                    // by the package's explicit bare-export surface and should not be truncated.
                     let max_siblings = crate::memory_guard::sibling_preload_limit();
-                    if sibling_files.len() > max_siblings {
+                    if requested_names.is_none() && sibling_files.len() > max_siblings {
                         loader_trace!(
                             "sibling-cap",
                             "skipping preload for {} — {} siblings exceeds cap {}",

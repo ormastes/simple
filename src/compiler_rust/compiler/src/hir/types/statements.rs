@@ -24,6 +24,8 @@ pub enum HirStmt {
     While {
         condition: HirExpr,
         body: Vec<HirStmt>,
+        /// Explicit loop-level SIMD request from `@simd`.
+        simd_requested: bool,
         /// Loop invariants for verification
         invariants: Vec<HirContractClause>,
     },
@@ -36,11 +38,15 @@ pub enum HirStmt {
         iterable: HirExpr,
         /// Loop body
         body: Vec<HirStmt>,
+        /// Explicit loop-level SIMD request from `@simd`.
+        simd_requested: bool,
         /// Loop invariants for verification
         invariants: Vec<HirContractClause>,
     },
     Loop {
         body: Vec<HirStmt>,
+        /// Explicit loop-level SIMD request from `@simd`.
+        simd_requested: bool,
     },
     Break,
     Continue,

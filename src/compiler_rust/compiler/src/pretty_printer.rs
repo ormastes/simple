@@ -746,6 +746,9 @@ impl PrettyPrinter {
     }
 
     fn print_for(&mut self, for_stmt: &ForStmt) {
+        if for_stmt.simd_requested {
+            self.write_line("@simd");
+        }
         self.write_indent();
         if let Some(ref label) = for_stmt.label {
             self.write(&format!("'{}: ", label));
@@ -769,6 +772,9 @@ impl PrettyPrinter {
     }
 
     fn print_while(&mut self, while_stmt: &WhileStmt) {
+        if while_stmt.simd_requested {
+            self.write_line("@simd");
+        }
         self.write_indent();
         if let Some(ref label) = while_stmt.label {
             self.write(&format!("'{}: ", label));
@@ -790,6 +796,9 @@ impl PrettyPrinter {
     }
 
     fn print_loop(&mut self, loop_stmt: &LoopStmt) {
+        if loop_stmt.simd_requested {
+            self.write_line("@simd");
+        }
         self.write_indent();
         if let Some(ref label) = loop_stmt.label {
             self.write(&format!("'{}: ", label));

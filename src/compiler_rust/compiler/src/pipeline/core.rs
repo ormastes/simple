@@ -12,6 +12,14 @@ use crate::mir::ContractMode;
 use crate::project::ProjectContext;
 use crate::verification_checker::{VerificationChecker, VerificationViolation};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimdMode {
+    Off,
+    #[default]
+    Auto,
+    Report,
+}
+
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
 pub struct CompilerPipeline {
     pub(super) gc: Option<Arc<dyn GcAllocator>>,
@@ -39,6 +47,8 @@ pub struct CompilerPipeline {
     pub(super) coverage_enabled: bool,
     /// Enable test mode (activates SPipe DSL parsing)
     pub(super) test_mode: bool,
+    /// SIMD loop/vectorization reporting mode from the driver.
+    pub(super) simd_mode: SimdMode,
 }
 
 impl CompilerPipeline {
@@ -57,6 +67,7 @@ impl CompilerPipeline {
             verification_violations: Vec::new(),
             coverage_enabled: false,
             test_mode: false,
+            simd_mode: SimdMode::Auto,
         })
     }
 
@@ -75,6 +86,7 @@ impl CompilerPipeline {
             verification_violations: Vec::new(),
             coverage_enabled: false,
             test_mode: false,
+            simd_mode: SimdMode::Auto,
         })
     }
 
@@ -95,6 +107,7 @@ impl CompilerPipeline {
             verification_violations: Vec::new(),
             coverage_enabled: false,
             test_mode: false,
+            simd_mode: SimdMode::Auto,
         })
     }
 
@@ -115,6 +128,7 @@ impl CompilerPipeline {
             verification_violations: Vec::new(),
             coverage_enabled: false,
             test_mode: false,
+            simd_mode: SimdMode::Auto,
         })
     }
 
@@ -307,5 +321,15 @@ impl CompilerPipeline {
     /// Check if test mode is enabled
     pub fn test_mode(&self) -> bool {
         self.test_mode
+    }
+
+    /// Set SIMD reporting/lowering mode from the driver.
+    pub fn set_simd_mode(&mut self, mode: SimdMode) {
+        self.simd_mode = mode;
+    }
+
+    /// Get the current SIMD reporting/lowering mode.
+    pub fn simd_mode(&self) -> SimdMode {
+        self.simd_mode
     }
 }

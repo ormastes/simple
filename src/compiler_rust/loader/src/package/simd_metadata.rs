@@ -27,9 +27,9 @@ impl VariantMetadata {
             }
         }
 
-        if self.simd_tier != SimdTier::Scalar && self.simd_tier != simd_tier {
+        if !self.simd_tier.compatible_with(simd_tier) {
             return Err(format!(
-                "package SIMD tier mismatch: expected {}, got {}",
+                "package SIMD tier mismatch: package {}, host {}",
                 self.simd_tier, simd_tier
             ));
         }

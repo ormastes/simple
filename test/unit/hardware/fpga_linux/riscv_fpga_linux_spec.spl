@@ -6,8 +6,14 @@ Truthfulness and orchestration tests for the shared RV32/RV64 Linux pipeline.
 
 use std.spec.*
 
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
 use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
 use hardware.riscv_common.pkg.riscv_generated_core_pkg.RiscvProofLane
+
+fn shell(command: text) -> i64:
+    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    code
 
 describe "RISC-V FPGA Linux board profile":
     it "allows the generic Xilinx profile for prepare-only generation":
@@ -35,6 +41,9 @@ describe "RISC-V FPGA Linux lanes":
         expect(lane.required_soc_blocks()).to_contain("opensbi-handoff")
         expect(lane.required_soc_blocks()).to_contain("generated-core-shell")
         expect(lane.proof_acceptance_markers()).to_contain("OpenSBI")
+        expect(lane.expected_boot_markers()).to_contain("Linux version")
+        expect(lane.expected_boot_markers()).to_contain("init started")
+        expect(lane.proof_lane_summary()).to_equal("generated_rv64_linux shell=none")
         expect(lane.hardware_source_contract_errors().len()).to_equal(0)
 
     it "defines RV32 as a repo-native generated-core baremetal proof lane":
@@ -91,6 +100,13 @@ describe "RISC-V FPGA Linux manifest":
         expect(manifest.readiness_summary()).to_contain("rv32:contract:qemu_virt_rv32:simple_rv32gc_core:generated_rv32_baremetal")
         expect(manifest.readiness_summary()).to_contain("rv64:contract:qemu_virt_rv64:simple_rv64gc_core:generated_rv64_linux")
 
+    it "emits generated RV64 Linux lane metadata in the manifest":
+        val manifest = create_default_riscv_fpga_linux_manifest()
+        val text = manifest.rtl_manifest_text("/tmp/rv64_linux_manifest")
+        expect(text).to_contain("proof_lane = \"generated_rv64_linux\"")
+        expect(text).to_contain("shell_contract = \"generated_rv64_linux shell=none\"")
+        expect(text).to_contain("firmware_mode = \"fw_jump\"")
+
     it "generates a deterministic Vivado TCL plan from both lanes":
         val manifest = create_default_riscv_fpga_linux_manifest()
         val tcl = manifest.vivado_tcl_plan()
@@ -103,20 +119,37 @@ describe "RISC-V FPGA Linux manifest":
 
 describe "RISC-V FPGA Linux RTL generation":
     it "emits dual-architecture bundles by default":
+        expect(shell("rm -rf '/tmp/simple_rv64_fpga_rtl_spec'")).to_equal(0)
         val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_rv64_fpga_rtl_spec")
         expect(result.is_ok()).to_equal(true)
+        val bundle = result.unwrap()
 
         val rv32_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv32/rtl/simple_rv32gc_core.spl")
         val rv64_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core.spl")
         val rv64_pkg = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core_pkg.vhd")
         val rv64_core = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/simple_rv64gc_core.vhd")
+        val rv64_fw_jump_tb = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_fw_jump.vhd")
+        val rv64_real_dtb_tb = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_boot_info_real_dtb.vhd")
+        val rv64_sv39_tb = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_sv39.vhd")
+        val rv64_sv39_fault_tb = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_sv39_fault.vhd")
+        val rv64_tb = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_boot_info_dtb.vhd")
         val manifest_text = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv64_fpga_rtl_spec/riscv_fpga_rtl_manifest.sdn")
 
         expect(rv32_source != "").to_equal(true)
         expect(rv64_source != "").to_equal(true)
         expect(rv64_pkg != "").to_equal(true)
         expect(rv64_core != "").to_equal(true)
+        expect(rv64_fw_jump_tb != "").to_equal(true)
+        expect(rv64_real_dtb_tb != "").to_equal(true)
+        expect(rv64_sv39_tb != "").to_equal(true)
+        expect(rv64_sv39_fault_tb != "").to_equal(true)
+        expect(rv64_tb != "").to_equal(true)
         expect(manifest_text != "").to_equal(true)
+        expect(bundle.generated_files).to_contain("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_fw_jump.vhd")
+        expect(bundle.generated_files).to_contain("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_boot_info_real_dtb.vhd")
+        expect(bundle.generated_files).to_contain("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_sv39.vhd")
+        expect(bundle.generated_files).to_contain("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_sv39_fault.vhd")
+        expect(bundle.generated_files).to_contain("/tmp/simple_rv64_fpga_rtl_spec/rv64/rtl/tb_generated_rv64_boot_info_dtb.vhd")
         expect(rv32_source).to_contain("bitfield Rv32Instruction(u32):")
         expect(rv32_source).to_contain("platform: qemu_virt_rv32")
         expect(rv32_source).to_contain("proof_lane: generated_rv32_baremetal")
@@ -206,6 +239,36 @@ describe "RISC-V FPGA Linux RTL generation":
         expect(has_handwritten_funct3_case).to_equal(false)
         val has_handwritten_opcode_case = rv64_core.contains("case imem_rdata(6 downto 0) is")
         expect(has_handwritten_opcode_case).to_equal(false)
+        expect(rv64_tb).to_contain("entity tb_generated_rv64_boot_info_dtb is")
+        expect(rv64_tb).to_contain("use work.simple_rv64i_core_pkg.all;")
+        expect(rv64_tb).to_contain("constant DTB_SIZE_BYTES      : integer := 239;")
+        expect(rv64_tb).to_contain("constant DTB_BYTES           : byte_array_t(0 to DTB_SIZE_BYTES - 1) := (")
+        expect(rv64_tb).to_contain("function hex_to_word64(text_value : string) return std_logic_vector is")
+        expect(rv64_tb).to_contain("procedure load_preload_file(")
+        expect(rv64_tb).to_contain("report \"PRELOAD_\" & label_name & \"_DONE_WORDS: \"")
+        expect(rv64_tb).to_contain("u_cpu : entity work.simple_rv64gc_core")
+        expect(rv64_tb).to_contain("report \"GENERATED_RV64_BOOT_INFO_DTB: PASS\";")
+        expect(rv64_tb).to_contain("dtb_probe_addr = BOOT_DTB_ADDR then")
+        expect(rv64_fw_jump_tb).to_contain("entity tb_generated_rv64_fw_jump is")
+        expect(rv64_fw_jump_tb).to_contain("use work.test_program.all;")
+        expect(rv64_fw_jump_tb).to_contain("use work.simple_rv64i_core_pkg.all;")
+        expect(rv64_fw_jump_tb).to_contain("u_cpu : entity work.simple_rv64gc_core")
+        expect(rv64_fw_jump_tb).to_contain("report \"GENERATED_RV64_FW_JUMP: PASS\";")
+        expect(rv64_real_dtb_tb).to_contain("entity tb_generated_rv64_boot_info_real_dtb is")
+        expect(rv64_real_dtb_tb).to_contain("use work.test_program.all;")
+        expect(rv64_real_dtb_tb).to_contain("use work.simple_rv64i_core_pkg.all;")
+        expect(rv64_real_dtb_tb).to_contain("u_cpu : entity work.simple_rv64gc_core")
+        expect(rv64_real_dtb_tb).to_contain("report \"GENERATED_RV64_BOOT_INFO_REAL_DTB: PASS\";")
+        expect(rv64_sv39_tb).to_contain("entity tb_generated_rv64_sv39 is")
+        expect(rv64_sv39_tb).to_contain("use work.test_program.all;")
+        expect(rv64_sv39_tb).to_contain("use work.simple_rv64i_core_pkg.all;")
+        expect(rv64_sv39_tb).to_contain("u_cpu : entity work.simple_rv64gc_core")
+        expect(rv64_sv39_tb).to_contain("report \"GENERATED_RV64_SV39: PASS\";")
+        expect(rv64_sv39_fault_tb).to_contain("entity tb_generated_rv64_sv39_fault is")
+        expect(rv64_sv39_fault_tb).to_contain("use work.test_program.all;")
+        expect(rv64_sv39_fault_tb).to_contain("use work.simple_rv64i_core_pkg.all;")
+        expect(rv64_sv39_fault_tb).to_contain("u_cpu : entity work.simple_rv64gc_core")
+        expect(rv64_sv39_fault_tb).to_contain("report \"GENERATED_RV64_SV39_FAULT: PASS\";")
         expect(manifest_text).to_contain("platform = \"qemu_virt_rv32\"")
         expect(manifest_text).to_contain("platform = \"qemu_virt_rv64\"")
         expect(manifest_text).to_contain("proof_lane = \"generated_rv32_baremetal\"")

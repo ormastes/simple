@@ -269,8 +269,8 @@ skip_c_string_aligned:
     lbu t1, 0(t0)
     addi t0, t0, 1
     bne t1, zero, 1b
-    mv a0, t0
-    jal ra, align4
+    addi a0, t0, 3
+    andi a0, a0, -4
     ret
 
 classify_node:

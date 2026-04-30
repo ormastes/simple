@@ -254,6 +254,11 @@ impl Lowerer {
                     if self.should_import_symbol(&extern_fn.name, target) {
                         let ret_ty = self.resolve_type_opt(&extern_fn.return_type)?;
                         self.globals.insert(extern_fn.name.clone(), ret_ty);
+                        // Imported externs participate in function-value lowering via
+                        // HIR globals, but they are still function symbols and must be
+                        // tracked as such so later MIR/LLVM stages do not redeclare
+                        // them as data globals.
+                        self.extern_fn_names.insert(extern_fn.name.clone());
                         imported_count += 1;
                     }
                 }

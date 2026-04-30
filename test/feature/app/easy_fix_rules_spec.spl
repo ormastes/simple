@@ -158,6 +158,37 @@ describe "Rule: unnamed_duplicate_typed_args":
             val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
             expect fixes.len() == 1
 
+        it "rewrites declaration and same-file positional call":
+            val source = "fn add(Int, Int) -> Int:\n    0\nval total = add(1, 2)\n"
+            val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
+            expect fixes.len() == 1
+            expect fixes[0].replacements.len() == 2
+
+            var sources: Dict<String, String> = {}
+            sources["test.spl"] = source
+
+            val result = FixApplicator.apply(fixes, sources)
+            match result:
+                case Ok(new_sources):
+                    val fixed = new_sources["test.spl"]
+                    expect fixed.contains("fn add(int1: Int, int2: Int)")
+                    expect fixed.contains("add(int1: 1, int2: 2)")
+                case Err(_):
+                    expect false
+
+        it "rewrites same-file positional call when duplicate typed params already have names":
+            val source = "fn clamp(min: Int, max: Int, value: Int) -> Int:\n    value\nval result = clamp(1, 5, current)\n"
+            val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
+            expect fixes.len() == 1
+            expect fixes[0].replacements.len() == 1
+            expect fixes[0].replacements[0].new_text == "min: 1, max: 5, value: current"
+
+        it "rewrites same-file method calls":
+            val source = "me move(dx: Int, dy: Int):\n    pass\nval _ = point.move(3, 4)\n"
+            val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
+            expect fixes.len() == 1
+            expect fixes[0].replacements[0].new_text == "dx: 3, dy: 4"
+
     context "no false positives":
         # ### Scenario: Named Parameters Not Flagged
         #
@@ -175,6 +206,21 @@ describe "Rule: unnamed_duplicate_typed_args":
 
         it "ignores different types":
             val source = "fn convert(Int, String) -> Bool:\n    true\n"
+            val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
+            expect fixes.len() == 0
+
+        it "does not rewrite already named calls":
+            val source = "fn clamp(min: Int, max: Int, value: Int) -> Int:\n    value\nval result = clamp(min: 1, max: 5, value: current)\n"
+            val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
+            expect fixes.len() == 0
+
+        it "does not rewrite ambiguous same-name call targets":
+            val source = "fn move(dx: Int, dy: Int):\n    pass\nfn move(x: Int, y: Int):\n    pass\nval _ = move(1, 2)\n"
+            val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
+            expect fixes.len() == 0
+
+        it "does not rewrite mismatched arity calls":
+            val source = "fn clamp(min: Int, max: Int, value: Int) -> Int:\n    value\nval result = clamp(1, 5)\n"
             val fixes = check_unnamed_duplicate_typed_args(source, "test.spl")
             expect fixes.len() == 0
 

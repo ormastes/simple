@@ -570,6 +570,25 @@ mod tests {
     }
 
     #[test]
+    fn test_loaded_package_validate_variant_accepts_host_fallback_compatibility() {
+        let package = LoadedPackage {
+            trailer: PackageTrailer::new(),
+            settlement_data: Vec::new(),
+            manifest: Some(ManifestSection {
+                manifest_toml: "name = \"demo\"".to_string(),
+                lock_toml: None,
+                target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+                simd_tier: SimdTier::X86_64Sse2,
+            }),
+            resources: Vec::new(),
+        };
+
+        assert!(package
+            .validate_variant(Some("x86_64-unknown-linux-gnu"), SimdTier::X86_64Avx512)
+            .is_ok());
+    }
+
+    #[test]
     fn test_loaded_package_validate_variant_allows_unpinned_variant() {
         let package = LoadedPackage {
             trailer: PackageTrailer::new(),

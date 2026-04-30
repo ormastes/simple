@@ -105,6 +105,8 @@ pub struct ForStmt {
     pub pattern: Pattern,
     pub iterable: Expr,
     pub body: Block,
+    /// Explicit loop-level SIMD request from `@simd`.
+    pub simd_requested: bool,
     /// Suspension for loop (for~) for explicit suspension points in async-by-default
     pub is_suspend: bool,
     /// Enumerate shorthand: `for i, item in items:` auto-wraps items with indices
@@ -127,6 +129,8 @@ pub struct WhileStmt {
     pub let_pattern: Option<Pattern>,
     pub condition: Expr,
     pub body: Block,
+    /// Explicit loop-level SIMD request from `@simd`.
+    pub simd_requested: bool,
     /// Suspension while loop (while~) for explicit suspension points in async-by-default
     pub is_suspend: bool,
     /// Loop invariants for verification
@@ -145,6 +149,8 @@ pub struct WhileStmt {
 pub struct LoopStmt {
     pub span: Span,
     pub body: Block,
+    /// Explicit loop-level SIMD request from `@simd`.
+    pub simd_requested: bool,
     /// Optional label for labeled break/continue: `'outer: loop:`
     pub label: Option<String>,
 }

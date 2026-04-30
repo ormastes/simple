@@ -241,8 +241,8 @@ impl Lowerer {
                     return Ok(result);
                 }
             }
-            // SIMD type static methods: f32x4.load(), etc.
-            else if matches!(recv_name.as_str(), "f32x4" | "f64x4" | "i32x4" | "i64x4") {
+            // SIMD type static methods: f32x4.load(), f32x8.gather(), etc.
+            else if self.is_simd_static_type_name(recv_name) {
                 if let Some(result) = self.lower_simd_static_method(recv_name, method, args, ctx)? {
                     return Ok(result);
                 }
@@ -251,6 +251,9 @@ impl Lowerer {
             // Only treat as static method if the name is NOT a local variable
             // (e.g., `text` is both a type alias and could be a variable name)
             else if ctx.lookup(recv_name).is_none() && self.module.types.lookup(recv_name).is_some() {
+                if let Some(result) = self.lower_simd_static_method(recv_name, method, args, ctx)? {
+                    return Ok(result);
+                }
                 return self.lower_static_method_call(recv_name, method, args, ctx);
             }
         }

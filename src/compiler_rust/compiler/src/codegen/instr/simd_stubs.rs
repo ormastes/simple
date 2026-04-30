@@ -65,16 +65,18 @@ pub fn compile_vec_load<M: Module>(
     dest: VReg,
     array: VReg,
     offset: VReg,
+    lanes: u32,
 ) -> InstrResult<()> {
     let array_val = ctx.vreg_values[&array];
     let offset_val = ctx.vreg_values[&offset];
+    let lanes_val = builder.ins().iconst(types::I64, lanes as i64);
 
     let func_id = ctx
         .runtime_funcs
         .get("rt_vec_load")
         .ok_or_else(|| "rt_vec_load not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
-    let call = adapted_call(builder, func_ref, &[array_val, offset_val]);
+    let call = adapted_call(builder, func_ref, &[array_val, offset_val, lanes_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
     Ok(())

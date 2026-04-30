@@ -1887,6 +1887,7 @@ fn codegen_vec_load() {
             dest,
             array: arr,
             offset: off,
+            lanes: 4,
         });
         dest
     }));

@@ -29,8 +29,11 @@ pub fn stdlib_root_candidates(root: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let tier = active_simd_tier();
 
-    if !tier.is_scalar() {
-        append_tier_candidates(&mut candidates, root, tier);
+    for &fallback in tier.compatible_fallbacks() {
+        if fallback.is_scalar() {
+            continue;
+        }
+        append_tier_candidates(&mut candidates, root, fallback);
     }
 
     candidates.push(root.to_path_buf());
@@ -97,12 +100,14 @@ mod tests {
 
     #[test]
     fn variant_roots_prepend_tier_specific_tree() {
-        with_simd_tier_env(Some("x86_64_avx2"), || {
+        with_simd_tier_env(Some("x86_64_avx512"), || {
             let roots = stdlib_root_candidates(Path::new("/tmp/proj/src/lib/std/src"));
             assert_eq!(
                 roots,
                 vec![
+                    PathBuf::from("/tmp/proj/src/lib/std/variants/x86_64_avx512/src"),
                     PathBuf::from("/tmp/proj/src/lib/std/variants/x86_64_avx2/src"),
+                    PathBuf::from("/tmp/proj/src/lib/std/variants/x86_64_sse2/src"),
                     PathBuf::from("/tmp/proj/src/lib/std/src"),
                 ]
             );
@@ -117,6 +122,7 @@ mod tests {
                 roots,
                 vec![
                     PathBuf::from("/tmp/proj/simple/std_lib/variants/x86_64_avx2/src"),
+                    PathBuf::from("/tmp/proj/simple/std_lib/variants/x86_64_sse2/src"),
                     PathBuf::from("/tmp/proj/simple/std_lib/src"),
                 ]
             );
@@ -131,6 +137,7 @@ mod tests {
                 roots,
                 vec![
                     PathBuf::from("/tmp/proj/src/std/variants/x86_64_avx2"),
+                    PathBuf::from("/tmp/proj/src/std/variants/x86_64_sse2"),
                     PathBuf::from("/tmp/proj/src/std"),
                 ]
             );

@@ -1,5 +1,3 @@
-#![allow(unnamed_duplicate_typed_args)]
-@allow(unnamed_duplicate_typed_args)
 # LSP Server - Request handlers
 # Uses lightweight lsp_query.spl for fast code analysis (no full compiler load).
 # Only falls back to full query.spl for heavy operations (check/diagnostics).
@@ -82,7 +80,7 @@ fn _extract_uri(body: text) -> text:
         return ""
     val td_start = td_idx + td_search.len()
     val td_rest = body.substring(td_start)
-    extract_field(td_rest, "uri")
+    extract_field(json=td_rest, key="uri")
 
 fn _uri_to_path(uri: text) -> text:
     if uri.starts_with("file://"):
@@ -100,7 +98,7 @@ fn _extract_line(body: text) -> text:
         return "0"
     val pos_start = pos_idx + pos_search.len()
     val pos_rest = body.substring(pos_start)
-    val line_str = extract_field(pos_rest, "line")
+    val line_str = extract_field(json=pos_rest, key="line")
     if line_str == "":
         return "0"
     line_str
@@ -116,7 +114,7 @@ fn _extract_character(body: text) -> text:
         return "0"
     val pos_start = pos_idx + pos_search.len()
     val pos_rest = body.substring(pos_start)
-    val char_str = extract_field(pos_rest, "character")
+    val char_str = extract_field(json=pos_rest, key="character")
     if char_str == "":
         return "0"
     char_str
@@ -124,12 +122,12 @@ fn _extract_character(body: text) -> text:
 # --- Initialize ---
 
 fn lsp_handle_initialize(id: text) -> text:
-    lsp_handle_initialize_with_body(id, "")
+    lsp_handle_initialize_with_body(id=id, body="")
 
 fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
     # REQ-LSPVIS-008: Read client experimental.simpleVisibility capability
     if body != "":
-        val experimental_raw = extract_nested(body, "experimental")
+        val experimental_raw = extract_nested(json=body, key="experimental")
         if experimental_raw != "" and experimental_raw.contains("simpleVisibility"):
             CLIENT_SUPPORTS_VISIBILITY = true
     val completion_provider = jo1(jp("triggerCharacters", SB_L() + js(".") + "," + js(":") + "," + js("&") + SB_R()))
@@ -157,7 +155,7 @@ fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
     val server_info = jo2(jp("name", js("simple-lsp")), jp("version", js("0.1.0")))
     val experimental = jo1(jp("simpleVisibilityProvider", "true"))
     val result = jo3(jp("capabilities", capabilities_obj), jp("serverInfo", server_info), jp("experimental", experimental))
-    make_json_result(id, result)
+    make_json_result(id=id, result=result)
 
 # --- Document sync ---
 
@@ -166,7 +164,7 @@ fn lsp_handle_did_open(body: text):
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     if uri != "" and file_path != "":
-        _publish_diagnostics(uri, file_path)
+        _publish_diagnostics(uri=uri, file_path=file_path)
 
 fn lsp_handle_did_change(body: text):
     val _x = 0
@@ -175,13 +173,13 @@ fn lsp_handle_did_close(body: text):
     val uri = _extract_uri(body)
     if uri != "":
         val params = jo2(jp("uri", js(uri)), jp("diagnostics", SB_L() + SB_R()))
-        lsp_write_notification("textDocument/publishDiagnostics", params)
+        lsp_write_notification(method="textDocument/publishDiagnostics", params=params)
 
 fn lsp_handle_did_save(body: text):
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     if uri != "" and file_path != "":
-        _publish_diagnostics(uri, file_path)
+        _publish_diagnostics(uri=uri, file_path=file_path)
 
 # --- Diagnostics (heavy — uses full query.spl with compiler) ---
 
@@ -189,7 +187,7 @@ fn _publish_diagnostics(uri: text, file_path: text):
     val diags = _collect_diagnostics(file_path)
     val diags_str = SB_L() + diags.join(",") + SB_R()
     val params = jo2(jp("uri", js(uri)), jp("diagnostics", diags_str))
-    lsp_write_notification("textDocument/publishDiagnostics", params)
+    lsp_write_notification(method="textDocument/publishDiagnostics", params=params)
 
 fn _collect_diagnostics(file_path: text) -> [text]:
     var diags: [text] = []
@@ -204,7 +202,7 @@ fn _collect_diagnostics(file_path: text) -> [text]:
             val trimmed = line.trim()
             if trimmed == "":
                 continue
-            val diag = _parse_diagnostic_line(trimmed, file_path)
+            val diag = _parse_diagnostic_line(line=trimmed, file_path=file_path)
             if diag != "":
                 diags.push(diag)
         return diags
@@ -219,7 +217,7 @@ fn _collect_diagnostics(file_path: text) -> [text]:
             val trimmed = line.trim()
             if trimmed == "":
                 continue
-            val diag = _parse_diagnostic_line(trimmed, file_path)
+            val diag = _parse_diagnostic_line(line=trimmed, file_path=file_path)
             if diag != "":
                 diags.push(diag)
     diags
@@ -229,16 +227,16 @@ fn _parse_diagnostic_line(line: text, file_path: text) -> text:
     if line.starts_with("{"):
         return _parse_json_diagnostic(line)
     # Fallback: plain text format (file:line:col: severity: message)
-    _parse_text_diagnostic(line, file_path)
+    _parse_text_diagnostic(line=line, file_path=file_path)
 
 fn _parse_json_diagnostic(line: text) -> text:
-    val msg = extract_field(line, "message")
-    val sev_str = extract_field(line, "severity")
-    val code = extract_field(line, "code")
-    val source = extract_field(line, "source")
-    val line_str = extract_field(line, "line")
-    val col_str = extract_field(line, "col")
-    val tags_raw = extract_field(line, "tags")
+    val msg = extract_field(json=line, key="message")
+    val sev_str = extract_field(json=line, key="severity")
+    val code = extract_field(json=line, key="code")
+    val source = extract_field(json=line, key="source")
+    val line_str = extract_field(json=line, key="line")
+    val col_str = extract_field(json=line, key="col")
+    val tags_raw = extract_field(json=line, key="tags")
     var diag_line = 0
     var diag_col = 0
     if line_str != "":
@@ -282,8 +280,8 @@ fn _parse_json_diagnostic(line: text) -> text:
     if tag_items.len() > 0:
         parts.push(jp("tags", SB_L() + tag_items.join(",") + SB_R()))
     # Parse relatedInformation if present
-    val related_raw = extract_field(line, "relatedFile")
-    val related_msg = extract_field(line, "relatedMessage")
+    val related_raw = extract_field(json=line, key="relatedFile")
+    val related_msg = extract_field(json=line, key="relatedMessage")
     if related_raw != "" and related_msg != "":
         val related_loc = jo2(
             jp("uri", js("file://" + related_raw)),
@@ -353,9 +351,9 @@ fn lsp_handle_definition(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, "null")
+        return make_json_result(id=id, result="null")
     val result = _parse_location(out.trim())
-    make_json_result(id, result)
+    make_json_result(id=id, result=result)
 
 fn _parse_location(output: text) -> text:
     val lines = output.split("\n")
@@ -395,7 +393,7 @@ fn lsp_handle_references(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
     var locs: [text] = []
     for loc_line in lines:
@@ -405,7 +403,7 @@ fn lsp_handle_references(id: text, body: text) -> text:
         val loc = _parse_location(trimmed)
         if loc != "null":
             locs.push(loc)
-    make_json_result(id, SB_L() + locs.join(",") + SB_R())
+    make_json_result(id=id, result=SB_L() + locs.join(",") + SB_R())
 
 # --- Hover (fast path) ---
 
@@ -421,8 +419,8 @@ fn lsp_handle_hover(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, "null")
-    make_json_result(id, out.trim())
+        return make_json_result(id=id, result="null")
+    make_json_result(id=id, result=out.trim())
 
 # --- Completion (fast path) ---
 
@@ -438,8 +436,8 @@ fn lsp_handle_completion(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
-    make_json_result(id, out.trim())
+        return make_json_result(id=id, result=SB_L() + SB_R())
+    make_json_result(id=id, result=out.trim())
 
 # --- Document Symbol (fast path) ---
 
@@ -447,14 +445,14 @@ fn lsp_handle_document_symbol(id: text, body: text) -> text:
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     if file_path == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     var cmd = _visibility_query_cmd("symbols " + file_path + " --requester " + file_path)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
-    make_json_result(id, out.trim())
+        return make_json_result(id=id, result=SB_L() + SB_R())
+    make_json_result(id=id, result=out.trim())
 
 fn _symbol_kind_number(kind_str: text) -> i64:
     if kind_str == "fn" or kind_str == "function" or kind_str == "extern_fn":
@@ -487,7 +485,7 @@ fn lsp_handle_implementation(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
     var locs: [text] = []
     for loc_line in lines:
@@ -497,31 +495,31 @@ fn lsp_handle_implementation(id: text, body: text) -> text:
         val loc = _parse_location(trimmed)
         if loc != "null":
             locs.push(loc)
-    make_json_result(id, SB_L() + locs.join(",") + SB_R())
+    make_json_result(id=id, result=SB_L() + locs.join(",") + SB_R())
 
 # --- Workspace Symbol (fast path) ---
 
 fn lsp_handle_workspace_symbol(id: text, body: text) -> text:
-    val query = extract_nested(body, "query")
+    val query = extract_nested(json=body, key="query")
     var cmd = _visibility_query_cmd("workspace-symbols --query " + query + " --requester src/")
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
-    make_json_result(id, out.trim())
+        return make_json_result(id=id, result=SB_L() + SB_R())
+    make_json_result(id=id, result=out.trim())
 
 fn lsp_handle_folding_range(id: text, body: text) -> text:
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     if file_path == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     var cmd = _fast_query_cmd("folding-range " + file_path)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
     var ranges: [text] = []
     for raw_line in lines:
@@ -543,34 +541,34 @@ fn lsp_handle_folding_range(id: text, body: text) -> text:
         if parts.len() >= 3 and parts[2].trim() != "":
             range_parts.push(jp("kind", js(parts[2].trim())))
         ranges.push(LB() + range_parts.join(",") + RB())
-    make_json_result(id, SB_L() + ranges.join(",") + SB_R())
+    make_json_result(id=id, result=SB_L() + ranges.join(",") + SB_R())
 
 fn lsp_handle_semantic_tokens_full(id: text, body: text) -> text:
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     if file_path == "":
-        return make_json_result(id, "{\"data\":[]}")
+        return make_json_result(id=id, result="{\"data\":[]}")
     var cmd = _visibility_query_cmd("semantic-tokens " + file_path)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, "{\"data\":[]}")
-    make_json_result(id, out.trim())
+        return make_json_result(id=id, result="{\"data\":[]}")
+    make_json_result(id=id, result=out.trim())
 
 fn lsp_handle_semantic_tokens_range(id: text, body: text) -> text:
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     if file_path == "":
-        return make_json_result(id, "{\"data\":[]}")
-    val range_raw = extract_nested(body, "range")
-    val start_line = extract_field(range_raw, "line")
+        return make_json_result(id=id, result="{\"data\":[]}")
+    val range_raw = extract_nested(json=body, key="range")
+    val start_line = extract_field(json=range_raw, key="line")
     val end_idx = range_raw.last_index_of("\"line\"")
     var end_line = start_line
     match end_idx:
         Some(i):
             val tail = range_raw.substring(i)
-            val maybe_end = extract_field(tail, "line")
+            val maybe_end = extract_field(json=tail, key="line")
             if maybe_end != "":
                 end_line = maybe_end
         nil:
@@ -580,8 +578,8 @@ fn lsp_handle_semantic_tokens_range(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, "{\"data\":[]}")
-    make_json_result(id, out.trim())
+        return make_json_result(id=id, result="{\"data\":[]}")
+    make_json_result(id=id, result=out.trim())
 
 # --- Call Hierarchy (fast path) ---
 
@@ -597,10 +595,10 @@ fn lsp_handle_prepare_call_hierarchy(id: text, body: text) -> text:
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     val first_line = out.split("\n")[0].trim()
     if first_line == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     val lsp_line = str(int(line))
     val range = jo2(
         jp("start", jo2(jp("line", lsp_line), jp("character", col))),
@@ -608,13 +606,13 @@ fn lsp_handle_prepare_call_hierarchy(id: text, body: text) -> text:
     )
     val item = jo4(jp("name", js(first_line)), jp("kind", "12"), jp("uri", js(uri)), jp("range", range)) + "," + jp("selectionRange", range)
     val item_obj = LB() + item + RB()
-    make_json_result(id, SB_L() + item_obj + SB_R())
+    make_json_result(id=id, result=SB_L() + item_obj + SB_R())
 
 fn lsp_handle_incoming_calls(id: text, body: text) -> text:
-    make_json_result(id, SB_L() + SB_R())
+    make_json_result(id=id, result=SB_L() + SB_R())
 
 fn lsp_handle_outgoing_calls(id: text, body: text) -> text:
-    make_json_result(id, SB_L() + SB_R())
+    make_json_result(id=id, result=SB_L() + SB_R())
 
 # --- Inlay Hints (heavy — calls query engine) ---
 
@@ -622,13 +620,13 @@ fn lsp_handle_inlay_hint(id: text, body: text) -> text:
     val uri = _extract_uri(body)
     val file_path = _uri_to_path(uri)
     if file_path == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     var cmd = _heavy_query_cmd("inlay-hints " + file_path)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
     var hints: [text] = []
     for hint_line in lines:
@@ -638,15 +636,15 @@ fn lsp_handle_inlay_hint(id: text, body: text) -> text:
         val hint = _parse_inlay_hint(trimmed)
         if hint != "":
             hints.push(hint)
-    make_json_result(id, SB_L() + hints.join(",") + SB_R())
+    make_json_result(id=id, result=SB_L() + hints.join(",") + SB_R())
 
 fn _parse_inlay_hint(line: text) -> text:
     # JSON format: {"line":N,"character":N,"label":"text","kind":1|2}
     if line.starts_with("{"):
-        val hint_line = extract_field(line, "line")
-        val hint_char = extract_field(line, "character")
-        val hint_label = extract_field(line, "label")
-        val hint_kind = extract_field(line, "kind")
+        val hint_line = extract_field(json=line, key="line")
+        val hint_char = extract_field(json=line, key="character")
+        val hint_label = extract_field(json=line, key="label")
+        val hint_kind = extract_field(json=line, key="kind")
         if hint_label == "":
             return ""
         var ln = 0
@@ -687,34 +685,34 @@ fn lsp_handle_code_action(id: text, body: text) -> text:
     val line = _extract_line(body)
     val query_line = str(int(line) + 1)
     if file_path == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     var cmd = _heavy_query_cmd("code-actions " + file_path + " " + query_line)
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = _shell_cmd(cmd)
     if exit_code != 0 or out.trim() == "":
-        return make_json_result(id, SB_L() + SB_R())
+        return make_json_result(id=id, result=SB_L() + SB_R())
     val lines = out.split("\n")
     var actions: [text] = []
     for action_line in lines:
         val trimmed = action_line.trim()
         if trimmed == "":
             continue
-        val action = _parse_code_action(trimmed, uri)
+        val action = _parse_code_action(line=trimmed, uri=uri)
         if action != "":
             actions.push(action)
-    make_json_result(id, SB_L() + actions.join(",") + SB_R())
+    make_json_result(id=id, result=SB_L() + actions.join(",") + SB_R())
 
 fn _parse_code_action(line: text, uri: text) -> text:
     # JSON format: {"title":"...","kind":"quickfix|refactor","edit":{...}}
     if line.starts_with("{"):
-        val title = extract_field(line, "title")
-        val kind = extract_field(line, "kind")
-        val new_text = extract_field(line, "newText")
-        val edit_line = extract_field(line, "editLine")
-        val edit_col = extract_field(line, "editCol")
-        val edit_end_line = extract_field(line, "editEndLine")
-        val edit_end_col = extract_field(line, "editEndCol")
+        val title = extract_field(json=line, key="title")
+        val kind = extract_field(json=line, key="kind")
+        val new_text = extract_field(json=line, key="newText")
+        val edit_line = extract_field(json=line, key="editLine")
+        val edit_col = extract_field(json=line, key="editCol")
+        val edit_end_line = extract_field(json=line, key="editEndLine")
+        val edit_end_col = extract_field(json=line, key="editEndCol")
         if title == "":
             return ""
         var action_kind = "quickfix"
@@ -765,8 +763,8 @@ fn lsp_handle_pull_diagnostic(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     if file_path == "":
         val empty_result = jo2(jp("kind", js("full")), jp("items", SB_L() + SB_R()))
-        return make_json_result(id, empty_result)
+        return make_json_result(id=id, result=empty_result)
     val diags = _collect_diagnostics(file_path)
     val diags_str = SB_L() + diags.join(",") + SB_R()
     val result = jo2(jp("kind", js("full")), jp("items", diags_str))
-    make_json_result(id, result)
+    make_json_result(id=id, result=result)

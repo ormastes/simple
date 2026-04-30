@@ -15,6 +15,13 @@ use crate::blocks::math::ast::MathExpr;
 use crate::error::CompileError;
 use crate::value::Value;
 
+macro_rules! torch_unavailable {
+    (($($arg:expr),* $(,)?), $fallback:expr) => {{
+        let _ = ($($arg),*);
+        $fallback
+    }};
+}
+
 // ============================================================================
 // Availability Detection
 // Matches: rt_torch_available(), rt_torch_cuda_available(),
@@ -174,7 +181,6 @@ pub fn rt_torch_cuda_reset_peak_memory_stats(device: i32) -> i32 {
 
 /// Create a zeros tensor. Returns handle (0 on failure).
 /// Wraps `rt_torch_zeros(shape_ptr, ndim, dtype, device) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_zeros(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -182,13 +188,12 @@ pub fn rt_torch_zeros(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32)
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((shape_ptr, ndim, dtype, device), 0)
     }
 }
 
 /// Create a ones tensor. Returns handle (0 on failure).
 /// Wraps `rt_torch_ones(shape_ptr, ndim, dtype, device) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_ones(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -196,13 +201,12 @@ pub fn rt_torch_ones(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) 
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((shape_ptr, ndim, dtype, device), 0)
     }
 }
 
 /// Create a randn tensor. Returns handle (0 on failure).
 /// Wraps `rt_torch_randn(shape_ptr, ndim, dtype, device) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_randn(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -210,13 +214,12 @@ pub fn rt_torch_randn(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32)
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((shape_ptr, ndim, dtype, device), 0)
     }
 }
 
 /// Create an arange tensor. Returns handle (0 on failure).
 /// Wraps `rt_torch_arange(start, end, step, dtype, device) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_arange(start: i64, end: i64, step: i64, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -224,13 +227,12 @@ pub fn rt_torch_arange(start: i64, end: i64, step: i64, dtype: i32, device: i32)
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((start, end, step, dtype, device), 0)
     }
 }
 
 /// Free a tensor handle.
 /// Wraps `rt_torch_free(tensor_handle) -> i32`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_free(tensor_handle: u64) -> i32 {
     #[cfg(feature = "pytorch")]
     {
@@ -238,13 +240,12 @@ pub fn rt_torch_free(tensor_handle: u64) -> i32 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Clone a tensor. Returns new handle.
 /// Wraps `rt_torch_clone(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_clone(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -252,7 +253,7 @@ pub fn rt_torch_clone(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
@@ -262,7 +263,6 @@ pub fn rt_torch_clone(tensor_handle: u64) -> u64 {
 // ============================================================================
 
 /// Element-wise add. Wraps `rt_torch_add(a_handle, b_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_add(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -270,12 +270,11 @@ pub fn rt_torch_add(a_handle: u64, b_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((a_handle, b_handle), 0)
     }
 }
 
 /// Element-wise sub. Wraps `rt_torch_sub(a_handle, b_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_sub(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -283,12 +282,11 @@ pub fn rt_torch_sub(a_handle: u64, b_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((a_handle, b_handle), 0)
     }
 }
 
 /// Element-wise mul. Wraps `rt_torch_mul(a_handle, b_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_mul(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -296,12 +294,11 @@ pub fn rt_torch_mul(a_handle: u64, b_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((a_handle, b_handle), 0)
     }
 }
 
 /// Element-wise div. Wraps `rt_torch_div(a_handle, b_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_div(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -309,12 +306,11 @@ pub fn rt_torch_div(a_handle: u64, b_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((a_handle, b_handle), 0)
     }
 }
 
 /// Power. Wraps `rt_torch_pow(tensor_handle, exp) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_pow(tensor_handle: u64, exp: f64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -322,12 +318,11 @@ pub fn rt_torch_pow(tensor_handle: u64, exp: f64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle, exp), 0)
     }
 }
 
 /// Sqrt. Wraps `rt_torch_sqrt(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_sqrt(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -335,12 +330,11 @@ pub fn rt_torch_sqrt(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Exp. Wraps `rt_torch_exp(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_exp(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -348,12 +342,11 @@ pub fn rt_torch_exp(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Log. Wraps `rt_torch_log(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_log(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -361,7 +354,7 @@ pub fn rt_torch_log(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
@@ -371,7 +364,6 @@ pub fn rt_torch_log(tensor_handle: u64) -> u64 {
 // ============================================================================
 
 /// Matrix multiply. Wraps `rt_torch_matmul(a_handle, b_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_matmul(a_handle: u64, b_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -379,12 +371,11 @@ pub fn rt_torch_matmul(a_handle: u64, b_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((a_handle, b_handle), 0)
     }
 }
 
 /// Transpose. Wraps `rt_torch_transpose(tensor_handle, dim0, dim1) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_transpose(tensor_handle: u64, dim0: i64, dim1: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -392,7 +383,7 @@ pub fn rt_torch_transpose(tensor_handle: u64, dim0: i64, dim1: i64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle, dim0, dim1), 0)
     }
 }
 
@@ -402,7 +393,6 @@ pub fn rt_torch_transpose(tensor_handle: u64, dim0: i64, dim1: i64) -> u64 {
 // ============================================================================
 
 /// ReLU. Wraps `rt_torch_relu(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_relu(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -410,12 +400,11 @@ pub fn rt_torch_relu(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Sigmoid. Wraps `rt_torch_sigmoid(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_sigmoid(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -423,12 +412,11 @@ pub fn rt_torch_sigmoid(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Tanh. Wraps `rt_torch_tanh(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_tanh(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -436,12 +424,11 @@ pub fn rt_torch_tanh(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Softmax. Wraps `rt_torch_softmax(tensor_handle, dim) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_softmax(tensor_handle: u64, dim: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -449,12 +436,11 @@ pub fn rt_torch_softmax(tensor_handle: u64, dim: i64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle, dim), 0)
     }
 }
 
 /// GELU. Wraps `rt_torch_gelu(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_gelu(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -462,12 +448,11 @@ pub fn rt_torch_gelu(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// SiLU. Wraps `rt_torch_silu(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_silu(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -475,7 +460,7 @@ pub fn rt_torch_silu(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
@@ -485,7 +470,6 @@ pub fn rt_torch_silu(tensor_handle: u64) -> u64 {
 // ============================================================================
 
 /// Sum all elements. Wraps `rt_torch_sum(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_sum(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -493,12 +477,11 @@ pub fn rt_torch_sum(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Mean of all elements. Wraps `rt_torch_mean(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_mean(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -506,12 +489,11 @@ pub fn rt_torch_mean(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Scalar value. Wraps `rt_torch_item(tensor_handle) -> f64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_item(tensor_handle: u64) -> f64 {
     #[cfg(feature = "pytorch")]
     {
@@ -519,7 +501,7 @@ pub fn rt_torch_item(tensor_handle: u64) -> f64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0.0
+        torch_unavailable!((tensor_handle,), 0.0)
     }
 }
 
@@ -529,7 +511,6 @@ pub fn rt_torch_item(tensor_handle: u64) -> f64 {
 // ============================================================================
 
 /// Reshape. Wraps `rt_torch_reshape(tensor_handle, new_shape_ptr, ndim) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_reshape(tensor_handle: u64, new_shape_ptr: *const i64, ndim: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -537,7 +518,7 @@ pub fn rt_torch_reshape(tensor_handle: u64, new_shape_ptr: *const i64, ndim: i32
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle, new_shape_ptr, ndim), 0)
     }
 }
 
@@ -547,7 +528,6 @@ pub fn rt_torch_reshape(tensor_handle: u64, new_shape_ptr: *const i64, ndim: i32
 // ============================================================================
 
 /// Get tensor dtype code. Wraps `rt_torch_dtype(tensor_handle) -> i32`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_dtype(tensor_handle: u64) -> i32 {
     #[cfg(feature = "pytorch")]
     {
@@ -555,12 +535,11 @@ pub fn rt_torch_dtype(tensor_handle: u64) -> i32 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        -1
+        torch_unavailable!((tensor_handle,), -1)
     }
 }
 
 /// Get tensor element count. Wraps `rt_torch_numel(tensor_handle) -> i64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_numel(tensor_handle: u64) -> i64 {
     #[cfg(feature = "pytorch")]
     {
@@ -568,12 +547,11 @@ pub fn rt_torch_numel(tensor_handle: u64) -> i64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Get tensor device code. Wraps `rt_torch_device(tensor_handle) -> i32`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_device(tensor_handle: u64) -> i32 {
     #[cfg(feature = "pytorch")]
     {
@@ -581,7 +559,7 @@ pub fn rt_torch_device(tensor_handle: u64) -> i32 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
@@ -591,7 +569,6 @@ pub fn rt_torch_device(tensor_handle: u64) -> i32 {
 // ============================================================================
 
 /// Move tensor to device. Wraps `rt_torch_to_device(tensor_handle, device_code) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_to_device(tensor_handle: u64, device_code: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -599,12 +576,11 @@ pub fn rt_torch_to_device(tensor_handle: u64, device_code: i32) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle, device_code), 0)
     }
 }
 
 /// Move tensor to CPU. Wraps `rt_torch_to_cpu(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_to_cpu(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -612,12 +588,11 @@ pub fn rt_torch_to_cpu(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Move tensor to CUDA. Wraps `rt_torch_to_cuda(tensor_handle, device_id) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_to_cuda(tensor_handle: u64, device_id: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -625,7 +600,7 @@ pub fn rt_torch_to_cuda(tensor_handle: u64, device_id: i32) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle, device_id), 0)
     }
 }
 
@@ -635,7 +610,6 @@ pub fn rt_torch_to_cuda(tensor_handle: u64, device_id: i32) -> u64 {
 // ============================================================================
 
 /// Run backward pass. Wraps `rt_torch_backward(tensor_handle) -> i32`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_backward(tensor_handle: u64) -> i32 {
     #[cfg(feature = "pytorch")]
     {
@@ -643,12 +617,11 @@ pub fn rt_torch_backward(tensor_handle: u64) -> i32 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        -1
+        torch_unavailable!((tensor_handle,), -1)
     }
 }
 
 /// Get gradient tensor. Wraps `rt_torch_grad(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_grad(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -656,12 +629,11 @@ pub fn rt_torch_grad(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 
 /// Set requires_grad. Wraps `rt_torch_set_requires_grad(tensor_handle, requires_grad) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_set_requires_grad(tensor_handle: u64, requires_grad: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -669,12 +641,11 @@ pub fn rt_torch_set_requires_grad(tensor_handle: u64, requires_grad: i32) -> u64
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle, requires_grad), 0)
     }
 }
 
 /// Detach from computation graph. Wraps `rt_torch_detach(tensor_handle) -> u64`.
-#[allow(unused_variables)] // reason: stub awaiting torch backend impl; parameters required by extern signature
 pub fn rt_torch_detach(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
@@ -682,7 +653,7 @@ pub fn rt_torch_detach(tensor_handle: u64) -> u64 {
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        0
+        torch_unavailable!((tensor_handle,), 0)
     }
 }
 

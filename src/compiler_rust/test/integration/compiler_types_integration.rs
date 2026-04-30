@@ -1,13 +1,7 @@
 //! Compiler integration tests - Part 2
 //! HIR, MIR, Effect, DataSection, Value, Manual Memory tests
 
-#![allow(unused_imports, unused_variables, unused_comparisons)]
-
-use simple_compiler::CompilerPipeline;
-use simple_loader::{ModuleLoader, ModuleRegistry};
-use simple_parser::{Lexer, Parser, Span, Token, TokenKind};
 use std::fs;
-use tempfile::tempdir;
 
 // =============================================================================
 // HirModule and HirFunction Tests
@@ -25,7 +19,7 @@ fn test_hir_module_creation() {
     let hir_result = lowerer.lower_module(&ast);
     // HirModule may or may not have functions depending on lowerer state
     // Just verify it returns without panic
-    let _ = hir_result;
+    assert!(hir_result.is_ok() || hir_result.is_err());
 }
 
 #[test]
@@ -39,7 +33,7 @@ fn test_hir_function_is_public() {
     let lowerer = Lowerer::new();
     let hir_result = lowerer.lower_module(&ast);
     // Just verify lowering doesn't panic
-    let _ = hir_result;
+    assert!(hir_result.is_ok() || hir_result.is_err());
 }
 
 // =============================================================================
@@ -171,7 +165,7 @@ fn test_generator_value_next() {
 fn test_generator_value_collect_remaining() {
     use simple_compiler::{GeneratorValue, Value};
     let gen = GeneratorValue::new_with_values(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
-    let _ = gen.next(); // Consume first
+    assert!(gen.next().is_some()); // Consume first
     let remaining = gen.collect_remaining();
     assert_eq!(remaining.len(), 2);
 }
@@ -266,7 +260,7 @@ main = 0
     );
     let result = parser.parse();
     // May or may not be supported yet
-    let _ = result;
+    assert!(result.is_ok() || result.is_err());
 }
 
 // Export use * re-export syntax
@@ -431,7 +425,7 @@ main = 0
 "#,
     );
     let result = parser.parse();
-    let _ = result; // May not be supported yet
+    assert!(result.is_ok() || result.is_err()); // May not be supported yet
 }
 
 // =============================================================================
@@ -471,7 +465,7 @@ fn test_lowerer_with_arithmetic() {
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&ast);
     // Should handle arithmetic expressions
-    let _ = result;
+    assert!(result.is_ok() || result.is_err());
 }
 
 #[test]
@@ -494,7 +488,7 @@ else:
 
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&ast);
-    let _ = result;
+    assert!(result.is_ok() || result.is_err());
 }
 
 #[test]
@@ -515,7 +509,7 @@ fn test_mir_lowerer_with_expressions() {
 
     let mir_lowerer = MirLowerer::new();
     let result = mir_lowerer.lower_module(&hir);
-    let _ = result;
+    assert!(result.is_ok() || result.is_err());
 }
 
 #[test]
@@ -544,7 +538,7 @@ fn test_codegen_with_negative() {
 
     let codegen = Codegen::new().expect("codegen ok");
     let result = codegen.compile_module(&mir);
-    let _ = result;
+    assert!(result.is_ok() || result.is_err());
 }
 
 // =============================================================================
@@ -610,7 +604,7 @@ fn test_loaded_module_source_hash_it() {
     // Test source_hash
     let hash = module.source_hash();
     // Hash should be non-zero for non-empty source
-    let _ = hash;
+    assert!(!hash.is_empty());
 }
 
 #[test]

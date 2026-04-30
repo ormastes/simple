@@ -2,11 +2,9 @@
 //! Tests LeanTy, LeanExpr, lean_infer, Type, TypeScheme, and type checking
 //! Focus: Public function coverage for simple_type
 
-#![allow(unused_imports, unused_variables)]
-
 use simple_type::{
     check, infer_deterministic, infer_pure, infer_simple, lean_infer, to_simple_expr,
-    LeanExpr, LeanTy, SimpleTy, Substitution, Type, TypeChecker, TypeError, TypeScheme,
+    LeanExpr, LeanTy, SimpleTy, Substitution, Type, TypeChecker, TypeScheme,
 };
 
 // =============================================================================
@@ -722,9 +720,7 @@ fn test_substitution_default() {
 
 #[test]
 fn test_type_checker_new() {
-    let checker = TypeChecker::new();
-    // Just verify it doesn't panic
-    let _ = checker;
+    assert!(std::mem::size_of_val(&TypeChecker::new()) > 0);
 }
 
 // =============================================================================

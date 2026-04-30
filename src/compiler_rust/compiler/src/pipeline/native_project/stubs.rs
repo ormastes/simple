@@ -22,13 +22,9 @@ fn is_linker_provided_symbol(sym: &str, defined: &std::collections::HashSet<Stri
             | "__heap_end"
             | "__global_pointer$"
     ) || (sym == "spl_start"
-        && defined
-            .iter()
-            .any(|defined_sym| {
-                defined_sym == "spl_start"
-                    || defined_sym.ends_with("__spl_start")
-                    || defined_sym.ends_with("___start")
-            }))
+        && defined.iter().any(|defined_sym| {
+            defined_sym == "spl_start" || defined_sym.ends_with("__spl_start") || defined_sym.ends_with("___start")
+        }))
 }
 
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.

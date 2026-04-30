@@ -124,7 +124,12 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             if_true,
             if_false,
         } => emitter.emit_vec_select(*dest, *mask, *if_true, *if_false),
-        MirInst::VecLoad { dest, array, offset } => emitter.emit_vec_load(*dest, *array, *offset),
+        MirInst::VecLoad {
+            dest,
+            array,
+            offset,
+            lanes,
+        } => emitter.emit_vec_load(*dest, *array, *offset, *lanes),
         MirInst::VecStore { source, array, offset } => emitter.emit_vec_store(*source, *array, *offset),
         MirInst::VecGather { dest, array, indices } => emitter.emit_vec_gather(*dest, *array, *indices),
         MirInst::VecScatter { source, array, indices } => emitter.emit_vec_scatter(*source, *array, *indices),

@@ -167,7 +167,7 @@ impl<'a> GhostChecker<'a> {
                     self.check_ghost_stmt(stmt, func_name);
                 }
             }
-            HirStmt::Loop { body } => {
+            HirStmt::Loop { body, .. } => {
                 for stmt in body {
                     self.check_ghost_stmt(stmt, func_name);
                 }
@@ -338,7 +338,7 @@ impl<'a> GhostChecker<'a> {
                     self.check_non_ghost_stmt(stmt, func_name, in_contract);
                 }
             }
-            HirStmt::Loop { body } => {
+            HirStmt::Loop { body, .. } => {
                 for stmt in body {
                     self.check_non_ghost_stmt(stmt, func_name, in_contract);
                 }

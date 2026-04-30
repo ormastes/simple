@@ -73,7 +73,7 @@ impl Lowerer {
                     self.check_stmt_for_async_calls(s, caller_name, function_suspension)?;
                 }
             }
-            HirStmt::Loop { body } => {
+            HirStmt::Loop { body, .. } => {
                 for s in body {
                     self.check_stmt_for_async_calls(s, caller_name, function_suspension)?;
                 }

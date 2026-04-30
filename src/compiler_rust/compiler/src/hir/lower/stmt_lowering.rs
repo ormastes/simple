@@ -378,6 +378,7 @@ impl Lowerer {
                 Ok(vec![HirStmt::While {
                     condition,
                     body,
+                    simd_requested: while_stmt.simd_requested,
                     invariants,
                 }])
             }
@@ -455,6 +456,7 @@ impl Lowerer {
                         pattern: temp_name,
                         iterable,
                         body: new_body,
+                        simd_requested: for_stmt.simd_requested,
                         invariants,
                     }])
                 } else {
@@ -470,6 +472,7 @@ impl Lowerer {
                         pattern,
                         iterable,
                         body,
+                        simd_requested: for_stmt.simd_requested,
                         invariants,
                     }])
                 }
@@ -477,7 +480,10 @@ impl Lowerer {
 
             Node::Loop(loop_stmt) => {
                 let body = self.lower_block(&loop_stmt.body, ctx)?;
-                Ok(vec![HirStmt::Loop { body }])
+                Ok(vec![HirStmt::Loop {
+                    body,
+                    simd_requested: loop_stmt.simd_requested,
+                }])
             }
 
             Node::Break(_) => Ok(vec![HirStmt::Break]),

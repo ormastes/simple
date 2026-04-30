@@ -143,7 +143,7 @@ pub use monomorphize::{
 pub use parallel::{
     load_module_parallel, parse_all_parallel, parse_files_parallel, ParallelConfig, ParallelParseCache, ParsedFile,
 };
-pub use pipeline::CompilerPipeline;
+pub use pipeline::{CompilerPipeline, SimdMode};
 pub use pipeline::{extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints};
 pub use project::ProjectContext;
 pub use runtime_profile::{

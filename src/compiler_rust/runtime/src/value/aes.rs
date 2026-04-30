@@ -360,7 +360,7 @@ pub(crate) fn encrypt_block_with_expanded_for_tier(
 ) -> Option<[u8; AES_BLOCK_LEN]> {
     let rounds = usize::try_from(num_rounds).ok()?;
     match simd_tier {
-        SimdTier::X86_64Avx2 => {
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => {
             #[cfg(target_arch = "x86_64")]
             {
                 if std::is_x86_feature_detected!("aes") {
@@ -370,7 +370,7 @@ pub(crate) fn encrypt_block_with_expanded_for_tier(
             }
             scalar_encrypt_block_with_expanded(block, expanded_key, rounds)
         }
-        SimdTier::Aarch64Neon => {
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => {
             #[cfg(target_arch = "aarch64")]
             {
                 if std::arch::is_aarch64_feature_detected!("aes") {
@@ -379,7 +379,9 @@ pub(crate) fn encrypt_block_with_expanded_for_tier(
             }
             scalar_encrypt_block_with_expanded(block, expanded_key, rounds)
         }
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => scalar_encrypt_block_with_expanded(block, expanded_key, rounds),
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => {
+            scalar_encrypt_block_with_expanded(block, expanded_key, rounds)
+        }
     }
 }
 
@@ -399,7 +401,7 @@ pub(crate) fn decrypt_block_with_expanded_for_tier(
 ) -> Option<[u8; AES_BLOCK_LEN]> {
     let rounds = usize::try_from(num_rounds).ok()?;
     match simd_tier {
-        SimdTier::X86_64Avx2 => {
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => {
             #[cfg(target_arch = "x86_64")]
             {
                 if std::is_x86_feature_detected!("aes") {
@@ -408,7 +410,7 @@ pub(crate) fn decrypt_block_with_expanded_for_tier(
             }
             scalar_decrypt_block_with_expanded(block, expanded_key, rounds)
         }
-        SimdTier::Aarch64Neon => {
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => {
             #[cfg(target_arch = "aarch64")]
             {
                 if std::arch::is_aarch64_feature_detected!("aes") {
@@ -417,13 +419,15 @@ pub(crate) fn decrypt_block_with_expanded_for_tier(
             }
             scalar_decrypt_block_with_expanded(block, expanded_key, rounds)
         }
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => scalar_decrypt_block_with_expanded(block, expanded_key, rounds),
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => {
+            scalar_decrypt_block_with_expanded(block, expanded_key, rounds)
+        }
     }
 }
 
 pub(crate) fn aes_acceleration_available_for_tier(simd_tier: SimdTier) -> bool {
     match simd_tier {
-        SimdTier::X86_64Avx2 => {
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => {
             #[cfg(target_arch = "x86_64")]
             {
                 return std::is_x86_feature_detected!("aes");
@@ -431,7 +435,7 @@ pub(crate) fn aes_acceleration_available_for_tier(simd_tier: SimdTier) -> bool {
             #[allow(unreachable_code)]
             false
         }
-        SimdTier::Aarch64Neon => {
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => {
             #[cfg(target_arch = "aarch64")]
             {
                 return std::arch::is_aarch64_feature_detected!("aes");
@@ -439,7 +443,7 @@ pub(crate) fn aes_acceleration_available_for_tier(simd_tier: SimdTier) -> bool {
             #[allow(unreachable_code)]
             false
         }
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => false,
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => false,
     }
 }
 

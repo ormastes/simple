@@ -13,27 +13,60 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
+    pub(super) fn parse_simd_type_name(&self, type_name: &str) -> Option<(TypeId, u32)> {
+        let (element, lane_suffix) = if let Some(rest) = type_name.strip_prefix("f32x") {
+            (TypeId::F32, rest)
+        } else if let Some(rest) = type_name.strip_prefix("f64x") {
+            (TypeId::F64, rest)
+        } else if let Some(rest) = type_name.strip_prefix("i32x") {
+            (TypeId::I32, rest)
+        } else if let Some(rest) = type_name.strip_prefix("i64x") {
+            (TypeId::I64, rest)
+        } else {
+            return None;
+        };
+
+        let lanes = lane_suffix.parse::<u32>().ok()?;
+        if lanes == 0 {
+            return None;
+        }
+
+        Some((element, lanes))
+    }
+
+    pub(super) fn is_simd_static_type_name(&self, type_name: &str) -> bool {
+        self.parse_simd_type_name(type_name).is_some()
+            || self
+                .resolve_type_alias(type_name)
+                .is_some_and(|target_name| self.parse_simd_type_name(target_name).is_some())
+            || self
+                .module
+                .types
+                .lookup(type_name)
+                .is_some_and(|type_id| matches!(self.module.types.get(type_id), Some(HirType::Simd { .. })))
+    }
+
+    pub(super) fn resolve_simd_static_type(&mut self, type_name: &str) -> Option<TypeId> {
+        if let Some((element, lanes)) = self.parse_simd_type_name(type_name) {
+            return Some(self.module.types.register(HirType::Simd { lanes, element }));
+        }
+
+        if let Some(target_name) = self.resolve_type_alias(type_name).map(str::to_string) {
+            if let Some((element, lanes)) = self.parse_simd_type_name(&target_name) {
+                return Some(self.module.types.register(HirType::Simd { lanes, element }));
+            }
+        }
+
+        self.module
+            .types
+            .lookup(type_name)
+            .filter(|type_id| matches!(self.module.types.get(*type_id), Some(HirType::Simd { .. })))
+    }
+
     /// Register a SIMD type from its string name (f32x4, i32x4, etc.)
     pub(super) fn register_simd_type(&mut self, type_name: &str) -> TypeId {
-        match type_name {
-            "f32x4" => self.module.types.register(HirType::Simd {
-                lanes: 4,
-                element: TypeId::F32,
-            }),
-            "f64x4" => self.module.types.register(HirType::Simd {
-                lanes: 4,
-                element: TypeId::F64,
-            }),
-            "i32x4" => self.module.types.register(HirType::Simd {
-                lanes: 4,
-                element: TypeId::I32,
-            }),
-            "i64x4" => self.module.types.register(HirType::Simd {
-                lanes: 4,
-                element: TypeId::I64,
-            }),
-            _ => unreachable!(),
-        }
+        self.resolve_simd_static_type(type_name)
+            .unwrap_or_else(|| panic!("unsupported SIMD type name: {type_name}"))
     }
 
     pub(super) fn lower_gpu_method(
@@ -162,7 +195,13 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
-        let simd_ty = self.register_simd_type(type_name);
+        let Some(simd_ty) = self.resolve_simd_static_type(type_name) else {
+            return Ok(None);
+        };
+        let Some(HirType::Simd { lanes, .. }) = self.module.types.get(simd_ty) else {
+            return Ok(None);
+        };
+        let lanes = *lanes;
 
         match method {
             "load" => {
@@ -230,6 +269,10 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        if let Some(result) = self.lower_simd_static_method(class_name, method, args, ctx)? {
+            return Ok(result);
+        }
+
         if let Some(type_id) = self.module.types.lookup(class_name) {
             if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) && method == "new" {
                 return self.lower_bitfield_constructor(type_id, args, ctx);

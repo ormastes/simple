@@ -280,6 +280,12 @@ impl Lowerer {
         if let Some(target_name) = match &ta.ty {
             ast::Type::Simple(name) => Some(name.clone()),
             ast::Type::Generic { name, .. } => Some(name.clone()),
+            ast::Type::Simd { lanes, element } => match element.as_ref() {
+                ast::Type::Simple(name) if matches!(name.as_str(), "f32" | "f64" | "i32" | "i64") => {
+                    Some(format!("{name}x{lanes}"))
+                }
+                _ => None,
+            },
             _ => None,
         } {
             self.register_type_alias_mapping(ta.name.clone(), target_name);

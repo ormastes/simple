@@ -28,7 +28,7 @@ pub(crate) use collections::{
     eval_array_all, eval_array_any, eval_array_filter, eval_array_find, eval_array_map, eval_array_reduce,
     eval_dict_filter, eval_dict_map_values, eval_option_and_then, eval_option_filter, eval_option_map,
     eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else, iter_to_vec,
-    message_to_value,
+    message_to_value, OptionResultEvalContext,
 };
 
 pub(crate) use patterns::{bind_pattern, bind_pattern_value, handle_functional_update, handle_method_call_with_self_update};

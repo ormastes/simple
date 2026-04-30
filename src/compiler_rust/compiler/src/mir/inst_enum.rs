@@ -242,6 +242,8 @@ pub enum MirInst {
         array: VReg,
         /// Offset into array
         offset: VReg,
+        /// Number of lanes requested by the destination SIMD type
+        lanes: u32,
     },
 
     /// SIMD store to array: v.store(arr, offset)

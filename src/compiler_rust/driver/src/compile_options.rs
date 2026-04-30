@@ -7,6 +7,14 @@ use simple_common::gc::{MemoryLimitConfig, DEFAULT_MEMORY_LIMIT};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimdMode {
+    Off,
+    #[default]
+    Auto,
+    Report,
+}
+
 /// Compilation options for build optimization.
 #[derive(Debug, Clone)]
 pub struct CompileOptions {
@@ -58,6 +66,9 @@ pub struct CompileOptions {
 
     /// Whether to fail on memory limit exceeded (true) or just warn (false).
     pub memory_limit_fail: bool,
+
+    /// SIMD vectorization mode for compiler/runtime lowering.
+    pub simd_mode: SimdMode,
 }
 
 impl Default for CompileOptions {
@@ -79,6 +90,7 @@ impl Default for CompileOptions {
             allow_deprecated: false,
             memory_limit: DEFAULT_MEMORY_LIMIT,
             memory_limit_fail: true,
+            simd_mode: SimdMode::Auto,
         }
     }
 }
@@ -237,6 +249,11 @@ impl CompileOptions {
         self
     }
 
+    pub fn with_simd_mode(mut self, mode: SimdMode) -> Self {
+        self.simd_mode = mode;
+        self
+    }
+
     /// Get memory limit configuration.
     pub fn memory_limit_config(&self) -> MemoryLimitConfig {
         if self.memory_limit == 0 {
@@ -325,6 +342,13 @@ impl CompileOptions {
                 opts.memory_limit = 0;
             } else if arg == "--memory-warn-only" {
                 opts.memory_limit_fail = false;
+            } else if let Some(value) = arg.strip_prefix("--simd=") {
+                opts.simd_mode = match value {
+                    "off" => SimdMode::Off,
+                    "auto" => SimdMode::Auto,
+                    "report" => SimdMode::Report,
+                    _ => SimdMode::Auto,
+                };
             }
         }
 
@@ -424,6 +448,7 @@ mod tests {
         assert!(!opts.parallel);
         assert!(!opts.profile);
         assert_eq!(opts.read_strategy, ReadStrategy::Auto);
+        assert_eq!(opts.simd_mode, SimdMode::Auto);
     }
 
     #[test]
@@ -584,5 +609,13 @@ mod tests {
     fn test_with_log() {
         let opts = CompileOptions::new().with_log(PathBuf::from("test.json"));
         assert_eq!(opts.log_path, Some(PathBuf::from("test.json")));
+    }
+
+    #[test]
+    fn test_parse_simd_mode() {
+        let args = vec!["--simd=off".to_string()];
+        assert_eq!(CompileOptions::from_args(&args).simd_mode, SimdMode::Off);
+        let args = vec!["--simd=report".to_string()];
+        assert_eq!(CompileOptions::from_args(&args).simd_mode, SimdMode::Report);
     }
 }

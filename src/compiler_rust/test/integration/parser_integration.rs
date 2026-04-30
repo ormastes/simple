@@ -2,13 +2,11 @@
 //! Tests Lexer, Parser, AST nodes, Token, and diagnostic functions
 //! Focus: Public function coverage for simple_parser
 
-#![allow(unused_imports, unused_variables)]
-
 use simple_parser::{
-    ast::{BinOp, Expr, Node, Pattern, PointerKind, Type as AstType, UnaryOp, MoveMode, Argument},
+    ast::{Argument, BinOp, Expr, MoveMode, Pattern, PointerKind, Type as AstType, UnaryOp},
     diagnostic::{Diagnostic, Severity},
     error::ParseError,
-    DocItem, DocItemKind, ModuleDocs,
+    DocItemKind, ModuleDocs,
     lexer::Lexer,
     parser::Parser,
     token::{Token, TokenKind, Span},
@@ -20,8 +18,7 @@ use simple_parser::{
 
 #[test]
 fn test_lexer_new() {
-    let lexer = Lexer::new("main = 42");
-    let _ = lexer;
+    assert_eq!(Lexer::new("main = 42").tokenize().last().map(|t| &t.kind), Some(&TokenKind::Eof));
 }
 
 #[test]
@@ -70,15 +67,14 @@ fn test_lexer_tokenize_indentation() {
     let source = "if true:\n    return 1";
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
-    let has_indent = tokens.iter().any(|t| matches!(t.kind, TokenKind::Indent));
-    let _ = has_indent;
+    assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Indent)));
 }
 
 #[test]
 fn test_lexer_tokenize_comment() {
     let mut lexer = Lexer::new("# this is a comment\nmain = 1");
     let tokens = lexer.tokenize();
-    let _ = tokens;
+    assert!(!tokens.is_empty());
 }
 
 #[test]
@@ -93,7 +89,7 @@ fn test_lexer_tokenize_multiline() {
 fn test_lexer_tokenize_empty() {
     let mut lexer = Lexer::new("");
     let tokens = lexer.tokenize();
-    let _ = tokens;
+    assert_eq!(tokens.last().map(|t| &t.kind), Some(&TokenKind::Eof));
 }
 
 #[test]
@@ -118,8 +114,7 @@ fn test_lexer_tokenize_bool() {
 
 #[test]
 fn test_parser_new() {
-    let parser = Parser::new("main = 42");
-    let _ = parser;
+    assert!(Parser::new("main = 42").parse().is_ok());
 }
 
 #[test]
@@ -133,16 +128,14 @@ fn test_parser_parse_simple() {
 fn test_parser_parse_function() {
     let source = "fn add(a: i64, b: i64) -> i64:\n    return a + b";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
 fn test_parser_parse_if() {
     let source = "if x > 0:\n    return 1\nelse:\n    return 0";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
@@ -151,8 +144,7 @@ fn test_parser_parse_arithmetic() {
     for expr in expressions {
         let source = format!("x = {}", expr);
         let mut parser = Parser::new(&source);
-        let result = parser.parse();
-        let _ = result;
+        assert!(parser.parse().is_ok(), "failed for {expr}");
     }
 }
 
@@ -162,8 +154,7 @@ fn test_parser_parse_comparison() {
     for cmp in comparisons {
         let source = format!("x = {}", cmp);
         let mut parser = Parser::new(&source);
-        let result = parser.parse();
-        let _ = result;
+        assert!(parser.parse().is_ok(), "failed for {cmp}");
     }
 }
 
@@ -171,64 +162,56 @@ fn test_parser_parse_comparison() {
 fn test_parser_parse_class() {
     let source = "class Point:\n    x: i64\n    y: i64";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
 fn test_parser_parse_struct() {
     let source = "struct Point:\n    x: i64\n    y: i64";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
 fn test_parser_parse_while() {
     let source = "while x > 0:\n    x = x - 1";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
 fn test_parser_parse_for() {
     let source = "for i in range(10):\n    print(i)";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
 fn test_parser_parse_match() {
     let source = "match x:\n    case 1:\n        return \"one\"\n    case _:\n        return \"other\"";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
 fn test_parser_parse_import() {
     let source = "import std.io";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
 fn test_parser_parse_use() {
     let source = "use std.*";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_ok());
 }
 
 #[test]
 fn test_parser_syntax_error() {
     let source = "@#$%^&";
     let mut parser = Parser::new(source);
-    let result = parser.parse();
-    let _ = result;
+    assert!(parser.parse().is_err());
 }
 
 // =============================================================================

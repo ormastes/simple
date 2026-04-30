@@ -189,6 +189,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 pattern,
                 iterable,
                 body,
+                simd_requested: stmt.simd_requested,
                 is_suspend: stmt.is_suspend,
                 auto_enumerate: stmt.auto_enumerate,
                 invariants: stmt.invariants.clone(),
@@ -211,6 +212,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 condition,
                 body,
                 let_pattern,
+                simd_requested: stmt.simd_requested,
                 is_suspend: stmt.is_suspend,
                 invariants: stmt.invariants.clone(),
                 label: stmt.label.clone(),
@@ -219,6 +221,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
         Node::Loop(stmt) => Node::Loop(LoopStmt {
             span: stmt.span,
             body: apply_macro_hygiene_block(&stmt.body, ctx, true),
+            simd_requested: stmt.simd_requested,
             label: stmt.label.clone(),
         }),
         Node::Context(stmt) => Node::Context(ContextStmt {

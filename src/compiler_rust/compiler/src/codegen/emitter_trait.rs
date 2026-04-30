@@ -99,7 +99,7 @@ pub trait CodegenEmitter {
     fn emit_vec_shuffle(&mut self, dest: VReg, source: VReg, indices: VReg) -> Result<(), Self::Error>;
     fn emit_vec_blend(&mut self, dest: VReg, first: VReg, second: VReg, indices: VReg) -> Result<(), Self::Error>;
     fn emit_vec_select(&mut self, dest: VReg, mask: VReg, if_true: VReg, if_false: VReg) -> Result<(), Self::Error>;
-    fn emit_vec_load(&mut self, dest: VReg, array: VReg, offset: VReg) -> Result<(), Self::Error>;
+    fn emit_vec_load(&mut self, dest: VReg, array: VReg, offset: VReg, lanes: u32) -> Result<(), Self::Error>;
     fn emit_vec_store(&mut self, source: VReg, array: VReg, offset: VReg) -> Result<(), Self::Error>;
     fn emit_vec_gather(&mut self, dest: VReg, array: VReg, indices: VReg) -> Result<(), Self::Error>;
     fn emit_vec_scatter(&mut self, source: VReg, array: VReg, indices: VReg) -> Result<(), Self::Error>;

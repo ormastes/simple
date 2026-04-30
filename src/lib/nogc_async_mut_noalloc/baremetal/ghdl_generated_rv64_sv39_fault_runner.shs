@@ -7,8 +7,8 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-RTL_DIR="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/rtl"
 GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
+TEST_PKG_GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_rv64_program_test_package.spl"
 TIMEOUT=30
 PROGRAM=""
 
@@ -36,6 +36,7 @@ GEN_DIR="$TMP_DIR/generated"
 TEST_BASE="$TMP_DIR/program"
 TEST_ELF="$TEST_BASE.elf"
 TEST_BIN="$TEST_BASE.bin"
+TEST_HEX="$TMP_DIR/program.hex"
 TEST_PKG="$TMP_DIR/test_program.vhd"
 
 EXT="${PROGRAM##*.}"
@@ -52,28 +53,17 @@ fi
 
 bin/simple run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
 riscv64-linux-gnu-objcopy -O binary "$TEST_ELF" "$TEST_BIN"
-
-python3 -c "
-data = open('$TEST_BIN', 'rb').read()
-print('library ieee;')
-print('use ieee.std_logic_1164.all;')
-print('package test_program is')
-print('    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);')
-print('    constant PROGRAM_SIZE_BYTES : integer := %d;' % len(data))
-print('    constant PROGRAM_BYTES : byte_array_t(0 to %d) := (' % (len(data)-1))
-for i, b in enumerate(data):
-    comma = ',' if i < len(data)-1 else ''
-    print('        x\"%02x\"%s' % (b, comma))
-print('    );')
-print('end package test_program;')
-" > "$TEST_PKG"
+bin/simple run "$TEST_PKG_GEN_SCRIPT" -- \
+    "$TEST_BIN" \
+    "$TEST_HEX" \
+    "$TEST_PKG" >/dev/null
 
 cd "$TMP_DIR"
 ghdl -a --std=08 \
     "$GEN_DIR/rv64/rtl/simple_rv64i_core_pkg.vhd" \
     "$GEN_DIR/rv64/rtl/simple_rv64gc_core.vhd" \
     "$TEST_PKG" \
-    "$RTL_DIR/tb_generated_rv64_sv39_fault.vhd"
+    "$GEN_DIR/rv64/rtl/tb_generated_rv64_sv39_fault.vhd"
 ghdl -e --std=08 tb_generated_rv64_sv39_fault
 
 STOP_MS=$((TIMEOUT * 1000))

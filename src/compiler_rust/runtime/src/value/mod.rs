@@ -53,6 +53,7 @@ pub mod heap;
 #[cfg(feature = "monoio-direct")]
 pub mod monoio_future;
 pub mod net;
+mod numeric_kernels;
 mod objects;
 mod process;
 pub mod primitive_sort;
@@ -894,6 +895,11 @@ pub use simd::{
     rt_vec_extract, rt_vec_floor, rt_vec_fma, rt_vec_gather, rt_vec_load, rt_vec_masked_load, rt_vec_masked_store,
     rt_vec_max, rt_vec_max_vec, rt_vec_min, rt_vec_min_vec, rt_vec_product, rt_vec_recip, rt_vec_round, rt_vec_scatter,
     rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_store, rt_vec_sum, rt_vec_with,
+};
+pub use numeric_kernels::{
+    rt_numeric_active_simd_tier, rt_numeric_add_f32, rt_numeric_add_f64, rt_numeric_dot_f32, rt_numeric_dot_f64,
+    rt_numeric_fma_f32, rt_numeric_fma_f64, rt_numeric_max_f32, rt_numeric_min_f32, rt_numeric_mul_f32,
+    rt_numeric_mul_f64, rt_numeric_sum_f32, rt_numeric_sum_f64,
 };
 
 // Re-export regex FFI functions

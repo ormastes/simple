@@ -82,25 +82,25 @@ pub(crate) fn neon_find_invalid(bytes: &[u8]) -> i64 {
 
 pub(crate) fn count_codepoints_for_tier(simd_tier: SimdTier, bytes: &[u8]) -> i64 {
     match simd_tier {
-        SimdTier::X86_64Avx2 => avx2_count_codepoints(bytes),
-        SimdTier::Aarch64Neon => neon_count_codepoints(bytes),
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => scalar_count_codepoints(bytes),
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_count_codepoints(bytes),
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_count_codepoints(bytes),
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_count_codepoints(bytes),
     }
 }
 
 pub(crate) fn validate_for_tier(simd_tier: SimdTier, bytes: &[u8]) -> bool {
     match simd_tier {
-        SimdTier::X86_64Avx2 => avx2_validate(bytes),
-        SimdTier::Aarch64Neon => neon_validate(bytes),
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => scalar_validate(bytes),
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_validate(bytes),
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_validate(bytes),
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_validate(bytes),
     }
 }
 
 pub(crate) fn find_invalid_for_tier(simd_tier: SimdTier, bytes: &[u8]) -> i64 {
     match simd_tier {
-        SimdTier::X86_64Avx2 => avx2_find_invalid(bytes),
-        SimdTier::Aarch64Neon => neon_find_invalid(bytes),
-        SimdTier::Riscv64Rvv | SimdTier::Scalar => scalar_find_invalid(bytes),
+        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => avx2_find_invalid(bytes),
+        SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => neon_find_invalid(bytes),
+        SimdTier::Riscv64Rvv | SimdTier::Wasm128 | SimdTier::Scalar => scalar_find_invalid(bytes),
     }
 }
 
