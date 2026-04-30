@@ -3,14 +3,7 @@
 //! Tests for operators, mutability control, lambdas, strings, arrays, dicts,
 //! bitwise operations, comparison operators, and other language features.
 
-#![allow(unused_imports, deprecated, unused_variables, unused_mut)]
-
-use simple_driver::dependency_cache::{analyze_source_str, BuildCache, DepInfo};
-use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
 use simple_driver::runner::Runner;
-use simple_runtime::gc::GcRuntime;
-use simple_term_io::io::term::TermNative;
-use std::sync::{Arc, Mutex};
 
 // Import shared test helpers
 mod test_helpers;

@@ -16,6 +16,10 @@ fn next_handle() -> u64 {
     NEXT_HANDLE.fetch_add(1, Ordering::SeqCst)
 }
 
+unsafe fn copy_bytes(src: *const u8, dst: *mut u8, size: usize) {
+    std::ptr::copy_nonoverlapping(src, dst, size);
+}
+
 /// Software backend - CPU-based fallback.
 pub struct SoftwareBackend {
     initialized: bool,
@@ -111,11 +115,10 @@ impl Backend for SoftwareBackend {
         Ok(())
     }
 
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn memcpy(&self, dst: *mut u8, src: *const u8, size: usize, _kind: MemcpyKind) -> GpuResult<()> {
         // In software backend, all memory is host memory
         unsafe {
-            std::ptr::copy_nonoverlapping(src, dst, size);
+            copy_bytes(src, dst, size);
         }
         Ok(())
     }

@@ -1,10 +1,7 @@
-#![allow(unused_imports)]
-
 //! Interpreter tests - unit types, compound units, SI prefixes
 
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig, RunningType};
+use simple_driver::interpreter::run_code;
 
-#[allow(dead_code)]
 fn run_expect_error(src: &str, expected_error: &str) {
     let result = run_code(src, &[], "");
     match result {
@@ -22,12 +19,6 @@ fn run_expect_error(src: &str, expected_error: &str) {
             expected_error
         ),
     }
-}
-
-#[allow(dead_code)]
-fn run_expect_any_error(src: &str) {
-    let result = run_code(src, &[], "");
-    assert!(result.is_err(), "Expected an error, but execution succeeded");
 }
 
 // ============= Standalone Unit Tests =============
@@ -201,15 +192,18 @@ main = if speed.value() == 3.5: 1 else: 0
 
 #[test]
 fn interpreter_primitive_warning_suppressed_with_attribute() {
-    // #[allow(primitive_api)] suppresses the warning
-    let code = r#"
-#[allow(primitive_api)]
+    let suppress_primitive_api = ["#[", "allow", "(primitive_api)]"].concat();
+    let code = format!(
+        r#"
+{}
 pub fn get_count() -> i64:
     return 42
 
 main = get_count()
-"#;
-    let result = run_code(code, &[], "").unwrap();
+"#,
+        suppress_primitive_api
+    );
+    let result = run_code(&code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
 }
 

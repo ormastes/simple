@@ -1,8 +1,6 @@
-#![allow(unused_imports)]
-
 //! Interpreter tests - bindings
 
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+use simple_driver::interpreter::{run_code, Interpreter};
 
 #[test]
 fn interpreter_using_struct() {

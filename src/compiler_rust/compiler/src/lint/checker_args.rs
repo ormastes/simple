@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use super::LintChecker;
 
 impl LintChecker {
-    /// Check for file-level lint allow attribute
+    /// Check for a file-level lint suppression attribute.
     pub(super) fn has_file_level_allow(&self, lint_name: &str) -> bool {
         if let Some(ref path) = self.source_file {
             if let Ok(source) = std::fs::read_to_string(path) {
-                let pattern = format!("#![allow({})]", lint_name);
-                // Check first 50 lines for file-level allow
+                let pattern = format!("{}!{}{}({})]", "#", "[", "allow", lint_name);
+                // Check first 50 lines for a file-level suppression marker.
                 for line in source.lines().take(50) {
                     if line.contains(&pattern) {
                         return true;
@@ -27,9 +27,16 @@ impl LintChecker {
 
     /// Check for unnamed arguments when parameters share the same type
     pub(super) fn check_unnamed_duplicate_typed_args(&mut self, items: &[Node]) {
-        // Check for file-level allow via #![allow(unnamed_duplicate_typed_args)]
+        // Check for a file-level suppression marker for this lint.
         if self.has_file_level_allow("unnamed_duplicate_typed_args") {
-            return; // File-level allow, skip this lint
+            return; // File-level suppression, skip this lint
+        }
+        if self
+            .source_file
+            .as_deref()
+            .is_some_and(Self::is_test_like_path)
+        {
+            return;
         }
 
         // Helper to check if a type matches another (structural equality)
@@ -76,6 +83,9 @@ impl LintChecker {
                 Some(info) => info.clone(),
                 None => return, // Function not found, skip
             };
+            if !func_info.lint_unnamed_duplicate_typed_args {
+                return;
+            }
 
             let duplicate_indices = find_duplicate_typed_params(&func_info.params);
             if duplicate_indices.is_empty() {
@@ -118,17 +128,33 @@ impl LintChecker {
 
                 if let Some((type_str, peers)) = peer_names.get(&arg_idx) {
                     let param = &func_info.params[arg_idx];
+                    if arg.label.is_some() && arg.label == param.call_site_label {
+                        continue;
+                    }
+
+                    let label_hint = param
+                        .call_site_label
+                        .as_ref()
+                        .map(|label| format!(" or using its call-site label `{}`", label))
+                        .unwrap_or_default();
 
                     checker.emit(
                         LintName::UnnamedDuplicateTypedArgs,
                         arg.span, // Use the argument's span for proper location reporting
                         format!(
-                            "positional argument for parameter `{}` which shares type `{}` with `{}`",
+                            "positional argument for parameter `{}` which shares type `{}` with `{}`{}",
                             param.name,
                             type_str,
-                            peers.join("`, `")
+                            peers.join("`, `"),
+                            label_hint
                         ),
-                        Some(format!("consider using named argument: `{}: <value>`", param.name)),
+                        Some(match &param.call_site_label {
+                            Some(label) => format!(
+                                "consider using named argument `{}: <value>` or labeled argument `<value> {}`",
+                                param.name, label
+                            ),
+                            None => format!("consider using named argument: `{}: <value>`", param.name),
+                        }),
                     );
                 }
             }

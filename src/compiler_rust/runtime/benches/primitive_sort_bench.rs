@@ -25,7 +25,7 @@ fn build_byte_values(len: usize) -> Vec<RuntimeValue> {
 }
 
 fn tagged_int_sort(values: &mut [RuntimeValue]) {
-    values.sort_by(|left, right| left.as_int().cmp(&right.as_int()));
+    values.sort_by_key(|left| left.as_int());
 }
 
 fn tagged_float_sort(values: &mut [RuntimeValue]) {
@@ -33,7 +33,7 @@ fn tagged_float_sort(values: &mut [RuntimeValue]) {
 }
 
 fn tagged_byte_sort(values: &mut [RuntimeValue]) {
-    values.sort_by(|left, right| left.as_int().cmp(&right.as_int()));
+    values.sort_by_key(|left| left.as_int());
 }
 
 fn bench_primitive_runtime_sort(c: &mut Criterion) {

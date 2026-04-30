@@ -21,8 +21,7 @@ pub use simple_driver;
 // The crate itself compiles as "stubs only" on all hosts by default;
 // real Cocoa / Win32 code is gated behind its `cocoa-real` / `win32-real`
 // features.
-#[allow(unused_extern_crates)]
-extern crate spl_hosted_runtime;
+use spl_hosted_runtime as _;
 
 use std::path::PathBuf;
 

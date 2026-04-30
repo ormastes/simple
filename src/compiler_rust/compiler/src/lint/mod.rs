@@ -5,7 +5,7 @@
 //!
 //! - `primitive_api`: Warns/errors when bare primitives are used in public APIs
 //! - Lint levels: `allow`, `warn` (default), `deny`
-//! - Attribute-based control: `#[allow(lint)]`, `#[warn(lint)]`, `#[deny(lint)]`
+//! - Attribute-based control via lint-level attributes
 //! - Module-level inheritance through `__init__.spl`
 //!
 //! #![skip_todo]
@@ -65,6 +65,17 @@ mod tests {
         diagnostics
     }
 
+    fn check_code_at_path(path: &str, code: &str) -> Vec<LintDiagnostic> {
+        let module = parse_code(code);
+        let mut checker = LintChecker::new().with_source_file(Some(PathBuf::from(path)));
+        checker.check_module(&module.items);
+        checker.take_diagnostics()
+    }
+
+    fn lint_attr(level: &str, lint: &str) -> String {
+        format!("{}{}{}({})]", "#", "[", level, lint)
+    }
+
     #[test]
     fn test_public_function_with_primitive_param() {
         // Mixed types: i64 param + text return — NOT a pure math function
@@ -72,7 +83,7 @@ mod tests {
 pub fn format_number(x: i64) -> text:
     return "hello"
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         assert!(!diagnostics.is_empty());
         assert!(diagnostics.iter().any(|d| d.lint == LintName::PrimitiveApi));
         assert!(diagnostics.iter().all(|d| d.level == LintLevel::Warn));
@@ -88,7 +99,7 @@ pub fn abs(x: f64) -> f64:
 pub fn max(a: i64, b: i64) -> i64:
     return a
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         assert!(
             diagnostics.iter().all(|d| d.lint != LintName::PrimitiveApi),
             "pure math functions should be exempt from primitive_api lint"
@@ -102,7 +113,7 @@ pub fn max(a: i64, b: i64) -> i64:
 pub fn widen(x: i32) -> i64:
     return 0
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::PrimitiveApi));
     }
 
@@ -138,13 +149,73 @@ pub fn set_active(active: bool):
     }
 
     #[test]
+    fn test_public_api_lints_skip_spec_files() {
+        let code = r#"
+pub fn set_active(active: bool) -> i64:
+    return 1
+"#;
+        let diagnostics = check_code_at_path("test/demo_spec.spl", code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::PrimitiveApi && d.lint != LintName::BareBool));
+    }
+
+    #[test]
+    fn test_public_api_lints_skip_fixture_files() {
+        let code = r#"
+pub fn format_count(count: i64) -> i64:
+    return count
+"#;
+        let diagnostics = check_code_at_path("test/fixtures/demo.spl", code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::PrimitiveApi && d.lint != LintName::BareBool));
+    }
+
+    #[test]
+    fn test_public_api_lints_skip_stdlib_testing_paths() {
+        let code = r#"
+pub fn fuzz(property: fn(any) -> bool, iterations: i32) -> bool:
+    return true
+"#;
+        let diagnostics = check_code_at_path("src/compiler_rust/lib/std/src/testing/fuzz.spl", code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::PrimitiveApi && d.lint != LintName::BareBool));
+    }
+
+    #[test]
+    fn test_public_api_lints_skip_stdlib_tooling_paths() {
+        let code = r#"
+pub fn save_coverage_data(quiet: bool, retries: i32):
+    pass
+"#;
+        let diagnostics = check_code_at_path("src/compiler_rust/lib/std/src/tooling/coverage.spl", code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::PrimitiveApi && d.lint != LintName::BareBool));
+    }
+
+    #[test]
+    fn test_public_api_lints_skip_stdlib_infra_paths() {
+        let code = r#"
+pub fn file_exists(path: text) -> bool:
+    return true
+"#;
+        let diagnostics = check_code_at_path("src/compiler_rust/lib/std/src/infra/file_io.spl", code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::PrimitiveApi && d.lint != LintName::BareBool));
+    }
+
+    #[test]
     fn test_spipe_placeholder_tautology_detected() {
         let code = r#"
 describe "demo":
     it "uses fake success":
         expect(true).to_equal(true)
 "#;
-        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        let diagnostics = check_code_in_file("demo_spec.spl", &code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipePlaceholderTests));
     }
 
@@ -156,7 +227,7 @@ describe "demo":
         print "[skip] env unavailable"
         return
 "#;
-        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        let diagnostics = check_code_in_file("demo_spec.spl", &code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipeNoPrintBasedTests));
     }
 
@@ -167,7 +238,7 @@ describe "demo":
     it "just calls helper":
         run_check()
 "#;
-        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        let diagnostics = check_code_in_file("demo_spec.spl", &code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipeEmptyExamples));
     }
 
@@ -178,7 +249,7 @@ describe "demo":
     it "wraps comparison":
         expect(code != 0).to_equal(true)
 "#;
-        let diagnostics = check_code_in_file("demo_spec.spl", code);
+        let diagnostics = check_code_in_file("demo_spec.spl", &code);
         assert!(diagnostics
             .iter()
             .any(|d| d.lint == LintName::SPipeBooleanWrapperAssertions));
@@ -190,7 +261,7 @@ describe "demo":
 fn not_done(port: i64) -> i64:
     pass_todo("implement driver")
 "#;
-        let diagnostics = check_code_in_file("demo.spl", code);
+        let diagnostics = check_code_in_file("demo.spl", &code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::StubImpl));
     }
 
@@ -200,7 +271,7 @@ fn not_done(port: i64) -> i64:
 fn not_done():
     pass_todo
 "#;
-        let diagnostics = check_code_in_file("demo.spl", code);
+        let diagnostics = check_code_in_file("demo.spl", &code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentPass));
     }
 
@@ -210,7 +281,7 @@ fn not_done():
 fn not_done():
     todo("fix")
 "#;
-        let diagnostics = check_code_in_file("demo.spl", code);
+        let diagnostics = check_code_in_file("demo.spl", &code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentTodo));
     }
 
@@ -222,30 +293,36 @@ fn classify(x: i64):
         case 0: "zero"
         case _: "other"
 "#;
-        let diagnostics = check_code_in_file("demo.spl", code);
+        let diagnostics = check_code_in_file("demo.spl", &code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentWildcard));
     }
 
     #[test]
     fn test_allow_suppresses_spipe_placeholder_tests() {
-        let code = r#"
-#[allow(spipe_placeholder_tests)] // reason: lint test exercises placeholder-test detection; annotated to avoid self-referential false positive
+        let code = format!(
+            r#"
+{} // reason: lint test exercises placeholder-test detection; annotated to avoid self-referential false positive
 describe "demo":
     it "uses fake success":
         expect(true).to_equal(true)
-"#;
-        let diagnostics = check_code_in_file("demo_spec.spl", code);
+"#,
+            lint_attr("allow", "spipe_placeholder_tests")
+        );
+        let diagnostics = check_code_in_file("demo_spec.spl", &code);
         assert!(diagnostics.iter().all(|d| d.lint != LintName::SPipePlaceholderTests));
     }
 
     #[test]
     fn test_allow_suppresses_stub_impl() {
-        let code = r#"
-#[allow(stub_impl)] // reason: lint test body exercises stub_impl detection; annotation prevents false positive in test
+        let code = format!(
+            r#"
+{} // reason: lint test body exercises stub_impl detection; annotation prevents false positive in test
 fn not_done(port: i64) -> i64:
     pass_todo("implement driver")
-"#;
-        let diagnostics = check_code_in_file("demo.spl", code);
+"#,
+            lint_attr("allow", "stub_impl")
+        );
+        let diagnostics = check_code_in_file("demo.spl", &code);
         assert!(diagnostics.iter().all(|d| d.lint != LintName::StubImpl));
     }
 
@@ -263,12 +340,15 @@ pub fn format_number(x: i64) -> text:
 
     #[test]
     fn test_allow_suppresses_warning() {
-        let code = r#"
-#[allow(primitive_api)] // reason: lint checker/descriptor module uses raw primitives to represent lint check metadata
+        let code = format!(
+            r#"
+{} // reason: lint checker/descriptor module uses raw primitives to represent lint check metadata
 pub fn raw_bytes(count: i32) -> i32:
     return count
-"#;
-        let diagnostics = check_code(code);
+"#,
+            lint_attr("allow", "primitive_api")
+        );
+        let diagnostics = check_code(&code);
         // The allow attribute should suppress primitive_api warnings
         assert!(diagnostics.iter().all(|d| d.lint != LintName::PrimitiveApi));
     }
@@ -320,7 +400,7 @@ pub fn raw_bytes(count: i32) -> i32:
 pub fn get_name() -> str:
     return "test"
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         // str is allowed
         assert!(diagnostics.is_empty());
     }
@@ -331,25 +411,25 @@ pub fn get_name() -> str:
 pub fn find_value() -> Option[i64]:
     return None
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         // Should warn about i64 inside Option
         assert!(diagnostics.iter().any(|d| d.lint == LintName::PrimitiveApi));
     }
 
     #[test]
     fn test_lint_level_from_str() {
-        assert_eq!(LintLevel::from_str("allow"), Some(LintLevel::Allow));
-        assert_eq!(LintLevel::from_str("warn"), Some(LintLevel::Warn));
-        assert_eq!(LintLevel::from_str("deny"), Some(LintLevel::Deny));
-        assert_eq!(LintLevel::from_str("DENY"), Some(LintLevel::Deny));
-        assert_eq!(LintLevel::from_str("invalid"), None);
+        assert_eq!(LintLevel::parse("allow"), Some(LintLevel::Allow));
+        assert_eq!(LintLevel::parse("warn"), Some(LintLevel::Warn));
+        assert_eq!(LintLevel::parse("deny"), Some(LintLevel::Deny));
+        assert_eq!(LintLevel::parse("DENY"), Some(LintLevel::Deny));
+        assert_eq!(LintLevel::parse("invalid"), None);
     }
 
     #[test]
     fn test_lint_name_from_str() {
-        assert_eq!(LintName::from_str("primitive_api"), Some(LintName::PrimitiveApi));
-        assert_eq!(LintName::from_str("bare_bool"), Some(LintName::BareBool));
-        assert_eq!(LintName::from_str("unknown"), None);
+        assert_eq!(LintName::parse("primitive_api"), Some(LintName::PrimitiveApi));
+        assert_eq!(LintName::parse("bare_bool"), Some(LintName::BareBool));
+        assert_eq!(LintName::parse("unknown"), None);
     }
 
     #[test]
@@ -490,6 +570,12 @@ print("Test passed")
         assert!(diagnostics[0].message.contains("print()"));
         assert_eq!(diagnostics[0].lint, LintName::PrintInTestSpec);
         assert_eq!(diagnostics[0].level, LintLevel::Warn);
+        let suggestion = diagnostics[0].suggestion.as_deref().unwrap_or("");
+        assert!(suggestion.contains("explicit user or reviewer confirmation"));
+        assert!(!suggestion.contains(&format!(
+            "add {} if print is needed",
+            lint_attr("allow", "print_in_test_spec")
+        )));
     }
 
     #[test]
@@ -610,13 +696,13 @@ fn test():
     #[test]
     fn test_unnamed_duplicate_typed_args_warns() {
         let code = r#"
-fn point(x: i64, y: i64) -> i64:
+pub fn point(x: i64, y: i64) -> i64:
     x + y
 
 fn test():
     val result = point(3, 4)
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -629,13 +715,13 @@ fn test():
     #[test]
     fn test_unnamed_duplicate_typed_args_no_warn_named() {
         let code = r#"
-fn point(x: i64, y: i64) -> i64:
+pub fn point(x: i64, y: i64) -> i64:
     x + y
 
 fn test():
     val result = point(x: 3, y: 4)
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -647,13 +733,13 @@ fn test():
     #[test]
     fn test_unnamed_duplicate_typed_args_no_warn_different_types() {
         let code = r#"
-fn describe(name: text, age: i64) -> text:
+pub fn describe(name: text, age: i64) -> text:
     name
 
 fn test():
     val result = describe("Alice", 30)
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -665,13 +751,13 @@ fn test():
     #[test]
     fn test_unnamed_duplicate_typed_args_partial_named() {
         let code = r#"
-fn point(x: i64, y: i64) -> i64:
+pub fn point(x: i64, y: i64) -> i64:
     x + y
 
 fn test():
     val result = point(x: 3, 4)
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -679,6 +765,75 @@ fn test():
         // Should warn about the positional arg (y)
         assert!(!dup_warnings.is_empty());
         assert!(dup_warnings[0].message.contains("y"));
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_no_warn_private_helper() {
+        let code = r#"
+fn point(x: i64, y: i64) -> i64:
+    x + y
+
+fn test():
+    val result = point(3, 4)
+"#;
+        let diagnostics = check_code(&code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        assert!(dup_warnings.is_empty());
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_no_warn_labeled_args() {
+        let code = r#"
+pub fn transfer(src: text from, dst: text to) -> text:
+    dst
+
+fn test():
+    val result = transfer("a.txt" from, "b.txt" to)
+"#;
+        let diagnostics = check_code(&code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        assert!(dup_warnings.is_empty());
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_warns_partial_labeled_args() {
+        let code = r#"
+pub fn transfer(src: text from, dst: text to) -> text:
+    dst
+
+fn test():
+    val result = transfer("a.txt" from, "b.txt")
+"#;
+        let diagnostics = check_code(&code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        assert_eq!(dup_warnings.len(), 1);
+        assert!(dup_warnings[0].message.contains("call-site label `to`"));
+    }
+
+    #[test]
+    fn test_unnamed_duplicate_typed_args_no_warn_in_test_like_file() {
+        let code = r#"
+pub fn point(x: i64, y: i64) -> i64:
+    x + y
+
+fn test():
+    val result = point(3, 4)
+"#;
+        let diagnostics = check_code_in_file("duplicate_args_spec.spl", code);
+        let dup_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
+            .collect();
+        assert!(dup_warnings.is_empty());
     }
 
     #[test]
@@ -733,9 +888,129 @@ export use Client.*
     }
 
     #[test]
+    fn test_export_outside_init_no_warn_for_direct_forwarding_pub_use_shim() {
+        let code = r#"
+pub use compiler.driver.driver_public_api.{interpret_file, generate_headers}
+pub use compiler.driver.driver_public_compile.{compile_file}
+"#;
+        let module = parse_code(code);
+        let mut checker =
+            LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/compiler/driver_api.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::ExportOutsideInit),
+            "pure forwarding shims should be allowed: {:?}",
+            diagnostics
+                .iter()
+                .map(|d| format!("{:?}: {}", d.lint, d.message))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_export_outside_init_no_warn_for_import_then_pub_use_shim() {
+        let code = r#"
+use compiler.common.di.{
+    DiContainer,
+    Binding,
+    set_container
+}
+
+pub use DiContainer
+pub use Binding
+pub use set_container
+"#;
+        let module = parse_code(code);
+        let mut checker =
+            LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/compiler/di.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::ExportOutsideInit),
+            "import-then-re-export forwarding shims should be allowed: {:?}",
+            diagnostics
+                .iter()
+                .map(|d| format!("{:?}: {}", d.lint, d.message))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_export_outside_init_no_warn_for_forwarding_glob_shim() {
+        let code = r#"
+pub use compiler.common.driver_core_types.*
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new()
+            .with_source_file(Some(std::path::PathBuf::from("src/compiler/driver_core_types.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::ExportOutsideInit),
+            "forwarding glob shims should be allowed: {:?}",
+            diagnostics
+                .iter()
+                .map(|d| format!("{:?}: {}", d.lint, d.message))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_export_outside_init_no_warn_for_export_use_forwarding_shim() {
+        let code = r#"
+export use compiler.frontend.treesitter.{
+    OutlineModule,
+    TreeSitter,
+    ParseError
+}
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new()
+            .with_source_file(Some(std::path::PathBuf::from("src/compiler/treesitter.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::ExportOutsideInit),
+            "pure export-use forwarding shims should be allowed: {:?}",
+            diagnostics
+                .iter()
+                .map(|d| format!("{:?}: {}", d.lint, d.message))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_export_outside_init_still_warns_when_forwarding_is_mixed_with_local_code() {
+        let code = r#"
+use compiler.common.di.{DiContainer}
+
+pub struct LocalBinding:
+    name: str
+
+pub use DiContainer
+"#;
+        let module = parse_code(code);
+        let mut checker =
+            LintChecker::new().with_source_file(Some(std::path::PathBuf::from("src/compiler/di_plus_local.spl")));
+        checker.check_module(&module.items);
+        let diagnostics = checker.take_diagnostics();
+
+        let export_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::ExportOutsideInit)
+            .collect();
+        assert_eq!(export_diags.len(), 1, "mixed forwarding + local code should still warn");
+    }
+
+    #[test]
     fn test_init_boundary_violation_lint_name() {
         assert_eq!(
-            LintName::from_str("init_boundary_violation"),
+            LintName::parse("init_boundary_violation"),
             Some(LintName::InitBoundaryViolation)
         );
         assert_eq!(LintName::InitBoundaryViolation.as_str(), "init_boundary_violation");
@@ -745,7 +1020,7 @@ export use Client.*
     #[test]
     fn test_bypass_with_code_files_lint_name() {
         assert_eq!(
-            LintName::from_str("bypass_with_code_files"),
+            LintName::parse("bypass_with_code_files"),
             Some(LintName::BypassWithCodeFiles)
         );
         assert_eq!(LintName::BypassWithCodeFiles.as_str(), "bypass_with_code_files");
@@ -1153,13 +1428,16 @@ pub fn create_router() -> Router:
 fn my_function():
     pass
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         let unknown_dec: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnknownDecorator)
             .collect();
         assert_eq!(unknown_dec.len(), 1);
         assert!(unknown_dec[0].message.contains("@MyCustomDecorator"));
+        let suggestion = unknown_dec[0].suggestion.as_deref().unwrap_or("");
+        assert!(suggestion.contains("explicit user or reviewer confirmation"));
+        assert!(!suggestion.contains("Suppress with:"));
     }
 
     #[test]
@@ -1169,8 +1447,61 @@ fn my_function():
 fn my_function():
     pass
 "#;
-        let diagnostics = check_code(code);
+        let diagnostics = check_code(&code);
         assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
+    }
+
+    #[test]
+    fn test_known_stdlib_module_decorators_no_warning() {
+        let code = r#"
+@variant(any)
+@immutable
+@no_gc
+mod sample
+"#;
+        let diagnostics = check_code(&code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute));
+    }
+
+    #[test]
+    fn test_known_extern_attribute_no_warning() {
+        let code = r#"
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64) -> i32:
+    pass
+"#;
+        let diagnostics = check_code(&code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute));
+    }
+
+    #[test]
+    fn test_known_module_attributes_no_warning() {
+        let code = r#"
+@no_gc
+@variant(any)
+mod sample
+"#;
+        let diagnostics = check_code(&code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute));
+    }
+
+    #[test]
+    fn test_known_cfg_attribute_no_warning() {
+        let code = r#"
+@cfg(x86_64)
+fn syscall() -> i64:
+    0
+"#;
+        let diagnostics = check_code(&code);
+        assert!(diagnostics
+            .iter()
+            .all(|d| d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute));
     }
 
     #[test]
@@ -1187,40 +1518,52 @@ fn my_function():
             .collect();
         assert_eq!(unknown_attr.len(), 1);
         assert!(unknown_attr[0].message.contains("#[my_custom_attr]"));
+        let suggestion = unknown_attr[0].suggestion.as_deref().unwrap_or("");
+        assert!(suggestion.contains("explicit user or reviewer confirmation"));
+        assert!(!suggestion.contains("Suppress with:"));
     }
 
     #[test]
     fn test_known_attribute_no_warning() {
-        let code = r#"
-#[allow(primitive_api)] // reason: lint checker/descriptor module uses raw primitives to represent lint check metadata
+        let code = format!(
+            r#"
+{} // reason: lint checker/descriptor module uses raw primitives to represent lint check metadata
 pub fn my_function(x: i64):
     pass
-"#;
-        let diagnostics = check_code(code);
+"#,
+            lint_attr("allow", "primitive_api")
+        );
+        let diagnostics = check_code(&code);
         assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownAttribute));
     }
 
     #[test]
     fn test_allow_unknown_decorator_suppresses() {
-        let code = r#"
-#[allow(unknown_decorator)] // reason: lint type descriptor documents unknown_decorator; allow is intentional self-reference
+        let code = format!(
+            r#"
+{} // reason: lint type descriptor documents unknown_decorator; suppression is intentional self-reference
 @MyCustomDecorator
 fn my_function():
     pass
-"#;
-        let diagnostics = check_code(code);
+"#,
+            lint_attr("allow", "unknown_decorator")
+        );
+        let diagnostics = check_code(&code);
         assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
     }
 
     #[test]
     fn test_allow_unknown_annotation_suppresses_both() {
-        let code = r#"
-#[allow(unknown_annotation)] // reason: lint type descriptor documents unknown_annotation; allow is intentional self-reference
+        let code = format!(
+            r#"
+{} // reason: lint type descriptor documents unknown_annotation; suppression is intentional self-reference
 @MyCustomDecorator
 fn my_function():
     pass
-"#;
-        let diagnostics = check_code(code);
+"#,
+            lint_attr("allow", "unknown_annotation")
+        );
+        let diagnostics = check_code(&code);
         assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
         assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownAttribute));
     }
@@ -1255,11 +1598,11 @@ fn f5():
     #[test]
     fn test_unknown_decorator_and_unknown_attribute_lint_names() {
         assert_eq!(
-            LintName::from_str("unknown_decorator"),
+            LintName::parse("unknown_decorator"),
             Some(LintName::UnknownDecorator)
         );
         assert_eq!(
-            LintName::from_str("unknown_attribute"),
+            LintName::parse("unknown_attribute"),
             Some(LintName::UnknownAttribute)
         );
         assert_eq!(LintName::UnknownDecorator.as_str(), "unknown_decorator");

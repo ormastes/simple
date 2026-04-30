@@ -1157,12 +1157,231 @@ impl RiscvFpgaLane:
             "    subtype xword_t is std_logic_vector(XLEN - 1 downto 0);\n" +
             "    constant RESET_VECTOR : xword_t := x\"{self.reset_vector_hex()}\";\n" +
             "    constant BOOT_STRIDE : natural := {self.boot_stride_decimal()};\n" +
+            "    function rv64c_is_compressed(instr : std_logic_vector(31 downto 0)) return boolean;\n" +
+            "    function rv64c_decompress(instr : std_logic_vector(15 downto 0)) return std_logic_vector;\n" +
             "end package {package_name};\n\n" +
             "package body {package_name} is\n" +
+            "    function sign_extend(bits : std_logic_vector; width : natural) return std_logic_vector is\n" +
+            "        variable result : std_logic_vector(width - 1 downto 0);\n" +
+            "    begin\n" +
+            "        result := std_logic_vector(resize(signed(bits), width));\n" +
+            "        return result;\n" +
+            "    end function;\n\n" +
+            "    function encode_r(opcode : std_logic_vector(6 downto 0); rd : natural; funct3 : std_logic_vector(2 downto 0); rs1 : natural; rs2 : natural; funct7 : std_logic_vector(6 downto 0)) return std_logic_vector is\n" +
+            "    begin\n" +
+            "        return funct7 & std_logic_vector(to_unsigned(rs2, 5)) & std_logic_vector(to_unsigned(rs1, 5)) & funct3 & std_logic_vector(to_unsigned(rd, 5)) & opcode;\n" +
+            "    end function;\n\n" +
+            "    function encode_i(opcode : std_logic_vector(6 downto 0); rd : natural; funct3 : std_logic_vector(2 downto 0); rs1 : natural; imm : std_logic_vector(11 downto 0)) return std_logic_vector is\n" +
+            "    begin\n" +
+            "        return imm & std_logic_vector(to_unsigned(rs1, 5)) & funct3 & std_logic_vector(to_unsigned(rd, 5)) & opcode;\n" +
+            "    end function;\n\n" +
+            "    function encode_s(opcode : std_logic_vector(6 downto 0); funct3 : std_logic_vector(2 downto 0); rs1 : natural; rs2 : natural; imm : std_logic_vector(11 downto 0)) return std_logic_vector is\n" +
+            "    begin\n" +
+            "        return imm(11 downto 5) & std_logic_vector(to_unsigned(rs2, 5)) & std_logic_vector(to_unsigned(rs1, 5)) & funct3 & imm(4 downto 0) & opcode;\n" +
+            "    end function;\n\n" +
+            "    function encode_b(opcode : std_logic_vector(6 downto 0); funct3 : std_logic_vector(2 downto 0); rs1 : natural; rs2 : natural; imm : std_logic_vector(12 downto 0)) return std_logic_vector is\n" +
+            "    begin\n" +
+            "        return imm(12) & imm(10 downto 5) & std_logic_vector(to_unsigned(rs2, 5)) & std_logic_vector(to_unsigned(rs1, 5)) & funct3 & imm(4 downto 1) & imm(11) & opcode;\n" +
+            "    end function;\n\n" +
+            "    function encode_u(opcode : std_logic_vector(6 downto 0); rd : natural; imm : std_logic_vector(19 downto 0)) return std_logic_vector is\n" +
+            "    begin\n" +
+            "        return imm & std_logic_vector(to_unsigned(rd, 5)) & opcode;\n" +
+            "    end function;\n\n" +
+            "    function encode_j(opcode : std_logic_vector(6 downto 0); rd : natural; imm : std_logic_vector(20 downto 0)) return std_logic_vector is\n" +
+            "    begin\n" +
+            "        return imm(20) & imm(10 downto 1) & imm(11) & imm(19 downto 12) & std_logic_vector(to_unsigned(rd, 5)) & opcode;\n" +
+            "    end function;\n\n" +
+            "    function rvc_reg(bits : std_logic_vector(2 downto 0)) return natural is\n" +
+            "    begin\n" +
+            "        return 8 + to_integer(unsigned(bits));\n" +
+            "    end function;\n\n" +
+            "    function rv64c_is_compressed(instr : std_logic_vector(31 downto 0)) return boolean is\n" +
+            "    begin\n" +
+            "        return instr(1 downto 0) /= \"11\";\n" +
+            "    end function;\n\n" +
+            "    function rv64c_decompress(instr : std_logic_vector(15 downto 0)) return std_logic_vector is\n" +
+            "        variable result : std_logic_vector(31 downto 0) := (others => '0');\n" +
+            "        variable funct3 : std_logic_vector(2 downto 0);\n" +
+            "        variable funct2 : std_logic_vector(1 downto 0);\n" +
+            "        variable funct2b : std_logic_vector(1 downto 0);\n" +
+            "        variable rd : natural;\n" +
+            "        variable rs1_c : natural;\n" +
+            "        variable rs2_c : natural;\n" +
+            "        variable rs2 : natural;\n" +
+            "        variable imm12 : std_logic_vector(11 downto 0);\n" +
+            "        variable imm13 : std_logic_vector(12 downto 0);\n" +
+            "        variable imm20 : std_logic_vector(19 downto 0);\n" +
+            "        variable imm21 : std_logic_vector(20 downto 0);\n" +
+            "        variable shamt6 : std_logic_vector(5 downto 0);\n" +
+            "    begin\n" +
+            "        funct3 := instr(15 downto 13);\n" +
+            "        case instr(1 downto 0) is\n" +
+            "            when \"00\" =>\n" +
+            "                case funct3 is\n" +
+            "                    when \"000\" =>\n" +
+            "                        imm12 := \"00\" & instr(10 downto 7) & instr(12 downto 11) & instr(5) & instr(6) & \"00\";\n" +
+            "                        if imm12 = x\"000\" then\n" +
+            "                            return x\"00000000\";\n" +
+            "                        end if;\n" +
+            "                        rd := rvc_reg(instr(4 downto 2));\n" +
+            "                        return encode_i(\"0010011\", rd, \"000\", 2, imm12);\n" +
+            "                    when \"010\" =>\n" +
+            "                        imm12 := \"00000\" & instr(5) & instr(12 downto 10) & instr(6) & \"00\";\n" +
+            "                        rd := rvc_reg(instr(4 downto 2));\n" +
+            "                        rs1_c := rvc_reg(instr(9 downto 7));\n" +
+            "                        return encode_i(\"0000011\", rd, \"010\", rs1_c, imm12);\n" +
+            "                    when \"011\" =>\n" +
+            "                        imm12 := \"0000\" & instr(6 downto 5) & instr(12 downto 10) & \"000\";\n" +
+            "                        rd := rvc_reg(instr(4 downto 2));\n" +
+            "                        rs1_c := rvc_reg(instr(9 downto 7));\n" +
+            "                        return encode_i(\"0000011\", rd, \"011\", rs1_c, imm12);\n" +
+            "                    when \"110\" =>\n" +
+            "                        imm12 := \"00000\" & instr(5) & instr(12 downto 10) & instr(6) & \"00\";\n" +
+            "                        rs2_c := rvc_reg(instr(4 downto 2));\n" +
+            "                        rs1_c := rvc_reg(instr(9 downto 7));\n" +
+            "                        return encode_s(\"0100011\", \"010\", rs1_c, rs2_c, imm12);\n" +
+            "                    when \"111\" =>\n" +
+            "                        imm12 := \"0000\" & instr(6 downto 5) & instr(12 downto 10) & \"000\";\n" +
+            "                        rs2_c := rvc_reg(instr(4 downto 2));\n" +
+            "                        rs1_c := rvc_reg(instr(9 downto 7));\n" +
+            "                        return encode_s(\"0100011\", \"011\", rs1_c, rs2_c, imm12);\n" +
+            "                    when others =>\n" +
+            "                        return x\"00000000\";\n" +
+            "                end case;\n" +
+            "            when \"01\" =>\n" +
+            "                case funct3 is\n" +
+            "                    when \"000\" =>\n" +
+            "                        rd := to_integer(unsigned(instr(11 downto 7)));\n" +
+            "                        imm12 := sign_extend(instr(12) & instr(6 downto 2), 12);\n" +
+            "                        return encode_i(\"0010011\", rd, \"000\", rd, imm12);\n" +
+            "                    when \"001\" =>\n" +
+            "                        rd := to_integer(unsigned(instr(11 downto 7)));\n" +
+            "                        if rd = 0 then\n" +
+            "                            return x\"00000000\";\n" +
+            "                        end if;\n" +
+            "                        imm12 := sign_extend(instr(12) & instr(6 downto 2), 12);\n" +
+            "                        return encode_i(\"0011011\", rd, \"000\", rd, imm12);\n" +
+            "                    when \"010\" =>\n" +
+            "                        rd := to_integer(unsigned(instr(11 downto 7)));\n" +
+            "                        imm12 := sign_extend(instr(12) & instr(6 downto 2), 12);\n" +
+            "                        return encode_i(\"0010011\", rd, \"000\", 0, imm12);\n" +
+            "                    when \"011\" =>\n" +
+            "                        rd := to_integer(unsigned(instr(11 downto 7)));\n" +
+            "                        if rd = 2 then\n" +
+            "                            imm12 := sign_extend(instr(12) & instr(6) & instr(2) & instr(5) & instr(3) & instr(4) & \"0000\", 12);\n" +
+            "                            if imm12 = x\"000\" then\n" +
+            "                                return x\"00000000\";\n" +
+            "                            end if;\n" +
+            "                            return encode_i(\"0010011\", 2, \"000\", 2, imm12);\n" +
+            "                        end if;\n" +
+            "                        imm20 := instr(12) & instr(12) & instr(12) & instr(6 downto 2) & \"000000000000\";\n" +
+            "                        if imm20 = x\"00000\" then\n" +
+            "                            return x\"00000000\";\n" +
+            "                        end if;\n" +
+            "                        return encode_u(\"0110111\", rd, imm20);\n" +
+            "                    when \"100\" =>\n" +
+            "                        funct2 := instr(11 downto 10);\n" +
+            "                        rd := rvc_reg(instr(9 downto 7));\n" +
+            "                        case funct2 is\n" +
+            "                            when \"00\" =>\n" +
+            "                                shamt6 := instr(12) & instr(6 downto 2);\n" +
+            "                                return encode_i(\"0010011\", rd, \"101\", rd, \"000000\" & shamt6);\n" +
+            "                            when \"01\" =>\n" +
+            "                                shamt6 := instr(12) & instr(6 downto 2);\n" +
+            "                                return encode_i(\"0010011\", rd, \"101\", rd, \"010000\" & shamt6);\n" +
+            "                            when \"10\" =>\n" +
+            "                                imm12 := sign_extend(instr(12) & instr(6 downto 2), 12);\n" +
+            "                                return encode_i(\"0010011\", rd, \"111\", rd, imm12);\n" +
+            "                            when others =>\n" +
+            "                                rs2_c := rvc_reg(instr(4 downto 2));\n" +
+            "                                funct2b := instr(6 downto 5);\n" +
+            "                                if instr(12) = '0' then\n" +
+            "                                    case funct2b is\n" +
+            "                                        when \"00\" => return encode_r(\"0110011\", rd, \"000\", rd, rs2_c, \"0100000\");\n" +
+            "                                        when \"10\" => return encode_r(\"0110011\", rd, \"110\", rd, rs2_c, \"0000000\");\n" +
+            "                                        when \"11\" => return encode_r(\"0110011\", rd, \"111\", rd, rs2_c, \"0000000\");\n" +
+            "                                        when others => return x\"00000000\";\n" +
+            "                                    end case;\n" +
+            "                                end if;\n" +
+            "                                return x\"00000000\";\n" +
+            "                        end case;\n" +
+            "                    when \"101\" =>\n" +
+            "                        imm21 := sign_extend(instr(12) & instr(8) & instr(10 downto 9) & instr(6) & instr(7) & instr(2) & instr(11) & instr(5 downto 3) & '0', 21);\n" +
+            "                        return encode_j(\"1101111\", 0, imm21);\n" +
+            "                    when \"110\" =>\n" +
+            "                        rs1_c := rvc_reg(instr(9 downto 7));\n" +
+            "                        imm13 := sign_extend(instr(12) & instr(6 downto 5) & instr(2) & instr(11 downto 10) & instr(4 downto 3) & '0', 13);\n" +
+            "                        return encode_b(\"1100011\", \"000\", rs1_c, 0, imm13);\n" +
+            "                    when \"111\" =>\n" +
+            "                        rs1_c := rvc_reg(instr(9 downto 7));\n" +
+            "                        imm13 := sign_extend(instr(12) & instr(6 downto 5) & instr(2) & instr(11 downto 10) & instr(4 downto 3) & '0', 13);\n" +
+            "                        return encode_b(\"1100011\", \"001\", rs1_c, 0, imm13);\n" +
+            "                    when others =>\n" +
+            "                        return x\"00000000\";\n" +
+            "                end case;\n" +
+            "            when \"10\" =>\n" +
+            "                case funct3 is\n" +
+            "                    when \"000\" =>\n" +
+            "                        rd := to_integer(unsigned(instr(11 downto 7)));\n" +
+            "                        if rd = 0 then\n" +
+            "                            return x\"00000000\";\n" +
+            "                        end if;\n" +
+            "                        shamt6 := instr(12) & instr(6 downto 2);\n" +
+            "                        return encode_i(\"0010011\", rd, \"001\", rd, \"000000\" & shamt6);\n" +
+            "                    when \"010\" =>\n" +
+            "                        rd := to_integer(unsigned(instr(11 downto 7)));\n" +
+            "                        if rd = 0 then\n" +
+            "                            return x\"00000000\";\n" +
+            "                        end if;\n" +
+            "                        imm12 := \"0000\" & instr(3 downto 2) & instr(12) & instr(6 downto 4) & \"00\";\n" +
+            "                        return encode_i(\"0000011\", rd, \"010\", 2, imm12);\n" +
+            "                    when \"011\" =>\n" +
+            "                        rd := to_integer(unsigned(instr(11 downto 7)));\n" +
+            "                        if rd = 0 then\n" +
+            "                            return x\"00000000\";\n" +
+            "                        end if;\n" +
+            "                        imm12 := \"000\" & instr(4 downto 2) & instr(12) & instr(6 downto 5) & \"000\";\n" +
+            "                        return encode_i(\"0000011\", rd, \"011\", 2, imm12);\n" +
+            "                    when \"100\" =>\n" +
+            "                        rd := to_integer(unsigned(instr(11 downto 7)));\n" +
+            "                        rs2 := to_integer(unsigned(instr(6 downto 2)));\n" +
+            "                        if instr(12) = '0' then\n" +
+            "                            if rs2 = 0 then\n" +
+            "                                if rd = 0 then\n" +
+            "                                    return x\"00000000\";\n" +
+            "                                end if;\n" +
+            "                                return encode_i(\"1100111\", 0, \"000\", rd, x\"000\");\n" +
+            "                            end if;\n" +
+            "                            return encode_r(\"0110011\", rd, \"000\", 0, rs2, \"0000000\");\n" +
+            "                        elsif rs2 = 0 then\n" +
+            "                            if rd = 0 then\n" +
+            "                                return x\"00100073\";\n" +
+            "                            end if;\n" +
+            "                            return encode_i(\"1100111\", 1, \"000\", rd, x\"000\");\n" +
+            "                        else\n" +
+            "                            return encode_r(\"0110011\", rd, \"000\", rd, rs2, \"0000000\");\n" +
+            "                        end if;\n" +
+            "                    when \"110\" =>\n" +
+            "                        rs2 := to_integer(unsigned(instr(6 downto 2)));\n" +
+            "                        imm12 := \"0000\" & instr(8 downto 7) & instr(12 downto 9) & \"00\";\n" +
+            "                        return encode_s(\"0100011\", \"010\", 2, rs2, imm12);\n" +
+            "                    when \"111\" =>\n" +
+            "                        rs2 := to_integer(unsigned(instr(6 downto 2)));\n" +
+            "                        imm12 := \"000\" & instr(9 downto 7) & instr(12 downto 10) & \"000\";\n" +
+            "                        return encode_s(\"0100011\", \"011\", 2, rs2, imm12);\n" +
+            "                    when others =>\n" +
+            "                        return x\"00000000\";\n" +
+            "                end case;\n" +
+            "            when others =>\n" +
+            "                return x\"00000000\";\n" +
+            "        end case;\n" +
+            "    end function;\n" +
             "end package body {package_name};\n"
 
     fn core_vhdl_process_variables() -> text:
-        "        variable rd_i : integer range 0 to 31;\n" +
+        "        variable imem_rdata : std_logic_vector(31 downto 0);\n" +
+            "        variable instr_size_bytes : natural range 2 to 4;\n" +
+            "        variable rd_i : integer range 0 to 31;\n" +
             "        variable rs1_i : integer range 0 to 31;\n" +
             "        variable rs2_i : integer range 0 to 31;\n" +
             "        variable imm_i : signed(XLEN - 1 downto 0);\n" +
@@ -1278,19 +1497,19 @@ impl RiscvFpgaLane:
     fn core_vhdl_semihost_region() -> text:
         "                if imem_rdata = x\"01F01013\" and semi_phase_reg = 0 then\n" +
             "                    semi_phase_reg <= 1;\n" +
-            "                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                elsif imem_rdata = x\"00100073\" and semi_phase_reg = 1 then\n" +
             "                    semi_phase_reg <= 2;\n" +
             "                    semi_op_reg <= regs(10);\n" +
             "                    semi_param_reg <= regs(11);\n" +
-            "                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                elsif imem_rdata = x\"40705013\" and semi_phase_reg = 2 then\n" +
             "                    semi_phase_reg <= 0;\n" +
             "                    semi_trigger_reg <= '1';\n" +
             "                    if semi_op_reg = std_logic_vector(to_unsigned(16#18#, XLEN)) then\n" +
             "                        halt_reg <= '1';\n" +
             "                    else\n" +
-            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                    end if;\n" +
             "                elsif imem_rdata = x\"00100073\" and semi_phase_reg = 0 then\n" +
             "                    halt_reg <= '1';\n" +
@@ -1483,12 +1702,12 @@ impl RiscvFpgaLane:
             "                                if rd_i /= 0 then\n" +
             "                                    regs(rd_i) <= imm_u;\n" +
             "                                end if;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                            when \"0010\" =>\n" +
             "                                if rd_i /= 0 then\n" +
             "                                    regs(rd_i) <= std_logic_vector(signed(pc_reg) + signed(imm_u));\n" +
             "                                end if;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                            when \"0011\" =>\n" +
             "                                if decode_writeback_rd_i /= 0 then\n" +
             "                                    if decode_execute_is_reg = '0' then\n" +
@@ -1518,7 +1737,7 @@ impl RiscvFpgaLane:
             "                                        trap_reg <= '1';\n" +
             "                                    end if;\n" +
             "                                end if;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                            when \"1100\" =>\n" +
             "                                if decode_writeback_rd_i /= 0 then\n" +
             "                                    if XLEN = 64 and decode_execute_is_reg = '0' then\n" +
@@ -1533,7 +1752,7 @@ impl RiscvFpgaLane:
             "                                        trap_reg <= '1';\n" +
             "                                    end if;\n" +
             "                                end if;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                            when \"0100\" =>\n" +
             "                                if decode_writeback_rd_i /= 0 then\n" +
             "                                    if decode_execute_is_reg = '1' then\n" +
@@ -1564,7 +1783,7 @@ impl RiscvFpgaLane:
             "                                        trap_reg <= '1';\n" +
             "                                    end if;\n" +
             "                                end if;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                            when \"1101\" =>\n" +
             "                                if decode_writeback_rd_i /= 0 then\n" +
             "                                    if XLEN = 64 and decode_execute_is_reg = '1' then\n" +
@@ -1580,7 +1799,7 @@ impl RiscvFpgaLane:
             "                                        trap_reg <= '1';\n" +
             "                                    end if;\n" +
             "                                end if;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                            when \"0101\" =>\n" +
             "                                addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
             "                                if XLEN = 64 then\n" +
@@ -1658,7 +1877,7 @@ impl RiscvFpgaLane:
             "                                load_pending_rd_reg <= rd_i;\n" +
             "                                load_pending_addr_reg <= std_logic_vector(addr_i);\n" +
             "                                load_pending_funct3_reg <= decode_memory_funct3;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                                end if;\n" +
             "                            when \"0110\" =>\n" +
             "                                imm_i := resize(signed(decode_store_immediate_bits(11 downto 0)), XLEN);\n" +
@@ -1738,7 +1957,7 @@ impl RiscvFpgaLane:
             "                                        dmem_width_reg <= \"00\";\n" +
             "                                        trap_reg <= '1';\n" +
             "                                end case;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                                end if;\n"
 
     fn core_vhdl_control_region() -> text:
@@ -1755,11 +1974,11 @@ impl RiscvFpgaLane:
             "                                if decode_next_pc_op = \"01\" and branch_taken then\n" +
             "                                    pc_reg <= std_logic_vector(unsigned(signed(pc_reg) + branch_i));\n" +
             "                                else\n" +
-            "                                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                                end if;\n" +
             "                            when \"1000\" =>\n" +
             "                                if decode_writes_link = '1' and rd_i /= 0 then\n" +
-            "                                    regs(rd_i) <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                    regs(rd_i) <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                                end if;\n" +
             "                                addr_i := unsigned(signed(regs(rs1_i)) + imm_i);\n" +
             "                                addr_i(0) := '0';\n" +
@@ -1770,7 +1989,7 @@ impl RiscvFpgaLane:
             "                                end if;\n" +
             "                            when \"1001\" =>\n" +
             "                                if decode_writes_link = '1' and rd_i /= 0 then\n" +
-            "                                    regs(rd_i) <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                    regs(rd_i) <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                                end if;\n" +
             "                                if decode_next_pc_op = \"11\" then\n" +
             "                                    pc_reg <= std_logic_vector(unsigned(signed(pc_reg) + jump_i));\n" +
@@ -1778,7 +1997,7 @@ impl RiscvFpgaLane:
             "                                    trap_reg <= '1';\n" +
             "                                end if;\n" +
             "                            when \"1010\" =>\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                            when \"1011\" =>\n" +
             "                                if imem_rdata(14 downto 12) = \"000\" then\n" +
             "                                    if imem_rdata = x\"00100073\" then\n" +
@@ -1827,7 +2046,7 @@ impl RiscvFpgaLane:
             "                                        csr_mstatus_reg(8) <= '0';\n" +
             "                                        pc_reg <= csr_sepc_reg;\n" +
             "                                    elsif imem_rdata(31 downto 25) = \"0001001\" then\n" +
-            "                                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                        pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                                    else\n" +
             "                                        trap_reg <= '1';\n" +
             "                                    end if;\n" +
@@ -1922,7 +2141,7 @@ impl RiscvFpgaLane:
             "                                                    when x\"303\" => csr_mideleg_reg <= csr_new_val;\n" +
             "                                                    when others => null;\n" +
             "                                                end case;\n" +
-            "                                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(BOOT_STRIDE, XLEN));\n" +
+            "                                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
             "                                            when others => trap_reg <= '1';\n" +
             "                                        end case;\n" +
             "                                    end if;\n" +
@@ -2038,6 +2257,7 @@ impl RiscvFpgaLane:
             "end entity {top};\n\n" +
             "architecture rtl of {top} is\n" +
             "    type reg_file_t is array (0 to 31) of xword_t;\n" +
+            "    alias imem_rdata_raw : std_logic_vector(31 downto 0) is imem_rdata;\n" +
             "    signal pc_reg : xword_t := RESET_VECTOR;\n" +
             "    signal regs : reg_file_t := {self.reg_file_init_hex()};\n" +
             "    signal dmem_addr_reg : xword_t := (others => '0');\n" +
@@ -2251,6 +2471,15 @@ impl RiscvFpgaLane:
             "                        priv_mode_reg <= \"11\";\n" +
             "                        pc_reg <= csr_mtvec_reg;\n" +
             "                    else\n" +
+            "                imem_rdata := imem_rdata_raw;\n" +
+            "                instr_size_bytes := 4;\n" +
+            "                if rv64c_is_compressed(imem_rdata_raw) then\n" +
+            "                    imem_rdata := rv64c_decompress(imem_rdata_raw(15 downto 0));\n" +
+            "                    instr_size_bytes := 2;\n" +
+            "                    if imem_rdata = x\"00000000\" then\n" +
+            "                        trap_reg <= '1';\n" +
+            "                    end if;\n" +
+            "                end if;\n" +
             self.core_vhdl_semihost_region() +
             "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
             "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
@@ -2262,6 +2491,15 @@ impl RiscvFpgaLane:
             "                end if;\n" +
             "                    end if;\n" +
             "                    else\n" +
+            "                imem_rdata := imem_rdata_raw;\n" +
+            "                instr_size_bytes := 4;\n" +
+            "                if rv64c_is_compressed(imem_rdata_raw) then\n" +
+            "                    imem_rdata := rv64c_decompress(imem_rdata_raw(15 downto 0));\n" +
+            "                    instr_size_bytes := 2;\n" +
+            "                    if imem_rdata = x\"00000000\" then\n" +
+            "                        trap_reg <= '1';\n" +
+            "                    end if;\n" +
+            "                end if;\n" +
             self.core_vhdl_semihost_region() +
             "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
             "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +
@@ -2273,6 +2511,15 @@ impl RiscvFpgaLane:
             "                end if;\n" +
             "                    end if;\n" +
             "                else\n" +
+            "                imem_rdata := imem_rdata_raw;\n" +
+            "                instr_size_bytes := 4;\n" +
+            "                if rv64c_is_compressed(imem_rdata_raw) then\n" +
+            "                    imem_rdata := rv64c_decompress(imem_rdata_raw(15 downto 0));\n" +
+            "                    instr_size_bytes := 2;\n" +
+            "                    if imem_rdata = x\"00000000\" then\n" +
+            "                        trap_reg <= '1';\n" +
+            "                    end if;\n" +
+            "                end if;\n" +
             self.core_vhdl_semihost_region() +
             "                rd_i := to_integer(unsigned(imem_rdata(11 downto 7)));\n" +
             "                rs1_i := to_integer(unsigned(imem_rdata(19 downto 15)));\n" +

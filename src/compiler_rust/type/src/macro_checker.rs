@@ -19,16 +19,15 @@ impl TypeChecker {
     /// - Macros with `callsite.block.head` must appear before non-macro statements
     /// - Macros with `callsite.block.tail` must be last
     /// - No statements allowed after `callsite.block.tail` macro
-    pub(crate) fn check_block_with_macro_rules(
-        &mut self,
-        block: &simple_parser::ast::Block,
-    ) -> Result<(), TypeError> {
+    pub(crate) fn check_block_with_macro_rules(&mut self, block: &simple_parser::ast::Block) -> Result<(), TypeError> {
         let mut seen_non_macro = false;
         let mut seen_tail_macro = false;
 
         for stmt in &block.statements {
             if let Some((macro_name, anchors)) = self.macro_invocation_anchors(stmt) {
-                if anchors.iter().any(|a| matches!(a, simple_parser::ast::MacroAnchor::Head))
+                if anchors
+                    .iter()
+                    .any(|a| matches!(a, simple_parser::ast::MacroAnchor::Head))
                     && seen_non_macro
                 {
                     return Err(TypeError::Other(format!(
@@ -42,7 +41,10 @@ impl TypeChecker {
                         macro_name
                     )));
                 }
-                if anchors.iter().any(|a| matches!(a, simple_parser::ast::MacroAnchor::Tail)) {
+                if anchors
+                    .iter()
+                    .any(|a| matches!(a, simple_parser::ast::MacroAnchor::Tail))
+                {
                     seen_tail_macro = true;
                 }
             } else {
@@ -135,8 +137,7 @@ impl TypeChecker {
         const_bindings: &std::collections::HashMap<String, String>,
     ) -> Result<(), TypeError> {
         match decl.target {
-            MacroTarget::Enclosing(simple_parser::ast::EnclosingTarget::Module)
-            | MacroTarget::CallsiteBlock(_) => {}
+            MacroTarget::Enclosing(simple_parser::ast::EnclosingTarget::Module) | MacroTarget::CallsiteBlock(_) => {}
             _ => return Ok(()),
         }
 
@@ -213,9 +214,9 @@ impl TypeChecker {
             MacroIntroSpec::For { name, range, body } => (name, range, body),
             _ => return Ok(()),
         };
-        let values = self.eval_const_range(range, const_bindings).ok_or_else(|| {
-            TypeError::Other("macro intro for-range is not const-evaluable".into())
-        })?;
+        let values = self
+            .eval_const_range(range, const_bindings)
+            .ok_or_else(|| TypeError::Other("macro intro for-range is not const-evaluable".into()))?;
         for value in values {
             let mut loop_bindings = const_bindings.clone();
             loop_bindings.insert(name.clone(), value.to_string());
@@ -281,9 +282,7 @@ impl TypeChecker {
             Expr::Integer(value) | Expr::TypedInteger(value, _) => Some(ConstValue::Int(*value)),
             Expr::Float(value) | Expr::TypedFloat(value, _) => Some(ConstValue::Float(*value)),
             Expr::Bool(value) => Some(ConstValue::Bool(*value)),
-            Expr::String(value) | Expr::TypedString(value, _) => {
-                Some(ConstValue::Str(value.clone()))
-            }
+            Expr::String(value) | Expr::TypedString(value, _) => Some(ConstValue::Str(value.clone())),
             Expr::FString { parts, .. } => {
                 let mut out = String::new();
                 for part in parts {
@@ -319,12 +318,7 @@ impl TypeChecker {
     }
 
     /// Evaluate a binary operation on const values
-    pub(crate) fn eval_const_binop(
-        &self,
-        op: &BinOp,
-        left: ConstValue,
-        right: ConstValue,
-    ) -> Option<ConstValue> {
+    pub(crate) fn eval_const_binop(&self, op: &BinOp, left: ConstValue, right: ConstValue) -> Option<ConstValue> {
         match op {
             BinOp::Add => match (left, right) {
                 (ConstValue::Int(a), ConstValue::Int(b)) => Some(ConstValue::Int(a + b)),
@@ -411,7 +405,6 @@ impl TypeChecker {
     }
 
     /// Convert a const value back to string representation
-    #[allow(dead_code)]
     pub(crate) fn const_value_to_string(&self, value: &ConstValue) -> Option<String> {
         match value {
             ConstValue::Int(value) => Some(value.to_string()),

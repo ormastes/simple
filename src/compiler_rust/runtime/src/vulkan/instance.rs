@@ -15,9 +15,7 @@ pub struct VulkanInstance {
     instance: ash::Instance,
     #[cfg(feature = "vulkan")]
     surface_loader: ash::khr::surface::Instance,
-    #[allow(dead_code)]
     debug_utils: Option<ash::ext::debug_utils::Instance>,
-    #[allow(dead_code)]
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
 }
 

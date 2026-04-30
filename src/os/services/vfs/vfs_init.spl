@@ -1,4 +1,3 @@
-#![allow(primitive_api, bare_bool)]
 # VFS Boot Initialization — connects FAT32 to NVMe and starts VFS service
 #
 # MDSOC: feature dimension, vfs layer
@@ -238,6 +237,12 @@ impl BlockDevice for NvmeBlockAdapter:
 
 var g_vfs: VfsManager = VfsManager.new()
 var g_nvme: NvmeDriver = NvmeDriver.new()
+
+class VfsFileSize:
+    bytes: i64
+
+    fn to_i64() -> i64:
+        self.bytes
 var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
 var g_root_fat32: Fat32Core? = nil
@@ -1559,8 +1564,8 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
     val relpath = Path(raw: rel_raw)
     g_vfs_dispatch_read_file_bytes(entry.driver, relpath)
 
-pub fn g_vfs_file_size(name: text) -> i64:
-    """Return file size in bytes via the mount table, or -1 on error.
+pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
+    """Return file size in bytes via the mount table, or nil on error.
 
     Accepts bare FAT32 names or absolute paths.
     Prefer this over rt_fat32_file_size for all new callers.
@@ -1568,20 +1573,23 @@ pub fn g_vfs_file_size(name: text) -> i64:
     if g_root_fat32 != nil:
         val root_size_first = g_vfs_root_file_size(g_root_fat32.unwrap(), g_vfs_root_path(name))
         if root_size_first >= 0:
-            return root_size_first
+            return Some(VfsFileSize(bytes: root_size_first))
         val root_alias_name = _vfs_exec_disk_alias(name)
         if root_alias_name != name:
             val root_alias_size = g_vfs_root_file_size(g_root_fat32.unwrap(), g_vfs_root_path(root_alias_name))
             if root_alias_size >= 0:
-                return root_alias_size
+                return Some(VfsFileSize(bytes: root_alias_size))
         val root_name_first = g_vfs_root_path(name)
         val root_alias_first = _vfs_exec_disk_alias(root_name_first)
         if root_alias_first != root_name_first:
             val root_alias_path_size = g_vfs_root_file_size(g_root_fat32.unwrap(), root_alias_first)
             if root_alias_path_size >= 0:
-                return root_alias_path_size
+                return Some(VfsFileSize(bytes: root_alias_path_size))
     if g_root_nvfs_posix != nil:
-        return _g_vfs_root_nvfs_posix_file_size(g_vfs_root_path(name))
+        val hosted_size = _g_vfs_root_nvfs_posix_file_size(g_vfs_root_path(name))
+        if hosted_size >= 0:
+            return Some(VfsFileSize(bytes: hosted_size))
+        return nil
     val abs_first = g_vfs_abs_path(name)
     val entry_first_opt = g_mount_table.lookup(abs_first)
     if entry_first_opt.?:
@@ -1596,29 +1604,29 @@ pub fn g_vfs_file_size(name: text) -> i64:
             rel_raw_first = abs_first.raw
         val mounted_size = g_vfs_dispatch_file_size(entry_first.driver, Path(raw: rel_raw_first))
         if mounted_size >= 0:
-            return mounted_size
+            return Some(VfsFileSize(bytes: mounted_size))
     # Compatibility fallback for transitional C FAT32 bridge readers.
     val direct_size = simpleos_fat32_read_path_size(name)
     if direct_size > 0:
-        return direct_size
+        return Some(VfsFileSize(bytes: direct_size))
     val root_name = g_vfs_root_path(name)
     val root_size = simpleos_fat32_read_path_size(root_name)
     if root_size > 0:
-        return root_size
+        return Some(VfsFileSize(bytes: root_size))
     val alias_name = _vfs_exec_disk_alias(name)
     if alias_name != name:
         val alias_size = simpleos_fat32_read_path_size(alias_name)
         if alias_size > 0:
-            return alias_size
+            return Some(VfsFileSize(bytes: alias_size))
     val root_alias = _vfs_exec_disk_alias(root_name)
     if root_alias != root_name:
         val root_alias_size = simpleos_fat32_read_path_size(root_alias)
         if root_alias_size > 0:
-            return root_alias_size
+            return Some(VfsFileSize(bytes: root_alias_size))
     val abs = g_vfs_abs_path(name)
     val entry_opt = g_mount_table.lookup(abs)
     if not entry_opt.?:
-        return -1
+        return nil
     val entry = entry_opt.unwrap()
     val mp_len = entry.mount_point.len()
     var rel_raw: text = ""
@@ -1629,7 +1637,10 @@ pub fn g_vfs_file_size(name: text) -> i64:
     if rel_raw == "":
         rel_raw = abs.raw
     val relpath = Path(raw: rel_raw)
-    g_vfs_dispatch_file_size(entry.driver, relpath)
+    val final_size = g_vfs_dispatch_file_size(entry.driver, relpath)
+    if final_size >= 0:
+        return Some(VfsFileSize(bytes: final_size))
+    nil
 
 # ============================================================================
 # VFS Select-File Cursor (FR-SIMPLEOS-M5-001, Option C)
@@ -1663,7 +1674,7 @@ pub fn g_vfs_clear_selected_file():
     """Clear the VFS file cursor."""
     g_vfs_selected_file = ""
 
-pub fn g_vfs_write_selected_file_text(content: text) -> bool:
+fn g_vfs_write_selected_file_text(content: text) -> bool:
     """Write content to the currently selected file via the mount table.
 
     Returns true on success, false if no file is selected or write fails.

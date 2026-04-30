@@ -244,7 +244,8 @@ pub enum TokenKind {
     Label(String), // 'label (tick-prefixed identifier for labeled break/continue)
     // Note: "lean" is NOT a keyword - it's parsed contextually as lean{...} custom block
     // or "lean import" statement to avoid breaking existing module paths
-    // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with #[allow(...)]
+    // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with
+    // lint-level attributes.
     // Note: 'checked', 'saturate', 'wrap', 'range' are parsed as identifiers in where clauses
 
     // AOP & Unified Predicates (#1000-1050)

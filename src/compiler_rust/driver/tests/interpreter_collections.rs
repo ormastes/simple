@@ -1,8 +1,6 @@
-#![allow(unused_imports)]
-
 //! Interpreter tests - collections
 
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+use simple_driver::interpreter::run_code;
 mod test_helpers;
 
 #[test]

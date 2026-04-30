@@ -9,27 +9,23 @@ use indexmap::IndexMap;
 use std::collections::HashMap;
 
 /// SDN parser state.
-pub struct Parser<'a> {
+pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
-    /// Original source (preserved for error messages)
-    #[allow(dead_code)]
-    source: &'a str,
     /// Span tracking: maps path to source location
     spans: HashMap<String, Span>,
     /// Current path being parsed (for span tracking)
     current_path: Vec<String>,
 }
 
-impl<'a> Parser<'a> {
+impl Parser {
     /// Create a new parser from source.
-    pub fn new(source: &'a str) -> Self {
+    pub fn new(source: &str) -> Self {
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize();
         Self {
             tokens,
             pos: 0,
-            source,
             spans: HashMap::new(),
             current_path: Vec::new(),
         }

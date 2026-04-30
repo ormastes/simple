@@ -77,9 +77,6 @@ mod tests {
         let (enabled, metrics) = init_metrics();
         // Metrics are disabled by default unless --startup-metrics is passed
         assert!(!enabled || enabled); // Always true, just checking it compiles
-                                      // total_time() returns Option<Duration>, check it works
-        if let Some(elapsed) = metrics.total_time() {
-            assert!(elapsed.as_secs() >= 0);
-        }
+        let _ = metrics.total_time();
     }
 }

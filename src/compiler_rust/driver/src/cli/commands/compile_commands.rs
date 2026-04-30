@@ -390,7 +390,7 @@ fn load_native_policy_from_file(path: &std::path::Path) -> Result<NativePolicyCo
 }
 
 fn extract_native_policy(value: &toml::Value) -> NativePolicyConfig {
-    for table in [
+    if let Some(table) = [
         value.get("compile").and_then(|v| v.as_table()),
         value.get("native").and_then(|v| v.as_table()),
         value
@@ -401,14 +401,16 @@ fn extract_native_policy(value: &toml::Value) -> NativePolicyConfig {
             .get("compile")
             .and_then(|v| v.get("native"))
             .and_then(|v| v.as_table()),
-    ] {
-        if let Some(table) = table {
-            return NativePolicyConfig {
-                target: table.get("target").and_then(|v| v.as_str()).map(ToString::to_string),
-                cpu: table.get("cpu").and_then(|v| v.as_str()).map(ToString::to_string),
-                backend: table.get("backend").and_then(|v| v.as_str()).map(ToString::to_string),
-            };
-        }
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    {
+        return NativePolicyConfig {
+            target: table.get("target").and_then(|v| v.as_str()).map(ToString::to_string),
+            cpu: table.get("cpu").and_then(|v| v.as_str()).map(ToString::to_string),
+            backend: table.get("backend").and_then(|v| v.as_str()).map(ToString::to_string),
+        };
     }
 
     NativePolicyConfig::default()

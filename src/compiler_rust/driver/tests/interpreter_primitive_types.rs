@@ -1,28 +1,6 @@
-#![allow(unused_imports)]
-
 //! Interpreter tests - primitive types, type suffixes, unions
 
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig, RunningType};
-
-#[allow(dead_code)]
-fn run_expect_error(src: &str, expected_error: &str) {
-    let result = run_code(src, &[], "");
-    match result {
-        Err(e) => {
-            let err_msg = e.to_string();
-            assert!(
-                err_msg.contains(expected_error),
-                "Expected error containing '{}', got: {}",
-                expected_error,
-                err_msg
-            );
-        }
-        Ok(_) => panic!(
-            "Expected error containing '{}', but execution succeeded",
-            expected_error
-        ),
-    }
-}
+use simple_driver::interpreter::run_code;
 
 #[test]
 fn interpreter_enum_comparison_false() {

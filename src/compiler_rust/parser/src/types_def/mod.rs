@@ -416,13 +416,6 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 
-    /// Parse fields in an indented block (struct)
-    #[allow(dead_code)]
-    fn parse_indented_fields(&mut self) -> Result<Vec<Field>, ParseError> {
-        self.expect_block_start()?;
-        self.parse_indented_items(|p| p.parse_field())
-    }
-
     /// Parse fields and methods in an indented block (class, actor, struct)
     fn parse_indented_fields_and_methods(&mut self) -> Result<FieldsAndMethods, ParseError> {
         self.debug_enter("parse_indented_fields_and_methods");

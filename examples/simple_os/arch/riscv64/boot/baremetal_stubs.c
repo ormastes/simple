@@ -73,6 +73,8 @@ static unsigned char g_riscv_process_arena[2][8192] __attribute__((aligned(4096)
 static uint64_t g_riscv_process_entry[2];
 static uint64_t g_riscv_process_pid[2];
 static uint32_t g_riscv_process_count;
+uint64_t g_fb_addr = 0;
+uint64_t g_fb_w = 0;
 static char g_riscv_gui_surface[256];
 static volatile uint32_t *g_blk_mmio = 0;
 static uint16_t g_last_used_idx = 0;

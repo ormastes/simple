@@ -1,4 +1,3 @@
-#![allow(unnamed_duplicate_typed_args)]
 # Query CLI - LSP visibility JSON adapters
 #
 # Wraps the existing text-oriented query commands and enriches them with
@@ -24,14 +23,14 @@ fn query_visibility_main() -> i64:
         return 0
     val subcmd = args[0]
     if subcmd == "hover" and args.len() >= 4:
-        return query_visibility_hover(args[1], args[2].to_int(), args[3].to_int())
+        return query_visibility_hover(file: args[1], line_num: args[2].to_int(), col: args[3].to_int())
     if subcmd == "completions" and args.len() >= 4:
-        return query_visibility_completions(args[1], args[2].to_int(), args[3].to_int())
+        return query_visibility_completions(file: args[1], line_num: args[2].to_int(), col: args[3].to_int())
     if subcmd == "symbols" and args.len() >= 2:
         var requester = args[1]
         if args.len() >= 4 and args[2] == "--requester":
             requester = args[3]
-        return query_visibility_symbols(args[1], requester)
+        return query_visibility_symbols(file: args[1], requester_file: requester)
     if subcmd == "workspace-symbols":
         var query = ""
         var requester = ""
@@ -42,7 +41,7 @@ fn query_visibility_main() -> i64:
             elif args[j] == "--requester" and j + 1 < args.len():
                 requester = args[j + 1]
             j = j + 1
-        return query_visibility_workspace_symbols(query, requester)
+        return query_visibility_workspace_symbols(query: query, requester_file: requester)
     if subcmd == "semantic-tokens" and args.len() >= 2:
         var start_line = 0
         var end_line = 0
@@ -53,7 +52,7 @@ fn query_visibility_main() -> i64:
             elif args[j] == "--end-line" and j + 1 < args.len():
                 end_line = args[j + 1].to_int()
             j = j + 1
-        return query_visibility_semantic_tokens(args[1], start_line, end_line)
+        return query_visibility_semantic_tokens(file: args[1], start_line: start_line, end_line: end_line)
     1
 
 query_visibility_main()
@@ -63,22 +62,22 @@ fn query_visibility_hover(file: text, line_num: i64, col: i64) -> i64:
     if clean_file == "":
         print "null"
         return 1
-    val symbol = extract_symbol_at(clean_file, line_num, col)
+    val symbol = extract_symbol_at(file: clean_file, line_num: line_num, col: col)
     if symbol == "":
         print "null"
         return 1
-    val resolved = resolve_symbol_file(clean_file, symbol)
-    val hover = declaration_line(symbol, resolved)
-    val vis = visibility_json(symbol, resolved, clean_file)
+    val resolved = resolve_symbol_file(current_file: clean_file, symbol: symbol)
+    val hover = declaration_line(symbol: symbol, owner_file: resolved)
+    val vis = visibility_json(symbol: symbol, owner_file: resolved, requester_file: clean_file)
     var lines: [text] = []
     if hover != "":
         lines = lines.push(hover)
     lines = lines.push("")
-    lines = lines.push("Visibility: **" + visibility_display(symbol, resolved) + "**")
-    val boundary = boundary_module(resolved)
+    lines = lines.push("Visibility: **" + visibility_display(symbol: symbol, owner_file: resolved) + "**")
+    val boundary = boundary_module(owner_file: resolved)
     if boundary != "":
-        lines = lines.push("Boundary: `" + boundary + "` (" + boundary_kind(resolved) + ")")
-    val exported = exported_by(symbol, resolved)
+        lines = lines.push("Boundary: `" + boundary + "` (" + boundary_kind(owner_file: resolved) + ")")
+    val exported = exported_by(symbol: symbol, owner_file: resolved)
     if exported != "":
         lines = lines.push("Exported by: `" + exported + "`")
     print "{\"contents\":{\"kind\":\"markdown\",\"value\":" + json_text(lines.join("\n")) + "},\"simpleVisibility\":" + vis + "}"
@@ -90,29 +89,29 @@ fn query_visibility_completions(file: text, line_num: i64, col: i64) -> i64:
         print "[]"
         return 1
     var items: [text] = []
-    val prefix = extract_symbol_at(clean_file, line_num, col)
-    val local_symbols = parse_symbols_in_file(clean_file)
+    val prefix = extract_symbol_at(file: clean_file, line_num: line_num, col: col)
+    val local_symbols = parse_symbols_in_file(file_path: clean_file)
     for sym in local_symbols:
         if prefix != "" and not sym.name.starts_with(prefix):
             continue
-        val vis = visibility_json(sym.name, clean_file, clean_file)
-        if not visibility_reachable(sym.name, clean_file, clean_file):
+        val vis = visibility_json(symbol: sym.name, owner_file: clean_file, requester_file: clean_file)
+        if not visibility_reachable(symbol: sym.name, owner_file: clean_file, requester_file: clean_file):
             continue
-        val detail = "[" + visibility_display(sym.name, clean_file) + "] " + sym.kind
+        val detail = "[" + visibility_display(symbol: sym.name, owner_file: clean_file) + "] " + sym.kind
         items = items.push("{\"label\":" + json_text(sym.name) + ",\"kind\":6,\"detail\":" + json_text(detail) + ",\"data\":{\"simpleVisibility\":" + vis + "}" + "}")
-    val imports = parse_imported_modules(clean_file)
+    val imports = parse_imported_modules(file_path: clean_file)
     for module_path in imports:
-        val imported_file = resolve_module_path(module_path)
+        val imported_file = resolve_module_path(mod_path: module_path)
         if imported_file == "":
             continue
-        val imported_symbols = parse_symbols_in_file(imported_file)
+        val imported_symbols = parse_symbols_in_file(file_path: imported_file)
         for sym in imported_symbols:
             if prefix != "" and not sym.name.starts_with(prefix):
                 continue
-            if not visibility_reachable(sym.name, imported_file, clean_file):
+            if not visibility_reachable(symbol: sym.name, owner_file: imported_file, requester_file: clean_file):
                 continue
-            val vis = visibility_json(sym.name, imported_file, clean_file)
-            val detail = "[" + visibility_display(sym.name, imported_file) + "] " + sym.kind
+            val vis = visibility_json(symbol: sym.name, owner_file: imported_file, requester_file: clean_file)
+            val detail = "[" + visibility_display(symbol: sym.name, owner_file: imported_file) + "] " + sym.kind
             items = items.push("{\"label\":" + json_text(sym.name) + ",\"kind\":6,\"detail\":" + json_text(detail) + ",\"data\":{\"simpleVisibility\":" + vis + "}" + "}")
     val keywords = matching_keywords(prefix)
     for kw in keywords:
@@ -127,12 +126,12 @@ fn query_visibility_symbols(file: text, requester_file: text) -> i64:
         print "[]"
         return 1
     var items: [text] = []
-    val symbols = parse_symbols_in_file(clean_file)
+    val symbols = parse_symbols_in_file(file_path: clean_file)
     for parsed in symbols:
-        val vis = visibility_json(parsed.name, clean_file, requester)
+        val vis = visibility_json(symbol: parsed.name, owner_file: clean_file, requester_file: requester)
         val line_idx = if parsed.line_num > 0: parsed.line_num - 1 else: 0
         val range = "{\"start\":{\"line\":" + str(line_idx) + ",\"character\":0},\"end\":{\"line\":" + str(line_idx) + ",\"character\":0}" + "}"
-        items = items.push("{\"name\":" + json_text(parsed.name) + ",\"kind\":" + str(symbol_kind_number(parsed.kind)) + ",\"detail\":" + json_text("[" + visibility_display(parsed.name, clean_file) + "]") + ",\"range\":" + range + ",\"selectionRange\":" + range + ",\"simpleVisibility\":" + vis + "}")
+        items = items.push("{\"name\":" + json_text(parsed.name) + ",\"kind\":" + str(symbol_kind_number(parsed.kind)) + ",\"detail\":" + json_text("[" + visibility_display(symbol: parsed.name, owner_file: clean_file) + "]") + ",\"range\":" + range + ",\"selectionRange\":" + range + ",\"simpleVisibility\":" + vis + "}")
     print "[" + items.join(",") + "]"
     0
 
@@ -143,18 +142,18 @@ fn query_visibility_workspace_symbols(query: text, requester_file: text) -> i64:
         print "[]"
         return 0
     var items: [text] = []
-    val candidates = grep_workspace_symbol_candidates("src", clean_query)
+    val candidates = grep_workspace_symbol_candidates(root: "src", query: clean_query)
     var visible: [ParsedSymbol] = []
     for candidate in candidates:
         if candidate.name == "" or not candidate.name.lower().contains(clean_query.lower()):
             continue
-        if not visibility_reachable(candidate.name, candidate.file_path, requester):
+        if not visibility_reachable(symbol: candidate.name, owner_file: candidate.file_path, requester_file: requester):
             continue
         visible = visible.push(candidate)
-    val ranked = sort_workspace_symbol_candidates(visible, clean_query, requester)
+    val ranked = sort_workspace_symbol_candidates(items: visible, query: clean_query, requester: requester)
     for entry in ranked:
         val candidate = entry.symbol
-        val vis = visibility_json(candidate.name, candidate.file_path, requester)
+        val vis = visibility_json(symbol: candidate.name, owner_file: candidate.file_path, requester_file: requester)
         val line_idx = if candidate.line_num > 0: candidate.line_num - 1 else: 0
         val range = "{\"start\":{\"line\":" + str(line_idx) + ",\"character\":0},\"end\":{\"line\":" + str(line_idx) + ",\"character\":0}" + "}"
         items = items.push("{\"name\":" + json_text(candidate.name) + ",\"kind\":" + str(symbol_kind_number(candidate.kind)) + ",\"location\":{\"uri\":" + json_text("file://" + candidate.file_path) + ",\"range\":" + range + "},\"simpleVisibility\":" + vis + "}")
@@ -171,16 +170,16 @@ fn query_visibility_semantic_tokens(file: text, start_line: i64, end_line: i64) 
     var public_names: [text] = []
     var boundary_names: [text] = []
     var private_names: [text] = []
-    val parsed_symbols = parse_symbols_in_file(clean_file)
+    val parsed_symbols = parse_symbols_in_file(file_path: clean_file)
     for parsed in parsed_symbols:
-        val display = visibility_display(parsed.name, clean_file)
+        val display = visibility_display(symbol: parsed.name, owner_file: clean_file)
         if display == "public":
             public_names = public_names.push(parsed.name)
         elif display == "private":
             private_names = private_names.push(parsed.name)
         else:
             boundary_names = boundary_names.push(parsed.name)
-    val lines = scan_semantic_tokens(clean_file, start_line, end_line)
+    val lines = scan_semantic_tokens(file_path: clean_file, start_line: start_line, end_line: end_line)
     var data: [text] = []
     var prev_line = 0
     var prev_col = 0
@@ -192,7 +191,7 @@ fn query_visibility_semantic_tokens(file: text, start_line: i64, end_line: i64) 
         val token_col = parts[1].to_int()
         val token_len = parts[2].to_int()
         val token_type = semantic_token_type_number(parts[3])
-        val name = token_name_at(clean_file, token_line, token_col, token_len)
+        val name = token_name_at(file_path: clean_file, token_line: token_line, token_col: token_col, token_len: token_len)
         var modifiers = 0
         if list_has_text(public_names, name):
             modifiers = 512
@@ -240,21 +239,21 @@ fn parse_symbols_in_file(file_path: text) -> [ParsedSymbol]:
 
 fn visibility_json(symbol: text, owner_file: text, requester_file: text) -> text:
     var parts: [text] = []
-    parts = parts.push("\"display\":" + json_text(visibility_display(symbol, owner_file)))
-    parts = parts.push("\"reachable\":" + bool_json(visibility_reachable(symbol, owner_file, requester_file)))
-    parts = parts.push("\"boundaryKind\":" + json_text(boundary_kind(owner_file)))
-    val boundary = boundary_module(owner_file)
+    parts = parts.push("\"display\":" + json_text(visibility_display(symbol: symbol, owner_file: owner_file)))
+    parts = parts.push("\"reachable\":" + bool_json(visibility_reachable(symbol: symbol, owner_file: owner_file, requester_file: requester_file)))
+    parts = parts.push("\"boundaryKind\":" + json_text(boundary_kind(owner_file: owner_file)))
+    val boundary = boundary_module(owner_file: owner_file)
     if boundary != "":
         parts = parts.push("\"boundaryModule\":" + json_text(boundary))
-    val declared = declared_visibility(symbol, owner_file)
+    val declared = declared_visibility(symbol: symbol, owner_file: owner_file)
     parts = parts.push("\"declared\":" + json_text(declared))
-    val exported = exported_by(symbol, owner_file)
+    val exported = exported_by(symbol: symbol, owner_file: owner_file)
     if exported != "":
         parts = parts.push("\"exportedBy\":" + json_text(exported))
-    val friends = friend_packages(owner_file)
+    val friends = friend_packages(owner_file: owner_file)
     if friends.len() > 0:
         parts = parts.push("\"friendPackages\":[" + json_text_array(friends) + "]")
-    val capsule = capsule_name(owner_file)
+    val capsule = capsule_name(file_path: owner_file)
     if capsule != "":
         parts = parts.push("\"capsuleName\":" + json_text(capsule))
         parts = parts.push("\"capsuleVisibility\":\"internal\"")
@@ -271,7 +270,7 @@ fn grep_workspace_symbol_candidates(root: text, query: text) -> [ParsedSymbol]:
         val trimmed = line.trim()
         if trimmed == "":
             continue
-        val parsed = parse_grep_symbol_candidate(trimmed)
+        val parsed = parse_grep_symbol_candidate(line: trimmed)
         if parsed.name != "" and parsed.kind != "":
             items = items.push(parsed)
             if items.len() >= 200:
@@ -293,9 +292,9 @@ fn parse_grep_symbol_candidate(line: text) -> ParsedSymbol:
         idx = idx + 1
     if first_colon < 0 or second_colon < 0:
         return ParsedSymbol(name: "", kind: "", line_num: 0, file_path: "")
-    val file_path = join_char_slice(chars, 0, first_colon)
-    val line_num_str = join_char_slice(chars, first_colon + 1, second_colon)
-    val source_line = join_char_slice(chars, second_colon + 1, chars.len())
+    val file_path = join_char_slice(chars: chars, start_idx: 0, end_idx: first_colon)
+    val line_num_str = join_char_slice(chars: chars, start_idx: first_colon + 1, end_idx: second_colon)
+    val source_line = join_char_slice(chars: chars, start_idx: second_colon + 1, end_idx: chars.len())
     val trimmed = source_line.trim()
     val kind = declaration_kind(trimmed)
     val name = declaration_name(trimmed)
@@ -317,7 +316,7 @@ fn rank_workspace_symbol_candidate(candidate: ParsedSymbol, query: text, request
         score = score - 120
     else:
         score = score - 20
-    score = score + visibility_rank_for_display(visibility_display(candidate.name, candidate.file_path))
+    score = score + visibility_rank_for_display(visibility_display(symbol: candidate.name, owner_file: candidate.file_path))
     score = score + kind_rank(candidate.kind)
     score = score + candidate.line_num
     score
@@ -327,7 +326,7 @@ fn sort_workspace_symbol_candidates(items: [ParsedSymbol], query: text, requeste
         return []
     var sorted: [ScoredSymbol] = []
     for item in items:
-        val item_rank = rank_workspace_symbol_candidate(item, query, requester)
+        val item_rank = rank_workspace_symbol_candidate(candidate: item, query: query, requester: requester)
         var inserted = false
         var next: [ScoredSymbol] = []
         for existing in sorted:
@@ -359,49 +358,49 @@ fn kind_rank(kind: text) -> i64:
     10
 
 fn visibility_display(symbol: text, owner_file: text) -> text:
-    val declared = declared_visibility(symbol, owner_file)
+    val declared = declared_visibility(symbol: symbol, owner_file: owner_file)
     if declared == "peer":
         return "peer"
     if declared == "up":
         return "up"
-    val boundary = boundary_kind(owner_file)
+    val boundary = boundary_kind(owner_file: owner_file)
     if declared == "private":
         return "private"
     if boundary == "open" or boundary == "bypass":
         if declared == "public":
             return "public"
         return "boundary"
-    if declared == "public" and exported_by(symbol, owner_file) != "":
+    if declared == "public" and exported_by(symbol: symbol, owner_file: owner_file) != "":
         return "public"
     "boundary"
 
 fn visibility_reachable(symbol: text, owner_file: text, requester_file: text) -> bool:
     if requester_file == "" or requester_file == owner_file:
         return true
-    val declared = declared_visibility(symbol, owner_file)
+    val declared = declared_visibility(symbol: symbol, owner_file: owner_file)
     if declared == "peer":
-        return same_peer_path(requester_file, owner_file)
+        return same_peer_path(requester_file: requester_file, owner_file: owner_file)
     if declared == "up":
-        return is_parent_facade_requester(requester_file, owner_file)
-    val display = visibility_display(symbol, owner_file)
+        return is_parent_facade_requester(requester_file: requester_file, owner_file: owner_file)
+    val display = visibility_display(symbol: symbol, owner_file: owner_file)
     if display == "public":
         return true
     if display == "private":
         return false
-    if same_boundary(requester_file, owner_file):
+    if same_boundary(a: requester_file, b: owner_file):
         return true
-    val owner_pkg = package_name(owner_file)
-    val requester_pkg = package_name(requester_file)
+    val owner_pkg = package_name(file_path: owner_file)
+    val requester_pkg = package_name(file_path: requester_file)
     if declared == "package":
         return owner_pkg == requester_pkg
     if declared == "internal":
         if owner_pkg == requester_pkg:
             return true
-        return list_has_text(friend_packages(owner_file), requester_pkg)
+        return list_has_text(friend_packages(owner_file: owner_file), requester_pkg)
     false
 
 fn declared_visibility(symbol: text, owner_file: text) -> text:
-    val line = declaration_line(symbol, owner_file).trim()
+    val line = declaration_line(symbol: symbol, owner_file: owner_file).trim()
     if line.starts_with("pub(peer)") or line.contains(" pub(peer) "):
         return "peer"
     if line.starts_with("pub(up)") or line.contains(" pub(up) "):
@@ -501,10 +500,10 @@ fn boundary_kind(owner_file: text) -> text:
 fn same_peer_path(requester_file: text, owner_file: text) -> bool:
     if requester_file == "" or owner_file == "":
         return false
-    if not same_boundary(requester_file, owner_file):
+    if not same_boundary(a: requester_file, b: owner_file):
         return false
-    val owner_tail = peer_path_tail(owner_file)
-    val requester_tail = peer_path_tail(requester_file)
+    val owner_tail = peer_path_tail(file_path: owner_file)
+    val requester_tail = peer_path_tail(file_path: requester_file)
     if owner_tail == "" or requester_tail == "":
         return false
     if owner_tail != requester_tail:
@@ -563,7 +562,7 @@ fn exported_by(symbol: text, owner_file: text) -> text:
     val lines = content.split("\n")
     for line in lines:
         val trimmed = line.trim()
-        if trimmed.starts_with("export use ") and contains_symbol_token(trimmed, symbol):
+        if trimmed.starts_with("export use ") and contains_symbol_token(line: trimmed, symbol: symbol):
             return manifest
     ""
 
@@ -630,12 +629,12 @@ fn capsule_name(file_path: text) -> text:
     ""
 
 fn resolve_symbol_file(current_file: text, symbol: text) -> text:
-    if declaration_line(symbol, current_file) != "":
+    if declaration_line(symbol: symbol, owner_file: current_file) != "":
         return current_file
-    val imports = parse_imported_modules(current_file)
+    val imports = parse_imported_modules(file_path: current_file)
     for module_path in imports:
-        val resolved = resolve_module_path(module_path)
-        if resolved != "" and declaration_line(symbol, resolved) != "":
+        val resolved = resolve_module_path(mod_path: module_path)
+        if resolved != "" and declaration_line(symbol: symbol, owner_file: resolved) != "":
             return resolved
     current_file
 

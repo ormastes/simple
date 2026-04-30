@@ -1,0 +1,105 @@
+use compress.types.{CompressionOptions, CompressionError}
+use compress.utilities.{write_u32_le, read_u32_le}
+
+val ZSTD_MAGIC: u32 = 0xFD2FB528u32
+
+fn zstd_compress_frame(input: [u8], options: CompressionOptions) -> [u8]:
+    var out: [u8] = []
+    out = write_u32_le(out, ZSTD_MAGIC)
+    var fhd: u8 = 0xA0u8
+    if options.checksum:
+        fhd = fhd | 0x04u8
+    out.push(fhd)
+    out = write_u32_le(out, input.len().to_u32())
+    if input.len() == 0:
+        out.push(1u8)
+        out.push(0u8)
+        out.push(0u8)
+        return out
+    val all_same = _zstd_all_same(input)
+    if all_same:
+        val header = (1 | (1 << 1) | (input.len() << 3)).to_u32()
+        out.push((header & 0xFFu32).to_u8())
+        out.push(((header >> 8u32) & 0xFFu32).to_u8())
+        out.push(((header >> 16u32) & 0xFFu32).to_u8())
+        out.push(input[0])
+    else:
+        val header = (1 | (0 << 1) | (input.len() << 3)).to_u32()
+        out.push((header & 0xFFu32).to_u8())
+        out.push(((header >> 8u32) & 0xFFu32).to_u8())
+        out.push(((header >> 16u32) & 0xFFu32).to_u8())
+        var i = 0
+        while i < input.len():
+            out.push(input[i])
+            i = i + 1
+    out
+
+fn _zstd_all_same(input: [u8]) -> bool:
+    if input.len() <= 1:
+        return true
+    var i = 1
+    while i < input.len():
+        if input[i] != input[0]:
+            return false
+        i = i + 1
+    true
+
+fn zstd_decompress_frame(input: [u8]) -> Result<[u8], CompressionError>:
+    val magic_res = read_u32_le(input, 0)
+    if magic_res.is_err():
+        return Err(magic_res.unwrap_err())
+    if magic_res.unwrap() != ZSTD_MAGIC:
+        return Err(CompressionError.InvalidHeader("zstd frame magic"))
+    if input.len() < 9:
+        return Err(CompressionError.TruncatedInput("zstd frame header"))
+    val fhd = input[4].to_i64()
+    val single_segment = (fhd >> 5) & 1
+    if single_segment != 1:
+        return Err(CompressionError.UnsupportedFeature("zstd window descriptors are not supported"))
+    val checksum_flag = (fhd >> 2) & 1
+    val did_field_size = fhd & 0x03
+    if did_field_size != 0:
+        return Err(CompressionError.UnsupportedFeature("zstd dictionary ids are not supported"))
+    var pos = 5
+    val size_res = read_u32_le(input, pos)
+    if size_res.is_err():
+        return Err(size_res.unwrap_err())
+    val _expected_size = size_res.unwrap().to_i64()
+    pos = pos + 4
+    var out: [u8] = []
+    var done = false
+    while not done:
+        if pos + 3 > input.len():
+            return Err(CompressionError.TruncatedInput("zstd block header"))
+        val header = input[pos].to_i64() |
+            (input[pos + 1].to_i64() << 8) |
+            (input[pos + 2].to_i64() << 16)
+        pos = pos + 3
+        val last_block = header & 1
+        val block_type = (header >> 1) & 0x03
+        val block_size = (header >> 3) & 0x1FFFFF
+        if block_type == 0:
+            if pos + block_size > input.len():
+                return Err(CompressionError.TruncatedInput("zstd raw block"))
+            var i = 0
+            while i < block_size:
+                out.push(input[pos + i])
+                i = i + 1
+            pos = pos + block_size
+        elif block_type == 1:
+            if pos >= input.len():
+                return Err(CompressionError.TruncatedInput("zstd rle byte"))
+            var i = 0
+            while i < block_size:
+                out.push(input[pos])
+                i = i + 1
+            pos = pos + 1
+        elif block_type == 2:
+            return Err(CompressionError.UnsupportedFeature("zstd compressed blocks are not supported"))
+        else:
+            return Err(CompressionError.CorruptStream("zstd reserved block type"))
+        if last_block == 1:
+            done = true
+    if checksum_flag == 1:
+        return Err(CompressionError.UnsupportedFeature("zstd content checksum verification is not supported"))
+    Ok(out)

@@ -24,6 +24,7 @@ mod functions;
 mod items;
 
 // Re-export the Parser struct, ParserMode, DebugMode, and constants
+pub use attributes::{is_known_attribute_name, KNOWN_ATTRIBUTE_NAMES};
 pub use core::{DebugMode, Parser, ParserMode, MAX_LOOP_ITERATIONS};
 
 // Integration tests moved to tests/ directory - no longer using #[path] include

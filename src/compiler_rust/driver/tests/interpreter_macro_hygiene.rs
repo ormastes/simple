@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 //! Interpreter tests - Hygienic Macros
 //!
 //! Tests for macro hygiene system that prevents variable capture through gensym renaming.
@@ -11,7 +9,7 @@
 //! - Lambda parameters with hygiene
 //! - Match arms with hygiene
 
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+use simple_driver::interpreter::run_code;
 
 // ============================================================================
 // Basic Hygiene Tests

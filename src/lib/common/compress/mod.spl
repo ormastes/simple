@@ -1,0 +1,58 @@
+use compress.types.{CompressionCodec, CompressionLevel, CompressionOptions, CompressionError, CompressionEncoderState, CompressionDecoderState}
+use compress.utilities.{compression_level, default_compression_options, new_encoder_state, new_decoder_state, encoder_write, decoder_write, detect_codec}
+use compress.lz4.{lz4_compress_block, lz4_decompress_block, lz4_compress_frame, lz4_decompress_frame}
+use compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
+use compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
+
+fn compress_bytes(input: [u8], options: CompressionOptions) -> [u8]:
+    match options.codec:
+        CompressionCodec.lz4:
+            if options.block_mode == "block":
+                lz4_compress_block(input)
+            else:
+                lz4_compress_frame(input, options)
+        CompressionCodec.zstd:
+            if options.checksum:
+                zstd_compress_frame(input, CompressionOptions(
+                    codec: options.codec,
+                    level: options.level,
+                    checksum: false,
+                    block_mode: options.block_mode,
+                    dictionary_bytes: options.dictionary_bytes,
+                    content_size: options.content_size
+                ))
+            else:
+                zstd_compress_frame(input, options)
+        CompressionCodec.lzma2:
+            if options.block_mode == "raw":
+                lzma2_compress_xz(input, CompressionOptions(
+                    codec: options.codec,
+                    level: options.level,
+                    checksum: options.checksum,
+                    block_mode: "frame",
+                    dictionary_bytes: options.dictionary_bytes,
+                    content_size: options.content_size
+                ))
+            else:
+                lzma2_compress_xz(input, options)
+
+fn decompress_bytes(input: [u8], codec_hint: CompressionCodec?) -> Result<[u8], CompressionError>:
+    val codec_res = detect_codec(input, codec_hint)
+    if codec_res.is_err():
+        return Err(codec_res.unwrap_err())
+    match codec_res.unwrap():
+        CompressionCodec.lz4:
+            if input.len() >= 4 and input[0] == 0x04u8 and input[1] == 0x22u8 and input[2] == 0x4Du8 and input[3] == 0x18u8:
+                lz4_decompress_frame(input)
+            else:
+                lz4_decompress_block(input)
+        CompressionCodec.zstd:
+            zstd_decompress_frame(input)
+        CompressionCodec.lzma2:
+            lzma2_decompress_xz(input)
+
+fn encoder_finish(state: CompressionEncoderState) -> [u8]:
+    compress_bytes(state.pending, state.options)
+
+fn decoder_finish(state: CompressionDecoderState) -> Result<[u8], CompressionError>:
+    decompress_bytes(state.pending, state.codec_hint)

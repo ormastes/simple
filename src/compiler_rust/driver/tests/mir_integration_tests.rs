@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 //! MIR Integration Tests
 //!
 //! Tests every MIR instruction category through backend-parameterized tests.
@@ -8,7 +6,6 @@
 //! - `interp`: runs on Interpreter only (features not yet supported by JIT)
 
 mod test_helpers;
-use test_helpers::{run_expect, run_expect_interp};
 
 // =============================================================================
 // 1. Constants

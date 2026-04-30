@@ -43,7 +43,6 @@ pub struct Parser<'a> {
     pub(crate) lexer: Lexer<'a>,
     pub(crate) current: Token,
     pub(crate) previous: Token,
-    #[allow(dead_code)]
     pub(crate) source: &'a str,
     /// Buffer for lookahead tokens (used for multi-token peek operations)
     pub(crate) pending_tokens: VecDeque<Token>,
@@ -455,7 +454,6 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Kernel | TokenKind::Gen if is_gen_or_kernel_decl => self.parse_function_with_doc(doc_comment),
             TokenKind::Me if is_me_method_decl => self.parse_function_with_doc(doc_comment),
-            TokenKind::Async => self.parse_async_function_with_doc(doc_comment),
             TokenKind::Sync => self.parse_sync_function_with_doc(doc_comment),
             TokenKind::Struct => self.parse_struct_with_doc(doc_comment),
             TokenKind::Class => self.parse_class_with_doc(doc_comment),

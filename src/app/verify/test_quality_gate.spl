@@ -14,12 +14,12 @@ struct TestQualityVerifyReport:
     passes: i64
     status: text
 
-struct VisibleDebtAllow:
+struct VisibleDebtRegistryEntry:
     path: text
     pattern_class: text
     reason: text
 
-val VISIBLE_DEBT_ALLOWLIST = "scripts/visible_debt_allowlist.sdn"
+val VISIBLE_DEBT_REGISTRY = "scripts/visible_debt_registry.sdn"
 
 fn make_quality_finding(level: text, subject: text, message: text) -> TestQualityFinding:
     TestQualityFinding(level: level, subject: subject, message: message)
@@ -86,34 +86,34 @@ fn classify_visible_debt(line: text) -> text:
         return "dummy"
     "debt"
 
-fn parse_allowlist_line(line: text) -> VisibleDebtAllow:
+fn parse_registry_line(line: text) -> VisibleDebtRegistryEntry:
     val parts = line.split("\"")
     if parts.len() < 6:
-        return VisibleDebtAllow(path: "", pattern_class: "", reason: "")
-    VisibleDebtAllow(path: parts[1], pattern_class: parts[3], reason: parts[5])
+        return VisibleDebtRegistryEntry(path: "", pattern_class: "", reason: "")
+    VisibleDebtRegistryEntry(path: parts[1], pattern_class: parts[3], reason: parts[5])
 
-fn load_visible_debt_allowlist(path: text) -> [VisibleDebtAllow]:
+fn load_visible_debt_registry(path: text) -> [VisibleDebtRegistryEntry]:
     if not file_exists(path):
         return []
 
-    var entries: [VisibleDebtAllow] = []
+    var entries: [VisibleDebtRegistryEntry] = []
     for line in file_read(path).split("\n"):
         val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("visible_debt_allowlist"):
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("visible_debt_registry"):
             continue
-        val entry = parse_allowlist_line(trimmed)
+        val entry = parse_registry_line(trimmed)
         if entry.path != "" and entry.pattern_class != "":
             entries.push(entry)
     entries
 
-fn is_allowed_visible_debt(path: text, pattern_class: text, allowlist: [VisibleDebtAllow]) -> bool:
-    for entry in allowlist:
+fn is_registered_visible_debt(path: text, pattern_class: text, registry: [VisibleDebtRegistryEntry]) -> bool:
+    for entry in registry:
         if entry.path == path and entry.pattern_class == pattern_class:
             return true
     false
 
-fn visible_debt_allow_reason(path: text, pattern_class: text, allowlist: [VisibleDebtAllow]) -> text:
-    for entry in allowlist:
+fn visible_debt_registry_reason(path: text, pattern_class: text, registry: [VisibleDebtRegistryEntry]) -> text:
+    for entry in registry:
         if entry.path == path and entry.pattern_class == pattern_class:
             return entry.reason
     ""
@@ -157,13 +157,13 @@ fn build_test_quality_verify_report(scope: text, files: [text], full_scan: bool)
         findings.push(make_quality_finding("PASS", scope, "No visible-debt target files selected"))
         return quality_report_from_findings(scope, scan_paths, findings)
 
-    val allowlist = load_visible_debt_allowlist(VISIBLE_DEBT_ALLOWLIST)
+    val registry = load_visible_debt_registry(VISIBLE_DEBT_REGISTRY)
     val (stdout, exit_code) = run_visible_debt_rg(scan_paths)
     if exit_code != 0 and stdout.trim() == "":
         findings.push(make_quality_finding("PASS", scope, "No visible debt markers found"))
         return quality_report_from_findings(scope, scan_paths, findings)
 
-    var allowed_count = 0
+    var registered_count = 0
     for line in stdout.split("\n"):
         val trimmed = line.trim()
         if trimmed == "":
@@ -171,25 +171,25 @@ fn build_test_quality_verify_report(scope: text, files: [text], full_scan: bool)
         val path = parse_rg_path(trimmed)
         val line_number = parse_rg_line_number(trimmed)
         val pattern_class = classify_visible_debt(trimmed)
-        if is_allowed_visible_debt(path, pattern_class, allowlist):
-            allowed_count = allowed_count + 1
+        if is_registered_visible_debt(path, pattern_class, registry):
+            registered_count = registered_count + 1
             findings.push(make_quality_finding(
                 "WARN",
                 "{path}:{line_number}",
-                "allowlisted visible debt marker ({pattern_class}): {visible_debt_allow_reason(path, pattern_class, allowlist)}"
+                "registered visible debt marker ({pattern_class}): {visible_debt_registry_reason(path, pattern_class, registry)}"
             ))
         else:
             findings.push(make_quality_finding(
                 "FAIL",
                 "{path}:{line_number}",
-                "unallowlisted visible debt marker ({pattern_class})"
+                "unregistered visible debt marker ({pattern_class})"
             ))
 
     if findings.len() == 0:
         findings.push(make_quality_finding(
             "PASS",
             scope,
-            "Visible debt gate passed ({allowed_count} allowlisted marker(s))"
+            "Visible debt gate passed ({registered_count} registered marker(s))"
         ))
 
     quality_report_from_findings(scope, scan_paths, findings)
@@ -218,5 +218,5 @@ fn write_test_quality_verify_report(report: TestQualityVerifyReport, report_dir:
     else:
         ""
 
-export TestQualityFinding, TestQualityVerifyReport, VisibleDebtAllow
+export TestQualityFinding, TestQualityVerifyReport, VisibleDebtRegistryEntry
 export build_test_quality_verify_report, render_test_quality_verify_report, write_test_quality_verify_report

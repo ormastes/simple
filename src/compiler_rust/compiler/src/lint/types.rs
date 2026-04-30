@@ -16,14 +16,21 @@ pub enum LintLevel {
 
 impl LintLevel {
     /// Parse lint level from string (attribute value)
-    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "allow" => Some(LintLevel::Allow),
             "warn" => Some(LintLevel::Warn),
             "deny" => Some(LintLevel::Deny),
             _ => None,
         }
+    }
+}
+
+impl std::str::FromStr for LintLevel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or(())
     }
 }
 
@@ -118,8 +125,7 @@ impl LintName {
     }
 
     /// Parse lint name from string
-    #[allow(clippy::should_implement_trait)] // reason: standard trait signature does not match this fallible or extended variant
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "primitive_api" => Some(LintName::PrimitiveApi),
             "bare_bool" => Some(LintName::BareBool),
@@ -196,7 +202,7 @@ impl LintName {
     /// - Why it matters
     /// - Examples of code that triggers it
     /// - How to fix it
-    /// - How to suppress it
+    /// - Suppression policy for exceptional cases
     pub fn explain(&self) -> String {
         match self {
             LintName::PrimitiveApi => r#"Lint: primitive_api
@@ -250,16 +256,12 @@ Does not trigger:
         Disabled
     pub fn configure(cache: CacheMode)
 
-=== How to suppress ===
+=== Suppression policy ===
 
-If you really need primitives in a public API:
+Fix the API shape first. Do not add `allow` by default.
 
-    #[allow(primitive_api)] // reason: lint checker/descriptor module uses raw primitives to represent lint check metadata
-    pub fn legacy_api(value: i64)
-
-Or in simple.sdn:
-    [lints]
-    primitive_api = "allow"
+Only after explicit user or reviewer confirmation should you add a narrowly
+scoped suppression with a concrete reason.
 "#
             .to_string(),
             LintName::BareBool => r#"Lint: bare_bool
@@ -307,16 +309,12 @@ Replace boolean parameters with enums:
 Call sites become self-documenting:
     configure(CacheMode::Enabled, DebugMode::Disabled)
 
-=== How to suppress ===
+=== Suppression policy ===
 
-If you need boolean parameters:
+Replace the boolean with a semantic enum first.
 
-    #[allow(bare_bool)] // reason: boolean parameter is part of the lint descriptor public API
-    pub fn set_flag(value: bool)
-
-Or in simple.sdn:
-    [lints]
-    bare_bool = "allow"
+Only after explicit user or reviewer confirmation should you add a narrowly
+scoped suppression with a concrete reason.
 "#
             .to_string(),
             LintName::PrintInTestSpec => r#"Lint: print_in_test_spec
@@ -346,9 +344,9 @@ Does not trigger:
     # In regular code (not _spec.spl)
     print("Debug output")
 
-    # In _spec.spl with explicit allow
-    #[allow(print_in_test_spec)] // reason: lint type descriptor includes print-based diagnostic output for test coverage
+    # In _spec.spl after explicit review confirms print is required
     fn debug_helper():
+        """Prefer structured output; allow only after review."""
         print("Debug info")
 
 === How to fix ===
@@ -359,20 +357,12 @@ Does not trigger:
       should work correctly
     """
 
-2. If print is genuinely needed (e.g., debugging), add an attribute:
-    #[allow(print_in_test_spec)] // reason: lint type descriptor includes print-based diagnostic output for test coverage
-    fn debug_test():
-        print("Debug output")
+2. If print is genuinely needed, get explicit confirmation first and then add
+   the narrowest suppression with a concrete reason.
 
-=== How to suppress ===
+=== Suppression policy ===
 
-    #[allow(print_in_test_spec)] // reason: lint type descriptor includes print-based diagnostic output for test coverage
-    fn test_with_print():
-        print("Needed for this test")
-
-Or in simple.sdn:
-    [lints]
-    print_in_test_spec = "allow"
+Do not add `allow(print_in_test_spec)` by default. Prefer structured test output.
 "#
             .to_string(),
             LintName::TodoFormat => r#"Lint: todo_format
@@ -423,14 +413,10 @@ Examples:
     # TODO: [gpu][P1] Create Vector3 variant [#789] [blocked:#100]
     # FIXME: [parser][P2] Handle edge case in expression parsing
 
-=== How to suppress ===
+=== Suppression policy ===
 
-If you have a TODO that doesn't fit the format (rare):
-    #[allow(todo_format)] // reason: lint description uses TODO marker as structured descriptor data, not a code placeholder
-
-Or in simple.sdn:
-    [lints]
-    todo_format = "allow"
+Reformat the TODO first. Only after explicit user or reviewer confirmation
+should you add a narrowly scoped suppression with a concrete reason.
 
 See also: .claude/skills/todo.md for full format specification
 "#
@@ -452,8 +438,9 @@ Level: warn (default)
 
 === What it checks ===
 
-This lint warns when a function has multiple parameters with the same type
-and any of those parameters are passed positionally (not named) at the call site.
+This lint warns when a public function or method has multiple parameters with the
+same type and any of those parameters are passed without a disambiguating name or
+call-site label at the call site.
 
 === Why it matters ===
 
@@ -466,7 +453,7 @@ arguments without the compiler catching it:
     # Bug: arguments in wrong order, but compiles fine!
     create_user("john@example.com", "John", "555-1234")
 
-Named arguments make intent explicit and prevent such bugs:
+Named arguments or call-site labels make intent explicit and prevent such bugs:
 
     create_user(name: "John", email: "john@example.com", phone: "555-1234")
 
@@ -482,31 +469,27 @@ Does not trigger:
     point(x: 3, y: 4)        # All same-typed params are named
     point(y: 4, x: 3)        # Order doesn't matter with names
 
+    fn transfer(src: text from, dst: text to):
+        ...
+    transfer("a.txt" from, "b.txt" to)  # Labels disambiguate positional calls
+
     fn describe(name: text, age: i64):
         ...
     describe("Alice", 30)    # Types are different, no confusion
 
+    fn helper(x: i64, y: i64):
+        ...
+    helper(1, 2)             # Private/internal helpers are out of scope
+
 === How to fix ===
 
-Use named arguments for parameters that share a type:
+Use named arguments or the parameter's call-site label for parameters that share a type:
 
     # Instead of:
     point(3, 4)
 
     # Use:
     point(x: 3, y: 4)
-
-=== How to suppress ===
-
-If positional arguments are intentional:
-
-    #[allow(unnamed_duplicate_typed_args)] // reason: lint descriptor method uses positional args matching its target lint's pattern
-    fn swap(a: i64, b: i64):
-        ...
-
-Or in simple.sdn:
-    [lints]
-    unnamed_duplicate_typed_args = "allow"
 "#.to_string(),
             LintName::ResourceLeak => r#"Lint: resource_leak
 Level: warn (default)
@@ -575,17 +558,12 @@ Does not trigger:
         db.execute("SELECT 1")
     # db.close() called automatically after each test
 
-=== How to suppress ===
+=== Suppression policy ===
 
-If the resource is intentionally left open (e.g., returned to caller):
+Make ownership and cleanup explicit first.
 
-    #[allow(resource_leak)] // reason: lint type descriptor for resource_leak check; allow prevents self-referential false positive
-    fn create_connection() -> TcpStream:
-        TcpStream.connect("localhost:8080")  # Caller is responsible
-
-Or in simple.sdn:
-    [lints]
-    resource_leak = "allow"
+Only after explicit user or reviewer confirmation should you add a narrowly
+scoped suppression with a concrete reason.
 "#.to_string(),
             LintName::WildcardMatch => "Lint: wildcard_match\nLevel: allow\n\nWarns about wildcard catch-all patterns in match expressions.".to_string(),
             LintName::NonExhaustiveMatch => r#"Lint: non_exhaustive_match
@@ -629,14 +607,12 @@ Does not trigger:
     # Directories without __init__.spl are freely accessible:
     use crate.utils.helper.Helper  # ✅ no boundary
 
-=== How to suppress ===
+=== Suppression policy ===
 
-    #[allow(init_boundary_violation)] // reason: lint type descriptor for init_boundary_violation; allow avoids self-referential false positive
-    use crate.pkg.internal.Helper
+Fix the import path first.
 
-Or in simple.sdn:
-    [lints]
-    init_boundary_violation = "allow"
+Only after explicit user or reviewer confirmation should you add a narrowly
+scoped suppression with a concrete reason.
 "#.to_string(),
             LintName::BypassWithCodeFiles => r#"Lint: bypass_with_code_files
 Level: warn (default, will become deny in v1.0)
@@ -669,10 +645,10 @@ Either:
 1. Remove the #[bypass] attribute and properly export symbols
 2. Move .spl files into subdirectories
 
-=== How to suppress ===
+=== Suppression policy ===
 
-    [lints]
-    bypass_with_code_files = "allow"
+Restructure the module boundary first. Only after explicit user or reviewer
+confirmation should you relax this lint.
 "#.to_string(),
             LintName::UnknownDecorator => r#"Lint: unknown_decorator
 Level: warn (default)
@@ -686,15 +662,12 @@ Known decorators: @async, @pure, @io, @net, @fs, @unsafe, @verify, @trusted, @gh
 @deprecated, @generated_by, @Lib, @inject, @sys_inject, @naked, @noreturn, @interrupt,
 @entry, @align, @gpu_intrinsic
 
-=== How to suppress ===
+=== Suppression policy ===
 
-    #[allow(unknown_decorator)] // reason: lint type descriptor documents unknown_decorator; allow is intentional self-reference
-    @MyCustomDecorator
-    fn my_function():
-        pass
+Use a supported decorator first.
 
-Or suppress all unknown annotations:
-    #[allow(unknown_annotation)] // reason: lint type descriptor documents unknown_annotation; allow is intentional self-reference
+Only after explicit user or reviewer confirmation should you add a narrowly
+scoped suppression with a concrete reason.
 "#.to_string(),
             LintName::UnknownAttribute => r#"Lint: unknown_attribute
 Level: warn (default)
@@ -706,15 +679,12 @@ Warns when an unknown attribute (#[name]) is used that is not in the known white
 Known attributes: #[allow], #[warn], #[deny], #[default], #[concurrency_mode], #[layout],
 #[pure], #[snapshot], #[deprecated], #[bypass], #[skip_todo], #[generated], #[inline]
 
-=== How to suppress ===
+=== Suppression policy ===
 
-    #[allow(unknown_attribute)] // reason: lint type descriptor documents unknown_attribute; allow is intentional self-reference
-    #[my_custom_attr]
-    fn my_function():
-        pass
+Use a supported attribute first.
 
-Or suppress all unknown annotations:
-    #[allow(unknown_annotation)] // reason: lint type descriptor documents unknown_annotation; allow is intentional self-reference
+Only after explicit user or reviewer confirmation should you add a narrowly
+scoped suppression with a concrete reason.
 "#.to_string(),
             LintName::ExportOutsideInit => r#"Lint: export_outside_init
 Level: deny (error)
@@ -805,11 +775,12 @@ Group related parameters into a struct:
     fn create_user(info: UserInfo, manager: text, office: text):
         ...
 
-=== How to suppress ===
+=== Suppression policy ===
 
-    #[allow(too_many_arguments)] // reason: ABI-locked entry signature; refactoring would break caller contract
-    fn my_complex_function(a, b, c, d, e, f, g, h):
-        ...
+Refactor the signature first.
+
+Only after explicit user or reviewer confirmation should you add a narrowly
+scoped suppression with a concrete reason.
 "#.to_string(),
         }
     }
@@ -844,5 +815,13 @@ Group related parameters into a struct:
             LintName::UnknownAttribute,
             LintName::TooManyArguments,
         ]
+    }
+}
+
+impl std::str::FromStr for LintName {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or(())
     }
 }

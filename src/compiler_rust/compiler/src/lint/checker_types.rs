@@ -9,6 +9,32 @@ use super::checker_core::{format_type, is_pure_math_function, is_pure_predicate_
 use super::LintChecker;
 
 impl LintChecker {
+    fn is_forwarding_shim_item(node: &Node) -> bool {
+        matches!(node, Node::UseStmt(_) | Node::CommonUseStmt(_) | Node::ExportUseStmt(_))
+    }
+
+    fn is_forwarding_shim_module(items: &[Node]) -> bool {
+        let mut saw_export = false;
+
+        for node in items {
+            match node {
+                Node::ExportUseStmt(_) => saw_export = true,
+                Node::ModDecl(mod_decl) => {
+                    let Some(body) = mod_decl.body.as_ref() else {
+                        return false;
+                    };
+                    if !Self::is_forwarding_shim_module(body) {
+                        return false;
+                    }
+                }
+                _ if Self::is_forwarding_shim_item(node) => {}
+                _ => return false,
+            }
+        }
+
+        saw_export
+    }
+
     pub(super) fn check_node(&mut self, node: &Node) {
         match node {
             Node::Function(func) => self.check_function(func),
@@ -31,6 +57,12 @@ impl LintChecker {
 
         // Exports are allowed in test/spec files (they re-export test utilities)
         if filename.ends_with("_spec.spl") || filename.ends_with("_test.spl") {
+            return;
+        }
+
+        // Pure forwarding shims are an intentional public-surface pattern:
+        // they only import and re-export symbols from canonical modules.
+        if Self::is_forwarding_shim_module(items) {
             return;
         }
 
@@ -82,6 +114,10 @@ impl LintChecker {
             return;
         }
 
+        if self.skip_public_api_surface_lints() {
+            return;
+        }
+
         // Exempt pure math functions where all params + return are the same
         // bare numeric primitive (e.g., fn abs(x: f64) -> f64).
         if is_pure_math_function(func) {
@@ -122,6 +158,10 @@ impl LintChecker {
             return;
         }
 
+        if self.skip_public_api_surface_lints() {
+            return;
+        }
+
         let mut scoped_config = self.config.child();
         scoped_config.apply_attributes(&s.attributes);
         let original_config = std::mem::replace(&mut self.config, scoped_config);
@@ -146,6 +186,10 @@ impl LintChecker {
     /// Check a class definition
     pub(super) fn check_class(&mut self, c: &ClassDef) {
         if !c.visibility.is_public() {
+            return;
+        }
+
+        if self.skip_public_api_surface_lints() {
             return;
         }
 
@@ -176,6 +220,10 @@ impl LintChecker {
             return;
         }
 
+        if self.skip_public_api_surface_lints() {
+            return;
+        }
+
         let mut scoped_config = self.config.child();
         scoped_config.apply_attributes(&e.attributes);
         let original_config = std::mem::replace(&mut self.config, scoped_config);
@@ -199,6 +247,10 @@ impl LintChecker {
     /// Check a trait definition
     pub(super) fn check_trait(&mut self, t: &TraitDef) {
         if !t.visibility.is_public() {
+            return;
+        }
+
+        if self.skip_public_api_surface_lints() {
             return;
         }
 

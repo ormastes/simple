@@ -3,13 +3,9 @@
 //! These tests verify that TCP, UDP, and HTTP operations work correctly
 //! through the interpreter.
 
-#![allow(unused_imports)]
-
-mod test_helpers;
-
 use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, UdpSocket};
 use std::thread;
 use std::time::Duration;
 

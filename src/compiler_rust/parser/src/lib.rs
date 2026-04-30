@@ -1,5 +1,4 @@
-// Allow warnings for incomplete features
-#![allow(dead_code)]
+// Large AST enums intentionally avoid boxing for the current parser hot path.
 #![allow(clippy::large_enum_variant)]
 
 pub mod arena;
@@ -36,7 +35,7 @@ pub use error_recovery::*;
 pub use interner::*;
 pub use lexer::*;
 pub use macro_registry::*;
-pub use parser_impl::{DebugMode, Parser, ParserMode, MAX_LOOP_ITERATIONS};
+pub use parser_impl::{is_known_attribute_name, DebugMode, Parser, ParserMode, KNOWN_ATTRIBUTE_NAMES, MAX_LOOP_ITERATIONS};
 pub use sui_parser::*;
 pub use test_analyzer::*;
 pub use token::*;

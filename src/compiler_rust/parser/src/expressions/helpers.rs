@@ -778,15 +778,4 @@ impl<'a> Parser<'a> {
             capture_all,
         })
     }
-
-    /// Create a slice expression with the given components
-    #[allow(dead_code)]
-    fn make_slice(receiver: Expr, start: Option<Expr>, end: Option<Expr>, step: Option<Box<Expr>>) -> Expr {
-        Expr::Slice {
-            receiver: Box::new(receiver),
-            start: start.map(Box::new),
-            end: end.map(Box::new),
-            step,
-        }
-    }
 }

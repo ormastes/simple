@@ -1,8 +1,6 @@
-#![allow(unused_imports)]
 //! Comprehensive type checker unit tests
 
-use simple_parser::Parser;
-use simple_type::{check, Substitution, Type, TypeChecker, TypeError};
+use simple_type::{Substitution, Type, TypeChecker};
 
 // === Type Construction Tests ===
 

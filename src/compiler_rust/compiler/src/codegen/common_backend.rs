@@ -602,50 +602,6 @@ impl<M: Module> CodegenBackend<M> {
                 // Creating a data slot with define_zeroinit + write_function_addr
                 // corrupts Mach-O output (object crate BSS + relocation bug).
                 continue;
-                // DEAD CODE below (kept for reference):
-                // Reuse func_id from declare_functions if already declared,
-                // otherwise declare with generic signature.
-                let func_id = if let Some(&existing) = self.func_ids.get(name) {
-                    existing
-                } else {
-                    let sig = {
-                        let call_conv = super::shared::platform_call_conv();
-                        let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-                        sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                        sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                        sig
-                    };
-                    let sanitized = self.sanitize_symbol(name);
-                    let fid = self
-                        .module
-                        .declare_function(&sanitized, cranelift_module::Linkage::Import, &sig)
-                        .map_err(|e| BackendError::ModuleError(format!("extern fn '{}': {}", name, e)))?;
-                    self.func_ids.entry(name.clone()).or_insert(fid);
-                    fid
-                };
-
-                // Create a data slot (using the mangled name for collision avoidance)
-                // and initialize it with the function's address via a relocation.
-                let symbol_name = self.mangle_name(name);
-                let data_id = self
-                    .module
-                    .declare_data(&symbol_name, cranelift_module::Linkage::Preemptible, true, false)
-                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
-
-                let mut data_desc = cranelift_module::DataDescription::new();
-                data_desc.define_zeroinit(8);
-                let func_ref = self.module.declare_func_in_data(func_id, &mut data_desc);
-                data_desc.write_function_addr(0, func_ref);
-
-                self.module
-                    .define_data(data_id, &data_desc)
-                    .map_err(|e| BackendError::ModuleError(e.to_string()))?;
-
-                self.global_ids.insert(name.clone(), data_id);
-                if symbol_name != *name {
-                    self.global_ids.insert(symbol_name, data_id);
-                }
-                continue;
             }
 
             // If this global name matches a declared function (local or imported),

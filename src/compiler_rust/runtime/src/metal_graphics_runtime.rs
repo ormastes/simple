@@ -4,9 +4,6 @@
 //! Returns safe defaults (0 for handles, empty for strings).
 //! When real Metal integration is ready, these stubs will be replaced.
 
-#![allow(dead_code)]
-#![allow(unused_variables)]
-
 use std::ffi::CString;
 use std::os::raw::c_char;
 

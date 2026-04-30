@@ -218,8 +218,7 @@ fn test_save_and_load_test_db() {
 
     // Load it back
     let loaded_db = load_test_db(&db_path).unwrap();
-    // Just verify it loads successfully
-    assert!(loaded_db.files.len() >= 0);
+    assert_eq!(loaded_db.files.len(), db.files.len());
 }
 
 #[test]

@@ -2068,13 +2068,12 @@ impl LlvmBackend {
             // Global variable access
             MirInst::GlobalLoad { dest, global_name, ty } => {
                 let i64_type = self.runtime_int_type();
-                // Look up global variable, or create one
-                let global = module.get_global(global_name).unwrap_or_else(|| {
-                    let g = module.add_global(i64_type, None, global_name);
-                    g.set_initializer(&i64_type.const_int(0, false));
-                    g.set_linkage(inkwell::module::Linkage::WeakAny);
-                    g
-                });
+                let global = module.get_global(global_name).ok_or_else(|| {
+                    CompileError::semantic(format!(
+                        "llvm global load referenced undeclared symbol `{}`",
+                        global_name
+                    ))
+                })?;
                 let loaded = builder
                     .build_load(i64_type, global.as_pointer_value(), "gload")
                     .map_err(|e| crate::error::factory::llvm_build_failed("global load", &e))?;
@@ -2084,12 +2083,12 @@ impl LlvmBackend {
                 let i64_type = self.runtime_int_type();
                 let val = self.get_vreg(value, vreg_map)?;
                 let coerced = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
-                let global = module.get_global(global_name).unwrap_or_else(|| {
-                    let g = module.add_global(i64_type, None, global_name);
-                    g.set_initializer(&i64_type.const_int(0, false));
-                    g.set_linkage(inkwell::module::Linkage::WeakAny);
-                    g
-                });
+                let global = module.get_global(global_name).ok_or_else(|| {
+                    CompileError::semantic(format!(
+                        "llvm global store referenced undeclared symbol `{}`",
+                        global_name
+                    ))
+                })?;
                 let _ = builder.build_store(global.as_pointer_value(), coerced);
             }
             // Advanced memory instructions (not yet implemented — insert default dest values)

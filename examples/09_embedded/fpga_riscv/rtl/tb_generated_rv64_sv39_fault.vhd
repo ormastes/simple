@@ -83,6 +83,34 @@ architecture sim of tb_generated_rv64_sv39_fault is
         return safe_index(addr(15 downto 3));
     end function;
 
+
+    function fetch_imem_word(mem_state : mem_t; addr : std_logic_vector(63 downto 0)) return std_logic_vector is
+        variable idx : integer;
+        variable next_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+        variable next_word : std_logic_vector(63 downto 0) := x"0000001300000013";
+        variable result : std_logic_vector(31 downto 0) := x"00000013";
+    begin
+        idx := safe_index(addr(15 downto 3));
+        if idx >= MEM_WORDS then
+            return result;
+        end if;
+        current_word := mem_state(idx);
+        case addr(2 downto 1) is
+            when "00" => result := current_word(31 downto 0);
+            when "01" => result := current_word(47 downto 16);
+            when "10" => result := current_word(63 downto 32);
+            when others =>
+                next_idx := idx + 1;
+                if next_idx < MEM_WORDS then
+                    next_word := mem_state(next_idx);
+                end if;
+                result(15 downto 0) := current_word(63 downto 48);
+                result(31 downto 16) := next_word(15 downto 0);
+        end case;
+        return result;
+    end function;
+
     signal mem : mem_t := init_mem;
     signal done : boolean := false;
 begin
@@ -114,11 +142,7 @@ begin
 
     clk <= not clk after CLK_PERIOD / 2 when not done else '0';
 
-    imem_data <= mem(safe_index(imem_addr(15 downto 3)))(31 downto 0)
-        when safe_index(imem_addr(15 downto 3)) < MEM_WORDS and imem_addr(2) = '0'
-        else mem(safe_index(imem_addr(15 downto 3)))(63 downto 32)
-        when safe_index(imem_addr(15 downto 3)) < MEM_WORDS
-        else x"00000013";
+    imem_data <= fetch_imem_word(mem, imem_addr);
 
     process(clk)
         variable word_idx : integer;

@@ -11,12 +11,10 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct SdnDocument {
     /// Original source text (preserved for future span-based updates)
-    #[allow(dead_code)]
     source: String,
     /// Parsed value tree
     root: SdnValue,
     /// Path to source spans for targeted updates (future use)
-    #[allow(dead_code)]
     spans: HashMap<String, Span>,
     /// Track if document has been modified
     modified: bool,
@@ -47,6 +45,16 @@ impl SdnDocument {
     /// Get the root value.
     pub fn root(&self) -> &SdnValue {
         &self.root
+    }
+
+    /// Get the original source text used to build this document.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Get the captured source spans for parsed paths.
+    pub fn spans(&self) -> &HashMap<String, Span> {
+        &self.spans
     }
 
     /// Get mutable root value.

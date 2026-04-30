@@ -86,7 +86,8 @@ pub fn is_known_attribute_name(name: &str) -> bool {
 
 impl<'a> Parser<'a> {
     /// Check if current token is @ followed by a known attribute name.
-    /// Used to distinguish @allow(lint) (attribute) from @async (effect decorator).
+    /// Used to distinguish lint-style attributes from effect decorators such as
+    /// `@async`.
     pub(crate) fn is_at_known_attribute(&mut self) -> bool {
         if !self.check(&TokenKind::At) {
             return false;
@@ -107,7 +108,6 @@ impl<'a> Parser<'a> {
     /// DEPRECATED: This method parses the legacy #[...] syntax. All attributes should
     /// use @name(args) syntax instead. This method is retained for reference but is no
     /// longer called from the main parsing pipeline.
-    #[allow(dead_code)]
     pub(crate) fn parse_attribute(&mut self) -> Result<Attribute, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Hash)?;
@@ -174,7 +174,7 @@ impl<'a> Parser<'a> {
 
         // Handle keywords specially since they can be decorator names.
         // Allow/Warn/Deny/Forbid are also keywords (used in arch rules) but can
-        // appear as decorator names in @allow(...), @warn(...), etc.
+        // appear as decorator names in lint-level and policy decorators.
         let expr = if self.check(&TokenKind::Async) {
             self.advance();
             Expr::Identifier("async".to_string())

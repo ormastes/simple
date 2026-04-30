@@ -127,6 +127,46 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
+    fn declare_globals(&self, module_ir: &MirModule) {
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return;
+        };
+        let rv_type = self.runtime_int_type();
+
+        for (name, _ty, is_mutable) in &module_ir.globals {
+            // Extern/runtime functions are modeled as globals in MIR so GlobalLoad
+            // can treat them as values, but they must not become LLVM data globals.
+            // A same-named data global makes later call lowering add suffixed
+            // function decls like `rt_mmio_write_u64.1`, which then fail to link.
+            if module_ir.extern_fn_names.contains(name) {
+                continue;
+            }
+            if m.get_global(name).is_some() {
+                continue;
+            }
+            if m.get_function(name).is_some() {
+                continue;
+            }
+
+            let global = m.add_global(rv_type, None, name);
+            global.set_constant(!*is_mutable);
+
+            if module_ir.local_globals.contains(name) {
+                let init = module_ir
+                    .global_init_values
+                    .get(name)
+                    .map(|v| rv_type.const_int(*v as u64, true))
+                    .unwrap_or_else(|| rv_type.const_zero());
+                global.set_initializer(&init);
+                global.set_linkage(inkwell::module::Linkage::External);
+            } else {
+                global.set_linkage(inkwell::module::Linkage::External);
+            }
+        }
+    }
+
+    #[cfg(feature = "llvm")]
     fn declare_dot_aliases_for_methods(&self) {
         let m = self.module.borrow();
         let Some(m) = m.as_ref() else {
@@ -488,9 +528,9 @@ impl LlvmBackend {
             CodeModel::Default
         };
 
-        // Pass RISC-V extension features so that TargetMachine lowering matches the
-        // linker's -march=rv32imac / -march=rv64imac expectation (avoid rv32i-only
-        // sequences that reference absent atomics/multiplier helpers).
+        // Match the freestanding linker ISA contract for the generated soft-core
+        // lanes. RV64/RV32 compiled payloads are allowed to use compressed
+        // instructions, so codegen must keep C enabled.
         let features = match self.target.arch {
             TargetArch::Riscv32 => "+m,+a,+c",
             TargetArch::Riscv64 => "+m,+a,+c",
@@ -597,6 +637,9 @@ impl NativeBackend for LlvmBackend {
                 }
             }
         }
+
+        #[cfg(feature = "llvm")]
+        self.declare_globals(module);
 
         // First pass: forward-declare all function signatures
         // This is necessary so that functions can call each other regardless of compilation order

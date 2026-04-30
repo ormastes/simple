@@ -2,7 +2,8 @@
 
 use super::super::diagnostics::LintDiagnostic;
 use super::super::types::LintName;
-use simple_parser::ast::{Attribute, ClassDef, Decorator, EnumDef, Expr, FunctionDef, Node, StructDef, TraitDef};
+use simple_parser::ast::{Attribute, Decorator, Expr, Node};
+use simple_parser::is_known_attribute_name;
 
 use super::LintChecker;
 
@@ -59,8 +60,8 @@ impl LintChecker {
             Node::Enum(e) => {
                 self.check_attributes(&e.attributes);
             }
-            Node::Trait(_t) => {
-                // TraitDef doesn't have attributes field
+            Node::Bitfield(bitfield) => {
+                self.check_attributes(&bitfield.attributes);
             }
             Node::Impl(imp) => {
                 self.check_attributes(&imp.attributes);
@@ -79,6 +80,23 @@ impl LintChecker {
             Node::FunctionAlias(fa) => {
                 self.check_decorators(&fa.decorators);
             }
+            Node::Extern(extern_def) => {
+                self.check_attributes(&extern_def.attributes);
+            }
+            Node::ExternClass(extern_class) => {
+                self.check_attributes(&extern_class.attributes);
+                for method in &extern_class.methods {
+                    self.check_attributes(&method.attributes);
+                }
+            }
+            Node::ModDecl(mod_decl) => {
+                self.check_attributes(&mod_decl.attributes);
+                if let Some(body) = &mod_decl.body {
+                    for item in body {
+                        self.check_node_annotations(item);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -92,7 +110,10 @@ impl LintChecker {
                         LintName::UnknownDecorator,
                         dec.span,
                         format!("unknown decorator '@{}'", name),
-                        Some("Suppress with: #[allow(unknown_decorator)]".to_string()),
+                        Some(
+                            "use a supported decorator first; only add an unknown-decorator suppression after explicit user or reviewer confirmation"
+                                .to_string(),
+                        ),
                     );
                 }
             }
@@ -102,12 +123,15 @@ impl LintChecker {
     /// Check attributes against the known whitelist
     pub(super) fn check_attributes(&mut self, attributes: &[Attribute]) {
         for attr in attributes {
-            if !Self::KNOWN_ATTRIBUTES.contains(&attr.name.as_str()) {
+            if !Self::KNOWN_ATTRIBUTES.contains(&attr.name.as_str()) && !is_known_attribute_name(&attr.name) {
                 self.emit(
                     LintName::UnknownAttribute,
                     attr.span,
                     format!("unknown attribute '#[{}]'", attr.name),
-                    Some("Suppress with: #[allow(unknown_attribute)]".to_string()),
+                    Some(
+                        "use a supported attribute first; only add an unknown-attribute suppression after explicit user or reviewer confirmation"
+                            .to_string(),
+                    ),
                 );
             }
         }

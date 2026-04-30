@@ -764,7 +764,6 @@ impl<'a> Parser<'a> {
             TokenKind::Val => "val".to_string(),
             TokenKind::Impl => "impl".to_string(),
             TokenKind::Ghost => "ghost".to_string(),
-            TokenKind::Alias => "alias".to_string(),
             // Low-level keywords usable as identifiers in non-statement contexts
             TokenKind::Asm => "asm".to_string(),
             TokenKind::Bitfield => "bitfield".to_string(),
@@ -794,7 +793,6 @@ impl<'a> Parser<'a> {
             TokenKind::Match => "match".to_string(),
             TokenKind::Or => "or".to_string(),
             TokenKind::And => "and".to_string(),
-            TokenKind::Not => "not".to_string(),
             TokenKind::In => "in".to_string(),
             TokenKind::Is => "is".to_string(),
             TokenKind::Requires => "requires".to_string(),
@@ -806,7 +804,6 @@ impl<'a> Parser<'a> {
             TokenKind::While => "while".to_string(),
             TokenKind::Pass => "pass".to_string(),
             TokenKind::Var => "var".to_string(),
-            TokenKind::Val => "val".to_string(),
             TokenKind::Where => "where".to_string(),
             TokenKind::Self_ => "self".to_string(),
             TokenKind::Import => "import".to_string(),
@@ -816,8 +813,6 @@ impl<'a> Parser<'a> {
             TokenKind::Bind => "bind".to_string(),
             TokenKind::Unwrap => "unwrap".to_string(),
             TokenKind::Lazy => "lazy".to_string(),
-            TokenKind::Skip => "skip".to_string(),
-            TokenKind::Old => "old".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -984,8 +979,6 @@ impl<'a> Parser<'a> {
             TokenKind::Self_ => "self",
             TokenKind::Import => "import",
             TokenKind::Lazy => "lazy",
-            TokenKind::Skip => "skip",
-            TokenKind::Old => "old",
             _ => {
                 let ctx = parse_context!(format!("parsing path segment, previous tokens analyzed"));
                 return Err(ParseError::unexpected_token_with_context(

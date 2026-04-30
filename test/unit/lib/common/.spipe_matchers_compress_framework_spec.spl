@@ -1,0 +1,147 @@
+use std.common.compress.{
+    CompressionCodec,
+    CompressionOptions,
+    default_compression_options,
+    compress_bytes,
+    decompress_bytes,
+    new_encoder_state,
+    new_decoder_state,
+    encoder_write,
+    decoder_write,
+    encoder_finish,
+    decoder_finish
+}
+use std.io_runtime.{shell}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+val TMP_ROOT = "/tmp/common_compression_framework"
+
+fn _fixture_bytes() -> [u8]:
+    [
+        0x61u8, 0x61u8, 0x61u8, 0x61u8, 0x61u8,
+        0x62u8, 0x62u8, 0x62u8, 0x62u8, 0x62u8,
+        0x63u8, 0x63u8, 0x63u8, 0x63u8, 0x63u8,
+        0x64u8, 0x64u8, 0x64u8, 0x64u8, 0x64u8,
+        0x65u8, 0x65u8, 0x65u8, 0x65u8, 0x65u8
+    ]
+
+fn _write_bytes(path: text, data: [u8]):
+    expect rt_file_write_bytes(path, data) == true
+
+fn _read_bytes(path: text) -> [u8]:
+    rt_file_read_bytes(path) ?? []
+
+fn _ensure_tmp_root():
+    val result = shell("mkdir -p '" + TMP_ROOT + "'")
+    expect result.exit_code == 0
+
+describe "common compression framework":
+    it "REQ-009: lz4 block round-trips with explicit hint":
+        val options = default_compression_options(CompressionCodec.lz4)
+        val block_options = CompressionOptions(
+            codec: options.codec,
+            level: options.level,
+            checksum: options.checksum,
+            block_mode: "block",
+            dictionary_bytes: options.dictionary_bytes,
+            content_size: options.content_size
+        )
+        val input = _fixture_bytes()
+        val encoded = compress_bytes(input, block_options)
+        val decoded = decompress_bytes(encoded, Some(CompressionCodec.lz4))
+        match decoded:
+            Ok(bytes): expect(bytes).to_equal(input)
+            Err(err):
+                print(err)
+                expect false == true
+
+    it "REQ-009: lz4 frame auto-detect round-trips":
+        val options = default_compression_options(CompressionCodec.lz4)
+        val input = _fixture_bytes()
+        val encoded = compress_bytes(input, options)
+        val decoded = decompress_bytes(encoded, nil)
+        match decoded:
+            Ok(bytes): expect(bytes).to_equal(input)
+            Err(err):
+                print(err)
+                expect false == true
+
+    it "REQ-010: zstd frame round-trips through shared api":
+        val options = default_compression_options(CompressionCodec.zstd)
+        val input = _fixture_bytes()
+        val encoded = compress_bytes(input, options)
+        val decoded = decompress_bytes(encoded, nil)
+        match decoded:
+            Ok(bytes): expect(bytes).to_equal(input)
+            Err(err):
+                print(err)
+                expect false == true
+
+    it "REQ-011: xz lzma2 frame round-trips through shared api":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val input = _fixture_bytes()
+        val encoded = compress_bytes(input, options)
+        val decoded = decompress_bytes(encoded, nil)
+        match decoded:
+            Ok(bytes): expect(bytes).to_equal(input)
+            Err(err):
+                print(err)
+                expect false == true
+
+    it "REQ-008: streaming encoder/decoder produces the original bytes":
+        val options = default_compression_options(CompressionCodec.lz4)
+        var encoder = new_encoder_state(options)
+        encoder = encoder_write(encoder, [0x61u8, 0x61u8, 0x61u8])
+        encoder = encoder_write(encoder, [0x62u8, 0x62u8, 0x62u8])
+        val encoded = encoder_finish(encoder)
+
+        var decoder = new_decoder_state(nil)
+        decoder = decoder_write(decoder, encoded)
+        val decoded_res = decoder_finish(decoder)
+        match decoded_res:
+            Ok(bytes): expect(bytes).to_equal([0x61u8, 0x61u8, 0x61u8, 0x62u8, 0x62u8, 0x62u8])
+            Err(err):
+                print(err)
+                expect false == true
+
+    it "REQ-012: truncated lz4 frame fails closed":
+        val options = default_compression_options(CompressionCodec.lz4)
+        val input = _fixture_bytes()
+        val encoded = compress_bytes(input, options)
+        val truncated = encoded.slice(0, 6)
+        val result = decompress_bytes(truncated, nil)
+        match result:
+            Ok(_): expect(false).to_equal(true)
+            Err(_): expect(true).to_equal(true)
+
+    it "REQ-010: host zstd decodes the emitted frame":
+        _ensure_tmp_root()
+        val input = _fixture_bytes()
+        val options = default_compression_options(CompressionCodec.zstd)
+        val encoded = compress_bytes(input, options)
+        val compressed_path = TMP_ROOT + "/payload.zst"
+        val output_path = TMP_ROOT + "/payload.zst.out"
+        _write_bytes(compressed_path, encoded)
+        val run = shell("zstd -q -d -f '" + compressed_path + "' -o '" + output_path + "'")
+        if run.exit_code != 0:
+            print(run.stdout)
+            print(run.stderr)
+        expect run.exit_code == 0
+        expect _read_bytes(output_path) == input
+
+    it "REQ-011: host xz decodes the emitted stream":
+        _ensure_tmp_root()
+        val input = _fixture_bytes()
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = compress_bytes(input, options)
+        val compressed_path = TMP_ROOT + "/payload.xz"
+        val output_path = TMP_ROOT + "/payload.xz.out"
+        _write_bytes(compressed_path, encoded)
+        val run = shell("xz -q -d -f -c '" + compressed_path + "' > '" + output_path + "'")
+        if run.exit_code != 0:
+            print(run.stdout)
+            print(run.stderr)
+        expect run.exit_code == 0
+        expect _read_bytes(output_path) == input

@@ -1,17 +1,13 @@
 #![cfg(target_arch = "x86_64")]
-#![allow(unused_imports, deprecated)]
 
 use assert_cmd::Command;
-use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use simple_driver::dependency_cache::{analyze_source_str, BuildCache, DepInfo};
-use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
 use simple_driver::runner::Runner;
 use simple_runtime::gc::GcRuntime;
 use simple_term_io::io::term::TermNative;
 use std::fs;
 use std::sync::{Arc, Mutex};
-use tempfile::TempDir;
 
 // Import shared test helpers
 mod test_helpers;

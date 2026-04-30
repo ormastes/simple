@@ -112,33 +112,6 @@ impl<'a> super::Lexer<'a> {
         }
     }
 
-    /// Legacy scan_string for backward compatibility (not currently used - double quotes use scan_fstring)
-    #[allow(dead_code)]
-    pub(super) fn scan_string(&mut self) -> TokenKind {
-        let mut value = String::new();
-
-        while let Some(ch) = self.peek() {
-            if ch == '"' {
-                self.advance();
-                return TokenKind::String(value);
-            } else if ch == '\\' {
-                self.advance();
-                match self.process_escape(false) {
-                    EscapeResult::Char(c) => value.push(c),
-                    EscapeResult::Error(msg) => return TokenKind::Error(msg),
-                    EscapeResult::Unterminated => return TokenKind::Error("Unterminated string".to_string()),
-                }
-            } else if ch == '\n' {
-                return TokenKind::Error("Unterminated string".to_string());
-            } else {
-                self.advance();
-                value.push(ch);
-            }
-        }
-
-        TokenKind::Error("Unterminated string".to_string())
-    }
-
     /// Scan a triple-quoted string (docstring): """..."""
     /// These are raw strings that can span multiple lines and don't support interpolation
     pub(super) fn scan_triple_quoted_string(&mut self) -> TokenKind {

@@ -4,9 +4,7 @@
 //! ? operator, match guards, if let/while let, or patterns, range patterns,
 //! and numeric literals (hex, binary, octal).
 
-#![allow(unused_imports)]
-
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+use simple_driver::interpreter::run_code;
 
 #[test]
 fn interpreter_multiple_decorators() {
@@ -59,7 +57,7 @@ main = square(4)
 
 // ============= Attributes =============
 // Attributes are compile-time metadata that can be attached to items.
-// Currently we support: #[inline], #[deprecated], #[allow(...)]
+// Currently we support inline, deprecated, and lint-level attributes.
 
 #[test]
 fn interpreter_attribute_inline() {

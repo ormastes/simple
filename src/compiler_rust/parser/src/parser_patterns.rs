@@ -565,7 +565,6 @@ impl<'a> Parser<'a> {
             TokenKind::Const => self.parse_keyword_as_pattern("Const"),
             TokenKind::Super => self.parse_keyword_as_pattern("super"),
             TokenKind::Repr => self.parse_keyword_as_pattern("Repr"),
-            TokenKind::Match => self.parse_keyword_as_pattern("Match"),
             TokenKind::Dyn => self.parse_keyword_as_pattern("Dyn"),
             TokenKind::Macro => self.parse_keyword_as_pattern("Macro"),
             TokenKind::Mixin => self.parse_keyword_as_pattern("Mixin"),

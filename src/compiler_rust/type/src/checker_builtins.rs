@@ -305,11 +305,10 @@ impl TypeChecker {
         }
 
         // Apply the mapping to the type body
-        self.instantiate_type(&scheme.ty, &var_map)
+        Self::instantiate_type(&scheme.ty, &var_map)
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn instantiate_type(&self, ty: &Type, var_map: &HashMap<usize, usize>) -> Type {
+    fn instantiate_type(ty: &Type, var_map: &HashMap<usize, usize>) -> Type {
         match ty {
             Type::Var(id) => {
                 if let Some(&new_id) = var_map.get(id) {
@@ -319,36 +318,32 @@ impl TypeChecker {
                 }
             }
             Type::Function { params, ret } => Type::Function {
-                params: params.iter().map(|p| self.instantiate_type(p, var_map)).collect(),
-                ret: Box::new(self.instantiate_type(ret, var_map)),
+                params: params.iter().map(|p| Self::instantiate_type(p, var_map)).collect(),
+                ret: Box::new(Self::instantiate_type(ret, var_map)),
             },
-            Type::Array(elem) => Type::Array(Box::new(self.instantiate_type(elem, var_map))),
-            Type::Union(types) => Type::Union(
-                types.iter().map(|t| self.instantiate_type(t, var_map)).collect()
-            ),
+            Type::Array(elem) => Type::Array(Box::new(Self::instantiate_type(elem, var_map))),
+            Type::Union(types) => Type::Union(types.iter().map(|t| Self::instantiate_type(t, var_map)).collect()),
             Type::Generic { name, args } => Type::Generic {
                 name: name.clone(),
-                args: args.iter().map(|a| self.instantiate_type(a, var_map)).collect(),
+                args: args.iter().map(|a| Self::instantiate_type(a, var_map)).collect(),
             },
-            Type::Tuple(types) => Type::Tuple(
-                types.iter().map(|t| self.instantiate_type(t, var_map)).collect()
-            ),
+            Type::Tuple(types) => Type::Tuple(types.iter().map(|t| Self::instantiate_type(t, var_map)).collect()),
             Type::LabeledTuple(fields) => Type::LabeledTuple(
                 fields
                     .iter()
-                    .map(|(name, ty)| (name.clone(), self.instantiate_type(ty, var_map)))
+                    .map(|(name, ty)| (name.clone(), Self::instantiate_type(ty, var_map)))
                     .collect(),
             ),
             Type::Dict { key, value } => Type::Dict {
-                key: Box::new(self.instantiate_type(key, var_map)),
-                value: Box::new(self.instantiate_type(value, var_map)),
+                key: Box::new(Self::instantiate_type(key, var_map)),
+                value: Box::new(Self::instantiate_type(value, var_map)),
             },
-            Type::Optional(inner) => Type::Optional(Box::new(self.instantiate_type(inner, var_map))),
-            Type::Borrow(inner) => Type::Borrow(Box::new(self.instantiate_type(inner, var_map))),
-            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.instantiate_type(inner, var_map))),
+            Type::Optional(inner) => Type::Optional(Box::new(Self::instantiate_type(inner, var_map))),
+            Type::Borrow(inner) => Type::Borrow(Box::new(Self::instantiate_type(inner, var_map))),
+            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(Self::instantiate_type(inner, var_map))),
             Type::Simd { lanes, element } => Type::Simd {
                 lanes: *lanes,
-                element: Box::new(self.instantiate_type(element, var_map)),
+                element: Box::new(Self::instantiate_type(element, var_map)),
             },
             _ => ty.clone(),
         }
@@ -357,51 +352,50 @@ impl TypeChecker {
     /// Collect free type variables in a type (not in the environment)
     fn free_vars(&self, ty: &Type) -> Vec<usize> {
         let mut vars = Vec::new();
-        self.collect_free_vars(ty, &mut vars);
+        Self::collect_free_vars(ty, &mut vars);
         vars.sort();
         vars.dedup();
         vars
     }
 
-    #[allow(clippy::only_used_in_recursion)]
-    fn collect_free_vars(&self, ty: &Type, vars: &mut Vec<usize>) {
+    fn collect_free_vars(ty: &Type, vars: &mut Vec<usize>) {
         match ty {
             Type::Var(id) => vars.push(*id),
             Type::Function { params, ret } => {
                 for p in params {
-                    self.collect_free_vars(p, vars);
+                    Self::collect_free_vars(p, vars);
                 }
-                self.collect_free_vars(ret, vars);
+                Self::collect_free_vars(ret, vars);
             }
-            Type::Array(elem) => self.collect_free_vars(elem, vars),
+            Type::Array(elem) => Self::collect_free_vars(elem, vars),
             Type::Union(types) => {
                 for t in types {
-                    self.collect_free_vars(t, vars);
+                    Self::collect_free_vars(t, vars);
                 }
             }
             Type::Generic { args, .. } => {
                 for a in args {
-                    self.collect_free_vars(a, vars);
+                    Self::collect_free_vars(a, vars);
                 }
             }
             Type::Tuple(types) => {
                 for t in types {
-                    self.collect_free_vars(t, vars);
+                    Self::collect_free_vars(t, vars);
                 }
             }
             Type::LabeledTuple(fields) => {
                 for (_, t) in fields {
-                    self.collect_free_vars(t, vars);
+                    Self::collect_free_vars(t, vars);
                 }
             }
             Type::Dict { key, value } => {
-                self.collect_free_vars(key, vars);
-                self.collect_free_vars(value, vars);
+                Self::collect_free_vars(key, vars);
+                Self::collect_free_vars(value, vars);
             }
-            Type::Optional(inner) => self.collect_free_vars(inner, vars),
-            Type::Borrow(inner) => self.collect_free_vars(inner, vars),
-            Type::BorrowMut(inner) => self.collect_free_vars(inner, vars),
-            Type::Simd { element, .. } => self.collect_free_vars(element, vars),
+            Type::Optional(inner) => Self::collect_free_vars(inner, vars),
+            Type::Borrow(inner) => Self::collect_free_vars(inner, vars),
+            Type::BorrowMut(inner) => Self::collect_free_vars(inner, vars),
+            Type::Simd { element, .. } => Self::collect_free_vars(element, vars),
             _ => {}
         }
     }
@@ -411,7 +405,7 @@ impl TypeChecker {
         let mut vars = Vec::new();
         for ty in self.env.values() {
             let resolved = ty.apply_subst(&self.subst);
-            self.collect_free_vars(&resolved, &mut vars);
+            Self::collect_free_vars(&resolved, &mut vars);
         }
         vars.sort();
         vars.dedup();
@@ -426,10 +420,7 @@ impl TypeChecker {
         let env_free = self.env_free_vars();
 
         // Variables to quantify are those free in ty but not in env
-        let to_generalize: Vec<usize> = ty_free
-            .into_iter()
-            .filter(|v| !env_free.contains(v))
-            .collect();
+        let to_generalize: Vec<usize> = ty_free.into_iter().filter(|v| !env_free.contains(v)).collect();
 
         TypeScheme {
             vars: to_generalize,

@@ -1,8 +1,6 @@
-#![allow(unused_imports)]
-
 //! Interpreter tests - control
 
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+use simple_driver::interpreter::run_code;
 
 #[test]
 fn interpreter_if_else() {

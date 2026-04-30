@@ -63,13 +63,13 @@ impl LintConfig {
                     let lint_name = lint_name.trim();
                     let level_str = level_str.trim().trim_matches('"').trim_matches('\'');
 
-                    if let Some(level) = LintLevel::from_str(level_str) {
+                    if let Some(level) = LintLevel::parse(level_str) {
                         if lint_name == "required_comment" {
                             config.set_level(LintName::RequiredCommentPass, level);
                             config.set_level(LintName::RequiredCommentDangerous, level);
                             config.set_level(LintName::RequiredCommentTodo, level);
                             config.set_level(LintName::RequiredCommentWildcard, level);
-                        } else if let Some(lint) = LintName::from_str(lint_name) {
+                        } else if let Some(lint) = LintName::parse(lint_name) {
                             config.set_level(lint, level);
                         } else {
                             // Unknown lint name - could be a warning in the future
@@ -96,7 +96,7 @@ impl LintConfig {
     }
 
     /// Parse lint attributes and update config
-    /// Handles: #[allow(lint)], #[warn(lint)], #[deny(lint)]
+    /// Handles the standard lint-level attributes for allow, warn, and deny.
     pub fn apply_attributes(&mut self, attributes: &[Attribute]) {
         for attr in attributes {
             let level = match attr.name.as_str() {
@@ -119,7 +119,7 @@ impl LintConfig {
                             self.set_level(LintName::RequiredCommentDangerous, level);
                             self.set_level(LintName::RequiredCommentTodo, level);
                             self.set_level(LintName::RequiredCommentWildcard, level);
-                        } else if let Some(lint) = LintName::from_str(lint_name) {
+                        } else if let Some(lint) = LintName::parse(lint_name) {
                             self.set_level(lint, level);
                         }
                     }

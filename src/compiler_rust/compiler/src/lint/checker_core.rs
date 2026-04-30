@@ -19,12 +19,14 @@ use std::path::Path;
 pub(super) struct ParamInfo {
     pub(super) name: String,
     pub(super) ty: Option<Type>,
+    pub(super) call_site_label: Option<String>,
 }
 
 /// Function signature info for call-site checking
 #[derive(Clone, Debug)]
 pub(super) struct FunctionInfo {
     pub(super) params: Vec<ParamInfo>,
+    pub(super) lint_unnamed_duplicate_typed_args: bool,
 }
 
 /// Format a type for user-friendly display
@@ -158,6 +160,23 @@ pub struct LintChecker {
 }
 
 impl LintChecker {
+    pub(super) fn skip_public_api_surface_lints(&self) -> bool {
+        self.source_file
+            .as_deref()
+            .map(Self::is_non_surface_path)
+            .unwrap_or(false)
+    }
+
+    pub(super) fn is_non_surface_path(source_file: &std::path::Path) -> bool {
+        let path = source_file.to_string_lossy();
+        Self::is_test_like_path(source_file)
+            || path.contains("/fixtures/")
+            || path.ends_with("_fixture.spl")
+            || path.contains("/src/compiler_rust/lib/std/src/testing/")
+            || path.contains("/src/compiler_rust/lib/std/src/tooling/")
+            || path.contains("/src/compiler_rust/lib/std/src/infra/")
+    }
+
     pub fn new() -> Self {
         Self {
             config: LintConfig::new(),
@@ -254,10 +273,18 @@ impl LintChecker {
 
     /// Apply file-level lint directives from source.
     ///
-    /// Scans the source file for standalone `#[allow(...)]`, `#[deny(...)]`,
-    /// `#[warn(...)]` lines that appear before the first definition.
+    /// Scans the source file for standalone lint-level attributes that appear
+    /// before the first definition.
     /// The parser currently drops these attributes, so we pre-scan the raw source.
     fn apply_file_level_lint_directives(&mut self) {
+        fn directive_prefix(level: &str, inner: bool) -> String {
+            if inner {
+                format!("{}!{}{}(", "#", "[", level)
+            } else {
+                format!("{}{}{}(", "#", "[", level)
+            }
+        }
+
         let source_file = match &self.source_file {
             Some(f) => f.clone(),
             None => return,
@@ -285,14 +312,13 @@ impl LintChecker {
             {
                 break;
             }
-            // Parse #[allow(...)], #![allow(...)], #[deny(...)], #[warn(...)]
-            // Both #[allow(...)] and #![allow(...)] are supported; the latter is
-            // preferred as it is valid Simple parser syntax (inner module attribute).
+            // Parse outer and inner lint-level attributes.
+            // The inner form is preferred because it is valid Simple parser syntax.
             let allow_rest = trimmed
-                .strip_prefix("#![allow(")
-                .or_else(|| trimmed.strip_prefix("#[allow("));
-            let deny_rest = trimmed.strip_prefix("#[deny(");
-            let warn_rest = trimmed.strip_prefix("#[warn(");
+                .strip_prefix(&directive_prefix("allow", true))
+                .or_else(|| trimmed.strip_prefix(&directive_prefix("allow", false)));
+            let deny_rest = trimmed.strip_prefix(&directive_prefix("deny", false));
+            let warn_rest = trimmed.strip_prefix(&directive_prefix("warn", false));
             if let Some(rest) = allow_rest {
                 if let Some(args) = rest.strip_suffix(")]") {
                     for lint_name in args.split(',') {
@@ -304,7 +330,7 @@ impl LintChecker {
                             self.config.set_level(LintName::RequiredCommentTodo, LintLevel::Allow);
                             self.config
                                 .set_level(LintName::RequiredCommentWildcard, LintLevel::Allow);
-                        } else if let Some(lint) = LintName::from_str(lint_name) {
+                        } else if let Some(lint) = LintName::parse(lint_name) {
                             self.config.set_level(lint, LintLevel::Allow);
                         }
                     }
@@ -320,7 +346,7 @@ impl LintChecker {
                             self.config.set_level(LintName::RequiredCommentTodo, LintLevel::Deny);
                             self.config
                                 .set_level(LintName::RequiredCommentWildcard, LintLevel::Deny);
-                        } else if let Some(lint) = LintName::from_str(lint_name) {
+                        } else if let Some(lint) = LintName::parse(lint_name) {
                             self.config.set_level(lint, LintLevel::Deny);
                         }
                     }
@@ -336,7 +362,7 @@ impl LintChecker {
                             self.config.set_level(LintName::RequiredCommentTodo, LintLevel::Warn);
                             self.config
                                 .set_level(LintName::RequiredCommentWildcard, LintLevel::Warn);
-                        } else if let Some(lint) = LintName::from_str(lint_name) {
+                        } else if let Some(lint) = LintName::parse(lint_name) {
                             self.config.set_level(lint, LintLevel::Warn);
                         }
                     }
@@ -347,7 +373,7 @@ impl LintChecker {
 
     /// Check a module for lint violations
     pub fn check_module(&mut self, items: &[Node]) {
-        // Apply file-level lint directives (e.g., #[allow(primitive_api)])
+        // Apply file-level lint directives before walking the parsed module.
         self.apply_file_level_lint_directives();
 
         // First pass: collect function definitions for call-site checks
@@ -406,8 +432,10 @@ impl LintChecker {
                             .map(|p| ParamInfo {
                                 name: p.name.clone(),
                                 ty: p.ty.clone(),
+                                call_site_label: p.call_site_label.clone(),
                             })
                             .collect(),
+                        lint_unnamed_duplicate_typed_args: func.visibility.is_public(),
                     };
                     functions.insert(func.name.clone(), info);
                 }
@@ -422,8 +450,11 @@ impl LintChecker {
                                 .map(|p| ParamInfo {
                                     name: p.name.clone(),
                                     ty: p.ty.clone(),
+                                    call_site_label: p.call_site_label.clone(),
                                 })
                                 .collect(),
+                            lint_unnamed_duplicate_typed_args: c.visibility.is_public()
+                                && method.visibility.is_public(),
                         };
                         // Store as ClassName.method_name for method lookup
                         let key = format!("{}.{}", c.name, method.name);
@@ -442,8 +473,11 @@ impl LintChecker {
                                 .map(|p| ParamInfo {
                                     name: p.name.clone(),
                                     ty: p.ty.clone(),
+                                    call_site_label: p.call_site_label.clone(),
                                 })
                                 .collect(),
+                            lint_unnamed_duplicate_typed_args: s.visibility.is_public()
+                                && method.visibility.is_public(),
                         };
                         let key = format!("{}.{}", s.name, method.name);
                         functions.insert(key, info.clone());
@@ -460,8 +494,10 @@ impl LintChecker {
                                 .map(|p| ParamInfo {
                                     name: p.name.clone(),
                                     ty: p.ty.clone(),
+                                    call_site_label: p.call_site_label.clone(),
                                 })
                                 .collect(),
+                            lint_unnamed_duplicate_typed_args: method.visibility.is_public(),
                         };
                         // Format target_type for key
                         let type_name = format!("{:?}", impl_block.target_type);
@@ -502,8 +538,14 @@ impl LintChecker {
         "deprecated",
         "generated_by",
         "Lib",
+        "export",
         "inject",
+        "public",
+        "requires_auth",
         "sys_inject",
+        "variant",
+        "immutable",
+        "no_gc",
         // Baremetal / low-level decorators
         "naked",
         "noreturn",
@@ -521,7 +563,10 @@ impl LintChecker {
         "deny",
         "default",
         "concurrency_mode",
+        "cfg",
+        "extern",
         "layout",
+        "packed",
         "pure",
         "snapshot",
         "deprecated",
@@ -530,5 +575,8 @@ impl LintChecker {
         "generated",
         "inline",
         "ignore",
+        "immutable",
+        "no_gc",
+        "variant",
     ];
 }

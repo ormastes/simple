@@ -1534,4 +1534,41 @@ mod tests {
             assert_eq!(func.params.len(), 1);
         }
     }
+
+    #[test]
+    fn test_parse_at_extern_as_attribute_on_function() {
+        let source = r#"@extern("runtime", "rt_print")
+fn rt_print(msg: text):
+    pass
+"#;
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("Should parse @extern attribute");
+
+        let func = module.items.iter().find_map(|node| match node {
+            crate::ast::Node::Function(func) => Some(func),
+            _ => None,
+        });
+        let func = func.expect("Should parse function");
+        assert!(func.decorators.is_empty(), "@extern should not become a decorator");
+        assert_eq!(func.attributes.len(), 1);
+        assert_eq!(func.attributes[0].name, "extern");
+    }
+
+    #[test]
+    fn test_parse_known_module_attributes() {
+        let source = r#"@no_gc
+@variant(any)
+mod sample
+"#;
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("Should parse module attributes");
+
+        let mod_decl = module.items.iter().find_map(|node| match node {
+            crate::ast::Node::ModDecl(mod_decl) => Some(mod_decl),
+            _ => None,
+        });
+        let mod_decl = mod_decl.expect("Should parse mod decl");
+        let attr_names: Vec<_> = mod_decl.attributes.iter().map(|attr| attr.name.as_str()).collect();
+        assert_eq!(attr_names, vec!["no_gc", "variant"]);
+    }
 }

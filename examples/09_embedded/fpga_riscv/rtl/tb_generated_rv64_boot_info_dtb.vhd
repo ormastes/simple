@@ -223,11 +223,41 @@ architecture sim of tb_generated_rv64_boot_info_dtb is
         return result;
     end function;
 
+
+    function fetch_imem_word(mem_state : mem_t; addr : std_logic_vector(63 downto 0)) return std_logic_vector is
+        variable idx : integer;
+        variable next_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+        variable next_word : std_logic_vector(63 downto 0) := x"0000001300000013";
+        variable result : std_logic_vector(31 downto 0) := x"00000013";
+    begin
+        idx := mem_index(addr);
+        if idx >= MEM_WORDS then
+            return result;
+        end if;
+        current_word := mem_state(idx);
+        case addr(2 downto 1) is
+            when "00" => result := current_word(31 downto 0);
+            when "01" => result := current_word(47 downto 16);
+            when "10" => result := current_word(63 downto 32);
+            when others =>
+                next_idx := idx + 1;
+                if next_idx < MEM_WORDS then
+                    next_word := mem_state(next_idx);
+                end if;
+                result(15 downto 0) := current_word(63 downto 48);
+                result(31 downto 16) := next_word(15 downto 0);
+        end case;
+        return result;
+    end function;
+
     signal mem : mem_t := init_mem;
     signal uart_word : std_logic_vector(31 downto 0) := (others => '0');
     signal uart_marker_seen : boolean := false;
     signal dtb_probe_seen : boolean := false;
     signal dtb_probe_addr : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_write_seen : boolean := false;
+    signal dmem_write_addr : std_logic_vector(63 downto 0) := (others => '0');
     signal done : boolean := false;
 begin
     u_cpu : entity work.simple_rv64gc_core
@@ -258,11 +288,7 @@ begin
 
     clk <= not clk after CLK_PERIOD / 2 when not done else '0';
 
-    imem_data <= mem(mem_index(imem_addr))(31 downto 0)
-        when mem_index(imem_addr) < MEM_WORDS and imem_addr(2) = '0'
-        else mem(mem_index(imem_addr))(63 downto 32)
-        when mem_index(imem_addr) < MEM_WORDS
-        else x"00000013";
+    imem_data <= fetch_imem_word(mem, imem_addr);
 
     process(clk)
         variable word_idx : integer;
@@ -284,6 +310,8 @@ begin
                     uart_marker_seen <= true;
                 end if;
             elsif dmem_we = '1' then
+                dmem_write_seen <= true;
+                dmem_write_addr <= dmem_addr;
                 word_idx := mem_index(dmem_addr);
                 if word_idx < MEM_WORDS then
                     current_word := mem(word_idx);
@@ -353,6 +381,9 @@ begin
         report "HALT_SEEN: " & std_logic'image(halt);
         report "TRAP_SEEN: " & std_logic'image(trap);
         report "PC_LOW32: " & integer'image(word32_to_report_int(debug_pc(31 downto 0)));
+        report "PC_HEX32: " & hex32(debug_pc(31 downto 0));
+        report "DMEM_WRITE_SEEN: " & boolean'image(dmem_write_seen);
+        report "DMEM_WRITE_ADDR_HEX32: " & hex32(dmem_write_addr(31 downto 0));
         if (halt = '1' or trap = '1') and
             mem(mem_index(MAGIC_ADDR_BITS)) = PROOF_MAGIC_EXPECTED and
             mem(mem_index(DONE_ADDR_BITS)) = PROOF_DONE_EXPECTED and

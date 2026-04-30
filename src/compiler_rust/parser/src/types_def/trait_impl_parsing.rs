@@ -335,13 +335,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parse methods only (legacy)
-    #[allow(dead_code)]
-    fn parse_indented_methods(&mut self) -> Result<Vec<FunctionDef>, ParseError> {
-        let (_, methods) = self.parse_indented_impl_body()?;
-        Ok(methods)
-    }
-
     // === Trait body parsing ===
 
     /// Parse trait body: associated types and methods
@@ -519,13 +512,6 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse trait methods in an indented block (can be abstract or have default impl)
-    /// Legacy function for backwards compatibility
-    #[allow(dead_code)]
-    fn parse_indented_trait_methods(&mut self) -> Result<Vec<FunctionDef>, ParseError> {
-        let (_, methods) = self.parse_indented_trait_body()?;
-        Ok(methods)
-    }
-
     /// Parse a single trait method (can be abstract or have default implementation)
     /// Abstract: `fn foo(self) -> i64` (ends with newline)
     /// Default:  `fn foo(self) -> i64:\n    return 0`

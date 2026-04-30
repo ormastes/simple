@@ -118,7 +118,7 @@ pub struct Decorator {
 /// FR-DRIVER-0004: `named_args` preserves `name = value` pairs from the
 /// source. The existing `args` field keeps every positional *and* named
 /// arg as a flat `Expr` list for backward-compat with pre-FR-0004
-/// consumers (`@allow(lint)`, `@layout(...)`, `@concurrency_mode(...)`).
+/// consumers (lint suppressions, `@layout(...)`, `@concurrency_mode(...)`).
 /// Named args surface as `Expr::Identifier(name)` in `args` so legacy code
 /// that does `if let Expr::Identifier(x) = arg` keeps seeing the arg name,
 /// while new code (FR-DRIVER-0004 `.drv_manifest` section writer) reads

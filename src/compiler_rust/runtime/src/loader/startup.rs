@@ -55,18 +55,15 @@ impl From<std::io::Error> for StartupError {
 /// A loaded settlement ready for execution.
 pub struct LoadedSettlement {
     /// Executable memory for code
-    #[allow(dead_code)]
-    code_mem: ExecutableMemory,
+    _code_mem: ExecutableMemory,
     /// Executable memory for data (read-write)
-    #[allow(dead_code)]
-    data_mem: ExecutableMemory,
+    _data_mem: ExecutableMemory,
     /// Function table
     func_table: FunctionTable,
     /// Global table
     global_table: GlobalTable,
     /// Native library manager
-    #[allow(dead_code)]
-    native_libs: NativeLibManager,
+    _native_libs: NativeLibManager,
     /// Entry point function pointer
     entry_fn: Option<*const u8>,
     /// Memory allocator reference
@@ -331,11 +328,11 @@ impl StartupLoader {
 
         debug!("Settlement loaded successfully");
         Ok(LoadedSettlement {
-            code_mem,
-            data_mem,
+            _code_mem: code_mem,
+            _data_mem: data_mem,
             func_table,
             global_table,
-            native_libs,
+            _native_libs: native_libs,
             entry_fn,
             _allocator: self.allocator.clone(),
         })

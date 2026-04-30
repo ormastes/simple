@@ -79,6 +79,8 @@ const RADIX_PASS_BITS: usize = 8;
 const RADIX_BUCKETS: usize = 1 << RADIX_PASS_BITS;
 const AVX2_I64_RADIX_MIN_LEN: usize = usize::MAX;
 const AVX2_F64_RADIX_MIN_LEN: usize = usize::MAX;
+const NEON_I64_RADIX_MIN_LEN: usize = usize::MAX;
+const NEON_F64_RADIX_MIN_LEN: usize = usize::MAX;
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

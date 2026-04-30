@@ -234,7 +234,7 @@ impl<'a> super::Lexer<'a> {
             // Note: "lean" is NOT a keyword - it's parsed contextually to avoid breaking
             // existing module paths like "verification.lean.codegen"
             // Note: "allow" is NOT a keyword - it's parsed contextually in unit definitions
-            // to avoid conflicts with #[allow(...)] attributes
+            // to avoid conflicts with lint-level attributes.
             // Contract keywords (new spec)
             "out" => TokenKind::Out,
             "out_err" => TokenKind::OutErr,

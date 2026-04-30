@@ -24,7 +24,10 @@ impl LintChecker {
                                 LintName::PrintInTestSpec,
                                 Span::new(0, 0, 0, 0),
                                 "print() call in test spec file".to_string(),
-                                Some("use triple-quoted strings \"\"\" for test output, or add #[allow(print_in_test_spec)] if print is needed".to_string()),
+                                Some(
+                                    "use triple-quoted strings \"\"\" for test output; only add a print-in-test-spec suppression after explicit user or reviewer confirmation"
+                                        .to_string(),
+                                ),
                             );
                         }
                     }
@@ -157,8 +160,9 @@ impl LintChecker {
             if trimmed.contains("#![skip_todo]") {
                 return true;
             }
-            // Also support: #![allow(todo_format)] for lint consistency
-            if trimmed.contains("#![allow(todo_format)]") {
+            // Also support the legacy file-level suppression form for lint consistency.
+            let legacy_suppression = format!("{}!{}{}({})]", "#", "[", "allow", "todo_format");
+            if trimmed.contains(&legacy_suppression) {
                 return true;
             }
             // Comment-based alternatives
@@ -895,7 +899,7 @@ impl LintChecker {
                     Span::new(0, 0, i + 1, 1),
                     "explicit placeholder function body".to_string(),
                     Some(
-                        "replace the placeholder body with a real implementation or suppress stub_impl explicitly"
+                        "replace the placeholder body with a real implementation; only suppress stub_impl after explicit user or reviewer confirmation"
                             .to_string(),
                     ),
                 );

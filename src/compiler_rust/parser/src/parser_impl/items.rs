@@ -298,7 +298,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Skip docstrings between attributes and declaration (e.g., @allow(...) """doc""" fn ...)
+        // Skip docstrings between attributes and declaration.
         while matches!(&self.current.kind, TokenKind::String(_) | TokenKind::DocComment(_)) {
             self.advance();
             while self.check(&TokenKind::Newline) {
@@ -445,7 +445,6 @@ impl<'a> Parser<'a> {
             | TokenKind::Var
             | TokenKind::Val
             | TokenKind::Trait
-            | TokenKind::Mixin
             | TokenKind::From
             | TokenKind::Import
             | TokenKind::Const

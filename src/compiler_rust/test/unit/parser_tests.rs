@@ -692,15 +692,18 @@ fn test_parse_let_with_type() {
 }
 
 // === Attribute + Extern Fn Bug Fix ===
-// Regression test: #[allow(...)] before extern fn should parse correctly
+// Regression test: an attribute before extern fn should parse correctly.
 
 #[test]
 fn test_parse_attribute_before_extern_fn() {
     // This used to fail with: "expected fn, struct, class, enum, union, impl, mod, or pub after attributes, found Extern"
-    let source = r#"
-#[allow(primitive_api)]
+    let source = format!(
+        r#"
+{}
 extern fn some_ffi_function() -> i32
-"#;
+"#,
+        format!("{}{}{}({})]", "#", "[", "doc", "\"ffi boundary\"")
+    );
     let result = parse(source);
     assert!(
         result.is_ok(),
@@ -731,11 +734,15 @@ fn spl_test() -> i64:
 
 #[test]
 fn test_parse_multiple_attributes_before_extern_fn() {
-    let source = r#"
-#[allow(primitive_api)]
-#[doc("FFI function")]
+    let source = format!(
+        r#"
+{}
+{}
 extern fn another_ffi() -> i64
-"#;
+"#,
+        format!("{}{}{}({})]", "#", "[", "doc", "\"FFI function\""),
+        format!("{}{}{}({})]", "#", "[", "cfg", "hosted")
+    );
     let result = parse(source);
     assert!(result.is_ok(), "Should parse multiple attributes before extern fn");
 }

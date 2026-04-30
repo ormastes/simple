@@ -1,0 +1,233 @@
+use compress.types.{CompressionOptions, CompressionError}
+use compress.utilities.{write_u16_be, write_u32_le, read_u32_le, crc32_bytes}
+
+val XZ_HEADER_MAGIC: [u8] = [0xFDu8, 0x37u8, 0x7Au8, 0x58u8, 0x5Au8, 0x00u8]
+val XZ_FOOTER_MAGIC_0: u8 = 0x59u8
+val XZ_FOOTER_MAGIC_1: u8 = 0x5Au8
+val XZ_CHECK_CRC32: u8 = 0x01u8
+
+fn _vli_encode(value: u64) -> [u8]:
+    var out: [u8] = []
+    var v = value
+    while true:
+        var b = (v & 0x7Fu64).to_u8()
+        v = v >> 7u64
+        if v != 0u64:
+            b = b | 0x80u8
+        out.push(b)
+        if v == 0u64:
+            break
+    out
+
+fn _vli_decode(data: [u8], start: i64) -> Result<(u64, i64), CompressionError>:
+    var value: u64 = 0u64
+    var shift: u64 = 0u64
+    var pos = start
+    while true:
+        if pos >= data.len():
+            return Err(CompressionError.TruncatedInput("xz vli"))
+        val b = data[pos]
+        value = value | ((b & 0x7Fu8).to_u64() << shift)
+        pos = pos + 1
+        if (b & 0x80u8) == 0u8:
+            return Ok((value, pos))
+        shift = shift + 7u64
+        if shift > 63u64:
+            return Err(CompressionError.CorruptStream("xz vli too large"))
+    Err(CompressionError.CorruptStream("xz vli"))
+
+fn _lzma2_props_for_level(level: i64) -> u8:
+    if level <= 1:
+        0x0Au8
+    elif level <= 3:
+        0x10u8
+    elif level <= 6:
+        0x16u8
+    else:
+        0x18u8
+
+fn lzma2_compress_xz(input: [u8], options: CompressionOptions) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < XZ_HEADER_MAGIC.len():
+        out.push(XZ_HEADER_MAGIC[i])
+        i = i + 1
+    val stream_flags: [u8] = [0x00u8, XZ_CHECK_CRC32]
+    out.push(stream_flags[0])
+    out.push(stream_flags[1])
+    out = write_u32_le(out, crc32_bytes(stream_flags))
+
+    var block_header_body: [u8] = [0x00u8]
+    val filter_id = _vli_encode(0x21u64)
+    i = 0
+    while i < filter_id.len():
+        block_header_body.push(filter_id[i])
+        i = i + 1
+    val props_size = _vli_encode(1u64)
+    i = 0
+    while i < props_size.len():
+        block_header_body.push(props_size[i])
+        i = i + 1
+    block_header_body.push(_lzma2_props_for_level(options.level.value))
+    while (block_header_body.len() + 1) % 4 != 0:
+        block_header_body.push(0x00u8)
+    val total_block_header_size = 1 + block_header_body.len() + 4
+    val block_header_size = (total_block_header_size / 4).to_u8() - 1u8
+    val block_header_start = out.len()
+    out.push(block_header_size)
+    i = 0
+    while i < block_header_body.len():
+        out.push(block_header_body[i])
+        i = i + 1
+    val header_crc = crc32_bytes(out.slice(block_header_start, out.len()))
+    out = write_u32_le(out, header_crc)
+
+    val block_start = out.len()
+    var compressed_data_len = 0
+    var pos = 0
+    while pos < input.len():
+        val chunk_len = if input.len() - pos > 65536: 65536 else: input.len() - pos
+        val control = if pos == 0: 0x01u8 else: 0x02u8
+        out.push(control)
+        out = write_u16_be(out, (chunk_len - 1).to_u16())
+        compressed_data_len = compressed_data_len + 3
+        i = 0
+        while i < chunk_len:
+            out.push(input[pos + i])
+            i = i + 1
+        pos = pos + chunk_len
+        compressed_data_len = compressed_data_len + chunk_len
+    out.push(0x00u8)
+    compressed_data_len = compressed_data_len + 1
+    while (out.len() - block_start) % 4 != 0:
+        out.push(0x00u8)
+    out = write_u32_le(out, crc32_bytes(input))
+
+    val block_end = out.len()
+    val unpadded_size = (total_block_header_size + compressed_data_len + 4).to_u64()
+    val uncompressed_size = input.len().to_u64()
+
+    val index_start = out.len()
+    out.push(0x00u8)
+    val record_count = _vli_encode(1u64)
+    i = 0
+    while i < record_count.len():
+        out.push(record_count[i])
+        i = i + 1
+    val up_vli = _vli_encode(unpadded_size)
+    i = 0
+    while i < up_vli.len():
+        out.push(up_vli[i])
+        i = i + 1
+    val uc_vli = _vli_encode(uncompressed_size)
+    i = 0
+    while i < uc_vli.len():
+        out.push(uc_vli[i])
+        i = i + 1
+    while (out.len() - index_start) % 4 != 0:
+        out.push(0x00u8)
+    val index_crc = crc32_bytes(out.slice(index_start, out.len()))
+    out = write_u32_le(out, index_crc)
+    val index_size = out.len() - index_start
+
+    val backward_size = (index_size / 4) - 1
+    val footer_fields: [u8] = [
+        (backward_size & 0xFF).to_u8(),
+        ((backward_size >> 8) & 0xFF).to_u8(),
+        ((backward_size >> 16) & 0xFF).to_u8(),
+        ((backward_size >> 24) & 0xFF).to_u8(),
+        stream_flags[0],
+        stream_flags[1]
+    ]
+    out = write_u32_le(out, crc32_bytes(footer_fields))
+    i = 0
+    while i < footer_fields.len():
+        out.push(footer_fields[i])
+        i = i + 1
+    out.push(XZ_FOOTER_MAGIC_0)
+    out.push(XZ_FOOTER_MAGIC_1)
+    out
+
+fn lzma2_decompress_xz(input: [u8]) -> Result<[u8], CompressionError>:
+    if input.len() < 24:
+        return Err(CompressionError.TruncatedInput("xz stream"))
+    var i = 0
+    while i < XZ_HEADER_MAGIC.len():
+        if input[i] != XZ_HEADER_MAGIC[i]:
+            return Err(CompressionError.InvalidHeader("xz header magic"))
+        i = i + 1
+    val stream_flags: [u8] = [input[6], input[7]]
+    val header_crc_res = read_u32_le(input, 8)
+    if header_crc_res.is_err():
+        return Err(header_crc_res.unwrap_err())
+    if header_crc_res.unwrap() != crc32_bytes(stream_flags):
+        return Err(CompressionError.ChecksumMismatch("xz header crc32"))
+    if stream_flags[1] != XZ_CHECK_CRC32:
+        return Err(CompressionError.UnsupportedFeature("only xz crc32 check is supported"))
+    val footer_pos = input.len() - 12
+    if input[footer_pos + 10] != XZ_FOOTER_MAGIC_0 or input[footer_pos + 11] != XZ_FOOTER_MAGIC_1:
+        return Err(CompressionError.InvalidHeader("xz footer magic"))
+    val backward_size = input[footer_pos + 4].to_i64() |
+        (input[footer_pos + 5].to_i64() << 8) |
+        (input[footer_pos + 6].to_i64() << 16) |
+        (input[footer_pos + 7].to_i64() << 24)
+    val index_size = (backward_size + 1) * 4
+    val index_start = footer_pos - index_size
+    if index_start <= 0:
+        return Err(CompressionError.CorruptStream("xz index size"))
+    val header_size = (input[12].to_i64() + 1) * 4
+    val block_header_end = 12 + header_size
+    val block_header_crc_res = read_u32_le(input, block_header_end - 4)
+    if block_header_crc_res.is_err():
+        return Err(block_header_crc_res.unwrap_err())
+    val block_header_crc = crc32_bytes(input.slice(12, block_header_end - 4))
+    if block_header_crc_res.unwrap() != block_header_crc:
+        return Err(CompressionError.ChecksumMismatch("xz block header crc32"))
+    var data_pos = block_header_end
+    var block_payload_end = index_start - 4
+    if block_payload_end < data_pos:
+        return Err(CompressionError.CorruptStream("xz block payload range"))
+    val check_crc_res = read_u32_le(input, index_start - 4)
+    if check_crc_res.is_err():
+        return Err(check_crc_res.unwrap_err())
+    var out: [u8] = []
+    while data_pos < block_payload_end:
+        val control = input[data_pos]
+        data_pos = data_pos + 1
+        if control == 0x00u8:
+            break
+        if control != 0x01u8 and control != 0x02u8:
+            return Err(CompressionError.UnsupportedFeature("compressed lzma2 chunks are not supported"))
+        if data_pos + 2 > block_payload_end:
+            return Err(CompressionError.TruncatedInput("lzma2 chunk size"))
+        val size = ((input[data_pos].to_i64() << 8) | input[data_pos + 1].to_i64()) + 1
+        data_pos = data_pos + 2
+        if data_pos + size > block_payload_end:
+            return Err(CompressionError.TruncatedInput("lzma2 uncompressed chunk"))
+        i = 0
+        while i < size:
+            out.push(input[data_pos + i])
+            i = i + 1
+        data_pos = data_pos + size
+    while data_pos < block_payload_end and input[data_pos] == 0x00u8:
+        data_pos = data_pos + 1
+    if check_crc_res.unwrap() != crc32_bytes(out):
+        return Err(CompressionError.ChecksumMismatch("xz block crc32"))
+    if input[index_start] != 0x00u8:
+        return Err(CompressionError.CorruptStream("xz index marker"))
+    val record_count_res = _vli_decode(input, index_start + 1)
+    if record_count_res.is_err():
+        return Err(record_count_res.unwrap_err())
+    if record_count_res.unwrap().0 != 1u64:
+        return Err(CompressionError.UnsupportedFeature("only one xz block is supported"))
+    var pos = record_count_res.unwrap().1
+    val up_res = _vli_decode(input, pos)
+    if up_res.is_err():
+        return Err(up_res.unwrap_err())
+    pos = up_res.unwrap().1
+    val uc_res = _vli_decode(input, pos)
+    if uc_res.is_err():
+        return Err(uc_res.unwrap_err())
+    if uc_res.unwrap().0 != out.len().to_u64():
+        return Err(CompressionError.CorruptStream("xz index uncompressed size"))
+    Ok(out)

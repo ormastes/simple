@@ -166,9 +166,9 @@ impl ProjectContext {
         let mut lint_config = LintConfig::new();
         if let Some(lint_table) = toml.get("lint").and_then(|v| v.as_table()) {
             for (lint_name, level_value) in lint_table {
-                if let Some(lint) = LintName::from_str(lint_name) {
+                if let Some(lint) = LintName::parse(lint_name) {
                     if let Some(level_str) = level_value.as_str() {
-                        if let Some(level) = LintLevel::from_str(level_str) {
+                        if let Some(level) = LintLevel::parse(level_str) {
                             lint_config.set_level(lint, level);
                         }
                     }

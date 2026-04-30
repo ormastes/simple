@@ -20,6 +20,9 @@ fn check_export_outside_init(source: text, file: text) -> [EasyFix]:
     if file.ends_with("__init__.spl"):
         return []
 
+    if _is_forwarding_pub_use_shim(source):
+        return []
+
     for_each_line(source, \ctx:
         var line_fixes: [EasyFix] = []
 
@@ -42,6 +45,48 @@ fn check_export_outside_init(source: text, file: text) -> [EasyFix]:
 
         line_fixes
     )
+
+fn _is_forwarding_pub_use_shim(source: text) -> bool:
+    """Detect narrow forwarding facade files made only of imports/re-exports."""
+    var saw_reexport = false
+    var continuation_depth = 0
+
+    for line in source.split("\n"):
+        val trimmed = line.trim()
+
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        if continuation_depth > 0:
+            continuation_depth = continuation_depth + _brace_delta(trimmed)
+            continue
+
+        if trimmed.starts_with("pub use "):
+            saw_reexport = true
+            continuation_depth = continuation_depth + _brace_delta(trimmed)
+            continue
+
+        if trimmed.starts_with("use "):
+            continuation_depth = continuation_depth + _brace_delta(trimmed)
+            continue
+
+        if trimmed.starts_with("export "):
+            saw_reexport = true
+            continuation_depth = continuation_depth + _brace_delta(trimmed)
+            continue
+
+        return false
+
+    saw_reexport and continuation_depth == 0
+
+fn _brace_delta(line: text) -> int:
+    var delta = 0
+    for ch in line.chars():
+        if ch == "{":
+            delta = delta + 1
+        if ch == "}":
+            delta = delta - 1
+    delta
 
 # ============================================================================
 # Rule: init_boundary_violation
