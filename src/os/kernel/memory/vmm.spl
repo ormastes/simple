@@ -28,7 +28,7 @@ use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.types.vmspace_types.{
     VmArea, ProcessVmSpace,
     VMA_ANON, VMA_FILE, VMA_SHARED,
-    VMA_EXEC, VMA_COW
+    VMA_EXEC
 }
 use os.kernel.boot.mmio.{mmio_read8, mmio_read64, mmio_write64}
 use os.kernel.memory.pmm.{PhysMemManager}
@@ -58,6 +58,7 @@ val PTE_ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 val IDENTITY_MAP_END: u64 = 0x100000000    # 4GB
 val VMM_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
 val VMM_MAX_VMAS: u64 = 256
+val VMM_VMA_COW: u32 = 8
 
 @cfg(x86_64)
 val VMM_KERNEL_SPACE_START: u64 = 0xFFFF800000000000
@@ -1509,7 +1510,7 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
     1. Allocates a new PML4 via `vmm_cow_clone_pages` (existing helper),
        which copies user-half entries with PTE_WRITABLE cleared in both
        parent and child.
-    2. Clones the parent's VMA list, marking every VMA with VMA_COW.
+    2. Clones the parent's VMA list, marking every VMA with VMM_VMA_COW.
     3. Bumps the PMM ref count for every page present in the parent PT.
        (Refcount increment is on the full PML4 walk; a per-VMA pmm_ref_page
        call is a TODO because the PT walk needs the HHDM helper.)
@@ -1526,13 +1527,13 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
     )
     g_next_as_id = g_next_as_id + 1
 
-    # Clone VMA list, setting VMA_COW on all writable VMAs
+    # Clone VMA list, setting VMM_VMA_COW on all writable VMAs
     var i: i32 = 0
     while (i as u64) < parent_space.vma_count:
         val src = parent_space.areas[i]
         var child_flags = src.flags
         if (src.flags & 2) != 0:
-            child_flags = child_flags | VMA_COW
+            child_flags = child_flags | VMM_VMA_COW
         val cloned = VmArea(
             start: src.start,
             len: src.len,
@@ -1546,7 +1547,7 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
 
         # Also mark parent VMA as COW so the parent faults on next write
         if (src.flags & 2) != 0:
-            var parent_flags = src.flags | VMA_COW
+            var parent_flags = src.flags | VMM_VMA_COW
             parent_space.areas[i] = VmArea(
                 start: src.start,
                 len: src.len,
@@ -1569,16 +1570,16 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
 fn vmm_handle_cow_fault(space: ProcessVmSpace, fault_vaddr: u64) -> i32:
     """Handle a COW write fault at `fault_vaddr` in `space`.
 
-    1. Confirm the faulting address is in a VMA with VMA_COW set.
+    1. Confirm the faulting address is in a VMA with VMM_VMA_COW set.
     2. Allocate a fresh physical page.
     3. Copy the old page contents (read the original via HHDM).
     4. Map the new page as RW in the faulting address space.
-    5. Clear VMA_COW + set VMA_WRITE on the VMA (now private).
+    5. Clear VMM_VMA_COW + set VMA_WRITE on the VMA (now private).
     Returns 0 on success, -EINVAL if not a COW fault, -ENOMEM if no pages.
     """
     val area_opt = vma_find(space, fault_vaddr)
     if val Some(area) = area_opt:
-        if (area.flags & VMA_COW) == 0:
+        if (area.flags & VMM_VMA_COW) == 0:
             return -22  # -EINVAL — not a COW mapping
 
         # Allocate replacement page
@@ -1619,7 +1620,7 @@ fn vmm_handle_cow_fault(space: ProcessVmSpace, fault_vaddr: u64) -> i32:
         while (i as u64) < space.vma_count:
             val a = space.areas[i]
             if (fault_vaddr >= a.start) and (fault_vaddr < (a.start + a.len)):
-                val new_flags = (a.flags & ~VMA_COW) | 2
+                val new_flags = (a.flags & ~VMM_VMA_COW) | 2
                 space.areas[i] = VmArea(
                     start: a.start,
                     len: a.len,

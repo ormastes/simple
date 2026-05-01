@@ -6,7 +6,7 @@
 # FDs 0-2 are reserved for stdin/stdout/stderr (serial on baremetal).
 
 use os.posix.errno.{ENOENT, ENOSYS, EMFILE}
-use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_get_type, fd_flags, fd_ports, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
+use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_get_type, fd_get_status_flags, fd_get_backend_handle, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
 use os.posix.async_io_rw.{sync_read, sync_write}
 use os.posix.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
 use os.posix.socket_compat.{posix_close_socket}
@@ -213,10 +213,10 @@ fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactByt
     val idx: u64 = fd as u64
     if fd_io_read_route(fd_get_type(fd)) != FD_IO_ROUTE_FILE:
         return _posix_pread_exact_error(-9)
-    if _fd_io_is_write_only(fd_flags[idx]):
+    if _fd_io_is_write_only(fd_get_status_flags(fd)):
         return _posix_pread_exact_error(-9)
 
-    val synthetic = _posix_pread_exact_synthetic(handle: fd_ports[idx], offset: offset, len: len)
+    val synthetic = _posix_pread_exact_synthetic(handle: fd_get_backend_handle(fd), offset: offset, len: len)
     if synthetic != nil:
         return synthetic.unwrap()
 
@@ -316,7 +316,7 @@ fn posix_close(fd: i32) -> i32:
 
     # Send VFS_CLOSE for file FDs
     if route == FD_IO_ROUTE_FILE:
-        val vfs_handle = fd_ports[idx]
+        val vfs_handle = fd_get_backend_handle(fd)
         var payload: [u8] = []
         _push_u32(payload, VFS_CLOSE)
         _push_u64(payload, vfs_handle)
@@ -360,7 +360,7 @@ fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
         fd_set_offset(fd, (fd_get_offset(fd) as i64 + offset) as u64)
     elif whence == SEEK_END:
         # Query VFS for file size
-        val vfs_handle = fd_ports[idx]
+        val vfs_handle = fd_get_backend_handle(fd)
         var payload: [u8] = []
         _push_u32(payload, 5)  # VFS_STAT
         _push_u64(payload, vfs_handle)
