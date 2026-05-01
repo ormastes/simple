@@ -169,6 +169,11 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     return ENCODE_PTR(array);
 }
 
+RuntimeValue rt_array_new_with_cap(int64_t cap)
+{
+    return rt_array_new((RuntimeValue)cap);
+}
+
 int8_t rt_array_push(RuntimeValue array_value, RuntimeValue item)
 {
     if (!IS_HEAP(array_value)) return 0;
@@ -222,9 +227,45 @@ RuntimeValue rt_tuple_set(RuntimeValue tuple, RuntimeValue index, RuntimeValue i
     return rt_array_set(tuple, index, item);
 }
 
+RuntimeValue rt_string_replace(RuntimeValue str, RuntimeValue old_val, RuntimeValue new_val)
+{
+    if (!IS_HEAP(str) || !IS_HEAP(old_val) || !IS_HEAP(new_val)) return NIL_VALUE;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    RuntimeString *o = (RuntimeString *)DECODE_PTR(old_val);
+    RuntimeString *n = (RuntimeString *)DECODE_PTR(new_val);
+    if (!s || !o || !n || s->hdr.type != HEAP_STRING || o->hdr.type != HEAP_STRING || n->hdr.type != HEAP_STRING) {
+        return NIL_VALUE;
+    }
+    if (o->len == 0 || o->len > s->len) return str;
+
+    for (uint32_t i = 0; i <= s->len - o->len; i++) {
+        uint32_t j = 0;
+        while (j < o->len && s->data[i + j] == o->data[j]) j++;
+        if (j != o->len) continue;
+
+        uint32_t out_len = s->len - o->len + n->len;
+        RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + out_len + 1U);
+        if (!out) return str;
+        out->hdr.type = HEAP_STRING;
+        out->hdr.size = (uint32_t)(sizeof(RuntimeString) + out_len + 1U);
+        out->len = out_len;
+        for (uint32_t k = 0; k < i; k++) out->data[k] = s->data[k];
+        for (uint32_t k = 0; k < n->len; k++) out->data[i + k] = n->data[k];
+        for (uint32_t k = i + o->len; k < s->len; k++) out->data[i + n->len + (k - i - o->len)] = s->data[k];
+        out->data[out_len] = 0;
+        return ENCODE_PTR(out);
+    }
+    return str;
+}
+
 uint8_t rt_mmio_read_u8(uint64_t addr)
 {
     return *(volatile uint8_t *)(uintptr_t)addr;
+}
+
+RuntimeValue rt_volatile_read_u8(RuntimeValue addr)
+{
+    return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(uint64_t)addr;
 }
 
 uint16_t rt_mmio_read_u16(uint64_t addr)

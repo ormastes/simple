@@ -16,6 +16,8 @@ Current target: repo-native generated RTL evidence for both RV32 and RV64 Linux 
 - Generated RV32 and RV64 GHDL PASS does not yet equal full Linux/userspace boot PASS for repo-native generated RTL.
 - The current repo-native RV64 script no longer uses external `bbl`; it builds and runs the local `ghdl_boot_info_entry` payload instead.
 - Generated lanes now emit `*.debug.json` sidecars beside the VHDL/source bundle; those sidecars are the canonical machine-readable debug contract for lint/static-analysis, while the existing VHDL/source-map comments remain the human-readable review surface.
+- In that sidecar, `reportMarkers` are failure/debug-context telemetry for trap edges, halt edges, heartbeats, progress reports, and similar forensic context.
+- In that sidecar, `runnerSuccessMarkers` are the canonical machine-readable summary of top-level runner PASS markers for each generated acceptance testbench.
 - Board-level synth/program/UART orchestration for `MLK-S02-100T` now lives at `scripts/mlk_s02_100t_generated_linux.shs`, with per-arch output contracts emitted in `board_linux_boot_products.sdn`.
 
 ## Commands

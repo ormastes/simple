@@ -17,6 +17,46 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    fn enum_variant_payload_type_for_method_receiver(&self, ty: TypeId, variant_name: &str) -> Option<TypeId> {
+        let registry = self.type_registry?;
+        match registry.get(ty) {
+            Some(HirType::Enum { variants, .. }) => variants.iter().find_map(|(name, payload)| {
+                if name == variant_name {
+                    payload.as_ref().and_then(|fields| fields.first()).copied()
+                } else {
+                    None
+                }
+            }),
+            Some(HirType::Pointer { inner, .. }) if *inner != ty => {
+                self.enum_variant_payload_type_for_method_receiver(*inner, variant_name)
+            }
+            _ => None,
+        }
+    }
+
+    fn enum_has_variant_for_method_receiver(&self, ty: TypeId, variant_name: &str) -> bool {
+        let registry = match self.type_registry {
+            Some(registry) => registry,
+            None => return false,
+        };
+        match registry.get(ty) {
+            Some(HirType::Enum { variants, .. }) => variants.iter().any(|(name, _)| name == variant_name),
+            Some(HirType::Pointer { inner, .. }) if *inner != ty => {
+                self.enum_has_variant_for_method_receiver(*inner, variant_name)
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn enum_variant_discriminant(variant_name: &str) -> i64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        variant_name.hash(&mut hasher);
+        (hasher.finish() & 0xFFFF_FFFF) as i64
+    }
+
     pub(super) fn lower_method_call_expr(
         &mut self,
         receiver: &HirExpr,
@@ -26,14 +66,57 @@ impl<'a> MirLowerer<'a> {
     ) -> MirLowerResult<VReg> {
         let receiver_local_ty: Option<TypeId> = self.recover_receiver_type(receiver);
 
-        // Result/Option-style enum unwrap should lower through the direct enum
-        // payload builtin path, not a synthesized `Type.unwrap` method symbol.
-        if method == "unwrap" && args.is_empty() {
-            if let Some(payload_ty) = self
-                .enum_payload_type_for_method_receiver(receiver.ty)
-                .or_else(|| receiver_local_ty.and_then(|ty| self.enum_payload_type_for_method_receiver(ty)))
-            {
-                return self.lower_builtin_call_expr("rt_enum_payload", std::slice::from_ref(receiver), payload_ty);
+        if args.is_empty() {
+            let effective_ty = receiver_local_ty.unwrap_or(receiver.ty);
+            match method {
+                "unwrap" => {
+                    if let Some(payload_ty) = self
+                        .enum_payload_type_for_method_receiver(receiver.ty)
+                        .or_else(|| self.enum_payload_type_for_method_receiver(effective_ty))
+                    {
+                        return self
+                            .lower_builtin_call_expr("rt_enum_payload", std::slice::from_ref(receiver), payload_ty);
+                    }
+                }
+                "unwrap_err" => {
+                    if let Some(payload_ty) = self
+                        .enum_variant_payload_type_for_method_receiver(receiver.ty, "Err")
+                        .or_else(|| self.enum_variant_payload_type_for_method_receiver(effective_ty, "Err"))
+                    {
+                        return self
+                            .lower_builtin_call_expr("rt_enum_payload", std::slice::from_ref(receiver), payload_ty);
+                    }
+                }
+                "is_some" => {
+                    if self.enum_has_variant_for_method_receiver(receiver.ty, "Some")
+                        || self.enum_has_variant_for_method_receiver(effective_ty, "Some")
+                    {
+                        return self
+                            .lower_builtin_call_expr("rt_is_some", std::slice::from_ref(receiver), TypeId::BOOL);
+                    }
+                }
+                "is_none" => {
+                    if self.enum_has_variant_for_method_receiver(receiver.ty, "None")
+                        || self.enum_has_variant_for_method_receiver(effective_ty, "None")
+                    {
+                        return self
+                            .lower_builtin_call_expr("rt_is_none", std::slice::from_ref(receiver), TypeId::BOOL);
+                    }
+                }
+                "is_ok" | "is_err" => {
+                    let variant_name = if method == "is_ok" { "Ok" } else { "Err" };
+                    if self.enum_has_variant_for_method_receiver(receiver.ty, variant_name)
+                        || self.enum_has_variant_for_method_receiver(effective_ty, variant_name)
+                    {
+                        let expected = HirExpr {
+                            kind: crate::hir::HirExprKind::Integer(Self::enum_variant_discriminant(variant_name)),
+                            ty: TypeId::I64,
+                        };
+                        let args = [receiver.clone(), expected];
+                        return self.lower_builtin_call_expr("rt_enum_check_discriminant", &args, TypeId::BOOL);
+                    }
+                }
+                _ => {}
             }
         }
 

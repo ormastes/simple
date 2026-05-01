@@ -2,6 +2,7 @@
 # RISC-V RTL debuggability lint for generated-core bundle artifacts.
 
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use hardware.riscv_common.pkg.riscv_generated_core_pkg.GeneratedCoreShellContract
 
 pub struct RiscvRtlDebugLintWarning:
     code: text
@@ -23,7 +24,7 @@ pub fn lint_riscv_rtl_debuggability(source: text, path: text) -> [RiscvRtlDebugL
 
     val sidecar = _compact_json(file_read(sidecar_path))
     if not _sidecar_has_required_shape(sidecar):
-        warnings.push(_warn("RTLDBG001", "ERROR", path, "debug sidecar is malformed or missing required keys", "write schemaVersion, laneId, proofLane, xlen, debugOutputs, sourceMap, observability, reportMarkers, and runnerTestbenches"))
+        warnings.push(_warn("RTLDBG001", "ERROR", path, "debug sidecar is malformed or missing required keys", "write schemaVersion, laneId, proofLane, xlen, acceptanceMarkers, debugOutputs, sourceMap, observability, reportMarkers, runnerSuccessMarkers, and runnerTestbenches"))
         return warnings
 
     val proof_lane = _extract_vhdl_header_value(source, "-- proof-lane: ", " shell=")
@@ -83,10 +84,31 @@ pub fn lint_riscv_rtl_debuggability(source: text, path: text) -> [RiscvRtlDebugL
         val text = file_read(runner_path)
         runner_text = runner_text + "\n" + text
         val pass_marker = _extract_runner_pass_marker(sidecar, runner_file)
+        val success_marker = _extract_runner_success_marker(sidecar, runner_file)
+        if pass_marker == "" or success_marker != pass_marker:
+            warnings.push(_warn("RTLDBG003", "ERROR", path, "runnerSuccessMarkers disagrees with runnerTestbenches for {runner_file}", "mirror every runnerTestbenches[*].passMarker under runnerSuccessMarkers[file]"))
+            continue
         if pass_marker != "" and text.contains("report \"{pass_marker}\""):
             present_pass_markers = present_pass_markers + 1
     if present_pass_markers < runner_files.len():
         warnings.push(_warn("RTLDBG102", "WARNING", path, "one or more runner testbenches are missing their declared PASS marker", "keep runnerTestbenches[file].passMarker aligned with emitted report strings"))
+    val acceptance_markers = _extract_json_text_array(sidecar, "acceptanceMarkers")
+    val contract_acceptance_markers = _expected_acceptance_markers(proof_lane)
+    if contract_acceptance_markers.len() > 0 and not _same_marker_set(acceptance_markers, contract_acceptance_markers):
+        warnings.push(_warn("RTLDBG003", "ERROR", path, "sidecar acceptanceMarkers disagree with the proof-lane debug contract", "keep acceptanceMarkers aligned with GeneratedCoreShellContract.acceptance_markers() for the emitted proofLane"))
+    val products_manifest_path = "{_parent_dir(_parent_dir(_parent_dir(path)))}/board_linux_boot_products.sdn"
+    val lane_id = _extract_json_string(sidecar, "laneId")
+    if file_exists(products_manifest_path):
+        val products_manifest = file_read(products_manifest_path)
+        val product_block = _extract_product_block_for_lane(products_manifest, lane_id)
+        if product_block == "":
+            warnings.push(_warn("RTLDBG003", "ERROR", path, "board boot products manifest is missing the generated lane entry for {lane_id}", "emit a per-lane [[product]] block so acceptanceMarkers are corroborated by generated boot outputs"))
+        else:
+            val expected_markers = _extract_manifest_text_value(product_block, "expected_markers")
+            if expected_markers == "":
+                warnings.push(_warn("RTLDBG003", "ERROR", path, "board boot products manifest is missing expected_markers for {lane_id}", "emit expected_markers in the per-lane boot products manifest"))
+            elif not _same_marker_set(acceptance_markers, _split_marker_text(expected_markers)):
+                warnings.push(_warn("RTLDBG003", "ERROR", path, "sidecar acceptanceMarkers disagree with the generated boot products manifest for {lane_id}", "keep acceptanceMarkers aligned with emitted expected_markers in board_linux_boot_products.sdn"))
     var present_report_markers = 0
     for marker in report_markers:
         if runner_text.contains(marker):
@@ -125,10 +147,12 @@ fn _sidecar_has_required_shape(sidecar: text) -> bool:
         sidecar.contains("\"laneId\":") and
         sidecar.contains("\"proofLane\":") and
         sidecar.contains("\"xlen\":") and
+        sidecar.contains("\"acceptanceMarkers\":") and
         sidecar.contains("\"debugOutputs\":") and
         sidecar.contains("\"sourceMap\":") and
         sidecar.contains("\"observability\":") and
         sidecar.contains("\"reportMarkers\":") and
+        sidecar.contains("\"runnerSuccessMarkers\":") and
         sidecar.contains("\"runnerTestbenches\":")
     has_all
 
@@ -204,15 +228,63 @@ fn _extract_runner_testbench_files(sidecar: text) -> [text]:
     files
 
 fn _extract_runner_pass_marker(sidecar: text, file_name: text) -> text:
-    val needle = "\"file\":\"{file_name}\",\"passMarker\":\""
-    val start = sidecar.find(needle)
+    val file_needle = "\"file\":\"{file_name}\""
+    val file_start = sidecar.find(file_needle)
+    if file_start < 0:
+        return ""
+    val tail = sidecar.slice(file_start + file_needle.len())
+    val marker_needle = "\"passMarker\":\""
+    val start = tail.find(marker_needle)
     if start < 0:
         return ""
-    val tail = sidecar.slice(start + needle.len())
-    val end = tail.find("\"")
+    val marker_tail = tail.slice(start + marker_needle.len())
+    val end = marker_tail.find("\"")
     if end < 0:
         return ""
-    tail.slice(0, end)
+    marker_tail.slice(0, end)
+
+fn _extract_runner_success_marker(sidecar: text, file_name: text) -> text:
+    val object_start = sidecar.find("\"runnerSuccessMarkers\":{")
+    if object_start < 0:
+        return ""
+    val tail = sidecar.slice(object_start + "\"runnerSuccessMarkers\":{".len())
+    val object_end = tail.find("},\"runnerTestbenches\":")
+    if object_end < 0:
+        return ""
+    val object_text = tail.slice(0, object_end)
+    val file_needle = "\"{file_name}\":\""
+    val start = object_text.find(file_needle)
+    if start < 0:
+        return ""
+    val marker_tail = object_text.slice(start + file_needle.len())
+    val end = marker_tail.find("\"")
+    if end < 0:
+        return ""
+    marker_tail.slice(0, end)
+
+fn _extract_product_block_for_lane(products_manifest: text, lane_id: text) -> text:
+    val blocks = products_manifest.split("[[product]]")
+    for block in blocks:
+        if _extract_manifest_text_value(block, "lane_id") == lane_id:
+            return block
+    ""
+
+fn _extract_manifest_text_value(source: text, key: text) -> text:
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if not trimmed.starts_with(key):
+            continue
+        val tail = trimmed.slice(key.len()).trim()
+        if not tail.starts_with("="):
+            continue
+        var value = tail.slice(1).trim()
+        if value.starts_with("\""):
+            value = value.slice(1)
+        if value.ends_with("\""):
+            value = value.slice(0, value.len() - 1)
+        return value
+    ""
 
 fn _count_substring(source: text, needle: text) -> i64:
     if needle == "":
@@ -260,6 +332,39 @@ fn _compact_json(source: text) -> text:
         elif ch != " " and ch != "\n" and ch != "\r" and ch != "\t":
             out = out + ch
     out
+
+fn _expected_acceptance_markers(proof_lane: text) -> [text]:
+    if proof_lane == "generated_rv32_linux":
+        return GeneratedCoreShellContract.rv32_linux().acceptance_markers()
+    if proof_lane == "generated_rv64_linux":
+        return GeneratedCoreShellContract.rv64_linux().acceptance_markers()
+    []
+
+fn _split_marker_text(source: text) -> [text]:
+    var markers: [text] = []
+    if source.trim() == "":
+        return markers
+    val parts = source.split("|")
+    for part in parts:
+        val marker = part.trim()
+        if marker != "":
+            markers.push(marker)
+    markers
+
+fn _same_marker_set(left: [text], right: [text]) -> bool:
+    if left.len() != right.len():
+        return false
+    for marker in left:
+        if _count_text(left, marker) != _count_text(right, marker):
+            return false
+    true
+
+fn _count_text(values: [text], needle: text) -> i64:
+    var count = 0
+    for value in values:
+        if value == needle:
+            count = count + 1
+    count
 
 fn _source_map_contains(sidecar: text, signal: text, slice_text: text) -> bool:
     val signal_idx = sidecar.find("\"signal\":\"{signal}\"")

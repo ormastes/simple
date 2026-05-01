@@ -180,6 +180,11 @@ pub(crate) fn mangle_mir(
             for inst in &mut block.instructions {
                 match inst {
                     MirInst::Call { target, .. } => {
+                        let mut canonical_name = target.name().to_string();
+                        canonicalize_equivalent_dot_name(&mut canonical_name, &known_mangled);
+                        if canonical_name != target.name() {
+                            *target = target.with_name(canonical_name);
+                        }
                         let name = target.name().to_string();
                         if is_runtime_or_builtin(&name) {
                             continue;
@@ -238,11 +243,6 @@ pub(crate) fn mangle_mir(
                                 &mut unresolved_count,
                             );
                         }
-                        let mut canonical_name = target.name().to_string();
-                        canonicalize_equivalent_dot_name(&mut canonical_name, &known_mangled);
-                        if canonical_name != target.name() {
-                            *target = target.with_name(canonical_name);
-                        }
                     }
                     MirInst::InterpCall { func_name, .. } => {
                         if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
@@ -275,6 +275,7 @@ pub(crate) fn mangle_mir(
                         }
                     }
                     MirInst::MethodCallStatic { func_name, .. } => {
+                        canonicalize_equivalent_dot_name(func_name, &known_mangled);
                         if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
                             continue;
                         }
@@ -320,7 +321,6 @@ pub(crate) fn mangle_mir(
                                 suffix_index,
                             );
                         }
-                        canonicalize_equivalent_dot_name(func_name, &known_mangled);
                     }
                     _ => {}
                 }

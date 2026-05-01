@@ -143,6 +143,15 @@ impl LlvmEmitter<'_> {
         func_name.rsplit('.').next().unwrap_or(func_name)
     }
 
+    fn enum_variant_discriminant(variant_name: &str) -> i64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        variant_name.hash(&mut hasher);
+        (hasher.finish() & 0xFFFF_FFFF) as i64
+    }
+
     fn runtime_method_name(method: &str) -> Option<&'static str> {
         match method {
             "len" => Some("rt_len"),
@@ -388,6 +397,28 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // =========================================================================
     fn emit_call(&mut self, dest: &Option<VReg>, target: &CallTarget, args: &[VReg]) -> Result<(), String> {
         let func_name = target.name();
+        let method = Self::method_leaf_name(func_name);
+
+        if matches!(method, "unwrap" | "unwrap_err") && args.len() == 1 {
+            let recv = self.get(args[0])?;
+            let result = self.call_runtime("rt_enum_payload", &[recv])?;
+            if let Some(d) = dest {
+                self.set(*d, result);
+            }
+            return Ok(());
+        }
+
+        if matches!(method, "is_ok" | "is_err") && args.len() == 1 {
+            let recv = self.get(args[0])?;
+            let variant = if method == "is_ok" { "Ok" } else { "Err" };
+            let disc = self.i64_const(Self::enum_variant_discriminant(variant));
+            let result = self.call_runtime("rt_enum_check_discriminant", &[recv, disc])?;
+            if let Some(d) = dest {
+                self.set(*d, result);
+            }
+            return Ok(());
+        }
+
         let i64_type = self.backend.runtime_int_type();
 
         let called_func = self.module.get_function(func_name).unwrap_or_else(|| {

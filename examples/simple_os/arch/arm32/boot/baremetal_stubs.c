@@ -1387,8 +1387,8 @@ RuntimeValue rt_arm_virtio_blk_read_sector_direct(RuntimeValue lba_val)
 
 RuntimeValue rt_arm_virtio_blk_read_prefix(RuntimeValue first_lba_val, RuntimeValue size_val)
 {
-    uint32_t first_lba = arm32_scalar_arg(first_lba_val);
-    uint32_t size = arm32_scalar_arg(size_val);
+    uint32_t first_lba = (uint32_t)first_lba_val;
+    uint32_t size = (uint32_t)size_val;
     if (size == 0U || size > 0x100000U) return rt_array_new(64);
     size_t alloc_size = sizeof(RuntimeArray) + (size_t)size * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
@@ -1454,7 +1454,7 @@ static uint32_t arm32_array_byte_at_raw_index(RuntimeValue arr, uint32_t idx)
 
 RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val)
 {
-    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint32_t idx = (uint32_t)idx_val;
     return (RuntimeValue)arm32_array_byte_at_raw_index(arr, idx);
 }
 
@@ -1473,7 +1473,7 @@ RuntimeValue rt_arm_array_len_u32(RuntimeValue arr)
 
 RuntimeValue rt_arm_array_get_u16_le(RuntimeValue arr, RuntimeValue idx_val)
 {
-    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint32_t idx = (uint32_t)idx_val;
     uint32_t lo = arm32_array_byte_at_raw_index(arr, idx);
     uint32_t hi = arm32_array_byte_at_raw_index(arr, idx + 1U);
     return (RuntimeValue)(lo | (hi << 8));
@@ -1481,7 +1481,7 @@ RuntimeValue rt_arm_array_get_u16_le(RuntimeValue arr, RuntimeValue idx_val)
 
 RuntimeValue rt_arm_array_get_u32_le(RuntimeValue arr, RuntimeValue idx_val)
 {
-    uint32_t idx = IS_INT(idx_val) ? (uint32_t)DECODE_INT(idx_val) : (uint32_t)idx_val;
+    uint32_t idx = (uint32_t)idx_val;
     uint32_t b0 = arm32_array_byte_at_raw_index(arr, idx);
     uint32_t b1 = arm32_array_byte_at_raw_index(arr, idx + 1U);
     uint32_t b2 = arm32_array_byte_at_raw_index(arr, idx + 2U);
@@ -1492,13 +1492,14 @@ RuntimeValue rt_arm_array_get_u32_le(RuntimeValue arr, RuntimeValue idx_val)
 RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_val, RuntimeValue max_count_val)
 {
     RuntimeArray *dst = (RuntimeArray *)(IS_HEAP(dst_val) ? DECODE_PTR(dst_val) : (void *)(uintptr_t)(uint32_t)dst_val);
-    RuntimeArray *src = (RuntimeArray *)(IS_HEAP(src_val) ? DECODE_PTR(src_val) : (void *)(uintptr_t)(uint32_t)src_val);
-    if (!dst || !src || dst->hdr.type != HEAP_ARRAY || src->hdr.type != HEAP_ARRAY) return 0;
-    uint32_t max_count = IS_INT(max_count_val) ? (uint32_t)DECODE_INT(max_count_val) : (uint32_t)max_count_val;
+    if (!dst || dst->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
+    uint32_t max_count = (uint32_t)max_count_val;
+    uint32_t src_len = (uint32_t)rt_arm_array_len_u32(src_val);
     uint32_t appended = 0;
-    while (appended < max_count && appended < src->len) {
+    while (appended < max_count && appended < src_len) {
         if (dst->len >= dst->cap) break;
-        dst->items[dst->len++] = src->items[appended++];
+        dst->items[dst->len++] = ENCODE_INT(arm32_array_byte_at_raw_index(src_val, appended));
+        appended++;
     }
     return (RuntimeValue)appended;
 }

@@ -25,6 +25,8 @@ Generated helper contract:
 Generated artifact details:
 
 - The emitted package/core VHDL carries a source-map header in comment form, and each lane now emits a sibling `*.debug.json` sidecar as the canonical machine-readable debug metadata artifact for lint and proof tooling.
+- Within that sidecar contract, `reportMarkers` are failure/debug-context telemetry markers for trap, halt, heartbeat, progress, and similar post-failure or in-flight diagnostics; they are not the top-level proof-success contract.
+- The sidecar `runnerSuccessMarkers` field is the canonical machine-readable summary of top-level runner PASS markers and should be the first success surface consumed by lint/proof tooling before any deeper testbench log inspection.
 - The emitted bundle is the only authoritative source for generated-core runner RTL; generated runners consume `GEN_DIR/.../rv32/rtl` and `GEN_DIR/.../rv64/rtl` rather than `examples/09_embedded/fpga_riscv/rtl`.
 - Source-map lines cover instruction `opcode`, `rd`, `funct3`, `rs1`, `rs2`, `funct7` plus branch/store/I-type/upper/execute-control/execute-datapath/branch-datapath/control-flow-datapath/jump overlay fields.
 - Source-map lines now also cover the dispatch-class and trap-halt opcode overlays.

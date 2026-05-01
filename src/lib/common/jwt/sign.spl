@@ -2,305 +2,413 @@
 @allow(unnamed_duplicate_typed_args)
 # JWT Signing Module
 #
-# This module handles HMAC-SHA256/384/512 signing operations.
+# Implements JWT signing and verification for HS256, RS256, ES256.
+# Primary public API: jwt_sign_hs256, jwt_sign_rs256, jwt_sign_es256,
+#                     jwt_verify_hs256, jwt_verify_rs256, jwt_verify_es256.
+#
+# NOTE: HMAC-SHA256 is implemented inline (prefixed _jwt_sha256_* / _jwt_hmac_*)
+# to avoid namespace collision between std.common.crypto.sha256 (sha256_process_block)
+# and os.crypto.sha256 (sha256_process_block with different arity), which are both
+# transitively loaded when os.crypto.rsa is imported.
+
+use std.common.jwt.encode.{base64url_encode, base64url_decode, base64url_encode_bytes, base64url_decode_to_bytes}
+use os.crypto.rsa.{rsa_sha256_sign, rsa_sha256_verify, rsa_sig_valid}
+use os.crypto.ecdsa_p256.{ecdsa_p256_sign_fixed, ecdsa_p256_verify_fixed}
 
 # ============================================================================
-# SHA-256 Implementation
+# Inline SHA-256 implementation (private, prefixed _jwt_sha256_*)
+# Avoids name collision with os.crypto.sha256 which has different function arities.
 # ============================================================================
 
-# SHA-256 constants (first 32 bits of fractional parts of cube roots of first 64 primes)
-fn sha256_k() -> list:
-    return [
-        1116352408, 1899447441, 3049323471, 3921009573,
-        961987163, 1508970993, 2453635748, 2870763221,
-        3624381080, 310598401, 607225278, 1426881987,
-        1925078388, 2162078206, 2614888103, 3248222580,
-        3835390401, 4022224774, 264347078, 604807628,
-        770255983, 1249150122, 1555081692, 1996064986,
-        2554220882, 2821834349, 2952996808, 3210313671,
-        3336571891, 3584528711, 113926993, 338241895,
-        666307205, 773529912, 1294757372, 1396182291,
-        1695183700, 1986661051, 2177026350, 2456956037,
-        2730485921, 2820302411, 3259730800, 3345764771,
-        3516065817, 3600352804, 4094571909, 275423344,
-        430227734, 506948616, 659060556, 883997877,
-        958139571, 1322822218, 1537002063, 1747873779,
-        1955562222, 2024104815, 2227730452, 2361852424,
-        2428436474, 2756734187, 3204031479, 3329325298
+fn _jwt_sha256_k() -> list:
+    [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
     ]
 
-# Right rotate 32-bit integer
-fn rotr32(n: i64, b: i64) -> i64:
-    var mask = 4294967295  # 0xFFFFFFFF
-    var n_masked = n & mask
-    var shifted = n_masked >> b
-    var rotated = n_masked << (32 - b)
-    var result = (shifted | rotated) & mask
-    return result
+fn _jwt_sha256_init_h() -> list:
+    [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ]
 
-# Real SHA-256 hash per FIPS 180-4.
-# Returns hex-encoded digest string (64 hex characters).
-fn sha256_hash(message: text) -> text:
-    var mask32 = 4294967295  # 0xFFFFFFFF
+fn _jwt_rotr32(x: i64, n: i64) -> i64:
+    val mask = 0xFFFFFFFF
+    ((x >> n) | ((x << (32 - n)) & mask)) & mask
 
-    # Initial hash values
-    var h0 = 1779033703
-    var h1 = 3144134277
-    var h2 = 1013904242
-    var h3 = 2773480762
-    var h4 = 1359893119
-    var h5 = 2600822924
-    var h6 = 528734635
-    var h7 = 1541459225
+fn _jwt_sha256_ch(e: i64, f: i64, g: i64) -> i64:
+    (e & f) ^ ((e ^ 0xFFFFFFFF) & g) & 0xFFFFFFFF
 
-    # Round constants
-    var kk = sha256_k()
+fn _jwt_sha256_maj(a: i64, b: i64, c: i64) -> i64:
+    (a & b) ^ (a & c) ^ (b & c)
 
-    # Convert message to bytes
-    var msg_len = message.length()
-    var bytes = []
-    var bi = 0
-    while bi < msg_len:
-        bytes.push(message.char_code_at(bi))
-        bi = bi + 1
+fn _jwt_sha256_sigma0(a: i64) -> i64:
+    _jwt_rotr32(a, 2) ^ _jwt_rotr32(a, 13) ^ _jwt_rotr32(a, 22)
 
-    # Pre-processing: pad to 512-bit blocks
-    var data_len = bytes.length()
-    bytes.push(128)  # 0x80
+fn _jwt_sha256_sigma1(e: i64) -> i64:
+    _jwt_rotr32(e, 6) ^ _jwt_rotr32(e, 11) ^ _jwt_rotr32(e, 25)
 
-    var pad_target = data_len + 1
-    var pad_zeros = 56 - (pad_target % 64)
-    if pad_zeros < 0:
-        pad_zeros = pad_zeros + 64
-    var pz = 0
-    while pz < pad_zeros:
-        bytes.push(0)
-        pz = pz + 1
+fn _jwt_sha256_gamma0(x: i64) -> i64:
+    _jwt_rotr32(x, 7) ^ _jwt_rotr32(x, 18) ^ (x >> 3)
 
-    # Append 64-bit big-endian length in bits
-    var bit_length = data_len * 8
-    bytes.push(0)
-    bytes.push(0)
-    bytes.push(0)
-    bytes.push(0)
-    bytes.push((bit_length >> 24) & 255)
-    bytes.push((bit_length >> 16) & 255)
-    bytes.push((bit_length >> 8) & 255)
-    bytes.push(bit_length & 255)
+fn _jwt_sha256_gamma1(x: i64) -> i64:
+    _jwt_rotr32(x, 17) ^ _jwt_rotr32(x, 19) ^ (x >> 10)
 
-    # Process each 64-byte block
-    var total_len = bytes.length()
-    var block_off = 0
-    while block_off < total_len:
-        # Build message schedule w[0..63]
-        var w = []
-        var wi = 0
-        while wi < 16:
-            var base = block_off + (wi * 4)
-            var b0 = bytes[base] & 255
-            var b1_v = bytes[base + 1] & 255
-            var b2_v = bytes[base + 2] & 255
-            var b3_v = bytes[base + 3] & 255
-            var word = ((b0 << 24) | (b1_v << 16) | (b2_v << 8) | b3_v) & mask32
-            w.push(word)
-            wi = wi + 1
-
-        wi = 16
-        while wi < 64:
-            var w15 = w[wi - 15] & mask32
-            var w2 = w[wi - 2] & mask32
-            var r7 = ((w15 >> 7) | (w15 << 25)) & mask32
-            var r18 = ((w15 >> 18) | (w15 << 14)) & mask32
-            var sh3 = (w15 >> 3) & mask32
-            var s0 = (r7 ^ r18 ^ sh3) & mask32
-            var r17 = ((w2 >> 17) | (w2 << 15)) & mask32
-            var r19 = ((w2 >> 19) | (w2 << 13)) & mask32
-            var sh10 = (w2 >> 10) & mask32
-            var s1 = (r17 ^ r19 ^ sh10) & mask32
-            var new_w = (w[wi - 16] + s0 + w[wi - 7] + s1) & mask32
-            w.push(new_w)
-            wi = wi + 1
-
-        var a = h0
-        var b = h1
-        var c = h2
-        var d = h3
-        var e = h4
-        var f = h5
-        var g = h6
-        var hv = h7
-
-        var ri = 0
-        while ri < 64:
-            var ea = e & mask32
-            var er6 = ((ea >> 6) | (ea << 26)) & mask32
-            var er11 = ((ea >> 11) | (ea << 21)) & mask32
-            var er25 = ((ea >> 25) | (ea << 7)) & mask32
-            var big_s1 = (er6 ^ er11 ^ er25) & mask32
-            var ch = ((ea & (f & mask32)) ^ ((~ea & mask32) & (g & mask32))) & mask32
-            var temp1 = (hv + big_s1 + ch + kk[ri] + w[ri]) & mask32
-
-            var aa = a & mask32
-            var ar2 = ((aa >> 2) | (aa << 30)) & mask32
-            var ar13 = ((aa >> 13) | (aa << 19)) & mask32
-            var ar22 = ((aa >> 22) | (aa << 10)) & mask32
-            var big_s0 = (ar2 ^ ar13 ^ ar22) & mask32
-            var maj = ((aa & (b & mask32)) ^ (aa & (c & mask32)) ^ ((b & mask32) & (c & mask32))) & mask32
-            var temp2 = (big_s0 + maj) & mask32
-
-            hv = g
-            g = f
-            f = e
-            e = (d + temp1) & mask32
-            d = c
-            c = b
-            b = a
-            a = (temp1 + temp2) & mask32
-            ri = ri + 1
-
-        h0 = (h0 + a) & mask32
-        h1 = (h1 + b) & mask32
-        h2 = (h2 + c) & mask32
-        h3 = (h3 + d) & mask32
-        h4 = (h4 + e) & mask32
-        h5 = (h5 + f) & mask32
-        h6 = (h6 + g) & mask32
-        h7 = (h7 + hv) & mask32
-
-        block_off = block_off + 64
-
-    # Convert hash words to hex string
-    var hex_chars = "0123456789abcdef"
-    var result = ""
-    var h_vals = [h0, h1, h2, h3, h4, h5, h6, h7]
-    var hi = 0
-    while hi < 8:
-        var word = h_vals[hi] & mask32
-        var nibble_idx = 7
-        while nibble_idx >= 0:
-            var nibble = (word >> (nibble_idx * 4)) & 15
-            var hex_char = hex_chars.substring(nibble, nibble + 1)
-            result = result + hex_char
-            nibble_idx = nibble_idx - 1
-        hi = hi + 1
-
-    return result
-
-# ============================================================================
-# HMAC-SHA Implementation
-# ============================================================================
-
-# HMAC-SHA256 (simplified)
-fn hmac_sha256(key: text, message: text) -> text:
-    # Simplified HMAC implementation for demonstration
-    # In production, use proper HMAC-SHA256 via FFI
-
-    var block_size = 64  # SHA-256 block size
-    var key_len = key.length()
-
-    # Adjust key length
-    var actual_key = key
-    if key_len > block_size:
-        actual_key = sha256_hash(key)
-
-    # Pad key to block size
-    var padded_key = actual_key
-    while padded_key.length() < block_size:
-        padded_key = padded_key + "\x00"
-
-    # Create inner and outer padded keys
-    var i_pad = ""
-    var o_pad = ""
+fn _jwt_sha256_pad(bytes: list) -> list:
+    val orig_len = bytes.len()
+    val bit_len = orig_len * 8
+    var padded = []
     var i = 0
+    while i < orig_len:
+        padded.push(bytes.get(i))
+        i = i + 1
+    padded.push(0x80)
+    while (padded.len() % 64) != 56:
+        padded.push(0)
+    # Append bit length as 64-bit big-endian (we only handle 32-bit lengths)
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push((bit_len >> 24) & 0xFF)
+    padded.push((bit_len >> 16) & 0xFF)
+    padded.push((bit_len >> 8) & 0xFF)
+    padded.push(bit_len & 0xFF)
+    padded
 
-    while i < block_size:
-        var k_byte = 0
-        if i < padded_key.length():
-            k_byte = padded_key.char_code_at(i)
-
-        var i_byte = k_byte ^ 54  # 0x36
-        i_pad = i_pad + text.from_char_code(i_byte)
-
-        var o_byte = k_byte ^ 92  # 0x5c
-        o_pad = o_pad + text.from_char_code(o_byte)
-
+fn _jwt_sha256_compress(h_state: list, block: list) -> list:
+    val k = _jwt_sha256_k()
+    var w = []
+    var i = 0
+    while i < 16:
+        val idx = i * 4
+        val word = ((block.get(idx) & 0xFF) << 24) | ((block.get(idx + 1) & 0xFF) << 16) | ((block.get(idx + 2) & 0xFF) << 8) | (block.get(idx + 3) & 0xFF)
+        w.push(word)
+        i = i + 1
+    while i < 64:
+        val s0 = _jwt_sha256_gamma0(w.get(i - 15))
+        val s1 = _jwt_sha256_gamma1(w.get(i - 2))
+        val word = (w.get(i - 16) + s0 + w.get(i - 7) + s1) & 0xFFFFFFFF
+        w.push(word)
         i = i + 1
 
-    # HMAC = H(o_pad || H(i_pad || message))
-    var inner_msg = i_pad + message
-    var inner_hash = sha256_hash(inner_msg)
-    var outer_msg = o_pad + inner_hash
-    var result = sha256_hash(outer_msg)
+    var a = h_state.get(0)
+    var b = h_state.get(1)
+    var c = h_state.get(2)
+    var d = h_state.get(3)
+    var e = h_state.get(4)
+    var f = h_state.get(5)
+    var g = h_state.get(6)
+    var hh = h_state.get(7)
 
-    return result
+    i = 0
+    while i < 64:
+        val t1 = (hh + _jwt_sha256_sigma1(e) + _jwt_sha256_ch(e, f, g) + k.get(i) + w.get(i)) & 0xFFFFFFFF
+        val t2 = (_jwt_sha256_sigma0(a) + _jwt_sha256_maj(a, b, c)) & 0xFFFFFFFF
+        hh = g
+        g = f
+        f = e
+        e = (d + t1) & 0xFFFFFFFF
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & 0xFFFFFFFF
+        i = i + 1
 
-# HMAC-SHA384 (simplified - uses SHA-256 as base for demonstration)
-fn hmac_sha384(key: text, message: text) -> text:
-    # In production, implement proper SHA-384
-    # For now, use SHA-256 with different initialization
-    var hash1 = hmac_sha256(key, message)
-    var hash2 = hmac_sha256(key + "384", message)
-    return hash1 + hash2.substring(0, 8)
+    [
+        (h_state.get(0) + a) & 0xFFFFFFFF,
+        (h_state.get(1) + b) & 0xFFFFFFFF,
+        (h_state.get(2) + c) & 0xFFFFFFFF,
+        (h_state.get(3) + d) & 0xFFFFFFFF,
+        (h_state.get(4) + e) & 0xFFFFFFFF,
+        (h_state.get(5) + f) & 0xFFFFFFFF,
+        (h_state.get(6) + g) & 0xFFFFFFFF,
+        (h_state.get(7) + hh) & 0xFFFFFFFF
+    ]
 
-# HMAC-SHA512 (simplified - uses SHA-256 as base for demonstration)
-fn hmac_sha512(key: text, message: text) -> text:
-    # In production, implement proper SHA-512
-    # For now, use SHA-256 with different initialization
-    var hash1 = hmac_sha256(key, message)
-    var hash2 = hmac_sha256(key + "512", message)
-    return hash1 + hash2
+fn _jwt_sha256_bytes(bytes: list) -> list:
+    val padded = _jwt_sha256_pad(bytes)
+    var h = _jwt_sha256_init_h()
+    var i = 0
+    while i < padded.len():
+        var block = []
+        var j = 0
+        while j < 64:
+            block.push(padded.get(i + j))
+            j = j + 1
+        h = _jwt_sha256_compress(h, block)
+        i = i + 64
+    var result = []
+    i = 0
+    while i < 8:
+        val v = h.get(i)
+        result.push((v >> 24) & 0xFF)
+        result.push((v >> 16) & 0xFF)
+        result.push((v >> 8) & 0xFF)
+        result.push(v & 0xFF)
+        i = i + 1
+    result
 
 # ============================================================================
-# Signing Functions
+# Inline HMAC-SHA256 (private, _jwt_hmac_sha256_bytes)
 # ============================================================================
 
-# Sign data with HS256
+fn _jwt_text_to_bytes(s: text) -> list:
+    var result = []
+    var i = 0
+    while i < s.length():
+        result.push(s.char_code_at(i) & 0xFF)
+        i = i + 1
+    result
+
+fn _jwt_hmac_sha256_bytes(key_bytes: list, message_bytes: list) -> list:
+    val block_size = 64
+    var k = []
+    if key_bytes.len() > block_size:
+        k = _jwt_sha256_bytes(key_bytes)
+    else:
+        var i = 0
+        while i < key_bytes.len():
+            k.push(key_bytes.get(i))
+            i = i + 1
+    while k.len() < block_size:
+        k.push(0)
+
+    var i_key_pad = []
+    var o_key_pad = []
+    var i = 0
+    while i < block_size:
+        i_key_pad.push(k.get(i) ^ 0x36)
+        o_key_pad.push(k.get(i) ^ 0x5c)
+        i = i + 1
+
+    var inner_input = []
+    i = 0
+    while i < i_key_pad.len():
+        inner_input.push(i_key_pad.get(i))
+        i = i + 1
+    i = 0
+    while i < message_bytes.len():
+        inner_input.push(message_bytes.get(i))
+        i = i + 1
+
+    val inner_hash = _jwt_sha256_bytes(inner_input)
+
+    var outer_input = []
+    i = 0
+    while i < o_key_pad.len():
+        outer_input.push(o_key_pad.get(i))
+        i = i + 1
+    i = 0
+    while i < inner_hash.len():
+        outer_input.push(inner_hash.get(i))
+        i = i + 1
+
+    _jwt_sha256_bytes(outer_input)
+
+# ============================================================================
+# Legacy text-based sign helpers (kept for backward compatibility)
+# These call the simple inline helpers below; new code uses jwt_sign_* APIs.
+# ============================================================================
+
+# Sign data with HS256 (text key, returns hex string — legacy interface)
 fn sign_hs256(data: text, secret: text) -> text:
-    return hmac_sha256(secret, data)
+    val key_bytes = _jwt_text_to_bytes(secret)
+    val msg_bytes = _jwt_text_to_bytes(data)
+    val mac = _jwt_hmac_sha256_bytes(key_bytes, msg_bytes)
+    _bytes_list_to_hex(mac)
 
-# Sign data with HS384
-fn sign_hs384(data: text, secret: text) -> text:
-    return hmac_sha384(secret, data)
-
-# Sign data with HS512
-fn sign_hs512(data: text, secret: text) -> text:
-    return hmac_sha512(secret, data)
-
-# Sign data with specified algorithm
+# Sign data with specified algorithm (legacy interface)
 fn sign_with_algorithm(data: text, secret: text, alg: text) -> text:
     if alg == "HS256":
         return sign_hs256(data, secret)
-    if alg == "HS384":
-        return sign_hs384(data, secret)
-    if alg == "HS512":
-        return sign_hs512(data, secret)
     return ""
 
-# Constant-time string comparison (prevent timing attacks)
-fn constant_time_compare(a: text, b: text) -> bool:
-    var a_len = a.length()
-    var b_len = b.length()
-
-    # Different lengths = not equal, but check entire strings anyway
-    var result = a_len == b_len
-    var max_len = a_len
-    if b_len > max_len:
-        max_len = b_len
-
+# Constant-time byte-list comparison (timing-safe)
+fn constant_time_compare_bytes(a: list, b: list) -> bool:
+    if a.len() != b.len():
+        return false
+    var acc = 0
     var i = 0
-    while i < max_len:
-        var a_char = 0
-        var b_char = 0
-
-        if i < a_len:
-            a_char = a.char_code_at(i)
-        if i < b_len:
-            b_char = b.char_code_at(i)
-
-        var equal_chars = a_char == b_char
-        if not equal_chars:
-            result = false
-
+    while i < a.len():
+        acc = acc | (a.get(i) ^ b.get(i))
         i = i + 1
+    acc == 0
 
-    return result
+# Constant-time text comparison (prevent timing attacks on JWT signatures)
+fn constant_time_compare(a: text, b: text) -> bool:
+    if a.length() != b.length():
+        return false
+    var acc = 0
+    var i = 0
+    while i < a.length():
+        acc = acc | (a.char_code_at(i) ^ b.char_code_at(i))
+        i = i + 1
+    acc == 0
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+# Convert text to [u8]
+fn _u8_list_from_text(s: text) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < s.length():
+        result.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    result
+
+# Convert list (i64 byte values) to [u8]
+fn _list_to_u8(lst: list) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < lst.len():
+        result.push(lst.get(i).to_u8())
+        i = i + 1
+    result
+
+# Convert [u8] to list (i64 byte values)
+fn _u8_to_list(arr: [u8]) -> list:
+    var result = []
+    var i = 0
+    while i < arr.len():
+        result.push(arr[i].to_i64())
+        i = i + 1
+    result
+
+# Convert list (i64 byte values) to lowercase hex string
+fn _bytes_list_to_hex(bytes: list) -> text:
+    val hex_chars = "0123456789abcdef"
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val b = bytes.get(i)
+        val hi = (b >> 4) & 15
+        val lo = b & 15
+        result = result + hex_chars.substring(hi, hi + 1)
+        result = result + hex_chars.substring(lo, lo + 1)
+        i = i + 1
+    result
+
+# ============================================================================
+# JWT Public Signing API — HS256, RS256, ES256
+# ============================================================================
+
+# Sign with HS256 using raw header/payload text and a byte list key.
+# key_list: list of i64 byte values (0..255).
+# Returns compact JWT: base64url(header).base64url(payload).base64url(sig)
+fn jwt_sign_hs256_bytes(header_json: text, payload_json: text, key_list: list) -> text:
+    val header_b64 = base64url_encode(header_json)
+    val payload_b64 = base64url_encode(payload_json)
+    val signing_input = _jwt_text_to_bytes(header_b64 + "." + payload_b64)
+    val mac = _jwt_hmac_sha256_bytes(key_list, signing_input)
+    val mac_u8 = _list_to_u8(mac)
+    val sig_b64 = base64url_encode_bytes(mac_u8)
+    header_b64 + "." + payload_b64 + "." + sig_b64
+
+# Sign with HS256 using [u8] key. Builds standard {"typ":"JWT","alg":"HS256"} header.
+fn jwt_sign_hs256(payload_json: text, key: [u8]) -> text:
+    val header_json = "{\"typ\":\"JWT\",\"alg\":\"HS256\"}"
+    val key_list = _u8_to_list(key)
+    jwt_sign_hs256_bytes(header_json, payload_json, key_list)
+
+# Verify HS256 compact JWT.
+# Returns Ok(payload_json) on success, Err(reason) on failure.
+fn jwt_verify_hs256(compact: text, key: [u8]) -> Result<text, text>:
+    var parts = compact.split(".")
+    if parts.len() != 3:
+        return Err("invalid JWT: expected 3 segments")
+    val header_b64 = parts.get(0)
+    val payload_b64 = parts.get(1)
+    val sig_b64 = parts.get(2)
+
+    val key_list = _u8_to_list(key)
+    val signing_input = _jwt_text_to_bytes(header_b64 + "." + payload_b64)
+    val mac = _jwt_hmac_sha256_bytes(key_list, signing_input)
+    val mac_u8 = _list_to_u8(mac)
+    val expected_b64 = base64url_encode_bytes(mac_u8)
+
+    if not constant_time_compare(sig_b64, expected_b64):
+        return Err("signature verification failed")
+
+    val payload_json = base64url_decode(payload_b64)
+    Ok(payload_json)
+
+# Sign with RS256 (RSA-PKCS1-SHA256).
+# pkcs8: PKCS#8 DER-encoded RSA private key bytes.
+# Returns Ok(compact JWT) or Err(reason).
+fn jwt_sign_rs256(payload_json: text, pkcs8: [u8]) -> Result<text, text>:
+    val header_json = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}"
+    val header_b64 = base64url_encode(header_json)
+    val payload_b64 = base64url_encode(payload_json)
+    val signing_input = _u8_list_from_text(header_b64 + "." + payload_b64)
+    val sig = rsa_sha256_sign(pkcs8, signing_input)
+    if not rsa_sig_valid(sig):
+        return Err("RSA signing failed: empty signature")
+    val sig_b64 = base64url_encode_bytes(sig)
+    Ok(header_b64 + "." + payload_b64 + "." + sig_b64)
+
+# Verify RS256 compact JWT.
+# spki: SPKI DER-encoded RSA public key bytes.
+# Returns Ok(payload_json) or Err(reason).
+fn jwt_verify_rs256(compact: text, spki: [u8]) -> Result<text, text>:
+    var parts = compact.split(".")
+    if parts.len() != 3:
+        return Err("invalid JWT: expected 3 segments")
+    val header_b64 = parts.get(0)
+    val payload_b64 = parts.get(1)
+    val sig_b64 = parts.get(2)
+    val signing_input = _u8_list_from_text(header_b64 + "." + payload_b64)
+    val sig = base64url_decode_to_bytes(sig_b64)
+    val valid = rsa_sha256_verify(spki, signing_input, sig)
+    if not valid:
+        return Err("RSA signature verification failed")
+    val payload_json = base64url_decode(payload_b64)
+    Ok(payload_json)
+
+# Sign with ES256 (ECDSA-P256-SHA256).
+# pkcs8: PKCS#8 DER-encoded ECDSA P-256 private key bytes.
+# Returns Ok(compact JWT) or Err(reason).
+fn jwt_sign_es256(payload_json: text, pkcs8: [u8]) -> Result<text, text>:
+    val header_json = "{\"alg\":\"ES256\",\"typ\":\"JWT\"}"
+    val header_b64 = base64url_encode(header_json)
+    val payload_b64 = base64url_encode(payload_json)
+    val signing_input = _u8_list_from_text(header_b64 + "." + payload_b64)
+    val sig = ecdsa_p256_sign_fixed(pkcs8, signing_input)
+    if sig.len() != 64:
+        return Err("ECDSA signing failed: expected 64-byte r||s")
+    val sig_b64 = base64url_encode_bytes(sig)
+    Ok(header_b64 + "." + payload_b64 + "." + sig_b64)
+
+# Verify ES256 compact JWT.
+# spki: SPKI DER-encoded ECDSA P-256 public key bytes.
+# Returns Ok(payload_json) or Err(reason).
+fn jwt_verify_es256(compact: text, spki: [u8]) -> Result<text, text>:
+    var parts = compact.split(".")
+    if parts.len() != 3:
+        return Err("invalid JWT: expected 3 segments")
+    val header_b64 = parts.get(0)
+    val payload_b64 = parts.get(1)
+    val sig_b64 = parts.get(2)
+    val signing_input = _u8_list_from_text(header_b64 + "." + payload_b64)
+    val sig = base64url_decode_to_bytes(sig_b64)
+    val valid = ecdsa_p256_verify_fixed(spki, signing_input, sig)
+    if not valid:
+        return Err("ECDSA signature verification failed")
+    val payload_json = base64url_decode(payload_b64)
+    Ok(payload_json)

@@ -43,6 +43,9 @@ struct Lzma2ChunkHeader:
     body_start: i64
     body_end: i64
 
+fn _copy_bytes_range(input: [u8], start: i64, end_idx: i64) -> [u8]:
+    append_bytes_range([], input, start, end_idx)
+
 fn _vli_encode(value: u64) -> [u8]:
     var out: [u8] = []
     var v = value
@@ -261,7 +264,7 @@ fn _encode_xz_block(input: [u8], props: u8, tier: CompressionSimdTier) -> ([u8],
     val block_header_start = block.len()
     block.push(block_header_size)
     block = append_bytes(block, block_header_body)
-    block = write_u32_le(block, crc32_bytes_for_tier(block.slice(block_header_start, block.len()), tier))
+    block = write_u32_le(block, crc32_bytes_for_tier(_copy_bytes_range(block, block_header_start, block.len()), tier))
 
     block = append_bytes(block, payload)
     while payload.len() % 4 != 0 and (block.len() - total_block_header_size) % 4 != 0:
@@ -315,7 +318,7 @@ fn _parse_block_header(input: [u8], block_start: i64, tier: CompressionSimdTier)
     val stored_crc_res = read_u32_le(input, block_start + header_size - 4)
     if stored_crc_res.is_err():
         return Err(stored_crc_res.unwrap_err())
-    val actual_crc = crc32_bytes_for_tier(input.slice(block_start, block_start + header_size - 4), tier)
+    val actual_crc = crc32_bytes_for_tier(_copy_bytes_range(input, block_start, block_start + header_size - 4), tier)
     if stored_crc_res.unwrap() != actual_crc:
         return Err(CompressionError.ChecksumMismatch("xz block header crc32"))
 
@@ -496,7 +499,7 @@ fn _parse_xz_index(input: [u8], index_start: i64, records: [XzBlockRecord], tier
     val stored_crc_res = read_u32_le(input, pos)
     if stored_crc_res.is_err():
         return Err(stored_crc_res.unwrap_err())
-    if stored_crc_res.unwrap() != crc32_bytes_for_tier(input.slice(index_start, pos), tier):
+    if stored_crc_res.unwrap() != crc32_bytes_for_tier(_copy_bytes_range(input, index_start, pos), tier):
         return Err(CompressionError.ChecksumMismatch("xz index crc32"))
     Ok(pos + 4)
 
@@ -547,7 +550,7 @@ fn _decompress_xz_stream(input: [u8], start: i64, tier: CompressionSimdTier) -> 
     val footer_crc_res = read_u32_le(input, footer_start)
     if footer_crc_res.is_err():
         return Err(footer_crc_res.unwrap_err())
-    val footer_fields = input.slice(footer_start + 4, footer_start + 10)
+    val footer_fields = _copy_bytes_range(input, footer_start + 4, footer_start + 10)
     if footer_crc_res.unwrap() != crc32_bytes_for_tier(footer_fields, tier):
         return Err(CompressionError.ChecksumMismatch("xz footer crc32"))
 
@@ -578,7 +581,7 @@ fn lzma2_compress_xz_for_tier(input: [u8], options: CompressionOptions, tier: Co
     var pos = 0
     while pos < input.len():
         val block_len = if input.len() - pos > XZ_BLOCK_MAX_UNCOMPRESSED: XZ_BLOCK_MAX_UNCOMPRESSED else: input.len() - pos
-        val encoded = _encode_xz_block(input.slice(pos, pos + block_len), props, tier)
+        val encoded = _encode_xz_block(_copy_bytes_range(input, pos, pos + block_len), props, tier)
         out = append_bytes(out, encoded.0)
         records.push(encoded.1)
         pos = pos + block_len

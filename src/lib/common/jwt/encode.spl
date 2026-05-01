@@ -134,6 +134,87 @@ fn base64url_decode(encoded: text) -> text:
 
     return base64_decode(b64)
 
+# Encode bytes ([u8]) to Base64URL (URL-safe, no padding)
+# Used for JWT second/third segment where signature is raw bytes.
+fn base64url_encode_bytes(data: [u8]) -> text:
+    var parts: [text] = []
+    var alphabet = base64url_chars()
+    var len = data.len()
+    var i = 0
+
+    while i < len:
+        var b1 = data[i].to_i64()
+        var b2 = 0
+        var b3 = 0
+
+        if i + 1 < len:
+            b2 = data[i + 1].to_i64()
+        if i + 2 < len:
+            b3 = data[i + 2].to_i64()
+
+        var idx1 = b1 >> 2
+        var idx2 = ((b1 & 3) << 4) | (b2 >> 4)
+        var idx3 = ((b2 & 15) << 2) | (b3 >> 6)
+        var idx4 = b3 & 63
+
+        parts.push(alphabet.substring(idx1, idx1 + 1))
+        parts.push(alphabet.substring(idx2, idx2 + 1))
+
+        if i + 1 < len:
+            parts.push(alphabet.substring(idx3, idx3 + 1))
+        if i + 2 < len:
+            parts.push(alphabet.substring(idx4, idx4 + 1))
+
+        i = i + 3
+
+    parts.join("")
+
+# Decode Base64URL string to bytes ([u8])
+fn base64url_decode_to_bytes(encoded: text) -> [u8]:
+    var b64 = encoded.replace("-", "+")
+    b64 = b64.replace("_", "/")
+
+    # Add padding
+    var mod = b64.length() % 4
+    if mod == 2:
+        b64 = b64 + "=="
+    if mod == 3:
+        b64 = b64 + "="
+
+    var alphabet = base64_chars()
+    var result: [u8] = []
+    var clean = b64.replace("=", "")
+    var clean_len = clean.length()
+    var i = 0
+
+    while i < clean_len:
+        var idx1 = base64_char_index(clean.substring(i, i + 1), alphabet)
+
+        if i + 1 >= clean_len:
+            break
+
+        var idx2 = base64_char_index(clean.substring(i + 1, i + 2), alphabet)
+        var byte1 = ((idx1 << 2) | (idx2 >> 4)) & 0xFF
+        result.push(byte1.to_u8())
+
+        if i + 2 < clean_len:
+            var idx3 = base64_char_index(clean.substring(i + 2, i + 3), alphabet)
+            var byte2 = (((idx2 & 15) << 4) | (idx3 >> 2)) & 0xFF
+            result.push(byte2.to_u8())
+
+        if i + 3 < clean_len:
+            var idx4 = base64_char_index(clean.substring(i + 3, i + 4), alphabet)
+            var byte3 = (((idx3 & 3) << 6) | idx4) & 0xFF
+            result.push(byte3.to_u8())
+
+        i = i + 4
+
+    result
+
+# Encode text as UTF-8 bytes then base64url — for header/payload segments
+fn base64url_encode_text(data: text) -> text:
+    base64url_encode(data)
+
 # Strip Base64 padding
 fn strip_padding(encoded: text) -> text:
     return encoded.replace("=", "")

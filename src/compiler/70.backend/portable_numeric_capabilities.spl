@@ -1,0 +1,178 @@
+# Portable numeric capability registry for scalar FP and portable SIMD.
+#
+# This module keeps the public capability surface architecture-neutral while
+# mapping target presets to backend lowering modules.
+
+use compiler.backend.target_presets.{
+    TargetPreset,
+    preset_linux_x86_64, preset_macos_arm64, preset_riscv64_linux,
+    preset_riscv32_baremetal, preset_wasm32, preset_cortex_m0,
+    preset_avr_atmega328, preset_i8086_dos
+}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct PortableNumericFeatureSelection:
+    scalar_fp: bool
+    vector_simd: bool
+    target_lowering: bool
+
+impl PortableNumericFeatureSelection:
+    static fn all_enabled() -> PortableNumericFeatureSelection:
+        PortableNumericFeatureSelection(
+            scalar_fp: true,
+            vector_simd: true,
+            target_lowering: true
+        )
+
+    static fn scalar_only() -> PortableNumericFeatureSelection:
+        PortableNumericFeatureSelection(
+            scalar_fp: true,
+            vector_simd: false,
+            target_lowering: true
+        )
+
+struct PortableNumericCapabilities:
+    has_scalar_fp: bool
+    has_vector_simd: bool
+    has_riscv_f: bool
+    has_riscv_d: bool
+    has_riscv_v: bool
+    has_avx: bool
+    has_avx2: bool
+    requires_runtime_simd_probe: bool
+
+struct PortableNumericLoweringPlan:
+    capabilities: PortableNumericCapabilities
+    selected_families: PortableNumericFeatureSelection
+    lowering_modules: [text]
+    diagnostics: [text]
+
+impl PortableNumericLoweringPlan:
+    fn lowering_modules_csv() -> text:
+        portable_numeric_join_csv(self.lowering_modules)
+
+    fn diagnostics_csv() -> text:
+        portable_numeric_join_csv(self.diagnostics)
+
+fn portable_numeric_capabilities_for_preset(preset: TargetPreset) -> PortableNumericCapabilities:
+    val is_x86_64 = preset.arch == "x86_64"
+    val is_riscv = preset.arch.starts_with("riscv32") or preset.arch.starts_with("riscv64")
+    val has_riscv_f = portable_numeric_riscv_has_f(preset)
+    val has_riscv_d = portable_numeric_riscv_has_d(preset)
+    val has_riscv_v = portable_numeric_riscv_has_v(preset)
+    val has_scalar_fp = preset.float_support or has_riscv_f or has_riscv_d
+    val has_vector_simd = is_x86_64 or has_riscv_v
+
+    PortableNumericCapabilities(
+        has_scalar_fp: has_scalar_fp,
+        has_vector_simd: has_vector_simd,
+        has_riscv_f: has_riscv_f,
+        has_riscv_d: has_riscv_d,
+        has_riscv_v: has_riscv_v,
+        has_avx: false,
+        has_avx2: false,
+        requires_runtime_simd_probe: is_x86_64
+    )
+
+fn portable_numeric_lowering_plan(
+    preset: TargetPreset,
+    selected_families: PortableNumericFeatureSelection
+) -> PortableNumericLoweringPlan:
+    val caps = portable_numeric_capabilities_for_preset(preset)
+    var modules: [text] = []
+    var diagnostics: [text] = []
+
+    if selected_families.scalar_fp:
+        if caps.has_scalar_fp:
+            modules.push("scalar_fp")
+        else:
+            diagnostics.push("scalar_fp_requested_but_target_lacks_fp")
+
+    if selected_families.vector_simd:
+        if caps.has_vector_simd:
+            modules.push("vector_simd")
+        else:
+            diagnostics.push("vector_simd_requested_but_target_lacks_vector_capability")
+
+    if selected_families.target_lowering:
+        modules.push("scalar_fallback")
+
+        if preset.arch == "x86_64":
+            modules.push("x86_avx")
+            diagnostics.push("x86_avx_requires_runtime_probe")
+        elif caps.has_riscv_v:
+            modules.push("riscv_v")
+        elif caps.has_riscv_f or caps.has_riscv_d:
+            modules.push("riscv_fd")
+
+    PortableNumericLoweringPlan(
+        capabilities: caps,
+        selected_families: selected_families,
+        lowering_modules: modules,
+        diagnostics: diagnostics
+    )
+
+fn portable_numeric_default_plan(preset: TargetPreset) -> PortableNumericLoweringPlan:
+    portable_numeric_lowering_plan(preset, PortableNumericFeatureSelection.all_enabled())
+
+fn portable_numeric_preset_for_target(target: CodegenTarget) -> TargetPreset:
+    match target:
+        case CodegenTarget.X86_64 | CodegenTarget.Host | CodegenTarget.Native | CodegenTarget.SimpleOS_X86_64:
+            preset_linux_x86_64()
+        case CodegenTarget.AArch64:
+            preset_macos_arm64()
+        case CodegenTarget.Riscv64:
+            preset_riscv64_linux()
+        case CodegenTarget.Riscv32:
+            preset_riscv32_baremetal()
+        case CodegenTarget.Wasm32 | CodegenTarget.Wasm64:
+            preset_wasm32()
+        case CodegenTarget.X86 | CodegenTarget.Arm:
+            preset_cortex_m0()
+        case CodegenTarget.Avr:
+            preset_avr_atmega328()
+        case CodegenTarget.I8086:
+            preset_i8086_dos()
+        case _:
+            preset_cortex_m0()
+
+fn portable_numeric_capabilities_for_target(target: CodegenTarget) -> PortableNumericCapabilities:
+    portable_numeric_capabilities_for_preset(portable_numeric_preset_for_target(target))
+
+fn portable_numeric_lowering_plan_for_target(
+    target: CodegenTarget,
+    selected_families: PortableNumericFeatureSelection
+) -> PortableNumericLoweringPlan:
+    portable_numeric_lowering_plan(portable_numeric_preset_for_target(target), selected_families)
+
+fn portable_numeric_default_plan_for_target(target: CodegenTarget) -> PortableNumericLoweringPlan:
+    portable_numeric_default_plan(portable_numeric_preset_for_target(target))
+
+fn portable_numeric_join_csv(items: [text]) -> text:
+    if items.len() == 0:
+        return ""
+
+    var result = items[0]
+    var index = 1
+    while index < items.len():
+        result = "{result},{items[index]}"
+        index = index + 1
+    result
+
+fn portable_numeric_riscv_has_f(preset: TargetPreset) -> bool:
+    if not (preset.arch.starts_with("riscv32") or preset.arch.starts_with("riscv64")):
+        return false
+
+    preset.float_support or preset.arch.contains("g") or preset.arch.contains("f") or preset.abi.contains("f") or preset.abi.contains("d")
+
+fn portable_numeric_riscv_has_d(preset: TargetPreset) -> bool:
+    if not (preset.arch.starts_with("riscv32") or preset.arch.starts_with("riscv64")):
+        return false
+
+    preset.arch.contains("g") or preset.arch.contains("d") or preset.abi.contains("d")
+
+fn portable_numeric_riscv_has_v(preset: TargetPreset) -> bool:
+    if not (preset.arch.starts_with("riscv32") or preset.arch.starts_with("riscv64")):
+        return false
+
+    preset.arch.contains("gcv") or preset.arch.contains("gv") or preset.arch.contains("imv") or preset.arch.ends_with("v") or preset.abi.contains("rvv")

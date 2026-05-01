@@ -2,6 +2,20 @@
 
 This task split assumes multiple spawned workers operating in parallel while preserving the pure-Simple constraint. Each worker owns code/tests in its lane, rebases frequently, and does not fork new Rust/runtime feature work.
 
+## Current Status (2026-05-01)
+
+Latest verify report (`doc/09_report/verify_common_compression_framework.md`) is STATUS=FAIL with 7 hard failures and 3 warnings. The 7 hard failures are:
+
+- `src/lib/common/compress/mod.spl:49` — façade still rejects Zstd encode levels other than `3`, dictionaries for all codecs, and `checksum=false` for XZ/LZMA2 encode.
+- `src/lib/common/compress/zstd.spl:324` — compressed-block decode still rejects non-RLE sequence tables.
+- `src/lib/common/compress/zstd.spl:704` — verification still cannot claim support for the missing FSE-compressed Huffman-weight path.
+- `src/lib/common/compress/zstd.spl:1265` — dictionary-backed Zstd frames remain explicitly unsupported on decode.
+- `src/lib/common/compress/lzma2.spl:330` — range-coded compressed LZMA2 chunks remain explicitly unsupported on decode.
+- `doc/02_requirements/feature/common_compression_framework.md:30` — REQ-030 still overstates forced-tier parity closure relative to the focused verified surface.
+- `doc/02_requirements/nfr/common_compression_framework.md:11` — NFR-011 still overstates end-to-end verification closure; repository `verify` cannot honestly report PASS for the original full-scope claims.
+
+Independent FR `static_file_compression_cache_integration_2026-05-01` IN PROGRESS (separate sstack agent).
+
 ## Shared constraints for every worker
 
 - Stay inside `.spl` implementation and test surfaces

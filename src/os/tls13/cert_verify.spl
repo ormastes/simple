@@ -1,26 +1,31 @@
 #![allow(unnamed_duplicate_typed_args)]
-# TLS 1.3 Certificate Verification — DER parse + Ed25519 + RSA-PSS signature verify
+# TLS 1.3 Certificate Verification — DER parse + Ed25519 + RSA-PSS + ECDSA-P256 signature verify
 #
 # Implements:
 #   - DER TLV helpers (tag, length, TLV, skip)
 #   - extract_ed25519_pubkey_from_cert: navigate X.509 DER to extract Ed25519 public key
-#   - extract_rsa_pubkey_spki_from_cert: navigate X.509 DER to extract RSA SPKI TLV bytes
+#   - extract_rsa_pubkey_spki_from_cert: navigate X.509 DER to extract RSA/ECDSA SPKI TLV bytes
 #   - verify_certificate_verify_msg: RFC 8446 §4.4.3 CertificateVerify verify (Ed25519 shim)
-#   - verify_certificate_verify_msg_scheme: dispatch on SignatureScheme (Ed25519 + RSA-PSS)
+#   - verify_certificate_verify_msg_scheme: dispatch on SignatureScheme (Ed25519 + RSA-PSS + ECDSA-P256)
 #   - verify_cert_signature_ed25519: verify a certificate's self/issuer signature
 #
 # Signature schemes (RFC 8446 §4.2.3):
-#   ed25519:             0x0807
-#   rsa_pss_rsae_sha256: 0x0804
-#   rsa_pss_rsae_sha384: 0x0805
-#   rsa_pss_rsae_sha512: 0x0806
+#   ed25519:                    0x0807
+#   rsa_pss_rsae_sha256:        0x0804
+#   rsa_pss_rsae_sha384:        0x0805
+#   rsa_pss_rsae_sha512:        0x0806
+#   ecdsa_secp256r1_sha256:     0x0403
+#   ecdsa_secp384r1_sha384:     0x0503  (P-384 primitive not in tree — unsupported)
+#   ecdsa_secp521r1_sha512:     0x0603  (P-521 primitive not in tree — unsupported)
 #
 # Reference: RFC 8446 §4.4.3 (CertificateVerify)
 # Reference: RFC 5280 (X.509 DER encoding)
 # Reference: RFC 8410 (Ed25519 in X.509, OID 1.3.101.112)
 # Reference: RFC 8017 (RSA-PSS)
+# Reference: RFC 5480 (ECDSA in X.509, OID 1.2.840.10045.4.3.2)
 
 use os.crypto.ed25519.{ed25519_verify}
+use os.crypto.ecdsa_p256.{ecdsa_p256_verify_fixed}
 use std.nogc_sync_mut.io.signature_ffi.{rsa_pss_sha256_verify, rsa_pss_sha384_verify, rsa_pss_sha512_verify}
 
 # Exact baremetal x86_64 freestanding builds already expose rt_ed25519_verify in
@@ -199,6 +204,172 @@ fn _is_rsa_pss_oid(data: [u8], offset: u64) -> bool:
         return false
     true
 
+fn _is_ecdsa_p256_oid(data: [u8], offset: u64) -> bool:
+    """Check for the ecdsa-with-SHA256 OID tag+value: 06 08 2A 86 48 CE 3D 04 03 02.
+
+    OID 1.2.840.10045.4.3.2 (RFC 5480 / ANSI X9.62).
+    """
+    if data[offset] != 0x06:
+        return false
+    if data[offset + 1] != 0x08:
+        return false
+    if data[offset + 2] != 0x2A:
+        return false
+    if data[offset + 3] != 0x86:
+        return false
+    if data[offset + 4] != 0x48:
+        return false
+    if data[offset + 5] != 0xCE:
+        return false
+    if data[offset + 6] != 0x3D:
+        return false
+    if data[offset + 7] != 0x04:
+        return false
+    if data[offset + 8] != 0x03:
+        return false
+    if data[offset + 9] != 0x02:
+        return false
+    true
+
+fn _ecdsa_p256_der_sig_to_fixed64(der_sig: [u8]) -> [u8]:
+    """Decode a DER-encoded ECDSA-Sig-Value SEQUENCE { r INTEGER, s INTEGER } to 64-byte r||s.
+
+    The DER blob is: 30 <len> 02 <rlen> <r bytes> 02 <slen> <s bytes>.
+    Each INTEGER may have a leading 0x00 padding byte (high-bit safety per DER).
+    Each component is stripped of the padding byte then left-padded to 32 bytes.
+    Returns empty [] on any malformed input.
+    """
+    if der_sig.len() < 8:
+        return []
+    # Outer SEQUENCE tag 0x30
+    if der_sig[0u64] != 0x30:
+        return []
+    val seq_tlv = _der_read_tlv(der_sig, 0)
+    if seq_tlv.tag != 0x30:
+        return []
+    # First INTEGER: r
+    val r_tlv = _der_read_tlv(der_sig, seq_tlv.value_offset)
+    if r_tlv.tag != 0x02:
+        return []
+    # Second INTEGER: s
+    val s_offset = seq_tlv.value_offset + r_tlv.total_length
+    val s_tlv = _der_read_tlv(der_sig, s_offset)
+    if s_tlv.tag != 0x02:
+        return []
+
+    # Extract r: strip optional leading 0x00 sign byte, left-pad to 32
+    var r_start = r_tlv.value_offset
+    var r_len = r_tlv.value_length
+    if r_len > 1 and der_sig[r_start] == 0x00:
+        r_start = r_start + 1
+        r_len = r_len - 1
+    if r_len > 32:
+        return []
+
+    # Extract s: strip optional leading 0x00 sign byte, left-pad to 32
+    var s_start = s_tlv.value_offset
+    var s_len = s_tlv.value_length
+    if s_len > 1 and der_sig[s_start] == 0x00:
+        s_start = s_start + 1
+        s_len = s_len - 1
+    if s_len > 32:
+        return []
+
+    var result: [u8] = []
+    # Left-pad r to 32 bytes
+    var pad: u64 = 32 - r_len
+    var p: u64 = 0
+    while p < pad:
+        result.push(0u8)
+        p = p + 1
+    var i: u64 = 0
+    while i < r_len:
+        result.push(der_sig[r_start + i])
+        i = i + 1
+    # Left-pad s to 32 bytes
+    pad = 32 - s_len
+    p = 0
+    while p < pad:
+        result.push(0u8)
+        p = p + 1
+    i = 0
+    while i < s_len:
+        result.push(der_sig[s_start + i])
+        i = i + 1
+    result
+
+fn _ecdsa_p256_der_sig_encode_fixed64(r32: [u8], s32: [u8]) -> [u8]:
+    """Encode a 64-byte r||s pair (32 bytes each) into DER SEQUENCE { INTEGER r, INTEGER s }.
+
+    Used in tests to produce a DER-encoded signature from a fixed64 form.
+    Prepends 0x00 if the high bit of r or s is set (DER positive integer).
+    """
+    # Build r DER INTEGER value (strip leading zeros, add 0x00 if high bit set)
+    var r_mag: [u8] = []
+    var i: u64 = 0
+    while i < 32 and r32[i] == 0:
+        i = i + 1
+    while i < 32:
+        r_mag.push(r32[i])
+        i = i + 1
+    if r_mag.len() == 0:
+        r_mag.push(0u8)
+    elif (r_mag[0u64] & 0x80) != 0:
+        var padded_r: [u8] = [0x00u8]
+        var j: u64 = 0
+        while j < r_mag.len():
+            padded_r.push(r_mag[j])
+            j = j + 1
+        r_mag = padded_r
+
+    # Build s DER INTEGER value
+    var s_mag: [u8] = []
+    i = 0
+    while i < 32 and s32[i] == 0:
+        i = i + 1
+    while i < 32:
+        s_mag.push(s32[i])
+        i = i + 1
+    if s_mag.len() == 0:
+        s_mag.push(0u8)
+    elif (s_mag[0u64] & 0x80) != 0:
+        var padded_s: [u8] = [0x00u8]
+        var j: u64 = 0
+        while j < s_mag.len():
+            padded_s.push(s_mag[j])
+            j = j + 1
+        s_mag = padded_s
+
+    # Build r INTEGER TLV: 02 <len> <mag>
+    var r_tlv_bytes: [u8] = [0x02u8]
+    r_tlv_bytes.push(r_mag.len().to_u8())
+    var j: u64 = 0
+    while j < r_mag.len():
+        r_tlv_bytes.push(r_mag[j])
+        j = j + 1
+
+    # Build s INTEGER TLV: 02 <len> <mag>
+    var s_tlv_bytes: [u8] = [0x02u8]
+    s_tlv_bytes.push(s_mag.len().to_u8())
+    j = 0
+    while j < s_mag.len():
+        s_tlv_bytes.push(s_mag[j])
+        j = j + 1
+
+    # Wrap in SEQUENCE: 30 <len> <r_tlv><s_tlv>
+    val seq_content_len = r_tlv_bytes.len() + s_tlv_bytes.len()
+    var result: [u8] = [0x30u8]
+    result.push(seq_content_len.to_u8())
+    j = 0
+    while j < r_tlv_bytes.len():
+        result.push(r_tlv_bytes[j])
+        j = j + 1
+    j = 0
+    while j < s_tlv_bytes.len():
+        result.push(s_tlv_bytes[j])
+        j = j + 1
+    result
+
 fn _oid_present_in_range(data: [u8], start: u64, end: u64, oid: [u8]) -> bool:
     """Return true when the exact tag+value OID bytes occur anywhere in [start, end)."""
     if oid.len() == 0:
@@ -224,6 +395,8 @@ fn _sig_scheme_from_algorithm_tlv(data: [u8], alg_tlv: DerTlv) -> u16:
     val end = alg_tlv.value_offset + alg_tlv.value_length
     if _is_ed25519_oid(data, start):
         return 0x0807
+    if _is_ecdsa_p256_oid(data, start):
+        return 0x0403
     if _is_rsa_pss_oid(data, start):
         val sha256_oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]
         val sha384_oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02]
@@ -336,6 +509,16 @@ fn _verify_cert_signature_with_issuer(parsed: ParsedCert, issuer_cert_der: [u8])
         if rsa_pss_sha512_verify(issuer_spki, parsed.tbs_bytes, parsed.signature):
             return CertVerifyResult.Ok
         return CertVerifyResult.Err(msg: "certificate signature invalid (rsa_pss_sha512)")
+    elif parsed.sig_scheme == 0x0403:
+        # ecdsa_secp256r1_sha256: cert chain ECDSA-P256 signature verify
+        # Cert chain signatures are DER-encoded SEQUENCE { INTEGER r, INTEGER s }
+        val issuer_spki = extract_rsa_pubkey_spki_from_cert(issuer_cert_der)
+        val fixed64 = _ecdsa_p256_der_sig_to_fixed64(parsed.signature)
+        if fixed64.len() != 64:
+            return CertVerifyResult.Err(msg: "certificate signature invalid (ecdsa_p256: DER decode failed)")
+        if ecdsa_p256_verify_fixed(issuer_spki, parsed.tbs_bytes, fixed64):
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (ecdsa_p256_sha256)")
     CertVerifyResult.Err(msg: "unsupported certificate signature algorithm")
 
 # ============================================================================
@@ -488,10 +671,13 @@ fn verify_certificate_verify_msg_scheme(pubkey: [u8], sig_scheme: u16, transcrip
       64 x 0x20 || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
 
     Supported sig_scheme values (RFC 8446 §4.2.3):
-      0x0807  ed25519              — pubkey is 32-byte raw Ed25519 key
-      0x0804  rsa_pss_rsae_sha256  — pubkey is DER SubjectPublicKeyInfo bytes
-      0x0805  rsa_pss_rsae_sha384  — pubkey is DER SubjectPublicKeyInfo bytes
-      0x0806  rsa_pss_rsae_sha512  — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0807  ed25519                   — pubkey is 32-byte raw Ed25519 key
+      0x0804  rsa_pss_rsae_sha256       — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0805  rsa_pss_rsae_sha384       — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0806  rsa_pss_rsae_sha512       — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0403  ecdsa_secp256r1_sha256    — pubkey is DER SubjectPublicKeyInfo bytes; sig is DER SEQUENCE{r,s}
+      0x0503  ecdsa_secp384r1_sha384    — unsupported (P-384 primitive not in tree)
+      0x0603  ecdsa_secp521r1_sha512    — unsupported (P-521 primitive not in tree)
 
     Args:
         pubkey:          Public key bytes (format depends on sig_scheme — see above).
@@ -583,6 +769,24 @@ fn verify_certificate_verify_msg_scheme(pubkey: [u8], sig_scheme: u16, transcrip
             CertVerifyResult.Ok
         else:
             CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha512)")
+    elif sig_scheme == 0x0403:
+        # ecdsa_secp256r1_sha256 — pubkey is DER SubjectPublicKeyInfo bytes (SPKI)
+        # sig is DER-encoded SEQUENCE { INTEGER r, INTEGER s } per RFC 8446 §4.2.3
+        val fixed64 = _ecdsa_p256_der_sig_to_fixed64(sig)
+        if fixed64.len() != 64:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_p256: DER decode failed)")
+        else:
+            val ok = ecdsa_p256_verify_fixed(pubkey, content, fixed64)
+            if ok:
+                CertVerifyResult.Ok
+            else:
+                CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
+    elif sig_scheme == 0x0503:
+        # ecdsa_secp384r1_sha384 — P-384 primitive not in tree
+        CertVerifyResult.Err(msg: "ecdsa_secp384r1_sha384 unsupported (P-384 primitive not in tree)")
+    elif sig_scheme == 0x0603:
+        # ecdsa_secp521r1_sha512 — P-521 primitive not in tree
+        CertVerifyResult.Err(msg: "ecdsa_secp521r1_sha512 unsupported (P-521 primitive not in tree)")
     else:
         CertVerifyResult.Err(msg: "unsupported signature scheme")
 

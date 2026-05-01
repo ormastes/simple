@@ -36,6 +36,33 @@ describe "RISC-V RTL debuggability lint":
         expect has_code(results, "RTLDBG001") == false
         expect has_code(results, "RTLDBG002") == false
         expect has_code(results, "RTLDBG003") == false
+        expect has_warn_code(results, "RTLDBG102") == false
+
+    it "emits RTLDBG003 when acceptanceMarkers drift from the generated boot products manifest":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_acceptance_manifest'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_acceptance_manifest")
+        expect result.is_ok() == true
+        val products_manifest_path = "/tmp/riscv_rtl_debug_lint_acceptance_manifest/board_linux_boot_products.sdn"
+        val products_manifest = read_generated_riscv_fpga_rtl_file(products_manifest_path)
+        val broken = products_manifest.replace("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"", "expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory\"")
+        expect rt_file_write_text(products_manifest_path, broken) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_acceptance_manifest/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG003") == true
+
+    it "emits RTLDBG003 when sidecar and board manifest drift together from the proof-lane contract":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_acceptance_contract'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_acceptance_contract")
+        expect result.is_ok() == true
+        val sidecar_path = "/tmp/riscv_rtl_debug_lint_acceptance_contract/rv64/rtl/simple_rv64gc_core.debug.json"
+        val sidecar = read_generated_riscv_fpga_rtl_file(sidecar_path)
+        val broken = sidecar.replace("\"acceptanceMarkers\": [\"OpenSBI\", \"Linux version\", \"OF: fdt\", \"Freeing unused kernel memory\", \"init started\"]", "\"acceptanceMarkers\": [\"OpenSBI\", \"Linux version\", \"OF: fdt\", \"Freeing unused kernel memory\", \"uart-login-prompt\"]")
+        expect rt_file_write_text(sidecar_path, broken) == true
+        val products_manifest_path = "/tmp/riscv_rtl_debug_lint_acceptance_contract/board_linux_boot_products.sdn"
+        val products_manifest = read_generated_riscv_fpga_rtl_file(products_manifest_path)
+        val broken_products = products_manifest.replace("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"", "expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|uart-login-prompt\"")
+        expect rt_file_write_text(products_manifest_path, broken_products) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_acceptance_contract/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG003") == true
 
     it "emits RTLDBG001 for malformed sidecars":
         expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_001'") == 0
@@ -99,10 +126,43 @@ describe "RISC-V RTL debuggability lint":
         expect result.is_ok() == true
         val sidecar_path = "/tmp/riscv_rtl_debug_lint_102/rv64/rtl/simple_rv64gc_core.debug.json"
         val sidecar = read_generated_riscv_fpga_rtl_file(sidecar_path)
-        val broken = sidecar.replace("\"reportMarkers\": [\"TRAP_EDGE_PC_HEX32\", \"HALT_EDGE_PC_HEX32\", \"HEARTBEAT_PC_HEX32\", \"PROGRESS_PC_HEX32\"]", "\"reportMarkers\": [\"TRAP_EDGE_PC_HEX32\"]")
+        val broken = sidecar.replace("\"reportMarkers\": [\"PASS_WORD:\", \"A0_LOW32:\", \"A1_LOW32:\", \"UART_BYTES_LOW32:\", \"PC_LOW32:\", \"DTB_PROBE_SEEN:\", \"TRAP_EDGE_PC_HEX32\", \"HALT_EDGE_PC_HEX32\", \"HEARTBEAT_PC_HEX32\", \"PROGRESS_PC_HEX32\", \"CHECK_PRIV_MODE_OK:\", \"TRAP_CAUSE_WORD:\", \"TRAP_TVAL_WORD:\", \"CAUSE_WORD:\", \"TVAL_WORD:\"]", "\"reportMarkers\": [\"TRAP_EDGE_PC_HEX32\"]")
         expect rt_file_write_text(sidecar_path, broken) == true
         val results = lint_core("/tmp/riscv_rtl_debug_lint_102/rv64/rtl/simple_rv64gc_core.vhd")
         expect has_warn_code(results, "RTLDBG102") == true
+
+    it "emits RTLDBG003 when runnerSuccessMarkers drifts from runner testbench metadata":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_runner_success_markers'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_runner_success_markers")
+        expect result.is_ok() == true
+        val sidecar_path = "/tmp/riscv_rtl_debug_lint_runner_success_markers/rv64/rtl/simple_rv64gc_core.debug.json"
+        val sidecar = read_generated_riscv_fpga_rtl_file(sidecar_path)
+        val broken = sidecar.replace("\"tb_generated_rv64_fw_jump.vhd\":\"GENERATED_RV64_FW_JUMP: PASS\"", "\"tb_generated_rv64_fw_jump.vhd\":\"BROKEN_FW_JUMP_PASS\"")
+        expect rt_file_write_text(sidecar_path, broken) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_runner_success_markers/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG003") == true
+
+    it "emits RTLDBG003 when acceptanceMarkers drift from board boot products":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_acceptance_markers'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_acceptance_markers")
+        expect result.is_ok() == true
+        val board_products_path = "/tmp/riscv_rtl_debug_lint_acceptance_markers/board_linux_boot_products.sdn"
+        val board_products = read_generated_riscv_fpga_rtl_file(board_products_path)
+        val broken = board_products.replace("Linux version|", "")
+        expect rt_file_write_text(board_products_path, broken) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_acceptance_markers/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG003") == true
+
+    it "accepts board boot products manifests with reordered acceptance markers and relaxed spacing":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_acceptance_reordered'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_acceptance_reordered")
+        expect result.is_ok() == true
+        val board_products_path = "/tmp/riscv_rtl_debug_lint_acceptance_reordered/board_linux_boot_products.sdn"
+        val board_products = read_generated_riscv_fpga_rtl_file(board_products_path)
+        val broken = board_products.replace("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"", "expected_markers    =    \"init started | Freeing unused kernel memory | OF: fdt | Linux version | OpenSBI\"")
+        expect rt_file_write_text(board_products_path, broken) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_acceptance_reordered/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG003") == false
 
     it "emits RTLDBG003 when a runner file listed in the sidecar is missing":
         expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_runner_missing'") == 0

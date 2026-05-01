@@ -17,6 +17,23 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    fn enum_variant_payload_type_for_call_receiver(&self, ty: TypeId, variant_name: &str) -> Option<TypeId> {
+        let registry = self.type_registry?;
+        match registry.get(ty) {
+            Some(HirType::Enum { variants, .. }) => variants.iter().find_map(|(name, payload)| {
+                if name == variant_name {
+                    payload.as_ref().and_then(|fields| fields.first()).copied()
+                } else {
+                    None
+                }
+            }),
+            Some(HirType::Pointer { inner, .. }) if *inner != ty => {
+                self.enum_variant_payload_type_for_call_receiver(*inner, variant_name)
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
         let mut arg_regs = Vec::new();
         for arg in args {
@@ -63,17 +80,60 @@ impl<'a> MirLowerer<'a> {
 
             // Check if this is an enum variant constructor (e.g., "Color::Blue" or "Color.Blue")
             if let Some((enum_name, variant_name)) = name.split_once("::").or_else(|| name.split_once('.')) {
-                if variant_name == "unwrap" && arg_regs.len() == 1 {
-                    let payload_ty = args
-                        .first()
-                        .and_then(|arg| self.enum_payload_type_for_call_receiver(arg.ty))
-                        .or_else(|| {
-                            self.type_registry
-                                .and_then(|registry| registry.lookup(enum_name))
-                                .and_then(|ty| self.enum_payload_type_for_call_receiver(ty))
-                        });
-                    if let (Some(payload_ty), Some(receiver)) = (payload_ty, args.first()) {
-                        return self.lower_builtin_call_expr("rt_enum_payload", std::slice::from_ref(receiver), payload_ty);
+                if arg_regs.len() == 1 {
+                    let receiver = args.first();
+                    match variant_name {
+                        "unwrap" => {
+                            let payload_ty = receiver
+                                .and_then(|arg| self.enum_payload_type_for_call_receiver(arg.ty))
+                                .or_else(|| {
+                                    self.type_registry
+                                        .and_then(|registry| registry.lookup(enum_name))
+                                        .and_then(|ty| self.enum_payload_type_for_call_receiver(ty))
+                                });
+                            if let (Some(payload_ty), Some(receiver)) = (payload_ty, receiver) {
+                                return self.lower_builtin_call_expr(
+                                    "rt_enum_payload",
+                                    std::slice::from_ref(receiver),
+                                    payload_ty,
+                                );
+                            }
+                        }
+                        "unwrap_err" => {
+                            let payload_ty = receiver
+                                .and_then(|arg| self.enum_variant_payload_type_for_call_receiver(arg.ty, "Err"))
+                                .or_else(|| {
+                                    self.type_registry
+                                        .and_then(|registry| registry.lookup(enum_name))
+                                        .and_then(|ty| self.enum_variant_payload_type_for_call_receiver(ty, "Err"))
+                                });
+                            if let (Some(payload_ty), Some(receiver)) = (payload_ty, receiver) {
+                                return self.lower_builtin_call_expr(
+                                    "rt_enum_payload",
+                                    std::slice::from_ref(receiver),
+                                    payload_ty,
+                                );
+                            }
+                        }
+                        "is_ok" | "is_err" => {
+                            if let Some(receiver) = receiver {
+                                let expected = HirExpr {
+                                    kind: HirExprKind::Integer(Self::enum_variant_discriminant(if variant_name == "is_ok" {
+                                        "Ok"
+                                    } else {
+                                        "Err"
+                                    })),
+                                    ty: TypeId::I64,
+                                };
+                                let builtin_args = [receiver.clone(), expected];
+                                return self.lower_builtin_call_expr(
+                                    "rt_enum_check_discriminant",
+                                    &builtin_args,
+                                    TypeId::BOOL,
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                 }
 

@@ -158,6 +158,9 @@ impl Lowerer {
                         candidate_struct_names.push(inferred_struct_name);
                     }
                 }
+                let has_known_method = candidate_struct_names
+                    .iter()
+                    .any(|name| self.has_known_method_for_struct_name(name, field));
                 // Try to resolve field type via struct name lookup before falling back.
                 // This preserves the real TypeId for self.field.method() chains — without
                 // this, the field node gets ty=ANY which causes MIR to mangle the wrong
@@ -190,6 +193,13 @@ impl Lowerer {
                             ty: TypeId::ANY,
                         });
                     }
+                }
+                if !has_known_method {
+                    return Err(LowerError::CannotInferFieldType {
+                        struct_name,
+                        field: field.to_string(),
+                        available_fields: Vec::new(),
+                    });
                 }
                 // Field not found - treat as no-paren method call
                 // This handles cases like container.resolve where resolve is a method
@@ -294,6 +304,11 @@ impl Lowerer {
 
     fn is_unspecific_field_struct_name(struct_name: &str) -> bool {
         matches!(struct_name, "ANY" | "Any" | "wildcard") || struct_name.starts_with("TypeId(")
+    }
+
+    fn has_known_method_for_struct_name(&self, struct_name: &str, method_name: &str) -> bool {
+        self.method_return_types
+            .contains_key(&format!("{}.{}", struct_name, method_name))
     }
 
     fn try_lower_result_projection(&self, recv_hir: &HirExpr, field: &str) -> Option<HirExpr> {
