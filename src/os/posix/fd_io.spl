@@ -5,16 +5,16 @@
 # posix_open sends an IPC request to the VFS service (port 1) to open files.
 # FDs 0-2 are reserved for stdin/stdout/stderr (serial on baremetal).
 
-use os.posix.errno.{EBADF, EINVAL, ENOENT, ENOSYS, EMFILE, EIO}
-use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_types, fd_flags, fd_ports, FD_TYPE_FILE, FD_TYPE_SERIAL, FD_TYPE_PIPE_READ, FD_TYPE_PIPE_WRITE, FD_TYPE_SOCKET, O_RDONLY, O_WRONLY, O_RDWR, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
+use os.posix.errno.{ENOENT, ENOSYS, EMFILE}
+use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_get_type, fd_flags, fd_ports, SEEK_SET, SEEK_CUR, SEEK_END, MAX_FDS}
 use os.posix.async_io_rw.{sync_read, sync_write}
 use os.posix.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
 use os.posix.socket_compat.{posix_close_socket}
 use os.userlib.syscall_raw.{syscall}
-use os.userlib.ipc_protocol.{VFS_OPEN, VFS_CLOSE}
-
 # Well-known VFS service IPC port
 val _VFS_PORT: u64 = 1
+val VFS_OPEN: u32 = 1
+val VFS_CLOSE: u32 = 4
 
 # Syscall numbers for IPC
 val _SYS_IPC_SEND: u64 = 20
@@ -28,6 +28,8 @@ val FD_IO_ROUTE_SERIAL: u8 = 2
 val FD_IO_ROUTE_PIPE: u8 = 3
 val FD_IO_ROUTE_SOCKET: u8 = 4
 val POSIX_PREAD_EXACT_CHUNK_MAX: u64 = 4084
+val _FD_IO_O_ACCMODE: u32 = 3u32
+val _FD_IO_O_WRONLY: u32 = 1u32
 
 struct PosixPreadExactBytes:
     status: i64
@@ -64,9 +66,9 @@ fn _posix_pread_exact_synthetic(handle: u64, offset: u64, len: u64) -> PosixPrea
     if len == 0:
         return Some(PosixPreadExactBytes(status: 0, len: 0, data: []))
     if offset > synthetic.bytes.len() as u64:
-        return Some(_posix_pread_exact_error(0 - EIO as i64))
+        return Some(_posix_pread_exact_error(-5))
     if len > synthetic.bytes.len() as u64 - offset:
-        return Some(_posix_pread_exact_error(0 - EIO as i64))
+        return Some(_posix_pread_exact_error(-5))
 
     var data: [u8] = []
     var idx: u64 = 0
@@ -77,37 +79,37 @@ fn _posix_pread_exact_synthetic(handle: u64, offset: u64, len: u64) -> PosixPrea
 
 fn fd_io_read_route(fd_type: u8) -> u8:
     """Return the native backend route used by posix_read for an FD type."""
-    if fd_type == FD_TYPE_FILE:
+    if fd_type == 1:
         return FD_IO_ROUTE_FILE
-    if fd_type == FD_TYPE_SERIAL:
+    if fd_type == 6:
         return FD_IO_ROUTE_SERIAL
-    if fd_type == FD_TYPE_PIPE_READ:
+    if fd_type == 2:
         return FD_IO_ROUTE_PIPE
-    if fd_type == FD_TYPE_SOCKET:
+    if fd_type == 4:
         return FD_IO_ROUTE_SOCKET
     FD_IO_ROUTE_INVALID
 
 fn fd_io_write_route(fd_type: u8) -> u8:
     """Return the native backend route used by posix_write for an FD type."""
-    if fd_type == FD_TYPE_FILE:
+    if fd_type == 1:
         return FD_IO_ROUTE_FILE
-    if fd_type == FD_TYPE_SERIAL:
+    if fd_type == 6:
         return FD_IO_ROUTE_SERIAL
-    if fd_type == FD_TYPE_PIPE_WRITE:
+    if fd_type == 3:
         return FD_IO_ROUTE_PIPE
-    if fd_type == FD_TYPE_SOCKET:
+    if fd_type == 4:
         return FD_IO_ROUTE_SOCKET
     FD_IO_ROUTE_INVALID
 
 fn fd_io_close_route(fd_type: u8) -> u8:
     """Return the native backend route used by posix_close for an FD type."""
-    if fd_type == FD_TYPE_FILE:
+    if fd_type == 1:
         return FD_IO_ROUTE_FILE
-    if fd_type == FD_TYPE_PIPE_READ or fd_type == FD_TYPE_PIPE_WRITE:
+    if fd_type == 2 or fd_type == 3:
         return FD_IO_ROUTE_PIPE
-    if fd_type == FD_TYPE_SERIAL:
+    if fd_type == 6:
         return FD_IO_ROUTE_SERIAL
-    if fd_type == FD_TYPE_SOCKET:
+    if fd_type == 4:
         return FD_IO_ROUTE_SOCKET
     FD_IO_ROUTE_INVALID
 
@@ -137,14 +139,14 @@ fn posix_open(path: text, flags: u32, mode: u32) -> i32:
     val payload_len = payload.len()
     val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_OPEN as u64, 0, payload_ptr, payload_len)
     if send_result < 0:
-        return 0 - EIO
+        return -5
 
     # Receive reply from VFS
     var reply_buf: [u8; 64] = [0; 64]
     val reply_ptr = unsafe_addr_of(reply_buf)
     val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 64, 0, 0)
     if recv_result < 0:
-        return 0 - EIO
+        return -5
 
     # Parse reply: status(i32) | vfs_handle(u64)
     val status = _read_i32(reply_buf, 0)
@@ -154,7 +156,7 @@ fn posix_open(path: text, flags: u32, mode: u32) -> i32:
     val vfs_handle = _read_u64(reply_buf, 4)
 
     # Set up the FD entry
-    val set_result = fd_set(fd, FD_TYPE_FILE, flags, vfs_handle)
+    val set_result = fd_set(fd, 1, flags, vfs_handle)
     if set_result < 0:
         var close_payload: [u8] = []
         _push_u32(close_payload, VFS_CLOSE)
@@ -171,9 +173,10 @@ fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
     For pipe FDs, blocks on the native pipe backend.
     """
     if not fd_is_valid(fd):
-        return 0 - EBADF as i64
+        return -9
     val idx: u64 = fd as u64
-    val route = fd_io_read_route(fd_types[idx])
+    val fd_type = fd_get_type(fd)
+    val route = fd_io_read_route(fd_type)
 
     # Serial: use existing async_io path
     if route == FD_IO_ROUTE_SERIAL:
@@ -188,13 +191,13 @@ fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
         return sync_read(fd, buf, count)
 
     if route != FD_IO_ROUTE_FILE:
-        return 0 - EBADF as i64
+        return -9
 
     # File reads are owned by async_io; POSIX blocks on its completion.
     sync_read(fd, buf, count)
 
 fn _fd_io_is_write_only(flags: u32) -> bool:
-    (flags & 3u32) == O_WRONLY
+    (flags & _FD_IO_O_ACCMODE) == _FD_IO_O_WRONLY
 
 fn _posix_pread_exact_error(status: i64) -> PosixPreadExactBytes:
     PosixPreadExactBytes(status: status, len: 0, data: [])
@@ -206,12 +209,12 @@ fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactByt
     returning, whether the read succeeds, short-reads, or fails.
     """
     if not fd_is_valid(fd):
-        return _posix_pread_exact_error(0 - EBADF as i64)
+        return _posix_pread_exact_error(-9)
     val idx: u64 = fd as u64
-    if fd_io_read_route(fd_types[idx]) != FD_IO_ROUTE_FILE:
-        return _posix_pread_exact_error(0 - EBADF as i64)
+    if fd_io_read_route(fd_get_type(fd)) != FD_IO_ROUTE_FILE:
+        return _posix_pread_exact_error(-9)
     if _fd_io_is_write_only(fd_flags[idx]):
-        return _posix_pread_exact_error(0 - EBADF as i64)
+        return _posix_pread_exact_error(-9)
 
     val synthetic = _posix_pread_exact_synthetic(handle: fd_ports[idx], offset: offset, len: len)
     if synthetic != nil:
@@ -243,15 +246,15 @@ fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactByt
             return _posix_pread_exact_error(read_result)
         if read_result == 0:
             fd_set_offset(fd, original_offset)
-            return _posix_pread_exact_error(0 - EIO as i64)
+            return _posix_pread_exact_error(-5)
 
         val bytes_read = read_result as u64
         if bytes_read > chunk_len:
             fd_set_offset(fd, original_offset)
-            return _posix_pread_exact_error(0 - EIO as i64)
+            return _posix_pread_exact_error(-5)
         if bytes_read < chunk_len:
             fd_set_offset(fd, original_offset)
-            return _posix_pread_exact_error(0 - EIO as i64)
+            return _posix_pread_exact_error(-5)
 
         var ci: u64 = 0
         while ci < bytes_read:
@@ -269,9 +272,10 @@ fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
     For pipe FDs, blocks on the native pipe backend.
     """
     if not fd_is_valid(fd):
-        return 0 - EBADF as i64
+        return -9
     val idx: u64 = fd as u64
-    val route = fd_io_write_route(fd_types[idx])
+    val fd_type = fd_get_type(fd)
+    val route = fd_io_write_route(fd_type)
 
     # Serial: use existing async_io path
     if route == FD_IO_ROUTE_SERIAL:
@@ -286,7 +290,7 @@ fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
         return sync_write(fd, buf, count)
 
     if route != FD_IO_ROUTE_FILE:
-        return 0 - EBADF as i64
+        return -9
 
     # File writes are owned by async_io; POSIX blocks on its completion.
     sync_write(fd, buf, count)
@@ -298,13 +302,14 @@ fn posix_close(fd: i32) -> i32:
     Then frees the local FD table entry.
     """
     if not fd_is_valid(fd):
-        return 0 - EBADF
+        return -9
     val idx: u64 = fd as u64
-    val route = fd_io_close_route(fd_types[idx])
+    val fd_type = fd_get_type(fd)
+    val route = fd_io_close_route(fd_type)
 
-    if fd_types[idx] == FD_TYPE_PIPE_READ:
+    if fd_type == 2:
         return pipe_close_read(fd)
-    if fd_types[idx] == FD_TYPE_PIPE_WRITE:
+    if fd_type == 3:
         return pipe_close_write(fd)
     if route == FD_IO_ROUTE_SOCKET:
         return posix_close_socket(fd) as i32
@@ -347,7 +352,7 @@ fn posix_close_task_fds_with_backends(owner: u64) -> u32:
 fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
     """Reposition file offset. Returns new offset or -errno."""
     if not fd_is_valid(fd):
-        return 0 - EBADF as i64
+        return -9
     val idx: u64 = fd as u64
     if whence == SEEK_SET:
         fd_set_offset(fd, offset as u64)
@@ -362,19 +367,19 @@ fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
         val payload_ptr = unsafe_addr_of(payload)
         val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, 5, 0, payload_ptr, payload.len())
         if send_result < 0:
-            return 0 - EIO as i64
+            return -5
         var reply_buf: [u8; 16] = [0; 16]
         val reply_ptr = unsafe_addr_of(reply_buf)
         val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 16, 0, 0)
         if recv_result < 0:
-            return 0 - EIO as i64
+            return -5
         val status = _read_i32(reply_buf, 0)
         if status < 0:
             return status as i64
         val file_size = _read_u64(reply_buf, 4)
         fd_set_offset(fd, (file_size as i64 + offset) as u64)
     else:
-        return 0 - EINVAL as i64
+        return -22
     fd_get_offset(fd) as i64
 
 fn posix_dup(fd: i32) -> i32:
@@ -384,9 +389,9 @@ fn posix_dup(fd: i32) -> i32:
 fn posix_dup2(old_fd: i32, new_fd: i32) -> i32:
     """Duplicate fd to a specific number with POSIX replacement semantics."""
     if not fd_is_valid(old_fd):
-        return 0 - EBADF
+        return -9
     if new_fd < 0 or (new_fd as u64) >= MAX_FDS:
-        return 0 - EBADF
+        return -9
     if old_fd == new_fd:
         return new_fd
     if fd_is_valid(new_fd):

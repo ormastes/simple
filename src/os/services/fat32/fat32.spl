@@ -9,7 +9,7 @@
 use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
 use os.services.vfs.vfs.{Filesystem, SeekWhence}
 use os.services.block_device.{BlockDevice}
-use os.services.fat32.fat32_write.{Fat32WriteContext, format_8_3_name, FAT32_EOC, FAT32_MASK, DELETED_MARKER, END_MARKER, DIR_ENTRY_SIZE}
+use os.services.fat32.fat32_write.{Fat32WriteContext, format_8_3_name, DIR_ENTRY_SIZE}
 use common.string_core.{str_char_at}
 
 # ============================================================================
@@ -1256,7 +1256,7 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
 
     Used by rename to remove the old entry while preserving the cluster chain.
     """
-    use os.services.fat32.fat32_write.{FAT32_EOC, FAT32_MASK, DELETED_MARKER, END_MARKER, DIR_ENTRY_SIZE}
+    use os.services.fat32.fat32_write.{DIR_ENTRY_SIZE}
 
     var write_ctx: Fat32WriteContext = ctx
     val upper_name = name.upper()
@@ -1268,14 +1268,14 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
             return Result.Err(_fat32_unwrap_err(data_result))
         var data = data_result.unwrap()
 
-        val entries_per_cluster = (write_ctx.sectors_per_cluster * write_ctx.bytes_per_sector) / DIR_ENTRY_SIZE
+        val entries_per_cluster = (write_ctx.sectors_per_cluster * write_ctx.bytes_per_sector) / 32
         var idx: u32 = 0
         while idx < entries_per_cluster:
-            val off = (idx * DIR_ENTRY_SIZE).to_i32()
+            val off = (idx * 32).to_i32()
             val first_byte = data[off]
-            if first_byte == END_MARKER:
+            if first_byte == 0x00:
                 return Result.Err("entry not found: {name}")
-            if first_byte == DELETED_MARKER or data[off + 11] == FAT32_ATTR_LFN:
+            if first_byte == 0xE5 or data[off + 11] == FAT32_ATTR_LFN:
                 idx = idx + 1
                 continue
             # Parse name and compare
@@ -1297,7 +1297,7 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
                 entry_name = entry_name + "." + ext_name
             if entry_name.upper() == upper_name:
                 # Mark as deleted
-                data[off] = DELETED_MARKER
+                data[off] = 0xE5
                 return write_ctx.write_cluster_data(current, data)
             idx = idx + 1
 
@@ -1315,7 +1315,7 @@ fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> 
         val next = (((fat_buf[entry_offset + 3].to_u32() << 24) |
                      (fat_buf[entry_offset + 2].to_u32() << 16) |
                      (fat_buf[entry_offset + 1].to_u32() << 8) |
-                     fat_buf[entry_offset].to_u32()) & FAT32_MASK)
+                     fat_buf[entry_offset].to_u32()) & 0x0FFFFFFF)
         if next >= FAT32_EOC or next < 2:
             break
         current = next

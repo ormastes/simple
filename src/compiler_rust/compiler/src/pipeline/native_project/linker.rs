@@ -811,9 +811,21 @@ int main(int argc, char** argv) {
         let mut boot_objects: Vec<PathBuf> = Vec::new();
         let mut boot_compile_failures: usize = 0;
         if let Some(ref entry) = self.entry_file {
+            let skip_boot_autodiscovery = cross_target.arch == simple_common::target::TargetArch::Riscv64
+                && entry
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with("ghdl_boot_info"))
+                    .unwrap_or(false);
             let boot_dir = entry.parent().unwrap_or(std::path::Path::new(".")).join("boot");
+            let debug_boot_sources =
+                self.config.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok();
+            if skip_boot_autodiscovery && debug_boot_sources {
+                eprintln!("  Boot autodiscovery skipped for {}", entry.display());
+            }
+            let proof_runtime_stem = "ghdl_boot_info_runtime";
             if boot_dir.is_dir() {
-                if self.config.verbose {
+                if debug_boot_sources {
                     eprintln!("  Boot directory: {}", boot_dir.display());
                 }
                 let asm_compilers: Vec<String> = {
@@ -838,6 +850,9 @@ int main(int argc, char** argv) {
                         for de in entries.flatten() {
                             let path = de.path();
                             if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+                                if skip_boot_autodiscovery {
+                                    continue;
+                                }
                                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
                                 let out = temp_dir.join(format!("_boot_{}.o", stem));
                                 let mut assembled = false;
@@ -860,6 +875,9 @@ int main(int argc, char** argv) {
                                         Ok(r) => {
                                             if r.status.success() {
                                                 boot_objects.push(out.clone());
+                                                if debug_boot_sources {
+                                                    eprintln!("  Boot ASM source: {}", path.display());
+                                                }
                                                 assembled = true;
                                                 break;
                                             } else {
@@ -899,8 +917,11 @@ int main(int argc, char** argv) {
                         let path = de.path();
                         if path.extension().and_then(|e| e.to_str()) == Some("c") {
                             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                            if skip_boot_autodiscovery && stem != proof_runtime_stem {
+                                continue;
+                            }
                             let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
-                            if minimal_boot && stem != "baremetal_stubs" {
+                            if minimal_boot && !skip_boot_autodiscovery && stem != "baremetal_stubs" {
                                 continue;
                             }
                             let out = temp_dir.join(format!("_boot_{}.o", stem));
@@ -937,6 +958,9 @@ int main(int argc, char** argv) {
                                     Ok(r) => {
                                         if r.status.success() {
                                             boot_objects.push(out.clone());
+                                            if debug_boot_sources {
+                                                eprintln!("  Boot C source: {}", path.display());
+                                            }
                                             compiled = true;
                                             break;
                                         }
@@ -975,7 +999,7 @@ int main(int argc, char** argv) {
                         boot_compile_failures
                     );
                 }
-                if self.config.verbose {
+                if debug_boot_sources {
                     eprintln!(
                         "  Boot objects: {} files ({} compile failures)",
                         boot_objects.len(),

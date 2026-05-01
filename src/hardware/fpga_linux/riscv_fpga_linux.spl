@@ -1370,6 +1370,7 @@ impl RiscvFpgaLane:
             "                                if instr(12) = '0' then\n" +
             "                                    case funct2b is\n" +
             "                                        when \"00\" => return encode_r(\"0110011\", rd, \"000\", rd, rs2_c, \"0100000\");\n" +
+            "                                        when \"01\" => return encode_r(\"0110011\", rd, \"100\", rd, rs2_c, \"0000000\");\n" +
             "                                        when \"10\" => return encode_r(\"0110011\", rd, \"110\", rd, rs2_c, \"0000000\");\n" +
             "                                        when \"11\" => return encode_r(\"0110011\", rd, \"111\", rd, rs2_c, \"0000000\");\n" +
             "                                        when others => return x\"00000000\";\n" +
@@ -1508,7 +1509,11 @@ impl RiscvFpgaLane:
             "        mmu_dmem_l1_pte : in  xword_t;\n" +
             "        mmu_dmem_l0_pte : in  xword_t;\n" +
             "        debug_priv_mode : out std_logic_vector(1 downto 0);\n" +
-            "        debug_last_load_value : out xword_t;\n"
+            "        debug_last_load_value : out xword_t;\n" +
+            "        debug_ra   : out xword_t;\n" +
+            "        debug_s0   : out xword_t;\n" +
+            "        debug_a0   : out xword_t;\n" +
+            "        debug_a1   : out xword_t;\n"
 
     fn core_vhdl_mmu_helper_lines() -> text:
         if self.xlen == RiscvXlen.Rv32:
@@ -2458,7 +2463,11 @@ impl RiscvFpgaLane:
         if self.xlen == RiscvXlen.Rv32:
             return ""
         "    debug_priv_mode <= priv_mode_reg;\n" +
-            "    debug_last_load_value <= debug_last_load_value_reg;\n"
+            "    debug_last_load_value <= debug_last_load_value_reg;\n" +
+            "    debug_ra <= regs(1);\n" +
+            "    debug_s0 <= regs(8);\n" +
+            "    debug_a0 <= regs(10);\n" +
+            "    debug_a1 <= regs(11);\n"
 
     fn core_vhdl() -> text:
         val package_name = self.package_name()
@@ -2521,6 +2530,10 @@ impl RiscvFpgaLane:
             "    dmem_wstrb <= dmem_wstrb_reg;\n" +
             "    debug_pc <= pc_reg;\n" +
             self.core_vhdl_mmu_output_lines() +
+            "    debug_ra <= regs(1);\n" +
+            "    debug_s0 <= regs(8);\n" +
+            "    debug_a0 <= regs(10);\n" +
+            "    debug_a1 <= regs(11);\n" +
             self.core_vhdl_semihost_output_lines() +
             "    trap <= trap_reg;\n" +
             "    halt <= halt_reg;\n\n" +
@@ -2579,7 +2592,12 @@ impl RiscvFpgaLane:
             "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"010\" =>\n" +
-            "                        if load_pending_rd_reg /= 0 then\n" +
+            "                        if XLEN = 64 then\n" +
+            "                            if load_pending_rd_reg /= 0 then\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 2))) * 32)(31 downto 0)), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 2))) * 32)(31 downto 0)), XLEN));\n" +
+            "                            end if;\n" +
+            "                        elsif load_pending_rd_reg /= 0 then\n" +
             "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
             "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
             "                        end if;\n" +
@@ -3088,7 +3106,8 @@ impl RiscvFpgaLane:
             "    constant CLK_PERIOD : time := 10 ns;\n" +
             "    constant FW_WINDOW_BYTES : integer := 16#200000#;\n" +
             "    constant PAYLOAD_BOOT_WINDOW_BYTES : integer := 16#200000#;\n" +
-            "    constant MEM_WORDS : integer := (FW_WINDOW_BYTES + PAYLOAD_BOOT_WINDOW_BYTES) / 8;\n" +
+            "    constant PAYLOAD_RUNTIME_WINDOW_BYTES : integer := 16#400000#;\n" +
+            "    constant MEM_WORDS : integer := (FW_WINDOW_BYTES + PAYLOAD_BOOT_WINDOW_BYTES + PAYLOAD_RUNTIME_WINDOW_BYTES) / 8;\n" +
             "    constant PROGRESS_REPORT_INTERVAL : integer := 100000;\n\n" +
             "    constant PAYLOAD_CHUNK_WORDS : integer := 65536;\n\n" +
             "    constant MAGIC_ADDR_BITS        : std_logic_vector(63 downto 0) := x\"0000000080600000\";\n" +
@@ -3181,6 +3200,10 @@ impl RiscvFpgaLane:
             "    signal irq_external : std_logic := '0';\n" +
             "    signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');\n" +
             "    signal debug_last_load_value : std_logic_vector(63 downto 0) := (others => '0');\n" +
+            "    signal debug_ra   : std_logic_vector(63 downto 0) := (others => '0');\n" +
+            "    signal debug_s0   : std_logic_vector(63 downto 0) := (others => '0');\n" +
+            "    signal debug_a0   : std_logic_vector(63 downto 0) := (others => '0');\n" +
+            "    signal debug_a1   : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal trap       : std_logic := '0';\n" +
             "    signal halt       : std_logic := '0';\n\n" +
@@ -3331,6 +3354,14 @@ impl RiscvFpgaLane:
             "        end loop;\n" +
             "        return result;\n" +
             "    end function;\n\n" +
+            "    function hex64(bits : std_logic_vector(63 downto 0)) return string is\n" +
+            "        variable result : string(1 to 16);\n" +
+            "    begin\n" +
+            "        for i in 0 to 15 loop\n" +
+            "            result(i + 1) := hex_char(bits(63 - (i * 4) downto 60 - (i * 4)));\n" +
+            "        end loop;\n" +
+            "        return result;\n" +
+            "    end function;\n\n" +
             "    function hex8(bits : std_logic_vector(7 downto 0)) return string is\n" +
             "        variable result : string(1 to 2);\n" +
             "    begin\n" +
@@ -3355,6 +3386,10 @@ impl RiscvFpgaLane:
             "    begin\n" +
             "        offs := dtb_offset(addr);\n" +
             "        return offs >= 0 and offs < DTB_SIZE_BYTES;\n" +
+            "    end function;\n\n" +
+            "    function proof_in_range(addr : std_logic_vector(63 downto 0)) return boolean is\n" +
+            "    begin\n" +
+            "        return addr(63 downto 8) = x\"00000000806000\";\n" +
             "    end function;\n\n" +
             "    function dtb_word(addr : std_logic_vector(63 downto 0)) return std_logic_vector is\n" +
             "        variable result : std_logic_vector(63 downto 0) := (others => '0');\n" +
@@ -3410,8 +3445,11 @@ impl RiscvFpgaLane:
             "    signal dtb_probe_addr : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal dmem_write_seen : boolean := false;\n" +
             "    signal dmem_write_addr : std_logic_vector(63 downto 0) := (others => '0');\n" +
+            "    signal watch_rt_alloc_reload_seen : boolean := false;\n" +
+            "    signal watch_calloc_spill_seen : boolean := false;\n" +
             "    signal fw_preload_done : boolean := false;\n" +
             "    signal payload_boot_chunk_ready : boolean := false;\n" +
+            "    signal mem_epoch : std_logic := '0';\n" +
             "    signal done : boolean := false;\n" +
             "begin\n" +
             "    preload_fw_mem : process\n" +
@@ -3439,6 +3477,7 @@ impl RiscvFpgaLane:
             "            end if;\n" +
             "            deallocate(row);\n" +
             "        end loop;\n" +
+            "        mem_epoch <= not mem_epoch;\n" +
             "        fw_preload_done <= true;\n" +
             "        report \"PRELOAD_FW_READY\";\n" +
             "        wait;\n" +
@@ -3497,6 +3536,7 @@ impl RiscvFpgaLane:
             "                deallocate(row);\n" +
             "            end loop;\n" +
             "            if not payload_boot_chunk_ready then\n" +
+            "                mem_epoch <= not mem_epoch;\n" +
             "                payload_boot_chunk_ready <= true;\n" +
             "                report \"PRELOAD_PAYLOAD_BOOT_CHUNK_READY_BYTES: \" & integer'image(bytes_loaded);\n" +
             "            end if;\n" +
@@ -3531,6 +3571,10 @@ impl RiscvFpgaLane:
             "            mmu_dmem_l0_pte => (others => '0'),\n" +
             "            debug_priv_mode => debug_priv_mode,\n" +
             "            debug_last_load_value => debug_last_load_value,\n" +
+            "            debug_ra   => debug_ra,\n" +
+            "            debug_s0   => debug_s0,\n" +
+            "            debug_a0   => debug_a0,\n" +
+            "            debug_a1   => debug_a1,\n" +
             "            debug_pc   => debug_pc,\n" +
             "            trap       => trap,\n" +
             "            halt       => halt\n" +
@@ -3538,6 +3582,9 @@ impl RiscvFpgaLane:
             "    clk <= not clk after CLK_PERIOD / 2 when not done else '0';\n\n" +
             "    process(all)\n" +
             "    begin\n" +
+            "        if mem_epoch = '1' then\n" +
+            "            null;\n" +
+            "        end if;\n" +
             "        imem_data <= fetch_imem_word(imem_addr);\n" +
             "    end process;\n\n" +
             "    process(clk)\n" +
@@ -3555,6 +3602,10 @@ impl RiscvFpgaLane:
             "                report \"TRAP_EDGE_DMEM_ADDR_HEX32: \" & hex32(dmem_addr(31 downto 0));\n" +
             "                report \"TRAP_EDGE_DMEM_RDATA_HEX32: \" & hex32(dmem_rdata(31 downto 0));\n" +
             "                report \"TRAP_EDGE_LAST_LOAD_HEX32: \" & hex32(debug_last_load_value(31 downto 0));\n" +
+            "                report \"TRAP_EDGE_RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "                report \"TRAP_EDGE_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "                report \"TRAP_EDGE_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"TRAP_EDGE_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
             "            end if;\n" +
             "            if halt = '1' and halt_prev = '0' then\n" +
             "                report \"HALT_EDGE_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
@@ -3563,20 +3614,50 @@ impl RiscvFpgaLane:
             "            end if;\n" +
             "            trap_prev := trap;\n" +
             "            halt_prev := halt;\n" +
+            "            if debug_pc = x\"0000000080209D70\" and not watch_rt_alloc_reload_seen then\n" +
+            "                watch_rt_alloc_reload_seen <= true;\n" +
+            "                report \"WATCH_RT_ALLOC_RELOAD_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_RT_ALLOC_RELOAD_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"WATCH_RT_ALLOC_RELOAD_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "                report \"WATCH_RT_ALLOC_RELOAD_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "                report \"WATCH_RT_ALLOC_RELOAD_S0_M24_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(24, 64)))(31 downto 0));\n" +
+            "                report \"WATCH_RT_ALLOC_RELOAD_S0_M32_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(32, 64)))(31 downto 0));\n" +
+            "            end if;\n" +
+            "            if debug_pc = x\"0000000080209C52\" and not watch_calloc_spill_seen then\n" +
+            "                watch_calloc_spill_seen <= true;\n" +
+            "                report \"WATCH_CALLOC_SPILL_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_CALLOC_SPILL_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"WATCH_CALLOC_SPILL_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "                report \"WATCH_CALLOC_SPILL_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "                report \"WATCH_CALLOC_SPILL_S0_M24_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(24, 64)))(31 downto 0));\n" +
+            "                report \"WATCH_CALLOC_SPILL_S0_M32_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(32, 64)))(31 downto 0));\n" +
+            "            end if;\n" +
             "            if dmem_re = '1' and dtb_in_range(dmem_addr) then\n" +
             "                dtb_probe_seen <= true;\n" +
             "                if not dtb_probe_seen then\n" +
             "                    dtb_probe_addr <= dmem_addr;\n" +
             "                end if;\n" +
             "            end if;\n" +
+            "            if dmem_re = '1' then\n" +
+            "                if dtb_in_range(dmem_addr) then\n" +
+            "                    dmem_rdata <= dtb_word(dmem_addr);\n" +
+            "                elsif mem_index(dmem_addr) < MEM_WORDS then\n" +
+            "                    dmem_rdata <= mem64(dmem_addr);\n" +
+            "                else\n" +
+            "                    dmem_rdata <= (others => '0');\n" +
+            "                end if;\n" +
+            "            end if;\n" +
             "            if dmem_re = '1' and now <= 1000 ns then\n" +
             "                report \"DMEM_READ_EVENT_ADDR_HEX32: \" & hex32(dmem_addr(31 downto 0));\n" +
             "                report \"DMEM_READ_EVENT_DATA_HEX32: \" & hex32(dmem_rdata(31 downto 0));\n" +
+            "                report \"DMEM_READ_EVENT_DATA_HEX64: \" & hex64(dmem_rdata);\n" +
             "            end if;\n\n" +
             "            if dmem_we = '1' and dmem_addr = UART_ADDR and dmem_wstrb(0) = '1' then\n" +
             "                if now <= 1000 ns then\n" +
             "                    report \"DMEM_WRITE_EVENT_ADDR_HEX32: \" & hex32(dmem_addr(31 downto 0));\n" +
             "                    report \"DMEM_WRITE_EVENT_DATA_HEX32: \" & hex32(dmem_wdata(31 downto 0));\n" +
+            "                    report \"DMEM_WRITE_EVENT_DATA_HEX64: \" & hex64(dmem_wdata);\n" +
+            "                    report \"DMEM_WRITE_EVENT_WSTRB_HEX8: \" & hex8(dmem_wstrb);\n" +
             "                end if;\n" +
             "                report \"UART_CHAR_HEX8: \" & hex8(dmem_wdata(7 downto 0));\n" +
             "                next_uart_word := uart_word(23 downto 0) & dmem_wdata(7 downto 0);\n" +
@@ -3585,9 +3666,17 @@ impl RiscvFpgaLane:
             "                    uart_marker_seen <= true;\n" +
             "                end if;\n" +
             "            elsif dmem_we = '1' then\n" +
+            "                if proof_in_range(dmem_addr) then\n" +
+            "                    report \"PROOF_WRITE_ADDR_HEX32: \" & hex32(dmem_addr(31 downto 0));\n" +
+            "                    report \"PROOF_WRITE_DATA_HEX32: \" & hex32(dmem_wdata(31 downto 0));\n" +
+            "                    report \"PROOF_WRITE_DATA_HEX64: \" & hex64(dmem_wdata);\n" +
+            "                    report \"PROOF_WRITE_WSTRB_HEX8: \" & hex8(dmem_wstrb);\n" +
+            "                end if;\n" +
             "                if now <= 1000 ns then\n" +
             "                    report \"DMEM_WRITE_EVENT_ADDR_HEX32: \" & hex32(dmem_addr(31 downto 0));\n" +
             "                    report \"DMEM_WRITE_EVENT_DATA_HEX32: \" & hex32(dmem_wdata(31 downto 0));\n" +
+            "                    report \"DMEM_WRITE_EVENT_DATA_HEX64: \" & hex64(dmem_wdata);\n" +
+            "                    report \"DMEM_WRITE_EVENT_WSTRB_HEX8: \" & hex8(dmem_wstrb);\n" +
             "                end if;\n" +
             "                dmem_write_seen <= true;\n" +
             "                dmem_write_addr <= dmem_addr;\n" +
@@ -3600,18 +3689,9 @@ impl RiscvFpgaLane:
             "                        end if;\n" +
             "                    end loop;\n" +
             "                    mem(word_idx) := current_word;\n" +
+            "                    mem_epoch <= not mem_epoch;\n" +
             "                end if;\n" +
             "            end if;\n" +
-            "        end if;\n" +
-            "    end process;\n\n" +
-            "    process(all)\n" +
-            "    begin\n" +
-            "        if dtb_in_range(dmem_addr) then\n" +
-            "            dmem_rdata <= dtb_word(dmem_addr);\n" +
-            "        elsif mem_index(dmem_addr) < MEM_WORDS then\n" +
-            "            dmem_rdata <= mem64(dmem_addr);\n" +
-            "        else\n" +
-            "            dmem_rdata <= (others => '0');\n" +
             "        end if;\n" +
             "    end process;\n\n" +
             "    process\n" +
@@ -3632,12 +3712,18 @@ impl RiscvFpgaLane:
             "                report \"HEARTBEAT_PRIV_MODE: \" & integer'image(safe_index(debug_priv_mode));\n" +
             "                report \"HEARTBEAT_IMEM_HEX32: \" & hex32(imem_data);\n" +
             "                report \"HEARTBEAT_LAST_LOAD_HEX32: \" & hex32(debug_last_load_value(31 downto 0));\n" +
+            "                report \"HEARTBEAT_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"HEARTBEAT_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
             "            elsif (cycles mod PROGRESS_REPORT_INTERVAL) = 0 then\n" +
             "                report \"PROGRESS_CYCLES: \" & integer'image(cycles);\n" +
             "                report \"PROGRESS_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
             "                report \"PROGRESS_PRIV_MODE: \" & integer'image(safe_index(debug_priv_mode));\n" +
             "                report \"PROGRESS_IMEM_HEX32: \" & hex32(imem_data);\n" +
             "                report \"PROGRESS_LAST_LOAD_HEX32: \" & hex32(debug_last_load_value(31 downto 0));\n" +
+            "                report \"PROGRESS_RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "                report \"PROGRESS_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "                report \"PROGRESS_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"PROGRESS_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
             "                report \"PROGRESS_UART_WORD_HEX32: \" & hex32(uart_word);\n" +
             "            end if;\n" +
             "        end loop;\n\n" +
@@ -3680,6 +3766,21 @@ impl RiscvFpgaLane:
             "        report \"TRAP_SEEN: \" & std_logic'image(trap);\n" +
             "        report \"PC_LOW32: \" & integer'image(word32_to_report_int(debug_pc(31 downto 0)));\n" +
             "        report \"PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "        report \"RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "        report \"S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "        report \"A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "        report \"A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "        report \"S0_M8_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(8, 64)))(31 downto 0));\n" +
+            "        report \"S0_M16_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(16, 64)))(31 downto 0));\n" +
+            "        report \"S0_M24_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(24, 64)))(31 downto 0));\n" +
+            "        report \"S0_M32_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(32, 64)))(31 downto 0));\n" +
+            "        report \"S0_M64_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(64, 64)))(31 downto 0));\n" +
+            "        report \"S0_M56_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(56, 64)))(31 downto 0));\n" +
+            "        report \"S0_M40_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(40, 64)))(31 downto 0));\n" +
+            "        report \"CALLER_S0_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(16, 64)))(31 downto 0));\n" +
+            "        report \"CALLER_RA_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(16, 64)))) - to_unsigned(8, 64)))(31 downto 0));\n" +
+            "        report \"CALLER_S0_M24_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(16, 64)))) - to_unsigned(24, 64)))(31 downto 0));\n" +
+            "        report \"CALLER_S0_M32_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(16, 64)))) - to_unsigned(32, 64)))(31 downto 0));\n" +
             "        report \"DMEM_WRITE_SEEN: \" & boolean'image(dmem_write_seen);\n" +
             "        report \"DMEM_WRITE_ADDR_HEX32: \" & hex32(dmem_write_addr(31 downto 0));\n" +
             "        if (halt = '1' or trap = '1') and\n" +

@@ -6,8 +6,6 @@
 # Async by default: FD operations internally use non-blocking IPC.
 # Sync POSIX wrappers block the calling thread until completion.
 
-use os.posix.errno.{EBADF, EMFILE, EINVAL}
-
 val MAX_FDS: u64 = 256
 val MAX_FD_CONTEXTS: u64 = 256
 val FD_CONTEXT_SLOTS: u64 = 65536
@@ -299,7 +297,7 @@ fn fd_alloc() -> i32:
         if fd_types[i] == FD_TYPE_FREE:
             return i as i32
         i = i + 1
-    0 - EMFILE
+    -24
 
 fn fd_is_valid(fd: i32) -> bool:
     """Check if an FD is valid and allocated."""
@@ -314,12 +312,12 @@ fn fd_set(fd: i32, fd_type: u8, flags: u32, ipc_port: u64) -> i32:
     """Configure an FD entry."""
     val idx: u64 = fd as u64
     if idx >= MAX_FDS:
-        return 0 - EBADF
+        return -9
     if fd_objects[idx] != 0:
         fd_close(fd)
     val obj = _fd_object_alloc()
     if obj == 0:
-        return 0 - EMFILE
+        return -24
     val status_flags = flags & ~O_CLOEXEC
     of_types[obj] = fd_type
     of_flags[obj] = status_flags
@@ -340,7 +338,7 @@ fn fd_set(fd: i32, fd_type: u8, flags: u32, ipc_port: u64) -> i32:
 fn fd_close(fd: i32) -> i32:
     """Close an FD. Returns 0 on success, -EBADF on error."""
     if not fd_is_valid(fd):
-        return 0 - EBADF
+        return -9
     val idx: u64 = fd as u64
     val obj = fd_objects[idx]
     fd_objects[idx] = 0
@@ -356,7 +354,7 @@ fn fd_close(fd: i32) -> i32:
 fn fd_dup(old_fd: i32) -> i32:
     """Duplicate an FD. Returns new FD or -EBADF/-EMFILE."""
     if not fd_is_valid(old_fd):
-        return 0 - EBADF
+        return -9
     val new_fd = fd_alloc()
     if new_fd < 0:
         return new_fd
@@ -372,9 +370,9 @@ fn fd_dup(old_fd: i32) -> i32:
 fn fd_dup_from(old_fd: i32, min_fd: i32, cloexec: bool) -> i32:
     """Duplicate old_fd to the lowest free fd >= min_fd."""
     if not fd_is_valid(old_fd):
-        return 0 - EBADF
+        return -9
     if min_fd < 0 or (min_fd as u64) >= MAX_FDS:
-        return 0 - EINVAL
+        return -22
     var new_fd = min_fd
     while (new_fd as u64) < MAX_FDS:
         if not fd_is_valid(new_fd):
@@ -387,14 +385,14 @@ fn fd_dup_from(old_fd: i32, min_fd: i32, cloexec: bool) -> i32:
             _fd_refresh_object_mirrors(obj)
             return new_fd
         new_fd = new_fd + 1
-    0 - EMFILE
+    -24
 
 fn fd_dup2(old_fd: i32, new_fd: i32) -> i32:
     """Duplicate old_fd to new_fd, closing new_fd first if open."""
     if not fd_is_valid(old_fd):
-        return 0 - EBADF
+        return -9
     if new_fd < 0 or (new_fd as u64) >= MAX_FDS:
-        return 0 - EBADF
+        return -9
     if old_fd == new_fd:
         return new_fd
     # Close new_fd if it's open
@@ -419,7 +417,7 @@ fn fd_get_cloexec(fd: i32) -> bool:
 fn fd_set_cloexec(fd: i32, enabled: bool) -> i32:
     """Set or clear FD_CLOEXEC on a descriptor."""
     if not fd_is_valid(fd):
-        return 0 - EBADF
+        return -9
     val idx: u64 = fd as u64
     if enabled:
         fd_fd_flags[idx] = fd_fd_flags[idx] | FD_CLOEXEC
@@ -565,7 +563,7 @@ fn fd_get_status_flags(fd: i32) -> u32:
 fn fd_set_status_flags(fd: i32, flags: u32) -> i32:
     """Replace shared open-file-description status flags."""
     if not fd_is_valid(fd):
-        return 0 - EBADF
+        return -9
     val idx: u64 = fd as u64
     val obj = fd_objects[idx]
     of_flags[obj] = flags & ~O_CLOEXEC
@@ -582,7 +580,7 @@ fn fd_get_offset(fd: i32) -> u64:
 fn fd_set_offset(fd: i32, offset: u64) -> i32:
     """Set the shared open-file-description offset."""
     if not fd_is_valid(fd):
-        return 0 - EBADF
+        return -9
     val idx: u64 = fd as u64
     val obj = fd_objects[idx]
     of_offsets[obj] = offset
@@ -625,7 +623,7 @@ fn fd_poll_ready(fd: i32, events: i16) -> i16:
     val obj = fd_objects[idx]
     val fd_type = of_types[obj]
     var revents: i16 = 0
-    if fd_type == FD_TYPE_SERIAL or fd_type == FD_TYPE_FILE:
+    if fd_type == 6 or fd_type == 1:
         if (events & POLLIN) != 0:
             revents = revents | POLLIN
         if (events & POLLOUT) != 0:
@@ -636,7 +634,7 @@ fn fd_poll_ready(fd: i32, events: i16) -> i16:
 fn fd_set_poll_notification(fd: i32, events: i16, notif_id: u64) -> i32:
     """Attach backend wake notifications to the shared open description."""
     if not fd_is_valid(fd):
-        return 0 - EBADF
+        return -9
     val idx: u64 = fd as u64
     val obj = fd_objects[idx]
     if (events & POLLIN) != 0:
@@ -664,7 +662,7 @@ fn fd_poll_notification(fd: i32, events: i16) -> u64:
 fn fd_update_ready(fd: i32, set_events: i16, clear_events: i16) -> i32:
     """Update readiness bits on the shared open file description."""
     if not fd_is_valid(fd):
-        return 0 - EBADF
+        return -9
     val idx: u64 = fd as u64
     val obj = fd_objects[idx]
     val before = of_ready_events[obj]

@@ -4,8 +4,8 @@ use std.common.compress.{
     CompressionError,
     default_compression_options
 }
-use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
-use std.common.compress.utilities.{crc32_bytes}
+use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_compress_xz_for_tier, lzma2_decompress_xz, lzma2_decompress_xz_for_tier}
+use std.common.compress.utilities.{CompressionSimdTier, crc32_bytes}
 use std.io_runtime.{shell}
 
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
@@ -78,6 +78,15 @@ fn _first_block_header_size(data: [u8]) -> i64:
 fn _first_block_data_start(data: [u8]) -> i64:
     12 + _first_block_header_size(data)
 
+fn _replace_first_chunk_prefix(data: [u8], prefix: [u8]) -> [u8]:
+    var out = data
+    val start = _first_block_data_start(data)
+    var i = 0
+    while i < prefix.len():
+        out[start + i] = prefix[i]
+        i = i + 1
+    out
+
 fn _first_filter_id_pos(data: [u8]) -> i64:
     var pos = 14
     val compressed = _read_vli(data, pos)
@@ -111,6 +120,19 @@ describe "xz lzma2 codec":
             print(run.stderr)
         expect run.exit_code == 0
         expect _read_bytes(output_path) == input
+
+    it "keeps xz framing and decode parity across scalar avx2 and neon tiers":
+        val input = _payload(2048)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val scalar = lzma2_compress_xz_for_tier(input, options, CompressionSimdTier.scalar)
+        val avx2 = lzma2_compress_xz_for_tier(input, options, CompressionSimdTier.avx2)
+        val neon = lzma2_compress_xz_for_tier(input, options, CompressionSimdTier.neon)
+        expect avx2 == scalar
+        expect neon == scalar
+        expect lzma2_compress_xz(input, options) == scalar
+        expect lzma2_decompress_xz_for_tier(scalar, CompressionSimdTier.scalar).unwrap() == input
+        expect lzma2_decompress_xz_for_tier(scalar, CompressionSimdTier.avx2).unwrap() == input
+        expect lzma2_decompress_xz_for_tier(scalar, CompressionSimdTier.neon).unwrap() == input
 
     it "rejects misaligned xz stream padding":
         val options = default_compression_options(CompressionCodec.lzma2)
@@ -148,7 +170,65 @@ describe "xz lzma2 codec":
         encoded[_first_block_data_start(encoded)] = 0x80u8
         val decoded = lzma2_decompress_xz(encoded)
         expect decoded.is_err() == true
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "compressed lzma2 chunks")
+        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "dictionary reset")
+
+    it "rejects invalid non-terminal lzma2 control bytes explicitly":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        var encoded = lzma2_compress_xz(_payload(128), options)
+        encoded[_first_block_data_start(encoded)] = 0x03u8
+        val decoded = lzma2_decompress_xz(encoded)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "control")
+
+    it "rejects compressed lzma2 chunks without required new properties in the first chunk":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = _replace_first_chunk_prefix(
+            lzma2_compress_xz(_payload(128), options),
+            [0xA0u8, 0x00u8, 0x00u8, 0x00u8, 0x04u8]
+        )
+        val decoded = lzma2_decompress_xz(encoded)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "properties")
+
+    it "rejects too-short compressed lzma2 payloads after parsing their headers":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = _replace_first_chunk_prefix(
+            lzma2_compress_xz(_payload(128), options),
+            [0xE0u8, 0x00u8, 0x00u8, 0x00u8, 0x03u8, 0x00u8]
+        )
+        val decoded = lzma2_decompress_xz(encoded)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "compressed chunk size")
+
+    it "rejects invalid compressed lzma2 property bytes":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = _replace_first_chunk_prefix(
+            lzma2_compress_xz(_payload(128), options),
+            [0xE0u8, 0x00u8, 0x00u8, 0x00u8, 0x04u8, 0x29u8]
+        )
+        val decoded = lzma2_decompress_xz(encoded)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "properties")
+
+    it "rejects malformed compressed lzma2 range-decoder init bytes before unsupported-feature fallback":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = _replace_first_chunk_prefix(
+            lzma2_compress_xz(_payload(128), options),
+            [0xE0u8, 0x00u8, 0x00u8, 0x00u8, 0x04u8, 0x00u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        )
+        val decoded = lzma2_decompress_xz(encoded)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "range decoder init")
+
+    it "parses compressed lzma2 chunk headers before falling back on body decode":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = _replace_first_chunk_prefix(
+            lzma2_compress_xz(_payload(128), options),
+            [0xE0u8, 0x00u8, 0x00u8, 0x00u8, 0x04u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        )
+        val decoded = lzma2_decompress_xz(encoded)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "range-coded compressed chunks")
 
     it "reports footer crc corruption as a checksum mismatch":
         val options = default_compression_options(CompressionCodec.lzma2)
@@ -172,4 +252,4 @@ describe "xz lzma2 codec":
         val encoded = _read_bytes(compressed_path)
         val decoded = lzma2_decompress_xz(encoded)
         expect decoded.is_err() == true
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "compressed lzma2 chunks")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "range-coded compressed chunks")

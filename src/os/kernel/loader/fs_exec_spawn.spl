@@ -1,0 +1,152 @@
+# Shared filesystem-exec scheduler bridge.
+#
+# Keeps executable-byte resolution, process-image construction, scheduler task
+# creation, and common status mapping in one place. Per-arch differences are
+# reduced to the active architecture selection, byte-source bridge, and the
+# optional live handoff hook.
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.process_image.{build_user_process_image_unchecked}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.task_types.{TaskPriority, user_process_image_entry}
+
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+extern fn serial_println(msg: text)
+
+@cfg(arm64)
+use os.kernel.arch.arm64.user_entry.{dispatch_enter_user_blocking_probe}
+
+@cfg(riscv64)
+use os.kernel.arch.riscv64.user_entry.{dispatch_enter_user_blocking_probe}
+
+@cfg(x86_64)
+use os.kernel.arch.x86_64.user_entry.{dispatch_enter_user_blocking}
+
+@cfg(arm64)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+@cfg(arm32)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+@cfg(x86_64)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(x86)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(riscv64)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(riscv32)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(x86_64)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.X86_64
+
+@cfg(x86)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.X86
+
+@cfg(arm64)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.Arm64
+
+@cfg(arm32)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.Arm32
+
+@cfg(riscv64)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.Riscv64
+
+@cfg(riscv32)
+fn _fs_exec_active_arch() -> Architecture:
+    Architecture.Riscv32
+
+@cfg(arm64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    arm_fs_exec_read_file_bytes(path)
+
+@cfg(arm32)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    arm_fs_exec_read_file_bytes(path)
+
+@cfg(x86_64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(x86)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(riscv64)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(riscv32)
+fn _fs_exec_read_bytes(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(x86_64)
+fn _fs_exec_dispatch_user_handoff(pid: u64, scheduler: Scheduler) -> i64:
+    dispatch_enter_user_blocking(pid, scheduler)
+
+@cfg(arm64)
+fn _fs_exec_dispatch_user_handoff(pid: u64, scheduler: Scheduler) -> i64:
+    dispatch_enter_user_blocking_probe(pid, scheduler)
+
+@cfg(x86)
+fn _fs_exec_dispatch_user_handoff(pid: u64, scheduler: Scheduler) -> i64:
+    val _pid = pid
+    val _scheduler = scheduler
+    0
+
+@cfg(arm32)
+fn _fs_exec_dispatch_user_handoff(pid: u64, scheduler: Scheduler) -> i64:
+    val _pid = pid
+    val _scheduler = scheduler
+    0
+
+@cfg(riscv64)
+fn _fs_exec_dispatch_user_handoff(pid: u64, scheduler: Scheduler) -> i64:
+    dispatch_enter_user_blocking_probe(pid, scheduler)
+
+@cfg(riscv32)
+fn _fs_exec_dispatch_user_handoff(pid: u64, scheduler: Scheduler) -> i64:
+    val _pid = pid
+    val _scheduler = scheduler
+    0
+
+pub fn fs_exec_read_executable_bytes(path: text) -> [u8]:
+    """Read executable bytes through the active target's filesystem bridge."""
+    _fs_exec_read_bytes(path)
+
+pub fn fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
+    """Load a filesystem executable and register a bootstrap user task."""
+    serial_println("[fs-exec] spawn:resolve path={path}")
+    val bytes = _fs_exec_read_bytes(path)
+    val byte_len = rt_arm_array_len_u32(bytes)
+    if byte_len <= 4:
+        serial_println("[fs-exec] spawn:resolve-fail path={path}")
+        return -2
+
+    val image = build_user_process_image_unchecked(path, bytes, _fs_exec_active_arch(), argv, envp)
+    if user_process_image_entry(image) == 0:
+        serial_println("[fs-exec] spawn:image-fail path={path}")
+        return -8
+
+    var scheduler = Scheduler.new_bootstrap()
+    val pid = scheduler.create_bootstrap_user_task_pid(image, TaskPriority.Normal, CapabilitySet.full())
+    if pid == 0:
+        serial_println("[fs-exec] spawn:scheduler-fail path={path}")
+        return -12
+
+    val handoff = _fs_exec_dispatch_user_handoff(pid, scheduler)
+    if handoff != 0:
+        serial_println("[fs-exec] spawn:handoff-fail path={path} pid={pid}")
+        return -16
+
+    serial_println("[fs-exec] spawn:pid={pid} path={path}")
+    pid as i64

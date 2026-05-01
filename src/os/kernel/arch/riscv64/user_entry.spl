@@ -1,0 +1,38 @@
+# RISC-V 64 User Entry Bridge
+#
+# Mirrors the arm64 probe bridge shape while RV64 filesystem-exec acceptance
+# still validates the handoff frame instead of performing a long-lived live
+# U-mode session for each staged tool app.
+
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.log.klog_api.{log_raw_println}
+
+fn dispatch_enter_user_blocking_probe(pid_hint: u64, scheduler: Scheduler) -> i64:
+    """Validate the target RV64 user-task handoff state for fs-exec launch."""
+    log_raw_println("[rv64-user] dispatch_enter_user_blocking_probe enter")
+    var sched = scheduler
+
+    val tcb = sched.get_user_handoff_task(pid_hint)
+    if tcb == nil:
+        log_raw_println("[rv64-user] handoff task not found pid_hint={pid_hint}")
+        return -22
+
+    val task = tcb
+    val target_pid = task.id.id
+    if not task.is_user:
+        log_raw_println("[rv64-user] task is not a user task pid={target_pid}")
+        return -22
+
+    val uctx = task.user_context
+    if uctx == nil:
+        log_raw_println("[rv64-user] task has no user_context pid={target_pid}")
+        return -22
+
+    val ctx = uctx.unwrap()
+    val satp_root = task.address_space
+    if ctx.rip == 0 or ctx.rsp == 0 or satp_root == 0:
+        log_raw_println("[rv64-user] invalid handoff frame pid={target_pid} rip={ctx.rip} sp={ctx.rsp} satp={satp_root}")
+        return -14
+
+    log_raw_println("[rv64-user] handoff probe ok pid={target_pid} rip={ctx.rip} satp={satp_root}")
+    0

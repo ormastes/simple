@@ -136,8 +136,8 @@ fi
 if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$SIMPLE_BIN" ]; then
     echo "[build] Building SimpleOS riscv64 kernel (per-file timeout: ${BUILD_TIMEOUT_SEC}s)..."
     mkdir -p "$REPO_ROOT/build/os"
-    if [ "$SMOKE" -eq 1 ]; then
-        SIMPLE_BOOT_MINIMAL=1 "$SIMPLE_BIN" native-build \
+    if [ "$HOSTED" -eq 1 ]; then
+        SIMPLE_BOOT_MINIMAL=1 SIMPLE_LINKER_DEBUG=1 "$SIMPLE_BIN" native-build \
             --backend llvm \
             --timeout "$BUILD_TIMEOUT_SEC" \
             $SOURCE_ARGS \
@@ -163,6 +163,12 @@ if [ "$SKIP_BUILD" -eq 0 ] && [ -x "$SIMPLE_BIN" ]; then
         if grep -q "LLVM backend requested but 'llvm' feature not enabled" "$BUILD_LOG"; then
             echo "prerequisite: rebuild the selected Simple compiler with the Rust llvm feature, or set SIMPLE_BINARY to an LLVM-enabled simple binary."
         fi
+        echo "[build] Log tail ($BUILD_LOG):"
+        tail -n 80 "$BUILD_LOG"
+        exit 1
+    fi
+    if [ "$HOSTED" -eq 1 ] && ! grep -q "Boot C source: .*examples/simple_os/arch/riscv64/boot/baremetal_stubs.c" "$BUILD_LOG"; then
+        echo "FAIL: Hosted RV64 build did not prove compilation of examples/simple_os/arch/riscv64/boot/baremetal_stubs.c"
         echo "[build] Log tail ($BUILD_LOG):"
         tail -n 80 "$BUILD_LOG"
         exit 1
@@ -518,12 +524,24 @@ if [ "$DISPLAY" -eq 1 ]; then
 elif [ "$HOSTED" -eq 1 ]; then
     qemu-system-riscv64 $QEMU_ARGS 2>/dev/null &
     QEMU_PID=$!
-    if ! wait_for_serial_marker "HOSTED_PREFLIGHT_READY|HOSTED_PREFLIGHT_FAILED|HOSTED_NETWORK_UNAVAILABLE|TEST FAILED" 30; then
+    if ! wait_for_serial_marker "HOSTED_FS_TOOLCHAIN_READY|HOSTED_PREFLIGHT_READY|HOSTED_PREFLIGHT_FAILED|HOSTED_NETWORK_UNAVAILABLE|TEST FAILED" 30; then
         echo "FAIL: Hosted preflight markers not seen"
         kill "$QEMU_PID" 2>/dev/null
         wait "$QEMU_PID" 2>/dev/null
         exit 1
     fi
+    if grep -q "HOSTED_FS_TOOLCHAIN_READY" "$SERIAL_LOG"; then
+        if ! grep -q "TEST PASSED" "$SERIAL_LOG"; then
+            echo "FAIL: Hosted fs-toolchain lane did not report TEST PASSED"
+            kill "$QEMU_PID" 2>/dev/null
+            wait "$QEMU_PID" 2>/dev/null
+            exit 1
+        fi
+        echo "PASS: RV64 filesystem toolchain launch proof"
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+        QEMU_EXIT=0
+    else
     HOSTED_FAIL=0
     if grep -q "HOSTED_NETWORK_UNAVAILABLE" "$SERIAL_LOG"; then
         echo "FAIL: RV64 guest networking is not implemented yet"
@@ -552,6 +570,7 @@ elif [ "$HOSTED" -eq 1 ]; then
     if [ "$HOSTED_FAIL" -ne 0 ]; then
         echo "FAIL: Hosted RV64 proof incomplete"
         exit 1
+    fi
     fi
 elif [ -n "$TIMEOUT_CMD" ]; then
     $TIMEOUT_CMD "$TIMEOUT_SEC" qemu-system-riscv64 $QEMU_ARGS 2>/dev/null

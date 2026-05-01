@@ -8,8 +8,8 @@ use std.common.compress.{
     compress_bytes,
     decompress_bytes
 }
-use std.common.compress.lz4.{lz4_compress_block, lz4_decompress_block, lz4_compress_frame, lz4_decompress_frame}
-use std.common.compress.utilities.{xxhash32_bytes}
+use std.common.compress.lz4.{lz4_compress_block, lz4_decompress_block, lz4_compress_frame, lz4_compress_frame_for_tier, lz4_decompress_frame, lz4_decompress_frame_for_tier}
+use std.common.compress.utilities.{CompressionSimdTier, xxhash32_bytes}
 
 fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
     match err:
@@ -106,6 +106,13 @@ fn _frame_content_checksum_offset(frame: [u8]) -> i64:
             pos = pos + 4
     pos
 
+fn _frame_first_block_size_word(frame: [u8]) -> u32:
+    val pos = _frame_header_checksum_offset(frame) + 1
+    frame[pos].to_u32() |
+        (frame[pos + 1].to_u32() << 8) |
+        (frame[pos + 2].to_u32() << 16) |
+        (frame[pos + 3].to_u32() << 24)
+
 fn _count_frame_blocks(frame: [u8]) -> i64:
     var pos = _frame_header_checksum_offset(frame) + 1
     val has_block_checksum = (frame[4] & 0x10u8) != 0u8
@@ -126,6 +133,13 @@ fn _count_frame_blocks(frame: [u8]) -> i64:
 
 describe "lz4 pure-Simple block and frame":
     it "round-trips overlap-heavy raw blocks":
+        val input = _repetitive_bytes(8192)
+        val encoded = lz4_compress_block(input)
+        val decoded = lz4_decompress_block(encoded)
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(input)
+
+    it "round-trips repetitive data through the baseline raw-block encoder":
         val input = _repetitive_bytes(8192)
         val encoded = lz4_compress_block(input)
         val decoded = lz4_decompress_block(encoded)
@@ -163,9 +177,32 @@ describe "lz4 pure-Simple block and frame":
         expect(decoded.is_err()).to_equal(false)
         expect(decoded.unwrap()).to_equal(input)
 
+    it "keeps framed output and decode parity across scalar avx2 and neon tiers":
+        val input = _repetitive_bytes(4096)
+        val options = _frame_options(false, input.len(), 1)
+        val scalar = lz4_compress_frame_for_tier(input, options, CompressionSimdTier.scalar)
+        val avx2 = lz4_compress_frame_for_tier(input, options, CompressionSimdTier.avx2)
+        val neon = lz4_compress_frame_for_tier(input, options, CompressionSimdTier.neon)
+        expect(avx2).to_equal(scalar)
+        expect(neon).to_equal(scalar)
+        expect(lz4_compress_frame(input, options)).to_equal(scalar)
+        expect(lz4_decompress_frame_for_tier(scalar, CompressionSimdTier.scalar).unwrap()).to_equal(input)
+        expect(lz4_decompress_frame_for_tier(scalar, CompressionSimdTier.avx2).unwrap()).to_equal(input)
+        expect(lz4_decompress_frame_for_tier(scalar, CompressionSimdTier.neon).unwrap()).to_equal(input)
+
+    it "stores compressed frame blocks for repetitive data on the baseline path":
+        val input = _repetitive_bytes(8192)
+        val encoded = lz4_compress_frame(input, _frame_options(false, input.len(), 1))
+        val size_word = _frame_first_block_size_word(encoded)
+        expect((size_word & 0x80000000u32) == 0u32).to_equal(true)
+        expect((size_word & 0x7FFFFFFFu32).to_i64() < input.len()).to_equal(true)
+        val decoded = lz4_decompress_frame(encoded)
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(input)
+
     it "fails closed on a corrupt frame header checksum":
         val input = _repetitive_bytes(2048)
-        val encoded = lz4_compress_frame(input, _frame_options(false, input.len(), 8))
+        val encoded = lz4_compress_frame(input, _frame_options(false, input.len(), 1))
         var corrupt = encoded
         val hc_offset = _frame_header_checksum_offset(corrupt)
         corrupt[hc_offset] = corrupt[hc_offset] ^ 0x01u8
@@ -185,7 +222,7 @@ describe "lz4 pure-Simple block and frame":
 
     it "fails closed on a corrupt content checksum":
         val input = _repetitive_bytes(4096)
-        val encoded = lz4_compress_frame(input, _frame_options(true, input.len(), 6))
+        val encoded = lz4_compress_frame(input, _frame_options(true, input.len(), 1))
         var corrupt = encoded
         val checksum_offset = _frame_content_checksum_offset(corrupt)
         corrupt[checksum_offset] = corrupt[checksum_offset] ^ 0x01u8
@@ -195,7 +232,7 @@ describe "lz4 pure-Simple block and frame":
 
     it "validates declared content size against decoded bytes":
         val input = _repetitive_bytes(2048)
-        val encoded = lz4_compress_frame(input, _frame_options(false, input.len(), 5))
+        val encoded = lz4_compress_frame(input, _frame_options(false, input.len(), 1))
         var corrupt = encoded
         corrupt[6] = corrupt[6] + 1u8
         corrupt = _set_header_checksum(corrupt)

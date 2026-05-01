@@ -186,3 +186,147 @@ runtime crash and will be needed again after the bench is stable.
 - The temporary region-windowed signal-backed bench is not yet a valid replacement for the older flat/shared-memory loader.
 - The generated core is trapping at the first instruction because the bench is not making the FW preload visible at reset release.
 - Once the bench is restored to a truthful memory model, the next likely guest-side blocker is still generated-core ISA support, with AMO/A-extension coverage the strongest locally supported candidate for the earlier deeper `bbl` failure around `PC_HEX32=00380000`.
+
+## New Verification After Runtime Window And Readback Fixes
+
+- Date:
+  - 2026-05-01
+- Commands:
+  - `bin/simple test test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
+  - `bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_boot_info_dtb_runner.shs --payload-elf build/os/ghdl_boot_info_probe_payload.elf --timeout=20 --max-cycles 50000`
+  - `bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_boot_info_dtb_runner.shs --payload-elf build/os/ghdl_boot_info_payload.elf --timeout=20 --max-cycles 50000`
+- Result:
+  - the generated bench now backs an 8 MiB contiguous window from `0x80000000`, so the runtime stack / mailbox-adjacent region around `0x80610xxx` is no longer silently dropped
+  - the bench now toggles a small memory-epoch signal on RAM writes so same-address read-after-write no longer stays stale inside the DTB lane
+  - bounded probe payload evidence improved:
+    - before the readback fix, a read from `0x80610F90` still returned `0x00000000` immediately after a write of `0x55667788`
+    - after the fix, the same read returns `0x55667788`
+  - bounded main boot-info payload evidence improved:
+    - the run still reaches the deeper boot-info helper PCs around `0x8020C95x`
+    - the run now continues until a later failing end-state at `PC_HEX32=8020B706`
+  - the repo-native lane still does **not** satisfy the DTB proof contract:
+    - `MAGIC_LOW32: 0`
+    - `DTB_ADDR_HEX32: 00000000`
+    - `DTB_PROBE_SEEN: false`
+    - `UART_MARKER_SEEN: false`
+    - `GENERATED_RV64_BOOT_INFO_DTB: FAIL`
+
+## Current Interpretation After These Fixes
+
+- The bench is no longer failing for the original two reasons:
+  - missing runtime RAM backing for `0x8060xxxx`
+  - stale same-address read-after-write in the shared-variable RAM model
+- The remaining blocker is guest/core behavior again, not silent bench memory loss.
+- The strongest current symptom is:
+  - bounded boot-info payloads still fail to complete their proof mailbox / DTB contract
+  - the main payload ends in a later trap/end-state around `PC_HEX32=8020B706`
+- Next investigation should stay on the generated core / guest-side execution path, starting from the instruction stream around that later PC and the remaining boot-info / MMIO contract usage.
+
+## New Verification After RV64 `lw` Lane And `c.xor` Decompress Fixes
+
+- Date:
+  - 2026-05-01
+- Commands:
+  - `bin/simple test test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
+  - `bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_boot_info_dtb_runner.shs --payload-elf build/os/ghdl_boot_info_payload.elf --timeout=20 --max-cycles 50000`
+- Result:
+  - the RV64 core now lane-selects `lw` correctly for aligned word loads in the upper half of a 64-bit memory beat
+  - the RV64C decompressor now expands the previously missing `c.xor` subcase, which matched the old terminal helper PC at `0x8020B706`
+  - the bounded DTB payload no longer ends in the prior trap state:
+    - previous bounded end-state: `TRAP_SEEN='1'`, `PC_HEX32=8020B706`
+    - new bounded end-state at `MAX_CYCLES=50000`: `TRAP_SEEN='0'`, `PC_HEX32=80209C8E`
+  - the DTB proof contract still does not complete:
+    - `MAGIC_LOW32: 0`
+    - `DTB_ADDR_HEX32: 00000000`
+    - `DTB_PROBE_SEEN: false`
+    - `UART_MARKER_SEEN: false`
+    - `GENERATED_RV64_BOOT_INFO_DTB: FAIL`
+  - a suspicious early aligned write/read pair at `0x80610E40` still appears in bounded traces and remains worth revisiting, but it is no longer the top-level terminal signature
+
+## Current Interpretation After `c.xor` Fix
+
+- The missing compressed-ALU decode was a real generated-core bug and materially advanced execution.
+- The repo-native RV64 Linux lane now survives past the previous `rt_native_eq` trap point and continues running until the bounded cycle cap.
+- The next debugging target should move forward with execution, centered on the later path around `PC_HEX32=80209C8E`, while keeping the earlier `0x80610E40` readback anomaly as a secondary core-state suspect.
+
+## New Verification After `calloc` Register And Frame Instrumentation
+
+- Date:
+  - 2026-05-01
+- Commands:
+  - `bin/simple test test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
+  - `bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_boot_info_dtb_runner.shs --payload-elf build/os/ghdl_boot_info_payload.elf --timeout=20 --max-cycles 200000 --log-path /tmp/rv64_calloc_debug2.log --uart-log-path /tmp/rv64_calloc_debug2.uart`
+- Result:
+  - bounded progress still lands inside `calloc`:
+    - `PROGRESS_PC_HEX32: 80209C9C` at 100k cycles
+    - `PROGRESS_PC_HEX32: 80209C8E` at 200k cycles
+  - direct register/frame instrumentation shows this is not just a large-but-sane zeroing loop:
+    - `RA_HEX32: 80209C6A`
+    - `S0_HEX32: 80610A50`
+    - `A0_HEX32: 00002041`
+    - `A1_HEX32: 80612AC1`
+    - `S0_M64_HEX32: 00002042`
+    - `S0_M56_HEX32: 80610A80`
+    - `S0_M40_HEX32: 80215460`
+  - interpretation of those slots in `calloc`:
+    - `s0-64` is the loop index local
+    - `s0-56` is the saved base pointer returned by `rv_alloc`
+    - `s0-40` is the saved total byte count (`nmemb * size`)
+
+## Current Interpretation After `calloc` Frame Dump
+
+- The `calloc` frame locals are nonsensical for a healthy allocator call:
+  - saved base pointer `s0-56 = 0x80610A80` looks stack-like, not like the expected heap region near `g_heap`
+  - saved byte-count `s0-40 = 0x80215460` looks pointer/code-data-like, not like a reasonable allocation size
+- This means the current blocker is stronger than “bytewise zeroing is slow”:
+  - either the allocator inputs are already corrupted before/during `calloc`
+  - or an earlier execution bug is corrupting `calloc` frame locals in RAM
+- The earlier `0x80610E40` aligned readback anomaly is now demoted further; the priority target is the `rt_alloc` caller chain and the provenance of the corrupted `calloc` locals.
+
+## New Verification After Registered DTB Bench Read Response
+
+- Date:
+  - 2026-05-01
+- Commands:
+  - `bin/simple test test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
+  - `bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_boot_info_dtb_runner.shs --payload-elf build/os/ghdl_boot_info_payload.elf --timeout=20 --max-cycles 200000 --log-path /tmp/rv64_calloc_debug5.log --uart-log-path /tmp/rv64_calloc_debug5.uart`
+- Change under test:
+  - switched the generated RV64 boot-info DTB bench from combinational `dmem_rdata` readback to a registered one-cycle read response in the clocked process
+- Result:
+  - the old stale-read symptom disappeared:
+    - `DMEM_READ_EVENT_ADDR_HEX32: 80610E40`
+    - `DMEM_READ_EVENT_DATA_HEX32: 524F4F46`
+  - the allocator path now receives sane arguments again:
+    - `WATCH_RT_ALLOC_RELOAD_S0_M24_HEX32: 00000050`
+    - `WATCH_RT_ALLOC_RELOAD_S0_M32_HEX32: 00000050`
+    - `WATCH_RT_ALLOC_RELOAD_A0_HEX32: 00000050`
+    - `WATCH_CALLOC_SPILL_A0_HEX32: 00000001`
+    - `WATCH_CALLOC_SPILL_A1_HEX32: 00000050`
+  - bounded execution no longer stalls in `calloc`; it halts after `boot_main` returns:
+    - `CYCLES: 47672`
+    - `HALT_SEEN: '1'`
+    - `TRAP_SEEN: '0'`
+    - `PC_HEX32: 8020C5DC`
+  - boot-info bring-up now reaches later success markers:
+    - `MAGIC_LOW32: 1380929350` (`0x524F4F46`, low 32 bits of `PROOF_MAGIC_EXPECTED`)
+    - `DONE_LOW32: 1`
+    - `DTB_PROBE_SEEN: true`
+    - `DTB_PROBE_ADDR_HEX32: 88000000`
+    - `UART_MARKER_SEEN: true`
+  - but the proof contract is still incomplete at halt:
+    - `DTB_ADDR_HEX32: 00000000`
+    - `RAM_BASE_HEX32: 00000000`
+    - `RAM_SIZE_HEX32: 00000000`
+    - `SERIAL_BASE_HEX32: 00000000`
+    - `MAP_LEN_LOW32: 0`
+
+## Current Interpretation After Registered Read Fix
+
+- The earlier `calloc` corruption was not a guest allocator bug; it was caused by the generated DTB bench returning stale data on the load path.
+- The registered read response fixed both:
+  - the `rt_alloc`/`calloc` argument corruption
+  - the earlier same-address readback anomaly at `0x80610E40`
+- The primary blocker has moved again:
+  - execution now returns from `boot_main` and halts cleanly
+  - but the proof mailbox still does not receive the expected boot-info fields even though DTB parsing and UART progress are clearly happening
+- The next target is no longer memory-model plumbing. It is the boot-info proof/output path between successful boot parsing and the mailbox writes checked by the bounded DTB contract.

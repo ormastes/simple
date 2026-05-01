@@ -114,7 +114,7 @@ describe "common compression framework":
                 print(err)
                 expect(false).to_equal(true)
 
-    it "REQ-012: checked api rejects unsupported zstd checksum requests":
+    it "REQ-012: checked api accepts zstd checksum requests and round-trips":
         val base = default_compression_options(CompressionCodec.zstd)
         val options = CompressionOptions(
             codec: base.codec,
@@ -125,7 +125,11 @@ describe "common compression framework":
             dictionary_id: base.dictionary_id,
             content_size: base.content_size
         )
-        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "checksum")
+        val encoded_res = try_compress_bytes(_fixture_bytes(), options)
+        expect(encoded_res.is_err()).to_equal(false)
+        val decoded = decompress_bytes(encoded_res.unwrap(), Some(CompressionCodec.zstd))
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(_fixture_bytes())
 
     it "REQ-012: checked api rejects unsupported dictionary metadata":
         val base = default_compression_options(CompressionCodec.lz4)
@@ -153,7 +157,7 @@ describe "common compression framework":
         )
         _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "dictionary_id requires dictionary_bytes")
 
-    it "REQ-012: checked encoder finish preserves typed option failures":
+    it "REQ-012: checked encoder finish preserves zstd checksum success":
         val base = default_compression_options(CompressionCodec.zstd)
         val options = CompressionOptions(
             codec: base.codec,
@@ -166,7 +170,11 @@ describe "common compression framework":
         )
         var encoder = new_encoder_state(options)
         encoder = encoder_write(encoder, _fixture_bytes())
-        _expect_unsupported_feature(encoder_finish_checked(encoder), "checksum")
+        val encoded = encoder_finish_checked(encoder)
+        expect(encoded.is_err()).to_equal(false)
+        val decoded = decompress_bytes(encoded.unwrap(), Some(CompressionCodec.zstd))
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(_fixture_bytes())
 
     it "REQ-012: checked encoder finish matches direct checked encode on success":
         val options = default_compression_options(CompressionCodec.zstd)
@@ -256,7 +264,11 @@ describe "common compression framework":
         val result = decompress_bytes(truncated, nil)
         match result:
             Ok(_): expect(false).to_equal(true)
-            Err(_): expect(true).to_equal(true)
+            Err(err):
+                match err:
+                    CompressionError.TruncatedInput(message): expect(message).to_contain("lz4 frame")
+                    CompressionError.InvalidHeader(message): expect(message).to_contain("lz4")
+                    _: expect(false).to_equal(true)
 
     it "REQ-010: host zstd decodes the emitted frame":
         _ensure_tmp_root()

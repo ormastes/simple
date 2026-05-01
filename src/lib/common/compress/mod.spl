@@ -1,6 +1,6 @@
 use compress.types.{CompressionCodec, CompressionLevel, CompressionOptions, CompressionError, CompressionEncoderState, CompressionDecoderState}
 use compress.utilities.{compression_level, default_compression_options, new_encoder_state, new_decoder_state, encoder_write, decoder_write, detect_codec}
-use compress.lz4.{lz4_compress_block, lz4_decompress_block, lz4_compress_frame, lz4_decompress_frame}
+use compress.lz4.{lz4_compress_block, lz4_compress_block_with_level, lz4_decompress_block, lz4_compress_frame, lz4_decompress_frame}
 use compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
 use compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
 
@@ -42,9 +42,6 @@ fn _validate_encode_options(input: [u8], options: CompressionOptions) -> Result<
             val dictionary_res = _validate_dictionary_options(options, "lz4", "lz4 frame dictionaries are not supported")
             if dictionary_res.is_err():
                 return Err(dictionary_res.unwrap_err())
-            val level_supported = if options.level.value == 1: Ok(()) else: Err(CompressionError.UnsupportedFeature("lz4 levels other than 1 are not supported by the current façade implementation"))
-            if level_supported.is_err():
-                return Err(level_supported.unwrap_err())
             val content_size_res = _require_content_size_matches_input(input, options.content_size, "lz4")
             if content_size_res.is_err():
                 return Err(content_size_res.unwrap_err())
@@ -54,8 +51,6 @@ fn _validate_encode_options(input: [u8], options: CompressionOptions) -> Result<
                 return Err(CompressionError.UnsupportedFeature("zstd block_mode must be frame"))
             if options.level.value != 3:
                 return Err(CompressionError.UnsupportedFeature("zstd levels other than 3 are not supported by the current façade implementation"))
-            if options.checksum:
-                return Err(CompressionError.UnsupportedFeature("zstd content checksum emission is not supported"))
             val dictionary_res = _validate_dictionary_options(options, "zstd", "zstd dictionaries are not supported by the current façade implementation")
             if dictionary_res.is_err():
                 return Err(dictionary_res.unwrap_err())
@@ -86,7 +81,7 @@ fn try_compress_bytes(input: [u8], options: CompressionOptions) -> Result<[u8], 
     match options.codec:
         CompressionCodec.lz4:
             if options.block_mode == "block":
-                return Ok(lz4_compress_block(input))
+                return Ok(lz4_compress_block_with_level(input, options.level.value))
             return Ok(lz4_compress_frame(input, options))
         CompressionCodec.zstd:
             return Ok(zstd_compress_frame(input, options))

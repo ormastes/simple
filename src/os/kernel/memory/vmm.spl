@@ -28,13 +28,10 @@ use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.types.vmspace_types.{
     VmArea, ProcessVmSpace,
     VMA_ANON, VMA_FILE, VMA_SHARED,
-    VMA_READ, VMA_WRITE, VMA_EXEC, VMA_COW,
-    MAX_VMAS
+    VMA_EXEC, VMA_COW
 }
 use os.kernel.boot.mmio.{mmio_read8, mmio_read64, mmio_write64}
 use os.kernel.memory.pmm.{PhysMemManager}
-use os.posix.errno.{E2BIG, EFAULT, ESUCCESS}
-
 # ============================================================================
 # Constants
 # ============================================================================
@@ -60,6 +57,7 @@ val PTE_ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 # Identity map range: first 4GB
 val IDENTITY_MAP_END: u64 = 0x100000000    # 4GB
 val VMM_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+val VMM_MAX_VMAS: u64 = 256
 
 @cfg(x86_64)
 val VMM_KERNEL_SPACE_START: u64 = 0xFFFF800000000000
@@ -433,7 +431,7 @@ struct VmmPtWalkResult:
     bytes_until_page_end: u64
 
 fn _vmm_copy_ok(bytes_read: u64) -> VmmUserCopyStatus:
-    VmmUserCopyStatus(ok: true, errno: ESUCCESS, bytes_read: bytes_read)
+    VmmUserCopyStatus(ok: true, errno: 0, bytes_read: bytes_read)
 
 fn _vmm_copy_err(errno: i32, bytes_read: u64) -> VmmUserCopyStatus:
     VmmUserCopyStatus(ok: false, errno: errno, bytes_read: bytes_read)
@@ -535,7 +533,7 @@ fn vmm_pt_walk_user_read(space: ProcessVmSpace, vaddr: u64) -> u64?:
         val area = vma_find(space, vaddr)
         if area == nil:
             return nil
-        if (area.flags & VMA_READ) == 0:
+        if (area.flags & 1) == 0:
             return nil
 
     val walked = _vmm_pt_walk(space, vaddr, PTE_PRESENT | PTE_USER)
@@ -554,7 +552,7 @@ fn vmm_pt_range_user_readable(space: ProcessVmSpace, ptr: u64, len: u64) -> bool
             val area = vma_find(space, current)
             if area == nil:
                 return false
-            if (area.flags & VMA_READ) == 0:
+            if (area.flags & 1) == 0:
                 return false
         val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER)
         if not walked.ok:
@@ -573,7 +571,7 @@ fn vmm_pt_range_user_writable(space: ProcessVmSpace, ptr: u64, len: u64) -> bool
             val area = vma_find(space, current)
             if area == nil:
                 return false
-            if (area.flags & VMA_WRITE) == 0:
+            if (area.flags & 2) == 0:
                 return false
         val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER | PTE_WRITABLE)
         if not walked.ok:
@@ -584,11 +582,11 @@ fn vmm_pt_range_user_writable(space: ProcessVmSpace, ptr: u64, len: u64) -> bool
 fn vmm_copyin_bytes_from_space(space: ProcessVmSpace, ptr: u64, len: u64) -> VmmCopyBytesResult:
     """Copy an exact byte range through an explicit address-space page walk."""
     if ptr == 0:
-        return _vmm_copy_bytes_err(EFAULT)
+        return _vmm_copy_bytes_err(14)
     if len == 0:
         return VmmCopyBytesResult(status: _vmm_copy_ok(0), bytes: [])
     if ptr + len < ptr:
-        return _vmm_copy_bytes_err(EFAULT)
+        return _vmm_copy_bytes_err(14)
 
     var bytes: [u8] = []
     var copied: u64 = 0
@@ -597,12 +595,12 @@ fn vmm_copyin_bytes_from_space(space: ProcessVmSpace, ptr: u64, len: u64) -> Vmm
         if space.vma_count > 0:
             val area = vma_find(space, current)
             if area == nil:
-                return _vmm_copy_bytes_err(EFAULT)
-            if (area.flags & VMA_READ) == 0:
-                return _vmm_copy_bytes_err(EFAULT)
+                return _vmm_copy_bytes_err(14)
+            if (area.flags & 1) == 0:
+                return _vmm_copy_bytes_err(14)
         val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER)
         if not walked.ok:
-            return _vmm_copy_bytes_err(EFAULT)
+            return _vmm_copy_bytes_err(14)
         var chunk = walked.bytes_until_page_end
         val remaining = len - copied
         if chunk > remaining:
@@ -621,24 +619,33 @@ fn _vmm_bytes_to_text(bytes: [u8]) -> text:
         chars.push((b.to_i64()).to_char())
     chars.join("")
 
+fn _vmm_copyin_current_byte(ptr: u64) -> u8?:
+    """Read one byte from the current userspace mapping through page tables."""
+    val translated = vmm_translate(VirtAddr(addr: ptr))
+    if val Some(phys) = translated:
+        return mmio_read8(_phys_to_virt(phys_addr_value(phys)))
+    nil
+
 fn vmm_copyin_bytes(ptr: u64, len: u64) -> VmmCopyBytesResult:
     """Copy an exact byte range from userspace into kernel-owned memory."""
     if ptr == 0:
-        return _vmm_copy_bytes_err(EFAULT)
+        return _vmm_copy_bytes_err(14)
     if len == 0:
         return VmmCopyBytesResult(status: _vmm_copy_ok(0), bytes: [])
     if not vmm_verify_user_read(ptr, len):
-        return _vmm_copy_bytes_err(EFAULT)
+        return _vmm_copy_bytes_err(14)
 
     var bytes: [u8] = []
     var i: u64 = 0
     while i < len:
         val current = ptr + i
         if current < ptr:
-            return _vmm_copy_bytes_err(EFAULT)
-        unsafe:
-            val byte_ptr = current as *const u8
-            bytes.push(*byte_ptr)
+            return _vmm_copy_bytes_err(14)
+        val read = _vmm_copyin_current_byte(current)
+        if val Some(byte) = read:
+            bytes.push(byte)
+        else:
+            return _vmm_copy_bytes_err(14)
         i = i + 1
 
     VmmCopyBytesResult(status: _vmm_copy_ok(len), bytes: bytes)
@@ -646,19 +653,21 @@ fn vmm_copyin_bytes(ptr: u64, len: u64) -> VmmCopyBytesResult:
 fn vmm_copyin_u64(ptr: u64) -> VmmCopyU64Result:
     """Copy a little-endian u64 from userspace."""
     if ptr == 0:
-        return _vmm_copy_u64_err(EFAULT)
+        return _vmm_copy_u64_err(14)
     if not vmm_verify_user_read(ptr, 8):
-        return _vmm_copy_u64_err(EFAULT)
+        return _vmm_copy_u64_err(14)
 
     var value: u64 = 0
     var i: u64 = 0
     while i < 8:
         val current = ptr + i
         if current < ptr:
-            return _vmm_copy_u64_err(EFAULT)
-        unsafe:
-            val byte_ptr = current as *const u8
-            value = value | ((*byte_ptr).to_u64() << (i * 8))
+            return _vmm_copy_u64_err(14)
+        val read = _vmm_copyin_current_byte(current)
+        if val Some(byte) = read:
+            value = value | (byte.to_u64() << (i * 8))
+        else:
+            return _vmm_copy_u64_err(14)
         i = i + 1
 
     VmmCopyU64Result(status: _vmm_copy_ok(8), value: value)
@@ -666,28 +675,29 @@ fn vmm_copyin_u64(ptr: u64) -> VmmCopyU64Result:
 fn vmm_copyin_cstr(ptr: u64, max_len: u64) -> VmmCopyCstrResult:
     """Copy a NUL-terminated userspace string, bounded by max_len bytes."""
     if ptr == 0:
-        return _vmm_copy_cstr_err(EFAULT, 0)
+        return _vmm_copy_cstr_err(14, 0)
 
     var bytes: [u8] = []
     var i: u64 = 0
     while i < max_len:
         val current = ptr + i
         if current < ptr:
-            return _vmm_copy_cstr_err(EFAULT, i)
+            return _vmm_copy_cstr_err(14, i)
         if not vmm_verify_user_read(current, 1):
-            return _vmm_copy_cstr_err(EFAULT, i)
-        unsafe:
-            val byte_ptr = current as *const u8
-            val b = *byte_ptr
+            return _vmm_copy_cstr_err(14, i)
+        val read = _vmm_copyin_current_byte(current)
+        if val Some(b) = read:
             if b == 0u8:
                 return VmmCopyCstrResult(
                     status: _vmm_copy_ok(i + 1),
                     value: _vmm_bytes_to_text(bytes)
                 )
             bytes.push(b)
+        else:
+            return _vmm_copy_cstr_err(14, i)
         i = i + 1
 
-    _vmm_copy_cstr_err(E2BIG, i)
+    _vmm_copy_cstr_err(7, i)
 
 fn vmm_copyin_string_vector(
     vec_ptr: u64,
@@ -709,17 +719,17 @@ fn vmm_copyin_string_vector(
     var i: u64 = 0
     while i < max_count:
         if i > (VMM_U64_MAX / 8):
-            return _vmm_copy_vector_err(EFAULT, bytes_read)
+            return _vmm_copy_vector_err(14, bytes_read)
         val offset = i * 8
         val slot = vec_ptr + offset
         if slot < vec_ptr:
-            return _vmm_copy_vector_err(EFAULT, bytes_read)
+            return _vmm_copy_vector_err(14, bytes_read)
 
         val item_ptr_result = vmm_copyin_u64(slot)
         if not item_ptr_result.status.ok:
             return _vmm_copy_vector_err(item_ptr_result.status.errno, bytes_read)
         if bytes_read > VMM_U64_MAX - 8:
-            return _vmm_copy_vector_err(E2BIG, bytes_read)
+            return _vmm_copy_vector_err(7, bytes_read)
         bytes_read = bytes_read + 8
 
         val item_ptr = item_ptr_result.value
@@ -729,25 +739,25 @@ fn vmm_copyin_string_vector(
         val item_result = vmm_copyin_cstr(item_ptr, max_string_len)
         if not item_result.status.ok:
             if bytes_read > VMM_U64_MAX - item_result.status.bytes_read:
-                return _vmm_copy_vector_err(E2BIG, bytes_read)
+                return _vmm_copy_vector_err(7, bytes_read)
             return _vmm_copy_vector_err(item_result.status.errno, bytes_read + item_result.status.bytes_read)
 
         val item_bytes = item_result.status.bytes_read
         if total_bytes + item_bytes < total_bytes:
-            return _vmm_copy_vector_err(E2BIG, bytes_read)
+            return _vmm_copy_vector_err(7, bytes_read)
         total_bytes = total_bytes + item_bytes
         if total_bytes > max_total_bytes:
             if bytes_read > VMM_U64_MAX - item_bytes:
-                return _vmm_copy_vector_err(E2BIG, bytes_read)
-            return _vmm_copy_vector_err(E2BIG, bytes_read + item_bytes)
+                return _vmm_copy_vector_err(7, bytes_read)
+            return _vmm_copy_vector_err(7, bytes_read + item_bytes)
 
         if bytes_read > VMM_U64_MAX - item_bytes:
-            return _vmm_copy_vector_err(E2BIG, bytes_read)
+            return _vmm_copy_vector_err(7, bytes_read)
         bytes_read = bytes_read + item_bytes
         out.push(item_result.value)
         i = i + 1
 
-    _vmm_copy_vector_err(E2BIG, bytes_read)
+    _vmm_copy_vector_err(7, bytes_read)
 
 fn vmm_verify_user_write(addr: u64, size: u64) -> bool:
     """Verify that [addr, addr+size) is mapped as user-writable.
@@ -1260,7 +1270,7 @@ fn vma_add(space: ProcessVmSpace, area: VmArea) -> i32:
     Returns 0 on success, -EEXIST (-17) if the range overlaps an existing VMA,
     -ENOMEM (-12) if the VMA table is full.
     """
-    if space.vma_count >= MAX_VMAS:
+    if space.vma_count >= VMM_MAX_VMAS:
         return -12  # -ENOMEM
 
     val new_end = area.start + area.len
@@ -1393,7 +1403,7 @@ val VMM_USER_HINT_LIMIT: u64 = 0x0000800000000000  # Top of lower canonical half
 fn _pick_free_vaddr(space: ProcessVmSpace, len: u64) -> u64:
     """Find the lowest page-aligned address in user range with no VMA overlap.
 
-    O(N^2) in the number of VMAs — acceptable for up to MAX_VMAS entries.
+    O(N^2) in the number of VMAs — acceptable for up to VMM_MAX_VMAS entries.
     Returns 0 if no suitable range exists.
     """
     var candidate = VMM_USER_HINT_BASE
@@ -1521,7 +1531,7 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
     while (i as u64) < parent_space.vma_count:
         val src = parent_space.areas[i]
         var child_flags = src.flags
-        if (src.flags & VMA_WRITE) != 0:
+        if (src.flags & 2) != 0:
             child_flags = child_flags | VMA_COW
         val cloned = VmArea(
             start: src.start,
@@ -1535,7 +1545,7 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
         child.vma_count = child.vma_count + 1
 
         # Also mark parent VMA as COW so the parent faults on next write
-        if (src.flags & VMA_WRITE) != 0:
+        if (src.flags & 2) != 0:
             var parent_flags = src.flags | VMA_COW
             parent_space.areas[i] = VmArea(
                 start: src.start,
@@ -1609,7 +1619,7 @@ fn vmm_handle_cow_fault(space: ProcessVmSpace, fault_vaddr: u64) -> i32:
         while (i as u64) < space.vma_count:
             val a = space.areas[i]
             if (fault_vaddr >= a.start) and (fault_vaddr < (a.start + a.len)):
-                val new_flags = (a.flags & ~VMA_COW) | VMA_WRITE
+                val new_flags = (a.flags & ~VMA_COW) | 2
                 space.areas[i] = VmArea(
                     start: a.start,
                     len: a.len,
@@ -1660,7 +1670,7 @@ fn vmm_handle_anon_fault(space: ProcessVmSpace, vaddr: u64) -> i32:
 
         # Build PTE flags from VMA permission bits
         var flag_bits: u32 = 1  # VM_PRESENT always
-        if (area.flags & VMA_WRITE) != 0:
+        if (area.flags & 2) != 0:
             flag_bits = flag_bits | 2   # VM_WRITABLE
         flag_bits = flag_bits | 4       # VM_USER
         if (area.flags & VMA_EXEC) == 0:

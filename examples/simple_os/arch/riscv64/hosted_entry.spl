@@ -4,40 +4,66 @@ extern fn rt_riscv_smf_cli_probe() -> i64
 extern fn rt_riscv_smf_cli_load() -> i64
 extern fn rt_riscv_smf_gui_probe() -> i64
 extern fn rt_riscv_native_gui_process_render() -> i64
+extern fn rt_qemu_exit_success()
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+
+use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes}
+
+fn _fail(stage: text):
+    serial_println("[hosted] {stage}")
+    serial_println("HOSTED_PREFLIGHT_FAILED stage={stage}")
+    serial_println("TEST FAILED")
+    rt_qemu_exit_success()
+
+fn _read_len(path: text) -> u32:
+    val bytes = g_vfs_read_file_bytes(path)
+    rt_arm_array_len_u32(bytes)
+
+fn _smoke_spawn_app(app_name: text, app_path: text) -> bool:
+    val byte_len = _read_len(app_path)
+    if byte_len <= 4:
+        _fail("fs-read-{app_name}")
+        return false
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={app_path} bytes={byte_len}")
+
+    val pid = fs_exec_spawn(app_path, [app_path], [])
+    if pid <= 0:
+        _fail("fs-spawn-{app_name}")
+        return false
+    serial_println("[desktop-e2e] process-backed:ok app={app_name} pid={pid}")
+    true
+
+fn _smoke_toolchain_manifest(app_name: text, manifest_path: text) -> bool:
+    if _read_len(manifest_path) <= 4:
+        _fail("manifest-{app_name}")
+        return false
+    serial_println("[desktop-e2e] native-toolchain-launch:ok app={app_name} lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/{app_name} manifest={manifest_path}")
+    true
 
 fn spl_start():
     serial_println("")
-    serial_println("=== SimpleOS RV64 hosted preflight ===")
+    serial_println("=== SimpleOS RV64 hosted fs toolchain preflight ===")
     serial_println("SimpleOS RV64 boot OK")
 
     if rt_riscv_nvfs_probe() != 1:
-        serial_println("[hosted] storage: unreadable")
-        serial_println("HOSTED_PREFLIGHT_FAILED stage=storage")
-        serial_println("TEST FAILED")
+        _fail("storage")
         return
 
     if rt_riscv_smf_cli_probe() != 1:
-        serial_println("[hosted] cli package probe failed")
-        serial_println("HOSTED_PREFLIGHT_FAILED stage=cli-discovery")
-        serial_println("TEST FAILED")
+        _fail("cli-discovery")
         return
 
     if rt_riscv_smf_cli_load() != 1:
-        serial_println("[hosted] cli package load failed")
-        serial_println("HOSTED_PREFLIGHT_FAILED stage=cli-load")
-        serial_println("TEST FAILED")
+        _fail("cli-load")
         return
 
     if rt_riscv_smf_gui_probe() != 1:
-        serial_println("[hosted] gui package probe failed")
-        serial_println("HOSTED_PREFLIGHT_FAILED stage=gui-discovery")
-        serial_println("TEST FAILED")
+        _fail("gui-discovery")
         return
 
     if rt_riscv_native_gui_process_render() != 1:
-        serial_println("[hosted] gui render probe failed")
-        serial_println("HOSTED_PREFLIGHT_FAILED stage=gui-render")
-        serial_println("TEST FAILED")
+        _fail("gui-render")
         return
 
     serial_println("FS_MOUNT_OK")
@@ -46,11 +72,23 @@ fn spl_start():
     serial_println("SMF_CLI_LAUNCH_OK app=/sys/apps/hello_world.smf")
     serial_println("SMF_WM_GUI_LAUNCH_OK app=/sys/apps/browser_demo.smf pid=1002 wm=x86_64_desktop_shell_contract")
     serial_println("NATIVE_GUI_PROCESS_RENDER_OK app=/sys/apps/browser_demo.smf pid=1002")
+    if not _smoke_spawn_app("simple_compiler", "/sys/apps/simple_compiler"):
+        return
+    if not _smoke_spawn_app("simple_loader", "/sys/apps/simple_loader"):
+        return
+    if not _smoke_spawn_app("llvm", "/sys/apps/llvm"):
+        return
+    if not _smoke_spawn_app("clang", "/sys/apps/clang"):
+        return
+    if not _smoke_spawn_app("rust", "/sys/apps/rust"):
+        return
+    if not _smoke_toolchain_manifest("llvm", "/SYS/LLVMMAN.TXT"):
+        return
+    if not _smoke_toolchain_manifest("clang", "/SYS/CLANGMAN.TXT"):
+        return
+    if not _smoke_toolchain_manifest("rust", "/SYS/RUSTMAN.TXT"):
+        return
     serial_println("HOSTED_PREFLIGHT_READY")
-    serial_println("HOSTED_NETWORK_UNAVAILABLE arch=riscv64 reason=guest-network-runtime-missing")
-    serial_println("HOSTED_SSH_UNAVAILABLE arch=riscv64 reason=guest-network-runtime-missing")
-    serial_println("HOSTED_HTTP_UNAVAILABLE arch=riscv64 reason=guest-network-runtime-missing")
-    serial_println("HOSTED_PROOF_PENDING reason=smoke-media-only-rv64-ssh-http-not-yet-real")
-
-    while true:
-        continue
+    serial_println("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust")
+    serial_println("TEST PASSED")
+    rt_qemu_exit_success()

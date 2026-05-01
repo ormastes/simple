@@ -14,10 +14,13 @@ use os.tools.pkg.pkg_format.{
     ExtendedManifest, PkgArch, PackageType,
     pkg_arch_to_text, pkg_arch_from_text
 }
-use os.userlib.fs.{read_text, write_text, readdir, mkdir}
 
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
 
 # === Image Constants ===
 
@@ -394,6 +397,18 @@ fn _staging_root(output_path: text) -> text:
 fn _sidecar_manifest_path(output_path: text) -> text:
     "{output_path}.manifest.sdn"
 
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn write_text(path: text, content: text):
+    val _ok = rt_file_write_text(path, content)
+
+fn readdir(path: text) -> [text]:
+    rt_dir_list(path) ?? []
+
+fn mkdir(path: text):
+    val _ok = rt_dir_create_all(path)
+
 fn _ensure_dir(path: text):
     if path == "":
         return
@@ -420,16 +435,22 @@ fn _ensure_parent_dirs(rootfs_root: text, file_path: text):
 fn _write_placeholder_payload(rootfs_root: text, file_path: text, pkg: ExtendedManifest, arch: PkgArch):
     _ensure_parent_dirs(rootfs_root, file_path)
     if file_path == "/SYS/LLVMMAN.TXT":
-        write_text("{rootfs_root}{file_path}", _toolchain_manifest_payload("llvm", "LLVM", "/sys/apps/llvm", "local-ir-inspection", "/usr/share/simpleos/toolchain/llvm/hello.ll", "object-assembly-inspection", "/usr/share/simpleos/toolchain/llvm/hello.s", "compile-pipeline-step", "/usr/share/simpleos/toolchain/llvm/pipeline.step"))
+        write_text("{rootfs_root}{file_path}", _toolchain_manifest_payload(arch, "llvm", "LLVM", "/sys/apps/llvm", "local-ir-inspection", "/usr/share/simpleos/toolchain/llvm/hello.ll", "object-assembly-inspection", "/usr/share/simpleos/toolchain/llvm/hello.s", "compile-pipeline-step", "/usr/share/simpleos/toolchain/llvm/pipeline.step"))
+        return
+    if file_path == "/SYS/CLANGMAN.TXT":
+        write_text("{rootfs_root}{file_path}", _toolchain_manifest_payload(arch, "clang", "Clang", "/sys/apps/clang", "local-c-source-inspection", "/usr/share/simpleos/toolchain/clang/hello.c", "driver-flag-inspection", "/usr/share/simpleos/toolchain/clang/flags.rsp", "compile-pipeline-step", "/usr/share/simpleos/toolchain/clang/pipeline.step"))
         return
     if file_path == "/SYS/RUSTMAN.TXT":
-        write_text("{rootfs_root}{file_path}", _toolchain_manifest_payload("rust", "Rust", "/sys/apps/rust", "local-source-inspection", "/usr/share/simpleos/toolchain/rust/hello.rs", "package-layout-inspection", "/usr/share/simpleos/toolchain/rust/Cargo.toml", "build-pipeline-step", "/usr/share/simpleos/toolchain/rust/pipeline.step"))
+        write_text("{rootfs_root}{file_path}", _toolchain_manifest_payload(arch, "rust", "Rust", "/sys/apps/rust", "local-source-inspection", "/usr/share/simpleos/toolchain/rust/hello.rs", "package-layout-inspection", "/usr/share/simpleos/toolchain/rust/Cargo.toml", "build-pipeline-step", "/usr/share/simpleos/toolchain/rust/pipeline.step"))
         return
     if file_path == "/SYS/TOOLSET.SDN":
-        write_text("{rootfs_root}{file_path}", _toolset_payload())
+        write_text("{rootfs_root}{file_path}", _toolset_payload(arch))
         return
     if file_path == "/SYS/LLVMVER.TXT":
         write_text("{rootfs_root}{file_path}", "SimpleOS LLVM standalone app v1\n")
+        return
+    if file_path == "/SYS/CLANGVER.TXT":
+        write_text("{rootfs_root}{file_path}", "clang version 20.0.0\n")
         return
     if file_path == "/SYS/RUSTVER.TXT":
         write_text("{rootfs_root}{file_path}", "SimpleOS Rust standalone app v1\n")
@@ -442,6 +463,15 @@ fn _write_placeholder_payload(rootfs_root: text, file_path: text, pkg: ExtendedM
         return
     if file_path == "/usr/share/simpleos/toolchain/llvm/pipeline.step":
         write_text("{rootfs_root}{file_path}", "pipeline=compile-pipeline-step\ninput=/work/hello.simple\noutput=/work/hello.ll\nnext=/sys/apps/simple_loader\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/clang/hello.c":
+        write_text("{rootfs_root}{file_path}", "int main(void) " + "{\n    return 0;\n}\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/clang/flags.rsp":
+        write_text("{rootfs_root}{file_path}", "--target=x86_64-unknown-simpleos\n-ffreestanding\n-nostdlib\n-O2\n")
+        return
+    if file_path == "/usr/share/simpleos/toolchain/clang/pipeline.step":
+        write_text("{rootfs_root}{file_path}", "pipeline=compile-pipeline-step\ninput=/work/hello.c\noutput=/work/hello.o\nnext=/sys/apps/simple_loader\n")
         return
     if file_path == "/usr/share/simpleos/toolchain/rust/hello.rs":
         write_text("{rootfs_root}{file_path}", "fn main() " + "{\n    println!(\"hello from simpleos\");\n}\n")
@@ -462,14 +492,23 @@ fn _write_placeholder_payload(rootfs_root: text, file_path: text, pkg: ExtendedM
         content = content + "kind = \"placeholder\"\n"
     write_text("{rootfs_root}{file_path}", content)
 
-fn _toolchain_manifest_payload(payload: text, title: text, app_path: text,
+fn _toolchain_lane(arch: PkgArch) -> text:
+    match arch:
+        PkgArch.X86_64: "x86_64-uefi-hardware"
+        PkgArch.Arm64: "arm64-virtio-fat32-smf"
+        PkgArch.Riscv64: "riscv64-hosted"
+        PkgArch.Riscv32: "riscv32-virtio-fat32-smf"
+        PkgArch.Any: "x86_64-uefi-hardware"
+
+fn _toolchain_manifest_payload(arch: PkgArch, payload: text, title: text, app_path: text,
                                cap_a: text, proof_a: text,
                                cap_b: text, proof_b: text,
                                cap_c: text, proof_c: text) -> text:
+    val lane = _toolchain_lane(arch)
     var out = "payload={payload}\n"
     out = out + "title={title}\n"
     out = out + "entry_app={app_path}\n"
-    out = out + "lane=x86_64-uefi-hardware\n"
+    out = out + "lane={lane}\n"
     out = out + "mode=native-filesystem-app\n"
     out = out + "status=standalone-required\n"
     out = out + "capability_primary={cap_a}\n"
@@ -480,10 +519,12 @@ fn _toolchain_manifest_payload(payload: text, title: text, app_path: text,
     out = out + "proof_pipeline={proof_c}\n"
     out
 
-fn _toolset_payload() -> text:
+fn _toolset_payload(arch: PkgArch) -> text:
+    val lane = _toolchain_lane(arch)
     var out = "[toolchain]\n"
-    out = out + "lane = \"x86_64-uefi-hardware\"\n"
+    out = out + "lane = \"{lane}\"\n"
     out = out + "llvm = \"/sys/apps/llvm status=standalone-required\"\n"
+    out = out + "clang = \"/sys/apps/clang status=standalone-required\"\n"
     out = out + "rust = \"/sys/apps/rust status=standalone-required\"\n"
     out = out + "developer_export_llvm = \"/usr/bin/clang optional\"\n"
     out = out + "developer_export_rust = \"/usr/bin/rustc optional\"\n"

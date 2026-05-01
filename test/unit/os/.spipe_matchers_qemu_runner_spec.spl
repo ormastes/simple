@@ -1,6 +1,6 @@
 use os.qemu_runner.{
     build_qemu_command, build_qemu_command_with_options,
-    get_all_targets, get_gui_target, get_target,
+    get_all_targets, get_gui_target, get_qemu_target, get_target,
     get_scenario, scenario_arm64_virtio_fat32_smf, scenario_arm32_virtio_fat32_smf,
     scenario_riscv64_virtio_fat32_smf, scenario_riscv64_hosted, scenario_riscv32_virtio_fat32_smf,
     scenario_x64_desktop_uefi, scenario_x64_wm_simple_web_check,
@@ -14,6 +14,7 @@ use os.qemu_runner.{
     desktop_release_installer_iso_path, native_build_prerequisite_hint, ovmf_code_path,
     os_native_build_args, os_native_build_sources, os_native_build_env_prefix,
     desktop_uefi_disk_image_tool_app_validation_command, build_os_with_backend,
+    desktop_uefi_required_marker_fragments, riscv64_hosted_required_marker_fragments,
     _simpleos_log_config_source,
     OsTarget,
     qemu_run_options_debug_gui
@@ -50,8 +51,10 @@ fn desktop_tool_app_fallback_fixture() -> text:
         "SINTSMF\n" +
         "SLOADSMF\n" +
         "LLVMSMF\n" +
+        "CLANGSMF\n" +
         "RUSTSMF\n" +
         "SimpleOS LLVM standalone app v1\n" +
+        "clang version 20.0.0\n" +
         "SimpleOS Rust standalone app v1\n" +
         "mode=native-filesystem-app\n" +
         "status=standalone-required\n" +
@@ -61,7 +64,10 @@ fn desktop_tool_app_fallback_fixture() -> text:
         "/sys/apps/simple_interpreter\n" +
         "/sys/apps/simple_loader\n" +
         "/sys/apps/llvm\n" +
+        "/sys/apps/clang\n" +
         "/sys/apps/rust\n" +
+        "/usr/share/simpleos/toolchain/clang/hello.c\n" +
+        "/usr/share/simpleos/toolchain/clang/pipeline.step\n" +
         "/usr/share/simpleos/toolchain/llvm/hello.ll\n" +
         "/usr/share/simpleos/toolchain/rust/hello.rs\n" +
         "SMF\n"
@@ -97,6 +103,22 @@ describe "Qemu runner serial routing":
         expect arm32.entry == "src/os/kernel/arch/arm32/boot.spl"
         expect arm32.target_triple == "armv7-unknown-none-eabihf"
         expect arm32.qemu_system == "qemu-system-arm"
+
+    it "routes default ARM QEMU targets to the fs-exec acceptance lane":
+        val arm64 = get_qemu_target(Architecture.Arm64)
+        expect arm64.entry == "examples/simple_os/arch/arm64/fs_exec_entry.spl"
+        expect arm64.output == "build/os/simpleos_arm64_fs_exec.elf"
+        val arm32 = get_qemu_target(Architecture.Arm32)
+        expect arm32.entry == "examples/simple_os/arch/arm32/fs_exec_entry.spl"
+        expect arm32.output == "build/os/simpleos_arm32_fs_exec.elf"
+
+    it "routes default RISC-V QEMU targets to fs-backed acceptance lanes":
+        val rv64 = get_qemu_target(Architecture.Riscv64)
+        expect rv64.entry == "examples/simple_os/arch/riscv64/hosted_entry.spl"
+        expect rv64.output == "build/os/simpleos_riscv64_hosted.elf"
+        val rv32 = get_qemu_target(Architecture.Riscv32)
+        expect rv32.entry == "examples/simple_os/arch/riscv32/smoke_entry.spl"
+        expect rv32.output == "build/os/simpleos_riscv32_smf_fs.elf"
 
     it "defines ARM VirtIO FAT32 SMF execution scenarios":
         val arm64 = scenario_arm64_virtio_fat32_smf()
@@ -444,6 +466,12 @@ describe "Qemu runner native-build prerequisites":
         expect (env_prefix).contains("SIMPLE_BOOTSTRAP=1")
         expect (env_prefix).contains("SIMPLE_LIB=\"$(pwd)/src\"")
 
+    it "keeps RV64 hosted builds on minimal boot sources without freestanding unresolved-symbol stubs":
+        val hosted_target = scenario_target(scenario_riscv64_hosted())
+        val env_prefix = os_native_build_env_prefix(hosted_target, "")
+        expect (env_prefix).contains("SIMPLE_BOOT_MINIMAL=1")
+        expect env_prefix.contains("SIMPLE_ALLOW_FREESTANDING_STUBS=1") == false
+
     it "keeps the checked-in generated fallback aligned with the enabled override template":
         val fallback = rt_file_read_text("src/generated/simpleos_log_config.spl")
         expect fallback == _simpleos_log_config_source(true)
@@ -557,15 +585,35 @@ describe "Qemu runner desktop UEFI tool app validator":
         expect_tool_app_validation_reference(cmd, "simple_interpreter", "SINTSMF", "/sys/apps/simple_interpreter")
         expect_tool_app_validation_reference(cmd, "simple_loader", "SLOADSMF", "/sys/apps/simple_loader")
         expect_tool_app_validation_reference(cmd, "llvm", "LLVMSMF", "/sys/apps/llvm")
+        expect_tool_app_validation_reference(cmd, "clang", "CLANGSMF", "/sys/apps/clang")
         expect_tool_app_validation_reference(cmd, "rust", "RUSTSMF", "/sys/apps/rust")
         expect (cmd).contains("::/SYS/LLVMMAN.TXT")
+        expect (cmd).contains("::/SYS/CLANGMAN.TXT")
         expect (cmd).contains("::/SYS/RUSTMAN.TXT")
+        expect (cmd).contains("::/SYS/TOOLSET.SDN")
         expect (cmd).contains("grep -q 'mode=native-filesystem-app'")
         expect (cmd).contains("grep -q 'lane=x86_64-uefi-hardware'")
         expect (cmd).contains("grep -q 'status=standalone-required'")
+        expect (cmd).contains("grep -q 'lane = \"x86_64-uefi-hardware\"'")
+        expect (cmd).contains("grep -q '/sys/apps/clang status=standalone-required'")
+        expect (cmd).contains("/usr/share/simpleos/toolchain/clang/pipeline.step")
         expect (cmd).contains("/usr/share/simpleos/toolchain/llvm/pipeline.step")
         expect (cmd).contains("/usr/share/simpleos/toolchain/rust/pipeline.step")
         expect (cmd).contains("grep -a -q 'SMF'")
+
+    it "requires clang in the x64 desktop live acceptance marker set":
+        val markers = desktop_uefi_required_marker_fragments()
+        expect (markers).contains("[desktop-e2e] process-backed:ok app=clang pid=")
+        expect (markers).contains("[desktop-e2e] native-toolchain-launch:ok app=clang lane=x86_64-uefi-hardware mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
+        expect (markers).contains("[desktop-e2e] native-capability:ok app=clang capability=local-c-source-inspection proof=/usr/share/simpleos/toolchain/clang/hello.c")
+        expect (markers).contains("[desktop-e2e] native-capability:ok app=clang capability=driver-flag-inspection proof=/usr/share/simpleos/toolchain/clang/flags.rsp")
+        expect (markers).contains("[desktop-e2e] native-capability:ok app=clang capability=compile-pipeline-step proof=/usr/share/simpleos/toolchain/clang/pipeline.step")
+
+    it "requires clang in the riscv64 hosted acceptance marker set":
+        val markers = riscv64_hosted_required_marker_fragments()
+        expect (markers).contains("[desktop-e2e] process-backed:ok app=clang pid=")
+        expect (markers).contains("[desktop-e2e] native-toolchain-launch:ok app=clang lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
+        expect (markers).contains("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust")
 
     it "accepts the raw-image fallback when mdir and mtype are unavailable but the CLI catalog marker is present":
         val root = "build/test-qemu-tool-app-validator"

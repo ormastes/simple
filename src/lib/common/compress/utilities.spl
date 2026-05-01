@@ -1,4 +1,5 @@
 use compress.types.{CompressionCodec, CompressionLevel, CompressionOptions, CompressionError, CompressionEncoderState, CompressionDecoderState}
+use std.simd.{SimdTier, detect_profile, profile_name}
 
 val CRC32_POLY_REV: u32 = 0xEDB88320u32
 val XXH_PRIME32_1: u32 = 0x9E3779B1u32
@@ -6,6 +7,29 @@ val XXH_PRIME32_2: u32 = 0x85EBCA77u32
 val XXH_PRIME32_3: u32 = 0xC2B2AE3Du32
 val XXH_PRIME32_4: u32 = 0x27D4EB2Fu32
 val XXH_PRIME32_5: u32 = 0x165667B1u32
+
+enum CompressionSimdTier:
+    scalar
+    avx2
+    neon
+
+fn compression_simd_tier_from_simd_profile(profile: SimdTier) -> CompressionSimdTier:
+    match profile:
+        case SimdTier.x86_64_avx2: CompressionSimdTier.avx2
+        case SimdTier.aarch64_neon: CompressionSimdTier.neon
+        case _: CompressionSimdTier.scalar
+
+fn compression_simd_tier_detect() -> CompressionSimdTier:
+    compression_simd_tier_from_simd_profile(detect_profile())
+
+fn compression_simd_tier_name(tier: CompressionSimdTier) -> text:
+    match tier:
+        CompressionSimdTier.scalar: "scalar"
+        CompressionSimdTier.avx2: "avx2"
+        CompressionSimdTier.neon: "neon"
+
+fn compression_simd_runtime_profile_name() -> text:
+    profile_name()
 
 fn compression_level(codec: CompressionCodec, value: i64) -> Result<CompressionLevel, CompressionError>:
     if codec == CompressionCodec.lz4:
@@ -120,19 +144,66 @@ fn push_many_byte(out: [u8], byte: u8, count: i64) -> [u8]:
         i = i + 1
     result
 
-fn crc32_bytes(data: [u8]) -> u32:
-    var crc: u32 = 0xFFFFFFFFu32
+fn append_bytes(out: [u8], bytes: [u8]) -> [u8]:
+    var result = out
     var i = 0
-    while i < data.len():
-        crc = crc ^ data[i].to_u32()
-        var bit = 0
-        while bit < 8:
-            if (crc & 1u32) == 1u32:
-                crc = (crc >> 1) ^ CRC32_POLY_REV
-            else:
-                crc = crc >> 1
-            bit = bit + 1
+    while i < bytes.len():
+        result.push(bytes[i])
         i = i + 1
+    result
+
+fn append_bytes_range(out: [u8], bytes: [u8], start: i64, end: i64) -> [u8]:
+    var result = out
+    var i = start
+    while i < end:
+        result.push(bytes[i])
+        i = i + 1
+    result
+
+fn append_self_overlap_copy(out: [u8], offset: i64, count: i64) -> Result<[u8], CompressionError>:
+    if offset <= 0 or offset > out.len():
+        return Err(CompressionError.CorruptStream("invalid overlap copy offset"))
+    var result = out
+    var i = 0
+    while i < count:
+        val src = result.len() - offset
+        result.push(result[src])
+        i = i + 1
+    Ok(result)
+
+fn _crc32_update_byte(crc: u32, byte: u8) -> u32:
+    var next = crc ^ byte.to_u32()
+    var bit = 0
+    while bit < 8:
+        if (next & 1u32) == 1u32:
+            next = (next >> 1) ^ CRC32_POLY_REV
+        else:
+            next = next >> 1
+        bit = bit + 1
+    next
+
+fn _compression_simd_chunk_width(tier: CompressionSimdTier) -> i64:
+    match tier:
+        CompressionSimdTier.avx2: 32
+        CompressionSimdTier.neon: 16
+        CompressionSimdTier.scalar: 1
+
+fn crc32_bytes(data: [u8]) -> u32:
+    crc32_bytes_for_tier(data, compression_simd_tier_detect())
+
+fn crc32_bytes_for_tier(data: [u8], tier: CompressionSimdTier) -> u32:
+    var crc: u32 = 0xFFFFFFFFu32
+    val chunk_width = _compression_simd_chunk_width(tier)
+    var idx = 0
+    while idx + chunk_width <= data.len():
+        var lane = 0
+        while lane < chunk_width:
+            crc = _crc32_update_byte(crc, data[idx + lane])
+            lane = lane + 1
+        idx = idx + chunk_width
+    while idx < data.len():
+        crc = _crc32_update_byte(crc, data[idx])
+        idx = idx + 1
     crc ^ 0xFFFFFFFFu32
 
 fn xxh32_rotl(x: u32, amount: u32) -> u32:
@@ -145,7 +216,38 @@ fn xxh32_round(acc: u32, input: u32) -> u32:
 fn xxh32_merge_round(acc: u32, val: u32) -> u32:
     (acc ^ xxh32_round(0u32, val)) * XXH_PRIME32_1 + XXH_PRIME32_4
 
+fn _read_u32_lane_le(data: [u8], pos: i64) -> u32:
+    data[pos].to_u32() |
+        (data[pos + 1].to_u32() << 8) |
+        (data[pos + 2].to_u32() << 16) |
+        (data[pos + 3].to_u32() << 24)
+
+fn _xxhash32_finalize_accumulators(v1: u32, v2: u32, v3: u32, v4: u32) -> u32:
+    var hash = xxh32_rotl(v1, 1u32) + xxh32_rotl(v2, 7u32) + xxh32_rotl(v3, 12u32) + xxh32_rotl(v4, 18u32)
+    hash = xxh32_merge_round(hash, v1)
+    hash = xxh32_merge_round(hash, v2)
+    hash = xxh32_merge_round(hash, v3)
+    hash = xxh32_merge_round(hash, v4)
+    hash
+
+fn _xxhash32_process_chunk(data: [u8], idx: i64, v1: u32, v2: u32, v3: u32, v4: u32, chunk_width: i64) -> (u32, u32, u32, u32):
+    var next1 = v1
+    var next2 = v2
+    var next3 = v3
+    var next4 = v4
+    var cursor = idx
+    while cursor < idx + chunk_width:
+        next1 = xxh32_round(next1, _read_u32_lane_le(data, cursor))
+        next2 = xxh32_round(next2, _read_u32_lane_le(data, cursor + 4))
+        next3 = xxh32_round(next3, _read_u32_lane_le(data, cursor + 8))
+        next4 = xxh32_round(next4, _read_u32_lane_le(data, cursor + 12))
+        cursor = cursor + 16
+    (next1, next2, next3, next4)
+
 fn xxhash32_bytes(data: [u8], seed: u32) -> u32:
+    xxhash32_bytes_for_tier(data, seed, compression_simd_tier_detect())
+
+fn xxhash32_bytes_for_tier(data: [u8], seed: u32, tier: CompressionSimdTier) -> u32:
     var idx = 0
     var hash: u32 = 0u32
     if data.len() >= 16:
@@ -154,40 +256,18 @@ fn xxhash32_bytes(data: [u8], seed: u32) -> u32:
         var v3 = seed + 0u32
         var v4 = seed - XXH_PRIME32_1
         while idx + 16 <= data.len():
-            val w1 = data[idx].to_u32() |
-                (data[idx + 1].to_u32() << 8) |
-                (data[idx + 2].to_u32() << 16) |
-                (data[idx + 3].to_u32() << 24)
-            val w2 = data[idx + 4].to_u32() |
-                (data[idx + 5].to_u32() << 8) |
-                (data[idx + 6].to_u32() << 16) |
-                (data[idx + 7].to_u32() << 24)
-            val w3 = data[idx + 8].to_u32() |
-                (data[idx + 9].to_u32() << 8) |
-                (data[idx + 10].to_u32() << 16) |
-                (data[idx + 11].to_u32() << 24)
-            val w4 = data[idx + 12].to_u32() |
-                (data[idx + 13].to_u32() << 8) |
-                (data[idx + 14].to_u32() << 16) |
-                (data[idx + 15].to_u32() << 24)
-            v1 = xxh32_round(v1, w1)
-            v2 = xxh32_round(v2, w2)
-            v3 = xxh32_round(v3, w3)
-            v4 = xxh32_round(v4, w4)
+            val accs = _xxhash32_process_chunk(data, idx, v1, v2, v3, v4, 16)
+            v1 = accs.0
+            v2 = accs.1
+            v3 = accs.2
+            v4 = accs.3
             idx = idx + 16
-        hash = xxh32_rotl(v1, 1u32) + xxh32_rotl(v2, 7u32) + xxh32_rotl(v3, 12u32) + xxh32_rotl(v4, 18u32)
-        hash = xxh32_merge_round(hash, v1)
-        hash = xxh32_merge_round(hash, v2)
-        hash = xxh32_merge_round(hash, v3)
-        hash = xxh32_merge_round(hash, v4)
+        hash = _xxhash32_finalize_accumulators(v1, v2, v3, v4)
     else:
         hash = seed + XXH_PRIME32_5
     hash = hash + data.len().to_u32()
     while idx + 4 <= data.len():
-        val w = data[idx].to_u32() |
-            (data[idx + 1].to_u32() << 8) |
-            (data[idx + 2].to_u32() << 16) |
-            (data[idx + 3].to_u32() << 24)
+        val w = _read_u32_lane_le(data, idx)
         hash = xxh32_rotl(hash + w * XXH_PRIME32_3, 17u32) * XXH_PRIME32_4
         idx = idx + 4
     while idx < data.len():

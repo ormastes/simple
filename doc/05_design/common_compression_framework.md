@@ -3,7 +3,7 @@
 
 ## Design goal
 
-The implementation target is the full pure-Simple compression library promised by the current feature intent, not the currently landed subset. This document defines the concrete module interactions, helper seams, option semantics, and verification-oriented work partition for that target.
+This document records the current landed design for `std.common.compress` as verified on 2026-05-01. It intentionally distinguishes stable API shape from still-unsupported codec behavior.
 
 ## Stable public API
 
@@ -12,8 +12,8 @@ The implementation target is the full pure-Simple compression library promised b
   - `zstd`
   - `lzma2`
 - `CompressionLevel`
-  - validated wrapper over codec-specific numeric ranges
-  - implementation must make `level` affect real compression behavior instead of accepting-but-ignoring it
+  - validated against codec-specific numeric ranges
+  - the facade still narrows accepted encode levels further for some codecs
 - `CompressionOptions`
   - `codec`
   - `level`
@@ -33,39 +33,38 @@ The implementation target is the full pure-Simple compression library promised b
   - `CompressionEncoderState`
   - `CompressionDecoderState`
 
-## API semantics
+## Current API semantics
 
 - `try_compress_bytes(input, options) -> Result<[u8], CompressionError>`
-  - canonical checked encode path
-  - rejects unsupported or non-representable option combinations before codec-local emission begins
+  - validates the shared contract before codec-local encode begins
+  - rejects unsupported option combinations instead of rewriting them
 - `compress_bytes(input, options) -> [u8]`
-  - thin fail-fast wrapper over `try_compress_bytes(...).unwrap()`
+  - unwraps the checked path
 - `encoder_finish_checked(state) -> Result<[u8], CompressionError>`
-  - canonical checked finish path for buffered encode state
+  - routes buffered encode through the same checked validation path
 - `encoder_finish(state) -> [u8]`
-  - thin fail-fast wrapper over `encoder_finish_checked(...).unwrap()`
+  - unwraps `encoder_finish_checked`
 - `decompress_bytes(input, codec_hint?)`
-  - detects framed codecs by magic when possible
-  - preserves explicit raw-LZ4 hinting for headerless blocks
+  - auto-detects framed LZ4, Zstd, and XZ/LZMA2 payloads
+  - still requires an explicit LZ4 hint for raw blocks
 
-## Required option behavior
+## Current option behavior
 
 - `level`
-  - LZ4 must map level to match-search effort / parser behavior.
-  - Zstd must map level to real block-splitting and entropy/compression choices.
-  - LZMA2 must map level to dictionary/match-finder/preset behavior within the supported XZ+LZMA2 configuration.
+  - LZ4 levels validate in `0..16`, but the facade currently accepts only encode level `1`.
+  - Zstd levels validate in `1..22`, but the facade currently accepts only encode level `3`.
+  - LZMA2 levels validate in `0..9`; the current facade does not reject non-default levels, but current verification only proves the default emitted stream shape.
 - `checksum`
-  - LZ4 frame: emit and verify standard block/content checksum fields when selected.
-  - Zstd: emit and verify the standard frame content checksum mode.
-  - XZ/LZMA2: emit and verify the selected supported XZ integrity mode; within current scope this stays bounded by the XZ/LZMA2 design decisions documented by the owning workers.
+  - LZ4 frame mode can emit and verify block/content checksums.
+  - Zstd frame mode can emit and verify frame content checksums.
+  - LZMA2/XZ encode currently requires `checksum=true` because the encoder always emits CRC32-backed XZ checks.
 - `content_size`
-  - emitted where the format supports it
-  - validated on decode where the format supplies it
-  - mismatches are errors, not normalization points
-- `dictionary_bytes` + `dictionary_id`
-  - Zstd framed dictionary handling must honor both fields together.
-  - If only one field is present when both are required for interoperable framing, the checked path must fail.
-  - LZ4 and LZMA2 must return `UnsupportedFeature` until the public option surface can express their interoperable dictionary requirements.
+  - the checked path requires any declared content size to match the input length
+  - LZ4 block mode rejects `content_size`
+- `dictionary_bytes` and `dictionary_id`
+  - all current codecs reject dictionary-backed encode requests
+  - Zstd decode also rejects non-zero dictionary-backed frames
+  - `dictionary_id` without `dictionary_bytes` is rejected before codec dispatch
 - `block_mode`
   - `lz4`: `block` or `frame`
   - `zstd`: `frame` only
@@ -74,175 +73,69 @@ The implementation target is the full pure-Simple compression library promised b
 ## Internal module layout
 
 - [src/lib/common/compress/mod.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/mod.spl:1)
-  - facade entrypoints
-  - top-level option enforcement
-  - dispatch to codec modules
+  - shared validation and dispatch
 - [src/lib/common/compress/types.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/types.spl:1)
-  - stable public data model
+  - public data model
 - [src/lib/common/compress/utilities.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/utilities.spl:1)
-  - shared validation
-  - byte-order reads/writes
-  - codec detect helpers
-  - streaming append/reset helpers
-  - checksum entrypoints
-- `shared-kernel seam` within `common.compress`
-  - scalar helpers
-  - AVX2 helpers
-  - NEON helpers
-  - direct-call test hooks for each tier
+  - default options, checksum helpers, codec detection, and tier helpers
 - [src/lib/common/compress/lz4.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/lz4.spl:1)
-  - LZ4 framing/parser/token logic
+  - LZ4 block and frame logic
 - [src/lib/common/compress/zstd.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/zstd.spl:1)
-  - Zstd frame orchestration
+  - current Zstd frame parser and emitter subset
 - [src/lib/common/compress/zstd_bits.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/zstd_bits.spl:1)
   - bit-reader/writer primitives
 - [src/lib/common/compress/zstd_fse.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/zstd_fse.spl:1)
-  - FSE table build/use
+  - FSE table helpers
 - [src/lib/common/compress/zstd_huf.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/zstd_huf.spl:1)
-  - Huffman table build/use
+  - Huffman table helpers
 - [src/lib/common/compress/lzma2.spl](/home/ormastes/dev/pub/simple/src/lib/common/compress/lzma2.spl:1)
-  - XZ framing/index/footer plus LZMA2 coder/parser
+  - XZ container handling plus the current LZMA2 subset
 
-## Shared-kernel seam
+## Codec-specific design notes
 
-The implementation should extract duplicated byte work into a shared helper seam instead of keeping codec-local copies.
+### LZ4
 
-- Required helpers:
-  - `match_extend_*`
-  - `copy_literals_*`
-  - `copy_match_overlap_*`
-  - `crc32_*`
-  - `xxh32_*`
-  - bounded chunk/sequence staging helpers needed by LZ4 and Zstd
-- Dispatch model:
-  - scalar helper functions are always available
-  - AVX2/NEON helpers are optional at runtime but directly invocable in tests
-  - one selector chooses the active tier for production calls
-- Correctness model:
-  - scalar result is the oracle
-  - SIMD helpers must preserve exact bytes, lengths, and checksum results
+- Encode supports raw blocks and independent-block frames.
+- Decode validates descriptor checksum, optional content size, optional block/content checksums, and block boundaries.
+- Tier-forced encode/decode entrypoints are already present for scalar, AVX2, and NEON parity tests.
+- The facade intentionally rejects unsupported dictionary requests and non-level-1 encode selection.
 
-## LZ4 design
+### Zstd
 
-- Decode path:
-  - parse raw-block tokens and frame envelopes
-  - validate frame descriptor checksum, block sizes, end marker, optional content size, optional block checksum, optional content checksum
-  - support multi-block frames
-- Encode path:
-  - block mode emits standard raw block
-  - frame mode emits standard descriptor, blocks, end marker, and requested checksums
-  - match finding uses shared LZ77-style helper utilities where they reduce duplication
-  - overlap-safe match copy flows through the shared copy kernel seam
-- Error model:
-  - malformed token or impossible back-reference: `CorruptStream`
-  - short descriptor/block/checksum tail: `TruncatedInput`
-  - unsupported dictionary request: `UnsupportedFeature`
+- Encode emits the current framed subset and can set the frame checksum bit.
+- Decode covers the currently tested header forms, concatenated frames, raw blocks, and the emitted checksum mode.
+- The implementation still rejects:
+  - non-RLE sequence tables in compressed blocks
+  - dictionary-backed frames
+  - the missing compressed-Huffman-weight cases called out by verification
+- Tier-forced encode/decode entrypoints already exist for scalar, AVX2, and NEON parity tests.
 
-## Zstd design
+### XZ/LZMA2
 
-- Decode path:
-  - parse all normal frame header variants
-  - validate declared window and content size against safe limits
-  - parse and validate dictionary ID metadata
-  - handle raw, RLE, and compressed blocks
-  - support repeated FSE tables
-  - support compressed Huffman weights
-  - support raw/RLE/compressed literals, including treeless and 4-stream forms
-  - support checksum verification
-  - support multi-block and multi-frame payloads
-- Encode path:
-  - split input into standards-compliant blocks
-  - generate sequences and literal sections
-  - emit FSE/HUF tables and payloads
-  - choose compression strategy from `level`
-  - emit checksum and content-size metadata when requested/supported
-  - support framed dictionary encode using both `dictionary_bytes` and `dictionary_id`
-- Shared helpers:
-  - bitstream helpers stay in `zstd_bits`
-  - entropy helpers stay in `zstd_fse` and `zstd_huf`
-  - byte-copy and checksum work flows through shared kernels
-- Consumer unification:
-  - [src/os/kernel/loader/zstd_decompress.spl](/home/ormastes/dev/pub/simple/src/os/kernel/loader/zstd_decompress.spl:1) becomes a thin adapter translating `CompressionError` to `Result<[u8], text>`
-
-## XZ/LZMA2 design
-
-- Container scope:
-  - `.xz` stream parsing and emission
-  - block header/index/footer validation
-  - stream and block CRC verification
-  - multi-block streams
-  - concatenated streams
-- Filter scope:
-  - LZMA2-only filter chain supported
-  - any alternate filter chain fails explicitly with `UnsupportedFeature`
-- LZMA2 coder/parser:
-  - support compressed and uncompressed chunks
-  - maintain dictionary/reset-state semantics across chunk boundaries
-  - map `level` to the actual LZMA2 encoder preset behavior
-- Canonical encode format:
-  - emit XZ container with LZMA2 payload for `CompressionCodec.lzma2`
+- Encode emits XZ streams that host `xz` can decode.
+- Decode validates XZ structure, CRCs, aligned stream padding, and concatenated streams.
+- The implementation explicitly does not decode range-coded compressed LZMA2 chunks yet.
+- Non-LZMA2 filter chains remain typed `UnsupportedFeature`.
+- Tier-forced encode/decode entrypoints already exist for scalar, AVX2, and NEON parity tests.
 
 ## Streaming state design
 
-- Public streaming state remains buffered in the current facade shape unless a coordinated API change happens elsewhere.
-- `encoder_write` and `decoder_write` append to `pending`.
-- `encoder_finish_checked` and `decoder_finish` route through the same codec implementations as single-shot APIs.
-- Internal codec helpers may still use chunk/block incremental processing to avoid repeated rescans and duplicate allocation inside the finish path.
-- State-local reusable structures are allowed:
-  - LZ4 match tables
-  - Zstd entropy tables and sequence scratch buffers
-  - LZMA2 dictionary/match-finder scratch
+- Public streaming remains buffered:
+  - `encoder_write` and `decoder_write` append to `pending`
+  - `encoder_finish_checked` and `decoder_finish` route through the same single-shot codec paths
+- This means streaming behavior is currently correctness-oriented rather than truly incremental.
 
-## Startup, hot path, and cache considerations
+## Verification-oriented invariants
 
-- Startup must remain near-zero:
-  - no subprocesses
-  - no file IO
-  - no precomputed on-disk tables
-  - no second SIMD detector
-- Hot paths must stay fully in-process:
-  - block parsers and emitters
-  - entropy decoders/encoders
-  - shared byte kernels
-- Allowed reusable caches are state-local or frame-local only.
-- Invalidation rules:
-  - drop encoder/decoder state to drop its scratch tables
-  - reset entropy/dictionary-derived state at frame boundaries or dictionary changes
-  - no global cache invalidation protocol is needed because there is no process-global codec cache
+- Checked APIs must reject unsupported combinations before encode dispatch.
+- Raw LZ4 blocks must remain explicitly hinted.
+- LZ4 frame corruption must fail with typed errors.
+- Zstd support claims must stay limited to the landed framed subset.
+- XZ/LZMA2 support claims must stay limited to emitted streams plus explicit unsupported-feature handling for compressed chunks.
 
-## Verification hooks built into the design
+## Still-open design gaps
 
-- Tier-specific helper entrypoints must be callable directly by tests for scalar/AVX2/NEON parity.
-- Each codec must expose enough internal determinism for fixture-based corruption and truncation testing.
-- Checked APIs must fail before emission for invalid option combinations.
-- Duplicate-consumer adapters must be verifiable against the shared codec outputs instead of preserving divergent logic.
-
-## Worker lane breakdown for spawned agents
-
-This section is the intended task split for parallel workers consuming this design. It does not create new ownership roots; every lane still lands under `common.compress` or its direct adapter.
-
-- Worker 1: shared helper extraction and scalar oracle seam
-  - extract match/copy/checksum helpers from codec-local code
-  - define direct-call scalar helper test surface
-- Worker 2: SIMD specialization lane
-  - add AVX2/NEON helper implementations using existing Simple-visible SIMD facilities
-  - add forced-tier parity tests against scalar
-- Worker 3: LZ4 completion lane
-  - finish full frame/block semantics
-  - adopt shared kernels in match/copy/checksum hot spots
-- Worker 4: Zstd completion lane
-  - finish full decode coverage and real encoder
-  - replace kernel-local decoder with thin adapter
-- Worker 5: XZ/LZMA2 completion lane
-  - finish compressed chunks, block/index/footer validation, and concatenated-stream handling
-- Worker 6: verification/fixtures lane
-  - host-generated fixtures
-  - corruption/truncation matrices
-  - adapter parity and checked-API failure coverage
-
-## Design invariants
-
-- No new Rust/C/runtime codec engine is allowed.
-- No second dispatch stack is allowed for SIMD.
-- No silent normalization of unsupported options is allowed.
-- `common.compress` remains the single ownership root for shared compression behavior.
+- The docs can no longer claim full Zstd compressed-block coverage.
+- The docs can no longer claim general compressed-chunk LZMA2 decode.
+- The docs can no longer claim forced-tier scalar/AVX2/NEON requirement closure for the whole feature; focused parity tests exist, but requirement-level closure is still broader than the verified surface.
+- The docs should not claim repository `verify` PASS for this feature until the requirement docs are narrowed or the missing codec behavior lands.

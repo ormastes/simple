@@ -1,61 +1,22 @@
-# Verification Report — `common_compression_framework`
+=== Verification Report: common_compression_framework ===
 
-## Command evidence
+[PASS] doc/04_architecture/common_compression_framework.md:1 — architecture now describes the currently landed compression subset instead of the original full-scope target.
+[PASS] doc/05_design/common_compression_framework.md:1 — design now documents the actual facade restrictions, supported checksums, and known unsupported codec paths.
+[PASS] test/unit/lib/common/compress_framework_spec.spl:1 — focused facade tests still align with the current checked/fail-fast API surface.
+[PASS] test/unit/lib/common/lz4_spec.spl:1 — focused LZ4 tests cover block/frame round-trip behavior, corruption typing, and forced-tier parity.
+[PASS] test/unit/lib/common/zstd_frame_variants_spec.spl:1 — focused Zstd tests cover the current framed subset, checksum handling, concatenated frames, and forced-tier parity.
+[PASS] test/unit/lib/common/xz_lzma2_spec.spl:1 — focused XZ/LZMA2 tests cover emitted-stream interoperability, concatenated streams, and explicit unsupported compressed-chunk handling.
+[PASS] src/os/kernel/loader/zstd_decompress.spl:1 — the kernel loader remains a thin adapter over `std.common.compress`.
 
-- [PASS] `bin/simple test test/unit/lib/common/compress_framework_spec.spl --clean`
-  - `8` examples
-  - `0` failures
-  - verified:
-    - `REQ-009: lz4 block round-trips with explicit hint`
-    - `REQ-009: lz4 frame auto-detect round-trips`
-    - `REQ-010: zstd frame round-trips through shared api`
-    - `REQ-011: xz lzma2 frame round-trips through shared api`
-    - `REQ-008: streaming encoder/decoder produces the original bytes`
-    - `REQ-012: truncated lz4 frame fails closed`
-    - `REQ-010: host zstd decodes the emitted frame`
-    - `REQ-011: host xz decodes the emitted stream`
-- [PASS] `bin/simple build lint`
-- [PASS] `sh scripts/check-core-runtime-smoke.shs bin/simple`
-  - runtime banner: `Simple v0.9.8`
-  - smoke checkpoints passed:
-    - `basic-print`
-    - `function-call`
-    - `control-flow`
-    - `recursion`
-  - cached core suite summary:
-    - files: `24`
-    - passed: `383`
-    - failed: `0`
-- [PASS] `SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs`
-  - native server builds completed
-  - native probe bytes reported:
-    - `mcp_init bytes=507`
-    - `mcp_tools bytes=343493`
-    - `lsp_init bytes=380`
-    - `lsp_tools bytes=5068`
-  - wrapper result: `Native MCP/LSP smoke passed`
+[FAIL] src/lib/common/compress/mod.spl:49 — the facade still rejects Zstd encode levels other than `3`, dictionaries for all codecs, and `checksum=false` for XZ/LZMA2 encode, so docs cannot claim wider option support.
+[FAIL] src/lib/common/compress/zstd.spl:324 — compressed-block decode still rejects non-RLE sequence tables.
+[FAIL] src/lib/common/compress/zstd.spl:704 — verification still cannot claim support for the missing FSE-compressed Huffman-weight path.
+[FAIL] src/lib/common/compress/zstd.spl:1265 — dictionary-backed Zstd frames remain explicitly unsupported on decode.
+[FAIL] src/lib/common/compress/lzma2.spl:330 — range-coded compressed LZMA2 chunks remain explicitly unsupported on decode.
+[FAIL] doc/02_requirements/feature/common_compression_framework.md:30 — REQ-030 still overstates forced-tier parity closure relative to the focused verified surface.
+[FAIL] doc/02_requirements/nfr/common_compression_framework.md:11 — NFR-011 still overstates end-to-end verification closure; repository `verify` cannot honestly report PASS for the original full-scope claims.
 
-## Delivered scope verified by current evidence
+[WARN] src/lib/common/compress/zstd.spl:1 — the Zstd implementation remains large and multi-responsibility, which raises maintenance risk even though this lane did not modify code.
+[WARN] doc/01_research/local/common_compression_framework.md:1 — the research artifacts still describe the original full completion target; that may be fine as intent, but they should not be read as current-state support documentation.
 
-- LZ4:
-  - raw block round-trip with explicit hint
-  - frame auto-detect round-trip
-  - truncated-frame failure path
-- Zstd:
-  - shared API round-trip for the delivered raw/RLE frame subset
-  - host `zstd` decode of emitted frames
-- XZ/LZMA2:
-  - shared API round-trip for the delivered single-filter uncompressed-chunk subset
-  - host `xz` decode of emitted streams
-- Streaming:
-  - buffered append-and-finish state smoke coverage
-
-## Residual phased limits confirmed by code review
-
-- Zstd compressed blocks are still rejected explicitly.
-- Zstd dictionary ids, window descriptors, and checksum verification are still rejected explicitly.
-- Host-generated general Zstd frames are not yet broadly interoperable; the current verified interoperability claim is for emitted raw/RLE subset frames.
-- XZ/LZMA2 compressed chunks, unsupported check types, and multi-block streams are still rejected explicitly.
-- SIMD fast paths and forced-tier parity evidence are not present in the current landing.
-
-STATUS: PASS
+STATUS: FAIL (7 failures, 2 warnings)

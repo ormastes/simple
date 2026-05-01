@@ -9,11 +9,10 @@
 #   - FPU/SSE state (fxsave/fxrstor) — 512-byte region
 #   - CR3 (page table base) — for address space switch
 #
-# The actual register save/restore is done via inline assembly.
+# The actual register save/restore is done via standalone assembly helpers.
 # See os.kernel.arch.arch_context.X86_64Context for the register state layout.
 
 use os.kernel.arch.arch_context.{X86_64Context}
-use os.kernel.interrupts.gdt.{GDT_KERNEL_CS, GDT_KERNEL_DS, GDT_USER_CS, GDT_USER_DS}
 use os.kernel.types.task_types.{TaskContext}
 
 # ============================================================================
@@ -33,6 +32,9 @@ extern fn rt_x86_enter_user_first(
     rflags: u64,
     cr3_phys: u64
 )
+extern fn rt_x86_64_context_switch(from_ptr: u64, to_ptr: u64)
+extern fn rt_x86_64_fpu_save(fpu_addr: u64)
+extern fn rt_x86_64_fpu_restore(fpu_addr: u64)
 
 fn arch_x86_64_enter_user_task(ctx: TaskContext, cr3_phys: u64):
     """Convenience wrapper: pull ring-3 iret frame fields out of `ctx` and
@@ -61,8 +63,8 @@ struct X86ContextSwitch:
     """x86_64 context switching implementation.
 
     Provides context creation for kernel and user threads, and a
-    register save/restore switch via inline assembly. FPU/SSE state
-    is saved/restored separately via FXSAVE/FXRSTOR when needed.
+    register save/restore switch via standalone assembly helpers.
+    FPU/SSE state is saved/restored separately when needed.
 
     Named X86ContextSwitch (not X86Context) to avoid collision
     with the X86_64Context register state struct in arch_context.spl.
@@ -93,14 +95,14 @@ impl X86ContextSwitch:
         libc `_start` reads argc/argv/envp from the stack; we do NOT pass
         them via rdi/rsi/rdx. The stack must be 16-byte aligned.
         """
-        var cs_val: u64 = GDT_KERNEL_CS as u64
-        var ss_val: u64 = GDT_KERNEL_DS as u64
+        var cs_val: u64 = 0x08
+        var ss_val: u64 = 0x10
         var flags = RFLAGS_DEFAULT
 
         if user_mode:
             # User mode segments need RPL=3 (ring 3)
-            cs_val = (GDT_USER_CS as u64) | 3
-            ss_val = (GDT_USER_DS as u64) | 3
+            cs_val = 0x18 | 3
+            ss_val = 0x20 | 3
             flags = RFLAGS_USER
 
         # Align stack to 16 bytes (ABI requirement)
@@ -145,50 +147,7 @@ impl X86ContextSwitch:
         NOT saved because the C ABI guarantees they are already saved
         by the calling code.
         """
-        # Save callee-saved registers into from_ctx
-        asm """
-            # Save callee-saved registers to from_ctx
-            mov rax, {from_ctx}
-
-            mov [rax + 8],   rbx      # offset of rbx in X86_64Context
-            mov [rax + 48],  rbp      # offset of rbp
-            mov [rax + 56],  rsp      # offset of rsp
-            mov [rax + 96],  r12      # offset of r12
-            mov [rax + 104], r13      # offset of r13
-            mov [rax + 112], r14      # offset of r14
-            mov [rax + 120], r15      # offset of r15
-
-            # Save rflags
-            pushfq
-            pop qword [rax + 136]     # offset of rflags
-
-            # Save return address as rip (so we resume after this asm block)
-            lea rcx, [rip + .Lswitch_resume]
-            mov [rax + 128], rcx      # offset of rip
-
-            # ---- Now restore to_ctx ----
-            mov rax, {to_ctx}
-
-            mov rbx, [rax + 8]
-            mov rbp, [rax + 48]
-            mov r12, [rax + 96]
-            mov r13, [rax + 104]
-            mov r14, [rax + 112]
-            mov r15, [rax + 120]
-
-            # Restore rflags
-            push qword [rax + 136]
-            popfq
-
-            # Restore stack pointer
-            mov rsp, [rax + 56]
-
-            # Jump to saved rip (resumes execution in new context)
-            jmp qword [rax + 128]
-
-        .Lswitch_resume:
-            # We arrive here when someone switches back to us
-        """
+        rt_x86_64_context_switch((&from_ctx) as u64, (&to_ctx) as u64)
 
     fn save_fpu(ctx: X86_64Context):
         """Save FPU/SSE state for the given context using FXSAVE.
@@ -199,10 +158,7 @@ impl X86ContextSwitch:
         val fpu_addr = ctx.fpu_state
         if fpu_addr == 0:
             return
-        asm """
-            mov rax, {fpu_addr}
-            fxsave [rax]
-        """
+        rt_x86_64_fpu_save(fpu_addr)
 
     fn restore_fpu(ctx: X86_64Context):
         """Restore FPU/SSE state for the given context using FXRSTOR.
@@ -213,7 +169,4 @@ impl X86ContextSwitch:
         val fpu_addr = ctx.fpu_state
         if fpu_addr == 0:
             return
-        asm """
-            mov rax, {fpu_addr}
-            fxrstor [rax]
-        """
+        rt_x86_64_fpu_restore(fpu_addr)

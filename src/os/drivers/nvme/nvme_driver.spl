@@ -21,7 +21,7 @@
 
 use os.kernel.types.device_mem_types.{DeviceGrant}
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
-use os.drivers.nvme.nvme_types.{NVME_REG_CAP, NVME_REG_VS, NVME_REG_CC, NVME_REG_CSTS, NVME_REG_AQA, NVME_REG_ASQ, NVME_REG_ACQ, CC_EN, CC_CSS_NVM, CC_MPS_4K, CC_IOSQES_64, CC_IOCQES_16, CSTS_RDY, CSTS_CFS, ADMIN_QUEUE_DEPTH, IO_QUEUE_DEPTH, SQE_SIZE, CQE_SIZE, NVME_ADMIN_IDENTIFY, NVME_ADMIN_CREATE_IOCQ, NVME_ADMIN_CREATE_IOSQ, NVME_ADMIN_SET_FEATURES, NVME_IO_READ, NVME_IO_WRITE, NVME_IO_FLUSH, IDENTIFY_CNS_NAMESPACE, IDENTIFY_CNS_CONTROLLER, IDNS_NSZE_OFFSET, IDNS_FLBAS_OFFSET, IDNS_LBAF0_OFFSET}
+use os.drivers.nvme.nvme_types.{NVME_REG_VS, NVME_ADMIN_CREATE_IOCQ, NVME_ADMIN_CREATE_IOSQ, NVME_ADMIN_SET_FEATURES, NVME_IO_READ, NVME_IO_WRITE, NVME_IO_FLUSH}
 use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
@@ -34,6 +34,9 @@ val READY_TIMEOUT: u32 = 1000000
 val CMD_TIMEOUT: u32 = 500000
 # DMA allocation page size
 val DMA_PAGE_SIZE: u64 = 4096
+val IDENTITY_NAMESPACE_NSZE_OFFSET: u64 = 0
+val IDENTITY_NAMESPACE_FLBAS_OFFSET: u64 = 26
+val IDENTITY_NAMESPACE_LBAF0_OFFSET: u64 = 128
 
 # Syscall numbers
 val SYS_MAP_BAR: u64 = 83
@@ -64,8 +67,8 @@ impl NvmeDriver:
         """Create an uninitialized NVMe driver."""
         NvmeDriver(
             bar0_virt: 0,
-            admin_queue: NvmeQueuePair.new(0, ADMIN_QUEUE_DEPTH),
-            io_queue: NvmeQueuePair.new(1, IO_QUEUE_DEPTH),
+            admin_queue: NvmeQueuePair.new(0, 32),
+            io_queue: NvmeQueuePair.new(1, 64),
             notif_id: 0,
             sector_count: 0,
             sector_size: 512,
@@ -93,7 +96,7 @@ impl NvmeDriver:
         log_info("[nvme] " + "NVMe: BAR0 mapped")
 
         # Step 2: Read CAP register -- extract doorbell stride and max queue entries
-        val cap = mmio_read64(self.bar0_virt + NVME_REG_CAP)
+        val cap = mmio_read64(self.bar0_virt + 0x00)
         # CAP bits 32-35: DSTRD (Doorbell Stride, in units of 4 bytes)
         val dstrd = ((cap >> 32) & 0x0F).to_u32()
         self.db_stride = dstrd
@@ -107,8 +110,8 @@ impl NvmeDriver:
             return disable_result
 
         # Step 4: Allocate admin queue DMA memory
-        val admin_sq_size = ADMIN_QUEUE_DEPTH.to_u64() * SQE_SIZE
-        val admin_cq_size = ADMIN_QUEUE_DEPTH.to_u64() * CQE_SIZE
+        val admin_sq_size = 32u64 * 64
+        val admin_cq_size = 32u64 * 16
         val admin_sq_result = self.alloc_dma(admin_sq_size)
         if admin_sq_result.is_err():
             return Result.Err("NVMe: failed to allocate admin SQ")
@@ -137,16 +140,16 @@ impl NvmeDriver:
 
         # Step 5: Write AQA (admin queue attributes)
         # Bits 0-11: ASQS (admin SQ size, 0-based), Bits 16-27: ACQS (admin CQ size, 0-based)
-        val asqs = (ADMIN_QUEUE_DEPTH - 1).to_u32()
-        val acqs = (ADMIN_QUEUE_DEPTH - 1).to_u32()
+        val asqs = 31u32
+        val acqs = 31u32
         val aqa = asqs | (acqs << 16)
-        mmio_write32(self.bar0_virt + NVME_REG_AQA, aqa)
+        mmio_write32(self.bar0_virt + 0x24, aqa)
 
         # Step 6: Write ASQ (admin submission queue base address)
-        mmio_write64(self.bar0_virt + NVME_REG_ASQ, self.admin_queue.sq_phys)
+        mmio_write64(self.bar0_virt + 0x28, self.admin_queue.sq_phys)
 
         # Step 7: Write ACQ (admin completion queue base address)
-        mmio_write64(self.bar0_virt + NVME_REG_ACQ, self.admin_queue.cq_phys)
+        mmio_write64(self.bar0_virt + 0x30, self.admin_queue.cq_phys)
 
         # Step 8: Enable controller
         val enable_result = self.enable_controller()
@@ -198,7 +201,7 @@ impl NvmeDriver:
         log_info("[nvme] BAR0 at 0x{bar0_virt_addr}")
 
         # Read CAP register
-        val cap = mmio_read64(self.bar0_virt + NVME_REG_CAP)
+        val cap = mmio_read64(self.bar0_virt + 0x00)
         val dstrd = ((cap / 4294967296) & 0x0F).to_u32()
         self.db_stride = dstrd
         val mqes = (cap & 0xFFFF).to_u16()
@@ -236,11 +239,11 @@ impl NvmeDriver:
 
         # Configure AQA, ASQ, ACQ registers
         val aqa = (31 << 16) | 31  # 32-1 entries each
-        mmio_write32(self.bar0_virt + NVME_REG_AQA, aqa)
-        mmio_write32(self.bar0_virt + NVME_REG_ASQ, sq_dma & 0xFFFFFFFF)
-        mmio_write32(self.bar0_virt + NVME_REG_ASQ + 4, (sq_dma / 4294967296) & 0xFFFFFFFF)
-        mmio_write32(self.bar0_virt + NVME_REG_ACQ, cq_dma & 0xFFFFFFFF)
-        mmio_write32(self.bar0_virt + NVME_REG_ACQ + 4, (cq_dma / 4294967296) & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + 0x24, aqa)
+        mmio_write32(self.bar0_virt + 0x28, sq_dma & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + 0x28 + 4, (sq_dma / 4294967296) & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + 0x30, cq_dma & 0xFFFFFFFF)
+        mmio_write32(self.bar0_virt + 0x30 + 4, (cq_dma / 4294967296) & 0xFFFFFFFF)
         log_info("[nvme] Admin queues configured")
 
         # Enable controller
@@ -293,34 +296,34 @@ impl NvmeDriver:
 
     me disable_controller() -> Result<bool, text>:
         """Disable controller by clearing CC.EN and wait for CSTS.RDY == 0."""
-        val cc = mmio_read32(self.bar0_virt + NVME_REG_CC)
-        val cc_disabled = cc & (0xFFFFFFFF ^ CC_EN)
-        mmio_write32(self.bar0_virt + NVME_REG_CC, cc_disabled)
+        val cc = mmio_read32(self.bar0_virt + 0x14)
+        val cc_disabled = cc & (0xFFFFFFFF ^ 1)
+        mmio_write32(self.bar0_virt + 0x14, cc_disabled)
 
         # Wait for CSTS.RDY to clear
         var i: u32 = 0
         while i < READY_TIMEOUT:
-            val csts = mmio_read32(self.bar0_virt + NVME_REG_CSTS)
-            if (csts & CSTS_RDY) == 0:
+            val csts = mmio_read32(self.bar0_virt + 0x1C)
+            if (csts & 1) == 0:
                 log_info("[nvme] " + "NVMe: controller disabled")
                 return Result.Ok(true)
-            if (csts & CSTS_CFS) != 0:
+            if (csts & 2) != 0:
                 return Result.Err("NVMe: controller fatal status during disable")
             i = i + 1
         Result.Err("NVMe: timeout waiting for controller disable")
 
     me enable_controller() -> Result<bool, text>:
         """Enable controller with NVM command set, 4KB pages, 64B SQ / 16B CQ entries."""
-        val cc = CC_EN | CC_CSS_NVM | CC_MPS_4K | CC_IOSQES_64 | CC_IOCQES_16
-        mmio_write32(self.bar0_virt + NVME_REG_CC, cc)
+        val cc = 1 | 0 | 0 | 393216 | 4194304
+        mmio_write32(self.bar0_virt + 0x14, cc)
 
         # Wait for CSTS.RDY to set
         var i: u32 = 0
         while i < READY_TIMEOUT:
-            val csts = mmio_read32(self.bar0_virt + NVME_REG_CSTS)
-            if (csts & CSTS_RDY) != 0:
+            val csts = mmio_read32(self.bar0_virt + 0x1C)
+            if (csts & 1) != 0:
                 return Result.Ok(true)
-            if (csts & CSTS_CFS) != 0:
+            if (csts & 2) != 0:
                 return Result.Err("NVMe: controller fatal status during enable")
             i = i + 1
         Result.Err("NVMe: timeout waiting for controller ready")
@@ -343,8 +346,8 @@ impl NvmeDriver:
 
         # Identify: opcode=0x06, NSID=0, PRP1=buffer, CDW10=CNS (1=controller)
         self.admin_queue.submit_command(
-            NVME_ADMIN_IDENTIFY, 0, buf.phys, 0,
-            IDENTIFY_CNS_CONTROLLER, 0, 0
+            0x06, 0, buf.phys, 0,
+            1, 0, 0
         )
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
@@ -365,22 +368,22 @@ impl NvmeDriver:
 
         # Identify Namespace: opcode=0x06, NSID=1, PRP1=buffer, CDW10=CNS (0=namespace)
         self.admin_queue.submit_command(
-            NVME_ADMIN_IDENTIFY, 1, buf.phys, 0,
-            IDENTIFY_CNS_NAMESPACE, 0, 0
+            0x06, 1, buf.phys, 0,
+            0, 0, 0
         )
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
             return Result.Err("NVMe: identify namespace timeout")
 
         # Parse NSZE (Namespace Size in LBAs) at offset 0
-        self.sector_count = mmio_read64(buf.virt + IDNS_NSZE_OFFSET)
+        self.sector_count = mmio_read64(buf.virt + IDENTITY_NAMESPACE_NSZE_OFFSET)
 
         # Parse FLBAS (Formatted LBA Size) at offset 26 to find active LBA format index
-        val flbas_raw = mmio_read32(buf.virt + IDNS_FLBAS_OFFSET)
+        val flbas_raw = mmio_read32(buf.virt + IDENTITY_NAMESPACE_FLBAS_OFFSET)
         val flbas = flbas_raw & 0x0F  # Lower 4 bits = LBA format index
 
         # Read LBA Format descriptor: LBAF0 is at offset 128, each LBAF is 4 bytes
-        val lbaf_offset = IDNS_LBAF0_OFFSET + flbas.to_u64() * 4
+        val lbaf_offset = IDENTITY_NAMESPACE_LBAF0_OFFSET + flbas.to_u64() * 4
         val lbaf = mmio_read32(buf.virt + lbaf_offset)
         # LBAF bits 16-23: LBADS (LBA Data Size as power of 2)
         val lbads = (lbaf >> 16) & 0xFF
@@ -418,7 +421,7 @@ impl NvmeDriver:
         CDW10: bits[31:16] = QSIZE (0-based), bits[15:0] = QID
         CDW11: bit[0] = PC (physically contiguous), bits[31:16] = IV (interrupt vector)
         """
-        val cq_size = IO_QUEUE_DEPTH.to_u64() * CQE_SIZE
+        val cq_size = 64u64 * 16
         val cq_result = self.alloc_dma(cq_size)
         if cq_result.is_err():
             return Result.Err("NVMe: failed to allocate I/O CQ")
@@ -434,7 +437,7 @@ impl NvmeDriver:
         self.io_queue.cq_doorbell = self.bar0_virt + 0x1000 + (2 * io_qid + 1) * db_size_u64
 
         # CDW10: QID=1 | QSIZE=(depth-1) << 16
-        val cdw10 = 1 | ((IO_QUEUE_DEPTH - 1).to_u32() << 16)
+        val cdw10 = 1 | (63u32 << 16)
         # CDW11: PC=1 (physically contiguous), IV=0, IEN=1
         val cdw11: u32 = 0x01  # PC bit
 
@@ -454,7 +457,7 @@ impl NvmeDriver:
         CDW10: bits[31:16] = QSIZE (0-based), bits[15:0] = QID
         CDW11: bit[0] = PC, bits[31:16] = CQID (associated CQ)
         """
-        val sq_size = IO_QUEUE_DEPTH.to_u64() * SQE_SIZE
+        val sq_size = 64u64 * 64
         val sq_result = self.alloc_dma(sq_size)
         if sq_result.is_err():
             return Result.Err("NVMe: failed to allocate I/O SQ")
@@ -470,7 +473,7 @@ impl NvmeDriver:
         self.io_queue.sq_doorbell = self.bar0_virt + 0x1000 + 2 * io_qid * db_size_u64
 
         # CDW10: QID=1 | QSIZE=(depth-1) << 16
-        val cdw10 = 1 | ((IO_QUEUE_DEPTH - 1).to_u32() << 16)
+        val cdw10 = 1 | (63u32 << 16)
         # CDW11: PC=1 (physically contiguous), CQID=1 << 16
         val cdw11: u32 = 0x01 | (1 << 16)
 
