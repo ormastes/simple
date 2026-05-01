@@ -12,7 +12,9 @@ use std.nogc_sync_mut.compression.gzip.types.{
     BLOCK_STORED, BLOCK_FIXED, BLOCK_DYNAMIC
 }
 use std.nogc_sync_mut.compression.gzip.huffman.{
-    deflate_fixed_huffman, deflate_fixed_distances, huffman_lookup
+    deflate_fixed_huffman, deflate_fixed_distances, huffman_lookup,
+    bitstream_new, bitstream_write_bits_lsb, bitstream_write_huffman,
+    bitstream_finish, deflate_length_extra, deflate_distance_extra
 }
 
 # =============================================================================
@@ -53,22 +55,24 @@ fn deflate_block_stored(data, is_final):
 
     return block
 
-# Create DEFLATE fixed Huffman block
+# Create DEFLATE fixed Huffman block (RFC 1951 §3.2.6)
+# Produces a proper bitstream: BFINAL+BTYPE LSB-first, Huffman codes MSB-first packed LSB into bytes.
 fn deflate_block_fixed(tokens, is_final):
     if tokens == nil:
         return []
 
-    # Block header
-    var header = BLOCK_FIXED << 1
-    if is_final:
-        header = header | 1
-
-    var block = [header]
-
-    # Encode tokens using fixed Huffman codes
-    val lit_codes = deflate_fixed_huffman()
+    val lit_codes  = deflate_fixed_huffman()
     val dist_codes = deflate_fixed_distances()
 
+    # Start bit stream — write BFINAL (1 bit) and BTYPE (2 bits) LSB-first
+    var bfinal = 0
+    if is_final:
+        bfinal = 1
+    var bs = bitstream_new()
+    bs = bitstream_write_bits_lsb(bs, bfinal, 1)
+    bs = bitstream_write_bits_lsb(bs, BLOCK_FIXED, 2)
+
+    # Encode tokens
     var i = 0
     loop:
         if i >= tokens.len():
@@ -79,35 +83,49 @@ fn deflate_block_fixed(tokens, is_final):
         val value = token[1]
 
         if token_type == 0:
-            # Literal
+            # Literal byte
             val code_info = huffman_lookup(lit_codes, value)
             if code_info != nil:
-                block.push(code_info[0])
+                bs = bitstream_write_huffman(bs, code_info[0], code_info[1])
         else:
-            # Match
+            # Match: token = [1, distance, length]
             val distance = value
-            val length = token[2]
+            val length   = token[2]
 
-            # Encode length
+            # Length code
             val len_code = deflate_length_code(length)
             val len_info = huffman_lookup(lit_codes, len_code)
             if len_info != nil:
-                block.push(len_info[0])
+                bs = bitstream_write_huffman(bs, len_info[0], len_info[1])
 
-            # Encode distance
+            # Length extra bits (LSB-first)
+            val len_extra = deflate_length_extra(length)
+            val len_ex_val = len_extra[0]
+            val len_ex_cnt = len_extra[1]
+            if len_ex_cnt > 0:
+                bs = bitstream_write_bits_lsb(bs, len_ex_val, len_ex_cnt)
+
+            # Distance code (5-bit, MSB-first)
             val dist_code = deflate_distance_code(distance)
             val dist_info = huffman_lookup(dist_codes, dist_code)
             if dist_info != nil:
-                block.push(dist_info[0])
+                bs = bitstream_write_huffman(bs, dist_info[0], dist_info[1])
+
+            # Distance extra bits (LSB-first)
+            val dist_extra = deflate_distance_extra(distance)
+            val dist_ex_val = dist_extra[0]
+            val dist_ex_cnt = dist_extra[1]
+            if dist_ex_cnt > 0:
+                bs = bitstream_write_bits_lsb(bs, dist_ex_val, dist_ex_cnt)
 
         i = i + 1
 
-    # End of block marker (256)
+    # End-of-block symbol (256)
     val eob_info = huffman_lookup(lit_codes, 256)
     if eob_info != nil:
-        block.push(eob_info[0])
+        bs = bitstream_write_huffman(bs, eob_info[0], eob_info[1])
 
-    return block
+    return bitstream_finish(bs)
 
 # Get length code for match length
 fn deflate_length_code(length):

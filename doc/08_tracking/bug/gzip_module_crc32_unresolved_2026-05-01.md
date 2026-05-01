@@ -135,8 +135,17 @@ mislead clients that explicitly requested gzip with `Accept-Encoding: gzip`.
   entries (a truncated approximation); real gzip uses 256 entries. System `gzip -d`
   will likely reject output due to CRC mismatch. This is a separate follow-up bug.
 - **Follow-up bugs needed:**
-  1. Implement fixed-Huffman inflation in `inflate.spl` to restore levels 1–9 actual compression.
+  1. ~~Implement fixed-Huffman inflation in `inflate.spl` to restore levels 1–9 actual compression.~~
+     **DONE (2026-05-01):** `inflate_block_fixed` implemented (RFC 1951 §3.2.6). `inflate()` dispatcher
+     handles stored + fixed blocks; dynamic-Huffman (BTYPE=10) explicitly returns `nil`/Err pending a
+     separate follow-up. Levels 1-9 now route through `deflate_block_fixed` in `compress.spl`.
+     `deflate_block_fixed` was also fixed to use a proper `BitStream` (LSB-first byte packing) with
+     MSB-first Huffman code emission and extra-bits support. Compression ratios verified:
+     256×'A' → 37 bytes (85% savings), 1000 zeros → 46 bytes, 1080-byte text → 65 bytes.
+     11/11 smoke tests passing.
   2. Expand CRC table in `crc.spl` from 16 → 256 entries for real-tool interop.
+  3. Implement dynamic-Huffman block inflation (RFC 1951 §3.2.7) — `inflate()` currently returns
+     `nil` for BTYPE=10. This is a larger separate follow-up.
 
 ## Cross-references
 

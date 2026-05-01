@@ -358,3 +358,331 @@ fn deflate_fixed_distances():
 
     return codes
 
+# =============================================================================
+# BITSTREAM — LSB-first byte packing (RFC 1951 §3.1.1)
+#
+# State: [bytes: [u8], bit_buf: i64, bit_count: i64]
+#   bytes     — fully packed output bytes so far
+#   bit_buf   — bits waiting to be flushed (LSB = oldest bit waiting)
+#   bit_count — how many valid bits are in bit_buf
+# =============================================================================
+
+# Create a new empty BitStream writer
+fn bitstream_new():
+    var bytes: [u8] = []
+    return [bytes, 0, 0]
+
+# Write `n` bits of `value` LSB-first (for non-Huffman values: BFINAL, BTYPE, extra bits)
+fn bitstream_write_bits_lsb(bs, value, n):
+    var bytes   = bs[0]
+    var bit_buf = bs[1]
+    var bit_cnt = bs[2]
+
+    var v = value
+    var remaining = n
+    loop:
+        if remaining <= 0:
+            break
+        val bit = v & 1
+        bit_buf = bit_buf | (bit << bit_cnt)
+        bit_cnt = bit_cnt + 1
+        v = v >> 1
+        remaining = remaining - 1
+        if bit_cnt == 8:
+            bytes.push(bit_buf.to_u8())
+            bit_buf = 0
+            bit_cnt = 0
+
+    return [bytes, bit_buf, bit_cnt]
+
+# Write `n`-bit Huffman code `code` MSB-first (packed LSB into bytes per RFC 1951)
+fn bitstream_write_huffman(bs, code, n):
+    var bytes   = bs[0]
+    var bit_buf = bs[1]
+    var bit_cnt = bs[2]
+
+    # emit MSB first: bit (n-1) down to bit 0
+    var i = n - 1
+    loop:
+        if i < 0:
+            break
+        val bit = (code >> i) & 1
+        bit_buf = bit_buf | (bit << bit_cnt)
+        bit_cnt = bit_cnt + 1
+        i = i - 1
+        if bit_cnt == 8:
+            bytes.push(bit_buf.to_u8())
+            bit_buf = 0
+            bit_cnt = 0
+
+    return [bytes, bit_buf, bit_cnt]
+
+# Flush remaining bits (zero-pad to byte boundary), return final [u8] byte array
+fn bitstream_finish(bs):
+    var bytes   = bs[0]
+    var bit_buf = bs[1]
+    var bit_cnt = bs[2]
+
+    if bit_cnt > 0:
+        bytes.push(bit_buf.to_u8())
+
+    return bytes
+
+# =============================================================================
+# BITSTREAM READER — LSB-first (RFC 1951 §3.1.1)
+#
+# State: [data: [u8], byte_pos: i64, bit_pos: i64]
+#   data     — input byte array
+#   byte_pos — current byte index
+#   bit_pos  — bit within current byte (0 = LSB)
+# =============================================================================
+
+# Create a new BitStream reader over a byte array
+fn bitstream_reader_new(data):
+    return [data, 0, 0]
+
+# Read `n` bits LSB-first (non-Huffman values: BFINAL, BTYPE, extra bits)
+# Returns [value, new_reader_state]
+fn bitstream_read_bits_lsb(br, n):
+    var data     = br[0]
+    var byte_pos = br[1]
+    var bit_pos  = br[2]
+
+    var result = 0
+    var shift = 0
+    var remaining = n
+    loop:
+        if remaining <= 0:
+            break
+        if byte_pos >= data.len():
+            break
+        val cur_byte = data[byte_pos].to_i64()
+        val bit = (cur_byte >> bit_pos) & 1
+        result = result | (bit << shift)
+        shift = shift + 1
+        bit_pos = bit_pos + 1
+        if bit_pos == 8:
+            bit_pos = 0
+            byte_pos = byte_pos + 1
+        remaining = remaining - 1
+
+    return [result, [data, byte_pos, bit_pos]]
+
+# Read one Huffman code bit-by-bit (MSB-first encoding, packed LSB-first into bytes).
+# Caller accumulates bits from calls to bitstream_read_one_bit.
+# Returns [bit_value, new_reader_state]
+fn bitstream_read_one_bit(br):
+    var data     = br[0]
+    var byte_pos = br[1]
+    var bit_pos  = br[2]
+
+    if byte_pos >= data.len():
+        return [0, [data, byte_pos, bit_pos]]
+
+    val cur_byte = data[byte_pos].to_i64()
+    val bit = (cur_byte >> bit_pos) & 1
+
+    bit_pos = bit_pos + 1
+    if bit_pos == 8:
+        bit_pos = 0
+        byte_pos = byte_pos + 1
+
+    return [bit, [data, byte_pos, bit_pos]]
+
+# Get current byte/bit position for block-boundary tracking
+fn bitstream_reader_pos(br):
+    return [br[1], br[2]]
+
+# =============================================================================
+# FIXED HUFFMAN DECODE TABLES (symbol → code lookup by code value+length)
+# =============================================================================
+
+# Decode a fixed-Huffman literal/length symbol from the bit stream.
+# Reads 7 bits first (codes 256..279), then 8 bits (0..143, 280..287), then 9 bits (144..255).
+# Returns [symbol, new_reader_state]  or  [-1, new_reader_state] on error.
+fn deflate_fixed_decode_litlen(br):
+    # Read 7 bits (MSB-first accumulation)
+    var acc = 0
+    var cur_br = br
+    var i = 0
+    loop:
+        if i >= 7:
+            break
+        val ret = bitstream_read_one_bit(cur_br)
+        val bit = ret[0]
+        cur_br = ret[1]
+        acc = (acc << 1) | bit
+        i = i + 1
+
+    # 7-bit codes: 0000000..0010111 → symbols 256..279
+    if acc >= 0 and acc <= 23:
+        return [256 + acc, cur_br]
+
+    # Need one more bit (8 bits total)
+    val ret8 = bitstream_read_one_bit(cur_br)
+    val bit8 = ret8[0]
+    cur_br = ret8[1]
+    val acc8 = (acc << 1) | bit8
+
+    # 8-bit codes 00110000..10111111 → symbols 0..143
+    if acc8 >= 0b00110000 and acc8 <= 0b10111111:
+        return [acc8 - 0b00110000, cur_br]
+
+    # 8-bit codes 11000000..11000111 → symbols 280..287
+    if acc8 >= 0b11000000 and acc8 <= 0b11000111:
+        return [280 + (acc8 - 0b11000000), cur_br]
+
+    # Need one more bit (9 bits total)
+    val ret9 = bitstream_read_one_bit(cur_br)
+    val bit9 = ret9[0]
+    cur_br = ret9[1]
+    val acc9 = (acc8 << 1) | bit9
+
+    # 9-bit codes 110010000..111111111 → symbols 144..255
+    if acc9 >= 0b110010000 and acc9 <= 0b111111111:
+        return [144 + (acc9 - 0b110010000), cur_br]
+
+    return [-1, cur_br]
+
+# Decode a fixed-Huffman distance code (5 bits, MSB-first).
+# Returns [dist_code, new_reader_state]
+fn deflate_fixed_decode_dist(br):
+    var acc = 0
+    var cur_br = br
+    var i = 0
+    loop:
+        if i >= 5:
+            break
+        val ret = bitstream_read_one_bit(cur_br)
+        val bit = ret[0]
+        cur_br = ret[1]
+        acc = (acc << 1) | bit
+        i = i + 1
+    return [acc, cur_br]
+
+# =============================================================================
+# LENGTH + DISTANCE EXTRA-BITS TABLES (RFC 1951 §3.2.5)
+# =============================================================================
+
+# Given a length code (257..285), return [base_length, extra_bits_count]
+fn deflate_length_decode_info(code):
+    if code == 257: return [3, 0]
+    if code == 258: return [4, 0]
+    if code == 259: return [5, 0]
+    if code == 260: return [6, 0]
+    if code == 261: return [7, 0]
+    if code == 262: return [8, 0]
+    if code == 263: return [9, 0]
+    if code == 264: return [10, 0]
+    if code == 265: return [11, 1]
+    if code == 266: return [13, 1]
+    if code == 267: return [15, 1]
+    if code == 268: return [17, 1]
+    if code == 269: return [19, 2]
+    if code == 270: return [23, 2]
+    if code == 271: return [27, 2]
+    if code == 272: return [31, 2]
+    if code == 273: return [35, 3]
+    if code == 274: return [43, 3]
+    if code == 275: return [51, 3]
+    if code == 276: return [59, 3]
+    if code == 277: return [67, 4]
+    if code == 278: return [83, 4]
+    if code == 279: return [99, 4]
+    if code == 280: return [115, 4]
+    if code == 281: return [131, 5]
+    if code == 282: return [163, 5]
+    if code == 283: return [195, 5]
+    if code == 284: return [227, 5]
+    if code == 285: return [258, 0]
+    return [3, 0]
+
+# Given a distance code (0..29), return [base_distance, extra_bits_count]
+fn deflate_distance_decode_info(code):
+    if code == 0:  return [1, 0]
+    if code == 1:  return [2, 0]
+    if code == 2:  return [3, 0]
+    if code == 3:  return [4, 0]
+    if code == 4:  return [5, 1]
+    if code == 5:  return [7, 1]
+    if code == 6:  return [9, 2]
+    if code == 7:  return [13, 2]
+    if code == 8:  return [17, 3]
+    if code == 9:  return [25, 3]
+    if code == 10: return [33, 4]
+    if code == 11: return [49, 4]
+    if code == 12: return [65, 5]
+    if code == 13: return [97, 5]
+    if code == 14: return [129, 6]
+    if code == 15: return [193, 6]
+    if code == 16: return [257, 7]
+    if code == 17: return [385, 7]
+    if code == 18: return [513, 8]
+    if code == 19: return [769, 8]
+    if code == 20: return [1025, 9]
+    if code == 21: return [1537, 9]
+    if code == 22: return [2049, 10]
+    if code == 23: return [3073, 10]
+    if code == 24: return [4097, 11]
+    if code == 25: return [6145, 11]
+    if code == 26: return [8193, 12]
+    if code == 27: return [12289, 12]
+    if code == 28: return [16385, 13]
+    if code == 29: return [24577, 13]
+    return [1, 0]
+
+# Given a length (3..258), return [extra_bits_value, extra_bits_count]
+fn deflate_length_extra(length):
+    if length <= 10: return [0, 0]
+    if length <= 12: return [length - 11, 1]
+    if length <= 14: return [length - 13, 1]
+    if length <= 16: return [length - 15, 1]
+    if length <= 18: return [length - 17, 1]
+    if length <= 22: return [length - 19, 2]
+    if length <= 26: return [length - 23, 2]
+    if length <= 30: return [length - 27, 2]
+    if length <= 34: return [length - 31, 2]
+    if length <= 42: return [length - 35, 3]
+    if length <= 50: return [length - 43, 3]
+    if length <= 58: return [length - 51, 3]
+    if length <= 66: return [length - 59, 3]
+    if length <= 82: return [length - 67, 4]
+    if length <= 98: return [length - 83, 4]
+    if length <= 114: return [length - 99, 4]
+    if length <= 130: return [length - 115, 4]
+    if length <= 162: return [length - 131, 5]
+    if length <= 194: return [length - 163, 5]
+    if length <= 226: return [length - 195, 5]
+    if length <= 257: return [length - 227, 5]
+    return [0, 0]
+
+# Given a distance (1..32768), return [extra_bits_value, extra_bits_count]
+fn deflate_distance_extra(distance):
+    if distance <= 4:     return [0, 0]
+    if distance <= 6:     return [distance - 5, 1]
+    if distance <= 8:     return [distance - 7, 1]
+    if distance <= 12:    return [distance - 9, 2]
+    if distance <= 16:    return [distance - 13, 2]
+    if distance <= 24:    return [distance - 17, 3]
+    if distance <= 32:    return [distance - 25, 3]
+    if distance <= 48:    return [distance - 33, 4]
+    if distance <= 64:    return [distance - 49, 4]
+    if distance <= 96:    return [distance - 65, 5]
+    if distance <= 128:   return [distance - 97, 5]
+    if distance <= 192:   return [distance - 129, 6]
+    if distance <= 256:   return [distance - 193, 6]
+    if distance <= 384:   return [distance - 257, 7]
+    if distance <= 512:   return [distance - 385, 7]
+    if distance <= 768:   return [distance - 513, 8]
+    if distance <= 1024:  return [distance - 769, 8]
+    if distance <= 1536:  return [distance - 1025, 9]
+    if distance <= 2048:  return [distance - 1537, 9]
+    if distance <= 3072:  return [distance - 2049, 10]
+    if distance <= 4096:  return [distance - 3073, 10]
+    if distance <= 6144:  return [distance - 4097, 11]
+    if distance <= 8192:  return [distance - 6145, 11]
+    if distance <= 12288: return [distance - 8193, 12]
+    if distance <= 16384: return [distance - 12289, 12]
+    if distance <= 24576: return [distance - 16385, 13]
+    return [distance - 24577, 13]
+

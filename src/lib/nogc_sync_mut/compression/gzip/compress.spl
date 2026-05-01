@@ -36,26 +36,31 @@ use std.nogc_sync_mut.compression.gzip.huffman.{
 use std.nogc_sync_mut.compression.gzip.deflate.{
     deflate_block_stored, deflate_block_fixed, deflate_length_code, deflate_distance_code
 }
-use std.nogc_sync_mut.compression.gzip.inflate.{deflate_block_parse}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate}
 
 # =============================================================================
 # GZIP COMPRESSION
 # =============================================================================
 
 # Compress data to GZIP format
-# level: 0-9 (0=none, 1-9=stored for now — fixed-Huffman inflate is unimplemented)
+# level: 0 = stored (uncompressed), 1-9 = fixed-Huffman DEFLATE
 fn gzip_compress(data: [u8], level: i64) -> [u8]:
     if data.len() == 0:
         val crc_empty = crc32_calculate(data)
         val header_empty = gzip_header_create(nil, 0, 0, OS_UNIX)
-        val stored_empty = deflate_block_stored(data, true)
+        var deflate_empty: [u8] = []
+        if level == 0:
+            deflate_empty = deflate_block_stored(data, true)
+        else:
+            val tokens_empty = lz77_compress(data, level)
+            deflate_empty = deflate_block_fixed(tokens_empty, true)
         val footer_empty = gzip_footer_create(crc_empty, 0)
         var result_empty = header_empty
         var ei = 0
         loop:
-            if ei >= stored_empty.len():
+            if ei >= deflate_empty.len():
                 break
-            result_empty.push(stored_empty[ei])
+            result_empty.push(deflate_empty[ei])
             ei = ei + 1
         ei = 0
         loop:
@@ -79,8 +84,13 @@ fn gzip_compress(data: [u8], level: i64) -> [u8]:
 
     val header = gzip_header_create(nil, timestamp, extra_flags, OS_UNIX)
 
-    # All levels use stored blocks (fixed-Huffman inflate is not yet implemented)
-    val compressed = deflate_block_stored(data, true)
+    # Level 0 → stored blocks; levels 1-9 → fixed-Huffman DEFLATE
+    var compressed: [u8] = []
+    if level == 0:
+        compressed = deflate_block_stored(data, true)
+    else:
+        val tokens = lz77_compress(data, level)
+        compressed = deflate_block_fixed(tokens, true)
 
     # Create footer
     val footer = gzip_footer_create(crc, size)
@@ -131,35 +141,11 @@ fn gzip_decompress(data: [u8]) -> [u8]?:
         compressed.push(data[header_size + i])
         i = i + 1
 
-    # Decompress DEFLATE blocks
-    var decompressed: [u8] = []
-    var offset = 0
-
-    loop:
-        if offset >= compressed.len():
-            break
-
-        val block_info = deflate_block_parse(compressed, offset)
-        if block_info == nil:
-            break
-
-        val block_type = block_info[0]
-        val is_final = block_info[1]
-        val block_data = block_info[2]
-        val next_offset = block_info[3]
-
-        # Append decompressed block data
-        var j = 0
-        loop:
-            if j >= block_data.len():
-                break
-            decompressed.push(block_data[j])
-            j = j + 1
-
-        offset = next_offset
-
-        if is_final:
-            break
+    # Decompress DEFLATE blocks via inflate()
+    val maybe_decompressed = inflate(compressed)
+    if maybe_decompressed == nil:
+        return nil
+    val decompressed = maybe_decompressed ?? []
 
     # Validate footer
     val valid = gzip_footer_validate(footer_info, decompressed, decompressed.len())
