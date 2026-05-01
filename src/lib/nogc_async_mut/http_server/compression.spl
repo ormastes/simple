@@ -1,0 +1,82 @@
+# HTTP server response-body compression dispatcher.
+#
+# Maps a negotiated Content-Encoding name (from `negotiate_encoding` in
+# `lib/nogc_sync_mut/http/accept_encoding.spl`) to a concrete encoder call,
+# returning the compressed bytes.
+#
+# Currently wired:
+#
+# - `"zstd"` and `"lz4"` go through the typed `lib/common/compress` façade.
+#
+# Not yet wired (return `Err` with a specific reason — fix in a follow-up
+# commit, do not silently fall through to identity):
+#
+# - `"gzip"` — the in-tree `lib/nogc_sync_mut/compression/gzip` module is
+#   untyped and not exposed through the common compress façade; integrating
+#   it requires either adding `CompressionCodec.gzip` to
+#   `lib/common/compress/types.spl` with proper `[u8]` signatures, or
+#   exporting it through this layer once its signature is verified.
+# - `"br"` — needs the brotli encoder from Phase 3 of the compression pass.
+# - `"deflate"` — same blocker as gzip (deflate lives under the gzip module
+#   tree).
+# - `"identity"` and `""` — no compression; callers should detect these
+#   before invoking this dispatcher.
+
+use std.common.compress.{
+    CompressionCodec,
+    CompressionOptions,
+    CompressionError,
+    default_compression_options,
+    try_compress_bytes,
+}
+
+# Compress `body` with the named encoding. Returns the compressed bytes or an
+# error message describing why the encoding is not supported.
+#
+# `encoding` is a lowercase token like "gzip", "br", "zstd", "lz4", "deflate",
+# or "" (identity). Identity is treated as a programmer error — the caller
+# should not have invoked this dispatcher with no encoding to apply.
+fn compress_response_body(body: [u8], encoding: text) -> Result<[u8], text>:
+    match encoding:
+        "zstd":
+            _compress_via_facade(body, CompressionCodec.zstd)
+        "lz4":
+            _compress_via_facade(body, CompressionCodec.lz4)
+        "gzip":
+            Err("Content-Encoding 'gzip' is not yet wired into the common compress façade; pending gzip module integration")
+        "deflate":
+            Err("Content-Encoding 'deflate' is not yet wired; pending gzip module integration")
+        "br":
+            Err("Content-Encoding 'br' is not yet implemented; pending Phase 3 brotli encoder")
+        "":
+            Err("compress_response_body called with empty encoding (caller should skip compression)")
+        "identity":
+            Err("compress_response_body called with 'identity' encoding (caller should skip compression)")
+        _:
+            Err("unknown Content-Encoding '" + encoding + "'")
+
+# Returns the list of Content-Encoding names this dispatcher can produce
+# right now. Useful as input to `negotiate_encoding`. Order is server
+# preference: stronger compression first.
+fn supported_encodings() -> [text]:
+    ["zstd", "lz4"]
+
+# ----------------------------------------------------------------------------
+# Internal helpers
+# ----------------------------------------------------------------------------
+
+fn _compress_via_facade(body: [u8], codec: CompressionCodec) -> Result<[u8], text>:
+    val options = default_compression_options(codec)
+    val result = try_compress_bytes(body, options)
+    if result.is_err():
+        return Err(_format_compression_error(result.unwrap_err()))
+    Ok(result.unwrap())
+
+fn _format_compression_error(err: CompressionError) -> text:
+    match err:
+        CompressionError.InvalidHeader(msg): "compress: invalid header: " + msg
+        CompressionError.UnsupportedFeature(msg): "compress: unsupported: " + msg
+        CompressionError.TruncatedInput(msg): "compress: truncated: " + msg
+        CompressionError.ChecksumMismatch(msg): "compress: checksum: " + msg
+        CompressionError.CorruptStream(msg): "compress: corrupt stream: " + msg
+        CompressionError.SizeLimitExceeded(limit): "compress: size limit exceeded: " + limit.to_text()
