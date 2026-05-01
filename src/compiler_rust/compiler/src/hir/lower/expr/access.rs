@@ -149,12 +149,30 @@ impl Lowerer {
                 if let Some(projected) = self.try_lower_result_projection(&recv_hir, field) {
                     return Ok(projected);
                 }
+                let mut candidate_struct_names = Vec::new();
+                if !Self::is_unspecific_field_struct_name(&struct_name) {
+                    candidate_struct_names.push(struct_name.clone());
+                }
+                if let Some(inferred_struct_name) = self.try_resolve_receiver_struct_name_from_expr(receiver, ctx) {
+                    if !candidate_struct_names.iter().any(|name| name == &inferred_struct_name) {
+                        candidate_struct_names.push(inferred_struct_name);
+                    }
+                }
                 // Try to resolve field type via struct name lookup before falling back.
                 // This preserves the real TypeId for self.field.method() chains — without
                 // this, the field node gets ty=ANY which causes MIR to mangle the wrong
                 // method name and emit a recursive self-call (phase4 STOP marker).
-                if let Some(field_ty) = self.try_resolve_field_type_by_name(&struct_name, field) {
-                    if let Ok((field_index, _)) = self.get_field_info(recv_hir.ty, field) {
+                for candidate_struct_name in candidate_struct_names {
+                    if let Some(field_ty) = self
+                        .try_resolve_field_type_by_name(&candidate_struct_name, field)
+                        .or_else(|| self.try_resolve_global_field_type_by_name(&candidate_struct_name, field))
+                    {
+                        let field_index = self
+                            .get_field_info(recv_hir.ty, field)
+                            .ok()
+                            .map(|(field_index, _)| field_index)
+                            .or_else(|| self.try_resolve_global_field_index_by_name(&candidate_struct_name, field))
+                            .unwrap_or(0);
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -163,24 +181,15 @@ impl Lowerer {
                             ty: field_ty,
                         });
                     }
-                    // Index unknown but type known — emit FieldAccess at 0 with correct type.
-                    // MIR will use the type for dispatch; layout offset will be resolved later.
-                    return Ok(HirExpr {
-                        kind: HirExprKind::FieldAccess {
-                            receiver: recv_hir,
-                            field_index: 0,
-                        },
-                        ty: field_ty,
-                    });
-                }
-                if let Some(field_index) = self.try_resolve_global_field_index_by_name(&struct_name, field) {
-                    return Ok(HirExpr {
-                        kind: HirExprKind::FieldAccess {
-                            receiver: recv_hir,
-                            field_index,
-                        },
-                        ty: TypeId::ANY,
-                    });
+                    if let Some(field_index) = self.try_resolve_global_field_index_by_name(&candidate_struct_name, field) {
+                        return Ok(HirExpr {
+                            kind: HirExprKind::FieldAccess {
+                                receiver: recv_hir,
+                                field_index,
+                            },
+                            ty: TypeId::ANY,
+                        });
+                    }
                 }
                 // Field not found - treat as no-paren method call
                 // This handles cases like container.resolve where resolve is a method
@@ -224,6 +233,17 @@ impl Lowerer {
         None
     }
 
+    fn try_resolve_global_field_type_by_name(&mut self, struct_name: &str, field_name: &str) -> Option<TypeId> {
+        let field_type_name = {
+            let global_defs = self.global_struct_defs.as_ref()?;
+            let fields = global_defs.get(struct_name)?;
+            fields
+                .iter()
+                .find_map(|(fname, ftype)| if fname == field_name { Some(ftype.clone()) } else { None })?
+        };
+        self.resolve_type(&simple_parser::Type::Simple(field_type_name)).ok()
+    }
+
     fn try_resolve_global_field_index_by_name(&self, struct_name: &str, field_name: &str) -> Option<usize> {
         let global_defs = self.global_struct_defs.as_ref()?;
         let fields = global_defs.get(struct_name)?;
@@ -231,6 +251,49 @@ impl Lowerer {
             .iter()
             .enumerate()
             .find_map(|(idx, (fname, _))| if fname == field_name { Some(idx) } else { None })
+    }
+
+    fn try_resolve_receiver_struct_name_from_expr(
+        &mut self,
+        receiver: &Expr,
+        ctx: &FunctionContext,
+    ) -> Option<String> {
+        match receiver {
+            Expr::Identifier(name) => {
+                let ty = if let Some(idx) = ctx.lookup(name) {
+                    ctx.locals.get(idx).map(|local| local.ty)
+                } else {
+                    self.globals.get(name).copied()
+                }?;
+                self.try_named_struct_name_for_type(ty)
+            }
+            Expr::FieldAccess { receiver: base, field } => {
+                let base_struct_name = self.try_resolve_receiver_struct_name_from_expr(base, ctx)?;
+                let field_ty = self
+                    .try_resolve_field_type_by_name(&base_struct_name, field)
+                    .or_else(|| self.try_resolve_global_field_type_by_name(&base_struct_name, field))?;
+                self.try_named_struct_name_for_type(field_ty)
+            }
+            _ => self
+                .infer_type(receiver, ctx)
+                .ok()
+                .and_then(|ty| self.try_named_struct_name_for_type(ty)),
+        }
+    }
+
+    fn try_named_struct_name_for_type(&self, ty: TypeId) -> Option<String> {
+        let mut current = ty;
+        loop {
+            match self.module.types.get(current)? {
+                HirType::Struct { name, .. } => return Some(name.clone()),
+                HirType::Pointer { inner, .. } => current = *inner,
+                _ => return None,
+            }
+        }
+    }
+
+    fn is_unspecific_field_struct_name(struct_name: &str) -> bool {
+        matches!(struct_name, "ANY" | "Any" | "wildcard") || struct_name.starts_with("TypeId(")
     }
 
     fn try_lower_result_projection(&self, recv_hir: &HirExpr, field: &str) -> Option<HirExpr> {

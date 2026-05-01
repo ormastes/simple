@@ -2,10 +2,21 @@
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
 use super::lowering_di::builtin_type_name;
-use crate::hir::{DispatchMode, HirExpr, TypeId};
+use crate::hir::{DispatchMode, HirExpr, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
+    fn enum_payload_type_for_method_receiver(&self, ty: TypeId) -> Option<TypeId> {
+        let registry = self.type_registry?;
+        match registry.get(ty) {
+            Some(HirType::Enum { variants, .. }) => variants
+                .iter()
+                .find_map(|(_, payload)| payload.as_ref().and_then(|fields| fields.first()).copied()),
+            Some(HirType::Pointer { inner, .. }) if *inner != ty => self.enum_payload_type_for_method_receiver(*inner),
+            _ => None,
+        }
+    }
+
     pub(super) fn lower_method_call_expr(
         &mut self,
         receiver: &HirExpr,
@@ -13,6 +24,19 @@ impl<'a> MirLowerer<'a> {
         args: &[HirExpr],
         dispatch: &DispatchMode,
     ) -> MirLowerResult<VReg> {
+        let receiver_local_ty: Option<TypeId> = self.recover_receiver_type(receiver);
+
+        // Result/Option-style enum unwrap should lower through the direct enum
+        // payload builtin path, not a synthesized `Type.unwrap` method symbol.
+        if method == "unwrap" && args.is_empty() {
+            if let Some(payload_ty) = self
+                .enum_payload_type_for_method_receiver(receiver.ty)
+                .or_else(|| receiver_local_ty.and_then(|ty| self.enum_payload_type_for_method_receiver(ty)))
+            {
+                return self.lower_builtin_call_expr("rt_enum_payload", std::slice::from_ref(receiver), payload_ty);
+            }
+        }
+
         // rt_array_push returns bool, not a new pointer — no store-back needed.
         let _receiver_local_index: Option<usize> = None;
 
@@ -141,8 +165,6 @@ impl<'a> MirLowerer<'a> {
         // from `TypeRegistry` — no synthesis — and the recursion
         // terminates at a Local (or an expression whose own `ty`
         // is already named).
-        let receiver_local_ty: Option<TypeId> = self.recover_receiver_type(receiver);
-
         let func_name = if let Some(registry) = self.type_registry {
             if let Some(type_name) = registry.get_type_name(receiver.ty) {
                 format!("{}.{}", type_name, method)

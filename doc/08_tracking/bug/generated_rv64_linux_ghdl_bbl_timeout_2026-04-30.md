@@ -416,3 +416,35 @@ runtime crash and will be needed again after the bench is stable.
   - incorrect payload argument `a1 = 0`
 - That moves the highest-signal suspect upstream to the value-producing path just before the call.
 - The strongest current candidate is a generated RV64 compressed-load / load-writeback bug on the `c.ldsp`-based reload of the proof magic into `a1` before `proof_store_u64`, or an adjacent load-pending destination-register corruption on that same path.
+
+## New Verification After Late Proof-Store Bring-Up
+
+- Date:
+  - 2026-05-01
+- Commands:
+  - `bin/simple test test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
+  - `bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_boot_info_dtb_runner.shs --payload-elf /tmp/ghdl_boot_info_payload_new.elf --timeout=30 --max-cycles 200000 --log-path /tmp/rv64_proof_trace39.log --uart-log-path /tmp/rv64_proof_trace39.uart`
+- Result:
+  - the generated RV64 boot-info proof lane is now green again from the bounded DTB runner
+  - the final bounded run ends with:
+    - `GENERATED_RV64_BOOT_INFO_DTB: PASS`
+    - `HALT_SEEN: '1'`
+    - `TRAP_SEEN: '0'`
+    - `DTB_PROBE_SEEN: true`
+    - `UART_MARKER_SEEN: true`
+  - final proof-mailbox contents match the active lane contract:
+    - `DTB_ADDR_HEX32: 88000000`
+    - `RAM_BASE_HEX32: 80000000`
+    - `RAM_SIZE_HEX32: 08000000`
+    - `SERIAL_BASE_HEX32: 10000000`
+    - `MAP_LEN_LOW32: 3`
+    - reserved/kernel/usable region slots all match expected values
+  - the generated bench now includes late proof-store call counters, mailbox-write counters, slot first/last summaries, and per-clause pass/fail reports, which made the last bounded proof failure diagnosable instead of silent
+
+## Remaining Follow-Up
+
+- The narrow repo-native RV64 boot-info proof lane is passing; it should no longer be treated as the active blocker for the Linux lane.
+- Remaining work for `generated_rv64_linux` is now back in the full Linux/OpenSBI path:
+  - rerun `scripts/rtl_riscv64_linux_generated.shs --skip-proofs --timeout=...` against the current generated core
+  - capture the first post-proof OpenSBI/Linux blocker with the same bounded instrumentation discipline
+  - trim or gate the temporary late proof-store observability once the broader Linux lane has a stable next reproducer

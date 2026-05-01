@@ -1257,6 +1257,61 @@ impl CodegenEmitter for LlvmEmitter<'_> {
             return Ok(());
         }
 
+        if matches!(method, "min" | "max") && args.len() == 1 {
+            let lhs = self.get(receiver)?;
+            let rhs = self.get(args[0])?;
+            let lhs = match lhs {
+                BasicValueEnum::IntValue(v) => v,
+                _ => return Err(format!("unsupported receiver kind for '{}' method", method)),
+            };
+            let rhs = match rhs {
+                BasicValueEnum::IntValue(v) => v,
+                _ => return Err(format!("unsupported argument kind for '{}' method", method)),
+            };
+            let lhs64 = if lhs.get_type() == self.backend.runtime_int_type() {
+                lhs
+            } else {
+                self.builder
+                    .build_int_z_extend(lhs, self.backend.runtime_int_type(), "int_minmax_lhs")
+                    .map_err(|e| format!("LLVM int zext failed: {}", e))?
+            };
+            let rhs64 = if rhs.get_type() == self.backend.runtime_int_type() {
+                rhs
+            } else {
+                self.builder
+                    .build_int_z_extend(rhs, self.backend.runtime_int_type(), "int_minmax_rhs")
+                    .map_err(|e| format!("LLVM int zext failed: {}", e))?
+            };
+            let pred = if method == "min" {
+                inkwell::IntPredicate::SLE
+            } else {
+                inkwell::IntPredicate::SGE
+            };
+            let cmp = self
+                .builder
+                .build_int_compare(pred, lhs64, rhs64, "int_minmax_cmp")
+                .map_err(|e| format!("LLVM int compare failed: {}", e))?;
+            let value = self
+                .builder
+                .build_select(cmp, lhs64, rhs64, "int_minmax_select")
+                .map_err(|e| format!("LLVM select failed: {}", e))?;
+            if let Some(d) = dest {
+                self.set(*d, value);
+            }
+            return Ok(());
+        }
+
+        if method == "repeat" && args.len() == 1 {
+            let mut all_args = vec![receiver];
+            all_args.extend_from_slice(args);
+            self.emit_call(
+                dest,
+                &CallTarget::from_name("lib__common__string_core__str_repeat"),
+                &all_args,
+            )?;
+            return Ok(());
+        }
+
         if let Some(rt_name) = Self::runtime_method_name(method) {
             let recv = self.get(receiver)?;
             let mut rt_args = vec![recv];

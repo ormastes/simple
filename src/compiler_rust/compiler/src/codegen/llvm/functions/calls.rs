@@ -364,6 +364,134 @@ impl LlvmBackend {
             return Ok(());
         }
 
+        let qualified_name = func_name_raw.replace("_dot_", ".");
+        if let Some(dot_pos) = qualified_name.rfind('.') {
+            let method = &qualified_name[dot_pos + 1..];
+
+            if matches!(method, "min" | "max") && args.len() >= 2 {
+                let lhs = self.get_vreg(&args[0], vreg_map)?;
+                let rhs = self.get_vreg(&args[1], vreg_map)?;
+                let lhs = self.coerce_value_to_type(lhs, Some(i64_type.into()), builder)?;
+                let rhs = self.coerce_value_to_type(rhs, Some(i64_type.into()), builder)?;
+                let lhs = lhs.into_int_value();
+                let rhs = rhs.into_int_value();
+                let pred = if method == "min" {
+                    inkwell::IntPredicate::SLE
+                } else {
+                    inkwell::IntPredicate::SGE
+                };
+                let cmp = builder
+                    .build_int_compare(pred, lhs, rhs, "call_int_minmax_cmp")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("qualified int min/max compare", &e))?;
+                let selected = builder
+                    .build_select(cmp, lhs, rhs, "call_int_minmax_select")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("qualified int min/max select", &e))?;
+                if let Some(d) = dest {
+                    vreg_map.insert(d, selected);
+                }
+                return Ok(());
+            }
+
+            if matches!(method, "chr" | "to_char") && !args.is_empty() {
+                let recv = self.get_vreg(&args[0], vreg_map)?;
+                let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                let rt_func = module
+                    .get_function("char_from_code")
+                    .unwrap_or_else(|| module.add_function("char_from_code", fn_type, None));
+                let call_site = builder
+                    .build_call(rt_func, &[recv.into()], "qualified_char_from_code")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("qualified char_from_code call", &e))?;
+                if let Some(d) = dest {
+                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        vreg_map.insert(d, ret_val);
+                    }
+                }
+                return Ok(());
+            }
+
+            let qualified_rt_redirect: Option<&str> = match method {
+                "starts_with" => Some("rt_string_starts_with"),
+                "ends_with" => Some("rt_string_ends_with"),
+                "contains" | "contains_key" | "has_key" => Some("rt_contains"),
+                "split" => Some("rt_string_split"),
+                "trim" => Some("rt_string_trim"),
+                "repeat" => Some("lib__common__string_core__str_repeat"),
+                "replace" => Some("rt_string_replace"),
+                "to_upper" | "upper" => Some("rt_string_to_upper"),
+                "to_lower" | "lower" => Some("rt_string_to_lower"),
+                "char_at" | "at" => Some("rt_string_char_at"),
+                "to_text" | "to_string" | "str" => Some("rt_to_string"),
+                "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+                "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
+                "concat" => Some("rt_string_concat"),
+                "rfind" | "last_index_of" => Some("rt_string_rfind"),
+                "push" => Some("rt_array_push"),
+                "pop" => Some("rt_array_pop"),
+                "sort" => Some("rt_array_sort"),
+                "reverse" => Some("rt_array_reverse"),
+                "clear" => Some("rt_array_clear"),
+                "slice" => Some("rt_slice"),
+                "len" => Some("rt_len"),
+                "get" => Some("rt_index_get"),
+                "set" => Some("rt_index_set"),
+                "keys" => Some("rt_dict_keys"),
+                "values" => Some("rt_dict_values"),
+                "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                "is_none" => Some("rt_is_none"),
+                "is_some" => Some("rt_is_some"),
+                "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
+                _ => None,
+            };
+
+            if let Some(rt_fn_name) = qualified_rt_redirect {
+                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                for arg in args.iter() {
+                    let val = self.get_vreg(arg, vreg_map)?;
+                    let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                    arg_vals.push(casted.into());
+                }
+                let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    arg_vals.iter().map(|_| i64_type.into()).collect();
+                let returns_bool = matches!(
+                    rt_fn_name,
+                    "rt_array_push"
+                        | "rt_array_clear"
+                        | "rt_array_reverse"
+                        | "rt_array_sort"
+                        | "rt_index_set"
+                        | "rt_contains"
+                        | "rt_is_none"
+                        | "rt_is_some"
+                        | "rt_enum_check_discriminant"
+                );
+                let fn_type = if returns_bool {
+                    self.context.bool_type().fn_type(&param_types, false)
+                } else {
+                    i64_type.fn_type(&param_types, false)
+                };
+                let rt_func = module
+                    .get_function(rt_fn_name)
+                    .unwrap_or_else(|| module.add_function(rt_fn_name, fn_type, None));
+                let call_site = builder
+                    .build_call(rt_func, &arg_vals, "qualified_rt_redirect")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("qualified rt redirect call", &e))?;
+                if let Some(d) = dest {
+                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        let ret_val = if returns_bool {
+                            self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
+                        } else {
+                            ret_val
+                        };
+                        vreg_map.insert(d, ret_val);
+                    } else {
+                        vreg_map.insert(d, i64_type.const_int(0, false).into());
+                    }
+                }
+                return Ok(());
+            }
+        }
+
         // Resolve through use_map/import_map before declaring (matches Cranelift behavior)
         let resolved_name = self
             .use_map

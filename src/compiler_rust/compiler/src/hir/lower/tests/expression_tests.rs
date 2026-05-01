@@ -1,6 +1,9 @@
 use super::super::super::types::*;
 use super::super::*;
 use super::parse_and_lower;
+use simple_parser::Parser;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[test]
 fn test_lower_literals() {
@@ -193,6 +196,42 @@ fn test_lower_field_access() {
     let func = &module.functions[0];
     if let HirStmt::Return(Some(expr)) = &func.body[0] {
         assert!(matches!(expr.kind, HirExprKind::FieldAccess { .. }));
+    }
+}
+
+#[test]
+fn test_lower_ambiguous_global_field_chain_as_field_access() {
+    let source = "fn test(s: Holder) -> text:\n    return s.suggestion.new_text\n";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([
+        (
+            "Holder".to_string(),
+            vec![("suggestion".to_string(), "Suggestion".to_string())],
+        ),
+        (
+            "Suggestion".to_string(),
+            vec![
+                ("new_text".to_string(), "text".to_string()),
+                ("confidence".to_string(), "FixConfidence".to_string()),
+            ],
+        ),
+        (
+            "Replacement".to_string(),
+            vec![("new_text".to_string(), "text".to_string())],
+        ),
+    ])));
+    lowerer.set_ambiguous_field_names(Arc::new(HashSet::from(["new_text".to_string()])));
+
+    let lowered = lowerer.lower_module(&module).unwrap();
+    let func = &lowered.functions[0];
+    if let HirStmt::Return(Some(expr)) = &func.body[0] {
+        assert!(matches!(expr.kind, HirExprKind::FieldAccess { .. }));
+        assert_eq!(expr.ty, TypeId::STRING);
+    } else {
+        panic!("Expected return statement");
     }
 }
 

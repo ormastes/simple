@@ -194,7 +194,9 @@ impl LlvmBackend {
             let alias_name = name.replace('.', "_dot_");
             if m.get_function(&alias_name).is_none() {
                 let alias = m.add_function(&alias_name, f.get_type(), None);
-                alias.set_linkage(inkwell::module::Linkage::Private);
+                // Cross-module callers can still reference the sanitized `_dot_`
+                // spelling, so this alias must remain externally visible.
+                alias.set_linkage(inkwell::module::Linkage::External);
             }
         }
     }

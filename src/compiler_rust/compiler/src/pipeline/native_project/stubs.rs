@@ -40,14 +40,33 @@ fn has_equivalent_defined_symbol(sym: &str, defined: &std::collections::HashSet<
     false
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FreestandingUnresolvedMode {
+    DeferToLinker,
+    StrictPrecheck,
+    EmitStubs,
+}
+
+fn freestanding_unresolved_mode() -> FreestandingUnresolvedMode {
+    if std::env::var("SIMPLE_ALLOW_FREESTANDING_STUBS").as_deref() == Ok("1") {
+        FreestandingUnresolvedMode::EmitStubs
+    } else if std::env::var("SIMPLE_STRICT_FREESTANDING_PRECHECK").as_deref() == Ok("1") {
+        FreestandingUnresolvedMode::StrictPrecheck
+    } else {
+        FreestandingUnresolvedMode::DeferToLinker
+    }
+}
+
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.
 ///
 /// Unlike `generate_stub_object`, this does not emit asm using host instructions
 /// and does not scan host system libraries. It discovers unresolved symbols across
 /// the provided `object_paths` (and any boot objects), filters out symbols defined
-/// elsewhere in that same object set, and fails on unexpected unresolved names
-/// by default. Set `SIMPLE_ALLOW_FREESTANDING_STUBS=1` to emit weak legacy stubs
-/// while debugging incomplete ports.
+/// elsewhere in that same object set. By default this now defers unresolved
+/// enforcement to the real linker, which can apply section GC and report only
+/// live failures. Set `SIMPLE_STRICT_FREESTANDING_PRECHECK=1` to restore the old
+/// eager-failure mode, or `SIMPLE_ALLOW_FREESTANDING_STUBS=1` to emit weak
+/// legacy stubs while debugging incomplete ports.
 pub(crate) fn generate_stub_object_freestanding(
     temp_dir: &Path,
     object_paths: &[PathBuf],
@@ -143,33 +162,98 @@ pub(crate) fn generate_stub_object_freestanding(
         .filter(|s| s != "main" && s != "_main")
         .collect();
 
-    eprintln!(
-        "Freestanding unresolved symbol check: {} unexpected symbol(s)",
-        needs_stub.len()
-    );
-    if std::env::var("SIMPLE_TRACE_STUBS").is_ok() {
-        for s in needs_stub.iter().take(20) {
-            eprintln!("  STUB: {}", s);
-        }
-        if needs_stub.len() > 20 {
-            eprintln!("  ... ({} more)", needs_stub.len() - 20);
+    let mut compat_symbols = BTreeSet::new();
+    let mut unresolved = Vec::new();
+    for sym in needs_stub {
+        match sym.as_str() {
+            "i64.max" | "i64.min" | "str.repeat" | "bytes_to_u16_le" => {
+                compat_symbols.insert(sym);
+            }
+            _ => unresolved.push(sym),
         }
     }
 
-    if needs_stub.is_empty() {
+    eprintln!(
+        "Freestanding unresolved symbol check: {} unexpected symbol(s)",
+        unresolved.len() + compat_symbols.len()
+    );
+    if std::env::var("SIMPLE_TRACE_STUBS").is_ok() {
+        for s in unresolved.iter().chain(compat_symbols.iter()).take(20) {
+            eprintln!("  STUB: {}", s);
+        }
+        let total = unresolved.len() + compat_symbols.len();
+        if total > 20 {
+            eprintln!("  ... ({} more)", total - 20);
+        }
+    }
+
+    if unresolved.is_empty() && compat_symbols.is_empty() {
         return Ok(None);
     }
-    if std::env::var("SIMPLE_ALLOW_FREESTANDING_STUBS").as_deref() != Ok("1") {
-        return Err(format!(
-            "freestanding link has unexpected unresolved symbol(s): {}",
-            needs_stub.join(", ")
-        ));
+    match freestanding_unresolved_mode() {
+        FreestandingUnresolvedMode::DeferToLinker => {
+            eprintln!(
+                "Freestanding unresolved precheck deferred to linker: {} candidate symbol(s)",
+                unresolved.len()
+            );
+            if unresolved.is_empty() && !compat_symbols.is_empty() {
+                // Continue below to emit the compatibility object even when strict
+                // freestanding stubs are otherwise disabled.
+            } else {
+                return Ok(None);
+            }
+        }
+        FreestandingUnresolvedMode::StrictPrecheck => {
+            if unresolved.is_empty() {
+                // Only compatibility aliases remain; emit them below rather than
+                // failing the precheck on an empty unresolved set.
+            } else {
+            return Err(format!(
+                "freestanding link has unexpected unresolved symbol(s): {}",
+                unresolved.join(", ")
+            ));
+            }
+        }
+        FreestandingUnresolvedMode::EmitStubs => {}
     }
 
     let stub_c = temp_dir.join("_stubs_freestanding.c");
     let mut code = String::from("/* Auto-generated freestanding stubs — weak definitions return 0 */\n");
     code.push_str("typedef long long __stub_i64;\n\n");
-    for (i, sym) in needs_stub.iter().enumerate() {
+    if compat_symbols.contains("str.repeat") {
+        code.push_str(
+            "__stub_i64 lib__common__string_core__str_repeat(__stub_i64, __stub_i64);\n\
+             __stub_i64 __stub_compat_str_repeat(__stub_i64 s, __stub_i64 count) __asm__(\"str.repeat\");\n\
+             __stub_i64 __stub_compat_str_repeat(__stub_i64 s, __stub_i64 count) {\n\
+                 return lib__common__string_core__str_repeat(s, count);\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("i64.max") {
+        code.push_str(
+            "__stub_i64 __stub_compat_i64_max(__stub_i64 a, __stub_i64 b) __asm__(\"i64.max\");\n\
+             __stub_i64 __stub_compat_i64_max(__stub_i64 a, __stub_i64 b) {\n\
+                 return a >= b ? a : b;\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("i64.min") {
+        code.push_str(
+            "__stub_i64 __stub_compat_i64_min(__stub_i64 a, __stub_i64 b) __asm__(\"i64.min\");\n\
+             __stub_i64 __stub_compat_i64_min(__stub_i64 a, __stub_i64 b) {\n\
+                 return a <= b ? a : b;\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("bytes_to_u16_le") {
+        code.push_str(
+            "unsigned short __stub_compat_bytes_to_u16_le(unsigned char b0, unsigned char b1) __asm__(\"bytes_to_u16_le\");\n\
+             unsigned short __stub_compat_bytes_to_u16_le(unsigned char b0, unsigned char b1) {\n\
+                 return (unsigned short)(((unsigned short)b1 << 8) | (unsigned short)b0);\n\
+             }\n\n",
+        );
+    }
+    for (i, sym) in unresolved.iter().enumerate() {
         // Sanitize C identifier for the wrapper name; keep the external symbol
         // name exact via an __asm__ label so the linker sees the mangled form.
         let wrapper = format!("__stub_fs_{}", i);

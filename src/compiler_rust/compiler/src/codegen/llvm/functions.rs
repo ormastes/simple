@@ -1573,8 +1573,14 @@ impl LlvmBackend {
             } => {
                 let i64_type = self.runtime_int_type();
 
-                // Extract plain method name from qualified name (e.g., "text.len" -> "len")
-                let method = func_name.rsplit('.').next().unwrap_or(func_name);
+                // Extract plain method name from qualified name. LLVM-side symbol
+                // resolution may already have sanitized `Type.method` to
+                // `Type_dot_method`, so handle both spellings here.
+                let method = if let Some(dot_pos) = func_name.rfind("_dot_") {
+                    &func_name[dot_pos + "_dot_".len()..]
+                } else {
+                    func_name.rsplit('.').next().unwrap_or(func_name)
+                };
 
                 // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
                 if method == "substring" && args.len() == 1 {
@@ -1642,6 +1648,48 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                if matches!(method, "chr" | "to_char") {
+                    let recv_val = self.get_vreg(receiver, vreg_map)?;
+                    let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
+                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                    let rt_func = module
+                        .get_function("char_from_code")
+                        .unwrap_or_else(|| module.add_function("char_from_code", fn_type, None));
+                    let call_site = builder
+                        .build_call(rt_func, &[recv_casted.into()], "char_from_code")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("char_from_code call", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            vreg_map.insert(*d, ret_val);
+                        }
+                    }
+                    return Ok(());
+                }
+
+                if matches!(method, "min" | "max") && args.len() == 1 {
+                    let lhs = self.get_vreg(receiver, vreg_map)?;
+                    let rhs = self.get_vreg(&args[0], vreg_map)?;
+                    let lhs = self.coerce_value_to_type(lhs, Some(i64_type.into()), builder)?;
+                    let rhs = self.coerce_value_to_type(rhs, Some(i64_type.into()), builder)?;
+                    let lhs = lhs.into_int_value();
+                    let rhs = rhs.into_int_value();
+                    let pred = if method == "min" {
+                        inkwell::IntPredicate::SLE
+                    } else {
+                        inkwell::IntPredicate::SGE
+                    };
+                    let cmp = builder
+                        .build_int_compare(pred, lhs, rhs, "int_minmax_cmp")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("int min/max compare", &e))?;
+                    let selected = builder
+                        .build_select(cmp, lhs, rhs, "int_minmax_select")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("int min/max select", &e))?;
+                    if let Some(d) = dest {
+                        vreg_map.insert(*d, selected);
+                    }
+                    return Ok(());
+                }
+
                 // Map well-known methods to runtime functions
                 let runtime_func = match method {
                     // Collection methods
@@ -1667,6 +1715,7 @@ impl LlvmBackend {
                     "join" => Some("rt_string_join"),
                     "trim" => Some("rt_string_trim"),
                     "split" => Some("rt_string_split"),
+                    "repeat" => Some("lib__common__string_core__str_repeat"),
                     "replace" => Some("rt_string_replace"),
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),
@@ -1674,6 +1723,7 @@ impl LlvmBackend {
                     "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
                         Some("rt_string_to_float")
                     }
+                    "rfind" | "last_index_of" => Some("rt_string_rfind"),
                     "to_string" | "str" => Some("rt_to_string"),
                     // Index methods
                     "get" => Some("rt_index_get"),
@@ -1684,7 +1734,7 @@ impl LlvmBackend {
                     "values" => Some("rt_dict_values"),
                     "contains_key" | "has_key" => Some("rt_contains"),
                     // Option/Result methods
-                    "unwrap" | "unwrap_or" => Some("rt_enum_payload"),
+                    "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
                     "is_none" => Some("rt_is_none"),
                     "is_some" => Some("rt_is_some"),
                     "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),

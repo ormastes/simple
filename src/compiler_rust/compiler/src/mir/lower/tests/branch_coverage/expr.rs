@@ -242,6 +242,20 @@ fn parse_program() -> BrowserResult<i64>:
     );
 }
 
+#[test]
+fn direct_result_unwrap_lowers_to_enum_payload_not_method_dispatch() {
+    let mir = compile_to_mir(
+        "fn mk() -> Result<i64, text>:\n    return Ok(7)\n\nfn test() -> i64:\n    return mk().unwrap()\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload"))
+    }));
+    assert!(!has_inst(&mir, |i| {
+        matches!(i, MirInst::MethodCallStatic { func_name, .. } if func_name == "unwrap" || func_name.ends_with(".unwrap"))
+    }));
+}
+
 // =============================================================================
 // Cast operations
 // =============================================================================
