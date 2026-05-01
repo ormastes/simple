@@ -138,6 +138,52 @@ impl LlvmEmitter<'_> {
     fn i32_const(&self, value: i32) -> BasicValueEnum<'static> {
         self.backend.context.i32_type().const_int(value as u64, true).into()
     }
+
+    fn method_leaf_name(func_name: &str) -> &str {
+        func_name.rsplit('.').next().unwrap_or(func_name)
+    }
+
+    fn runtime_method_name(method: &str) -> Option<&'static str> {
+        match method {
+            "len" => Some("rt_len"),
+            "push" => Some("rt_array_push"),
+            "pop" => Some("rt_array_pop"),
+            "clear" => Some("rt_array_clear"),
+            "reverse" => Some("rt_array_reverse"),
+            "sort" => Some("rt_array_sort"),
+            "first" => Some("rt_array_first"),
+            "last" => Some("rt_array_last"),
+            "find" => Some("rt_array_find"),
+            "any" => Some("rt_array_any"),
+            "all" => Some("rt_array_all"),
+            "filter" => Some("rt_array_filter"),
+            "map" => Some("rt_option_map"),
+            "starts_with" => Some("rt_string_starts_with"),
+            "ends_with" => Some("rt_string_ends_with"),
+            "concat" => Some("rt_string_concat"),
+            "contains" | "contains_key" | "has_key" => Some("rt_contains"),
+            "char_at" | "at" => Some("rt_string_char_at"),
+            "join" => Some("rt_string_join"),
+            "trim" => Some("rt_string_trim"),
+            "split" => Some("rt_string_split"),
+            "replace" => Some("rt_string_replace"),
+            "to_upper" | "upper" => Some("rt_string_to_upper"),
+            "to_lower" | "lower" => Some("rt_string_to_lower"),
+            "to_string" | "str" => Some("rt_to_string"),
+            "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
+                Some("rt_string_to_float")
+            }
+            "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
+            "index_of" | "find_str" => Some("rt_string_index_of"),
+            "rfind" | "last_index_of" => Some("rt_string_rfind"),
+            "slice" | "substring" => Some("rt_slice"),
+            "get" => Some("rt_index_get"),
+            "keys" => Some("rt_dict_keys"),
+            "values" => Some("rt_dict_values"),
+            "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(feature = "llvm")]
@@ -1159,7 +1205,78 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         func_name: &str,
         args: &[VReg],
     ) -> Result<(), String> {
-        // Static method call: prepend receiver to args and call function
+        let method = Self::method_leaf_name(func_name);
+
+        if matches!(
+            method,
+            "to_u8" | "to_i8" | "to_u16" | "to_i16" | "to_u32" | "to_i32" | "to_u64" | "to_i64" | "to_int"
+        ) {
+            let recv = self.get(receiver)?;
+            let int_type = match method {
+                "to_u8" | "to_i8" => self.backend.context.i8_type(),
+                "to_u16" | "to_i16" => self.backend.context.i16_type(),
+                "to_u32" | "to_i32" => self.backend.context.i32_type(),
+                _ => self.backend.context.i64_type(),
+            };
+            let value = match recv {
+                BasicValueEnum::IntValue(v) => {
+                    if v.get_type() == int_type {
+                        v
+                    } else if v.get_type().get_bit_width() > int_type.get_bit_width() {
+                        self.builder
+                            .build_int_truncate(v, int_type, "method_int_trunc")
+                            .map_err(|e| format!("LLVM int truncate failed: {}", e))?
+                    } else {
+                        self.builder
+                            .build_int_z_extend(v, int_type, "method_int_zext")
+                            .map_err(|e| format!("LLVM int zext failed: {}", e))?
+                    }
+                }
+                BasicValueEnum::FloatValue(v) => self
+                    .builder
+                    .build_float_to_unsigned_int(v, int_type, "method_float_to_uint")
+                    .map_err(|e| format!("LLVM float_to_uint failed: {}", e))?,
+                BasicValueEnum::PointerValue(v) => self
+                    .builder
+                    .build_ptr_to_int(v, int_type, "method_ptr_to_int")
+                    .map_err(|e| format!("LLVM ptr_to_int failed: {}", e))?,
+                _ => return Err(format!("unsupported receiver kind for numeric cast method '{}'", method)),
+            };
+            if let Some(d) = dest {
+                self.set(*d, value.into());
+            }
+            return Ok(());
+        }
+
+        if matches!(method, "chr" | "to_char") {
+            let recv = self.get(receiver)?;
+            let result = self.call_runtime("char_from_code", &[recv])?;
+            if let Some(d) = dest {
+                self.set(*d, result);
+            }
+            return Ok(());
+        }
+
+        if let Some(rt_name) = Self::runtime_method_name(method) {
+            let recv = self.get(receiver)?;
+            let mut rt_args = vec![recv];
+            for arg in args {
+                rt_args.push(self.get(*arg)?);
+            }
+            let result = if matches!(method, "unwrap_or") && rt_args.len() > 1 {
+                // Keep the ABI simple here: unresolved lowering should not emit a fake
+                // method symbol, and the runtime helper still uses the first arg payload.
+                self.call_runtime(rt_name, &rt_args[..1])?
+            } else {
+                self.call_runtime(rt_name, &rt_args)?
+            };
+            if let Some(d) = dest {
+                self.set(*d, result);
+            }
+            return Ok(());
+        }
+
+        // Static method call: prepend receiver to args and call function.
         let mut all_args = vec![receiver];
         all_args.extend_from_slice(args);
         self.emit_call(dest, &CallTarget::from_name(func_name), &all_args)
@@ -1845,5 +1962,24 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let inp = self.get(input)?;
         let cls = self.get(closure)?;
         self.call_runtime_void("rt_par_for_each", &[inp, cls])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LlvmEmitter;
+
+    #[test]
+    fn llvm_runtime_method_name_covers_freestanding_leaks() {
+        assert_eq!(LlvmEmitter::runtime_method_name("rfind"), Some("rt_string_rfind"));
+        assert_eq!(LlvmEmitter::runtime_method_name("repeat"), None);
+        assert_eq!(LlvmEmitter::runtime_method_name("unwrap_err"), Some("rt_enum_payload"));
+        assert_eq!(LlvmEmitter::runtime_method_name("to_string"), Some("rt_to_string"));
+    }
+
+    #[test]
+    fn llvm_method_leaf_name_handles_qualified_symbols() {
+        assert_eq!(LlvmEmitter::method_leaf_name("Result.unwrap_err"), "unwrap_err");
+        assert_eq!(LlvmEmitter::method_leaf_name("to_u32"), "to_u32");
     }
 }

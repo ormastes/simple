@@ -8,17 +8,25 @@ fn _validate_level(codec: CompressionCodec, level: CompressionLevel) -> Result<(
     val result = compression_level(codec, level.value)
     if result.is_err():
         return Err(result.unwrap_err())
+    if codec == CompressionCodec.lz4 and level.value != 1:
+        return Err(CompressionError.UnsupportedFeature("lz4 levels other than 1 are not supported by the current façade implementation"))
+    if codec == CompressionCodec.zstd and level.value != 3:
+        return Err(CompressionError.UnsupportedFeature("zstd levels other than 3 are not supported by the current façade implementation"))
     Ok(())
 
 fn _require_content_size_matches_input(input: [u8], content_size: i64?, codec_name: text) -> Result<i64, CompressionError>:
     if content_size == nil:
         return Ok(input.len())
     val size = content_size ?? input.len()
+    if size < 0:
+        return Err(CompressionError.UnsupportedFeature(codec_name + " content_size must be >= 0"))
     if size != input.len():
         return Err(CompressionError.UnsupportedFeature(codec_name + " content_size must match the input length"))
     Ok(size)
 
 fn _validate_dictionary_options(options: CompressionOptions, codec_name: text, support_message: text) -> Result<(), CompressionError>:
+    if options.dictionary_id != nil and (options.dictionary_id ?? 0) < 0:
+        return Err(CompressionError.UnsupportedFeature(codec_name + " dictionary_id must be >= 0"))
     if options.dictionary_id != nil and options.dictionary_bytes == nil:
         return Err(CompressionError.UnsupportedFeature(codec_name + " dictionary_id requires dictionary_bytes"))
     if options.dictionary_bytes != nil or options.dictionary_id != nil:
@@ -49,8 +57,6 @@ fn _validate_encode_options(input: [u8], options: CompressionOptions) -> Result<
         CompressionCodec.zstd:
             if options.block_mode != "frame":
                 return Err(CompressionError.UnsupportedFeature("zstd block_mode must be frame"))
-            if options.level.value != 3:
-                return Err(CompressionError.UnsupportedFeature("zstd levels other than 3 are not supported by the current façade implementation"))
             val dictionary_res = _validate_dictionary_options(options, "zstd", "zstd dictionaries are not supported by the current façade implementation")
             if dictionary_res.is_err():
                 return Err(dictionary_res.unwrap_err())

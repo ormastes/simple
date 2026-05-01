@@ -431,18 +431,11 @@ pub(crate) fn build_import_map(
                     .iter()
                     .map(|s| if s == "std" { "lib" } else { s.as_str() })
                     .collect();
-                let names = collect_imported_names_flat(target);
+                let names = collect_imported_names_flat(target, &norm_segments, &raw_to_mangled, &re_exports);
                 for name in names {
-                    if let Some(candidates) = raw_to_mangled.get(&name) {
-                        let resolved = if candidates.len() == 1 {
-                            candidates[0].clone()
-                        } else {
-                            candidates
-                                .iter()
-                                .find(|c| mangled_matches_use_path(c, &norm_segments))
-                                .cloned()
-                                .unwrap_or_else(|| candidates[0].clone())
-                        };
+                    if let Some(resolved) =
+                        resolve_import_name_strict(&name, &norm_segments, &raw_to_mangled, &re_exports)
+                    {
                         re_exports.entry(prefix.clone()).or_default().insert(name, resolved);
                     }
                 }
@@ -566,11 +559,31 @@ fn collect_use_imports(
                 collect_use_imports(path_segments, item, all_mangled, re_exports, use_map);
             }
         }
-        simple_parser::ast::ImportTarget::Glob => {}
+        simple_parser::ast::ImportTarget::Glob => {
+            for raw_name in all_mangled.keys() {
+                if let Some(mangled) = resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports) {
+                    use_map.insert(raw_name.clone(), mangled);
+                }
+            }
+        }
     }
 }
 
 fn resolve_import_name(
+    func_name: &str,
+    use_segments: &[&str],
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> Option<String> {
+    if let Some(resolved) = resolve_import_name_strict(func_name, use_segments, all_mangled, re_exports) {
+        return Some(resolved);
+    }
+
+    let candidates = all_mangled.get(func_name)?;
+    Some(candidates[0].clone())
+}
+
+fn resolve_import_name_strict(
     func_name: &str,
     use_segments: &[&str],
     all_mangled: &std::collections::HashMap<String, Vec<String>>,
@@ -603,20 +616,31 @@ fn resolve_import_name(
         }
     }
 
-    Some(candidates[0].clone())
+    None
 }
 
-fn collect_imported_names_flat(target: &simple_parser::ast::ImportTarget) -> Vec<String> {
+fn collect_imported_names_flat(
+    target: &simple_parser::ast::ImportTarget,
+    use_segments: &[&str],
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    re_exports: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+) -> Vec<String> {
     let mut names = Vec::new();
     match target {
         simple_parser::ast::ImportTarget::Single(name) => names.push(name.clone()),
         simple_parser::ast::ImportTarget::Aliased { name, .. } => names.push(name.clone()),
         simple_parser::ast::ImportTarget::Group(items) => {
             for item in items {
-                names.extend(collect_imported_names_flat(item));
+                names.extend(collect_imported_names_flat(item, use_segments, all_mangled, re_exports));
             }
         }
-        simple_parser::ast::ImportTarget::Glob => {}
+        simple_parser::ast::ImportTarget::Glob => {
+            for raw_name in all_mangled.keys() {
+                if resolve_import_name_strict(raw_name, use_segments, all_mangled, re_exports).is_some() {
+                    names.push(raw_name.clone());
+                }
+            }
+        }
     }
     names
 }

@@ -101,7 +101,6 @@ void *calloc(size_t n, size_t size)
     size_t total = n * size;
     unsigned char *ptr = (unsigned char *)rv_alloc(total);
     if (!ptr) return 0;
-    for (size_t i = 0; i < total; i++) ptr[i] = 0;
     return ptr;
 }
 
@@ -134,7 +133,7 @@ int memcmp(const void *a, const void *b, size_t n)
 
 RuntimeValue rt_alloc(RuntimeValue size)
 {
-    size_t bytes = (size_t)size;
+    size_t bytes = (size_t)simpleos_raw_or_encoded_int(size);
     void *ptr = calloc(1, bytes);
     return ptr ? (RuntimeValue)(uintptr_t)ptr : 0;
 }
@@ -243,24 +242,59 @@ uint64_t rt_mmio_read_u64(uint64_t addr)
     return *(volatile uint64_t *)(uintptr_t)addr;
 }
 
-void rt_mmio_write_u8(uint64_t addr, uint8_t value)
+__attribute__((naked)) void rt_mmio_write_u8(uint64_t addr, uint8_t value)
 {
-    *(volatile uint8_t *)(uintptr_t)addr = value;
+    __asm__ volatile(
+        "sb a1, 0(a0)\n"
+        "ret\n"
+    );
 }
 
-void rt_mmio_write_u16(uint64_t addr, uint16_t value)
+__attribute__((naked)) void rt_mmio_write_u16(uint64_t addr, uint16_t value)
 {
-    *(volatile uint16_t *)(uintptr_t)addr = value;
+    __asm__ volatile(
+        "sh a1, 0(a0)\n"
+        "ret\n"
+    );
 }
 
-void rt_mmio_write_u32(uint64_t addr, uint32_t value)
+__attribute__((naked)) void rt_mmio_write_u32(uint64_t addr, uint32_t value)
 {
-    *(volatile uint32_t *)(uintptr_t)addr = value;
+    __asm__ volatile(
+        "sw a1, 0(a0)\n"
+        "ret\n"
+    );
 }
 
-void rt_mmio_write_u64(uint64_t addr, uint64_t value)
+__attribute__((naked)) void rt_mmio_write_u64(uint64_t addr, uint64_t value)
 {
-    *(volatile uint64_t *)(uintptr_t)addr = value;
+    __asm__ volatile(
+        "sd a1, 0(a0)\n"
+        "ret\n"
+    );
+}
+
+__attribute__((naked)) void proof_store_u64(uint64_t slot, uint64_t value)
+{
+    __asm__ volatile(
+        "slli a0, a0, 3\n"
+        "li t0, 0x80FF1000\n"
+        "add a0, a0, t0\n"
+        "sd a1, 0(a0)\n"
+        "ret\n"
+    );
+}
+
+__attribute__((naked)) void proof_store_bool(uint64_t slot, uint64_t value)
+{
+    __asm__ volatile(
+        "snez a1, a1\n"
+        "slli a0, a0, 3\n"
+        "li t0, 0x80FF1000\n"
+        "add a0, a0, t0\n"
+        "sd a1, 0(a0)\n"
+        "ret\n"
+    );
 }
 
 RuntimeValue rt_len(RuntimeValue value)

@@ -448,12 +448,12 @@ int main(int argc, char** argv) {
 
         let main_o = self.compile_main_stub(temp_dir)?;
         let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
-
         let selected_runtime = self.selected_runtime_library(temp_dir);
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
         let has_native_all = selected_runtime
             .as_ref()
             .is_some_and(|(_, is_native_all)| *is_native_all);
+
         let cc = if has_native_all {
             find_cxx_compiler()
         } else {
@@ -789,7 +789,6 @@ int main(int argc, char** argv) {
             _ => return Err("unsupported freestanding target architecture".to_string()),
         };
 
-        let cc = find_c_compiler();
         let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
         let (march, mabi) = match cross_target.arch {
             simple_common::target::TargetArch::Riscv64 if use_llvm => ("-march=rv64imac", "-mabi=lp64"),
@@ -805,6 +804,7 @@ int main(int argc, char** argv) {
         let object_paths = link_object_paths.as_slice();
         let mut symbol_cache = HashMap::new();
         let init_o = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
+        let cc = find_c_compiler();
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);
 
@@ -1068,8 +1068,14 @@ int main(int argc, char** argv) {
             ordered
         };
 
-        let freestanding_stub_obj =
-            generate_stub_object_freestanding(temp_dir, object_paths, &boot_objects, triple, march, mabi)?;
+        let freestanding_stub_obj = generate_stub_object_freestanding(
+            temp_dir,
+            object_paths,
+            &boot_objects,
+            triple,
+            march,
+            mabi,
+        )?;
         let weak_boot_defsyms = Self::freestanding_weak_boot_defsyms(object_paths, &boot_objects, imports)?;
         if !weak_boot_defsyms.is_empty() {
             eprintln!(
@@ -1080,6 +1086,7 @@ int main(int argc, char** argv) {
 
         let mut cmd = if let Some(ref lld_path) = use_direct_lld {
             let mut c = std::process::Command::new(lld_path);
+            c.arg("--gc-sections");
             if let Some(ref ls) = self.config.linker_script {
                 c.arg(format!("-T{}", ls.display()));
             }
@@ -1112,6 +1119,7 @@ int main(int argc, char** argv) {
             c.arg("-fno-pic");
             c.arg("-fno-pie");
             c.arg("-fuse-ld=lld");
+            c.arg("-Wl,--gc-sections");
             if let Some(ref ls) = self.config.linker_script {
                 c.arg(format!("-T{}", ls.display()));
             }

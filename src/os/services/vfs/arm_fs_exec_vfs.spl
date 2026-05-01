@@ -3,7 +3,9 @@
 # This keeps the ARM QEMU acceptance boot path out of the full desktop/VFS
 # service closure while still mounting real VirtIO-BLK FAT32 media.
 
-use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_last_read_bytes}
+use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_last_read_bytes, virtio_blk_arm_init, virtio_blk_arm_read_sector}
+use common.string_core.{str_char_at}
+use os.kernel.boot.mmio.{mmio_read32}
 extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
 extern fn rt_arm_array_get_byte_u32(arr: [u8], idx: u64) -> u32
 extern fn rt_arm_array_get_u16_le(arr: [u8], idx: u64) -> u32
@@ -27,6 +29,16 @@ var g_arm_fats: u64 = 0
 var g_arm_fat_size: u64 = 0
 var g_arm_root_cluster: u64 = 2
 var g_arm_data_start: u64 = 0
+
+fn _text_has_prefix(source: text, prefix: text) -> bool:
+    if prefix.len() > source.len():
+        return false
+    var idx: i64 = 0
+    while idx < prefix.len():
+        if str_char_at(source, idx) != str_char_at(prefix, idx):
+            return false
+        idx = idx + 1
+    true
 
 fn _arm_exec_alias(path: text) -> text:
     match path:
@@ -117,8 +129,11 @@ fn _arm_vfs_log(msg: text):
 
 pub fn arm_fs_exec_vfs_boot_init() -> bool:
     _arm_vfs_log("[vfs-init] Starting VirtIO-BLK FAT32 initialization...")
+    _arm_vfs_log("[vfs-init] virtio mmio magic={mmio_read32(0x0A003E00)} version={mmio_read32(0x0A003E04)} device_id={mmio_read32(0x0A003E08)}")
     var dev = VirtioBlkDriver.arm_qemu_virt()
-    val dev_init = dev.init_ok()
+    val init_result = virtio_blk_arm_init(dev)
+    dev = init_result.driver
+    val dev_init = init_result.ok
     if not dev_init:
         _arm_vfs_log("[vfs-init] VirtIO-BLK init failed")
         return false
@@ -150,21 +165,39 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
 
 pub fn arm_fs_exec_read_file_bytes(path: text) -> [u8]:
     val mapped = _arm_exec_alias(path)
-    if mapped == "/SYS/APPS/HELLOSMF.SMF" and g_arm_hello_smf_len > 0:
+    _arm_vfs_log("[vfs-read] path={path} mapped={mapped} initialized={g_arm_vfs_initialized}")
+    if mapped == "/SYS/APPS/HELLOSMF.SMF":
+        val direct_hello = rt_arm_virtio_blk_read_hello_smf()
+        _arm_vfs_log("[vfs-read] direct-hello len={rt_arm_array_len_u32(direct_hello)}")
+        if rt_arm_array_len_u32(direct_hello) > 4:
+            return direct_hello
+    val cached_hello_len = rt_arm_array_len_u32(g_arm_hello_smf_bytes)
+    if mapped == "/SYS/APPS/HELLOSMF.SMF" and cached_hello_len > 4:
+        _arm_vfs_log("[vfs-read] cached-hello len={cached_hello_len}")
         return g_arm_hello_smf_bytes
     if val Some(dev) = g_arm_blk:
-        return _arm_fat32_read_path_from_dev(dev, mapped)
+        _arm_fat32_probe_bpb(dev)
+        val bytes = _arm_fat32_read_path_from_dev(dev, mapped)
+        _arm_vfs_log("[vfs-read] blk-hit len={rt_arm_array_len_u32(bytes)}")
+        return bytes
 
     var dev = VirtioBlkDriver.arm_qemu_virt()
-    if dev.init_ok():
+    val init_result = virtio_blk_arm_init(dev)
+    dev = init_result.driver
+    if init_result.ok:
         _arm_fat32_probe_bpb(dev)
-        return _arm_fat32_read_path_from_dev(dev, mapped)
+        val bytes = _arm_fat32_read_path_from_dev(dev, mapped)
+        _arm_vfs_log("[vfs-read] late-init len={rt_arm_array_len_u32(bytes)}")
+        return bytes
 
     if not g_arm_vfs_initialized:
+        _arm_vfs_log("[vfs-read] unavailable")
         return []
 
     if mapped == "/SYS/VERSION.TXT" and rt_arm_array_len_u32(g_arm_version_bytes) > 0:
+        _arm_vfs_log("[vfs-read] cached-version len={rt_arm_array_len_u32(g_arm_version_bytes)}")
         return g_arm_version_bytes
+    _arm_vfs_log("[vfs-read] miss")
     []
 
 pub fn arm_fs_exec_loaded_hello_len() -> u32:
@@ -211,7 +244,7 @@ fn _arm_read_sector(dev: VirtioBlkDriver, lba: u64) -> [u8]:
     while i < 512:
         buf.push(0)
         i = i + 1
-    val r = dev.read_sector(lba, buf)
+    val r = virtio_blk_arm_read_sector(dev, lba, buf)
     if r.is_err():
         _arm_vfs_log("[vfs-root] direct_sector_failed")
         return []
@@ -470,13 +503,13 @@ fn _arm_fat32_read_path_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
         if rt_arm_array_len_u32(direct) > 4:
             return direct
         return _arm_fat32_read_short_name_from_dir(dev, g_arm_root_cluster, "HELLOSMF.SMF")
-    if mapped.starts_with("/SYS/APPS/"):
+    if _text_has_prefix(mapped, "/SYS/APPS/"):
         val apps_cluster = _arm_fat32_find_apps_cluster(dev)
         if apps_cluster < 2:
             return []
         val short_name = mapped.slice("/SYS/APPS/".len(), mapped.len())
         return _arm_fat32_read_short_name_from_dir(dev, apps_cluster, short_name)
-    if mapped.starts_with("/SYS/"):
+    if _text_has_prefix(mapped, "/SYS/"):
         val sys_cluster = _arm_fat32_find_sys_cluster(dev)
         if sys_cluster < 2:
             return []
@@ -484,6 +517,6 @@ fn _arm_fat32_read_path_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
         if short_name == "VERSION.TXT":
             return _arm_fat32_read_sys_version_from_dev(dev, mapped)
         return _arm_fat32_read_short_name_from_dir(dev, sys_cluster, short_name)
-    if mapped.starts_with("/") and not mapped.slice(1, mapped.len()).contains("/"):
+    if _text_has_prefix(mapped, "/") and not mapped.slice(1, mapped.len()).contains("/"):
         return _arm_fat32_read_short_name_from_dir(dev, g_arm_root_cluster, mapped.slice(1, mapped.len()))
     []

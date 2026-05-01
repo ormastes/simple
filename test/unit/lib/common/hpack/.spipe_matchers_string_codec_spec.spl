@@ -1,0 +1,146 @@
+# Specification for src/lib/common/hpack/string_codec.spl
+#
+# Covers RFC 7541 §5.2 (HPACK literal string), raw H=0 form only.
+
+use std.spipe.*
+use std.common.hpack.string_codec.{encode_string_octets_raw, decode_string_octets_raw}
+
+# ASCII bytes for "custom-key" (RFC 7541 Appendix C.2.1 example).
+fn _custom_key_bytes() -> [u8]:
+    [0x63u8, 0x75u8, 0x73u8, 0x74u8, 0x6fu8, 0x6du8, 0x2du8, 0x6bu8, 0x65u8, 0x79u8]
+
+# ASCII bytes for "custom-header" (RFC 7541 Appendix C.2.1 example).
+fn _custom_header_bytes() -> [u8]:
+    [0x63u8, 0x75u8, 0x73u8, 0x74u8, 0x6fu8, 0x6du8, 0x2du8, 0x68u8, 0x65u8, 0x61u8, 0x64u8, 0x65u8, 0x72u8]
+
+# Build a [u8] of `n` repetitions of `byte`. Used by tests that exercise
+# multi-byte varint length headers (>=127 bytes). Module-level so the
+# var-update loop runs in fn scope rather than `it`-block scope, where
+# interpreter mode does not preserve var updates across iterations.
+fn _make_repeating(byte: u8, n: i64) -> [u8]:
+    val unit: [u8] = [byte]
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        bytes = bytes + unit
+        i = i + 1
+    bytes
+
+# Build a [u8] of `n` bytes where byte i = (i mod 256). Used to verify
+# round-trip preserves byte order, not just length.
+fn _make_indexed(n: i64) -> [u8]:
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        val one: [u8] = [(i % 256).to_u8()]
+        bytes = bytes + one
+        i = i + 1
+    bytes
+
+describe "HPACK string codec — encoder":
+
+    it "encodes the empty string as a single zero byte":
+        val out = encode_string_octets_raw([])
+        expect out.len() == 1
+        expect out[0] == 0x00u8
+
+    it "encodes a 10-byte string with the H=0 length prefix (RFC 7541 C.2.1 name)":
+        # "custom-key" is 10 bytes; H=0, length fits in 7-bit prefix → 0x0a header.
+        val key = _custom_key_bytes()
+        val out = encode_string_octets_raw(key)
+        expect out.len() == 11
+        expect out[0] == 0x0au8
+        # Verify the first and last payload bytes match the source.
+        expect out[1] == 0x63u8
+        expect out[10] == 0x79u8
+
+    it "encodes a 13-byte string (RFC 7541 C.2.1 value)":
+        val value = _custom_header_bytes()
+        val out = encode_string_octets_raw(value)
+        expect out.len() == 14
+        expect out[0] == 0x0du8
+        expect out[1] == 0x63u8
+        expect out[13] == 0x72u8
+
+    it "encodes a 127-byte string in a single header byte":
+        # 127 == 2^7 - 1 boundary; needs the multi-byte form (one continuation 0).
+        val payload = _make_repeating(0x41u8, 127)
+        val out = encode_string_octets_raw(payload)
+        # 127 == mask, so prefix = 0x7f, then continuation 0x00, then 127 bytes.
+        expect out.len() == 2 + 127
+        expect out[0] == 0x7fu8
+        expect out[1] == 0x00u8
+
+describe "HPACK string codec — decoder":
+
+    it "decodes the empty string":
+        val res = decode_string_octets_raw([0x00u8], 0)
+        expect res.is_ok() == true
+        val pair = res.unwrap()
+        expect pair.0.len() == 0
+        expect pair.1 == 1
+
+    it "decodes the RFC 7541 C.2.1 'custom-key' field":
+        # Header 0x0a + 10 ASCII bytes for "custom-key".
+        val header: [u8] = [0x0au8]
+        val bytes = header + _custom_key_bytes()
+        val res = decode_string_octets_raw(bytes, 0)
+        expect res.is_ok() == true
+        val pair = res.unwrap()
+        expect pair.0.len() == 10
+        expect pair.0[0] == 0x63u8
+        expect pair.0[9] == 0x79u8
+        expect pair.1 == 11
+
+    it "rejects Huffman-coded strings (H=1)":
+        # Header 0x80 (H=1, length prefix 0). Rejected per §5.2.
+        val res = decode_string_octets_raw([0x80u8], 0)
+        expect res.is_err() == true
+
+    it "rejects truncated payload":
+        # Header says 10 bytes, but only 3 bytes follow.
+        val res = decode_string_octets_raw([0x0au8, 0x61u8, 0x62u8, 0x63u8], 0)
+        expect res.is_err() == true
+
+    it "rejects out-of-range offset":
+        val res = decode_string_octets_raw([0x00u8], 5)
+        expect res.is_err() == true
+
+    it "tolerates trailing bytes after the string (returns consumed count)":
+        # Encode "abc" with one trailing 0xFF.
+        val bytes: [u8] = [0x03u8, 0x61u8, 0x62u8, 0x63u8, 0xffu8]
+        val res = decode_string_octets_raw(bytes, 0)
+        expect res.is_ok() == true
+        val pair = res.unwrap()
+        expect pair.0.len() == 3
+        expect pair.1 == 4
+
+describe "HPACK string codec — round-trip":
+
+    it "round-trips empty input":
+        val encoded = encode_string_octets_raw([])
+        val decoded = decode_string_octets_raw(encoded, 0).unwrap()
+        expect decoded.0.len() == 0
+
+    it "round-trips short ASCII":
+        val key = _custom_key_bytes()
+        val encoded = encode_string_octets_raw(key)
+        val decoded = decode_string_octets_raw(encoded, 0).unwrap()
+        expect decoded.0.len() == 10
+        var i: i64 = 0
+        var ok = true
+        while i < 10:
+            if decoded.0[i] != key[i]:
+                ok = false
+            i = i + 1
+        expect ok == true
+
+    it "round-trips 200-byte payload (multi-byte length)":
+        val payload = _make_indexed(200)
+        val encoded = encode_string_octets_raw(payload)
+        val decoded = decode_string_octets_raw(encoded, 0).unwrap()
+        expect decoded.0.len() == 200
+        # Spot-check first, middle, last
+        expect decoded.0[0] == 0x00u8
+        expect decoded.0[100] == 0x64u8
+        expect decoded.0[199] == 0xc7u8

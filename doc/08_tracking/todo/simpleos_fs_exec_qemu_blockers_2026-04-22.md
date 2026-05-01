@@ -1,5 +1,10 @@
 # SimpleOS FS Exec QEMU Blockers (2026-04-22)
 
+Superseded for ARM filesystem-backed acceptance planning by
+`doc/03_plan/sys_test/simpleos_arm_qemu_fs_toolchain_verification.md`.
+Keep this note for historical blocker context; use the plan doc for current ARM
+success criteria, commands, and follow-up sequencing.
+
 ## Context
 
 Feature lane: filesystem app load/execution from shell app to WM GUI app.

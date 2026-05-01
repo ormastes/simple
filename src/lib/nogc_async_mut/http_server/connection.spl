@@ -25,7 +25,7 @@ use std.http_server.types.{
     ServerConfig
 }
 use std.http_server.parser.{HttpRequestParser}
-use std.http_server.response.{serialize_response, add_keepalive_headers}
+use std.http_server.response.{serialize_response, serialize_response_bytes, add_keepalive_headers}
 use std.http_server.error.{HttpServerError}
 use std.http.headers.{get_header}
 use std.thread_sffi.{spl_thread_current_id}
@@ -47,6 +47,7 @@ class Connection:
     parser: HttpRequestParser
     request: HttpRequestData?
     response_bytes: text
+    response_bytes_buf: [u8]
     write_offset: i64
     keepalive: bool
     requests_count: i64
@@ -68,6 +69,7 @@ class Connection:
             parser: HttpRequestParser.new(),
             request: nil,
             response_bytes: "",
+            response_bytes_buf: [],
             write_offset: 0,
             keepalive: true,
             requests_count: 0,
@@ -143,6 +145,26 @@ class Connection:
     fn get_response_bytes() -> text:
         """Get the serialized response bytes to send."""
         self.response_bytes
+
+    me set_response_bytes(resp: HttpResponseData, keepalive_timeout_s: i64):
+        """Prepare a binary response (with compressed body) for sending.
+
+        Serializes headers + binary body as [u8] and updates connection state.
+
+        Args:
+            resp: Response to send (must have body_bytes populated)
+            keepalive_timeout_s: Keep-alive timeout in seconds for header
+        """
+        self.keepalive = self.should_keepalive()
+        val final_resp = add_keepalive_headers(resp, self.keepalive, keepalive_timeout_s)
+        self.response_bytes_buf = serialize_response_bytes(final_resp)
+        self.response_bytes = ""
+        self.write_offset = 0
+        self.state = ConnectionState.SendingResponse
+
+    fn get_response_bytes_buf() -> [u8]:
+        """Get the serialized binary response to send."""
+        self.response_bytes_buf
 
     me on_write_complete(now: i64) -> ConnectionAction:
         """Handle write completion.

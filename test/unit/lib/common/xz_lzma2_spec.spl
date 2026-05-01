@@ -101,6 +101,16 @@ fn _repair_first_block_header_crc(data: [u8]) -> [u8]:
     val crc = crc32_bytes(data.slice(12, crc_pos))
     _set_u32_le(data, crc_pos, crc)
 
+fn _first_block_declared_compressed_size(data: [u8]) -> i64:
+    _read_vli(data, 14).0.to_i64()
+
+fn _first_block_check_pos(data: [u8]) -> i64:
+    val start = _first_block_data_start(data)
+    var pos = start + _first_block_declared_compressed_size(data)
+    while (pos - start) % 4 != 0:
+        pos = pos + 1
+    pos
+
 describe "xz lzma2 codec":
     it "round-trips and host-xz decodes a framed stream":
         _ensure_tmp_root()
@@ -237,6 +247,43 @@ describe "xz lzma2 codec":
         val decoded = lzma2_decompress_xz(encoded)
         expect(decoded.is_err()).to_equal(true)
         _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "footer crc32")
+
+    it "reports header crc corruption as a checksum mismatch":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        var encoded = lzma2_compress_xz(_payload(128), options)
+        encoded[8] = encoded[8] ^ 0x01u8
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "xz header crc32")
+
+    it "reports block crc corruption as a checksum mismatch":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        var encoded = lzma2_compress_xz(_payload(128), options)
+        val check_pos = _first_block_check_pos(encoded)
+        encoded[check_pos] = encoded[check_pos] ^ 0x01u8
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "xz block crc32")
+
+    it "reports index crc corruption as a checksum mismatch":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        var encoded = lzma2_compress_xz(_payload(128), options)
+        val footer_start = encoded.len() - 12
+        encoded[footer_start - 1] = encoded[footer_start - 1] ^ 0x01u8
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "xz index crc32")
+
+    it "reports truncated block checks before unsupported compressed-chunk fallback":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        var encoded = _replace_first_chunk_prefix(
+            lzma2_compress_xz(_payload(128), options),
+            [0xE0u8, 0x00u8, 0x00u8, 0x00u8, 0x04u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        )
+        encoded = encoded.slice(0, _first_block_check_pos(encoded) + 2)
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "xz block check")
 
     it "rejects host-generated compressed xz streams with an explicit unsupported-feature error":
         _ensure_tmp_root()

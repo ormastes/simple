@@ -374,3 +374,45 @@ runtime crash and will be needed again after the bench is stable.
   - `ghdl_boot_info_proof_layout__proof_store_u64` computes `0x80600000 + slot * 8`
   - `rt_mmio_write_u64` itself compiles to the expected `sd a0, 0(a1)` store sequence
 - That points the next pass back toward the generated RV64 execution/bench interaction on this later narrow proof path, rather than linker wiring or missing freestanding support.
+
+## New Verification After Narrow Proof Watchpoints
+
+- Date:
+  - 2026-05-01
+- Commands:
+  - `bin/simple test --clean test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
+  - `bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_boot_info_dtb_runner.shs --payload-elf /tmp/ghdl_boot_info_payload_new.elf --timeout=20 --max-cycles 200000 --log-path /tmp/rv64_proof_trace7.log --uart-log-path /tmp/rv64_proof_trace7.uart`
+- Change under test:
+  - added one-shot generated-bench watchpoints for:
+    - `0x802082D6` first `boot_main -> proof_store_u64` call site
+    - `0x80200D1C` `ghdl_boot_info_proof_layout__proof_store_u64` entry
+    - `0x80200970` `rt_mmio_write_u64` entry
+- Result:
+  - the first proof-store call path is definitely reached:
+    - `WATCH_BOOT_MAIN_CALL_PC_HEX32: 802082D6`
+    - `WATCH_PROOF_STORE_ENTRY_PC_HEX32: 80200D1C`
+    - `WATCH_PROOF_MMIO_ENTRY_PC_HEX32: 80200970`
+  - the target address survives correctly into the final MMIO helper:
+    - `WATCH_PROOF_MMIO_ENTRY_A0_HEX32: 80600000`
+  - but the payload value is already lost before the actual store:
+    - `WATCH_PROOF_STORE_ENTRY_A1_HEX32: 00000000`
+    - `WATCH_PROOF_MMIO_ENTRY_A1_HEX32: 00000000`
+  - raw bench logging still shows:
+    - no `PROOF_WRITE_*` lines
+    - no `DMEM_WRITE_EVENT_ADDR_HEX32: 80600000`
+    - final mailbox summary remains zero (`MAGIC_LOW32: 0`, `DONE_LOW32: 0`)
+  - unit coverage still passes after the extra observability:
+    - `bin/simple test --clean test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
+
+## Current Interpretation After Proof Watchpoints
+
+- The remaining narrow proof failure is not:
+  - a missing `_start`
+  - a bad call target to `proof_store_u64`
+  - a bench-side summary/filtering artifact
+  - a failure to enter `rt_mmio_write_u64`
+- The first proof store reaches `rt_mmio_write_u64`, but with:
+  - correct address argument `a0 = 0x80600000`
+  - incorrect payload argument `a1 = 0`
+- That moves the highest-signal suspect upstream to the value-producing path just before the call.
+- The strongest current candidate is a generated RV64 compressed-load / load-writeback bug on the `c.ldsp`-based reload of the proof magic into `a1` before `proof_store_u64`, or an adjacent load-pending destination-register corruption on that same path.

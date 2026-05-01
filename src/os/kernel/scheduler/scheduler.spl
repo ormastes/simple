@@ -935,6 +935,88 @@ impl Scheduler:
         self._enqueue_ready_at_slot(id, 0)
         user_next_id
 
+pub fn scheduler_create_bootstrap_user_task_pid(
+    scheduler_in: Scheduler,
+    image: UserProcessImage,
+    priority: TaskPriority,
+    caps: CapabilitySet
+) -> (Scheduler, u64):
+    """ARM fs-exec helper that avoids weak dot-method dispatch stubs."""
+    var scheduler = scheduler_in
+    if scheduler.tasks[0] != nil:
+        log_raw_println("[scheduler] bootstrap_user_task: slot busy")
+        return (scheduler, 0)
+
+    val entry = user_process_image_entry(image)
+    val stack_top = user_process_image_stack_top(image)
+    val stack_size = user_process_image_stack_size(image)
+    val user_sp = user_process_image_initial_sp(image) & 0xFFFFFFFFFFFFFFF0
+    val initial_stack_bytes = user_process_image_initial_stack_bytes(image)
+    val segments = user_process_image_segments(image)
+    val file_bytes = user_process_image_file_bytes(image)
+    if stack_top == 0 or stack_size == 0 or user_sp == 0:
+        log_raw_println("[scheduler] bootstrap_user_task: invalid image")
+        return (scheduler, 0)
+    if (initial_stack_bytes.len() as u64) > stack_size:
+        log_raw_println("[scheduler] bootstrap_user_task: initial stack too large")
+        return (scheduler, 0)
+
+    val user_as: AddressSpace = create_user_address_space()
+    val map_result = if _address_space_can_map(user_as):
+        _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
+    else:
+        log_raw_println("[scheduler] bootstrap_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
+        0
+    if map_result < 0:
+        destroy_user_address_space(user_as)
+        log_raw_println("[scheduler] bootstrap_user_task: map failed")
+        return (scheduler, 0)
+    val mapped_entry = _scheduler_mapped_entry(user_as, file_bytes, entry)
+    if mapped_entry != entry:
+        log_raw_println("[scheduler] bootstrap_user_task: direct entry mapped")
+        if not verify_direct_load_entry(user_as, file_bytes, entry):
+            destroy_user_address_space(user_as)
+            log_raw_println("[scheduler] bootstrap_user_task: direct entry verify failed")
+            return (scheduler, 0)
+    val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
+
+    var user_next_id = g_scheduler_next_task_id
+    if user_next_id == 0 or user_next_id >= 0x40000000:
+        user_next_id = 1
+    g_scheduler_next_task_id = user_next_id + 1
+    val id = TaskId(id: user_next_id)
+
+    val tcb = TaskControlBlock(
+        id: id,
+        name: "bootstrap-user",
+        state: TaskState.Ready,
+        priority: priority,
+        is_user: true,
+        entry_point: mapped_entry,
+        context: user_ctx,
+        user_context: Some(user_ctx),
+        address_space: user_as.phys_root,
+        kernel_stack: 0,
+        user_stack: stack_top,
+        capabilities: caps,
+        parent: nil,
+        schedule: default_task_schedule(priority),
+        isolation: default_task_isolation(user_as.id),
+        assigned_cpu: 0u32,
+        exit_code: 0,
+        ticks_remaining: TIME_SLICE_TICKS
+    )
+
+    scheduler.tasks[0] = tcb
+    _record_arm64_user_handoff(mapped_entry, user_sp, user_as.phys_root)
+    cap_init_task_record(id, true)
+
+    val queue_idx = _priority_to_index(priority)
+    scheduler.ready_queues[queue_idx].enqueue(id)
+    val cpu = if scheduler.cpu_runqueues.len() == 0: 0u32 else: 0u32
+    scheduler.cpu_runqueues[cpu as i64].enqueue(id, tcb.schedule)
+    (scheduler, user_next_id)
+
     me _enqueue_ready_at_slot(id: TaskId, slot: i32):
         """Enqueue a task whose slot is already known. Avoids _find_slot."""
         if slot < 0:

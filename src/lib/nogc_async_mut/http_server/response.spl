@@ -17,6 +17,8 @@ val bytes = serialize_response(resp)
 use std.http_server.types.{HttpResponseData, default_response_data}
 use std.http.types.{status_reason}
 
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
 # ============================================================================
 # Response Serialization
 # ============================================================================
@@ -66,6 +68,7 @@ fn build_ok(body: text, content_type: text) -> HttpResponseData:
             ("Server", "SimpleServer")
         ],
         body: body,
+        body_bytes: [],
         body_file: "",
         body_offset: 0,
         body_length: 0,
@@ -102,6 +105,7 @@ fn build_redirect(url: text, status: i64) -> HttpResponseData:
             ("Content-Length", "0")
         ],
         body: "",
+        body_bytes: [],
         body_file: "",
         body_offset: 0,
         body_length: 0,
@@ -124,6 +128,7 @@ fn build_error(status: i64, message: text) -> HttpResponseData:
             ("Connection", "close")
         ],
         body: body,
+        body_bytes: [],
         body_file: "",
         body_offset: 0,
         body_length: 0,
@@ -181,6 +186,7 @@ fn build_file_response(path: text, content_type: text, size: i64) -> HttpRespons
             ("Server", "SimpleServer")
         ],
         body: "",
+        body_bytes: [],
         body_file: path,
         body_offset: 0,
         body_length: size,
@@ -194,6 +200,7 @@ fn build_not_modified() -> HttpResponseData:
         reason: "Not Modified",
         headers: [("Server", "SimpleServer")],
         body: "",
+        body_bytes: [],
         body_file: "",
         body_offset: 0,
         body_length: 0,
@@ -218,8 +225,62 @@ fn add_keepalive_headers(resp: HttpResponseData, keepalive: bool, timeout_s: i64
         reason: resp.reason,
         headers: headers,
         body: resp.body,
+        body_bytes: resp.body_bytes,
         body_file: resp.body_file,
         body_offset: resp.body_offset,
         body_length: resp.body_length,
         chunked: resp.chunked
     )
+
+# ============================================================================
+# Binary Response Serializer
+# ============================================================================
+
+fn serialize_response_bytes(resp: HttpResponseData) -> [u8]:
+    """Serialize an HttpResponseData to HTTP/1.1 wire format as bytes.
+
+    Uses body_bytes if non-empty, else the bytes of body: text.
+    Content-Length is computed from the actual payload.
+
+    Args:
+        resp: Response data to serialize
+
+    Returns:
+        Complete HTTP response as [u8]
+    """
+    # Determine actual body payload
+    val use_body_bytes = resp.body_bytes.len() > 0
+    val body_len: i64 = if use_body_bytes: resp.body_bytes.len() else: resp.body.len()
+
+    var out: [u8] = []
+    # Status line
+    out = _append_text_bytes(out, "HTTP/1.1 {resp.status} {resp.reason}\r\n")
+
+    # Headers
+    var has_content_length = false
+    for header in resp.headers:
+        val name = header.0
+        val value = header.1
+        if name.lower() == "content-length":
+            has_content_length = true
+        out = _append_text_bytes(out, "{name}: {value}\r\n")
+
+    # Emit Content-Length if body present and not chunked
+    if not has_content_length and body_len > 0 and not resp.chunked:
+        out = _append_text_bytes(out, "Content-Length: {body_len}\r\n")
+
+    out = _append_text_bytes(out, "\r\n")
+
+    # Body
+    if use_body_bytes:
+        out = out + resp.body_bytes
+    elif resp.body.len() > 0:
+        out = _append_text_bytes(out, resp.body)
+
+    out
+
+fn _append_text_bytes(buf: [u8], s: text) -> [u8]:
+    """Return `buf` extended with the UTF-8 bytes of `s`."""
+    val bytes = rt_text_to_bytes(s)
+    var out = buf + bytes
+    out

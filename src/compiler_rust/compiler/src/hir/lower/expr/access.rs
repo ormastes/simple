@@ -4,6 +4,8 @@
 //! (struct fields, thread_group, SIMD swizzle, neighbor access) and indexing.
 
 use simple_parser::Expr;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crate::hir::lifetime::ReferenceOrigin;
 use crate::hir::lower::context::FunctionContext;
@@ -144,6 +146,9 @@ impl Lowerer {
                 })
             }
             Err(LowerError::CannotInferFieldType { struct_name, .. }) => {
+                if let Some(projected) = self.try_lower_result_projection(&recv_hir, field) {
+                    return Ok(projected);
+                }
                 // Try to resolve field type via struct name lookup before falling back.
                 // This preserves the real TypeId for self.field.method() chains — without
                 // this, the field node gets ty=ANY which causes MIR to mangle the wrong
@@ -166,6 +171,15 @@ impl Lowerer {
                             field_index: 0,
                         },
                         ty: field_ty,
+                    });
+                }
+                if let Some(field_index) = self.try_resolve_global_field_index_by_name(&struct_name, field) {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::FieldAccess {
+                            receiver: recv_hir,
+                            field_index,
+                        },
+                        ty: TypeId::ANY,
                     });
                 }
                 // Field not found - treat as no-paren method call
@@ -208,6 +222,76 @@ impl Lowerer {
             }
         }
         None
+    }
+
+    fn try_resolve_global_field_index_by_name(&self, struct_name: &str, field_name: &str) -> Option<usize> {
+        let global_defs = self.global_struct_defs.as_ref()?;
+        let fields = global_defs.get(struct_name)?;
+        fields
+            .iter()
+            .enumerate()
+            .find_map(|(idx, (fname, _))| if fname == field_name { Some(idx) } else { None })
+    }
+
+    fn try_lower_result_projection(&self, recv_hir: &HirExpr, field: &str) -> Option<HirExpr> {
+        let variant = match field {
+            "ok" => "Ok",
+            "err" => "Err",
+            _ => return None,
+        };
+        let payload_ty = self.enum_variant_payload_type(recv_hir.ty, "Result", variant)?;
+        let expected_disc = self.enum_variant_discriminant(variant);
+        let subject_for_check = recv_hir.clone();
+        let subject_for_payload = recv_hir.clone();
+        Some(HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_check_discriminant".to_string(),
+                        args: vec![
+                            subject_for_check,
+                            HirExpr {
+                                kind: HirExprKind::Integer(expected_disc),
+                                ty: TypeId::I64,
+                            },
+                        ],
+                    },
+                    ty: TypeId::BOOL,
+                }),
+                then_branch: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_payload".to_string(),
+                        args: vec![subject_for_payload],
+                    },
+                    ty: payload_ty,
+                }),
+                else_branch: Some(Box::new(HirExpr {
+                    kind: HirExprKind::Nil,
+                    ty: TypeId::NIL,
+                })),
+            },
+            ty: payload_ty,
+        })
+    }
+
+    fn enum_variant_payload_type(&self, ty: TypeId, enum_name: &str, variant_name: &str) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, variants, .. }) if name == enum_name => variants.iter().find_map(|(name, payload)| {
+                if name == variant_name {
+                    payload.as_ref().and_then(|fields| fields.first()).copied()
+                } else {
+                    None
+                }
+            }),
+            Some(HirType::Pointer { inner, .. }) => self.enum_variant_payload_type(*inner, enum_name, variant_name),
+            _ => None,
+        }
+    }
+
+    fn enum_variant_discriminant(&self, variant: &str) -> i64 {
+        let mut hasher = DefaultHasher::new();
+        variant.hash(&mut hasher);
+        (hasher.finish() & 0xFFFFFFFF) as i64
     }
 
     /// Lower thread_group field access to GPU intrinsics

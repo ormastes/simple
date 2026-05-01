@@ -27,6 +27,19 @@ fn is_linker_provided_symbol(sym: &str, defined: &std::collections::HashSet<Stri
         }))
 }
 
+fn has_equivalent_defined_symbol(sym: &str, defined: &std::collections::HashSet<String>) -> bool {
+    if defined.contains(sym) {
+        return true;
+    }
+    if sym.contains("_dot_") {
+        return defined.contains(&sym.replace("_dot_", "."));
+    }
+    if sym.contains('.') {
+        return defined.contains(&sym.replace('.', "_dot_"));
+    }
+    false
+}
+
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.
 ///
 /// Unlike `generate_stub_object`, this does not emit asm using host instructions
@@ -116,7 +129,7 @@ pub(crate) fn generate_stub_object_freestanding(
     // Exclude obvious system/dyld/C++ runtime mangled names.
     let needs_stub: Vec<String> = undefined
         .into_iter()
-        .filter(|s| !defined.contains(s))
+        .filter(|s| !has_equivalent_defined_symbol(s, &defined))
         .filter(|s| !s.is_empty())
         .filter(|s| {
             s.chars()

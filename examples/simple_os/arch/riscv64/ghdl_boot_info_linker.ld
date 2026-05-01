@@ -1,7 +1,7 @@
 /* RV64 GHDL boot-info proof linker script.
  *
  * Keeps the payload origin at 0x80200000, uses the normal RV64 boot entry
- * shape, and reserves a disjoint proof mailbox page at 0x80600000.
+ * shape, and reserves a disjoint proof mailbox page at 0x80FF1000.
  */
 OUTPUT_ARCH(riscv)
 OUTPUT_FORMAT("elf64-littleriscv")
@@ -37,7 +37,7 @@ SECTIONS {
         _ebss = .;
     } > RAM
 
-    .proof_mailbox 0x80600000 (NOLOAD) : ALIGN(4K) {
+    .proof_mailbox 0x80FF1000 (NOLOAD) : ALIGN(4K) {
         __ghdl_boot_info_proof_start = .;
         . += 4K;
         __ghdl_boot_info_proof_end = .;

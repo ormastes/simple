@@ -291,6 +291,19 @@ static int _crypto_bytes_to_rv(const uint8_t *src, uint32_t src_len, RuntimeValu
     return 0;
 }
 
+static RuntimeValue _crypto_make_byte_array(const uint8_t *src, uint32_t src_len)
+{
+    RuntimeArray *arr = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (sizeof(RuntimeValue) * src_len));
+    if (!arr) return NIL_VALUE;
+    arr->hdr.type = HEAP_ARRAY;
+    arr->hdr.size = sizeof(RuntimeArray) + (sizeof(RuntimeValue) * src_len);
+    arr->len = src_len;
+    arr->cap = src_len;
+    for (uint32_t i = 0; i < src_len; i++)
+        CRYPTO_ARRAY_ITEMS(arr)[i] = ENCODE_INT((RV_INT)src[i]);
+    return ENCODE_PTR(arr);
+}
+
 /* ===================================================================
  * AES-128 block encryption helper (portable)
  * =================================================================== */

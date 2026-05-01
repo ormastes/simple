@@ -389,6 +389,7 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
     var pos = header.data_start
     val payload_start = pos
     var out: [u8] = []
+    var has_unsupported_compressed_chunk = false
     var state = Lzma2ChunkState(need_dict_reset: true, need_props: true)
     while true:
         if pos >= input.len():
@@ -409,12 +410,24 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
         val range_init_res = _validate_lzma_range_decoder_init(input, chunk.body_start)
         if range_init_res.is_err():
             return Err(range_init_res.unwrap_err())
-        return Err(CompressionError.UnsupportedFeature("lzma2 range-coded compressed chunks are not supported"))
+        if header.declared_compressed_size == nil:
+            return Err(CompressionError.UnsupportedFeature("lzma2 range-coded compressed chunks are not supported"))
+        has_unsupported_compressed_chunk = true
+        val declared_payload_size = header.declared_compressed_size ?? -1
+        if declared_payload_size <= 0:
+            return Err(CompressionError.CorruptStream("xz block compressed size"))
+        val payload_end = payload_start + declared_payload_size
+        if payload_end > input.len():
+            return Err(CompressionError.TruncatedInput("xz block payload"))
+        if input[payload_end - 1] != 0x00u8:
+            return Err(CompressionError.CorruptStream("lzma2 end marker"))
+        pos = payload_end
+        break
     val payload_size = pos - payload_start
 
     if header.declared_compressed_size != nil and (header.declared_compressed_size ?? -1) != payload_size:
         return Err(CompressionError.CorruptStream("xz block compressed size"))
-    if header.declared_uncompressed_size != nil and (header.declared_uncompressed_size ?? -1) != out.len():
+    if not has_unsupported_compressed_chunk and header.declared_uncompressed_size != nil and (header.declared_uncompressed_size ?? -1) != out.len():
         return Err(CompressionError.CorruptStream("xz block uncompressed size"))
 
     val padded_pos_res = _consume_alignment_zeroes(input, payload_start, pos, "xz block padding")
@@ -431,6 +444,8 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
     val stored_check_res = read_u32_le(input, pos)
     if stored_check_res.is_err():
         return Err(stored_check_res.unwrap_err())
+    if has_unsupported_compressed_chunk:
+        return Err(CompressionError.UnsupportedFeature("lzma2 range-coded compressed chunks are not supported"))
     if stored_check_res.unwrap() != crc32_bytes_for_tier(out, tier):
         return Err(CompressionError.ChecksumMismatch("xz block crc32"))
 

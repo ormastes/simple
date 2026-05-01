@@ -339,6 +339,32 @@ fn resolve_name(
 ) -> Option<String> {
     if let Some(mangled) = local_map.get(name) {
         Some(mangled.clone())
+    } else if name.contains("_dot_") {
+        let dotted = name.replace("_dot_", ".");
+        if let Some(mangled) = local_map.get(&dotted) {
+            Some(mangled.clone())
+        } else if let Some(resolved) = use_map.get(&dotted) {
+            Some(resolved.clone())
+        } else if let Some(resolved) = import_map.get(&dotted) {
+            Some(resolved.clone())
+        } else {
+            resolve_name_variants(name, use_map, import_map)
+                .or_else(|| resolve_by_suffix(name, local_suffix_index))
+                .or_else(|| resolve_by_suffix(name, suffix_index))
+        }
+    } else if name.contains('.') {
+        let sanitized = name.replace('.', "_dot_");
+        if let Some(mangled) = local_map.get(&sanitized) {
+            Some(mangled.clone())
+        } else if let Some(resolved) = use_map.get(&sanitized) {
+            Some(resolved.clone())
+        } else if let Some(resolved) = import_map.get(&sanitized) {
+            Some(resolved.clone())
+        } else {
+            resolve_name_variants(name, use_map, import_map)
+                .or_else(|| resolve_by_suffix(name, local_suffix_index))
+                .or_else(|| resolve_by_suffix(name, suffix_index))
+        }
     } else if let Some(resolved) = use_map.get(name) {
         Some(resolved.clone())
     } else if let Some(resolved) = import_map.get(name) {
@@ -363,14 +389,22 @@ fn resolve_call_target(
     prefix: &str,
     unresolved_count: &mut usize,
 ) {
-    if let Some(resolved) = resolve_name_variants(name, use_map, import_map) {
+    let lookup_name_storage;
+    let lookup_name = if name.contains("_dot_") {
+        lookup_name_storage = name.replace("_dot_", ".");
+        lookup_name_storage.as_str()
+    } else {
+        name
+    };
+
+    if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
         *target = target.with_name(resolved);
-    } else if name.contains('.') {
-        let method = name.rsplit('.').next().unwrap_or(name);
-        let type_part = name.split('.').next().unwrap_or("");
+    } else if lookup_name.contains('.') {
+        let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+        let type_part = lookup_name.split('.').next().unwrap_or("");
         let candidates = local_suffix_index
-            .get(name)
-            .or_else(|| suffix_index.get(name))
+            .get(lookup_name)
+            .or_else(|| suffix_index.get(lookup_name))
             .or_else(|| local_suffix_index.get(method))
             .or_else(|| suffix_index.get(method));
         if let Some(candidates) = candidates {
@@ -387,7 +421,8 @@ fn resolve_call_target(
             if let Some(b) = best {
                 *target = target.with_name(b.clone());
             } else if let Some(resolved) =
-                resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
+                resolve_by_suffix(lookup_name, local_suffix_index)
+                    .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
             {
                 *target = target.with_name(resolved);
             } else {
@@ -397,8 +432,8 @@ fn resolve_call_target(
                     name, func_name, prefix
                 );
             }
-        } else if let Some(resolved) =
-            resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
+        } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
+            .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
         {
             *target = target.with_name(resolved);
         } else {
@@ -408,8 +443,8 @@ fn resolve_call_target(
                 name, func_name, prefix
             );
         }
-    } else if let Some(resolved) =
-        resolve_by_suffix(name, local_suffix_index).or_else(|| resolve_by_suffix(name, suffix_index))
+    } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
+        .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
     {
         *target = target.with_name(resolved);
     } else {
@@ -429,12 +464,20 @@ fn resolve_method_call_static(
     local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) {
-    if let Some(resolved) = resolve_name_variants(func_name, use_map, import_map) {
+    let lookup_name_storage;
+    let lookup_name = if func_name.contains("_dot_") {
+        lookup_name_storage = func_name.replace("_dot_", ".");
+        lookup_name_storage.as_str()
+    } else {
+        func_name.as_str()
+    };
+
+    if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
         *func_name = resolved;
     } else {
-        let method = func_name.rsplit('.').next().unwrap_or(func_name);
-        let type_part = func_name.split('.').next().unwrap_or("");
-        let has_type_qualifier = func_name.contains('.');
+        let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
+        let type_part = lookup_name.split('.').next().unwrap_or("");
+        let has_type_qualifier = lookup_name.contains('.');
         let type_part_lower = type_part.to_lowercase();
         let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
         if let Some(candidates) = candidates {
@@ -475,8 +518,8 @@ fn resolve_method_call_static(
             if let Some(b) = best {
                 *func_name = b.clone();
             }
-        } else if let Some(resolved) =
-            resolve_by_suffix(func_name, local_suffix_index).or_else(|| resolve_by_suffix(func_name, suffix_index))
+        } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
+            .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
         {
             *func_name = resolved;
         }

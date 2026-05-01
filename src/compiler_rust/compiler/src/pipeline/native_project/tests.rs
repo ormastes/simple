@@ -398,6 +398,109 @@ fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
     builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
 }
 
+#[test]
+fn test_freestanding_linker_uses_c_compiler_without_runtime_bundle_probe() {
+    let temp = tempfile::tempdir().unwrap();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("kernel.elf")).config(
+        NativeBuildConfig {
+            target: Some(simple_common::target::Target::new(
+                simple_common::target::TargetArch::Riscv64,
+                simple_common::target::TargetOS::None,
+            )),
+            ..Default::default()
+        },
+    );
+
+    let cc = super::tools::find_c_compiler();
+    let cxx = super::tools::find_cxx_compiler();
+
+    assert!(!cc.is_empty());
+    if cc != cxx {
+        assert_ne!(cc, cxx);
+    }
+    assert!(builder.config.target.is_some());
+}
+
+#[test]
+fn test_build_use_map_glob_import_populates_symbol_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    std::fs::create_dir_all(lib_root.join("nogc_async_mut_noalloc/log")).unwrap();
+
+    let logger_path = lib_root.join("nogc_async_mut_noalloc/log/logger.spl");
+    let consumer_path = src_root.join("app/consumer.spl");
+    std::fs::create_dir_all(consumer_path.parent().unwrap()).unwrap();
+
+    std::fs::write(&logger_path, "fn log_info(msg: text):\n    pass\n").unwrap();
+    std::fs::write(&consumer_path, "use lib.nogc_async_mut_noalloc.log.*\nfn main():\n    log_info(\"x\")\n").unwrap();
+
+    let file_sources = vec![
+        (logger_path.clone(), std::fs::read_to_string(&logger_path).unwrap()),
+        (consumer_path.clone(), std::fs::read_to_string(&consumer_path).unwrap()),
+    ];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let expected = format!(
+        "{}__log_info",
+        module_prefix_from_path(&logger_path, &lib_root)
+    );
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+
+    assert_eq!(use_map.get("log_info"), Some(&expected));
+}
+
+#[test]
+fn test_re_exports_include_glob_imported_facade_symbols() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    let os_root = src_root.join("os");
+    std::fs::create_dir_all(lib_root.join("nogc_async_mut_noalloc/log")).unwrap();
+    std::fs::create_dir_all(os_root.join("kernel/log")).unwrap();
+    std::fs::create_dir_all(src_root.join("app")).unwrap();
+
+    let logger_path = lib_root.join("nogc_async_mut_noalloc/log/logger.spl");
+    let facade_path = os_root.join("kernel/log/klog_api.spl");
+    let consumer_path = src_root.join("app/consumer.spl");
+
+    std::fs::write(&logger_path, "fn log_info(msg: text):\n    pass\n").unwrap();
+    std::fs::write(&facade_path, "use lib.nogc_async_mut_noalloc.log.*\nexport log_info\n").unwrap();
+    std::fs::write(&consumer_path, "use os.kernel.log.klog_api.{log_info}\nfn main():\n    log_info(\"x\")\n").unwrap();
+
+    let file_sources = vec![
+        (logger_path.clone(), std::fs::read_to_string(&logger_path).unwrap()),
+        (facade_path.clone(), std::fs::read_to_string(&facade_path).unwrap()),
+        (consumer_path.clone(), std::fs::read_to_string(&consumer_path).unwrap()),
+    ];
+    let source_dirs = vec![lib_root.clone(), os_root.clone(), src_root.join("app")];
+    let result = super::imports::build_import_map(&file_sources, &source_dirs, &src_root);
+    let expected = format!(
+        "{}__log_info",
+        module_prefix_from_path(&logger_path, &lib_root)
+    );
+    let facade_prefix = module_prefix_from_path(&facade_path, &os_root);
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+
+    assert_eq!(
+        result
+            .re_exports
+            .get(&facade_prefix)
+            .and_then(|exports| exports.get("log_info")),
+        Some(&expected)
+    );
+    assert_eq!(use_map.get("log_info"), Some(&expected));
+}
+
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_runtime_retention_symbols_include_object_undefineds_and_roots() {

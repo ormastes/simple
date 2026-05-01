@@ -1500,7 +1500,8 @@ impl RiscvFpgaLane:
             "        variable atomic_old_word32_v : std_logic_vector(31 downto 0);\n" +
             "        variable atomic_new_word32_v : std_logic_vector(31 downto 0);\n" +
             "        variable atomic_old_word64_v : xword_t;\n" +
-            "        variable atomic_new_word64_v : xword_t;\n"
+            "        variable atomic_new_word64_v : xword_t;\n" +
+            "        variable load_should_issue_v : boolean;\n"
 
     fn core_vhdl_mmu_port_lines() -> text:
         if self.xlen == RiscvXlen.Rv32:
@@ -1511,9 +1512,11 @@ impl RiscvFpgaLane:
             "        debug_priv_mode : out std_logic_vector(1 downto 0);\n" +
             "        debug_last_load_value : out xword_t;\n" +
             "        debug_ra   : out xword_t;\n" +
+            "        debug_sp   : out xword_t;\n" +
             "        debug_s0   : out xword_t;\n" +
             "        debug_a0   : out xword_t;\n" +
-            "        debug_a1   : out xword_t;\n"
+            "        debug_a1   : out xword_t;\n" +
+            "        debug_a2   : out xword_t;\n"
 
     fn core_vhdl_mmu_helper_lines() -> text:
         if self.xlen == RiscvXlen.Rv32:
@@ -1973,7 +1976,6 @@ impl RiscvFpgaLane:
             "                                end if;\n" +
             "                                dmem_addr_reg <= translated_addr_v;\n" +
             "                                dmem_re_reg <= '1';\n" +
-            "                                load_pending_reg <= '0';\n" +
             "                                if translated_fault_v = '1' then\n" +
             "                                    dmem_re_reg <= '0';\n" +
             "                                    csr_mepc_reg <= pc_reg;\n" +
@@ -1985,23 +1987,24 @@ impl RiscvFpgaLane:
             "                                    priv_mode_reg <= \"11\";\n" +
             "                                    pc_reg <= csr_mtvec_reg;\n" +
             "                                else\n" +
+            "                                load_should_issue_v := false;\n" +
             "                                case decode_memory_funct3 is\n" +
             "                                    when \"000\" =>\n" +
             "                                        dmem_width_reg <= \"00\";\n" +
-            "                                        load_issue_reg <= '1';\n" +
+            "                                        load_should_issue_v := true;\n" +
             "                                    when \"001\" =>\n" +
             "                                        dmem_width_reg <= \"01\";\n" +
             "                                        if addr_i(0) = '1' then\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        else\n" +
-            "                                            load_issue_reg <= '1';\n" +
+            "                                            load_should_issue_v := true;\n" +
             "                                        end if;\n" +
             "                                    when \"010\" =>\n" +
             "                                        dmem_width_reg <= \"10\";\n" +
             "                                        if addr_i(1 downto 0) /= \"00\" then\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        else\n" +
-            "                                            load_issue_reg <= '1';\n" +
+            "                                            load_should_issue_v := true;\n" +
             "                                        end if;\n" +
             "                                    when \"011\" =>\n" +
             "                                        dmem_width_reg <= \"11\";\n" +
@@ -2009,20 +2012,20 @@ impl RiscvFpgaLane:
             "                                            if addr_i(2 downto 0) /= \"000\" then\n" +
             "                                                trap_reg <= '1';\n" +
             "                                            else\n" +
-            "                                                load_issue_reg <= '1';\n" +
+            "                                                load_should_issue_v := true;\n" +
             "                                            end if;\n" +
             "                                        else\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when \"100\" =>\n" +
             "                                        dmem_width_reg <= \"00\";\n" +
-            "                                        load_issue_reg <= '1';\n" +
+            "                                        load_should_issue_v := true;\n" +
             "                                    when \"101\" =>\n" +
             "                                        dmem_width_reg <= \"01\";\n" +
             "                                        if addr_i(0) = '1' then\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        else\n" +
-            "                                            load_issue_reg <= '1';\n" +
+            "                                            load_should_issue_v := true;\n" +
             "                                        end if;\n" +
             "                                    when \"110\" =>\n" +
             "                                        dmem_width_reg <= \"10\";\n" +
@@ -2030,17 +2033,23 @@ impl RiscvFpgaLane:
             "                                            if addr_i(1 downto 0) /= \"00\" then\n" +
             "                                                trap_reg <= '1';\n" +
             "                                            else\n" +
-            "                                                load_issue_reg <= '1';\n" +
+            "                                                load_should_issue_v := true;\n" +
             "                                            end if;\n" +
             "                                        else\n" +
             "                                            trap_reg <= '1';\n" +
             "                                        end if;\n" +
             "                                    when others => trap_reg <= '1';\n" +
             "                                end case;\n" +
-            "                                load_pending_rd_reg <= rd_i;\n" +
-            "                                load_pending_addr_reg <= std_logic_vector(addr_i);\n" +
-            "                                load_pending_funct3_reg <= decode_memory_funct3;\n" +
-            "                                pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
+            "                                if load_should_issue_v then\n" +
+            "                                    load_issue_reg <= '1';\n" +
+            "                                    load_pending_reg <= '1';\n" +
+            "                                    load_pending_rd_reg <= rd_i;\n" +
+            "                                    load_pending_addr_reg <= std_logic_vector(addr_i);\n" +
+            "                                    load_pending_funct3_reg <= decode_memory_funct3;\n" +
+            "                                    pc_reg <= std_logic_vector(unsigned(pc_reg) + to_unsigned(instr_size_bytes, XLEN));\n" +
+            "                                else\n" +
+            "                                    dmem_re_reg <= '0';\n" +
+            "                                end if;\n" +
             "                                end if;\n" +
             "                            when \"0110\" =>\n" +
             "                                imm_i := resize(signed(decode_store_immediate_bits(11 downto 0)), XLEN);\n" +
@@ -2465,9 +2474,11 @@ impl RiscvFpgaLane:
         "    debug_priv_mode <= priv_mode_reg;\n" +
             "    debug_last_load_value <= debug_last_load_value_reg;\n" +
             "    debug_ra <= regs(1);\n" +
+            "    debug_sp <= regs(2);\n" +
             "    debug_s0 <= regs(8);\n" +
             "    debug_a0 <= regs(10);\n" +
-            "    debug_a1 <= regs(11);\n"
+            "    debug_a1 <= regs(11);\n" +
+            "    debug_a2 <= regs(12);\n"
 
     fn core_vhdl() -> text:
         val package_name = self.package_name()
@@ -2515,7 +2526,9 @@ impl RiscvFpgaLane:
             "    signal halt_reg : std_logic := '0';\n" +
             self.core_vhdl_semihost_signal_lines() +
             "    signal load_issue_reg : std_logic := '0';\n" +
+            "    signal load_capture_reg : std_logic := '0';\n" +
             "    signal load_pending_reg : std_logic := '0';\n" +
+            "    signal load_writeback_reg : std_logic := '0';\n" +
             "    signal load_pending_rd_reg : integer range 0 to 31 := 0;\n" +
             "    signal load_pending_addr_reg : xword_t := (others => '0');\n" +
             "    signal load_pending_funct3_reg : std_logic_vector(2 downto 0) := (others => '0');\n" +
@@ -2530,10 +2543,6 @@ impl RiscvFpgaLane:
             "    dmem_wstrb <= dmem_wstrb_reg;\n" +
             "    debug_pc <= pc_reg;\n" +
             self.core_vhdl_mmu_output_lines() +
-            "    debug_ra <= regs(1);\n" +
-            "    debug_s0 <= regs(8);\n" +
-            "    debug_a0 <= regs(10);\n" +
-            "    debug_a1 <= regs(11);\n" +
             self.core_vhdl_semihost_output_lines() +
             "    trap <= trap_reg;\n" +
             "    halt <= halt_reg;\n\n" +
@@ -2553,7 +2562,9 @@ impl RiscvFpgaLane:
             "            halt_reg <= '0';\n" +
             self.core_vhdl_semihost_reset_lines() +
             "            load_issue_reg <= '0';\n" +
+            "            load_capture_reg <= '0';\n" +
             "            load_pending_reg <= '0';\n" +
+            "            load_writeback_reg <= '0';\n" +
             "            load_pending_rd_reg <= 0;\n" +
             "            load_pending_addr_reg <= (others => '0');\n" +
             "            load_pending_funct3_reg <= (others => '0');\n" +
@@ -2565,47 +2576,51 @@ impl RiscvFpgaLane:
             self.core_vhdl_semihost_default_lines() +
             "            if load_issue_reg = '1' then\n" +
             "                load_issue_reg <= '0';\n" +
-            "                load_pending_reg <= '1';\n" +
+            "                load_capture_reg <= '1';\n" +
             "                regs(0) <= (others => '0');\n" +
-            "            elsif load_pending_reg = '1' then\n" +
-            "                addr_i := unsigned(load_pending_addr_reg);\n" +
+            "            elsif load_capture_reg = '1' then\n" +
+            "                load_capture_reg <= '0';\n" +
+            "                load_writeback_reg <= '1';\n" +
             "                load_data_reg <= dmem_rdata;\n" +
+            "                regs(0) <= (others => '0');\n" +
+            "            elsif load_writeback_reg = '1' then\n" +
+            "                addr_i := unsigned(load_pending_addr_reg);\n" +
             "                case load_pending_funct3_reg is\n" +
             "                    when \"000\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
-            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
-            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"001\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
-            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
-            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"010\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 2))) * 32)(31 downto 0)), XLEN));\n" +
-            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 2))) * 32)(31 downto 0)), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 2))) * 32)(31 downto 0)), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(signed(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 2))) * 32)(31 downto 0)), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
-            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(dmem_rdata(31 downto 0)), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(signed(load_data_reg(31 downto 0)), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(signed(load_data_reg(31 downto 0)), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"011\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= dmem_rdata;\n" +
-            "                                debug_last_load_value_reg <= dmem_rdata;\n" +
+            "                                regs(load_pending_rd_reg) <= load_data_reg;\n" +
+            "                                debug_last_load_value_reg <= load_data_reg;\n" +
             "                            end if;\n" +
             "                        else\n" +
             "                            trap_reg <= '1';\n" +
@@ -2613,35 +2628,38 @@ impl RiscvFpgaLane:
             "                    when \"100\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0), XLEN));\n" +
-            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(7 downto 0), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
-            "                            debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(7 downto 0), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"101\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0), XLEN));\n" +
-            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(15 downto 0), XLEN));\n" +
             "                            end if;\n" +
             "                        elsif load_pending_rd_reg /= 0 then\n" +
-            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
-            "                            debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                            regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
+            "                            debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(1 downto 0))) * 8)(15 downto 0), XLEN));\n" +
             "                        end if;\n" +
             "                    when \"110\" =>\n" +
             "                        if XLEN = 64 then\n" +
             "                            if load_pending_rd_reg /= 0 then\n" +
-            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(31 downto 0), XLEN));\n" +
-            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(dmem_rdata), to_integer(unsigned(addr_i(2 downto 0))) * 8)(31 downto 0), XLEN));\n" +
+            "                                regs(load_pending_rd_reg) <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(31 downto 0), XLEN));\n" +
+            "                                debug_last_load_value_reg <= std_logic_vector(resize(shift_right(unsigned(load_data_reg), to_integer(unsigned(addr_i(2 downto 0))) * 8)(31 downto 0), XLEN));\n" +
             "                            end if;\n" +
             "                        else\n" +
             "                            trap_reg <= '1';\n" +
             "                        end if;\n" +
             "                    when others => trap_reg <= '1';\n" +
             "                end case;\n" +
+            "                load_writeback_reg <= '0';\n" +
             "                load_pending_reg <= '0';\n" +
+            "                regs(0) <= (others => '0');\n" +
+            "            elsif load_pending_reg = '1' then\n" +
             "                regs(0) <= (others => '0');\n" +
             "            elsif amo_pending_reg = '1' then\n" +
             "                addr_i := unsigned(amo_pending_addr_reg);\n" +
@@ -3110,25 +3128,25 @@ impl RiscvFpgaLane:
             "    constant MEM_WORDS : integer := (FW_WINDOW_BYTES + PAYLOAD_BOOT_WINDOW_BYTES + PAYLOAD_RUNTIME_WINDOW_BYTES) / 8;\n" +
             "    constant PROGRESS_REPORT_INTERVAL : integer := 100000;\n\n" +
             "    constant PAYLOAD_CHUNK_WORDS : integer := 65536;\n\n" +
-            "    constant MAGIC_ADDR_BITS        : std_logic_vector(63 downto 0) := x\"0000000080600000\";\n" +
-            "    constant DONE_ADDR_BITS         : std_logic_vector(63 downto 0) := x\"0000000080600008\";\n" +
-            "    constant HART_ID_ADDR_BITS      : std_logic_vector(63 downto 0) := x\"0000000080600010\";\n" +
-            "    constant DTB_ADDR_ADDR_BITS     : std_logic_vector(63 downto 0) := x\"0000000080600018\";\n" +
-            "    constant DTB_VALID_ADDR_BITS    : std_logic_vector(63 downto 0) := x\"0000000080600020\";\n" +
-            "    constant RAM_BASE_ADDR_BITS     : std_logic_vector(63 downto 0) := x\"0000000080600028\";\n" +
-            "    constant RAM_SIZE_ADDR_BITS     : std_logic_vector(63 downto 0) := x\"0000000080600030\";\n" +
-            "    constant SERIAL_BASE_ADDR_BITS  : std_logic_vector(63 downto 0) := x\"0000000080600038\";\n" +
-            "    constant SERIAL_MMIO_ADDR_BITS  : std_logic_vector(63 downto 0) := x\"0000000080600040\";\n" +
-            "    constant MAP_LEN_ADDR_BITS      : std_logic_vector(63 downto 0) := x\"0000000080600048\";\n" +
-            "    constant REGION0_BASE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600050\";\n" +
-            "    constant REGION0_SIZE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600058\";\n" +
-            "    constant REGION0_KIND_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600060\";\n" +
-            "    constant REGION1_BASE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600068\";\n" +
-            "    constant REGION1_SIZE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600070\";\n" +
-            "    constant REGION1_KIND_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600078\";\n" +
-            "    constant REGION2_BASE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600080\";\n" +
-            "    constant REGION2_SIZE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600088\";\n" +
-            "    constant REGION2_KIND_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080600090\";\n\n" +
+            "    constant MAGIC_ADDR_BITS        : std_logic_vector(63 downto 0) := x\"0000000080FF1000\";\n" +
+            "    constant DONE_ADDR_BITS         : std_logic_vector(63 downto 0) := x\"0000000080FF1008\";\n" +
+            "    constant HART_ID_ADDR_BITS      : std_logic_vector(63 downto 0) := x\"0000000080FF1010\";\n" +
+            "    constant DTB_ADDR_ADDR_BITS     : std_logic_vector(63 downto 0) := x\"0000000080FF1018\";\n" +
+            "    constant DTB_VALID_ADDR_BITS    : std_logic_vector(63 downto 0) := x\"0000000080FF1020\";\n" +
+            "    constant RAM_BASE_ADDR_BITS     : std_logic_vector(63 downto 0) := x\"0000000080FF1028\";\n" +
+            "    constant RAM_SIZE_ADDR_BITS     : std_logic_vector(63 downto 0) := x\"0000000080FF1030\";\n" +
+            "    constant SERIAL_BASE_ADDR_BITS  : std_logic_vector(63 downto 0) := x\"0000000080FF1038\";\n" +
+            "    constant SERIAL_MMIO_ADDR_BITS  : std_logic_vector(63 downto 0) := x\"0000000080FF1040\";\n" +
+            "    constant MAP_LEN_ADDR_BITS      : std_logic_vector(63 downto 0) := x\"0000000080FF1048\";\n" +
+            "    constant REGION0_BASE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1050\";\n" +
+            "    constant REGION0_SIZE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1058\";\n" +
+            "    constant REGION0_KIND_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1060\";\n" +
+            "    constant REGION1_BASE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1068\";\n" +
+            "    constant REGION1_SIZE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1070\";\n" +
+            "    constant REGION1_KIND_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1078\";\n" +
+            "    constant REGION2_BASE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1080\";\n" +
+            "    constant REGION2_SIZE_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1088\";\n" +
+            "    constant REGION2_KIND_ADDR_BITS : std_logic_vector(63 downto 0) := x\"0000000080FF1090\";\n\n" +
             "    constant UART_ADDR            : std_logic_vector(63 downto 0) := x\"0000000010000000\";\n" +
             "    constant UART_MARKER_WORD     : std_logic_vector(31 downto 0) := x\"42490D0A\";\n" +
             "    constant PROOF_MAGIC_EXPECTED : std_logic_vector(63 downto 0) := x\"42494F50524F4F46\";\n" +
@@ -3201,16 +3219,20 @@ impl RiscvFpgaLane:
             "    signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');\n" +
             "    signal debug_last_load_value : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal debug_ra   : std_logic_vector(63 downto 0) := (others => '0');\n" +
+            "    signal debug_sp   : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal debug_s0   : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal debug_a0   : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal debug_a1   : std_logic_vector(63 downto 0) := (others => '0');\n" +
+            "    signal debug_a2   : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal trap       : std_logic := '0';\n" +
             "    signal halt       : std_logic := '0';\n\n" +
             "    subtype word32_t is std_logic_vector(31 downto 0);\n" +
             "    subtype word64_t is std_logic_vector(63 downto 0);\n" +
             "    type mem_t is array (0 to MEM_WORDS - 1) of word64_t;\n" +
-            "    shared variable mem : mem_t := (others => (others => '0'));\n\n" +
+            "    shared variable mem : mem_t := (others => (others => '0'));\n" +
+            "    type proof_mem_t is array (0 to 31) of word64_t;\n" +
+            "    signal proof_mem : proof_mem_t := (others => (others => '0'));\n\n" +
             "    function hex_to_slv4(ch : character) return std_logic_vector is\n" +
             "    begin\n" +
             "        case ch is\n" +
@@ -3389,7 +3411,11 @@ impl RiscvFpgaLane:
             "    end function;\n\n" +
             "    function proof_in_range(addr : std_logic_vector(63 downto 0)) return boolean is\n" +
             "    begin\n" +
-            "        return addr(63 downto 8) = x\"00000000806000\";\n" +
+            "        return addr(63 downto 8) = x\"0000000080FF10\";\n" +
+            "    end function;\n\n" +
+            "    function proof_index(addr : std_logic_vector(63 downto 0)) return integer is\n" +
+            "    begin\n" +
+            "        return safe_index(addr(7 downto 3));\n" +
             "    end function;\n\n" +
             "    function dtb_word(addr : std_logic_vector(63 downto 0)) return std_logic_vector is\n" +
             "        variable result : std_logic_vector(63 downto 0) := (others => '0');\n" +
@@ -3407,6 +3433,13 @@ impl RiscvFpgaLane:
             "        variable idx : integer;\n" +
             "        variable zero_word : word64_t := (others => '0');\n" +
             "    begin\n" +
+            "        if proof_in_range(addr) then\n" +
+            "            idx := proof_index(addr);\n" +
+            "            if idx < proof_mem'length then\n" +
+            "                return proof_mem(idx);\n" +
+            "            end if;\n" +
+            "            return zero_word;\n" +
+            "        end if;\n" +
             "        idx := mem_index(addr);\n" +
             "        if idx >= MEM_WORDS then\n" +
             "            return zero_word;\n" +
@@ -3446,7 +3479,13 @@ impl RiscvFpgaLane:
             "    signal dmem_write_seen : boolean := false;\n" +
             "    signal dmem_write_addr : std_logic_vector(63 downto 0) := (others => '0');\n" +
             "    signal watch_rt_alloc_reload_seen : boolean := false;\n" +
-            "    signal watch_calloc_spill_seen : boolean := false;\n" +
+            "    signal watch_magic_load_complete_seen : boolean := false;\n" +
+            "    signal watch_boot_main_post_load_seen : boolean := false;\n" +
+            "    signal watch_boot_main_pre_call_seen : boolean := false;\n" +
+            "    signal watch_boot_main_call_seen : boolean := false;\n" +
+            "    signal watch_proof_store_entry_seen : boolean := false;\n" +
+            "    signal watch_proof_mmio_entry_seen : boolean := false;\n" +
+            "    signal watch_proof_mmio_store_seen : boolean := false;\n" +
             "    signal fw_preload_done : boolean := false;\n" +
             "    signal payload_boot_chunk_ready : boolean := false;\n" +
             "    signal mem_epoch : std_logic := '0';\n" +
@@ -3572,9 +3611,11 @@ impl RiscvFpgaLane:
             "            debug_priv_mode => debug_priv_mode,\n" +
             "            debug_last_load_value => debug_last_load_value,\n" +
             "            debug_ra   => debug_ra,\n" +
+            "            debug_sp   => debug_sp,\n" +
             "            debug_s0   => debug_s0,\n" +
             "            debug_a0   => debug_a0,\n" +
             "            debug_a1   => debug_a1,\n" +
+            "            debug_a2   => debug_a2,\n" +
             "            debug_pc   => debug_pc,\n" +
             "            trap       => trap,\n" +
             "            halt       => halt\n" +
@@ -3623,14 +3664,65 @@ impl RiscvFpgaLane:
             "                report \"WATCH_RT_ALLOC_RELOAD_S0_M24_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(24, 64)))(31 downto 0));\n" +
             "                report \"WATCH_RT_ALLOC_RELOAD_S0_M32_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(32, 64)))(31 downto 0));\n" +
             "            end if;\n" +
-            "            if debug_pc = x\"0000000080209C52\" and not watch_calloc_spill_seen then\n" +
-            "                watch_calloc_spill_seen <= true;\n" +
-            "                report \"WATCH_CALLOC_SPILL_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
-            "                report \"WATCH_CALLOC_SPILL_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
-            "                report \"WATCH_CALLOC_SPILL_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
-            "                report \"WATCH_CALLOC_SPILL_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
-            "                report \"WATCH_CALLOC_SPILL_S0_M24_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(24, 64)))(31 downto 0));\n" +
-            "                report \"WATCH_CALLOC_SPILL_S0_M32_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(32, 64)))(31 downto 0));\n" +
+            "            if debug_pc = x\"0000000080207CD6\" and not watch_boot_main_post_load_seen then\n" +
+            "                watch_boot_main_post_load_seen <= true;\n" +
+            "                report \"WATCH_BOOT_MAIN_POST_LOAD_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_POST_LOAD_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_POST_LOAD_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_POST_LOAD_A2_HEX32: \" & hex32(debug_a2(31 downto 0));\n" +
+            "            end if;\n" +
+            "            if debug_pc = x\"0000000080207CCC\" and not watch_boot_main_pre_call_seen then\n" +
+            "                watch_boot_main_pre_call_seen <= true;\n" +
+            "                report \"WATCH_PROOF_STORE_POST_MMIO_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_POST_MMIO_RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_POST_MMIO_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_POST_MMIO_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_POST_MMIO_A2_HEX32: \" & hex32(debug_a2(31 downto 0));\n" +
+            "            end if;\n" +
+            "            if debug_pc = x\"0000000080207CD6\" and not watch_boot_main_call_seen then\n" +
+            "                watch_boot_main_call_seen <= true;\n" +
+            "                report \"WATCH_PROOF_STORE_RA_RELOAD_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_RA_RELOAD_RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_RA_RELOAD_SP_HEX32: \" & hex32(debug_sp(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_RA_RELOAD_SP_P58_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_sp) + to_unsigned(16#58#, 64)))(31 downto 0));\n" +
+            "            end if;\n" +
+            "            if debug_pc = x\"0000000080207CD6\" and not watch_magic_load_complete_seen then\n" +
+            "                watch_magic_load_complete_seen <= true;\n" +
+            "                report \"WATCH_BOOT_MAIN_CALL_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_CALL_RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_CALL_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_CALL_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_CALL_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_CALL_A2_HEX32: \" & hex32(debug_a2(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_CALL_S0_M8_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(8, 64)))(31 downto 0));\n" +
+            "                report \"WATCH_BOOT_MAIN_CALL_S0_M16_HEX32: \" & hex32(mem64(std_logic_vector(unsigned(debug_s0) - to_unsigned(16, 64)))(31 downto 0));\n" +
+            "            end if;\n" +
+            "            if debug_pc = x\"00000000802008EA\" and not watch_proof_store_entry_seen then\n" +
+            "                watch_proof_store_entry_seen <= true;\n" +
+            "                report \"WATCH_PROOF_STORE_ENTRY_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_ENTRY_RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_ENTRY_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_ENTRY_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_ENTRY_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_STORE_ENTRY_A2_HEX32: \" & hex32(debug_a2(31 downto 0));\n" +
+            "            end if;\n" +
+            "            if debug_pc = x\"00000000802008F6\" and not watch_proof_mmio_entry_seen then\n" +
+            "                watch_proof_mmio_entry_seen <= true;\n" +
+            "                report \"WATCH_PROOF_MMIO_ENTRY_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_ENTRY_RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_ENTRY_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_ENTRY_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_ENTRY_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_ENTRY_A2_HEX32: \" & hex32(debug_a2(31 downto 0));\n" +
+            "            end if;\n" +
+            "            if debug_pc = x\"00000000802008F8\" and not watch_proof_mmio_store_seen then\n" +
+            "                watch_proof_mmio_store_seen <= true;\n" +
+            "                report \"WATCH_PROOF_MMIO_STORE_PC_HEX32: \" & hex32(debug_pc(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_STORE_RA_HEX32: \" & hex32(debug_ra(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_STORE_S0_HEX32: \" & hex32(debug_s0(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_STORE_A0_HEX32: \" & hex32(debug_a0(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_STORE_A1_HEX32: \" & hex32(debug_a1(31 downto 0));\n" +
+            "                report \"WATCH_PROOF_MMIO_STORE_A2_HEX32: \" & hex32(debug_a2(31 downto 0));\n" +
             "            end if;\n" +
             "            if dmem_re = '1' and dtb_in_range(dmem_addr) then\n" +
             "                dtb_probe_seen <= true;\n" +
@@ -3641,6 +3733,8 @@ impl RiscvFpgaLane:
             "            if dmem_re = '1' then\n" +
             "                if dtb_in_range(dmem_addr) then\n" +
             "                    dmem_rdata <= dtb_word(dmem_addr);\n" +
+            "                elsif proof_in_range(dmem_addr) then\n" +
+            "                    dmem_rdata <= mem64(dmem_addr);\n" +
             "                elsif mem_index(dmem_addr) < MEM_WORDS then\n" +
             "                    dmem_rdata <= mem64(dmem_addr);\n" +
             "                else\n" +
@@ -3680,16 +3774,30 @@ impl RiscvFpgaLane:
             "                end if;\n" +
             "                dmem_write_seen <= true;\n" +
             "                dmem_write_addr <= dmem_addr;\n" +
-            "                word_idx := mem_index(dmem_addr);\n" +
-            "                if word_idx < MEM_WORDS then\n" +
-            "                    current_word := mem(word_idx);\n" +
-            "                    for i in 0 to 7 loop\n" +
-            "                        if dmem_wstrb(i) = '1' then\n" +
-            "                            current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);\n" +
-            "                        end if;\n" +
-            "                    end loop;\n" +
-            "                    mem(word_idx) := current_word;\n" +
-            "                    mem_epoch <= not mem_epoch;\n" +
+            "                if proof_in_range(dmem_addr) then\n" +
+            "                    word_idx := proof_index(dmem_addr);\n" +
+            "                    if word_idx < proof_mem'length then\n" +
+            "                        current_word := proof_mem(word_idx);\n" +
+            "                        for i in 0 to 7 loop\n" +
+            "                            if dmem_wstrb(i) = '1' then\n" +
+            "                                current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);\n" +
+            "                            end if;\n" +
+            "                        end loop;\n" +
+            "                        proof_mem(word_idx) <= current_word;\n" +
+            "                        mem_epoch <= not mem_epoch;\n" +
+            "                    end if;\n" +
+            "                else\n" +
+            "                    word_idx := mem_index(dmem_addr);\n" +
+            "                    if word_idx < MEM_WORDS then\n" +
+            "                        current_word := mem(word_idx);\n" +
+            "                        for i in 0 to 7 loop\n" +
+            "                            if dmem_wstrb(i) = '1' then\n" +
+            "                                current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);\n" +
+            "                            end if;\n" +
+            "                        end loop;\n" +
+            "                        mem(word_idx) := current_word;\n" +
+            "                        mem_epoch <= not mem_epoch;\n" +
+            "                    end if;\n" +
             "                end if;\n" +
             "            end if;\n" +
             "        end if;\n" +

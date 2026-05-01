@@ -8,6 +8,16 @@ val LZ4_FRAME_MAX_BLOCK_SIZE: i64 = 65536
 val LZ4_HASH_LOG: i64 = 12
 val LZ4_HASH_SIZE: i64 = 1 << LZ4_HASH_LOG
 
+fn _lz4_frame_flag_byte(options: CompressionOptions) -> u8:
+    var flg: u8 = 0x60u8
+    flg = flg | 0x20u8
+    if options.checksum:
+        flg = flg | 0x10u8
+        flg = flg | 0x04u8
+    if options.content_size != nil:
+        flg = flg | 0x08u8
+    flg
+
 fn _lz4_search_depth(level: i64) -> i64:
     if level <= 1:
         return 0
@@ -183,14 +193,7 @@ fn lz4_decompress_block(input: [u8]) -> Result<[u8], CompressionError>:
 
 fn _lz4_frame_descriptor(options: CompressionOptions, input_len: i64) -> [u8]:
     var desc: [u8] = []
-    var flg: u8 = 0x60u8
-    flg = flg | 0x20u8
-    if options.checksum:
-        flg = flg | 0x10u8
-        flg = flg | 0x04u8
-    if options.content_size != nil:
-        flg = flg | 0x08u8
-    desc.push(flg)
+    desc.push(_lz4_frame_flag_byte(options))
     desc.push(0x40u8)
     if options.content_size != nil:
         desc = write_u64_le(desc, (options.content_size ?? input_len).to_u64())
@@ -325,6 +328,8 @@ fn lz4_decompress_frame_for_tier(input: [u8], tier: CompressionSimdTier) -> Resu
             break
         val raw_block = (size_word & 0x80000000u32) != 0u32
         val block_len = (size_word & 0x7FFFFFFFu32).to_i64()
+        if block_len == 0:
+            return Err(CompressionError.CorruptStream("lz4 empty data block"))
         if raw_block and block_len > max_block_size:
             return Err(CompressionError.CorruptStream("lz4 raw block exceeds descriptor size"))
         val block_res = _lz4_take_slice(input, pos, block_len, "lz4 block")
