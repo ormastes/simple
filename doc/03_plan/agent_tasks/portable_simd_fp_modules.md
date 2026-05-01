@@ -1,6 +1,12 @@
 <!-- codex-design -->
 # Agent Tasks: portable_simd_fp_modules
 
+## Current Status (2026-05-01)
+
+- Startup/RSS evidence: PASS (`doc/09_report/verify/simd_startup_rss_evidence_2026-04-30.md`).
+- Runtime perf evidence: WARN (`doc/09_report/verify/simd_runtime_perf_evidence_2026-04-30.md`).
+- FR `simd_int_intrinsics_for_crypto_2026-05-01` Phase 1 IN PROGRESS (separate sstack agent — adds 10 bitwise/shift int intrinsics).
+
 ## Assumed Selection
 
 Use Feature Option B and NFR Option B from the supplied plan.
