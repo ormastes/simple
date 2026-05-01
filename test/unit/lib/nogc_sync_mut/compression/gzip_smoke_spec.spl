@@ -1,0 +1,75 @@
+# gzip_smoke_spec.spl — round-trip smoke tests for the gzip module.
+#
+# NOTE: All levels are routed through stored (uncompressed) DEFLATE blocks
+# because the fixed-Huffman inflate path is not yet implemented.
+# See doc/08_tracking/bug/gzip_module_crc32_unresolved_2026-05-01.md § Resolution.
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.compression.gzip.{gzip_compress, gzip_decompress}
+
+fn _make_small_payload() -> [u8]:
+    return [
+        0x61u8, 0x62u8, 0x63u8, 0x64u8,
+        0x65u8, 0x66u8, 0x67u8, 0x68u8,
+        0x69u8, 0x6Au8, 0x6Bu8, 0x6Cu8,
+        0x6Du8, 0x6Eu8, 0x6Fu8, 0x70u8
+    ]
+
+fn _make_200_byte_payload() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 200:
+        out.push((i % 251).to_u8())
+        i = i + 1
+    out
+
+describe("gzip round-trip"):
+    it("round-trips an empty payload"):
+        val empty: [u8] = []
+        val compressed = gzip_compress(empty, 6)
+        val decoded = gzip_decompress(compressed)
+        expect(decoded == nil).to_equal(false)
+        val out = decoded ?? []
+        expect(out.len()).to_equal(0)
+
+    it("round-trips a small 16-byte payload"):
+        val payload = _make_small_payload()
+        val compressed = gzip_compress(payload, 6)
+        val decoded = gzip_decompress(compressed)
+        expect(decoded == nil).to_equal(false)
+        val out = decoded ?? []
+        expect(out.len()).to_equal(16)
+        var i = 0
+        var all_match = true
+        while i < 16:
+            if out[i] != payload[i]:
+                all_match = false
+            i = i + 1
+        expect(all_match).to_equal(true)
+
+    it("round-trips a 200-byte payload"):
+        val payload = _make_200_byte_payload()
+        val compressed = gzip_compress(payload, 6)
+        val decoded = gzip_decompress(compressed)
+        expect(decoded == nil).to_equal(false)
+        val out = decoded ?? []
+        expect(out.len()).to_equal(200)
+        var i = 0
+        var all_match = true
+        while i < 200:
+            if out[i] != payload[i]:
+                all_match = false
+            i = i + 1
+        expect(all_match).to_equal(true)
+
+    it("compressed output is larger than empty input (header+footer overhead)"):
+        val empty: [u8] = []
+        val compressed = gzip_compress(empty, 0)
+        # minimum gzip frame: 10-byte header + 5-byte stored block + 8-byte footer = 23 bytes
+        expect(compressed.len() >= 18).to_equal(true)
+
+    it("compressed output is larger than small input (overhead dominates)"):
+        val payload = _make_small_payload()
+        val compressed = gzip_compress(payload, 1)
+        # gzip stored block adds ~18 bytes of overhead
+        expect(compressed.len() > payload.len()).to_equal(true)

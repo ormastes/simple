@@ -1,7 +1,7 @@
 # Bug: gzip module fails to load — `crc32_calculate` unresolved
 
 - **Date:** 2026-05-01
-- **Status:** Open
+- **Status:** Fixed (partial — stored-block only, Huffman inflate TBD)
 - **Module:** `src/lib/nogc_sync_mut/compression/gzip/`
 - **Discovered by:** HTTPS/HTTP2 compression+cipher pass, Phase 1B integration probe
 
@@ -100,6 +100,43 @@ option 1 or 2.
 None at the application layer. The dispatcher's explicit `Err` is the
 only safe behaviour today — silently falling back to identity would
 mislead clients that explicitly requested gzip with `Accept-Encoding: gzip`.
+
+## Resolution
+
+- **Status:** Fixed (2026-05-01)
+- **Root cause:** Two compounding issues, not one:
+  1. All submodules (`compress.spl`, `header.spl`, `stream.spl`, `deflate.spl`,
+     `lz77.spl`, `huffman.spl`, `inflate.spl`) used bare `mod compression.gzip.*`
+     declarations instead of explicit `use std.nogc_sync_mut.compression.gzip.*`
+     imports. The `mod` form declares module structure but does NOT bring symbols
+     into scope; `crc32_calculate` and all cross-file references were invisible to
+     external callers.
+  2. All files used `.length()` instead of the standard `.len()` method on `[u8]`.
+- **Fix applied:**
+  - Replaced all `mod compression.gzip.*` with fully-qualified
+    `use std.nogc_sync_mut.compression.gzip.*` imports in every submodule.
+  - Replaced `.length()` → `.len()` across all 7 submodule files.
+  - Typed the public entry points: `fn gzip_compress(data: [u8], level: i64) -> [u8]`
+    and `fn gzip_decompress(data: [u8]) -> [u8]?`.
+  - Replaced `data == nil` guards with `data.len() == 0`.
+  - Routed all compression levels through `deflate_block_stored` (stored/uncompressed
+    blocks) because the `inflate.spl` fixed-Huffman decode path is an unimplemented
+    stub — it returns empty `block_data` for non-stored blocks, causing CRC mismatch
+    and `nil` return from `gzip_decompress`. This means levels 1–9 produce valid gzip
+    frames but with no actual compression. Follow-up needed: implement fixed-Huffman
+    block inflation in `inflate.spl`.
+  - Updated `__init__.spl` from `export *` (broken/ambiguous) to explicit named
+    exports for the public API.
+- **Spec:** `test/unit/lib/nogc_sync_mut/compression/gzip_smoke_spec.spl`
+  — 5 tests, all passing: empty round-trip, 16-byte round-trip, 200-byte round-trip,
+  header+footer overhead checks.
+- **External-tool interop (system `gzip -d`):** NOT verified. The stored-block output
+  is structurally valid RFC 1952 gzip but the CRC table in `crc.spl` only has 16
+  entries (a truncated approximation); real gzip uses 256 entries. System `gzip -d`
+  will likely reject output due to CRC mismatch. This is a separate follow-up bug.
+- **Follow-up bugs needed:**
+  1. Implement fixed-Huffman inflation in `inflate.spl` to restore levels 1–9 actual compression.
+  2. Expand CRC table in `crc.spl` from 16 → 256 entries for real-tool interop.
 
 ## Cross-references
 
