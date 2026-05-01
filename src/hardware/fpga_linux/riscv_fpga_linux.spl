@@ -15,7 +15,7 @@ use hardware.riscv_common.pkg.riscv_linux_pkg.{RiscvLinuxProfile, RiscvPlatformP
 use hardware.riscv_common.pkg.riscv_generated_core_pkg.{RiscvProofLane, GeneratedCoreShellContract}
 use hardware.rv32gc.top.rv32_machine.{qemu_virt_rv32_platform_profile, rv32_qemu_virt_linux_profile}
 use hardware.rv64gc.top.rv64_machine.{qemu_virt_rv64_platform_profile, rv64_qemu_virt_linux_profile}
-use hardware.fpga_linux.riscv_fpga_linux_vhdl_templates.{generated_rv32_support_package_template, generated_rv32_wrapper_template, generated_rv32_smoke_testbench_template, generated_rv32_strobe_testbench_template, generated_rv32_semihost_testbench_template, generated_rv32_mailbox_testbench_template, generated_rv64_smoke_testbench_template, generated_rv64_irq_testbench_template, generated_rv64_linux_handoff_testbench_template, generated_rv64_boot_banner_testbench_template, generated_rv64_fw_jump_testbench_template, generated_rv64_boot_info_real_dtb_testbench_template, generated_rv64_sv39_testbench_template, generated_rv64_sv39_fault_testbench_template}
+use hardware.fpga_linux.riscv_fpga_linux_vhdl_templates.{generated_rv32_support_package_template, generated_rv32_wrapper_template, generated_rv32_smoke_testbench_template, generated_rv32_strobe_testbench_template, generated_rv32_semihost_testbench_template, generated_rv32_mailbox_testbench_template, generated_rv32_linux_handoff_testbench_template, generated_rv32_boot_info_real_dtb_testbench_template, generated_rv64_smoke_testbench_template, generated_rv64_irq_testbench_template, generated_rv64_linux_handoff_testbench_template, generated_rv64_boot_banner_testbench_template, generated_rv64_fw_jump_testbench_template, generated_rv64_boot_info_real_dtb_testbench_template, generated_rv64_sv39_testbench_template, generated_rv64_sv39_fault_testbench_template}
 
 enum RiscvXlen:
     Rv32
@@ -192,7 +192,11 @@ impl LinuxArtifactSet:
         )
 
 struct RiscvFpgaLane:
+    lane_id: text
     xlen: RiscvXlen
+    proof_lane_kind: RiscvProofLane
+    linux_policy_text: text
+    bundle_dir_name: text
     top_module: text
     rtl_dir: text
     rtl_sim_backend: text
@@ -207,7 +211,11 @@ impl RiscvFpgaLane:
     static fn rv64_default() -> RiscvFpgaLane:
         val platform = qemu_virt_rv64_platform_profile()
         RiscvFpgaLane(
+            lane_id: "rv64",
             xlen: RiscvXlen.Rv64,
+            proof_lane_kind: RiscvProofLane.GeneratedRv64Linux,
+            linux_policy_text: "repo-native-rv64-linux",
+            bundle_dir_name: "rv64",
             top_module: "simple_rv64gc_core",
             rtl_dir: "build/fpga/rv64/rtl",
             rtl_sim_backend: "ghdl-vhdl-2008",
@@ -222,7 +230,11 @@ impl RiscvFpgaLane:
     static fn rv32_default() -> RiscvFpgaLane:
         val platform = qemu_virt_rv32_platform_profile()
         RiscvFpgaLane(
+            lane_id: "rv32",
             xlen: RiscvXlen.Rv32,
+            proof_lane_kind: RiscvProofLane.GeneratedRv32Baremetal,
+            linux_policy_text: "repo-native-rv32-baremetal",
+            bundle_dir_name: "rv32",
             top_module: "simple_rv32gc_core",
             rtl_dir: "build/fpga/rv32/rtl",
             rtl_sim_backend: "ghdl-vhdl-2008",
@@ -234,14 +246,39 @@ impl RiscvFpgaLane:
             linux: LinuxArtifactSet.empty()
         )
 
+    static fn rv32_linux_experimental() -> RiscvFpgaLane:
+        val platform = qemu_virt_rv32_platform_profile()
+        RiscvFpgaLane(
+            lane_id: "rv32_linux_experimental",
+            xlen: RiscvXlen.Rv32,
+            proof_lane_kind: RiscvProofLane.GeneratedRv32Linux,
+            linux_policy_text: "experimental-generated-rv32-linux",
+            bundle_dir_name: "rv32_linux",
+            top_module: "simple_rv32gc_core",
+            rtl_dir: "build/fpga/rv32_linux/rtl",
+            rtl_sim_backend: "ghdl-vhdl-2008",
+            bootrom_path: "build/fpga/rv32_linux/bootrom.bin",
+            readiness: RiscvReadinessStatus.Contract,
+            linux_profile: rv32_qemu_virt_linux_profile(),
+            platform_profile: platform,
+            scope_note: "experimental RV32GC generated-core Linux lane (non-authoritative repo proof cross-check)",
+            linux: LinuxArtifactSet.empty()
+        )
+
     fn proof_lane() -> RiscvProofLane:
-        if self.xlen == RiscvXlen.Rv32:
-            return RiscvProofLane.GeneratedRv32Baremetal
-        RiscvProofLane.GeneratedRv64Linux
+        self.proof_lane_kind
+
+    fn linux_policy() -> text:
+        self.linux_policy_text
+
+    fn bundle_root_name() -> text:
+        self.bundle_dir_name
 
     fn generated_core_shell_contract() -> GeneratedCoreShellContract:
-        if self.xlen == RiscvXlen.Rv32:
+        if self.proof_lane_kind == RiscvProofLane.GeneratedRv32Baremetal:
             return GeneratedCoreShellContract.rv32_baremetal()
+        if self.proof_lane_kind == RiscvProofLane.GeneratedRv32Linux:
+            return GeneratedCoreShellContract.rv32_linux()
         GeneratedCoreShellContract.rv64_linux()
 
     fn expected_boot_markers() -> [text]:
@@ -358,7 +395,7 @@ impl RiscvFpgaLane:
 
     fn reg_file_init_hex() -> text:
         val boot = self.generated_core_shell_contract().boot
-        if self.xlen == RiscvXlen.Rv64 and boot.opensbi_fw_jump:
+        if boot.opensbi_fw_jump:
             return "(2 => x\"{self.stack_pointer_hex()}\", 10 => x\"{self.boot_hartid_hex()}\", 11 => x\"{self.boot_dtb_hex()}\", others => (others => '0'))"
         "(2 => x\"{self.stack_pointer_hex()}\", others => (others => '0'))"
 
@@ -2871,25 +2908,37 @@ impl RiscvFpgaLane:
         "tb_generated_rv32_smoke.vhd"
 
     fn has_rv32_smoke_testbench() -> bool:
-        self.xlen == RiscvXlen.Rv32
+        self.proof_lane_kind == RiscvProofLane.GeneratedRv32Baremetal
 
     fn rv32_strobe_testbench_file_name() -> text:
         "tb_generated_rv32_strobe.vhd"
 
     fn has_rv32_strobe_testbench() -> bool:
-        self.xlen == RiscvXlen.Rv32
+        self.proof_lane_kind == RiscvProofLane.GeneratedRv32Baremetal
 
     fn rv32_semihost_testbench_file_name() -> text:
         "tb_semi_run.vhd"
 
     fn has_rv32_semihost_testbench() -> bool:
-        self.xlen == RiscvXlen.Rv32
+        self.proof_lane_kind == RiscvProofLane.GeneratedRv32Baremetal
 
     fn rv32_mailbox_testbench_file_name() -> text:
         "tb_mailbox.vhd"
 
     fn has_rv32_mailbox_testbench() -> bool:
-        self.xlen == RiscvXlen.Rv32
+        self.proof_lane_kind == RiscvProofLane.GeneratedRv32Baremetal
+
+    fn rv32_linux_handoff_testbench_file_name() -> text:
+        "tb_generated_rv32_linux_handoff.vhd"
+
+    fn has_rv32_linux_handoff_testbench() -> bool:
+        self.proof_lane_kind == RiscvProofLane.GeneratedRv32Linux
+
+    fn rv32_boot_info_real_dtb_testbench_file_name() -> text:
+        "tb_generated_rv32_boot_info_real_dtb.vhd"
+
+    fn has_rv32_boot_info_real_dtb_testbench() -> bool:
+        self.proof_lane_kind == RiscvProofLane.GeneratedRv32Linux
 
     fn fw_jump_testbench_file_name() -> text:
         "tb_generated_rv64_fw_jump.vhd"
@@ -2951,6 +3000,10 @@ impl RiscvFpgaLane:
                 generated_rv32_semihost_testbench_template()
             elif template_path == "tb_mailbox.vhd":
                 generated_rv32_mailbox_testbench_template()
+            elif template_path == "tb_generated_rv32_linux_handoff.vhd":
+                generated_rv32_linux_handoff_testbench_template()
+            elif template_path == "tb_generated_rv32_boot_info_real_dtb.vhd":
+                generated_rv32_boot_info_real_dtb_testbench_template()
             elif template_path == "tb_generated_rv64_smoke.vhd":
                 generated_rv64_smoke_testbench_template()
             elif template_path == "tb_generated_rv64_irq.vhd":
@@ -2986,6 +3039,12 @@ impl RiscvFpgaLane:
 
     fn rv32_mailbox_testbench_vhdl() -> text:
         self.generated_testbench_from_template("tb_mailbox.vhd")
+
+    fn rv32_linux_handoff_testbench_vhdl() -> text:
+        self.generated_testbench_from_template("tb_generated_rv32_linux_handoff.vhd")
+
+    fn rv32_boot_info_real_dtb_testbench_vhdl() -> text:
+        self.generated_testbench_from_template("tb_generated_rv32_boot_info_real_dtb.vhd")
 
     fn rv64_smoke_testbench_vhdl() -> text:
         self.generated_testbench_from_template("tb_generated_rv64_smoke.vhd")
@@ -3671,8 +3730,19 @@ impl FpgaPrepareManifest:
             generated_dir: "build/fpga/{board.id}/generated"
         )
 
+    static fn for_board_with_experimental_rv32_linux(board: XilinxBoardProfile) -> FpgaPrepareManifest:
+        FpgaPrepareManifest(
+            board: board,
+            lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default(), RiscvFpgaLane.rv32_linux_experimental()],
+            vivado_project_dir: "build/fpga/{board.id}/vivado",
+            generated_dir: "build/fpga/{board.id}/generated"
+        )
+
     static fn default_xilinx() -> FpgaPrepareManifest:
         FpgaPrepareManifest.for_board(XilinxBoardProfile.generic())
+
+    static fn default_xilinx_with_experimental_rv32_linux() -> FpgaPrepareManifest:
+        FpgaPrepareManifest.for_board_with_experimental_rv32_linux(XilinxBoardProfile.generic())
 
     fn validate_for_prepare() -> [text]:
         var errors = self.board.validate_for_prepare()
@@ -3704,7 +3774,7 @@ impl FpgaPrepareManifest:
     fn readiness_summary() -> text:
         var out = "board={self.board.name} part={self.board.part} lanes={self.lanes.len()}"
         for lane in self.lanes:
-            out = out + " {lane.xlen.to_text()}:{lane.readiness_status().to_text()}:{lane.platform_profile.name}:{lane.top_module}:{lane.proof_lane().to_text()}"
+            out = out + " {lane.lane_id}:{lane.readiness_status().to_text()}:{lane.platform_profile.name}:{lane.top_module}:{lane.proof_lane().to_text()}"
         out
 
     fn rtl_manifest_text(root_dir: text) -> text:
@@ -3722,10 +3792,16 @@ impl FpgaPrepareManifest:
         out = out + "programmer = \"{self.board.programmer}\"\n"
         out = out + "vivado_mode = \"{self.board.vivado_mode}\"\n"
         for lane in self.lanes:
-            val lane_dir = "{root_dir}/{lane.xlen.to_text()}/rtl"
+            val lane_dir = "{root_dir}/{lane.bundle_root_name()}/rtl"
+            val authoritative_text = if lane.proof_lane() == RiscvProofLane.GeneratedRv32Linux:
+                "false"
+            else:
+                "true"
             out = out + "\n[[lane]]\n"
+            out = out + "lane_id = \"{lane.lane_id}\"\n"
             out = out + "arch = \"{lane.xlen.to_text()}\"\n"
             out = out + "xlen = {lane.xlen.bits()}\n"
+            out = out + "bundle_dir = \"{lane.bundle_root_name()}\"\n"
             out = out + "top = \"{lane.top_module}\"\n"
             out = out + "rtl_dir = \"{lane_dir}\"\n"
             out = out + "authoritative_rtl_root = \"{lane_dir}\"\n"
@@ -3746,6 +3822,10 @@ impl FpgaPrepareManifest:
                 out = out + "runner_testbench = \"{lane_dir}/{lane.rv32_semihost_testbench_file_name()}\"\n"
             if lane.has_rv32_mailbox_testbench():
                 out = out + "runner_testbench = \"{lane_dir}/{lane.rv32_mailbox_testbench_file_name()}\"\n"
+            if lane.has_rv32_linux_handoff_testbench():
+                out = out + "runner_testbench = \"{lane_dir}/{lane.rv32_linux_handoff_testbench_file_name()}\"\n"
+            if lane.has_rv32_boot_info_real_dtb_testbench():
+                out = out + "runner_testbench = \"{lane_dir}/{lane.rv32_boot_info_real_dtb_testbench_file_name()}\"\n"
             if lane.has_rv64_smoke_testbench():
                 out = out + "runner_testbench = \"{lane_dir}/{lane.rv64_smoke_testbench_file_name()}\"\n"
             if lane.has_rv64_irq_testbench():
@@ -3759,7 +3839,8 @@ impl FpgaPrepareManifest:
             out = out + "platform = \"{lane.platform_profile.name}\"\n"
             out = out + "scope = \"{lane.scope_note}\"\n"
             out = out + "shell_contract = \"{lane.proof_lane_summary()}\"\n"
-            out = out + "linux_policy = \"{lane.xlen.linux_policy()}\"\n"
+            out = out + "linux_policy = \"{lane.linux_policy()}\"\n"
+            out = out + "authoritative = \"{authoritative_text}\"\n"
             out = out + "abi = \"{lane.linux_profile.abi.to_text()}\"\n"
             out = out + "mmu = \"{lane.linux_profile.mmu_mode.to_text()}\"\n"
             out = out + "firmware_mode = \"{lane.linux_profile.firmware_mode.to_text()}\"\n"
@@ -3788,16 +3869,19 @@ fn _bundle_readme_text(manifest: FpgaPrepareManifest, root_dir: text) -> text:
     out = out + "- Vivado plan scaffold: `vivado_project_plan.tcl`\n"
     out = out + "- logical board I/O contract: `board_interface_contract.sdn`\n"
     for lane in manifest.lanes:
-        out = out + "- {lane.xlen.to_text()} generated Simple source: `{lane.xlen.to_text()}/rtl/{lane.hardware_source_file_name()}`\n"
-        out = out + "- {lane.xlen.to_text()} generated VHDL package: `{lane.xlen.to_text()}/rtl/{lane.package_name()}.vhd`\n"
-        out = out + "- {lane.xlen.to_text()} generated VHDL core: `{lane.xlen.to_text()}/rtl/{lane.top_module}.vhd`\n"
+        out = out + "- {lane.lane_id} generated Simple source: `{lane.bundle_root_name()}/rtl/{lane.hardware_source_file_name()}`\n"
+        out = out + "- {lane.lane_id} generated VHDL package: `{lane.bundle_root_name()}/rtl/{lane.package_name()}.vhd`\n"
+        out = out + "- {lane.lane_id} generated VHDL core: `{lane.bundle_root_name()}/rtl/{lane.top_module}.vhd`\n"
         if lane.has_support_package():
-            out = out + "- {lane.xlen.to_text()} generated support package: `{lane.xlen.to_text()}/rtl/{lane.support_package_file_name()}`\n"
+            out = out + "- {lane.lane_id} generated support package: `{lane.bundle_root_name()}/rtl/{lane.support_package_file_name()}`\n"
         if lane.has_wrapper():
-            out = out + "- {lane.xlen.to_text()} generated wrapper: `{lane.xlen.to_text()}/rtl/{lane.wrapper_file_name()}`\n"
+            out = out + "- {lane.lane_id} generated wrapper: `{lane.bundle_root_name()}/rtl/{lane.wrapper_file_name()}`\n"
+        if lane.proof_lane() == RiscvProofLane.GeneratedRv32Linux:
+            out = out + "- {lane.lane_id} is experimental: bundle-emitted RV32 Linux handoff/DTB cross-checks only, not repo-authoritative generated-core proof.\n"
     out = out + "\nBoundary:\n"
     out = out + "- This bundle is the authoritative source for runner-consumed generated-core RTL.\n"
-    out = out + "- Generated-core runners must compile RTL only from the emitted `rv32/rtl` and `rv64/rtl` bundle directories.\n"
+    out = out + "- Generated-core runners must compile RTL only from the emitted bundle directories such as `rv32/rtl`, `rv64/rtl`, and the optional experimental `rv32_linux/rtl`.\n"
+    out = out + "- The experimental RV32 Linux lane is a non-authoritative bring-up cross-check. It does not replace the default RV32 baremetal proof lane or the default RV64 Linux proof lane.\n"
     out = out + "- It does not prove constraints completeness, synthesis success, programming success, or board runtime success.\n"
     out
 
@@ -3839,7 +3923,7 @@ fn generate_riscv_fpga_rtl_bundle(root_dir: text, manifest: FpgaPrepareManifest)
 
     var generated: [text] = []
     for lane in manifest.lanes:
-        val lane_root = "{root_dir}/{lane.xlen.to_text()}"
+        val lane_root = "{root_dir}/{lane.bundle_root_name()}"
         if not rt_dir_exists(lane_root) and not rt_dir_create(lane_root, true):
             return Err("failed to create rtl lane root dir: {lane_root}")
         val lane_dir = "{lane_root}/rtl"
@@ -3877,6 +3961,14 @@ fn generate_riscv_fpga_rtl_bundle(root_dir: text, manifest: FpgaPrepareManifest)
         if lane.has_rv32_mailbox_testbench():
             val testbench_path = "{lane_dir}/{lane.rv32_mailbox_testbench_file_name()}"
             _write_text_file(testbench_path, lane.rv32_mailbox_testbench_vhdl())?
+            generated.push(testbench_path)
+        if lane.has_rv32_linux_handoff_testbench():
+            val testbench_path = "{lane_dir}/{lane.rv32_linux_handoff_testbench_file_name()}"
+            _write_text_file(testbench_path, lane.rv32_linux_handoff_testbench_vhdl())?
+            generated.push(testbench_path)
+        if lane.has_rv32_boot_info_real_dtb_testbench():
+            val testbench_path = "{lane_dir}/{lane.rv32_boot_info_real_dtb_testbench_file_name()}"
+            _write_text_file(testbench_path, lane.rv32_boot_info_real_dtb_testbench_vhdl())?
             generated.push(testbench_path)
         if lane.has_rv64_smoke_testbench():
             val testbench_path = "{lane_dir}/{lane.rv64_smoke_testbench_file_name()}"
@@ -3939,12 +4031,23 @@ fn generate_riscv_fpga_rtl_bundle(root_dir: text, manifest: FpgaPrepareManifest)
 fn generate_default_riscv_fpga_rtl_bundle(root_dir: text) -> Result<RiscvFpgaRtlBundle, text>:
     generate_riscv_fpga_rtl_bundle(root_dir, FpgaPrepareManifest.default_xilinx())
 
+fn generate_default_riscv_fpga_rtl_bundle_with_experimental_rv32_linux(root_dir: text) -> Result<RiscvFpgaRtlBundle, text>:
+    generate_riscv_fpga_rtl_bundle(root_dir, FpgaPrepareManifest.default_xilinx_with_experimental_rv32_linux())
+
 fn create_riscv_fpga_linux_manifest_for_board(board_id: text) -> Result<FpgaPrepareManifest, text>:
     val board = XilinxBoardProfile.from_id(board_id)?
     Ok(FpgaPrepareManifest.for_board(board))
 
+fn create_riscv_fpga_linux_manifest_for_board_with_experimental_rv32_linux(board_id: text) -> Result<FpgaPrepareManifest, text>:
+    val board = XilinxBoardProfile.from_id(board_id)?
+    Ok(FpgaPrepareManifest.for_board_with_experimental_rv32_linux(board))
+
 fn generate_riscv_fpga_rtl_bundle_for_board(root_dir: text, board_id: text) -> Result<RiscvFpgaRtlBundle, text>:
     val manifest = create_riscv_fpga_linux_manifest_for_board(board_id)?
+    generate_riscv_fpga_rtl_bundle(root_dir, manifest)
+
+fn generate_riscv_fpga_rtl_bundle_for_board_with_experimental_rv32_linux(root_dir: text, board_id: text) -> Result<RiscvFpgaRtlBundle, text>:
+    val manifest = create_riscv_fpga_linux_manifest_for_board_with_experimental_rv32_linux(board_id)?
     generate_riscv_fpga_rtl_bundle(root_dir, manifest)
 
 fn read_generated_riscv_fpga_rtl_file(path: text) -> text:
@@ -3952,6 +4055,9 @@ fn read_generated_riscv_fpga_rtl_file(path: text) -> text:
 
 fn create_default_riscv_fpga_linux_manifest() -> FpgaPrepareManifest:
     FpgaPrepareManifest.default_xilinx()
+
+fn create_default_riscv_fpga_linux_manifest_with_experimental_rv32_linux() -> FpgaPrepareManifest:
+    FpgaPrepareManifest.default_xilinx_with_experimental_rv32_linux()
 
 fn known_riscv_fpga_board_ids() -> [text]:
     XilinxBoardProfile.known_board_ids()

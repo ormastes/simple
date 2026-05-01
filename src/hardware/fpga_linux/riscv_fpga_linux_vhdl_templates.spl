@@ -2566,3 +2566,381 @@ begin
     end process;
 end architecture sim;
 """
+
+pub fn generated_rv32_linux_handoff_testbench_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.test_program.all;
+use work.simple_rv32i_core_pkg.all;
+
+entity tb_generated_rv32_linux_handoff is
+    generic (
+        MAX_CYCLES : integer := 200000
+    );
+end entity tb_generated_rv32_linux_handoff;
+
+architecture sim of tb_generated_rv32_linux_handoff is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 2048;
+    constant PASS_ADDR  : integer := 16#100#;
+    constant A0_ADDR    : integer := 16#110#;
+    constant A1_ADDR    : integer := 16#114#;
+    constant UART_ADDR  : std_logic_vector(31 downto 0) := x"10000000";
+    constant UART_MAGIC : std_logic_vector(31 downto 0) := x"48584E4C";
+    constant BOOT_A0    : std_logic_vector(31 downto 0) := x"00000000";
+    constant BOOT_A1    : std_logic_vector(31 downto 0) := x"88000000";
+
+    signal clk        : std_logic := '0';
+    signal reset_n    : std_logic := '0';
+    signal imem_addr  : std_logic_vector(31 downto 0) := (others => '0');
+    signal imem_data  : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_addr  : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_wdata : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_rdata : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_we    : std_logic := '0';
+    signal dmem_re    : std_logic := '0';
+    signal dmem_width : std_logic_vector(1 downto 0) := (others => '0');
+    signal dmem_wstrb : std_logic_vector(3 downto 0) := (others => '0');
+    signal trap       : std_logic := '0';
+    signal halt       : std_logic := '0';
+
+    type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(31 downto 0);
+
+    function safe_index(bits : std_logic_vector) return integer is
+    begin
+        for i in bits'range loop
+            if bits(i) /= '0' and bits(i) /= '1' then
+                return 0;
+            end if;
+        end loop;
+        return to_integer(unsigned(bits));
+    end function;
+
+    function word32_to_report_int(word_val : std_logic_vector(31 downto 0)) return integer is
+    begin
+        if word_val(31) = '1' then
+            return -1;
+        end if;
+        return safe_index(word_val(30 downto 0));
+    end function;
+
+    function mem_word_index(addr : std_logic_vector(31 downto 0)) return integer is
+    begin
+        return safe_index(addr(12 downto 2));
+    end function;
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"00000013");
+    begin
+        for i in 0 to PROGRAM_SIZE - 1 loop
+            if i < MEM_WORDS then
+                m(i) := PROGRAM_DATA(i);
+            end if;
+        end loop;
+        return m;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal uart_word : std_logic_vector(31 downto 0) := (others => '0');
+    signal uart_count : integer range 0 to 4 := 0;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.simple_rv32gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb,
+            irq_software => '0',
+            irq_timer  => '0',
+            irq_external => '0',
+            trap       => trap,
+            halt       => halt
+        );
+
+    clk <= not clk after CLK_PERIOD / 2 when not done else '0';
+
+    imem_data <= mem(mem_word_index(imem_addr))
+        when mem_word_index(imem_addr) < MEM_WORDS
+        else x"00000013";
+
+    process(clk)
+        variable word_idx : integer;
+        variable current_word : std_logic_vector(31 downto 0);
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' and dmem_addr = UART_ADDR and dmem_wstrb(0) = '1' then
+                if uart_count < 4 then
+                    uart_word((uart_count * 8) + 7 downto uart_count * 8) <= dmem_wdata(7 downto 0);
+                    uart_count <= uart_count + 1;
+                end if;
+            elsif dmem_we = '1' then
+                word_idx := mem_word_index(dmem_addr);
+                if word_idx < MEM_WORDS then
+                    current_word := mem(word_idx);
+                    for i in 0 to 3 loop
+                        if dmem_wstrb(i) = '1' then
+                            current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);
+                        end if;
+                    end loop;
+                    mem(word_idx) <= current_word;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mem(mem_word_index(dmem_addr))
+        when mem_word_index(dmem_addr) < MEM_WORDS
+        else (others => '0');
+
+    process
+        variable cycles : integer := 0;
+        variable pass_value : integer;
+        variable a0_value : integer;
+        variable a1_value : integer;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halt = '0' and trap = '0' and cycles < MAX_CYCLES loop
+            wait for CLK_PERIOD;
+            cycles := cycles + 1;
+        end loop;
+
+        pass_value := word32_to_report_int(mem(PASS_ADDR / 4));
+        a0_value := word32_to_report_int(mem(A0_ADDR / 4));
+        a1_value := word32_to_report_int(mem(A1_ADDR / 4));
+        report "CYCLES: " & integer'image(cycles);
+        report "PASS_WORD: " & integer'image(pass_value);
+        report "A0_LOW32: " & integer'image(a0_value);
+        report "A1_LOW32: " & integer'image(a1_value);
+        report "UART_BYTES_LOW32: " & integer'image(word32_to_report_int(uart_word));
+        if halt = '1' and pass_value = 42 and mem(A0_ADDR / 4) = BOOT_A0 and mem(A1_ADDR / 4) = BOOT_A1 and uart_word = UART_MAGIC then
+            report "GENERATED_RV32_LINUX_HANDOFF: PASS";
+        else
+            report "GENERATED_RV32_LINUX_HANDOFF: FAIL";
+        end if;
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""
+
+pub fn generated_rv32_boot_info_real_dtb_testbench_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.test_program.all;
+use work.simple_rv32i_core_pkg.all;
+
+entity tb_generated_rv32_boot_info_real_dtb is
+    generic (
+        MAX_CYCLES : integer := 200000
+    );
+end entity tb_generated_rv32_boot_info_real_dtb;
+
+architecture sim of tb_generated_rv32_boot_info_real_dtb is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 2048;
+    constant PASS_ADDR      : integer := 16#100#;
+    constant A0_ADDR        : integer := 16#110#;
+    constant A1_ADDR        : integer := 16#114#;
+    constant DTB_VALID_ADDR : integer := 16#118#;
+    constant UART_ADDR      : std_logic_vector(31 downto 0) := x"10000000";
+    constant UART_MAGIC     : std_logic_vector(31 downto 0) := x"42544452";
+    constant BOOT_A0        : std_logic_vector(31 downto 0) := x"00000000";
+    constant BOOT_A1        : std_logic_vector(31 downto 0) := x"88000000";
+    constant DTB_BASE_ADDR  : std_logic_vector(31 downto 0) := x"88000000";
+    constant DTB_SIZE_BYTES : integer := 32;
+
+    signal clk        : std_logic := '0';
+    signal reset_n    : std_logic := '0';
+    signal imem_addr  : std_logic_vector(31 downto 0) := (others => '0');
+    signal imem_data  : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_addr  : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_wdata : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_rdata : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_we    : std_logic := '0';
+    signal dmem_re    : std_logic := '0';
+    signal dmem_width : std_logic_vector(1 downto 0) := (others => '0');
+    signal dmem_wstrb : std_logic_vector(3 downto 0) := (others => '0');
+    signal trap       : std_logic := '0';
+    signal halt       : std_logic := '0';
+
+    type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(31 downto 0);
+    type byte_array_t is array (0 to DTB_SIZE_BYTES - 1) of std_logic_vector(7 downto 0);
+    constant DTB_BYTES : byte_array_t := (
+        x"D0", x"0D", x"FE", x"ED",
+        x"00", x"00", x"00", x"20",
+        x"00", x"00", x"00", x"20",
+        x"00", x"00", x"00", x"00",
+        x"00", x"00", x"00", x"00",
+        x"00", x"00", x"00", x"00",
+        x"00", x"00", x"00", x"00",
+        x"00", x"00", x"00", x"00"
+    );
+
+    function safe_index(bits : std_logic_vector) return integer is
+    begin
+        for i in bits'range loop
+            if bits(i) /= '0' and bits(i) /= '1' then
+                return 0;
+            end if;
+        end loop;
+        return to_integer(unsigned(bits));
+    end function;
+
+    function word32_to_report_int(word_val : std_logic_vector(31 downto 0)) return integer is
+    begin
+        if word_val(31) = '1' then
+            return -1;
+        end if;
+        return safe_index(word_val(30 downto 0));
+    end function;
+
+    function mem_word_index(addr : std_logic_vector(31 downto 0)) return integer is
+    begin
+        return safe_index(addr(12 downto 2));
+    end function;
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"00000013");
+    begin
+        for i in 0 to PROGRAM_SIZE - 1 loop
+            if i < MEM_WORDS then
+                m(i) := PROGRAM_DATA(i);
+            end if;
+        end loop;
+        return m;
+    end function;
+
+    function is_dtb_addr(addr : std_logic_vector(31 downto 0)) return boolean is
+    begin
+        return addr(31 downto 8) = DTB_BASE_ADDR(31 downto 8);
+    end function;
+
+    function dtb_word_at(addr : std_logic_vector(31 downto 0)) return std_logic_vector is
+        variable out_word : std_logic_vector(31 downto 0) := (others => '0');
+        variable offset : integer;
+    begin
+        offset := safe_index(addr(7 downto 0));
+        for i in 0 to 3 loop
+            if offset + i >= 0 and offset + i < DTB_SIZE_BYTES then
+                out_word((i * 8) + 7 downto i * 8) := DTB_BYTES(offset + i);
+            end if;
+        end loop;
+        return out_word;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal uart_word : std_logic_vector(31 downto 0) := (others => '0');
+    signal uart_count : integer range 0 to 4 := 0;
+    signal dtb_probe_seen : boolean := false;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.simple_rv32gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb,
+            irq_software => '0',
+            irq_timer  => '0',
+            irq_external => '0',
+            trap       => trap,
+            halt       => halt
+        );
+
+    clk <= not clk after CLK_PERIOD / 2 when not done else '0';
+
+    imem_data <= mem(mem_word_index(imem_addr))
+        when mem_word_index(imem_addr) < MEM_WORDS
+        else x"00000013";
+
+    process(clk)
+        variable word_idx : integer;
+        variable current_word : std_logic_vector(31 downto 0);
+    begin
+        if rising_edge(clk) then
+            if dmem_re = '1' and is_dtb_addr(dmem_addr) then
+                dtb_probe_seen <= true;
+            end if;
+            if dmem_we = '1' and dmem_addr = UART_ADDR and dmem_wstrb(0) = '1' then
+                if uart_count < 4 then
+                    uart_word((uart_count * 8) + 7 downto uart_count * 8) <= dmem_wdata(7 downto 0);
+                    uart_count <= uart_count + 1;
+                end if;
+            elsif dmem_we = '1' then
+                word_idx := mem_word_index(dmem_addr);
+                if word_idx < MEM_WORDS then
+                    current_word := mem(word_idx);
+                    for i in 0 to 3 loop
+                        if dmem_wstrb(i) = '1' then
+                            current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);
+                        end if;
+                    end loop;
+                    mem(word_idx) <= current_word;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= dtb_word_at(dmem_addr)
+        when is_dtb_addr(dmem_addr)
+        else mem(mem_word_index(dmem_addr))
+        when mem_word_index(dmem_addr) < MEM_WORDS
+        else (others => '0');
+
+    process
+        variable cycles : integer := 0;
+        variable pass_value : integer;
+        variable a0_value : integer;
+        variable a1_value : integer;
+        variable dtb_valid_value : integer;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halt = '0' and trap = '0' and cycles < MAX_CYCLES loop
+            wait for CLK_PERIOD;
+            cycles := cycles + 1;
+        end loop;
+
+        pass_value := word32_to_report_int(mem(PASS_ADDR / 4));
+        a0_value := word32_to_report_int(mem(A0_ADDR / 4));
+        a1_value := word32_to_report_int(mem(A1_ADDR / 4));
+        dtb_valid_value := word32_to_report_int(mem(DTB_VALID_ADDR / 4));
+        report "CYCLES: " & integer'image(cycles);
+        report "PASS_WORD: " & integer'image(pass_value);
+        report "A0_LOW32: " & integer'image(a0_value);
+        report "A1_LOW32: " & integer'image(a1_value);
+        report "DTB_VALID_LOW32: " & integer'image(dtb_valid_value);
+        report "DTB_PROBE_SEEN: " & boolean'image(dtb_probe_seen);
+        report "UART_BYTES_LOW32: " & integer'image(word32_to_report_int(uart_word));
+        if halt = '1' and pass_value = 42 and mem(A0_ADDR / 4) = BOOT_A0 and mem(A1_ADDR / 4) = BOOT_A1 and dtb_valid_value = 1 and uart_word = UART_MAGIC and dtb_probe_seen then
+            report "GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS";
+        else
+            report "GENERATED_RV32_BOOT_INFO_REAL_DTB: FAIL";
+        end if;
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""

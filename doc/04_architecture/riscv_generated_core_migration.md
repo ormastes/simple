@@ -27,7 +27,7 @@ The public contract lives in `hardware.riscv_common.pkg.riscv_generated_core_pkg
 
 - `generated_rv32_baremetal` is the repo-native proof target for RV32 first.
 - `generated_rv64_linux` is the repo-native proof target for RV64 Linux and is validated by generated GHDL UART boot markers.
-- `generated_rv32_linux` remains an optional later lane.
+- `generated_rv32_linux` is now available only as an explicit experimental lane under the emitted `rv32_linux/rtl` bundle root. It remains non-authoritative and exists to advance Linux handoff and DTB bring-up without changing the default RV32 proof target.
 - External LiteX/CVA6 lanes never count as generated-core proof.
 
 ## Migration Rule

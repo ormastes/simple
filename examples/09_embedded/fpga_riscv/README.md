@@ -4,9 +4,11 @@ Handwritten RV32I single-cycle CPU with semihosting, validated in GHDL simulatio
 
 This directory is the current in-repo runnable RTL CPU lane. It is not generated from
 Simple today. Repo-native generated RV32/RV64 work lives under `src/hardware/` as
-contract/orchestration code, while Linux-capable RTL proof currently comes from
-explicit external reference lanes (`reference_external_rv32_linux`,
-`reference_external_rv64_linux`).
+contract/orchestration code. The default generated-core proof lanes remain
+`generated_rv32_baremetal` and `generated_rv64_linux`, while RV32 Linux exists
+only as an explicit experimental generated bundle lane under `rv32_linux/rtl`.
+External Linux-capable RTL lanes (`reference_external_rv32_linux`,
+`reference_external_rv64_linux`) remain cross-checks, not substitutes.
 
 ## Support Status
 

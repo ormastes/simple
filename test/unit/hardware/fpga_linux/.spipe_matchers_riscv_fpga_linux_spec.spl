@@ -9,7 +9,7 @@ use std.spec.*
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_read_text(path: text) -> text
 
-use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, LinuxArtifactSet, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, create_default_riscv_fpga_linux_manifest_with_experimental_rv32_linux, generate_default_riscv_fpga_rtl_bundle, generate_default_riscv_fpga_rtl_bundle_with_experimental_rv32_linux, read_generated_riscv_fpga_rtl_file}
 use hardware.riscv_common.pkg.riscv_generated_core_pkg.RiscvProofLane
 
 fn shell(command: text) -> i64:
@@ -60,6 +60,16 @@ describe "RISC-V FPGA Linux lanes":
         expect (lane.required_soc_blocks()).contains("mailbox-shell-service")
         expect (lane.proof_acceptance_markers()).contains("mailbox-sentinel")
 
+    it "defines an explicit experimental RV32 Linux lane without changing the default proof lane":
+        val lane = RiscvFpgaLane.rv32_linux_experimental()
+        expect lane.xlen.to_text() == "rv32"
+        expect lane.proof_lane() == RiscvProofLane.GeneratedRv32Linux
+        expect lane.bundle_root_name() == "rv32_linux"
+        expect lane.linux_policy() == "experimental-generated-rv32-linux"
+        expect (lane.scope_note).contains("experimental")
+        expect (lane.required_soc_blocks()).contains("opensbi-handoff")
+        expect (lane.proof_acceptance_markers()).contains("Linux version")
+
     it "requires validation plus boot artifacts before Linux boot claims":
         val lane = RiscvFpgaLane.rv32_default()
         val errors = lane.validate_for_linux_boot()
@@ -100,6 +110,20 @@ describe "RISC-V FPGA Linux manifest":
         expect manifest.validate_for_prepare().len() == 0
         expect (manifest.readiness_summary()).contains("rv32:contract:qemu_virt_rv32:simple_rv32gc_core:generated_rv32_baremetal")
         expect (manifest.readiness_summary()).contains("rv64:contract:qemu_virt_rv64:simple_rv64gc_core:generated_rv64_linux")
+
+    it "adds an opt-in experimental RV32 Linux lane without changing the default manifest":
+        val manifest = create_default_riscv_fpga_linux_manifest_with_experimental_rv32_linux()
+        expect manifest.lanes.len() == 3
+        expect (manifest.readiness_summary()).contains("rv32_linux_experimental:contract:qemu_virt_rv32:simple_rv32gc_core:generated_rv32_linux")
+        val text = manifest.rtl_manifest_text("/tmp/rv32_linux_manifest")
+        expect (text).contains("lane_id = \"rv32\"")
+        expect (text).contains("lane_id = \"rv32_linux_experimental\"")
+        expect (text).contains("bundle_dir = \"rv32_linux\"")
+        expect (text).contains("proof_lane = \"generated_rv32_linux\"")
+        expect (text).contains("linux_policy = \"experimental-generated-rv32-linux\"")
+        expect (text).contains("authoritative = \"false\"")
+        expect (text).contains("runner_testbench = \"/tmp/rv32_linux_manifest/rv32_linux/rtl/tb_generated_rv32_linux_handoff.vhd\"")
+        expect (text).contains("runner_testbench = \"/tmp/rv32_linux_manifest/rv32_linux/rtl/tb_generated_rv32_boot_info_real_dtb.vhd\"")
 
     it "emits generated RV64 Linux lane metadata in the manifest":
         val manifest = create_default_riscv_fpga_linux_manifest()
@@ -334,6 +358,8 @@ describe "Generated runner provenance":
         val rv32_semihost_runner = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv32_semihost_runner.shs")
         val rv32_mailbox_runner = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv32_mailbox_runner.shs")
         val rv32_strobe_runner = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv32_strobe_runner.shs")
+        val rv32_linux_handoff_runner = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv32_linux_handoff_runner.shs")
+        val rv32_boot_info_real_dtb_runner = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv32_boot_info_real_dtb_runner.shs")
         val rv64_runner = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_runner.shs")
         val rv64_irq_runner = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_irq_runner.shs")
         val rv64_linux_handoff_runner = rt_file_read_text("src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_linux_handoff_runner.shs")
@@ -343,6 +369,8 @@ describe "Generated runner provenance":
         expect (rv32_semihost_runner).contains("RTL_DIR=\"$GEN_DIR/rv32/rtl\"")
         expect (rv32_mailbox_runner).contains("RTL_DIR=\"$GEN_DIR/rv32/rtl\"")
         expect (rv32_strobe_runner).contains("RTL_DIR=\"$GEN_DIR/rv32/rtl\"")
+        expect (rv32_linux_handoff_runner).contains("RTL_DIR=\"$GEN_DIR/rv32_linux/rtl\"")
+        expect (rv32_boot_info_real_dtb_runner).contains("RTL_DIR=\"$GEN_DIR/rv32_linux/rtl\"")
         expect (rv64_runner).contains("RTL_DIR=\"$GEN_DIR/rv64/rtl\"")
         expect (rv64_irq_runner).contains("RTL_DIR=\"$GEN_DIR/rv64/rtl\"")
         expect (rv64_linux_handoff_runner).contains("RTL_DIR=\"$GEN_DIR/rv64/rtl\"")
@@ -352,7 +380,31 @@ describe "Generated runner provenance":
         expect rv32_semihost_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
         expect rv32_mailbox_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
         expect rv32_strobe_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
+        expect rv32_linux_handoff_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
+        expect rv32_boot_info_real_dtb_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
         expect rv64_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
         expect rv64_irq_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
         expect rv64_linux_handoff_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
         expect rv64_boot_banner_runner.contains("examples/09_embedded/fpga_riscv/rtl") == false
+
+describe "Experimental RV32 Linux bundle generation":
+    it "emits the experimental lane in a separate runner-consumable rtl root":
+        expect shell("rm -rf '/tmp/simple_rv32_linux_fpga_rtl_spec'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle_with_experimental_rv32_linux("/tmp/simple_rv32_linux_fpga_rtl_spec")
+        expect result.is_ok() == true
+        val bundle = result.unwrap()
+        val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+        val rv32_linux_source = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv32_linux_fpga_rtl_spec/rv32_linux/rtl/simple_rv32gc_core.spl")
+        val rv32_linux_handoff_tb = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv32_linux_fpga_rtl_spec/rv32_linux/rtl/tb_generated_rv32_linux_handoff.vhd")
+        val rv32_linux_real_dtb_tb = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv32_linux_fpga_rtl_spec/rv32_linux/rtl/tb_generated_rv32_boot_info_real_dtb.vhd")
+        expect (rv32_linux_source).contains("proof_lane: generated_rv32_linux")
+        expect (rv32_linux_source).contains("scope: experimental RV32GC generated-core Linux lane")
+        expect (rv32_linux_handoff_tb).contains("entity tb_generated_rv32_linux_handoff is")
+        expect (rv32_linux_handoff_tb).contains("report \"GENERATED_RV32_LINUX_HANDOFF: PASS\";")
+        expect (rv32_linux_real_dtb_tb).contains("entity tb_generated_rv32_boot_info_real_dtb is")
+        expect (rv32_linux_real_dtb_tb).contains("report \"GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS\";")
+        expect (manifest_text).contains("authoritative_rtl_root = \"/tmp/simple_rv32_linux_fpga_rtl_spec/rv32_linux/rtl\"")
+        expect (manifest_text).contains("lane_id = \"rv32_linux_experimental\"")
+        expect (manifest_text).contains("authoritative = \"false\"")
+        expect (bundle.generated_files).contains("/tmp/simple_rv32_linux_fpga_rtl_spec/rv32_linux/rtl/tb_generated_rv32_linux_handoff.vhd")
+        expect (bundle.generated_files).contains("/tmp/simple_rv32_linux_fpga_rtl_spec/rv32_linux/rtl/tb_generated_rv32_boot_info_real_dtb.vhd")

@@ -35,6 +35,7 @@ Generated artifact details:
 - The bounded store path now also exposes `dmem_wstrb` and lane-packed `dmem_wdata`, covering `SB/SH/SW` on RV32 and `SB/SH/SW/SD` on RV64 through address-derived masks and shifts.
 - The bounded load path now mirrors that lane behavior by extracting bytes, halfwords, and words from aligned `dmem_rdata` via address-derived right shifts before sign or zero extension.
 - Current lane policy is strict and repo-wide: RV32 is the repo-native generated-core baremetal lane, RV64 is the repo-native generated-core Linux lane, and generated-core provenance comes from the emitted bundle RTL rather than handwritten example RTL.
+- The generated RV32 Linux surface is emitted only behind an explicit experimental lane selector. Its bundle root is `rv32_linux/rtl`, its manifest entry is marked non-authoritative, and its proof goal is limited to deterministic Linux-handoff and DTB/boot-info checkpoints rather than the repo-authoritative generated-core claim.
 
 Validation:
 
@@ -50,4 +51,5 @@ Next slices:
 - Add Vivado project materialization and board programming once the exact board profile is known.
 - Extend the helper-proof pattern to additional decode/update families without reintroducing handwritten raw-slice reconstruction where a generated helper contract already exists.
 - Use the next milestone to add CSR/privilege/MMU/interrupt/trap completion, DTB plus firmware handoff generation, and Linux boot validation on top of this bounded helper-driven shell rather than widening this historical artifact into a second canonical Linux pipeline.
+- Until those layers are complete, treat external RV32 Linux references as cross-checks only. They do not substitute for the repo-emitted experimental `generated_rv32_linux` bundle, and that experimental bundle still does not promote RV32 Linux to authoritative repo proof.
 - Keep future docs aligned with `rv64_linux_rtl_pipeline` as the canonical milestone rather than restating mixed-lane Linux capability claims or restoring authority to handwritten example RTL here.
