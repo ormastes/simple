@@ -47,7 +47,10 @@ fn test_simd_load_wide_alias() {
                 assert_eq!(*lanes, 8);
                 assert_eq!(*element, TypeId::F32);
             } else {
-                panic!("Expected Simd type for load result, got {:?}", module.types.get(value.ty));
+                panic!(
+                    "Expected Simd type for load result, got {:?}",
+                    module.types.get(value.ty)
+                );
             }
         } else {
             panic!("Expected GpuIntrinsic SimdLoad, got {:?}", value.kind);
@@ -73,7 +76,10 @@ fn test_simd_load_named_alias() {
                 assert_eq!(*lanes, 8);
                 assert_eq!(*element, TypeId::F32);
             } else {
-                panic!("Expected Simd type for load result, got {:?}", module.types.get(value.ty));
+                panic!(
+                    "Expected Simd type for load result, got {:?}",
+                    module.types.get(value.ty)
+                );
             }
         } else {
             panic!("Expected GpuIntrinsic SimdLoad, got {:?}", value.kind);
@@ -121,7 +127,10 @@ fn test_simd_gather_wide_alias() {
                 assert_eq!(*lanes, 8);
                 assert_eq!(*element, TypeId::F32);
             } else {
-                panic!("Expected Simd type for gather result, got {:?}", module.types.get(value.ty));
+                panic!(
+                    "Expected Simd type for gather result, got {:?}",
+                    module.types.get(value.ty)
+                );
             }
         } else {
             panic!("Expected GpuIntrinsic SimdGather, got {:?}", value.kind);
@@ -147,7 +156,10 @@ fn test_simd_gather_named_alias() {
                 assert_eq!(*lanes, 8);
                 assert_eq!(*element, TypeId::F32);
             } else {
-                panic!("Expected Simd type for gather result, got {:?}", module.types.get(value.ty));
+                panic!(
+                    "Expected Simd type for gather result, got {:?}",
+                    module.types.get(value.ty)
+                );
             }
         } else {
             panic!("Expected GpuIntrinsic SimdGather, got {:?}", value.kind);

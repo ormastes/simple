@@ -43,6 +43,18 @@ enum HIRSimdLoopCandidate {
         input: HirExpr,
         guard: Option<HirExpr>,
     },
+    ReductionMin {
+        kernel: &'static str,
+        target: HirExpr,
+        input: HirExpr,
+        guard: Option<HirExpr>,
+    },
+    ReductionMax {
+        kernel: &'static str,
+        target: HirExpr,
+        input: HirExpr,
+        guard: Option<HirExpr>,
+    },
     ReductionDot {
         kernel: &'static str,
         target: HirExpr,
@@ -359,7 +371,14 @@ impl CompilerPipeline {
             _ => return "unsupported index pattern",
         }
 
-        if !matches!(stmt.iterable, Expr::Range { start: Some(_), end: Some(_), .. }) {
+        if !matches!(
+            stmt.iterable,
+            Expr::Range {
+                start: Some(_),
+                end: Some(_),
+                ..
+            }
+        ) {
             return "unsupported loop form (only canonical range for-loops are analyzed)";
         }
 
@@ -369,9 +388,7 @@ impl CompilerPipeline {
 
         match &stmt.body.statements[0] {
             Node::Assignment(assign) => {
-                if matches!(assign.op, AssignOp::AddAssign)
-                    && matches!(assign.target, Expr::Identifier(_))
-                {
+                if matches!(assign.op, AssignOp::AddAssign) && matches!(assign.target, Expr::Identifier(_)) {
                     return "unsupported reduction form";
                 }
 
@@ -395,7 +412,14 @@ impl CompilerPipeline {
             _ => return None,
         };
 
-        if !matches!(stmt.iterable, Expr::Range { start: Some(_), end: Some(_), .. }) {
+        if !matches!(
+            stmt.iterable,
+            Expr::Range {
+                start: Some(_),
+                end: Some(_),
+                ..
+            }
+        ) {
             return None;
         }
 
@@ -528,13 +552,16 @@ impl CompilerPipeline {
                     self.collect_typed_explicit_simd_warning_lines_from_stmts(types, function_name, body, lines);
                 }
                 HirStmt::If {
-                    then_block,
-                    else_block,
-                    ..
+                    then_block, else_block, ..
                 } => {
                     self.collect_typed_explicit_simd_warning_lines_from_stmts(types, function_name, then_block, lines);
                     if let Some(else_block) = else_block {
-                        self.collect_typed_explicit_simd_warning_lines_from_stmts(types, function_name, else_block, lines);
+                        self.collect_typed_explicit_simd_warning_lines_from_stmts(
+                            types,
+                            function_name,
+                            else_block,
+                            lines,
+                        );
                     }
                 }
                 HirStmt::While { body, .. } | HirStmt::Loop { body, .. } | HirStmt::Defer { body } => {
@@ -558,7 +585,12 @@ impl CompilerPipeline {
     pub(super) fn collect_typed_simd_report_lines(&self, hir_module: &hir::HirModule) -> Vec<String> {
         let mut lines = Vec::new();
         for function in &hir_module.functions {
-            self.collect_typed_simd_report_lines_from_stmts(&hir_module.types, &function.name, &function.body, &mut lines);
+            self.collect_typed_simd_report_lines_from_stmts(
+                &hir_module.types,
+                &function.name,
+                &function.body,
+                &mut lines,
+            );
         }
         lines
     }
@@ -593,9 +625,7 @@ impl CompilerPipeline {
                     self.collect_typed_simd_report_lines_from_stmts(types, function_name, body, lines);
                 }
                 HirStmt::If {
-                    then_block,
-                    else_block,
-                    ..
+                    then_block, else_block, ..
                 } => {
                     self.collect_typed_simd_report_lines_from_stmts(types, function_name, then_block, lines);
                     if let Some(else_block) = else_block {
@@ -603,9 +633,7 @@ impl CompilerPipeline {
                     }
                 }
                 HirStmt::While {
-                    body,
-                    simd_requested,
-                    ..
+                    body, simd_requested, ..
                 } => {
                     if *simd_requested {
                         lines.push(format!(
@@ -615,10 +643,7 @@ impl CompilerPipeline {
                     }
                     self.collect_typed_simd_report_lines_from_stmts(types, function_name, body, lines);
                 }
-                HirStmt::Loop {
-                    body,
-                    simd_requested,
-                } => {
+                HirStmt::Loop { body, simd_requested } => {
                     if *simd_requested {
                         lines.push(format!(
                             "simd-report: function={} explicit @simd on loop; not vectorized: unsupported loop form (only canonical range for-loops are analyzed)",
@@ -641,6 +666,8 @@ impl CompilerPipeline {
             HIRSimdLoopCandidate::MapMul { kernel, .. } => kernel,
             HIRSimdLoopCandidate::MapFma { kernel, .. } => kernel,
             HIRSimdLoopCandidate::ReductionSum { kernel, .. } => kernel,
+            HIRSimdLoopCandidate::ReductionMin { kernel, .. } => kernel,
+            HIRSimdLoopCandidate::ReductionMax { kernel, .. } => kernel,
             HIRSimdLoopCandidate::ReductionDot { kernel, .. } => kernel,
         }
     }
@@ -678,9 +705,7 @@ impl CompilerPipeline {
                     }
                 }
                 HirStmt::If {
-                    then_block,
-                    else_block,
-                    ..
+                    then_block, else_block, ..
                 } => {
                     self.rewrite_hir_simd_stmts(types, then_block);
                     if let Some(else_block) = else_block {
@@ -706,15 +731,16 @@ impl CompilerPipeline {
             } => (
                 guard,
                 HirStmt::Assign {
-                target: out.clone(),
-                value: HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: kernel.to_string(),
-                        args: vec![lhs, rhs],
+                    target: out.clone(),
+                    value: HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: kernel.to_string(),
+                            args: vec![lhs, rhs],
+                        },
+                        ty: out.ty,
                     },
-                    ty: out.ty,
                 },
-            }),
+            ),
             HIRSimdLoopCandidate::MapMul {
                 kernel,
                 out,
@@ -724,15 +750,16 @@ impl CompilerPipeline {
             } => (
                 guard,
                 HirStmt::Assign {
-                target: out.clone(),
-                value: HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: kernel.to_string(),
-                        args: vec![lhs, rhs],
+                    target: out.clone(),
+                    value: HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: kernel.to_string(),
+                            args: vec![lhs, rhs],
+                        },
+                        ty: out.ty,
                     },
-                    ty: out.ty,
                 },
-            }),
+            ),
             HIRSimdLoopCandidate::MapFma {
                 kernel,
                 out,
@@ -743,15 +770,16 @@ impl CompilerPipeline {
             } => (
                 guard,
                 HirStmt::Assign {
-                target: out.clone(),
-                value: HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: kernel.to_string(),
-                        args: vec![a, b, c],
+                    target: out.clone(),
+                    value: HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: kernel.to_string(),
+                            args: vec![a, b, c],
+                        },
+                        ty: out.ty,
                     },
-                    ty: out.ty,
                 },
-            }),
+            ),
             HIRSimdLoopCandidate::ReductionSum {
                 kernel,
                 target,
@@ -760,15 +788,52 @@ impl CompilerPipeline {
             } => (
                 guard,
                 HirStmt::Assign {
-                target: target.clone(),
-                value: HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: kernel.to_string(),
-                        args: vec![input],
+                    target: target.clone(),
+                    value: HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: kernel.to_string(),
+                            args: vec![input],
+                        },
+                        ty: target.ty,
                     },
-                    ty: target.ty,
                 },
-            }),
+            ),
+            HIRSimdLoopCandidate::ReductionMin {
+                kernel,
+                target,
+                input,
+                guard,
+            } => (
+                guard,
+                HirStmt::Assign {
+                    target: target.clone(),
+                    value: HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: kernel.to_string(),
+                            args: vec![input],
+                        },
+                        ty: target.ty,
+                    },
+                },
+            ),
+            HIRSimdLoopCandidate::ReductionMax {
+                kernel,
+                target,
+                input,
+                guard,
+            } => (
+                guard,
+                HirStmt::Assign {
+                    target: target.clone(),
+                    value: HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: kernel.to_string(),
+                            args: vec![input],
+                        },
+                        ty: target.ty,
+                    },
+                },
+            ),
             HIRSimdLoopCandidate::ReductionDot {
                 kernel,
                 target,
@@ -778,15 +843,16 @@ impl CompilerPipeline {
             } => (
                 guard,
                 HirStmt::Assign {
-                target: target.clone(),
-                value: HirExpr {
-                    kind: HirExprKind::BuiltinCall {
-                        name: kernel.to_string(),
-                        args: vec![lhs, rhs],
+                    target: target.clone(),
+                    value: HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: kernel.to_string(),
+                            args: vec![lhs, rhs],
+                        },
+                        ty: target.ty,
                     },
-                    ty: target.ty,
                 },
-            }),
+            ),
         };
 
         if let Some(condition) = guard {
@@ -894,11 +960,7 @@ impl CompilerPipeline {
                 let rhs = self.hir_indexed_array_receiver(right)?.clone();
                 let lhs_layout = self.float_array_layout(types, &lhs)?;
                 let rhs_layout = self.float_array_layout(types, &rhs)?;
-                if lhs_layout != out_layout
-                    || rhs_layout != out_layout
-                    || out == lhs
-                    || out == rhs
-                {
+                if lhs_layout != out_layout || rhs_layout != out_layout || out == lhs || out == rhs {
                     return None;
                 }
                 let guard = self.build_simd_bound_guard(types, &args[1], [&out, &lhs, &rhs])?;
@@ -929,63 +991,94 @@ impl CompilerPipeline {
         let HirExprKind::Local(target_idx) = target.kind else {
             return None;
         };
-        let HirExprKind::Binary {
-            op: HirBinOp::Add,
-            left,
-            right,
-        } = &value.kind
-        else {
-            return None;
-        };
+        match &value.kind {
+            HirExprKind::Binary {
+                op: HirBinOp::Add,
+                left,
+                right,
+            } => {
+                if let Some((lhs, rhs)) = self.hir_dot_reduction_operands(target_idx, left, right) {
+                    let lhs = lhs.clone();
+                    let rhs = rhs.clone();
+                    let (lhs_ty, _) = self.float_array_layout(types, &lhs)?;
+                    let (rhs_ty, _) = self.float_array_layout(types, &rhs)?;
+                    if lhs_ty != rhs_ty || target.ty != lhs_ty {
+                        return None;
+                    }
+                    let guard = self.build_simd_bound_guard(types, range_end, [&lhs, &rhs])?;
+                    let kernel = match lhs_ty {
+                        TypeId::F32 => "rt_numeric_dot_f32",
+                        TypeId::F64 => "rt_numeric_dot_f64",
+                        _ => return None,
+                    };
+                    return Some(HIRSimdLoopCandidate::ReductionDot {
+                        kernel,
+                        target: target.clone(),
+                        lhs,
+                        rhs,
+                        guard,
+                    });
+                }
 
-        if let Some((lhs, rhs)) = self.hir_dot_reduction_operands(target_idx, left, right) {
-            let lhs = lhs.clone();
-            let rhs = rhs.clone();
-            let (lhs_ty, _) = self.float_array_layout(types, &lhs)?;
-            let (rhs_ty, _) = self.float_array_layout(types, &rhs)?;
-            if lhs_ty != rhs_ty || target.ty != lhs_ty {
-                return None;
+                let input = if matches!(left.kind, HirExprKind::Local(idx) if idx == target_idx) {
+                    self.hir_indexed_array_receiver(right)?
+                } else if matches!(right.kind, HirExprKind::Local(idx) if idx == target_idx) {
+                    self.hir_indexed_array_receiver(left)?
+                } else {
+                    return None;
+                };
+
+                let (element_ty, _) = self.float_array_layout(types, input)?;
+                if target.ty != element_ty {
+                    return None;
+                }
+                let guard = self.build_simd_bound_guard(types, range_end, [input])?;
+                let kernel = match element_ty {
+                    TypeId::F32 => "rt_numeric_sum_f32",
+                    TypeId::F64 => "rt_numeric_sum_f64",
+                    _ => return None,
+                };
+
+                Some(HIRSimdLoopCandidate::ReductionSum {
+                    kernel,
+                    target: target.clone(),
+                    input: input.clone(),
+                    guard,
+                })
             }
-            let guard = self.build_simd_bound_guard(types, range_end, [&lhs, &rhs])?;
-            let kernel = match lhs_ty {
-                TypeId::F32 => "rt_numeric_dot_f32",
-                TypeId::F64 => "rt_numeric_dot_f64",
-                _ => return None,
-            };
-            return Some(HIRSimdLoopCandidate::ReductionDot {
-                kernel,
-                target: target.clone(),
-                lhs,
-                rhs,
-                guard,
-            });
+            HirExprKind::BuiltinCall { name, args } if args.len() == 2 && (name == "min" || name == "max") => {
+                let input = if matches!(args[0].kind, HirExprKind::Local(idx) if idx == target_idx) {
+                    self.hir_indexed_array_receiver(&args[1])?
+                } else if matches!(args[1].kind, HirExprKind::Local(idx) if idx == target_idx) {
+                    self.hir_indexed_array_receiver(&args[0])?
+                } else {
+                    return None;
+                };
+
+                let (element_ty, _) = self.float_array_layout(types, input)?;
+                if target.ty != TypeId::F32 || element_ty != TypeId::F32 {
+                    return None;
+                }
+                let guard = self.build_simd_bound_guard(types, range_end, [input])?;
+                let candidate = if name == "min" {
+                    HIRSimdLoopCandidate::ReductionMin {
+                        kernel: "rt_numeric_min_f32",
+                        target: target.clone(),
+                        input: input.clone(),
+                        guard,
+                    }
+                } else {
+                    HIRSimdLoopCandidate::ReductionMax {
+                        kernel: "rt_numeric_max_f32",
+                        target: target.clone(),
+                        input: input.clone(),
+                        guard,
+                    }
+                };
+                Some(candidate)
+            }
+            _ => None,
         }
-
-        let input = if matches!(left.kind, HirExprKind::Local(idx) if idx == target_idx) {
-            self.hir_indexed_array_receiver(right)?
-        } else if matches!(right.kind, HirExprKind::Local(idx) if idx == target_idx) {
-            self.hir_indexed_array_receiver(left)?
-        } else {
-            return None;
-        };
-
-        let (element_ty, _) = self.float_array_layout(types, input)?;
-        if target.ty != element_ty {
-            return None;
-        }
-        let guard = self.build_simd_bound_guard(types, range_end, [input])?;
-        let kernel = match element_ty {
-            TypeId::F32 => "rt_numeric_sum_f32",
-            TypeId::F64 => "rt_numeric_sum_f64",
-            _ => return None,
-        };
-
-        Some(HIRSimdLoopCandidate::ReductionSum {
-            kernel,
-            target: target.clone(),
-            input: input.clone(),
-            guard,
-        })
     }
 
     fn hir_dot_reduction_operands<'a>(
@@ -1012,7 +1105,10 @@ impl CompilerPipeline {
         else {
             return None;
         };
-        Some((self.hir_indexed_array_receiver(left)?, self.hir_indexed_array_receiver(right)?))
+        Some((
+            self.hir_indexed_array_receiver(left)?,
+            self.hir_indexed_array_receiver(right)?,
+        ))
     }
 
     fn build_simd_bound_guard<const N: usize>(
@@ -1043,7 +1139,11 @@ impl CompilerPipeline {
         Some(guard)
     }
 
-    fn hir_fma_operands<'a>(&self, lhs: &'a HirExpr, rhs: &'a HirExpr) -> Option<(&'a HirExpr, &'a HirExpr, &'a HirExpr)> {
+    fn hir_fma_operands<'a>(
+        &self,
+        lhs: &'a HirExpr,
+        rhs: &'a HirExpr,
+    ) -> Option<(&'a HirExpr, &'a HirExpr, &'a HirExpr)> {
         if let HirExprKind::Binary {
             op: HirBinOp::Mul,
             left,
@@ -1051,7 +1151,11 @@ impl CompilerPipeline {
         } = &lhs.kind
         {
             let addend = self.hir_indexed_array_receiver(rhs)?;
-            return Some((self.hir_indexed_array_receiver(left)?, self.hir_indexed_array_receiver(right)?, addend));
+            return Some((
+                self.hir_indexed_array_receiver(left)?,
+                self.hir_indexed_array_receiver(right)?,
+                addend,
+            ));
         }
         if let HirExprKind::Binary {
             op: HirBinOp::Mul,
@@ -1060,7 +1164,11 @@ impl CompilerPipeline {
         } = &rhs.kind
         {
             let addend = self.hir_indexed_array_receiver(lhs)?;
-            return Some((self.hir_indexed_array_receiver(left)?, self.hir_indexed_array_receiver(right)?, addend));
+            return Some((
+                self.hir_indexed_array_receiver(left)?,
+                self.hir_indexed_array_receiver(right)?,
+                addend,
+            ));
         }
         None
     }
@@ -1083,14 +1191,20 @@ impl CompilerPipeline {
             {
                 Some(false)
             }
-            (HirExprKind::MethodCall { receiver: end_receiver, method, args, .. }, _)
-                if method == "len" && args.is_empty() && end_receiver.as_ref() == receiver =>
-            {
-                Some(false)
-            }
+            (
+                HirExprKind::MethodCall {
+                    receiver: end_receiver,
+                    method,
+                    args,
+                    ..
+                },
+                _,
+            ) if method == "len" && args.is_empty() && end_receiver.as_ref() == receiver => Some(false),
             (HirExprKind::Integer(_), None) => None,
             (HirExprKind::Local(_), _) => Some(true),
-            (HirExprKind::BuiltinCall { name, args }, _) if (name == "len" || name == "rt_array_len") && args.len() == 1 => {
+            (HirExprKind::BuiltinCall { name, args }, _)
+                if (name == "len" || name == "rt_array_len") && args.len() == 1 =>
+            {
                 Some(true)
             }
             (HirExprKind::MethodCall { method, args, .. }, _) if method == "len" && args.is_empty() => Some(true),

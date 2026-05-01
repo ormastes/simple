@@ -140,8 +140,7 @@ fn unresolved_bare_export_names(items: &[Node]) -> Vec<String> {
         if let Node::ExportUseStmt(export_stmt) = item {
             if export_stmt.path.segments.is_empty() {
                 for name in export_target_names(&export_stmt.target) {
-                    if !local_names.iter().any(|local| local == &name) && !names.iter().any(|seen| seen == &name)
-                    {
+                    if !local_names.iter().any(|local| local == &name) && !names.iter().any(|seen| seen == &name) {
                         names.push(name);
                     }
                 }
@@ -580,7 +579,11 @@ pub fn load_and_merge_module(
                     })
                     .or_else(|| {
                         let names = unresolved_bare_export_names(&filtered_items);
-                        if names.is_empty() { None } else { Some(names) }
+                        if names.is_empty() {
+                            None
+                        } else {
+                            Some(names)
+                        }
                     });
                 if requested_names.as_ref().is_some_and(|names| names.is_empty()) {
                     None

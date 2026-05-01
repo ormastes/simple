@@ -515,7 +515,7 @@ fn os_native_build_args(target: OsTarget, backend: text) -> [text]:
     args.push("--opt-level=aggressive")
     args.push("--log")
     args.push(log_mode)
-    if _is_arm_fs_exec_target(target) or _is_riscv_fs_exec_target(target):
+    if _is_arm_fs_exec_target(target) or _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target):
         args.push("--timeout")
         args.push("180")
     elif _is_ssh_live_target(target):
@@ -680,6 +680,8 @@ fn _build_sources(target: OsTarget) -> [text]:
         return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_riscv64_fs_exec_target(target):
         return ["build/os/generated", "examples/simple_os/arch/riscv64"]
+    if _is_riscv64_hosted_target(target):
+        return ["build/os/generated", "src", "examples"]
     if _is_riscv32_fs_exec_target(target):
         return ["build/os/generated", "examples/simple_os/arch/riscv32"]
     ["build/os/generated", "src", "examples"]
@@ -693,7 +695,7 @@ fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
         envs.push("SIMPLE_BOOT_MINIMAL=1")
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
-    if _is_riscv_fs_exec_target(target):
+    if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target):
         envs.push("SIMPLE_BOOT_MINIMAL=1")
     if _needs_freestanding_stub_env(target):
         envs.push("SIMPLE_ALLOW_FREESTANDING_STUBS=1")
@@ -786,7 +788,7 @@ fn _apply_build_env(target: OsTarget, objcopy_prefix: text) -> bool:
             return false
         if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
             return false
-    if _is_riscv_fs_exec_target(target):
+    if _is_riscv_fs_exec_target(target) or _is_riscv64_hosted_target(target):
         if not rt_env_set("SIMPLE_BOOT_MINIMAL", "1"):
             return false
     if _needs_freestanding_stub_env(target):
@@ -856,6 +858,10 @@ fn _is_riscv64_fs_exec_target(target: OsTarget) -> bool:
 fn _is_riscv32_fs_exec_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/riscv32/smoke_entry.spl" and
         target.output == "build/os/simpleos_riscv32_smf_fs.elf"
+
+fn _is_riscv64_hosted_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/riscv64/hosted_entry.spl" and
+        target.output == "build/os/simpleos_riscv64_hosted.elf"
 
 fn _is_riscv_fs_exec_target(target: OsTarget) -> bool:
     _is_riscv64_fs_exec_target(target) or _is_riscv32_fs_exec_target(target)
@@ -1337,7 +1343,7 @@ fn scenario_riscv64_virtio_fat32_smf() -> QemuScenario:
         memory: "512M",
         qemu_extra: ["-bios", "default"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv64),
         gui_mode: false,
-        description: "RV64 virt boot with VirtIO-BLK FAT32 SMF CLI and WM GUI media"
+        description: "RV64 virt boot with VirtIO-BLK FAT32 SMF smoke media"
     )
 
 fn scenario_riscv32_virtio_fat32_smf() -> QemuScenario:
@@ -1351,6 +1357,22 @@ fn scenario_riscv32_virtio_fat32_smf() -> QemuScenario:
         qemu_extra: ["-bios", "none"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv32),
         gui_mode: false,
         description: "RV32 virt boot with VirtIO-BLK FAT32 SMF CLI and WM GUI media"
+    )
+
+fn scenario_riscv64_hosted() -> QemuScenario:
+    """RV64 hosted-preflight lane with disk + net + host-forwarded SSH/HTTP probes."""
+    QemuScenario(
+        name: "riscv64-hosted",
+        arch: Architecture.Riscv64,
+        machine: "virt",
+        cpu: "rv64",
+        memory: "1024M",
+        qemu_extra: ["-bios", "default"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv64) + [
+            "-netdev", "user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80",
+            "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"
+        ],
+        gui_mode: false,
+        description: "RV64 hosted preflight lane with storage and forwarded SSH/HTTP"
     )
 
 fn scenario_x64_full_stack() -> QemuScenario:
@@ -1519,6 +1541,7 @@ fn get_all_scenarios() -> [QemuScenario]:
         scenario_arm64_virtio_fat32_smf(),
         scenario_arm32_virtio_fat32_smf(),
         scenario_riscv64_virtio_fat32_smf(),
+        scenario_riscv64_hosted(),
         scenario_riscv32_virtio_fat32_smf(),
         scenario_x64_full_stack(),
         scenario_x64_desktop_test(),
@@ -1543,6 +1566,8 @@ fn scenario_target(scenario: QemuScenario) -> OsTarget:
         return get_arm32_fs_exec_target()
     if scenario.name == "riscv64-virtio-fat32-smf":
         return get_riscv64_fs_exec_target()
+    if scenario.name == "riscv64-hosted":
+        return get_riscv64_hosted_target()
     if scenario.name == "riscv32-virtio-fat32-smf":
         return get_riscv32_fs_exec_target()
     if scenario.name == "x64-ssh":
@@ -1622,6 +1647,26 @@ fn get_riscv32_fs_exec_target() -> OsTarget:
         qemu_memory: "256M",
         qemu_bios: "none",
         qemu_extra: _riscv_virtio_blk_exec_disk_args(Architecture.Riscv32),
+        gui_mode: false
+    )
+
+fn get_riscv64_hosted_target() -> OsTarget:
+    """RV64 hosted-preflight target."""
+    OsTarget(
+        arch: Architecture.Riscv64,
+        entry: "examples/simple_os/arch/riscv64/hosted_entry.spl",
+        linker_script: "examples/simple_os/arch/riscv64/linker.ld",
+        target_triple: "riscv64-unknown-none",
+        output: "build/os/simpleos_riscv64_hosted.elf",
+        qemu_system: "qemu-system-riscv64",
+        qemu_machine: "virt",
+        qemu_cpu: "rv64",
+        qemu_memory: "1024M",
+        qemu_bios: "default",
+        qemu_extra: ["-bios", "default"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv64) + [
+            "-netdev", "user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80",
+            "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"
+        ],
         gui_mode: false
     )
 fn _desktop_release_version() -> text:
@@ -2298,6 +2343,8 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
         return 60000
     if scenario.name == "riscv64-virtio-fat32-smf":
         return 60000
+    if scenario.name == "riscv64-hosted":
+        return 120000
     if scenario.name == "riscv32-virtio-fat32-smf":
         return 60000
     if scenario.name == "x64-desktop-test":
@@ -2333,7 +2380,7 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
         return true
     if scenario.name == "arm64-virtio-fat32-smf" or scenario.name == "arm32-virtio-fat32-smf":
         return ensure_arm_fs_exec_disk_image(scenario.arch)
-    if scenario.name == "riscv64-virtio-fat32-smf" or scenario.name == "riscv32-virtio-fat32-smf":
+    if scenario.name == "riscv64-virtio-fat32-smf" or scenario.name == "riscv64-hosted" or scenario.name == "riscv32-virtio-fat32-smf":
         return ensure_riscv_fs_exec_disk_image(scenario.arch)
     true
 

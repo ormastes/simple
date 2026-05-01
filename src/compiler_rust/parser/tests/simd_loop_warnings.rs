@@ -57,7 +57,10 @@ fn simd_loop_marks_ast_loop_nodes() {
     let Node::For(for_stmt) = &func.body.statements[0] else {
         panic!("expected for node");
     };
-    assert!(for_stmt.simd_requested, "expected parser to preserve loop-level SIMD intent");
+    assert!(
+        for_stmt.simd_requested,
+        "expected parser to preserve loop-level SIMD intent"
+    );
 }
 
 #[test]

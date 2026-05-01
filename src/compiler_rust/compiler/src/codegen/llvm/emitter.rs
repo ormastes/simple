@@ -14,6 +14,8 @@ use inkwell::InlineAsmDialect;
 #[cfg(feature = "llvm")]
 use inkwell::module::Module;
 #[cfg(feature = "llvm")]
+use inkwell::types::BasicType;
+#[cfg(feature = "llvm")]
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
 
 #[cfg(feature = "llvm")]
@@ -64,14 +66,23 @@ impl LlvmEmitter<'_> {
 
     /// Call a runtime function by name and return its result.
     fn call_runtime(&self, name: &str, args: &[BasicValueEnum<'static>]) -> Result<BasicValueEnum<'static>, String> {
+        self.call_runtime_with_return(name, args, self.backend.runtime_int_type().into())
+    }
+
+    /// Call a runtime function by name with an explicit return type.
+    fn call_runtime_with_return(
+        &self,
+        name: &str,
+        args: &[BasicValueEnum<'static>],
+        return_type: inkwell::types::BasicTypeEnum<'static>,
+    ) -> Result<BasicValueEnum<'static>, String> {
         let i64_type = self.backend.runtime_int_type();
-        let i8_ptr_type = self.backend.context.ptr_type(inkwell::AddressSpace::default());
 
         let func = self.module.get_function(name).unwrap_or_else(|| {
-            // Auto-declare: assume all runtime functions take i64 args and return i64
+            // Auto-declare: assume runtime helper arguments use the RuntimeValue ABI.
             let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                 args.iter().map(|_| i64_type.into()).collect();
-            let fn_type = i64_type.fn_type(&param_types, false);
+            let fn_type = return_type.fn_type(&param_types, false);
             self.module.add_function(name, fn_type, None)
         });
 
@@ -84,6 +95,20 @@ impl LlvmEmitter<'_> {
             .try_as_basic_value()
             .left()
             .ok_or_else(|| format!("'{}' did not return a value", name))
+    }
+
+    /// Call a runtime function returning a boolean-like integer and widen it to RuntimeValue width.
+    fn call_runtime_bool_as_int(
+        &self,
+        name: &str,
+        args: &[BasicValueEnum<'static>],
+    ) -> Result<BasicValueEnum<'static>, String> {
+        let result = self.call_runtime_with_return(name, args, self.backend.context.i8_type().into())?;
+        let widened = self
+            .builder
+            .build_int_z_extend(result.into_int_value(), self.backend.runtime_int_type(), "bool_to_rv")
+            .map_err(|e| format!("LLVM zext for '{}' failed: {}", name, e))?;
+        Ok(widened.into())
     }
 
     /// Call a runtime function that returns void.
@@ -764,7 +789,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // =========================================================================
     fn emit_vec_reduction(&mut self, dest: VReg, source: VReg, op: &str) -> Result<(), String> {
         let src = self.get(source)?;
-        let result = self.call_runtime("rt_vec_reduction", &[src])?;
+        let result = match op {
+            "rt_vec_all" | "rt_vec_any" => self.call_runtime_bool_as_int(op, &[src])?,
+            _ => self.call_runtime(op, &[src])?,
+        };
         self.set(dest, result);
         Ok(())
     }
@@ -788,7 +816,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_vec_math(&mut self, dest: VReg, source: VReg, op: &str) -> Result<(), String> {
         let src = self.get(source)?;
-        let result = self.call_runtime("rt_vec_math", &[src])?;
+        let result = self.call_runtime(op, &[src])?;
         self.set(dest, result);
         Ok(())
     }
@@ -894,7 +922,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     fn emit_vec_min_vec(&mut self, dest: VReg, a: VReg, b: VReg) -> Result<(), String> {
         let av = self.get(a)?;
         let bv = self.get(b)?;
-        let result = self.call_runtime("rt_vec_min", &[av, bv])?;
+        let result = self.call_runtime("rt_vec_min_vec", &[av, bv])?;
         self.set(dest, result);
         Ok(())
     }
@@ -902,7 +930,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     fn emit_vec_max_vec(&mut self, dest: VReg, a: VReg, b: VReg) -> Result<(), String> {
         let av = self.get(a)?;
         let bv = self.get(b)?;
-        let result = self.call_runtime("rt_vec_max", &[av, bv])?;
+        let result = self.call_runtime("rt_vec_max_vec", &[av, bv])?;
         self.set(dest, result);
         Ok(())
     }

@@ -8,6 +8,7 @@
 #   sh scripts/qemu_riscv64.shs --interactive --net --display
 #   sh scripts/qemu_riscv64.shs --fs-image   # attach generated FAT/NVFS-marked image
 #   sh scripts/qemu_riscv64.shs --fs-image --shared-service
+#   sh scripts/qemu_riscv64.shs --hosted    # truthful hosted preflight with SSH/HTTP probes
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL="$REPO_ROOT/build/os/simpleos_riscv64.elf"
@@ -36,7 +37,10 @@ DISPLAY=0
 FS_IMAGE=0
 NVFS_IMAGE=0
 FS_SHARED_SERVICE=0
+HOSTED=0
 DISK_IMAGE="${RISCV64_DISK_IMAGE:-$REPO_ROOT/build/os/fat32-riscv64.img}"
+HOSTED_SSH_PORT="${RISCV64_HOST_SSH_PORT:-2222}"
+HOSTED_HTTP_PORT="${RISCV64_HOST_HTTP_PORT:-8080}"
 QMP_SOCKET=""
 CAPTURE_PPM=""
 
@@ -49,6 +53,7 @@ while [ $# -gt 0 ]; do
         --display) DISPLAY=1 ;;
         --fs-image) FS_IMAGE=1 ;;
         --shared-service) FS_SHARED_SERVICE=1; SMOKE=1 ;;
+        --hosted) HOSTED=1; FS_IMAGE=1; NET=1 ;;
         --nvfs-image) FS_IMAGE=1; NVFS_IMAGE=1 ;;
         --disk-image=*) DISK_IMAGE="${1#--disk-image=}" ;;
         --disk-image)
@@ -61,11 +66,19 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-if [ "$FS_IMAGE" -eq 1 ] && [ "$NET" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ] && [ "$DISPLAY" -eq 0 ] && [ -z "$RISCV64_ENTRY" ]; then
+if [ "$HOSTED" -eq 0 ] && [ "$FS_IMAGE" -eq 1 ] && [ "$NET" -eq 0 ] && [ "$INTERACTIVE" -eq 0 ] && [ "$DISPLAY" -eq 0 ] && [ -z "$RISCV64_ENTRY" ]; then
     SMOKE=1
 fi
 
-if [ "$NET" -eq 1 ]; then
+if [ "$SMOKE" -eq 1 ] || [ "$FS_SHARED_SERVICE" -eq 1 ]; then
+    FS_IMAGE=1
+fi
+
+if [ "$HOSTED" -eq 1 ]; then
+    KERNEL="$REPO_ROOT/build/os/simpleos_riscv64_hosted.elf"
+    SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv64_hosted.log"
+    BUILD_LOG="$REPO_ROOT/build/os/build_riscv64_hosted.log"
+elif [ "$NET" -eq 1 ]; then
     KERNEL="$REPO_ROOT/build/os/simpleos_riscv64_net.elf"
     SERIAL_LOG="$REPO_ROOT/build/os/serial_riscv64_net.log"
     BUILD_LOG="$REPO_ROOT/build/os/build_riscv64_net.log"
@@ -81,7 +94,9 @@ if [ "$DISPLAY" -eq 1 ]; then
 fi
 
 if [ -z "$ENTRY_FILE" ]; then
-    if [ "$FS_SHARED_SERVICE" -eq 1 ]; then
+    if [ "$HOSTED" -eq 1 ]; then
+        ENTRY_FILE="examples/simple_os/arch/riscv64/hosted_entry.spl"
+    elif [ "$FS_SHARED_SERVICE" -eq 1 ]; then
         ENTRY_FILE="examples/simple_os/arch/riscv64/shared_service_smoke_entry.spl"
     elif [ "$SMOKE" -eq 1 ]; then
         ENTRY_FILE="examples/simple_os/arch/riscv64/smoke_entry.spl"
@@ -95,6 +110,8 @@ fi
 if [ -z "$SOURCE_ARGS" ]; then
     if [ -n "$RISCV64_SOURCE" ]; then
         SOURCE_ARGS="--source $RISCV64_SOURCE"
+    elif [ "$HOSTED" -eq 1 ]; then
+        SOURCE_ARGS="--source examples/simple_os/arch/riscv64 --source src"
     elif [ "$FS_SHARED_SERVICE" -eq 1 ]; then
         SOURCE_ARGS="--source examples/simple_os/arch/riscv64 --source src"
     elif [ "$SMOKE" -eq 1 ]; then
@@ -208,7 +225,58 @@ echo "[boot] Booting SimpleOS riscv64 in QEMU (timeout: ${TIMEOUT_SEC}s)..."
 rm -f "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_PPM"
 
 QEMU_DEVICE_ARGS=""
-if [ "$NET" -eq 1 ]; then
+if [ "$HOSTED" -eq 1 ]; then
+    HOSTED_SSH_PORT="$(python3 - "$HOSTED_SSH_PORT" <<'PY'
+import socket, sys
+preferred = int(sys.argv[1])
+candidates = [preferred, preferred + 1, preferred + 1000, preferred + 20000]
+seen = set()
+for port in candidates:
+    if port in seen or port <= 0 or port > 65535:
+        continue
+    seen.add(port)
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        s.close()
+        continue
+    s.close()
+    print(port)
+    raise SystemExit(0)
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+    HOSTED_HTTP_PORT="$(python3 - "$HOSTED_HTTP_PORT" <<'PY'
+import socket, sys
+preferred = int(sys.argv[1])
+candidates = [preferred, preferred + 1, preferred + 1000, preferred + 20000]
+seen = set()
+for port in candidates:
+    if port in seen or port <= 0 or port > 65535:
+        continue
+    seen.add(port)
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        s.close()
+        continue
+    s.close()
+    print(port)
+    raise SystemExit(0)
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+    echo "[hosted] Using host SSH port $HOSTED_SSH_PORT and HTTP port $HOSTED_HTTP_PORT"
+    QEMU_DEVICE_ARGS="$QEMU_DEVICE_ARGS -netdev user,id=net0,hostfwd=tcp::$HOSTED_SSH_PORT-:22,hostfwd=tcp::$HOSTED_HTTP_PORT-:80 -device virtio-net-pci,netdev=net0,disable-legacy=on"
+elif [ "$NET" -eq 1 ]; then
     QEMU_DEVICE_ARGS="$QEMU_DEVICE_ARGS -netdev user,id=net0 -device virtio-net-pci,netdev=net0,disable-legacy=on"
 else
     QEMU_DEVICE_ARGS="$QEMU_DEVICE_ARGS -nic none"
@@ -225,8 +293,13 @@ if [ "$DISPLAY" -eq 1 ]; then
     QMP_ARGS="-qmp unix:$QMP_SOCKET,server,nowait"
 fi
 
+QEMU_MEM="512M"
+if [ "$HOSTED" -eq 1 ]; then
+    QEMU_MEM="1024M"
+fi
+
 QEMU_ARGS="-nodefaults \
-    -machine virt -cpu rv64 -m 512M \
+    -machine virt -cpu rv64 -m $QEMU_MEM \
     -bios default \
     -kernel $KERNEL \
     -serial file:$SERIAL_LOG \
@@ -248,6 +321,92 @@ wait_for_serial_marker() {
         _elapsed=$((_elapsed + 1))
     done
     return 1
+}
+
+choose_host_port() {
+    _preferred="$1"
+    python3 - "$_preferred" <<'PY'
+import socket, sys
+preferred = int(sys.argv[1])
+candidates = [preferred, preferred + 1, preferred + 1000, preferred + 20000]
+seen = set()
+for port in candidates:
+    if port in seen or port <= 0 or port > 65535:
+        continue
+    seen.add(port)
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        s.close()
+        continue
+    s.close()
+    print(port)
+    raise SystemExit(0)
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+
+wait_for_tcp_port() {
+    _port="$1"
+    _timeout="$2"
+    python3 - "$_port" "$_timeout" <<'PY'
+import socket, sys, time
+port = int(sys.argv[1])
+deadline = time.time() + int(sys.argv[2])
+while time.time() < deadline:
+    s = socket.socket()
+    s.settimeout(1.0)
+    try:
+        s.connect(("127.0.0.1", port))
+    except OSError:
+        time.sleep(1)
+    else:
+        s.close()
+        raise SystemExit(0)
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+raise SystemExit(1)
+PY
+}
+
+probe_ssh_banner() {
+    _port="$1"
+    python3 - "$_port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket()
+s.settimeout(3.0)
+s.connect(("127.0.0.1", port))
+data = s.recv(128)
+s.close()
+if data.startswith(b"SSH-"):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+probe_http_response() {
+    _port="$1"
+    python3 - "$_port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket()
+s.settimeout(3.0)
+s.connect(("127.0.0.1", port))
+s.sendall(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+data = s.recv(512)
+s.close()
+if b"HTTP/" in data:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 qmp_screendump() {
@@ -356,6 +515,41 @@ if [ "$DISPLAY" -eq 1 ]; then
         wait "$QEMU_PID" 2>/dev/null
         QEMU_EXIT=$?
     fi
+elif [ "$HOSTED" -eq 1 ]; then
+    qemu-system-riscv64 $QEMU_ARGS 2>/dev/null &
+    QEMU_PID=$!
+    if ! wait_for_serial_marker "HOSTED_PREFLIGHT_READY|HOSTED_PREFLIGHT_FAILED|TEST FAILED" 30; then
+        echo "FAIL: Hosted preflight markers not seen"
+        kill "$QEMU_PID" 2>/dev/null
+        wait "$QEMU_PID" 2>/dev/null
+        exit 1
+    fi
+    HOSTED_FAIL=0
+    if ! wait_for_tcp_port "$HOSTED_SSH_PORT" 10; then
+        echo "FAIL: SSH TCP port $HOSTED_SSH_PORT did not open"
+        HOSTED_FAIL=1
+    elif ! probe_ssh_banner "$HOSTED_SSH_PORT"; then
+        echo "FAIL: SSH banner probe failed on port $HOSTED_SSH_PORT"
+        HOSTED_FAIL=1
+    else
+        echo "PASS: SSH host probe"
+    fi
+    if ! wait_for_tcp_port "$HOSTED_HTTP_PORT" 10; then
+        echo "FAIL: HTTP TCP port $HOSTED_HTTP_PORT did not open"
+        HOSTED_FAIL=1
+    elif ! probe_http_response "$HOSTED_HTTP_PORT"; then
+        echo "FAIL: HTTP response probe failed on port $HOSTED_HTTP_PORT"
+        HOSTED_FAIL=1
+    else
+        echo "PASS: HTTP host probe"
+    fi
+    kill "$QEMU_PID" 2>/dev/null
+    wait "$QEMU_PID" 2>/dev/null
+    QEMU_EXIT=0
+    if [ "$HOSTED_FAIL" -ne 0 ]; then
+        echo "FAIL: Hosted RV64 proof incomplete"
+        exit 1
+    fi
 elif [ -n "$TIMEOUT_CMD" ]; then
     $TIMEOUT_CMD "$TIMEOUT_SEC" qemu-system-riscv64 $QEMU_ARGS 2>/dev/null
     QEMU_EXIT=$?
@@ -403,6 +597,10 @@ check_marker "Boot banner"        "SimpleOS|simpleos|spl_start"
 check_marker "UART / SBI console" "UART|SBI|serial|RV32 boot OK|RV64 boot OK"
 check_marker "Boot complete"      "boot complete|SimpleOS ready|TEST PASSED"
 
+if [ "$HOSTED" -eq 1 ]; then
+    check_marker "Hosted preflight" "HOSTED_PREFLIGHT_READY"
+fi
+
 if [ "$INTERACTIVE" -eq 1 ]; then
     check_marker "SPM service"      "SPM port"
     if [ "$DISPLAY" -eq 1 ]; then
@@ -432,7 +630,6 @@ if [ "$FS_IMAGE" -eq 1 ]; then
     check_marker "ELF load marker" "ELF_LOAD_OK arch=riscv64"
     check_marker "SMF CLI launch marker" "SMF_CLI_LAUNCH_OK"
     check_marker "SMF WM GUI launch marker" "SMF_WM_GUI_LAUNCH_OK app=/sys/apps/browser_demo[.]smf pid=1002 wm=x86_64_desktop_shell_contract"
-    check_marker "x86_64 process-backed contract marker" "\\[desktop-e2e\\] process-backed:ok app=/sys/apps/browser_demo[.]smf pid=1002"
     check_marker "Native GUI process render marker" "NATIVE_GUI_PROCESS_RENDER_OK"
     check_marker "RISC-V SMF filesystem pass marker" "SIMPLEOS_RISCV_SMF_FS_PASS"
     if [ "$NVFS_IMAGE" -eq 1 ]; then

@@ -1,14 +1,18 @@
 use std.common.compress.{
     CompressionCodec,
+    CompressionError,
+    CompressionLevel,
     CompressionOptions,
     default_compression_options,
     compress_bytes,
+    try_compress_bytes,
     decompress_bytes,
     new_encoder_state,
     new_decoder_state,
     encoder_write,
     decoder_write,
     encoder_finish,
+    encoder_finish_checked,
     decoder_finish
 }
 use std.io_runtime.{shell}
@@ -37,6 +41,14 @@ fn _ensure_tmp_root():
     val result = shell("mkdir -p '" + TMP_ROOT + "'")
     expect result.exit_code == 0
 
+fn _expect_unsupported_feature(result: Result<[u8], CompressionError>, expected: text):
+    match result:
+        Ok(_): expect(false).to_equal(true)
+        Err(err):
+            match err:
+                CompressionError.UnsupportedFeature(message): expect(message).to_contain(expected)
+                _: expect(false).to_equal(true)
+
 describe "common compression framework":
     it "REQ-009: lz4 block round-trips with explicit hint":
         val options = default_compression_options(CompressionCodec.lz4)
@@ -46,6 +58,7 @@ describe "common compression framework":
             checksum: options.checksum,
             block_mode: "block",
             dictionary_bytes: options.dictionary_bytes,
+            dictionary_id: options.dictionary_id,
             content_size: options.content_size
         )
         val input = _fixture_bytes()
@@ -53,9 +66,7 @@ describe "common compression framework":
         val decoded = decompress_bytes(encoded, Some(CompressionCodec.lz4))
         match decoded:
             Ok(bytes): expect(bytes).to_equal(input)
-            Err(err):
-                print(err)
-                expect false == true
+            Err(_): expect(false).to_equal(true)
 
     it "REQ-009: lz4 frame auto-detect round-trips":
         val options = default_compression_options(CompressionCodec.lz4)
@@ -64,9 +75,7 @@ describe "common compression framework":
         val decoded = decompress_bytes(encoded, nil)
         match decoded:
             Ok(bytes): expect(bytes).to_equal(input)
-            Err(err):
-                print(err)
-                expect false == true
+            Err(_): expect(false).to_equal(true)
 
     it "REQ-010: zstd frame round-trips through shared api":
         val options = default_compression_options(CompressionCodec.zstd)
@@ -81,17 +90,16 @@ describe "common compression framework":
 
     it "REQ-011: xz lzma2 frame round-trips through shared api":
         val options = default_compression_options(CompressionCodec.lzma2)
+        expect options.checksum == true
         val input = _fixture_bytes()
         val encoded = compress_bytes(input, options)
         val decoded = decompress_bytes(encoded, nil)
         match decoded:
             Ok(bytes): expect(bytes).to_equal(input)
-            Err(err):
-                print(err)
-                expect false == true
+            Err(_): expect(false).to_equal(true)
 
     it "REQ-008: streaming encoder/decoder produces the original bytes":
-        val options = default_compression_options(CompressionCodec.lz4)
+        val options = default_compression_options(CompressionCodec.zstd)
         var encoder = new_encoder_state(options)
         encoder = encoder_write(encoder, [0x61u8, 0x61u8, 0x61u8])
         encoder = encoder_write(encoder, [0x62u8, 0x62u8, 0x62u8])
@@ -105,6 +113,140 @@ describe "common compression framework":
             Err(err):
                 print(err)
                 expect false == true
+
+    it "REQ-012: checked api rejects unsupported zstd checksum requests":
+        val base = default_compression_options(CompressionCodec.zstd)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: base.level,
+            checksum: true,
+            block_mode: base.block_mode,
+            dictionary_bytes: base.dictionary_bytes,
+            dictionary_id: base.dictionary_id,
+            content_size: base.content_size
+        )
+        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "checksum")
+
+    it "REQ-012: checked api rejects unsupported dictionary metadata":
+        val base = default_compression_options(CompressionCodec.lz4)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: base.level,
+            checksum: base.checksum,
+            block_mode: "frame",
+            dictionary_bytes: [0x61u8],
+            dictionary_id: 7,
+            content_size: base.content_size
+        )
+        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "dictionaries")
+
+    it "REQ-012: checked api rejects dictionary id without bytes":
+        val base = default_compression_options(CompressionCodec.zstd)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: base.level,
+            checksum: base.checksum,
+            block_mode: base.block_mode,
+            dictionary_bytes: nil,
+            dictionary_id: 99,
+            content_size: base.content_size
+        )
+        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "dictionary_id requires dictionary_bytes")
+
+    it "REQ-012: checked encoder finish preserves typed option failures":
+        val base = default_compression_options(CompressionCodec.zstd)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: base.level,
+            checksum: true,
+            block_mode: base.block_mode,
+            dictionary_bytes: base.dictionary_bytes,
+            dictionary_id: base.dictionary_id,
+            content_size: base.content_size
+        )
+        var encoder = new_encoder_state(options)
+        encoder = encoder_write(encoder, _fixture_bytes())
+        _expect_unsupported_feature(encoder_finish_checked(encoder), "checksum")
+
+    it "REQ-012: checked encoder finish matches direct checked encode on success":
+        val options = default_compression_options(CompressionCodec.zstd)
+        val input = _fixture_bytes()
+        var encoder = new_encoder_state(options)
+        encoder = encoder_write(encoder, input.slice(0, 10))
+        encoder = encoder_write(encoder, input.slice(10, input.len()))
+        val direct = try_compress_bytes(input, options)
+        val streamed = encoder_finish_checked(encoder)
+        match direct:
+            Ok(direct_bytes):
+                match streamed:
+                    Ok(streamed_bytes): expect(streamed_bytes).to_equal(direct_bytes)
+                    Err(_): expect(false).to_equal(true)
+            Err(_): expect(false).to_equal(true)
+
+    it "REQ-012: checked api rejects mismatched declared content size":
+        val base = default_compression_options(CompressionCodec.lzma2)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: base.level,
+            checksum: base.checksum,
+            block_mode: base.block_mode,
+            dictionary_bytes: base.dictionary_bytes,
+            dictionary_id: base.dictionary_id,
+            content_size: _fixture_bytes().len() + 1
+        )
+        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "content_size")
+
+    it "REQ-012: checked api rejects lz4 block checksum normalization":
+        val base = default_compression_options(CompressionCodec.lz4)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: base.level,
+            checksum: true,
+            block_mode: "block",
+            dictionary_bytes: base.dictionary_bytes,
+            dictionary_id: base.dictionary_id,
+            content_size: base.content_size
+        )
+        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "block mode does not support checksum")
+
+    it "REQ-012: checked api rejects lz4 block content size normalization":
+        val base = default_compression_options(CompressionCodec.lz4)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: base.level,
+            checksum: base.checksum,
+            block_mode: "block",
+            dictionary_bytes: base.dictionary_bytes,
+            dictionary_id: base.dictionary_id,
+            content_size: _fixture_bytes().len()
+        )
+        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "block mode does not support content_size")
+
+    it "REQ-012: checked api rejects unsupported lz4 level selection":
+        val base = default_compression_options(CompressionCodec.lz4)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: CompressionLevel(value: 5),
+            checksum: base.checksum,
+            block_mode: base.block_mode,
+            dictionary_bytes: base.dictionary_bytes,
+            dictionary_id: base.dictionary_id,
+            content_size: base.content_size
+        )
+        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "levels other than 1")
+
+    it "REQ-012: checked api rejects xz checksum disable requests":
+        val base = default_compression_options(CompressionCodec.lzma2)
+        val options = CompressionOptions(
+            codec: base.codec,
+            level: base.level,
+            checksum: false,
+            block_mode: base.block_mode,
+            dictionary_bytes: base.dictionary_bytes,
+            dictionary_id: base.dictionary_id,
+            content_size: base.content_size
+        )
+        _expect_unsupported_feature(try_compress_bytes(_fixture_bytes(), options), "checksum=true")
 
     it "REQ-012: truncated lz4 frame fails closed":
         val options = default_compression_options(CompressionCodec.lz4)

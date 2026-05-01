@@ -1,7 +1,70 @@
 //! MIR compilation tests - testing MIR to LLVM translation.
 
 use crate::codegen::llvm::*;
+use crate::mir::effects::LocalKind;
 use simple_common::target::{Target, TargetArch, TargetOS};
+
+#[cfg(feature = "llvm")]
+fn build_simd_runtime_call_test_function(name: &str) -> (LlvmBackend, String) {
+    use crate::hir::TypeId as T;
+    use crate::mir::{MirFunction, MirInst, MirLocal, Terminator, VReg};
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+    backend.create_module(name).unwrap();
+
+    let mut func = MirFunction::new(name.to_string(), T::I64, Visibility::Public);
+    for idx in 0..3 {
+        func.params.push(MirLocal {
+            name: format!("arg{idx}"),
+            ty: T::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+    }
+
+    let a = VReg(0);
+    let b = VReg(1);
+    let c = VReg(2);
+    let sum = VReg(3);
+    let product = VReg(4);
+    let min = VReg(5);
+    let max = VReg(6);
+    let all = VReg(7);
+    let any = VReg(8);
+    let sqrt = VReg(9);
+    let abs = VReg(10);
+    let floor = VReg(11);
+    let ceil = VReg(12);
+    let round = VReg(13);
+    let min_vec = VReg(14);
+    let max_vec = VReg(15);
+
+    let block = &mut func.blocks[0];
+    block.instructions.push(MirInst::VecSum { dest: sum, source: a });
+    block.instructions.push(MirInst::VecProduct {
+        dest: product,
+        source: a,
+    });
+    block.instructions.push(MirInst::VecMin { dest: min, source: a });
+    block.instructions.push(MirInst::VecMax { dest: max, source: a });
+    block.instructions.push(MirInst::VecAll { dest: all, source: a });
+    block.instructions.push(MirInst::VecAny { dest: any, source: a });
+    block.instructions.push(MirInst::VecSqrt { dest: sqrt, source: a });
+    block.instructions.push(MirInst::VecAbs { dest: abs, source: a });
+    block.instructions.push(MirInst::VecFloor { dest: floor, source: a });
+    block.instructions.push(MirInst::VecCeil { dest: ceil, source: a });
+    block.instructions.push(MirInst::VecRound { dest: round, source: a });
+    block.instructions.push(MirInst::VecMinVec { dest: min_vec, a, b });
+    block.instructions.push(MirInst::VecMaxVec { dest: max_vec, a, b: c });
+    block.terminator = Terminator::Return(Some(max_vec));
+
+    backend.compile_function(&func).unwrap();
+    let ir = backend.get_ir().unwrap();
+    backend.verify().unwrap();
+    (backend, ir)
+}
 
 fn test_mir_function_compilation() {
     use crate::hir::TypeId as T;
@@ -165,6 +228,26 @@ fn test_mir_control_flow_compilation() {
     assert!(ir.contains("bb2"));
 
     backend.verify().unwrap();
+}
+
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_simd_runtime_call_symbols() {
+    let (_backend, ir) = build_simd_runtime_call_test_function("mir_simd_runtime_symbols");
+
+    assert!(ir.contains("call i64 @rt_vec_sum("));
+    assert!(ir.contains("call i64 @rt_vec_product("));
+    assert!(ir.contains("call i64 @rt_vec_min("));
+    assert!(ir.contains("call i64 @rt_vec_max("));
+    assert!(ir.contains("@rt_vec_all("));
+    assert!(ir.contains("@rt_vec_any("));
+    assert!(ir.contains("call i64 @rt_vec_sqrt("));
+    assert!(ir.contains("call i64 @rt_vec_abs("));
+    assert!(ir.contains("call i64 @rt_vec_floor("));
+    assert!(ir.contains("call i64 @rt_vec_ceil("));
+    assert!(ir.contains("call i64 @rt_vec_round("));
+    assert!(ir.contains("call i64 @rt_vec_min_vec("));
+    assert!(ir.contains("call i64 @rt_vec_max_vec("));
 }
 
 /// Test MIR float constant compilation

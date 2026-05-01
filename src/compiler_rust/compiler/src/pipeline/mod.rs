@@ -733,7 +733,8 @@ main = 0
 
     #[test]
     fn simd_report_ignores_unannotated_loops() {
-        let source = "fn main() -> i64:\n    for i in 0..4:\n        pass\n    while false:\n        pass\n    return 0\n";
+        let source =
+            "fn main() -> i64:\n    for i in 0..4:\n        pass\n    while false:\n        pass\n    return 0\n";
         let mut parser = simple_parser::Parser::new(source);
         let ast_module = parser.parse().expect("parse ok");
 
@@ -767,7 +768,9 @@ main = 0
         pipeline.set_simd_mode(SimdMode::Report);
         let lines = pipeline.collect_simd_report_lines(&ast_module);
 
-        assert!(lines.iter().any(|line| line.contains("while-loop; not vectorized: unsupported loop form")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("while-loop; not vectorized: unsupported loop form")));
     }
 
     #[test]
@@ -780,8 +783,12 @@ main = 0
         pipeline.set_simd_mode(SimdMode::Auto);
         let lines = pipeline.collect_explicit_simd_warning_lines(&ast_module);
 
-        assert!(lines.iter().any(|line| line.contains("explicit @simd on while-loop was not vectorized")));
-        assert!(lines.iter().any(|line| line.contains("explicit @simd on for-loop was not vectorized: unsupported index pattern")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("explicit @simd on while-loop was not vectorized")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("explicit @simd on for-loop was not vectorized: unsupported index pattern")));
     }
 
     #[test]
@@ -795,7 +802,9 @@ main = 0
         pipeline.set_simd_mode(SimdMode::Report);
         let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
 
-        assert!(lines.iter().any(|line| line.contains("vectorized via runtime kernel rt_numeric_add_f64")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("vectorized via runtime kernel rt_numeric_add_f64")));
     }
 
     #[test]
@@ -809,9 +818,8 @@ main = 0
         pipeline.set_simd_mode(SimdMode::Report);
         let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
 
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("explicit @simd on for-loop; not vectorized: no typed runtime-kernel lowering available")));
+        assert!(lines.iter().any(|line| line
+            .contains("explicit @simd on for-loop; not vectorized: no typed runtime-kernel lowering available")));
     }
 
     #[test]
@@ -842,7 +850,9 @@ main = 0
         pipeline.set_simd_mode(SimdMode::Auto);
 
         assert!(pipeline.collect_explicit_simd_warning_lines(&ast_module).is_empty());
-        assert!(pipeline.collect_typed_explicit_simd_warning_lines(&hir_module).is_empty());
+        assert!(pipeline
+            .collect_typed_explicit_simd_warning_lines(&hir_module)
+            .is_empty());
     }
 
     #[test]
@@ -910,7 +920,9 @@ main = 0
         pipeline.set_simd_mode(SimdMode::Report);
         let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
 
-        assert!(lines.iter().any(|line| line.contains("vectorized via runtime kernel rt_numeric_add_f64")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("vectorized via runtime kernel rt_numeric_add_f64")));
     }
 
     #[test]
@@ -980,7 +992,9 @@ main = 0
         pipeline.set_simd_mode(SimdMode::Report);
         let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
 
-        assert!(lines.iter().any(|line| line.contains("vectorized via runtime kernel rt_numeric_dot_f64")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("vectorized via runtime kernel rt_numeric_dot_f64")));
     }
 
     #[test]
@@ -1022,6 +1036,94 @@ main = 0
     }
 
     #[test]
+    fn simd_typed_report_detects_dynamic_len_bounded_min_kernel_candidate() {
+        let source =
+            "fn main(vals: [f32]) -> f32:\n    var acc = 999.0f32\n    for i in 0..vals.len():\n        acc = min(acc, vals[i])\n    return acc\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("vectorized via runtime kernel rt_numeric_min_f32")));
+    }
+
+    #[test]
+    fn simd_typed_report_detects_dynamic_len_bounded_max_kernel_candidate() {
+        let source =
+            "fn main(vals: [f32]) -> f32:\n    var acc = -999.0f32\n    for i in 0..vals.len():\n        acc = max(acc, vals[i])\n    return acc\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
+
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("vectorized via runtime kernel rt_numeric_max_f32")));
+    }
+
+    #[test]
+    fn simd_auto_lowers_dynamic_len_bounded_f32_min_to_guarded_runtime_kernel() {
+        let source =
+            "fn main(vals: [f32]) -> f32:\n    var acc = 999.0f32\n    for i in 0..vals.len():\n        acc = min(acc, vals[i])\n    return acc\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_min_f32"))
+            }),
+            "expected guarded rt_numeric_min_f32 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_auto_lowers_dynamic_len_bounded_f32_max_to_guarded_runtime_kernel() {
+        let source =
+            "fn main(vals: [f32]) -> f32:\n    var acc = -999.0f32\n    for i in 0..vals.len():\n        acc = max(acc, vals[i])\n    return acc\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Auto);
+        let mir_module = pipeline.type_check_and_lower(&ast_module).expect("mir lower");
+
+        assert!(
+            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
+                matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_max_f32"))
+            }),
+            "expected guarded rt_numeric_max_f32 call in MIR"
+        );
+    }
+
+    #[test]
+    fn simd_typed_report_does_not_vectorize_noncanonical_minmax_reduction() {
+        let source =
+            "fn main(vals: [f32], flag: bool) -> f32:\n    var acc = 999.0f32\n    for i in 0..vals.len():\n        if flag:\n            acc = min(acc, vals[i])\n    return acc\n";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+        let hir_module = hir::lower_lenient(&ast_module).expect("hir lower");
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline");
+        pipeline.set_simd_mode(SimdMode::Report);
+        let lines = pipeline.collect_typed_simd_report_lines(&hir_module);
+
+        assert!(!lines.iter().any(|line| line.contains("rt_numeric_min_f32")));
+        assert!(!lines.iter().any(|line| line.contains("rt_numeric_max_f32")));
+    }
+
+    #[test]
     fn simd_off_keeps_fixed_size_f64_map_add_as_scalar_loop() {
         let source = "fn main() -> i64:\n    let a = [1.0, 2.0, 3.0, 4.0]\n    let b = [5.0, 6.0, 7.0, 8.0]\n    var out = [0.0, 0.0, 0.0, 0.0]\n    for i in 0..4:\n        out[i] = a[i] + b[i]\n    return 0\n";
         let mut parser = simple_parser::Parser::new(source);
@@ -1038,9 +1140,12 @@ main = 0
             "unexpected rt_numeric_add_f64 call in MIR"
         );
         assert!(
-            mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(|inst| {
-                matches!(inst, mir::MirInst::BinOp { op, .. } if *op == hir::BinOp::Lt)
-            }),
+            mir_module
+                .functions
+                .iter()
+                .flat_map(|func| &func.blocks)
+                .flat_map(|block| &block.instructions)
+                .any(|inst| { matches!(inst, mir::MirInst::BinOp { op, .. } if *op == hir::BinOp::Lt) }),
             "expected scalar range-loop compare in MIR"
         );
     }
@@ -1096,8 +1201,11 @@ main = 0
         assert!(mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(
             |inst| matches!(inst, mir::MirInst::Call { target, .. } if target == &mir::CallTarget::from_name("rt_numeric_sum_f32"))
         ));
-        assert!(mir_module.functions.iter().flat_map(|func| &func.blocks).flat_map(|block| &block.instructions).any(
-            |inst| matches!(inst, mir::MirInst::UnboxFloat { .. })
-        ));
+        assert!(mir_module
+            .functions
+            .iter()
+            .flat_map(|func| &func.blocks)
+            .flat_map(|block| &block.instructions)
+            .any(|inst| matches!(inst, mir::MirInst::UnboxFloat { .. })));
     }
 }

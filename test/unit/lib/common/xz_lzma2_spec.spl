@@ -1,0 +1,164 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.{
+    CompressionCodec,
+    CompressionError,
+    default_compression_options
+}
+use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
+use std.common.compress.utilities.{crc32_bytes}
+use std.io_runtime.{shell}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+val TMP_ROOT = "/tmp/common_xz_lzma2_spec"
+
+fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
+    match err:
+        CompressionError.InvalidHeader(message):
+            expect(kind).to_equal("InvalidHeader")
+            expect(message).to_contain(message_part)
+        CompressionError.UnsupportedFeature(message):
+            expect(kind).to_equal("UnsupportedFeature")
+            expect(message).to_contain(message_part)
+        CompressionError.TruncatedInput(message):
+            expect(kind).to_equal("TruncatedInput")
+            expect(message).to_contain(message_part)
+        CompressionError.ChecksumMismatch(message):
+            expect(kind).to_equal("ChecksumMismatch")
+            expect(message).to_contain(message_part)
+        CompressionError.CorruptStream(message):
+            expect(kind).to_equal("CorruptStream")
+            expect(message).to_contain(message_part)
+        CompressionError.SizeLimitExceeded(limit):
+            expect(kind).to_equal("SizeLimitExceeded")
+            expect(limit >= 0).to_equal(true)
+
+fn _write_bytes(path: text, data: [u8]):
+    expect(rt_file_write_bytes(path, data)).to_equal(true)
+
+fn _read_bytes(path: text) -> [u8]:
+    rt_file_read_bytes(path) ?? []
+
+fn _ensure_tmp_root():
+    val result = shell("mkdir -p '" + TMP_ROOT + "'")
+    expect(result.exit_code).to_equal(0)
+
+fn _payload(size: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < size:
+        out.push((((i * 17) + (i / 13) + 23) % 251).to_u8())
+        i = i + 1
+    out
+
+fn _set_u32_le(data: [u8], pos: i64, value: u32) -> [u8]:
+    var out = data
+    out[pos] = (value & 0xFFu32).to_u8()
+    out[pos + 1] = ((value >> 8) & 0xFFu32).to_u8()
+    out[pos + 2] = ((value >> 16) & 0xFFu32).to_u8()
+    out[pos + 3] = ((value >> 24) & 0xFFu32).to_u8()
+    out
+
+fn _read_vli(data: [u8], start: i64) -> (u64, i64):
+    var value: u64 = 0u64
+    var shift: u64 = 0u64
+    var pos = start
+    while true:
+        val b = data[pos]
+        value = value | ((b & 0x7Fu8).to_u64() << shift)
+        pos = pos + 1
+        if (b & 0x80u8) == 0u8:
+            return (value, pos)
+        shift = shift + 7u64
+
+fn _first_block_header_size(data: [u8]) -> i64:
+    (data[12].to_i64() + 1) * 4
+
+fn _first_block_data_start(data: [u8]) -> i64:
+    12 + _first_block_header_size(data)
+
+fn _first_filter_id_pos(data: [u8]) -> i64:
+    var pos = 14
+    val compressed = _read_vli(data, pos)
+    pos = compressed.1
+    val uncompressed = _read_vli(data, pos)
+    pos = uncompressed.1
+    pos
+
+fn _repair_first_block_header_crc(data: [u8]) -> [u8]:
+    val header_size = _first_block_header_size(data)
+    val crc_pos = 12 + header_size - 4
+    val crc = crc32_bytes(data.slice(12, crc_pos))
+    _set_u32_le(data, crc_pos, crc)
+
+describe "xz lzma2 codec":
+    it "round-trips and host-xz decodes a framed stream":
+        _ensure_tmp_root()
+        val input = _payload(8192)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(false)
+        expect(decoded.unwrap()).to_equal(input)
+
+        val compressed_path = TMP_ROOT + "/multiblock.xz"
+        val output_path = TMP_ROOT + "/multiblock.out"
+        _write_bytes(compressed_path, encoded)
+        val run = shell("xz -q -d -f -c '" + compressed_path + "' > '" + output_path + "'")
+        if run.exit_code != 0:
+            print(run.stdout)
+            print(run.stderr)
+        expect(run.exit_code).to_equal(0)
+        expect(_read_bytes(output_path)).to_equal(input)
+
+    it "rejects misaligned xz stream padding":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val left = lzma2_compress_xz(_payload(64), options)
+        val right = lzma2_compress_xz(_payload(96), options)
+        val combined = left + [0x00u8] + right
+        val decoded = lzma2_decompress_xz(combined)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "stream padding")
+
+    it "rejects unsupported non-lzma2 filter chains with a typed error":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        var encoded = lzma2_compress_xz(_payload(128), options)
+        val filter_id_pos = _first_filter_id_pos(encoded)
+        encoded[filter_id_pos] = 0x22u8
+        encoded = _repair_first_block_header_crc(encoded)
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "filter chains")
+
+    it "rejects compressed lzma2 chunk controls explicitly":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        var encoded = lzma2_compress_xz(_payload(128), options)
+        encoded[_first_block_data_start(encoded)] = 0x80u8
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "compressed lzma2 chunks")
+
+    it "reports footer crc corruption as a checksum mismatch":
+        val options = default_compression_options(CompressionCodec.lzma2)
+        var encoded = lzma2_compress_xz(_payload(128), options)
+        encoded[encoded.len() - 12] = encoded[encoded.len() - 12] ^ 0x01u8
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "footer crc32")
+
+    it "rejects host-generated compressed xz streams with an explicit unsupported-feature error":
+        _ensure_tmp_root()
+        val input = _payload(1024)
+        val input_path = TMP_ROOT + "/host-generated-input.bin"
+        val compressed_path = TMP_ROOT + "/host-generated.xz"
+        _write_bytes(input_path, input)
+        val run = shell("xz -q -z -f -c '" + input_path + "' > '" + compressed_path + "'")
+        if run.exit_code != 0:
+            print(run.stdout)
+            print(run.stderr)
+        expect(run.exit_code).to_equal(0)
+        val encoded = _read_bytes(compressed_path)
+        val decoded = lzma2_decompress_xz(encoded)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "compressed lzma2 chunks")

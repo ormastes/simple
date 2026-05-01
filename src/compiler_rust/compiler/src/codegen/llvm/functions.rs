@@ -768,7 +768,41 @@ impl LlvmBackend {
             // Unsupported instruction categories
             // =====================================================================
 
-            // SIMD instructions (not yet implemented — insert default dest values)
+            // SIMD instructions supported by the LLVM runtime-delegating emitter.
+            #[cfg(feature = "llvm")]
+            MirInst::VecLit { .. }
+            | MirInst::VecSum { .. }
+            | MirInst::VecProduct { .. }
+            | MirInst::VecMin { .. }
+            | MirInst::VecMax { .. }
+            | MirInst::VecAll { .. }
+            | MirInst::VecAny { .. }
+            | MirInst::VecExtract { .. }
+            | MirInst::VecWith { .. }
+            | MirInst::VecSqrt { .. }
+            | MirInst::VecAbs { .. }
+            | MirInst::VecFloor { .. }
+            | MirInst::VecCeil { .. }
+            | MirInst::VecRound { .. }
+            | MirInst::VecShuffle { .. }
+            | MirInst::VecBlend { .. }
+            | MirInst::VecSelect { .. }
+            | MirInst::VecLoad { .. }
+            | MirInst::VecStore { .. }
+            | MirInst::VecGather { .. }
+            | MirInst::VecScatter { .. }
+            | MirInst::VecFma { .. }
+            | MirInst::VecRecip { .. }
+            | MirInst::VecMaskedLoad { .. }
+            | MirInst::VecMaskedStore { .. }
+            | MirInst::VecMinVec { .. }
+            | MirInst::VecMaxVec { .. }
+            | MirInst::VecClamp { .. } => {
+                self.compile_emitter_simd_instruction(inst, vreg_map, local_allocas, builder, module)?;
+            }
+
+            // Non-LLVM builds keep the historical SIMD placeholder behavior.
+            #[cfg(not(feature = "llvm"))]
             MirInst::VecLit { dest, .. }
             | MirInst::VecSum { dest, .. }
             | MirInst::VecProduct { dest, .. }
@@ -797,7 +831,8 @@ impl LlvmBackend {
                 let default_val = self.runtime_int_type().const_int(0, false);
                 vreg_map.insert(*dest, default_val.into());
             }
-            // SIMD store instructions (no dest vreg)
+
+            #[cfg(not(feature = "llvm"))]
             MirInst::VecStore { .. } | MirInst::VecScatter { .. } | MirInst::VecMaskedStore { .. } => {}
 
             // Pointer instructions (not yet implemented — insert default dest values)
@@ -2135,6 +2170,26 @@ impl LlvmBackend {
             .get(vreg)
             .copied()
             .unwrap_or_else(|| i64_type.const_int(0, false).into())
+    }
+
+    #[cfg(feature = "llvm")]
+    fn compile_emitter_simd_instruction(
+        &self,
+        inst: &crate::mir::MirInst,
+        vreg_map: &mut VRegMap,
+        local_allocas: &std::collections::HashMap<usize, inkwell::values::PointerValue<'static>>,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<(), CompileError> {
+        let mut emitter = super::emitter::LlvmEmitter {
+            backend: self,
+            vreg_map,
+            local_allocas,
+            builder,
+            module,
+        };
+        crate::codegen::dispatch::dispatch_instruction(&mut emitter, inst)
+            .map_err(|e| crate::error::factory::llvm_build_failed("simd_dispatch", &e))
     }
 }
 

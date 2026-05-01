@@ -22,16 +22,17 @@ describe "REQ-RFL-001..003: board and lane contracts":
         expect(mlk.clock_hz).to_equal(25000000)
         expect(mlk.constraints_path).to_equal("examples/09_embedded/fpga_riscv/constraints/mlk_s02_100t.xdc")
 
-    it "defines RV32 and RV64 as explicit Linux contract lanes":
+    it "defines RV32 as generated baremetal and RV64 as generated Linux":
         val rv64 = RiscvFpgaLane.rv64_default()
         val rv32 = RiscvFpgaLane.rv32_default()
         expect(rv64.readiness_status()).to_equal(RiscvReadinessStatus.Contract)
         expect(rv64.platform_profile.name).to_equal("qemu_virt_rv64")
         expect(rv32.platform_profile.name).to_equal("qemu_virt_rv32")
-        expect(rv32.xlen.linux_policy()).to_equal("repo-native-rv32-linux")
+        expect(rv32.xlen.linux_policy()).to_equal("repo-native-rv32-baremetal")
+        expect(rv64.xlen.linux_policy()).to_equal("repo-native-rv64-linux")
 
 describe "REQ-RFL-004..006: deterministic dual-arch orchestration":
-    it "creates a deterministic dual-arch default manifest":
+    it "creates a deterministic dual-arch default manifest with stable rtl directories":
         val manifest = create_default_riscv_fpga_linux_manifest()
         expect(manifest.lanes.len()).to_equal(2)
         expect(manifest.readiness_summary()).to_contain("rv32:contract:qemu_virt_rv32:simple_rv32gc_core")
@@ -112,20 +113,31 @@ describe "REQ-RFL-004..006: deterministic dual-arch orchestration":
         expect(has_handwritten_opcode_case).to_equal(false)
         expect(manifest_text).to_contain("platform = \"qemu_virt_rv32\"")
         expect(manifest_text).to_contain("platform = \"qemu_virt_rv64\"")
+        expect(manifest_text).to_contain("authoritative_rtl_root = \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl\"")
+        expect(manifest_text).to_contain("authoritative_rtl_root = \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl\"")
         expect(manifest_text).to_contain("board_id = \"xilinx_generic\"")
         expect(manifest_text).to_contain("constraints_path = \"constraints/xilinx_generic.xdc\"")
         expect(manifest_text).to_contain("programmer = \"hw_server\"")
-        expect(manifest_text).to_contain("scope = \"repo-native RV32GC Linux contract lane\"")
+        expect(manifest_text).to_contain("scope = \"repo-native RV32GC generated-core baremetal lane\"")
+        expect(manifest_text).to_contain("linux_policy = \"repo-native-rv32-baremetal\"")
         expect(manifest_text).to_contain("abi = \"lp64d\"")
-        expect(manifest_text).to_contain("scope = \"repo-native RV64GC Linux contract lane\"")
+        expect(manifest_text).to_contain("scope = \"repo-native RV64GC generated-core Linux lane\"")
+        expect(manifest_text).to_contain("linux_policy = \"repo-native-rv64-linux\"")
         expect(vivado_plan_text).to_contain("create_project simple_riscv_fpga")
         expect(vivado_plan_text).to_contain("add_files constraints/xilinx_generic.xdc")
         expect(board_interface_text).to_contain("board_id = \"xilinx_generic\"")
         expect(board_interface_text).to_contain("clock = \"sys_clk\"")
         expect(board_interface_text).to_contain("led_count = 8")
         expect(bundle_readme_text).to_contain("Board: `xilinx_generic` (`BOARD_PART_TBD`)")
+        expect(bundle_readme_text).to_contain("Generated bundle root: `/tmp/simple_riscv_fpga_system_spec`")
         expect(bundle_readme_text).to_contain("logical board I/O contract: `board_interface_contract.sdn`")
         expect(bundle_readme_text).to_contain("This bundle proves source and RTL artifact generation.")
+        expect(bundle_readme_text).to_contain("This bundle is the authoritative source for runner-consumed generated-core RTL.")
+        expect(bundle_readme_text).to_contain("Generated-core runners must compile RTL only from the emitted `rv32/rtl` and `rv64/rtl` bundle directories.")
+        val manifest_uses_handwritten_rtl = manifest_text.contains("examples/09_embedded/fpga_riscv/rtl")
+        expect(manifest_uses_handwritten_rtl).to_equal(false)
+        val readme_uses_handwritten_rtl = bundle_readme_text.contains("examples/09_embedded/fpga_riscv/rtl")
+        expect(readme_uses_handwritten_rtl).to_equal(false)
 
     it "emits board-specific metadata for mlk_s02_100t bundles":
         val result = generate_riscv_fpga_rtl_bundle_for_board("/tmp/simple_riscv_fpga_system_spec_mlk", "mlk_s02_100t")

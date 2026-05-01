@@ -358,7 +358,9 @@ fn scalar_fma_f32(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
 }
 
 fn scalar_dot_f32(lhs: &[f32], rhs: &[f32]) -> f32 {
-    lhs.iter().zip(rhs.iter()).fold(0.0f32, |acc, (lhs, rhs)| lhs.mul_add(*rhs, acc))
+    lhs.iter()
+        .zip(rhs.iter())
+        .fold(0.0f32, |acc, (lhs, rhs)| lhs.mul_add(*rhs, acc))
 }
 
 fn scalar_sum_f32(values: &[f32]) -> f32 {
@@ -396,7 +398,9 @@ fn scalar_sum_f64(values: &[f64]) -> f64 {
 }
 
 fn scalar_dot_f64(lhs: &[f64], rhs: &[f64]) -> f64 {
-    lhs.iter().zip(rhs.iter()).fold(0.0f64, |acc, (lhs, rhs)| lhs.mul_add(*rhs, acc))
+    lhs.iter()
+        .zip(rhs.iter())
+        .fold(0.0f64, |acc, (lhs, rhs)| lhs.mul_add(*rhs, acc))
 }
 
 fn avx2_add_f32(lhs: &[f32], rhs: &[f32], out: &mut [f32]) {
@@ -570,7 +574,12 @@ unsafe fn avx2_fma_f32_impl(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]) {
         unsafe { _mm256_storeu_ps(out.as_mut_ptr().add(index), result) };
         index += width;
     }
-    scalar_fma_f32(&a[simd_len..len], &b[simd_len..len], &c[simd_len..len], &mut out[simd_len..len]);
+    scalar_fma_f32(
+        &a[simd_len..len],
+        &b[simd_len..len],
+        &c[simd_len..len],
+        &mut out[simd_len..len],
+    );
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -588,7 +597,12 @@ unsafe fn avx2_fma_f32_fma_impl(a: &[f32], b: &[f32], c: &[f32], out: &mut [f32]
         unsafe { _mm256_storeu_ps(out.as_mut_ptr().add(index), result) };
         index += width;
     }
-    scalar_fma_f32(&a[simd_len..len], &b[simd_len..len], &c[simd_len..len], &mut out[simd_len..len]);
+    scalar_fma_f32(
+        &a[simd_len..len],
+        &b[simd_len..len],
+        &c[simd_len..len],
+        &mut out[simd_len..len],
+    );
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -735,7 +749,12 @@ unsafe fn avx2_fma_f64_impl(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
         unsafe { _mm256_storeu_pd(out.as_mut_ptr().add(index), result) };
         index += width;
     }
-    scalar_fma_f64(&a[simd_len..len], &b[simd_len..len], &c[simd_len..len], &mut out[simd_len..len]);
+    scalar_fma_f64(
+        &a[simd_len..len],
+        &b[simd_len..len],
+        &c[simd_len..len],
+        &mut out[simd_len..len],
+    );
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -753,7 +772,12 @@ unsafe fn avx2_fma_f64_fma_impl(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]
         unsafe { _mm256_storeu_pd(out.as_mut_ptr().add(index), result) };
         index += width;
     }
-    scalar_fma_f64(&a[simd_len..len], &b[simd_len..len], &c[simd_len..len], &mut out[simd_len..len]);
+    scalar_fma_f64(
+        &a[simd_len..len],
+        &b[simd_len..len],
+        &c[simd_len..len],
+        &mut out[simd_len..len],
+    );
 }
 
 #[cfg(target_arch = "x86_64")]

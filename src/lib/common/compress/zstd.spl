@@ -1,7 +1,7 @@
 use compress.types.{CompressionOptions, CompressionError}
 use compress.utilities.{write_u32_le, read_u32_le}
 use compress.zstd_bits.{ZstdBackwardBits, zstd_bits_init, zstd_bits_peek, zstd_bits_consume, zstd_bits_remaining}
-use compress.zstd_huf.{ZstdHufCanonicalEntry, zstd_huf_complete_weights, zstd_huf_build_canonical_entries, zstd_huf_expand_decode_table}
+use compress.zstd_huf.{ZstdHufCanonicalEntry, ZstdHufDecodeEntry, zstd_huf_complete_weights, zstd_huf_build_canonical_entries, zstd_huf_expand_decode_table}
 use compress.zstd_fse.{ZstdFseDecodeTable, ZstdFseState, zstd_fse_parse_normalized_counts, zstd_fse_build_decode_table, zstd_fse_init_state, zstd_fse_get_entry}
 
 val ZSTD_MAGIC: u32 = 0xFD2FB528u32
@@ -65,6 +65,32 @@ struct ZstdSequenceTables:
     match_lengths_rle: i64?
     match_lengths: ZstdFseDecodeTable?
     bytes_used: i64
+
+struct ZstdSequenceTableHistory:
+    literal_lengths: ZstdFseDecodeTable
+    offsets: ZstdFseDecodeTable
+    match_lengths: ZstdFseDecodeTable
+
+struct ZstdHufTableState:
+    table_bits: i64
+    table: [ZstdHufDecodeEntry]
+
+struct ZstdLiteralsDecodeResult:
+    literals: [u8]
+    table_state: ZstdHufTableState?
+
+struct ZstdFrameHeader:
+    bytes_used: i64
+    checksum_flag: bool
+    window_size: i64
+    content_size: i64?
+    dictionary_id: i64?
+
+val ZSTD_XXH64_PRIME1: u64 = 0x9E3779B185EBCA87u64
+val ZSTD_XXH64_PRIME2: u64 = 0xC2B2AE3D27D4EB4Fu64
+val ZSTD_XXH64_PRIME3: u64 = 0x165667B19E3779F9u64
+val ZSTD_XXH64_PRIME4: u64 = 0x85EBCA77C2B2AE63u64
+val ZSTD_XXH64_PRIME5: u64 = 0x27D4EB2F165667C5u64
 
 fn zstd_compress_frame(input: [u8], options: CompressionOptions) -> [u8]:
     var out: [u8] = []
@@ -307,18 +333,19 @@ fn _zstd_parse_rle_sequence_tables(input: [u8], pos: i64, block_end: i64, modes:
 fn _zstd_predefined_table(distribution: [i64], table_log: i64) -> Result<ZstdFseDecodeTable, CompressionError>:
     zstd_fse_build_decode_table(table_log, distribution)
 
-fn _zstd_parse_single_sequence_table(input: [u8], pos: i64, block_end: i64, mode: i64, max_table_log: i64, predefined_distribution: [i64]) -> Result<(i64?, ZstdFseDecodeTable?, i64), CompressionError>:
+fn _zstd_parse_single_sequence_table(input: [u8], pos: i64, block_end: i64, mode: i64, max_table_log: i64, predefined_distribution: [i64], previous_table: ZstdFseDecodeTable) -> Result<(i64?, ZstdFseDecodeTable?, ZstdFseDecodeTable, i64), CompressionError>:
     if mode == 1:
         if pos >= block_end:
             return Err(CompressionError.TruncatedInput("zstd rle sequence table"))
-        return Ok((Some(input[pos].to_i64()), nil, 1))
+        return Ok((Some(input[pos].to_i64()), nil, previous_table, 1))
     if mode == 3:
-        return Err(CompressionError.UnsupportedFeature("zstd repeated fse tables are not supported"))
+        return Ok((nil, Some(previous_table), previous_table, 0))
     if mode == 0:
         val table_res = _zstd_predefined_table(predefined_distribution, if max_table_log == ZSTD_OF_MAX_TABLE_LOG: 5 else: 6)
         if table_res.is_err():
             return Err(table_res.unwrap_err())
-        return Ok((nil, Some(table_res.unwrap()), 0))
+        val table = table_res.unwrap()
+        return Ok((nil, Some(table), table, 0))
     val counts_res = zstd_fse_parse_normalized_counts(input, pos, block_end, max_table_log, predefined_distribution.len() - 1)
     if counts_res.is_err():
         return Err(counts_res.unwrap_err())
@@ -326,26 +353,28 @@ fn _zstd_parse_single_sequence_table(input: [u8], pos: i64, block_end: i64, mode
     val table_res = zstd_fse_build_decode_table(counts.table_log, counts.counts)
     if table_res.is_err():
         return Err(table_res.unwrap_err())
-    Ok((nil, Some(table_res.unwrap()), counts.bytes_used))
+    val table = table_res.unwrap()
+    Ok((nil, Some(table), table, counts.bytes_used))
 
-fn _zstd_parse_sequence_tables(input: [u8], pos: i64, block_end: i64, modes: ZstdSequenceModes) -> Result<ZstdSequenceTables, CompressionError>:
+fn _zstd_parse_sequence_tables(input: [u8], pos: i64, block_end: i64, modes: ZstdSequenceModes, previous_tables: ZstdSequenceTableHistory) -> Result<(ZstdSequenceTables, ZstdSequenceTableHistory), CompressionError>:
     var cursor = pos
-    val ll_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.literals_length_mode, ZSTD_LL_MAX_TABLE_LOG, ZSTD_LL_DEFAULT_DISTRIBUTION)
+    val ll_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.literals_length_mode, ZSTD_LL_MAX_TABLE_LOG, ZSTD_LL_DEFAULT_DISTRIBUTION, previous_tables.literal_lengths)
     if ll_res.is_err():
         return Err(ll_res.unwrap_err())
-    val (ll_rle, ll_table, ll_used) = ll_res.unwrap()
+    val (ll_rle, ll_table, next_ll_table, ll_used) = ll_res.unwrap()
     cursor = cursor + ll_used
-    val of_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.offsets_mode, ZSTD_OF_MAX_TABLE_LOG, ZSTD_OF_DEFAULT_DISTRIBUTION)
+    val of_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.offsets_mode, ZSTD_OF_MAX_TABLE_LOG, ZSTD_OF_DEFAULT_DISTRIBUTION, previous_tables.offsets)
     if of_res.is_err():
         return Err(of_res.unwrap_err())
-    val (of_rle, of_table, of_used) = of_res.unwrap()
+    val (of_rle, of_table, next_of_table, of_used) = of_res.unwrap()
     cursor = cursor + of_used
-    val ml_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.match_length_mode, ZSTD_ML_MAX_TABLE_LOG, ZSTD_ML_DEFAULT_DISTRIBUTION)
+    val ml_res = _zstd_parse_single_sequence_table(input, cursor, block_end, modes.match_length_mode, ZSTD_ML_MAX_TABLE_LOG, ZSTD_ML_DEFAULT_DISTRIBUTION, previous_tables.match_lengths)
     if ml_res.is_err():
         return Err(ml_res.unwrap_err())
-    val (ml_rle, ml_table, ml_used) = ml_res.unwrap()
+    val (ml_rle, ml_table, next_ml_table, ml_used) = ml_res.unwrap()
     cursor = cursor + ml_used
-    Ok(ZstdSequenceTables(
+    Ok((
+        ZstdSequenceTables(
         literal_lengths_mode: modes.literals_length_mode,
         literal_lengths_rle: ll_rle,
         literal_lengths: ll_table,
@@ -356,6 +385,12 @@ fn _zstd_parse_sequence_tables(input: [u8], pos: i64, block_end: i64, modes: Zst
         match_lengths_rle: ml_rle,
         match_lengths: ml_table,
         bytes_used: cursor - pos
+        ),
+        ZstdSequenceTableHistory(
+            literal_lengths: next_ll_table,
+            offsets: next_of_table,
+            match_lengths: next_ml_table
+        )
     ))
 
 fn _zstd_read_sequence_bits(reader: ZstdBackwardBits, count: i64) -> Result<(i64, ZstdBackwardBits), CompressionError>:
@@ -641,6 +676,17 @@ fn _zstd_table_bits(entries: [ZstdHufCanonicalEntry]) -> i64:
         i = i + 1
     max_bits
 
+fn _zstd_huf_build_table_from_weights(weights: [i64]) -> Result<ZstdHufTableState, CompressionError>:
+    val entries_res = zstd_huf_build_canonical_entries(weights)
+    if entries_res.is_err():
+        return Err(entries_res.unwrap_err())
+    val entries = entries_res.unwrap()
+    val table_bits = _zstd_table_bits(entries)
+    val table_res = zstd_huf_expand_decode_table(entries, table_bits)
+    if table_res.is_err():
+        return Err(table_res.unwrap_err())
+    Ok(ZstdHufTableState(table_bits: table_bits, table: table_res.unwrap()))
+
 fn _zstd_parse_direct_weights(input: [u8], pos: i64, payload_end: i64) -> Result<([i64], i64), CompressionError>:
     if pos >= payload_end:
         return Err(CompressionError.TruncatedInput("zstd huffman tree header"))
@@ -664,21 +710,7 @@ fn _zstd_parse_direct_weights(input: [u8], pos: i64, payload_end: i64) -> Result
         return Err(completed.unwrap_err())
     Ok((completed.unwrap(), 1 + packed_bytes))
 
-fn _zstd_decode_huffman_literals(input: [u8], stream_start: i64, stream_end: i64, regenerated_size: i64) -> Result<[u8], CompressionError>:
-    val weights_res = _zstd_parse_direct_weights(input, stream_start, stream_end)
-    if weights_res.is_err():
-        return Err(weights_res.unwrap_err())
-    val (weights, tree_size) = weights_res.unwrap()
-    val entries_res = zstd_huf_build_canonical_entries(weights)
-    if entries_res.is_err():
-        return Err(entries_res.unwrap_err())
-    val entries = entries_res.unwrap()
-    val table_bits = _zstd_table_bits(entries)
-    val table_res = zstd_huf_expand_decode_table(entries, table_bits)
-    if table_res.is_err():
-        return Err(table_res.unwrap_err())
-    val table = table_res.unwrap()
-    val data_start = stream_start + tree_size
+fn _zstd_decode_huffman_stream(input: [u8], data_start: i64, stream_end: i64, regenerated_size: i64, table_state: ZstdHufTableState) -> Result<[u8], CompressionError>:
     if data_start >= stream_end:
         return Err(CompressionError.TruncatedInput("zstd huffman literal stream"))
     val reader_res = zstd_bits_init(input, data_start, stream_end)
@@ -687,10 +719,10 @@ fn _zstd_decode_huffman_literals(input: [u8], stream_start: i64, stream_end: i64
     var reader = reader_res.unwrap()
     var literals: [u8] = []
     while literals.len() < regenerated_size:
-        val idx_res = zstd_bits_peek(reader, table_bits)
+        val idx_res = zstd_bits_peek(reader, table_state.table_bits)
         if idx_res.is_err():
             return Err(idx_res.unwrap_err())
-        val entry = table[idx_res.unwrap().to_i64()]
+        val entry = table_state.table[idx_res.unwrap().to_i64()]
         if entry.bits <= 0 or entry.symbol < 0 or entry.symbol > 255:
             return Err(CompressionError.CorruptStream("zstd invalid Huffman decode entry"))
         literals.push(entry.symbol.to_u8())
@@ -702,7 +734,72 @@ fn _zstd_decode_huffman_literals(input: [u8], stream_start: i64, stream_end: i64
         return Err(CompressionError.CorruptStream("zstd Huffman literal stream has trailing bits"))
     Ok(literals)
 
-fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64) -> Result<ZstdLiteralsSection, CompressionError>:
+fn _zstd_decode_huffman_literals(input: [u8], stream_start: i64, stream_end: i64, regenerated_size: i64) -> Result<ZstdLiteralsDecodeResult, CompressionError>:
+    val weights_res = _zstd_parse_direct_weights(input, stream_start, stream_end)
+    if weights_res.is_err():
+        return Err(weights_res.unwrap_err())
+    val (weights, tree_size) = weights_res.unwrap()
+    val table_state_res = _zstd_huf_build_table_from_weights(weights)
+    if table_state_res.is_err():
+        return Err(table_state_res.unwrap_err())
+    val table_state = table_state_res.unwrap()
+    val literals_res = _zstd_decode_huffman_stream(input, stream_start + tree_size, stream_end, regenerated_size, table_state)
+    if literals_res.is_err():
+        return Err(literals_res.unwrap_err())
+    Ok(ZstdLiteralsDecodeResult(literals: literals_res.unwrap(), table_state: Some(table_state)))
+
+fn _zstd_read_u16_le(input: [u8], pos: i64, what: text) -> Result<i64, CompressionError>:
+    if pos < 0 or pos + 2 > input.len():
+        return Err(CompressionError.TruncatedInput(what))
+    Ok(input[pos].to_i64() | (input[pos + 1].to_i64() << 8))
+
+fn _zstd_decode_huffman_4streams(input: [u8], stream_start: i64, stream_end: i64, regenerated_size: i64, table_state: ZstdHufTableState) -> Result<[u8], CompressionError>:
+    if stream_start + 6 > stream_end:
+        return Err(CompressionError.TruncatedInput("zstd 4-stream jump table"))
+    val stream1_size_res = _zstd_read_u16_le(input, stream_start, "zstd 4-stream jump table")
+    if stream1_size_res.is_err():
+        return Err(stream1_size_res.unwrap_err())
+    val stream2_size_res = _zstd_read_u16_le(input, stream_start + 2, "zstd 4-stream jump table")
+    if stream2_size_res.is_err():
+        return Err(stream2_size_res.unwrap_err())
+    val stream3_size_res = _zstd_read_u16_le(input, stream_start + 4, "zstd 4-stream jump table")
+    if stream3_size_res.is_err():
+        return Err(stream3_size_res.unwrap_err())
+    val stream1_size = stream1_size_res.unwrap()
+    val stream2_size = stream2_size_res.unwrap()
+    val stream3_size = stream3_size_res.unwrap()
+    val data_start = stream_start + 6
+    val stream4_size = stream_end - data_start - stream1_size - stream2_size - stream3_size
+    if stream1_size < 0 or stream2_size < 0 or stream3_size < 0 or stream4_size < 0:
+        return Err(CompressionError.CorruptStream("zstd 4-stream jump table lengths"))
+    val quarter = (regenerated_size + 3) / 4
+    val stream1_target = if regenerated_size < quarter: regenerated_size else: quarter
+    val remaining_after_1 = regenerated_size - stream1_target
+    val stream2_target = if remaining_after_1 < quarter: remaining_after_1 else: quarter
+    val remaining_after_2 = remaining_after_1 - stream2_target
+    val stream3_target = if remaining_after_2 < quarter: remaining_after_2 else: quarter
+    val stream4_target = remaining_after_2 - stream3_target
+    val stream1_end = data_start + stream1_size
+    val stream2_end = stream1_end + stream2_size
+    val stream3_end = stream2_end + stream3_size
+    val stream4_end = stream3_end + stream4_size
+    if stream4_end != stream_end:
+        return Err(CompressionError.CorruptStream("zstd 4-stream payload length"))
+    val stream1_res = _zstd_decode_huffman_stream(input, data_start, stream1_end, stream1_target, table_state)
+    if stream1_res.is_err():
+        return Err(stream1_res.unwrap_err())
+    val stream2_res = _zstd_decode_huffman_stream(input, stream1_end, stream2_end, stream2_target, table_state)
+    if stream2_res.is_err():
+        return Err(stream2_res.unwrap_err())
+    val stream3_res = _zstd_decode_huffman_stream(input, stream2_end, stream3_end, stream3_target, table_state)
+    if stream3_res.is_err():
+        return Err(stream3_res.unwrap_err())
+    val stream4_res = _zstd_decode_huffman_stream(input, stream3_end, stream4_end, stream4_target, table_state)
+    if stream4_res.is_err():
+        return Err(stream4_res.unwrap_err())
+    Ok(stream1_res.unwrap() + stream2_res.unwrap() + stream3_res.unwrap() + stream4_res.unwrap())
+
+fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64, previous_table_state: ZstdHufTableState?) -> Result<(ZstdLiteralsSection, ZstdHufTableState?), CompressionError>:
     if block_start >= block_end:
         return Err(CompressionError.TruncatedInput("zstd literals header"))
     val b0 = input[block_start].to_i64()
@@ -732,7 +829,7 @@ fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64) -
         while i < payload_end:
             literals.push(input[i])
             i = i + 1
-        return Ok(ZstdLiteralsSection(literals: literals, bytes_used: header_size + regenerated_size))
+        return Ok((ZstdLiteralsSection(literals: literals, bytes_used: header_size + regenerated_size), previous_table_state))
     if literals_type == 1:
         var header_size = 1
         var regenerated_size = b0 >> 3
@@ -755,16 +852,12 @@ fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64) -
         while i < regenerated_size:
             literals.push(input[block_start + header_size])
             i = i + 1
-        return Ok(ZstdLiteralsSection(literals: literals, bytes_used: header_size + 1))
-    if literals_type == 3:
-        return Err(CompressionError.UnsupportedFeature("zstd treeless literals are not supported"))
+        return Ok((ZstdLiteralsSection(literals: literals, bytes_used: header_size + 1), previous_table_state))
     if block_start + 3 > block_end:
         return Err(CompressionError.TruncatedInput("zstd compressed literals header"))
     var header_size = 3
     var regenerated_size = (b0 >> 4) | ((input[block_start + 1].to_i64() & 0x3F) << 4)
     var compressed_size = (input[block_start + 1].to_i64() >> 6) | (input[block_start + 2].to_i64() << 2)
-    if size_format == 1:
-        return Err(CompressionError.UnsupportedFeature("zstd 4-stream literals are not supported"))
     if size_format == 2:
         if block_start + 4 > block_end:
             return Err(CompressionError.TruncatedInput("zstd compressed literals header"))
@@ -773,8 +866,7 @@ fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64) -
             (input[block_start + 1].to_i64() << 4) |
             ((input[block_start + 2].to_i64() & 0x03) << 12)
         compressed_size = (input[block_start + 2].to_i64() >> 2) | (input[block_start + 3].to_i64() << 6)
-        return Err(CompressionError.UnsupportedFeature("zstd 4-stream literals are not supported"))
-    if size_format == 3:
+    elif size_format == 3:
         if block_start + 5 > block_end:
             return Err(CompressionError.TruncatedInput("zstd compressed literals header"))
         header_size = 5
@@ -784,116 +876,370 @@ fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64) -
         compressed_size = (input[block_start + 2].to_i64() >> 6) |
             (input[block_start + 3].to_i64() << 2) |
             (input[block_start + 4].to_i64() << 10)
-        return Err(CompressionError.UnsupportedFeature("zstd 4-stream literals are not supported"))
     if compressed_size <= 0:
         return Err(CompressionError.CorruptStream("zstd compressed literals size"))
     val payload_start = block_start + header_size
     val payload_end = payload_start + compressed_size
     if payload_end > block_end:
         return Err(CompressionError.TruncatedInput("zstd compressed literals payload"))
-    val literals_res = _zstd_decode_huffman_literals(input, payload_start, payload_end, regenerated_size)
+    var table_state: ZstdHufTableState? = previous_table_state
+    var data_start = payload_start
+    if literals_type == 2:
+        if size_format == 0 or size_format == 2:
+            val literals_res = _zstd_decode_huffman_literals(input, payload_start, payload_end, regenerated_size)
+            if literals_res.is_err():
+                return Err(literals_res.unwrap_err())
+            val decoded = literals_res.unwrap()
+            return Ok((ZstdLiteralsSection(literals: decoded.literals, bytes_used: header_size + compressed_size), decoded.table_state))
+        val weights_res = _zstd_parse_direct_weights(input, payload_start, payload_end)
+        if weights_res.is_err():
+            return Err(weights_res.unwrap_err())
+        val (weights, tree_size) = weights_res.unwrap()
+        val stream_table_res = _zstd_huf_build_table_from_weights(weights)
+        if stream_table_res.is_err():
+            return Err(stream_table_res.unwrap_err())
+        val stream_table = stream_table_res.unwrap()
+        table_state = Some(stream_table)
+        data_start = payload_start + tree_size
+        val four_stream_res = _zstd_decode_huffman_4streams(input, data_start, payload_end, regenerated_size, stream_table)
+        if four_stream_res.is_err():
+            return Err(four_stream_res.unwrap_err())
+        return Ok((ZstdLiteralsSection(literals: four_stream_res.unwrap(), bytes_used: header_size + compressed_size), table_state))
+    if previous_table_state == nil:
+        return Err(CompressionError.UnsupportedFeature("zstd treeless literals need a prior Huffman table"))
+    table_state = previous_table_state
+    val active_table = table_state ?? ZstdHufTableState(table_bits: 0, table: [])
+    if size_format == 0 or size_format == 2:
+        val literals_res = _zstd_decode_huffman_stream(input, data_start, payload_end, regenerated_size, active_table)
+        if literals_res.is_err():
+            return Err(literals_res.unwrap_err())
+        return Ok((ZstdLiteralsSection(literals: literals_res.unwrap(), bytes_used: header_size + compressed_size), table_state))
+    val literals_res = _zstd_decode_huffman_4streams(input, data_start, payload_end, regenerated_size, active_table)
     if literals_res.is_err():
         return Err(literals_res.unwrap_err())
-    Ok(ZstdLiteralsSection(literals: literals_res.unwrap(), bytes_used: header_size + compressed_size))
+    Ok((ZstdLiteralsSection(literals: literals_res.unwrap(), bytes_used: header_size + compressed_size), table_state))
 
-fn zstd_decompress_frame(input: [u8]) -> Result<[u8], CompressionError>:
-    val magic_res = read_u32_le(input, 0)
+fn _zstd_xxh64_rotl(value: u64, amount: u64) -> u64:
+    (value << amount) | (value >> (64u64 - amount))
+
+fn _zstd_xxh64_round(acc: u64, input: u64) -> u64:
+    val mixed = (acc + input * ZSTD_XXH64_PRIME2)
+    _zstd_xxh64_rotl(mixed, 31u64) * ZSTD_XXH64_PRIME1
+
+fn _zstd_xxh64_merge_round(acc: u64, value: u64) -> u64:
+    (acc ^ _zstd_xxh64_round(0u64, value)) * ZSTD_XXH64_PRIME1 + ZSTD_XXH64_PRIME4
+
+fn _zstd_xxh64_avalanche(value: u64) -> u64:
+    var acc = value
+    acc = acc ^ (acc >> 33u64)
+    acc = acc * ZSTD_XXH64_PRIME2
+    acc = acc ^ (acc >> 29u64)
+    acc = acc * ZSTD_XXH64_PRIME3
+    acc ^ (acc >> 32u64)
+
+fn _zstd_read_u64_local(data: [u8], pos: i64) -> Result<u64, CompressionError>:
+    if pos < 0 or pos + 8 > data.len():
+        return Err(CompressionError.TruncatedInput("zstd need 8 bytes"))
+    var value: u64 = 0u64
+    var idx = 0
+    while idx < 8:
+        value = value | (data[pos + idx].to_u64() << (idx * 8).to_u64())
+        idx = idx + 1
+    Ok(value)
+
+fn _zstd_xxh64_bytes(data: [u8], seed: u64) -> u64:
+    var idx = 0
+    var hash: u64 = 0u64
+    if data.len() >= 32:
+        var v1 = seed + ZSTD_XXH64_PRIME1 + ZSTD_XXH64_PRIME2
+        var v2 = seed + ZSTD_XXH64_PRIME2
+        var v3 = seed
+        var v4 = seed - ZSTD_XXH64_PRIME1
+        while idx + 32 <= data.len():
+            val w1 = _zstd_read_u64_local(data, idx).unwrap()
+            val w2 = _zstd_read_u64_local(data, idx + 8).unwrap()
+            val w3 = _zstd_read_u64_local(data, idx + 16).unwrap()
+            val w4 = _zstd_read_u64_local(data, idx + 24).unwrap()
+            v1 = _zstd_xxh64_round(v1, w1)
+            v2 = _zstd_xxh64_round(v2, w2)
+            v3 = _zstd_xxh64_round(v3, w3)
+            v4 = _zstd_xxh64_round(v4, w4)
+            idx = idx + 32
+        hash = _zstd_xxh64_rotl(v1, 1u64) +
+            _zstd_xxh64_rotl(v2, 7u64) +
+            _zstd_xxh64_rotl(v3, 12u64) +
+            _zstd_xxh64_rotl(v4, 18u64)
+        hash = _zstd_xxh64_merge_round(hash, v1)
+        hash = _zstd_xxh64_merge_round(hash, v2)
+        hash = _zstd_xxh64_merge_round(hash, v3)
+        hash = _zstd_xxh64_merge_round(hash, v4)
+    else:
+        hash = seed + ZSTD_XXH64_PRIME5
+    hash = hash + data.len().to_u64()
+    while idx + 8 <= data.len():
+        val lane = _zstd_read_u64_local(data, idx).unwrap()
+        hash = hash ^ _zstd_xxh64_round(0u64, lane)
+        hash = _zstd_xxh64_rotl(hash, 27u64) * ZSTD_XXH64_PRIME1 + ZSTD_XXH64_PRIME4
+        idx = idx + 8
+    if idx + 4 <= data.len():
+        val lane = data[idx].to_u64() |
+            (data[idx + 1].to_u64() << 8u64) |
+            (data[idx + 2].to_u64() << 16u64) |
+            (data[idx + 3].to_u64() << 24u64)
+        hash = _zstd_xxh64_rotl(hash ^ (lane * ZSTD_XXH64_PRIME1), 23u64) * ZSTD_XXH64_PRIME2 + ZSTD_XXH64_PRIME3
+        idx = idx + 4
+    while idx < data.len():
+        hash = _zstd_xxh64_rotl(hash ^ (data[idx].to_u64() * ZSTD_XXH64_PRIME5), 11u64) * ZSTD_XXH64_PRIME1
+        idx = idx + 1
+    _zstd_xxh64_avalanche(hash)
+
+fn _zstd_dictionary_id_field_size(code: i64) -> Result<i64, CompressionError>:
+    if code < 0 or code > 3:
+        return Err(CompressionError.CorruptStream("zstd dictionary id flag"))
+    if code == 0:
+        return Ok(0)
+    if code == 1:
+        return Ok(1)
+    if code == 2:
+        return Ok(2)
+    Ok(4)
+
+fn _zstd_frame_content_size_field_size(flag: i64, single_segment: bool) -> Result<i64, CompressionError>:
+    if flag < 0 or flag > 3:
+        return Err(CompressionError.CorruptStream("zstd frame content size flag"))
+    if flag == 0:
+        return Ok(if single_segment: 1 else: 0)
+    if flag == 1:
+        return Ok(2)
+    if flag == 2:
+        return Ok(4)
+    Ok(8)
+
+fn _zstd_parse_window_size(window_descriptor: i64) -> Result<i64, CompressionError>:
+    if window_descriptor < 0 or window_descriptor > 255:
+        return Err(CompressionError.CorruptStream("zstd window descriptor"))
+    val exponent = window_descriptor >> 3
+    val mantissa = window_descriptor & 0x07
+    val window_log = 10 + exponent
+    val window_base = 1 << window_log
+    val window_add = (window_base / 8) * mantissa
+    val window_size = window_base + window_add
+    if window_size <= 0:
+        return Err(CompressionError.CorruptStream("zstd window size"))
+    Ok(window_size)
+
+fn _zstd_parse_content_size(input: [u8], pos: i64, size_code: i64, single_segment: bool) -> Result<(i64?, i64), CompressionError>:
+    val field_size_res = _zstd_frame_content_size_field_size(size_code, single_segment)
+    if field_size_res.is_err():
+        return Err(field_size_res.unwrap_err())
+    val field_size = field_size_res.unwrap()
+    if field_size == 0:
+        return Ok((nil, 0))
+    if pos + field_size > input.len():
+        return Err(CompressionError.TruncatedInput("zstd frame content size"))
+    if field_size == 1:
+        return Ok((Some(input[pos].to_i64()), 1))
+    if field_size == 2:
+        return Ok((Some((input[pos].to_i64() | (input[pos + 1].to_i64() << 8)) + 256), 2))
+    if field_size == 4:
+        val size_res = read_u32_le(input, pos)
+        if size_res.is_err():
+            return Err(size_res.unwrap_err())
+        return Ok((Some(size_res.unwrap().to_i64()), 4))
+    val size_res = _zstd_read_u64_local(input, pos)
+    if size_res.is_err():
+        return Err(size_res.unwrap_err())
+    val size = size_res.unwrap()
+    if size > 0x7FFFFFFFFFFFFFFFu64:
+        return Err(CompressionError.UnsupportedFeature("zstd frame content size exceeds i64"))
+    Ok((Some(size.to_i64()), 8))
+
+fn _zstd_parse_dictionary_id(input: [u8], pos: i64, size_code: i64) -> Result<(i64?, i64), CompressionError>:
+    val field_size_res = _zstd_dictionary_id_field_size(size_code)
+    if field_size_res.is_err():
+        return Err(field_size_res.unwrap_err())
+    val field_size = field_size_res.unwrap()
+    if field_size == 0:
+        return Ok((nil, 0))
+    if pos + field_size > input.len():
+        return Err(CompressionError.TruncatedInput("zstd dictionary id"))
+    if field_size == 1:
+        return Ok((Some(input[pos].to_i64()), 1))
+    if field_size == 2:
+        return Ok((Some(input[pos].to_i64() | (input[pos + 1].to_i64() << 8)), 2))
+    val value = input[pos].to_i64() |
+        (input[pos + 1].to_i64() << 8) |
+        (input[pos + 2].to_i64() << 16) |
+        (input[pos + 3].to_i64() << 24)
+    Ok((Some(value), 4))
+
+fn _zstd_parse_frame_header(input: [u8], frame_start: i64) -> Result<ZstdFrameHeader, CompressionError>:
+    if frame_start + 5 > input.len():
+        return Err(CompressionError.TruncatedInput("zstd frame header"))
+    val magic_res = read_u32_le(input, frame_start)
     if magic_res.is_err():
         return Err(magic_res.unwrap_err())
     if magic_res.unwrap() != ZSTD_MAGIC:
         return Err(CompressionError.InvalidHeader("zstd frame magic"))
-    if input.len() < 9:
-        return Err(CompressionError.TruncatedInput("zstd frame header"))
-    val fhd = input[4].to_i64()
-    val single_segment = (fhd >> 5) & 1
-    if single_segment != 1:
-        return Err(CompressionError.UnsupportedFeature("zstd window descriptors are not supported"))
-    val checksum_flag = (fhd >> 2) & 1
-    val did_field_size = fhd & 0x03
-    if did_field_size != 0:
-        return Err(CompressionError.UnsupportedFeature("zstd dictionary ids are not supported"))
-    var pos = 5
-    val size_res = read_u32_le(input, pos)
-    if size_res.is_err():
-        return Err(size_res.unwrap_err())
-    val _expected_size = size_res.unwrap().to_i64()
-    pos = pos + 4
+    val descriptor = input[frame_start + 4].to_i64()
+    if ((descriptor >> 3) & 1) == 1:
+        return Err(CompressionError.CorruptStream("zstd reserved frame header bit"))
+    val single_segment = ((descriptor >> 5) & 1) == 1
+    val checksum_flag = ((descriptor >> 2) & 1) == 1
+    val dictionary_id_flag = descriptor & 0x03
+    val content_size_flag = (descriptor >> 6) & 0x03
+    var pos = frame_start + 5
+    var window_size = 0
+    if not single_segment:
+        if pos >= input.len():
+            return Err(CompressionError.TruncatedInput("zstd window descriptor"))
+        val window_res = _zstd_parse_window_size(input[pos].to_i64())
+        if window_res.is_err():
+            return Err(window_res.unwrap_err())
+        window_size = window_res.unwrap()
+        pos = pos + 1
+    val dictionary_res = _zstd_parse_dictionary_id(input, pos, dictionary_id_flag)
+    if dictionary_res.is_err():
+        return Err(dictionary_res.unwrap_err())
+    val (dictionary_id, dictionary_used) = dictionary_res.unwrap()
+    pos = pos + dictionary_used
+    val content_size_res = _zstd_parse_content_size(input, pos, content_size_flag, single_segment)
+    if content_size_res.is_err():
+        return Err(content_size_res.unwrap_err())
+    val (content_size, content_used) = content_size_res.unwrap()
+    pos = pos + content_used
+    if single_segment:
+        window_size = content_size ?? 0
+    Ok(ZstdFrameHeader(
+        bytes_used: pos - frame_start,
+        checksum_flag: checksum_flag,
+        window_size: window_size,
+        content_size: content_size,
+        dictionary_id: dictionary_id
+    ))
+
+fn _zstd_default_sequence_table_history() -> Result<ZstdSequenceTableHistory, CompressionError>:
+    val ll_res = _zstd_predefined_table(ZSTD_LL_DEFAULT_DISTRIBUTION, 6)
+    if ll_res.is_err():
+        return Err(ll_res.unwrap_err())
+    val of_res = _zstd_predefined_table(ZSTD_OF_DEFAULT_DISTRIBUTION, 5)
+    if of_res.is_err():
+        return Err(of_res.unwrap_err())
+    val ml_res = _zstd_predefined_table(ZSTD_ML_DEFAULT_DISTRIBUTION, 6)
+    if ml_res.is_err():
+        return Err(ml_res.unwrap_err())
+    Ok(ZstdSequenceTableHistory(
+        literal_lengths: ll_res.unwrap(),
+        offsets: of_res.unwrap(),
+        match_lengths: ml_res.unwrap()
+    ))
+
+fn zstd_decompress_frame(input: [u8]) -> Result<[u8], CompressionError>:
     var out: [u8] = []
-    var repeat_offsets = ZstdRepeatOffsets(rep1: 1, rep2: 4, rep3: 8)
-    var done = false
-    while not done:
-        if pos + 3 > input.len():
-            return Err(CompressionError.TruncatedInput("zstd block header"))
-        val header = input[pos].to_i64() |
-            (input[pos + 1].to_i64() << 8) |
-            (input[pos + 2].to_i64() << 16)
-        pos = pos + 3
-        val last_block = header & 1
-        val block_type = (header >> 1) & 0x03
-        val block_size = (header >> 3) & 0x1FFFFF
-        if block_type == 0:
-            if pos + block_size > input.len():
-                return Err(CompressionError.TruncatedInput("zstd raw block"))
-            var i = 0
-            while i < block_size:
-                out.push(input[pos + i])
-                i = i + 1
-            pos = pos + block_size
-        elif block_type == 1:
-            if pos >= input.len():
-                return Err(CompressionError.TruncatedInput("zstd rle byte"))
-            var i = 0
-            while i < block_size:
-                out.push(input[pos])
-                i = i + 1
-            pos = pos + 1
-        elif block_type == 2:
-            val block_end = pos + block_size
-            if block_end > input.len():
-                return Err(CompressionError.TruncatedInput("zstd compressed block"))
-            val literals_res = _zstd_parse_literals_section(input, pos, block_end)
-            if literals_res.is_err():
-                return Err(literals_res.unwrap_err())
-            val literals = literals_res.unwrap()
-            pos = pos + literals.bytes_used
-            val sequences_res = _zstd_parse_sequence_count(input, pos, block_end)
-            if sequences_res.is_err():
-                return Err(sequences_res.unwrap_err())
-            val sequence_count = sequences_res.unwrap()
-            pos = pos + sequence_count.bytes_used
-            if sequence_count.count > 0:
-                val modes_res = _zstd_parse_sequence_modes(input, pos, block_end)
-                if modes_res.is_err():
-                    return Err(modes_res.unwrap_err())
-                val modes = modes_res.unwrap()
-                pos = pos + modes.bytes_used
-                if modes.literals_length_mode == 3 or modes.offsets_mode == 3 or modes.match_length_mode == 3:
-                    return Err(CompressionError.UnsupportedFeature("zstd repeated fse tables are not supported"))
-                val tables_res = _zstd_parse_sequence_tables(input, pos, block_end, modes)
-                if tables_res.is_err():
-                    return Err(tables_res.unwrap_err())
-                val tables = tables_res.unwrap()
-                pos = pos + tables.bytes_used
-                val sequences_decoded_res = _zstd_decode_fse_sequences(input, pos, block_end, sequence_count.count, tables)
-                if sequences_decoded_res.is_err():
-                    return Err(sequences_decoded_res.unwrap_err())
-                val executed_res = _zstd_execute_sequences(out, literals.literals, sequences_decoded_res.unwrap(), repeat_offsets)
-                if executed_res.is_err():
-                    return Err(executed_res.unwrap_err())
-                (out, repeat_offsets) = executed_res.unwrap()
+    var pos = 0
+    while pos < input.len():
+        val header_res = _zstd_parse_frame_header(input, pos)
+        if header_res.is_err():
+            return Err(header_res.unwrap_err())
+        val frame_header = header_res.unwrap()
+        if frame_header.dictionary_id != nil:
+            return Err(CompressionError.UnsupportedFeature("zstd dictionary-backed frames are not supported"))
+        pos = pos + frame_header.bytes_used
+        val frame_output_start = out.len()
+        var repeat_offsets = ZstdRepeatOffsets(rep1: 1, rep2: 4, rep3: 8)
+        val table_history_res = _zstd_default_sequence_table_history()
+        if table_history_res.is_err():
+            return Err(table_history_res.unwrap_err())
+        var sequence_table_history = table_history_res.unwrap()
+        var huffman_table_state: ZstdHufTableState? = nil
+        var done = false
+        while not done:
+            if pos + 3 > input.len():
+                return Err(CompressionError.TruncatedInput("zstd block header"))
+            val header = input[pos].to_i64() |
+                (input[pos + 1].to_i64() << 8) |
+                (input[pos + 2].to_i64() << 16)
+            pos = pos + 3
+            val last_block = header & 1
+            val block_type = (header >> 1) & 0x03
+            val block_size = (header >> 3) & 0x1FFFFF
+            if block_type == 0:
+                if pos + block_size > input.len():
+                    return Err(CompressionError.TruncatedInput("zstd raw block"))
+                var i = 0
+                while i < block_size:
+                    out.push(input[pos + i])
+                    i = i + 1
+                pos = pos + block_size
+            elif block_type == 1:
+                if pos >= input.len():
+                    return Err(CompressionError.TruncatedInput("zstd rle byte"))
+                var i = 0
+                while i < block_size:
+                    out.push(input[pos])
+                    i = i + 1
+                pos = pos + 1
+            elif block_type == 2:
+                val block_end = pos + block_size
+                if block_end > input.len():
+                    return Err(CompressionError.TruncatedInput("zstd compressed block"))
+                val literals_res = _zstd_parse_literals_section(input, pos, block_end, huffman_table_state)
+                if literals_res.is_err():
+                    return Err(literals_res.unwrap_err())
+                val (literals, next_huffman_table_state) = literals_res.unwrap()
+                huffman_table_state = next_huffman_table_state
+                pos = pos + literals.bytes_used
+                val sequences_res = _zstd_parse_sequence_count(input, pos, block_end)
+                if sequences_res.is_err():
+                    return Err(sequences_res.unwrap_err())
+                val sequence_count = sequences_res.unwrap()
+                pos = pos + sequence_count.bytes_used
+                if sequence_count.count > 0:
+                    val modes_res = _zstd_parse_sequence_modes(input, pos, block_end)
+                    if modes_res.is_err():
+                        return Err(modes_res.unwrap_err())
+                    val modes = modes_res.unwrap()
+                    pos = pos + modes.bytes_used
+                    val tables_res = _zstd_parse_sequence_tables(input, pos, block_end, modes, sequence_table_history)
+                    if tables_res.is_err():
+                        return Err(tables_res.unwrap_err())
+                    val (tables, next_sequence_table_history) = tables_res.unwrap()
+                    sequence_table_history = next_sequence_table_history
+                    pos = pos + tables.bytes_used
+                    val sequences_decoded_res = _zstd_decode_fse_sequences(input, pos, block_end, sequence_count.count, tables)
+                    if sequences_decoded_res.is_err():
+                        return Err(sequences_decoded_res.unwrap_err())
+                    val executed_res = _zstd_execute_sequences(out, literals.literals, sequences_decoded_res.unwrap(), repeat_offsets)
+                    if executed_res.is_err():
+                        return Err(executed_res.unwrap_err())
+                    (out, repeat_offsets) = executed_res.unwrap()
+                    pos = block_end
+                else:
+                    if pos != block_end:
+                        return Err(CompressionError.CorruptStream("zstd zero-sequence compressed block has trailing bytes"))
+                    var i = 0
+                    while i < literals.literals.len():
+                        out.push(literals.literals[i])
+                        i = i + 1
                 pos = block_end
             else:
-                if pos != block_end:
-                    return Err(CompressionError.CorruptStream("zstd zero-sequence compressed block has trailing bytes"))
-                var i = 0
-                while i < literals.literals.len():
-                    out.push(literals.literals[i])
-                    i = i + 1
-            pos = block_end
-        else:
-            return Err(CompressionError.CorruptStream("zstd reserved block type"))
-        if last_block == 1:
-            done = true
-    if checksum_flag == 1:
-        return Err(CompressionError.UnsupportedFeature("zstd content checksum verification is not supported"))
+                return Err(CompressionError.CorruptStream("zstd reserved block type"))
+            if last_block == 1:
+                done = true
+        if frame_header.content_size != nil:
+            val expected = frame_header.content_size ?? 0
+            val actual = out.len() - frame_output_start
+            if actual != expected:
+                return Err(CompressionError.CorruptStream("zstd frame content size mismatch"))
+        if frame_header.checksum_flag:
+            if pos + 4 > input.len():
+                return Err(CompressionError.TruncatedInput("zstd content checksum"))
+            val checksum_res = read_u32_le(input, pos)
+            if checksum_res.is_err():
+                return Err(checksum_res.unwrap_err())
+            val expected = checksum_res.unwrap()
+            val actual = (_zstd_xxh64_bytes(out.slice(frame_output_start, out.len()), 0u64) & 0xFFFFFFFFu64).to_u32()
+            if actual != expected:
+                return Err(CompressionError.ChecksumMismatch("zstd content checksum"))
+            pos = pos + 4
     Ok(out)

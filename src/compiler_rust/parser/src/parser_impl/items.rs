@@ -19,11 +19,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_simd_annotated_loop(
-        &mut self,
-        decorator_span: Span,
-        decorator_count: usize,
-    ) -> Result<Node, ParseError> {
+    fn parse_simd_annotated_loop(&mut self, decorator_span: Span, decorator_count: usize) -> Result<Node, ParseError> {
         let message = if decorator_count == 1 {
             "Loop-level @simd is accepted but ignored; loop SIMD lowering is not implemented yet.".to_string()
         } else {
@@ -392,9 +388,9 @@ impl<'a> Parser<'a> {
                     _ => None,
                 });
                 let all_simd_decorators = !decorators.is_empty()
-                    && decorators.iter().all(|decorator| {
-                        matches!(&decorator.name, Expr::Identifier(name) if name == "simd")
-                    });
+                    && decorators
+                        .iter()
+                        .all(|decorator| matches!(&decorator.name, Expr::Identifier(name) if name == "simd"));
                 if all_simd_decorators && attributes.is_empty() && effects.is_empty() {
                     if matches!(self.current.kind, TokenKind::For | TokenKind::While | TokenKind::Loop) {
                         return self.parse_simd_annotated_loop(

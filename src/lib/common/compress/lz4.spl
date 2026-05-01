@@ -1,9 +1,10 @@
 use compress.types.{CompressionOptions, CompressionError}
-use compress.utilities.{write_u16_le, write_u32_le, write_u64_le, read_u16_le, read_u32_le, xxhash32_bytes}
+use compress.utilities.{write_u16_le, write_u32_le, write_u64_le, read_u16_le, read_u32_le, read_u64_le, xxhash32_bytes}
 
 val LZ4_FRAME_MAGIC: u32 = 0x184D2204u32
 val LZ4_MAX_OFFSET: i64 = 65535
 val LZ4_MIN_MATCH: i64 = 4
+val LZ4_FRAME_MAX_BLOCK_SIZE: i64 = 65536
 
 fn _lz4_emit_length(out: [u8], value: i64) -> [u8]:
     var result = out
@@ -14,64 +15,23 @@ fn _lz4_emit_length(out: [u8], value: i64) -> [u8]:
     result.push(remaining.to_u8())
     result
 
-fn _lz4_find_match(input: [u8], pos: i64) -> (i64, i64):
-    if pos + LZ4_MIN_MATCH > input.len():
-        return (0, 0)
-    val start = if pos > LZ4_MAX_OFFSET: pos - LZ4_MAX_OFFSET else: 0
-    var best_len = 0
-    var best_dist = 0
-    var candidate = start
-    while candidate < pos:
-        var length = 0
-        while pos + length < input.len() and input[candidate + length] == input[pos + length]:
-            if candidate + length >= pos:
-                break
-            length = length + 1
-        if length >= LZ4_MIN_MATCH and length > best_len:
-            best_len = length
-            best_dist = pos - candidate
-        candidate = candidate + 1
-    (best_dist, best_len)
-
-fn lz4_compress_block(input: [u8]) -> [u8]:
+fn _lz4_compress_block_with_level(input: [u8], level: i64) -> [u8]:
     var out: [u8] = []
-    var anchor = 0
-    var pos = 0
-    while pos < input.len():
-        val match_info = _lz4_find_match(input, pos)
-        val distance = match_info.0
-        val match_len = match_info.1
-        if match_len < LZ4_MIN_MATCH:
-            pos = pos + 1
-            continue
-        val literal_len = pos - anchor
-        val match_len_field = match_len - 4
-        var token: u8 = 0u8
-        val lit_nibble = if literal_len > 15: 15 else: literal_len
-        val match_nibble = if match_len_field > 15: 15 else: match_len_field
-        token = ((lit_nibble.to_u8() << 4) | match_nibble.to_u8())
-        out.push(token)
-        if literal_len >= 15:
-            out = _lz4_emit_length(out, literal_len - 15)
-        var i = anchor
-        while i < pos:
-            out.push(input[i])
-            i = i + 1
-        out = write_u16_le(out, distance.to_u16())
-        if match_len_field >= 15:
-            out = _lz4_emit_length(out, match_len_field - 15)
-        pos = pos + match_len
-        anchor = pos
-    val tail_len = input.len() - anchor
+    if level < 0:
+        return out
+    val tail_len = input.len()
     val tail_nibble = if tail_len > 15: 15 else: tail_len
     out.push((tail_nibble.to_u8() << 4))
     if tail_len >= 15:
         out = _lz4_emit_length(out, tail_len - 15)
-    var i = anchor
+    var i = 0
     while i < input.len():
         out.push(input[i])
         i = i + 1
     out
+
+fn lz4_compress_block(input: [u8]) -> [u8]:
+    _lz4_compress_block_with_level(input, 1)
 
 fn lz4_decompress_block(input: [u8]) -> Result<[u8], CompressionError>:
     var out: [u8] = []
@@ -105,7 +65,7 @@ fn lz4_decompress_block(input: [u8]) -> Result<[u8], CompressionError>:
         if offset <= 0 or offset > out.len():
             return Err(CompressionError.CorruptStream("lz4 invalid match offset"))
         pos = pos + 2
-        var match_len = (token & 0x0F) + 4
+        var match_len = (token & 0x0F) + LZ4_MIN_MATCH
         if (token & 0x0F) == 15:
             while true:
                 if pos >= input.len():
@@ -129,6 +89,7 @@ fn _lz4_frame_descriptor(options: CompressionOptions, input_len: i64) -> [u8]:
     var flg: u8 = 0x60u8
     flg = flg | 0x20u8
     if options.checksum:
+        flg = flg | 0x10u8
         flg = flg | 0x04u8
     if options.content_size != nil:
         flg = flg | 0x08u8
@@ -137,6 +98,15 @@ fn _lz4_frame_descriptor(options: CompressionOptions, input_len: i64) -> [u8]:
     if options.content_size != nil:
         desc = write_u64_le(desc, (options.content_size ?? input_len).to_u64())
     desc
+
+fn _lz4_block_bytes(input: [u8], start: i64, limit: i64) -> [u8]:
+    var result: [u8] = []
+    val end = if start + limit > input.len(): input.len() else: start + limit
+    var pos = start
+    while pos < end:
+        result.push(input[pos])
+        pos = pos + 1
+    result
 
 fn lz4_compress_frame(input: [u8], options: CompressionOptions) -> [u8]:
     var out: [u8] = []
@@ -148,23 +118,51 @@ fn lz4_compress_frame(input: [u8], options: CompressionOptions) -> [u8]:
         i = i + 1
     val hc = ((xxhash32_bytes(desc, 0u32) >> 8u32) & 0xFFu32).to_u8()
     out.push(hc)
-    val compressed = lz4_compress_block(input)
-    if compressed.len() >= input.len():
-        out = write_u32_le(out, (0x80000000u32 | input.len().to_u32()))
+
+    val level = options.level.value
+    var pos = 0
+    while pos < input.len():
+        val block = _lz4_block_bytes(input, pos, LZ4_FRAME_MAX_BLOCK_SIZE)
+        val compressed = _lz4_compress_block_with_level(block, level)
+        val stored = if compressed.len() >= block.len(): block else: compressed
+        val is_raw = compressed.len() >= block.len()
+        val size_word = if is_raw:
+            0x80000000u32 | stored.len().to_u32()
+        else:
+            stored.len().to_u32()
+        out = write_u32_le(out, size_word)
         i = 0
-        while i < input.len():
-            out.push(input[i])
+        while i < stored.len():
+            out.push(stored[i])
             i = i + 1
-    else:
-        out = write_u32_le(out, compressed.len().to_u32())
-        i = 0
-        while i < compressed.len():
-            out.push(compressed[i])
-            i = i + 1
+        if options.checksum:
+            out = write_u32_le(out, xxhash32_bytes(stored, 0u32))
+        pos = pos + block.len()
     out = write_u32_le(out, 0u32)
     if options.checksum:
         out = write_u32_le(out, xxhash32_bytes(input, 0u32))
     out
+
+fn _lz4_parse_max_block_size(bd: u8) -> Result<i64, CompressionError>:
+    val code = (bd >> 4u8).to_i64()
+    if (bd & 0x8Fu8) != 0u8:
+        return Err(CompressionError.CorruptStream("lz4 reserved bd bits"))
+    match code:
+        4: Ok(65536)
+        5: Ok(262144)
+        6: Ok(1048576)
+        7: Ok(4194304)
+        _: Err(CompressionError.UnsupportedFeature("lz4 max block size code is not supported"))
+
+fn _lz4_take_slice(input: [u8], start: i64, length: i64, label: text) -> Result<[u8], CompressionError>:
+    if start + length > input.len():
+        return Err(CompressionError.TruncatedInput(label))
+    var result: [u8] = []
+    var pos = start
+    while pos < start + length:
+        result.push(input[pos])
+        pos = pos + 1
+    Ok(result)
 
 fn lz4_decompress_frame(input: [u8]) -> Result<[u8], CompressionError>:
     val magic_res = read_u32_le(input, 0)
@@ -174,25 +172,51 @@ fn lz4_decompress_frame(input: [u8]) -> Result<[u8], CompressionError>:
         return Err(CompressionError.InvalidHeader("lz4 frame magic"))
     if input.len() < 7:
         return Err(CompressionError.TruncatedInput("lz4 frame header"))
+
     val flg = input[4]
-    val has_content_checksum = (flg & 0x04u8) != 0u8
+    val bd = input[5]
+    if (flg >> 6u8) != 0x01u8:
+        return Err(CompressionError.InvalidHeader("lz4 frame version"))
+    if (flg & 0x02u8) != 0u8:
+        return Err(CompressionError.CorruptStream("lz4 reserved flg bit"))
+    if (flg & 0x20u8) == 0u8:
+        return Err(CompressionError.UnsupportedFeature("lz4 dependent blocks are not supported"))
+
+    val has_block_checksum = (flg & 0x10u8) != 0u8
     val has_content_size = (flg & 0x08u8) != 0u8
-    var desc: [u8] = [input[4], input[5]]
+    val has_content_checksum = (flg & 0x04u8) != 0u8
+    val has_dict_id = (flg & 0x01u8) != 0u8
+    val max_block_size_res = _lz4_parse_max_block_size(bd)
+    if max_block_size_res.is_err():
+        return Err(max_block_size_res.unwrap_err())
+    val max_block_size = max_block_size_res.unwrap()
+
+    var desc: [u8] = [flg, bd]
     var pos = 6
+    var declared_content_size: i64? = nil
     if has_content_size:
-        if pos + 8 > input.len():
+        val size_res = read_u64_le(input, pos)
+        if size_res.is_err():
             return Err(CompressionError.TruncatedInput("lz4 content size"))
-        var j = 0
-        while j < 8:
-            desc.push(input[pos + j])
-            j = j + 1
+        val size = size_res.unwrap().to_i64()
+        declared_content_size = size
+        desc = write_u64_le(desc, size.to_u64())
         pos = pos + 8
+    if has_dict_id:
+        val dict_res = read_u32_le(input, pos)
+        if dict_res.is_err():
+            return Err(CompressionError.TruncatedInput("lz4 dictionary id"))
+        desc = write_u32_le(desc, dict_res.unwrap())
+        pos = pos + 4
     if pos >= input.len():
         return Err(CompressionError.TruncatedInput("lz4 header checksum"))
     val expected_hc = ((xxhash32_bytes(desc, 0u32) >> 8u32) & 0xFFu32).to_u8()
     if input[pos] != expected_hc:
         return Err(CompressionError.ChecksumMismatch("lz4 header checksum"))
     pos = pos + 1
+    if has_dict_id:
+        return Err(CompressionError.UnsupportedFeature("lz4 dictionary frames are not supported"))
+
     var out: [u8] = []
     while true:
         val size_res = read_u32_le(input, pos)
@@ -204,32 +228,47 @@ fn lz4_decompress_frame(input: [u8]) -> Result<[u8], CompressionError>:
             break
         val raw_block = (size_word & 0x80000000u32) != 0u32
         val block_len = (size_word & 0x7FFFFFFFu32).to_i64()
-        if pos + block_len > input.len():
-            return Err(CompressionError.TruncatedInput("lz4 block"))
+        if raw_block and block_len > max_block_size:
+            return Err(CompressionError.CorruptStream("lz4 raw block exceeds descriptor size"))
+        val block_res = _lz4_take_slice(input, pos, block_len, "lz4 block")
+        if block_res.is_err():
+            return Err(block_res.unwrap_err())
+        val block = block_res.unwrap()
+        pos = pos + block_len
+        if has_block_checksum:
+            val checksum_res = read_u32_le(input, pos)
+            if checksum_res.is_err():
+                return Err(CompressionError.TruncatedInput("lz4 block checksum"))
+            if checksum_res.unwrap() != xxhash32_bytes(block, 0u32):
+                return Err(CompressionError.ChecksumMismatch("lz4 block checksum"))
+            pos = pos + 4
         if raw_block:
             var i = 0
-            while i < block_len:
-                out.push(input[pos + i])
+            while i < block.len():
+                out.push(block[i])
                 i = i + 1
         else:
-            var block: [u8] = []
-            var i = 0
-            while i < block_len:
-                block.push(input[pos + i])
-                i = i + 1
             val decoded = lz4_decompress_block(block)
             if decoded.is_err():
                 return Err(decoded.unwrap_err())
             val bytes = decoded.unwrap()
-            i = 0
+            if bytes.len() > max_block_size:
+                return Err(CompressionError.CorruptStream("lz4 decoded block exceeds descriptor size"))
+            var i = 0
             while i < bytes.len():
                 out.push(bytes[i])
                 i = i + 1
-        pos = pos + block_len
+        if out.len() > 268435456:
+            return Err(CompressionError.SizeLimitExceeded(268435456))
     if has_content_checksum:
         val checksum_res = read_u32_le(input, pos)
         if checksum_res.is_err():
-            return Err(checksum_res.unwrap_err())
+            return Err(CompressionError.TruncatedInput("lz4 content checksum"))
         if checksum_res.unwrap() != xxhash32_bytes(out, 0u32):
             return Err(CompressionError.ChecksumMismatch("lz4 content checksum"))
+        pos = pos + 4
+    if declared_content_size != nil and out.len() != (declared_content_size ?? out.len()):
+        return Err(CompressionError.CorruptStream("lz4 content size mismatch"))
+    if pos != input.len():
+        return Err(CompressionError.CorruptStream("lz4 trailing bytes after frame"))
     Ok(out)

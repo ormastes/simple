@@ -280,8 +280,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vec_select", &[I64, I64, I64], &[I64]), // (mask, if_true, if_false) -> selected vector
     // SIMD load/store operations
     RuntimeFuncSpec::new("rt_vec_load", &[I64, I64, I64], &[I64]), // (array, offset, lanes) -> vector
-    RuntimeFuncSpec::new("rt_vec_store", &[I64, I64, I64], &[]), // (vector, array, offset) -> ()
-    RuntimeFuncSpec::new("rt_vec_gather", &[I64, I64], &[I64]), // (array, indices) -> vector
+    RuntimeFuncSpec::new("rt_vec_store", &[I64, I64, I64], &[]),   // (vector, array, offset) -> ()
+    RuntimeFuncSpec::new("rt_vec_gather", &[I64, I64], &[I64]),    // (array, indices) -> vector
     RuntimeFuncSpec::new("rt_vec_scatter", &[I64, I64, I64], &[]), // (vector, array, indices) -> ()
     // SIMD advanced operations
     RuntimeFuncSpec::new("rt_vec_fma", &[I64, I64, I64], &[I64]), // (a, b, c) -> a * b + c

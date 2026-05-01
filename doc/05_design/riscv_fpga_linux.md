@@ -2,7 +2,7 @@
 # RISC-V FPGA Linux Detail Design
 
 Superseded for canonical Linux-platform truth by `doc/05_design/rv64_linux_rtl_pipeline.md`.
-This file records the bounded helper-proof design and the original orchestration surface in `src/hardware/fpga_linux/riscv_fpga_linux.spl`.
+This file records the bounded helper-proof design and the original orchestration surface in `src/hardware/fpga_linux/riscv_fpga_linux.spl`, updated to match the strict generated-core provenance policy now enforced by generated runners.
 
 Data model:
 
@@ -10,7 +10,7 @@ Data model:
 - `XilinxBoardProfile`: board identity, part, clock/reset, memory, UART, constraints, programmer, Vivado mode.
 - `LinuxArtifactSet`: kernel, rootfs, firmware, DTB, and toolchain paths.
 - `RiscvFpgaLane`: per-width SoC lane manifest and validation.
-- `FpgaPrepareManifest`: board plus lanes, deterministic Vivado TCL plan, readiness summary.
+- `FpgaPrepareManifest`: board plus lanes, deterministic Vivado TCL plan, readiness summary, stable `build/.../rtl` contract paths, and emitted `authoritative_rtl_root` bundle paths for generated runners.
 - Generated helper bitfields:
   - instruction layouts: `Rv32Instruction` / `Rv64Instruction`
   - immediate/control target layouts: `RiscvBranchImmediate`, `RiscvStoreImmediate`, `RiscvIImmediate`, `RiscvUpperImmediate`, `RiscvExecuteControl`, `RiscvExecuteDatapath`, `RiscvBranchDatapath`, `RiscvControlFlowDatapath`, `RiscvJumpImmediate`, `RiscvDispatchClass`, `RiscvTrapHaltControl`
@@ -25,6 +25,7 @@ Generated helper contract:
 Generated artifact details:
 
 - The emitted package/core VHDL carries a source-map header in comment form.
+- The emitted bundle is the only authoritative source for generated-core runner RTL; generated runners consume `GEN_DIR/.../rv32/rtl` and `GEN_DIR/.../rv64/rtl` rather than `examples/09_embedded/fpga_riscv/rtl`.
 - Source-map lines cover instruction `opcode`, `rd`, `funct3`, `rs1`, `rs2`, `funct7` plus branch/store/I-type/upper/execute-control/execute-datapath/branch-datapath/control-flow-datapath/jump overlay fields.
 - Source-map lines now also cover the dispatch-class and trap-halt opcode overlays.
 - The handwritten VHDL shell keeps entity/package/process structure stable, but now consumes helper-aligned packed variables for writeback, branch immediate, store immediate, I-type immediate, upper immediate, execute control, execute datapath, branch datapath, control-flow datapath, memory access control, jump immediate, dispatch class, and trap/halt intent instead of independently reconstructing those values from ad hoc raw slices.
@@ -33,15 +34,15 @@ Generated artifact details:
 - The bounded memory shell now exposes `dmem_re` and `dmem_width` next to `dmem_we`, using helper-derived width codes `00/01/10/11` for byte/halfword/word/doubleword intent.
 - The bounded store path now also exposes `dmem_wstrb` and lane-packed `dmem_wdata`, covering `SB/SH/SW` on RV32 and `SB/SH/SW/SD` on RV64 through address-derived masks and shifts.
 - The bounded load path now mirrors that lane behavior by extracting bytes, halfwords, and words from aligned `dmem_rdata` via address-derived right shifts before sign or zero extension.
-- Current default generation is RV64-first. RV32 remains a parity-only contract lane and is intentionally not emitted by the default manifest.
+- Current lane policy is strict and repo-wide: RV32 is the repo-native generated-core baremetal lane, RV64 is the repo-native generated-core Linux lane, and generated-core provenance comes from the emitted bundle RTL rather than handwritten example RTL.
 
 Validation:
 
 - `validate_for_prepare` accepts `xilinx_generic` and catches malformed profiles/lanes.
 - `validate_for_hardware_boot` requires a real part and memory size.
-- `validate_for_linux_boot` requires Linux artifacts plus advanced readiness; RV64 additionally requires OpenSBI or U-Boot firmware, while RV32 is explicitly rejected as a first-class Linux CPU/RTL claim.
+- `validate_for_linux_boot` requires Linux artifacts plus advanced readiness; RV64 additionally requires OpenSBI or U-Boot firmware, while RV32 remains intentionally outside the first-class Linux lane and is tracked as generated baremetal only.
 - `hardware_source_contract_errors` enforces helper declarations, overlay bitfields, decode guards, and exact field-to-field reconstruction assignments.
-- Backend/unit/system specs prove the helper surface through exact MIR slice/concat checks, exact VHDL guard and concat checks, and exact source-map comment checks.
+- Backend/unit/system specs prove the helper surface through exact MIR slice/concat checks, exact VHDL guard and concat checks, exact source-map comment checks, and provenance assertions that generated lanes do not fall back to `examples/09_embedded/fpga_riscv/rtl`.
 
 Next slices:
 
@@ -49,4 +50,4 @@ Next slices:
 - Add Vivado project materialization and board programming once the exact board profile is known.
 - Extend the helper-proof pattern to additional decode/update families without reintroducing handwritten raw-slice reconstruction where a generated helper contract already exists.
 - Use the next milestone to add CSR/privilege/MMU/interrupt/trap completion, DTB plus firmware handoff generation, and Linux boot validation on top of this bounded helper-driven shell rather than widening this historical artifact into a second canonical Linux pipeline.
-- Keep future docs aligned with `rv64_linux_rtl_pipeline` as the canonical milestone rather than restating mixed-lane Linux capability claims here.
+- Keep future docs aligned with `rv64_linux_rtl_pipeline` as the canonical milestone rather than restating mixed-lane Linux capability claims or restoring authority to handwritten example RTL here.

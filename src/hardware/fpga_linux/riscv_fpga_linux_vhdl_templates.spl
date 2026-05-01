@@ -225,6 +225,1588 @@ begin
 end architecture sim;
 """
 
+pub fn generated_rv32_support_package_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+package rv32i_pkg is
+    constant OP_LUI    : std_logic_vector(6 downto 0) := "0110111";
+    constant OP_AUIPC  : std_logic_vector(6 downto 0) := "0010111";
+    constant OP_JAL    : std_logic_vector(6 downto 0) := "1101111";
+    constant OP_JALR   : std_logic_vector(6 downto 0) := "1100111";
+    constant OP_BRANCH : std_logic_vector(6 downto 0) := "1100011";
+    constant OP_LOAD   : std_logic_vector(6 downto 0) := "0000011";
+    constant OP_STORE  : std_logic_vector(6 downto 0) := "0100011";
+    constant OP_IMMED  : std_logic_vector(6 downto 0) := "0010011";
+    constant OP_REG    : std_logic_vector(6 downto 0) := "0110011";
+    constant OP_SYSTEM : std_logic_vector(6 downto 0) := "1110011";
+
+    type alu_op_t is (
+        ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU,
+        ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND, ALU_PASS_B
+    );
+
+    constant BR_BEQ  : std_logic_vector(2 downto 0) := "000";
+    constant BR_BNE  : std_logic_vector(2 downto 0) := "001";
+    constant BR_BLT  : std_logic_vector(2 downto 0) := "100";
+    constant BR_BGE  : std_logic_vector(2 downto 0) := "101";
+    constant BR_BLTU : std_logic_vector(2 downto 0) := "110";
+    constant BR_BGEU : std_logic_vector(2 downto 0) := "111";
+
+    constant SEMI_ENTRY : std_logic_vector(31 downto 0) := x"01f01013";
+    constant SEMI_BREAK : std_logic_vector(31 downto 0) := x"00100073";
+    constant SEMI_EXIT  : std_logic_vector(31 downto 0) := x"40705013";
+
+    constant SYS_WRITEC  : std_logic_vector(31 downto 0) := x"00000003";
+    constant SYS_WRITE0  : std_logic_vector(31 downto 0) := x"00000004";
+    constant SYS_EXIT    : std_logic_vector(31 downto 0) := x"00000018";
+
+    constant MB_BASE_ADDR    : std_logic_vector(31 downto 0) := x"80FF0000";
+    constant MB_OFF_CMD      : integer := 16#00#;
+    constant MB_OFF_ARG0     : integer := 16#04#;
+    constant MB_OFF_ARG1     : integer := 16#08#;
+    constant MB_OFF_STATUS   : integer := 16#0C#;
+    constant MB_OFF_RESULT   : integer := 16#10#;
+    constant MB_OFF_SEQ_ID   : integer := 16#14#;
+    constant MB_OFF_TRIGGER  : integer := 16#18#;
+
+    constant MB_CMD_PUTC   : std_logic_vector(31 downto 0) := x"00000001";
+    constant MB_CMD_EXIT   : std_logic_vector(31 downto 0) := x"00000002";
+    constant MB_CMD_RESULT : std_logic_vector(31 downto 0) := x"00000003";
+
+    constant MB_SENTINEL_ADDR : std_logic_vector(31 downto 0) := x"80008000";
+    constant MB_SENTINEL_SUCCESS : std_logic_vector(31 downto 0) := x"CAFE0000";
+    constant MB_SENTINEL_TIMEOUT : std_logic_vector(31 downto 0) := x"DEAD0000";
+    constant MB_TRIGGER_MAGIC : std_logic_vector(31 downto 0) := x"0000DEAD";
+end package rv32i_pkg;
+"""
+
+pub fn generated_rv32_wrapper_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.simple_rv32i_core_pkg.all;
+
+entity rv32i_core is
+    generic (
+        RESET_ADDR : std_logic_vector(31 downto 0) := x"80000000"
+    );
+    port (
+        clk          : in  std_logic;
+        reset_n      : in  std_logic;
+        imem_addr    : out std_logic_vector(31 downto 0);
+        imem_data    : in  std_logic_vector(31 downto 0);
+        dmem_addr    : out std_logic_vector(31 downto 0);
+        dmem_wdata   : out std_logic_vector(31 downto 0);
+        dmem_rdata   : in  std_logic_vector(31 downto 0);
+        dmem_we      : out std_logic;
+        dmem_re      : out std_logic;
+        dmem_width   : out std_logic_vector(1 downto 0);
+        halted       : out std_logic;
+        semi_trigger : out std_logic;
+        semi_op      : out std_logic_vector(31 downto 0);
+        semi_param   : out std_logic_vector(31 downto 0)
+    );
+end entity rv32i_core;
+
+architecture rtl of rv32i_core is
+    signal dmem_wstrb_i : std_logic_vector(3 downto 0);
+    signal debug_pc_i   : std_logic_vector(31 downto 0);
+    signal trap_i       : std_logic;
+    signal halt_i       : std_logic;
+begin
+    u_core : entity work.simple_rv32gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb_i,
+            irq_software => '0',
+            irq_timer  => '0',
+            irq_external => '0',
+            mmu_dmem_l2_pte => (others => '0'),
+            mmu_dmem_l1_pte => (others => '0'),
+            mmu_dmem_l0_pte => (others => '0'),
+            debug_pc   => debug_pc_i,
+            semi_trigger => semi_trigger,
+            semi_op    => semi_op,
+            semi_param => semi_param,
+            trap       => trap_i,
+            halt       => halt_i
+        );
+
+    halted <= halt_i or trap_i;
+end architecture rtl;
+"""
+
+pub fn generated_rv32_smoke_testbench_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.test_program.all;
+
+entity tb_generated_rv32_smoke is
+    generic (
+        MAX_CYCLES : integer := 200000
+    );
+end entity tb_generated_rv32_smoke;
+
+architecture sim of tb_generated_rv32_smoke is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 16384;
+    constant PASS_ADDR_IDX : integer := 16#100# / 4;
+    constant FAIL_ADDR_IDX : integer := 16#104# / 4;
+
+    signal clk       : std_logic := '0';
+    signal reset_n   : std_logic := '0';
+    signal imem_addr : std_logic_vector(31 downto 0);
+    signal imem_data : std_logic_vector(31 downto 0);
+    signal dmem_addr : std_logic_vector(31 downto 0);
+    signal dmem_wdata : std_logic_vector(31 downto 0);
+    signal dmem_rdata : std_logic_vector(31 downto 0);
+    signal dmem_we   : std_logic;
+    signal dmem_re   : std_logic;
+    signal dmem_width : std_logic_vector(1 downto 0);
+    signal halted    : std_logic;
+    signal semi_trigger : std_logic;
+    signal semi_op   : std_logic_vector(31 downto 0);
+    signal semi_param : std_logic_vector(31 downto 0);
+
+    type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(31 downto 0);
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"00000013");
+    begin
+        for i in 0 to PROGRAM_SIZE - 1 loop
+            m(i) := PROGRAM_DATA(i);
+        end loop;
+        return m;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.rv32i_core
+        generic map (RESET_ADDR => x"80000000")
+        port map (
+            clk => clk,
+            reset_n => reset_n,
+            imem_addr => imem_addr,
+            imem_data => imem_data,
+            dmem_addr => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we => dmem_we,
+            dmem_re => dmem_re,
+            dmem_width => dmem_width,
+            halted => halted,
+            semi_trigger => semi_trigger,
+            semi_op => semi_op,
+            semi_param => semi_param
+        );
+
+    clk <= not clk after CLK_PERIOD / 2 when not done else '0';
+
+    imem_data <= mem(to_integer(unsigned(imem_addr(15 downto 2))))
+        when to_integer(unsigned(imem_addr(15 downto 2))) < MEM_WORDS
+        else x"00000013";
+
+    process(clk)
+        variable idx : integer;
+        variable current_word : std_logic_vector(31 downto 0);
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' then
+                idx := to_integer(unsigned(dmem_addr(15 downto 2)));
+                if idx < MEM_WORDS then
+                    current_word := mem(idx);
+                    case dmem_width is
+                        when "00" =>
+                            case dmem_addr(1 downto 0) is
+                                when "00" => current_word(7 downto 0) := dmem_wdata(7 downto 0);
+                                when "01" => current_word(15 downto 8) := dmem_wdata(15 downto 8);
+                                when "10" => current_word(23 downto 16) := dmem_wdata(23 downto 16);
+                                when others => current_word(31 downto 24) := dmem_wdata(31 downto 24);
+                            end case;
+                        when "01" =>
+                            if dmem_addr(1) = '0' then
+                                current_word(15 downto 0) := dmem_wdata(15 downto 0);
+                            else
+                                current_word(31 downto 16) := dmem_wdata(31 downto 16);
+                            end if;
+                        when others =>
+                            current_word := dmem_wdata;
+                    end case;
+                    mem(idx) <= current_word;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mem(to_integer(unsigned(dmem_addr(15 downto 2))))
+        when to_integer(unsigned(dmem_addr(15 downto 2))) < MEM_WORDS
+        else (others => '0');
+
+    process
+        variable cycles : integer := 0;
+        variable pass_value : integer;
+        variable fail_value : integer;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halted = '0' and cycles < MAX_CYCLES loop
+            wait for CLK_PERIOD;
+            cycles := cycles + 1;
+        end loop;
+
+        pass_value := to_integer(unsigned(mem(PASS_ADDR_IDX)));
+        fail_value := to_integer(unsigned(mem(FAIL_ADDR_IDX)));
+        report "CYCLES: " & integer'image(cycles);
+        report "PASS_WORD: " & integer'image(pass_value);
+        report "FAIL_WORD: " & integer'image(fail_value);
+        if halted = '1' and pass_value = 42 and fail_value = 0 then
+            report "GENERATED_RV32_SMOKE: PASS";
+        else
+            report "GENERATED_RV32_SMOKE: FAIL";
+        end if;
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""
+
+pub fn generated_rv32_strobe_testbench_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.simple_rv32i_core_pkg.all;
+use work.test_program.all;
+
+entity tb_generated_rv32_strobe is
+    generic (
+        MAX_CYCLES : integer := 200000
+    );
+end entity tb_generated_rv32_strobe;
+
+architecture sim of tb_generated_rv32_strobe is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 16384;
+    constant PASS_ADDR_IDX : integer := 16#100# / 4;
+    constant FAIL_ADDR_IDX : integer := 16#104# / 4;
+
+    signal clk        : std_logic := '0';
+    signal reset_n    : std_logic := '0';
+    signal imem_addr  : std_logic_vector(31 downto 0);
+    signal imem_data  : std_logic_vector(31 downto 0);
+    signal dmem_addr  : std_logic_vector(31 downto 0);
+    signal dmem_wdata : std_logic_vector(31 downto 0);
+    signal dmem_rdata : std_logic_vector(31 downto 0);
+    signal dmem_we    : std_logic;
+    signal dmem_re    : std_logic;
+    signal dmem_width : std_logic_vector(1 downto 0);
+    signal dmem_wstrb : std_logic_vector(3 downto 0);
+    signal irq_software : std_logic := '0';
+    signal irq_timer    : std_logic := '0';
+    signal irq_external : std_logic := '0';
+    signal debug_pc   : std_logic_vector(31 downto 0);
+    signal semi_trigger : std_logic;
+    signal semi_op    : std_logic_vector(31 downto 0);
+    signal semi_param : std_logic_vector(31 downto 0);
+    signal trap       : std_logic;
+    signal halt       : std_logic;
+
+    type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(31 downto 0);
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"00000013");
+    begin
+        for i in 0 to PROGRAM_SIZE - 1 loop
+            m(i) := PROGRAM_DATA(i);
+        end loop;
+        return m;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.simple_rv32gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb,
+            irq_software => irq_software,
+            irq_timer  => irq_timer,
+            irq_external => irq_external,
+            mmu_dmem_l2_pte => (others => '0'),
+            mmu_dmem_l1_pte => (others => '0'),
+            mmu_dmem_l0_pte => (others => '0'),
+            debug_pc   => debug_pc,
+            semi_trigger => semi_trigger,
+            semi_op    => semi_op,
+            semi_param => semi_param,
+            trap       => trap,
+            halt       => halt
+        );
+
+    clk <= not clk after CLK_PERIOD / 2 when not done else '0';
+
+    imem_data <= mem(to_integer(unsigned(imem_addr(15 downto 2))))
+        when to_integer(unsigned(imem_addr(15 downto 2))) < MEM_WORDS
+        else x"00000013";
+
+    process(clk)
+        variable idx : integer;
+        variable current_word : std_logic_vector(31 downto 0);
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' then
+                idx := to_integer(unsigned(dmem_addr(15 downto 2)));
+                if idx < MEM_WORDS then
+                    current_word := mem(idx);
+                    if dmem_wstrb(0) = '1' then
+                        current_word(7 downto 0) := dmem_wdata(7 downto 0);
+                    end if;
+                    if dmem_wstrb(1) = '1' then
+                        current_word(15 downto 8) := dmem_wdata(15 downto 8);
+                    end if;
+                    if dmem_wstrb(2) = '1' then
+                        current_word(23 downto 16) := dmem_wdata(23 downto 16);
+                    end if;
+                    if dmem_wstrb(3) = '1' then
+                        current_word(31 downto 24) := dmem_wdata(31 downto 24);
+                    end if;
+                    mem(idx) <= current_word;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mem(to_integer(unsigned(dmem_addr(15 downto 2))))
+        when to_integer(unsigned(dmem_addr(15 downto 2))) < MEM_WORDS
+        else (others => '0');
+
+    process
+        variable cycles : integer := 0;
+        variable pass_value : integer;
+        variable fail_value : integer;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halt = '0' and trap = '0' and cycles < MAX_CYCLES loop
+            wait for CLK_PERIOD;
+            cycles := cycles + 1;
+        end loop;
+
+        pass_value := to_integer(unsigned(mem(PASS_ADDR_IDX)));
+        fail_value := to_integer(unsigned(mem(FAIL_ADDR_IDX)));
+        report "CYCLES: " & integer'image(cycles);
+        report "PASS_WORD: " & integer'image(pass_value);
+        report "FAIL_WORD: " & integer'image(fail_value);
+        if halt = '1' and pass_value = 42 and fail_value = 0 then
+            report "GENERATED_RV32_STROBE: PASS";
+        else
+            report "GENERATED_RV32_STROBE: FAIL";
+        end if;
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""
+
+pub fn generated_rv32_semihost_testbench_template() -> text:
+    """-- Semihosting test runner — loads program from test_program package
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.textio.all;
+use work.rv32i_pkg.all;
+use work.test_program.all;
+
+entity tb_semi_run is
+end entity tb_semi_run;
+
+architecture sim of tb_semi_run is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 16384;
+
+    signal clk     : std_logic := '0';
+    signal reset_n : std_logic := '0';
+    signal imem_addr, dmem_addr     : std_logic_vector(31 downto 0);
+    signal imem_data, dmem_wdata    : std_logic_vector(31 downto 0);
+    signal dmem_rdata               : std_logic_vector(31 downto 0);
+    signal dmem_we, dmem_re         : std_logic;
+    signal dmem_width               : std_logic_vector(1 downto 0);
+    signal halted                   : std_logic;
+    signal semi_trigger             : std_logic;
+    signal semi_op, semi_param      : std_logic_vector(31 downto 0);
+
+    type mem_t is array (0 to MEM_WORDS-1) of std_logic_vector(31 downto 0);
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"00000013");
+    begin
+        for i in 0 to PROGRAM_SIZE-1 loop
+            m(i) := PROGRAM_DATA(i);
+        end loop;
+        return m;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.rv32i_core
+        generic map (RESET_ADDR => x"80000000")
+        port map (
+            clk=>clk, reset_n=>reset_n,
+            imem_addr=>imem_addr, imem_data=>imem_data,
+            dmem_addr=>dmem_addr, dmem_wdata=>dmem_wdata,
+            dmem_rdata=>dmem_rdata, dmem_we=>dmem_we,
+            dmem_re=>dmem_re, dmem_width=>dmem_width,
+            halted=>halted,
+            semi_trigger=>semi_trigger, semi_op=>semi_op, semi_param=>semi_param
+        );
+
+    clk <= not clk after CLK_PERIOD/2 when not done else '0';
+
+    imem_data <= mem(to_integer(unsigned(imem_addr(15 downto 2))))
+                 when to_integer(unsigned(imem_addr(15 downto 2))) < MEM_WORDS
+                 else x"00000013";
+
+    process(clk)
+        variable idx : integer;
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' then
+                idx := to_integer(unsigned(dmem_addr(15 downto 2)));
+                if idx < MEM_WORDS then
+                    mem(idx) <= dmem_wdata;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mem(to_integer(unsigned(dmem_addr(15 downto 2))))
+                  when dmem_re = '1' and to_integer(unsigned(dmem_addr(15 downto 2))) < MEM_WORDS
+                  else (others => '0');
+
+    process
+        variable cycles    : integer := 0;
+        variable str_addr  : unsigned(15 downto 0);
+        variable ch_val    : integer;
+        variable word_val  : std_logic_vector(31 downto 0);
+        variable byte_off  : integer;
+        variable idx       : integer;
+        variable out_line  : line;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halted = '0' and cycles < 500000 loop
+            wait until falling_edge(clk);
+            cycles := cycles + 1;
+
+            if semi_trigger = '1' then
+                if semi_op = SYS_WRITE0 then
+                    str_addr := unsigned(semi_param(15 downto 0));
+                    for i in 0 to 1023 loop
+                        idx := to_integer(str_addr(15 downto 2));
+                        if idx < MEM_WORDS then
+                            word_val := mem(idx);
+                        else
+                            word_val := (others => '0');
+                        end if;
+                        byte_off := to_integer(str_addr(1 downto 0));
+                        case byte_off is
+                            when 0 => ch_val := to_integer(unsigned(word_val(7 downto 0)));
+                            when 1 => ch_val := to_integer(unsigned(word_val(15 downto 8)));
+                            when 2 => ch_val := to_integer(unsigned(word_val(23 downto 16)));
+                            when 3 => ch_val := to_integer(unsigned(word_val(31 downto 24)));
+                            when others => ch_val := 0;
+                        end case;
+                        exit when ch_val = 0;
+                        if ch_val >= 32 and ch_val < 127 then
+                            write(out_line, character'val(ch_val));
+                        elsif ch_val = 10 then
+                            write(out_line, string'("\n"));
+                        end if;
+                        str_addr := str_addr + 1;
+                    end loop;
+                end if;
+            end if;
+        end loop;
+
+        report "CYCLES: " & integer'image(cycles);
+        report "EXIT_CODE: " & integer'image(to_integer(unsigned(semi_param)));
+
+        if out_line /= null then
+            report "OUTPUT: " & out_line.all;
+        else
+            report "OUTPUT: (empty)";
+        end if;
+
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""
+
+pub fn generated_rv32_mailbox_testbench_template() -> text:
+    """-- Mailbox Testbench for RV32I CPU
+-- Memory: unified 64KB at 0x80000000 (remapped internally)
+-- Mailbox MMIO registers at 0x80FF0000 (debugger-independent I/O)
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.textio.all;
+use work.rv32i_pkg.all;
+use work.test_program.all;
+
+entity tb_mailbox is
+    generic (
+        MAX_CYCLES : integer := 1000000
+    );
+end entity tb_mailbox;
+
+architecture sim of tb_mailbox is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 16384;
+
+    signal clk     : std_logic := '0';
+    signal reset_n : std_logic := '0';
+    signal imem_addr, dmem_addr     : std_logic_vector(31 downto 0);
+    signal imem_data, dmem_wdata    : std_logic_vector(31 downto 0);
+    signal dmem_rdata               : std_logic_vector(31 downto 0);
+    signal dmem_we, dmem_re         : std_logic;
+    signal dmem_width               : std_logic_vector(1 downto 0);
+    signal halted                   : std_logic;
+    signal semi_trigger             : std_logic;
+    signal semi_op, semi_param      : std_logic_vector(31 downto 0);
+
+    type mem_t is array (0 to MEM_WORDS-1) of std_logic_vector(31 downto 0);
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"00000013");
+    begin
+        for i in 0 to PROGRAM_SIZE-1 loop
+            m(i) := PROGRAM_DATA(i);
+        end loop;
+        return m;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal done : boolean := false;
+    signal mb_cmd     : std_logic_vector(31 downto 0) := (others => '0');
+    signal mb_arg0    : std_logic_vector(31 downto 0) := (others => '0');
+    signal mb_arg1    : std_logic_vector(31 downto 0) := (others => '0');
+    signal mb_status  : std_logic_vector(31 downto 0) := (others => '0');
+    signal mb_result  : std_logic_vector(31 downto 0) := (others => '0');
+    signal mb_seq_id  : std_logic_vector(31 downto 0) := (others => '0');
+    signal mb_trigger : std_logic_vector(31 downto 0) := (others => '0');
+
+    constant MB_BASE : unsigned(31 downto 0) := x"80FF0000";
+
+    function is_mailbox_addr(addr : std_logic_vector(31 downto 0)) return boolean is
+    begin
+        return unsigned(addr) >= MB_BASE and
+               unsigned(addr) <= (MB_BASE + x"0000001B");
+    end function;
+
+    function mb_offset(addr : std_logic_vector(31 downto 0)) return integer is
+    begin
+        return to_integer(unsigned(addr) - MB_BASE);
+    end function;
+
+begin
+    u_cpu : entity work.rv32i_core
+        generic map (RESET_ADDR => x"80000000")
+        port map (
+            clk=>clk, reset_n=>reset_n,
+            imem_addr=>imem_addr, imem_data=>imem_data,
+            dmem_addr=>dmem_addr, dmem_wdata=>dmem_wdata,
+            dmem_rdata=>dmem_rdata, dmem_we=>dmem_we,
+            dmem_re=>dmem_re, dmem_width=>dmem_width,
+            halted=>halted,
+            semi_trigger=>semi_trigger, semi_op=>semi_op, semi_param=>semi_param
+        );
+
+    clk <= not clk after CLK_PERIOD/2 when not done else '0';
+
+    imem_data <= mem(to_integer(unsigned(imem_addr(15 downto 2))))
+                 when to_integer(unsigned(imem_addr(15 downto 2))) < MEM_WORDS
+                 else x"00000013";
+
+    process(clk)
+        variable idx    : integer;
+        variable offset : integer;
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' then
+                if is_mailbox_addr(dmem_addr) then
+                    offset := mb_offset(dmem_addr);
+                    case offset is
+                        when 16#00# => mb_cmd     <= dmem_wdata;
+                        when 16#04# => mb_arg0    <= dmem_wdata;
+                        when 16#08# => mb_arg1    <= dmem_wdata;
+                        when 16#0C# => mb_status  <= dmem_wdata;
+                        when 16#10# => mb_result  <= dmem_wdata;
+                        when 16#14# => mb_seq_id  <= dmem_wdata;
+                        when 16#18# => mb_trigger <= dmem_wdata;
+                        when others => null;
+                    end case;
+                else
+                    idx := to_integer(unsigned(dmem_addr(15 downto 2)));
+                    if idx < MEM_WORDS then
+                        mem(idx) <= dmem_wdata;
+                    end if;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mb_cmd    when dmem_re = '1' and is_mailbox_addr(dmem_addr) and mb_offset(dmem_addr) = 16#00# else
+                  mb_arg0   when dmem_re = '1' and is_mailbox_addr(dmem_addr) and mb_offset(dmem_addr) = 16#04# else
+                  mb_arg1   when dmem_re = '1' and is_mailbox_addr(dmem_addr) and mb_offset(dmem_addr) = 16#08# else
+                  mb_status when dmem_re = '1' and is_mailbox_addr(dmem_addr) and mb_offset(dmem_addr) = 16#0C# else
+                  mb_result when dmem_re = '1' and is_mailbox_addr(dmem_addr) and mb_offset(dmem_addr) = 16#10# else
+                  mb_seq_id when dmem_re = '1' and is_mailbox_addr(dmem_addr) and mb_offset(dmem_addr) = 16#14# else
+                  mb_trigger when dmem_re = '1' and is_mailbox_addr(dmem_addr) and mb_offset(dmem_addr) = 16#18# else
+                  mem(to_integer(unsigned(dmem_addr(15 downto 2))))
+                      when dmem_re = '1' and to_integer(unsigned(dmem_addr(15 downto 2))) < MEM_WORDS else
+                  (others => '0');
+
+    process
+        variable cycles   : integer := 0;
+        variable ch_val   : integer;
+        variable out_line : line;
+        variable sentinel : std_logic_vector(31 downto 0);
+        variable last_seq_id : std_logic_vector(31 downto 0) := (others => '0');
+        constant SENTINEL_IDX : integer := 16#8000# / 4;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while not done and cycles < MAX_CYCLES loop
+            wait until falling_edge(clk);
+            cycles := cycles + 1;
+
+            if mb_trigger = MB_TRIGGER_MAGIC and mb_seq_id /= last_seq_id then
+                last_seq_id := mb_seq_id;
+                if mb_cmd = MB_CMD_PUTC then
+                    ch_val := to_integer(unsigned(mb_arg0(7 downto 0)));
+                    if ch_val >= 32 and ch_val < 127 then
+                        write(out_line, character'val(ch_val));
+                    elsif ch_val = 10 then
+                        write(out_line, string'("\n"));
+                    end if;
+                elsif mb_cmd = MB_CMD_EXIT then
+                    sentinel := MB_SENTINEL_SUCCESS or
+                                (x"0000" & mb_arg0(15 downto 0));
+                    mem(SENTINEL_IDX) <= sentinel;
+                    report "SENTINEL: 0x" & to_hstring(unsigned(sentinel));
+                    report "EXIT_CODE: " & integer'image(to_integer(unsigned(mb_arg0)));
+                    done <= true;
+                elsif mb_cmd = MB_CMD_RESULT then
+                    report "RESULT: pass=" & integer'image(to_integer(unsigned(mb_arg0))) &
+                           " value=" & integer'image(to_integer(unsigned(mb_arg1)));
+                end if;
+            end if;
+        end loop;
+
+        if not done then
+            mem(SENTINEL_IDX) <= MB_SENTINEL_TIMEOUT;
+            report "SENTINEL: 0x" & to_hstring(unsigned(MB_SENTINEL_TIMEOUT));
+            report "TIMEOUT after " & integer'image(cycles) & " cycles";
+            done <= true;
+        end if;
+
+        report "CYCLES: " & integer'image(cycles);
+
+        if out_line /= null then
+            report "OUTPUT: " & out_line.all;
+        else
+            report "OUTPUT: (empty)";
+        end if;
+
+        wait;
+    end process;
+end architecture sim;
+"""
+
+pub fn generated_rv64_smoke_testbench_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.test_program.all;
+use work.simple_rv64i_core_pkg.all;
+
+entity tb_generated_rv64_smoke is
+    generic (
+        MAX_CYCLES : integer := 200000
+    );
+end entity tb_generated_rv64_smoke;
+
+architecture sim of tb_generated_rv64_smoke is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 8192;
+    constant PASS_ADDR  : integer := 16#100#;
+    constant FAIL_ADDR  : integer := 16#108#;
+
+    signal clk        : std_logic := '0';
+    signal reset_n    : std_logic := '0';
+    signal imem_addr  : std_logic_vector(63 downto 0) := (others => '0');
+    signal imem_data  : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_addr  : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_wdata : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_rdata : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_we    : std_logic := '0';
+    signal dmem_re    : std_logic := '0';
+    signal dmem_width : std_logic_vector(1 downto 0) := (others => '0');
+    signal dmem_wstrb : std_logic_vector(7 downto 0) := (others => '0');
+    signal irq_software : std_logic := '0';
+    signal irq_timer    : std_logic := '0';
+    signal irq_external : std_logic := '0';
+    signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');
+    signal debug_last_load_value : std_logic_vector(63 downto 0) := (others => '0');
+    signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');
+    signal trap       : std_logic := '0';
+    signal halt       : std_logic := '0';
+
+    type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(63 downto 0);
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"0000001300000013");
+        variable word_idx : integer;
+        variable byte_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+    begin
+        for i in 0 to PROGRAM_SIZE_BYTES - 1 loop
+            word_idx := i / 8;
+            byte_idx := i mod 8;
+            current_word := m(word_idx);
+            current_word((byte_idx * 8) + 7 downto byte_idx * 8) := PROGRAM_BYTES(i);
+            m(word_idx) := current_word;
+        end loop;
+        return m;
+    end function;
+
+    function safe_index(bits : std_logic_vector) return integer is
+    begin
+        for i in bits'range loop
+            if bits(i) /= '0' and bits(i) /= '1' then
+                return 0;
+            end if;
+        end loop;
+        return to_integer(unsigned(bits));
+    end function;
+
+    function word32_to_report_int(word_val : std_logic_vector(31 downto 0)) return integer is
+    begin
+        if word_val(31) = '1' then
+            return -1;
+        end if;
+        return safe_index(word_val(30 downto 0));
+    end function;
+
+    function fetch_imem_word(mem_state : mem_t; addr : std_logic_vector(63 downto 0)) return std_logic_vector is
+        variable idx : integer;
+        variable next_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+        variable next_word : std_logic_vector(63 downto 0) := x"0000001300000013";
+        variable result : std_logic_vector(31 downto 0) := x"00000013";
+    begin
+        idx := safe_index(addr(15 downto 3));
+        if idx >= MEM_WORDS then
+            return result;
+        end if;
+        current_word := mem_state(idx);
+        case addr(2 downto 1) is
+            when "00" => result := current_word(31 downto 0);
+            when "01" => result := current_word(47 downto 16);
+            when "10" => result := current_word(63 downto 32);
+            when others =>
+                next_idx := idx + 1;
+                if next_idx < MEM_WORDS then
+                    next_word := mem_state(next_idx);
+                end if;
+                result(15 downto 0) := current_word(63 downto 48);
+                result(31 downto 16) := next_word(15 downto 0);
+        end case;
+        return result;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.simple_rv64gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb,
+            irq_software => irq_software,
+            irq_timer  => irq_timer,
+            irq_external => irq_external,
+            mmu_dmem_l2_pte => (others => '0'),
+            mmu_dmem_l1_pte => (others => '0'),
+            mmu_dmem_l0_pte => (others => '0'),
+            debug_priv_mode => debug_priv_mode,
+            debug_last_load_value => debug_last_load_value,
+            debug_pc   => debug_pc,
+            trap       => trap,
+            halt       => halt
+        );
+
+    clk <= not clk after CLK_PERIOD / 2 when not done else '0';
+    imem_data <= fetch_imem_word(mem, imem_addr);
+
+    process(clk)
+        variable word_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' then
+                word_idx := safe_index(dmem_addr(15 downto 3));
+                if word_idx < MEM_WORDS then
+                    current_word := mem(word_idx);
+                    for i in 0 to 7 loop
+                        if dmem_wstrb(i) = '1' then
+                            current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);
+                        end if;
+                    end loop;
+                    mem(word_idx) <= current_word;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mem(safe_index(dmem_addr(15 downto 3)))
+        when safe_index(dmem_addr(15 downto 3)) < MEM_WORDS
+        else (others => '0');
+
+    process
+        variable cycles : integer := 0;
+        variable pass_value : integer;
+        variable fail_value : integer;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halt = '0' and trap = '0' and cycles < MAX_CYCLES loop
+            wait for CLK_PERIOD;
+            cycles := cycles + 1;
+        end loop;
+
+        pass_value := word32_to_report_int(mem(PASS_ADDR / 8)(31 downto 0));
+        fail_value := word32_to_report_int(mem(FAIL_ADDR / 8)(31 downto 0));
+        report "CYCLES: " & integer'image(cycles);
+        report "PASS_WORD: " & integer'image(pass_value);
+        report "FAIL_WORD: " & integer'image(fail_value);
+        if halt = '1' and pass_value = 42 and fail_value = 0 then
+            report "GENERATED_RV64_SMOKE: PASS";
+        else
+            report "GENERATED_RV64_SMOKE: FAIL";
+        end if;
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""
+
+pub fn generated_rv64_irq_testbench_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.test_program.all;
+use work.simple_rv64i_core_pkg.all;
+
+entity tb_generated_rv64_irq is
+    generic (
+        MAX_CYCLES : integer := 200000
+    );
+end entity tb_generated_rv64_irq;
+
+architecture sim of tb_generated_rv64_irq is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 8192;
+    constant PASS_ADDR  : integer := 16#100#;
+    constant FAIL_ADDR  : integer := 16#108#;
+
+    signal clk        : std_logic := '0';
+    signal reset_n    : std_logic := '0';
+    signal imem_addr  : std_logic_vector(63 downto 0) := (others => '0');
+    signal imem_data  : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_addr  : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_wdata : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_rdata : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_we    : std_logic := '0';
+    signal dmem_re    : std_logic := '0';
+    signal dmem_width : std_logic_vector(1 downto 0) := (others => '0');
+    signal dmem_wstrb : std_logic_vector(7 downto 0) := (others => '0');
+    signal irq_software : std_logic := '0';
+    signal irq_timer    : std_logic := '0';
+    signal irq_external : std_logic := '0';
+    signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');
+    signal debug_last_load_value : std_logic_vector(63 downto 0) := (others => '0');
+    signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');
+    signal trap       : std_logic := '0';
+    signal halt       : std_logic := '0';
+
+    type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(63 downto 0);
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"0000001300000013");
+        variable word_idx : integer;
+        variable byte_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+    begin
+        for i in 0 to PROGRAM_SIZE_BYTES - 1 loop
+            word_idx := i / 8;
+            byte_idx := i mod 8;
+            current_word := m(word_idx);
+            current_word((byte_idx * 8) + 7 downto byte_idx * 8) := PROGRAM_BYTES(i);
+            m(word_idx) := current_word;
+        end loop;
+        return m;
+    end function;
+
+    function safe_index(bits : std_logic_vector) return integer is
+    begin
+        for i in bits'range loop
+            if bits(i) /= '0' and bits(i) /= '1' then
+                return 0;
+            end if;
+        end loop;
+        return to_integer(unsigned(bits));
+    end function;
+
+    function word32_to_report_int(word_val : std_logic_vector(31 downto 0)) return integer is
+    begin
+        if word_val(31) = '1' then
+            return -1;
+        end if;
+        return safe_index(word_val(30 downto 0));
+    end function;
+
+    function fetch_imem_word(mem_state : mem_t; addr : std_logic_vector(63 downto 0)) return std_logic_vector is
+        variable idx : integer;
+        variable next_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+        variable next_word : std_logic_vector(63 downto 0) := x"0000001300000013";
+        variable result : std_logic_vector(31 downto 0) := x"00000013";
+    begin
+        idx := safe_index(addr(15 downto 3));
+        if idx >= MEM_WORDS then
+            return result;
+        end if;
+        current_word := mem_state(idx);
+        case addr(2 downto 1) is
+            when "00" => result := current_word(31 downto 0);
+            when "01" => result := current_word(47 downto 16);
+            when "10" => result := current_word(63 downto 32);
+            when others =>
+                next_idx := idx + 1;
+                if next_idx < MEM_WORDS then
+                    next_word := mem_state(next_idx);
+                end if;
+                result(15 downto 0) := current_word(63 downto 48);
+                result(31 downto 16) := next_word(15 downto 0);
+        end case;
+        return result;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.simple_rv64gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb,
+            irq_software => irq_software,
+            irq_timer  => irq_timer,
+            irq_external => irq_external,
+            mmu_dmem_l2_pte => (others => '0'),
+            mmu_dmem_l1_pte => (others => '0'),
+            mmu_dmem_l0_pte => (others => '0'),
+            debug_priv_mode => debug_priv_mode,
+            debug_last_load_value => debug_last_load_value,
+            debug_pc   => debug_pc,
+            trap       => trap,
+            halt       => halt
+        );
+
+    clk <= not clk after CLK_PERIOD / 2 when not done else '0';
+    imem_data <= fetch_imem_word(mem, imem_addr);
+
+    process(clk)
+        variable word_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' then
+                word_idx := safe_index(dmem_addr(15 downto 3));
+                if word_idx < MEM_WORDS then
+                    current_word := mem(word_idx);
+                    for i in 0 to 7 loop
+                        if dmem_wstrb(i) = '1' then
+                            current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);
+                        end if;
+                    end loop;
+                    mem(word_idx) <= current_word;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mem(safe_index(dmem_addr(15 downto 3)))
+        when safe_index(dmem_addr(15 downto 3)) < MEM_WORDS
+        else (others => '0');
+
+    process
+    begin
+        wait until reset_n = '1';
+        for i in 0 to 20 loop
+            wait until rising_edge(clk);
+        end loop;
+        irq_timer <= '1';
+        for i in 0 to 7 loop
+            wait until rising_edge(clk);
+        end loop;
+        irq_timer <= '0';
+        wait;
+    end process;
+
+    process
+        variable cycles : integer := 0;
+        variable pass_value : integer;
+        variable fail_value : integer;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halt = '0' and trap = '0' and cycles < MAX_CYCLES loop
+            wait for CLK_PERIOD;
+            cycles := cycles + 1;
+        end loop;
+
+        pass_value := word32_to_report_int(mem(PASS_ADDR / 8)(31 downto 0));
+        fail_value := word32_to_report_int(mem(FAIL_ADDR / 8)(31 downto 0));
+        report "CYCLES: " & integer'image(cycles);
+        report "PASS_WORD: " & integer'image(pass_value);
+        report "FAIL_WORD: " & integer'image(fail_value);
+        if halt = '1' and pass_value = 42 and fail_value = 0 then
+            report "GENERATED_RV64_IRQ: PASS";
+        else
+            report "GENERATED_RV64_IRQ: FAIL";
+        end if;
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""
+
+pub fn generated_rv64_linux_handoff_testbench_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.test_program.all;
+use work.simple_rv64i_core_pkg.all;
+
+entity tb_generated_rv64_linux_handoff is
+    generic (
+        MAX_CYCLES : integer := 200000
+    );
+end entity tb_generated_rv64_linux_handoff;
+
+architecture sim of tb_generated_rv64_linux_handoff is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 8192;
+    constant PASS_ADDR  : integer := 16#100#;
+    constant FAIL_ADDR  : integer := 16#108#;
+    constant A0_ADDR    : integer := 16#110#;
+    constant A1_ADDR    : integer := 16#118#;
+    constant UART_ADDR  : std_logic_vector(63 downto 0) := x"0000000010000000";
+    constant UART_MAGIC : std_logic_vector(31 downto 0) := x"48584E4C";
+    constant BOOT_A0    : std_logic_vector(63 downto 0) := x"0000000000000000";
+    constant BOOT_A1    : std_logic_vector(63 downto 0) := x"0000000088000000";
+
+    signal clk        : std_logic := '0';
+    signal reset_n    : std_logic := '0';
+    signal imem_addr  : std_logic_vector(63 downto 0) := (others => '0');
+    signal imem_data  : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_addr  : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_wdata : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_rdata : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_we    : std_logic := '0';
+    signal dmem_re    : std_logic := '0';
+    signal dmem_width : std_logic_vector(1 downto 0) := (others => '0');
+    signal dmem_wstrb : std_logic_vector(7 downto 0) := (others => '0');
+    signal irq_software : std_logic := '0';
+    signal irq_timer    : std_logic := '0';
+    signal irq_external : std_logic := '0';
+    signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');
+    signal debug_last_load_value : std_logic_vector(63 downto 0) := (others => '0');
+    signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');
+    signal trap       : std_logic := '0';
+    signal halt       : std_logic := '0';
+
+    type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(63 downto 0);
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"0000001300000013");
+        variable word_idx : integer;
+        variable byte_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+    begin
+        for i in 0 to PROGRAM_SIZE_BYTES - 1 loop
+            word_idx := i / 8;
+            byte_idx := i mod 8;
+            current_word := m(word_idx);
+            current_word((byte_idx * 8) + 7 downto byte_idx * 8) := PROGRAM_BYTES(i);
+            m(word_idx) := current_word;
+        end loop;
+        return m;
+    end function;
+
+    function safe_index(bits : std_logic_vector) return integer is
+    begin
+        for i in bits'range loop
+            if bits(i) /= '0' and bits(i) /= '1' then
+                return 0;
+            end if;
+        end loop;
+        return to_integer(unsigned(bits));
+    end function;
+
+    function word32_to_report_int(word_val : std_logic_vector(31 downto 0)) return integer is
+    begin
+        if word_val(31) = '1' then
+            return -1;
+        end if;
+        return safe_index(word_val(30 downto 0));
+    end function;
+
+    function fetch_imem_word(mem_state : mem_t; addr : std_logic_vector(63 downto 0)) return std_logic_vector is
+        variable idx : integer;
+        variable next_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+        variable next_word : std_logic_vector(63 downto 0) := x"0000001300000013";
+        variable result : std_logic_vector(31 downto 0) := x"00000013";
+    begin
+        idx := safe_index(addr(15 downto 3));
+        if idx >= MEM_WORDS then
+            return result;
+        end if;
+        current_word := mem_state(idx);
+        case addr(2 downto 1) is
+            when "00" => result := current_word(31 downto 0);
+            when "01" => result := current_word(47 downto 16);
+            when "10" => result := current_word(63 downto 32);
+            when others =>
+                next_idx := idx + 1;
+                if next_idx < MEM_WORDS then
+                    next_word := mem_state(next_idx);
+                end if;
+                result(15 downto 0) := current_word(63 downto 48);
+                result(31 downto 16) := next_word(15 downto 0);
+        end case;
+        return result;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal uart_word : std_logic_vector(31 downto 0) := (others => '0');
+    signal uart_count : integer range 0 to 4 := 0;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.simple_rv64gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb,
+            irq_software => irq_software,
+            irq_timer  => irq_timer,
+            irq_external => irq_external,
+            mmu_dmem_l2_pte => (others => '0'),
+            mmu_dmem_l1_pte => (others => '0'),
+            mmu_dmem_l0_pte => (others => '0'),
+            debug_priv_mode => debug_priv_mode,
+            debug_last_load_value => debug_last_load_value,
+            debug_pc   => debug_pc,
+            trap       => trap,
+            halt       => halt
+        );
+
+    clk <= not clk after CLK_PERIOD / 2 when not done else '0';
+    imem_data <= fetch_imem_word(mem, imem_addr);
+
+    process(clk)
+        variable word_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' and dmem_addr = UART_ADDR and dmem_wstrb(0) = '1' then
+                if uart_count < 4 then
+                    uart_word((uart_count * 8) + 7 downto uart_count * 8) <= dmem_wdata(7 downto 0);
+                    uart_count <= uart_count + 1;
+                end if;
+            elsif dmem_we = '1' then
+                word_idx := safe_index(dmem_addr(15 downto 3));
+                if word_idx < MEM_WORDS then
+                    current_word := mem(word_idx);
+                    for i in 0 to 7 loop
+                        if dmem_wstrb(i) = '1' then
+                            current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);
+                        end if;
+                    end loop;
+                    mem(word_idx) <= current_word;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mem(safe_index(dmem_addr(15 downto 3)))
+        when safe_index(dmem_addr(15 downto 3)) < MEM_WORDS
+        else (others => '0');
+
+    process
+        variable cycles : integer := 0;
+        variable pass_value : integer;
+        variable fail_value : integer;
+        variable a0_low_value : integer;
+        variable a1_low_value : integer;
+        variable a1_high_value : integer;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halt = '0' and trap = '0' and cycles < MAX_CYCLES loop
+            wait for CLK_PERIOD;
+            cycles := cycles + 1;
+        end loop;
+
+        pass_value := word32_to_report_int(mem(PASS_ADDR / 8)(31 downto 0));
+        fail_value := word32_to_report_int(mem(FAIL_ADDR / 8)(31 downto 0));
+        a0_low_value := word32_to_report_int(mem(A0_ADDR / 8)(31 downto 0));
+        a1_low_value := word32_to_report_int(mem(A1_ADDR / 8)(31 downto 0));
+        a1_high_value := word32_to_report_int(mem(A1_ADDR / 8)(63 downto 32));
+        report "CYCLES: " & integer'image(cycles);
+        report "PASS_WORD: " & integer'image(pass_value);
+        report "FAIL_WORD: " & integer'image(fail_value);
+        report "A0_LOW32: " & integer'image(a0_low_value);
+        report "A1_LOW32: " & integer'image(a1_low_value);
+        report "A1_HIGH32: " & integer'image(a1_high_value);
+        report "UART_BYTES_LOW32: " & integer'image(word32_to_report_int(uart_word));
+        if halt = '1' and pass_value = 42 and uart_word = UART_MAGIC and mem(A0_ADDR / 8) = BOOT_A0 and mem(A1_ADDR / 8) = BOOT_A1 then
+            report "GENERATED_RV64_LINUX_HANDOFF: PASS";
+        else
+            report "GENERATED_RV64_LINUX_HANDOFF: FAIL";
+        end if;
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""
+
+pub fn generated_rv64_boot_banner_testbench_template() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.test_program.all;
+use work.simple_rv64i_core_pkg.all;
+
+entity tb_generated_rv64_boot_banner is
+    generic (
+        MAX_CYCLES : integer := 300000
+    );
+end entity tb_generated_rv64_boot_banner;
+
+architecture sim of tb_generated_rv64_boot_banner is
+    constant CLK_PERIOD : time := 10 ns;
+    constant MEM_WORDS  : integer := 270000;
+    constant PASS_ADDR_BITS : std_logic_vector(63 downto 0) := x"0000000080200100";
+    constant A0_ADDR_BITS   : std_logic_vector(63 downto 0) := x"0000000080200110";
+    constant A1_ADDR_BITS   : std_logic_vector(63 downto 0) := x"0000000080200118";
+    constant UART_ADDR      : std_logic_vector(63 downto 0) := x"0000000010000000";
+    constant BOOT_A0        : std_logic_vector(63 downto 0) := x"0000000000000000";
+    constant BOOT_A1        : std_logic_vector(63 downto 0) := x"0000000088000000";
+    constant BSS0_ADDR_BITS : std_logic_vector(63 downto 0) := x"0000000080202000";
+    constant BSS1_ADDR_BITS : std_logic_vector(63 downto 0) := x"0000000080202008";
+    constant BSS2_ADDR_BITS : std_logic_vector(63 downto 0) := x"0000000080202010";
+    constant BSS3_ADDR_BITS : std_logic_vector(63 downto 0) := x"0000000080202018";
+    constant UART_EXPECTED_COUNT : integer := 15;
+
+    signal clk        : std_logic := '0';
+    signal reset_n    : std_logic := '0';
+    signal imem_addr  : std_logic_vector(63 downto 0) := (others => '0');
+    signal imem_data  : std_logic_vector(31 downto 0) := (others => '0');
+    signal dmem_addr  : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_wdata : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_rdata : std_logic_vector(63 downto 0) := (others => '0');
+    signal dmem_we    : std_logic := '0';
+    signal dmem_re    : std_logic := '0';
+    signal dmem_width : std_logic_vector(1 downto 0) := (others => '0');
+    signal dmem_wstrb : std_logic_vector(7 downto 0) := (others => '0');
+    signal irq_software : std_logic := '0';
+    signal irq_timer    : std_logic := '0';
+    signal irq_external : std_logic := '0';
+    signal debug_priv_mode : std_logic_vector(1 downto 0) := (others => '0');
+    signal debug_pc   : std_logic_vector(63 downto 0) := (others => '0');
+    signal trap       : std_logic := '0';
+    signal halt       : std_logic := '0';
+
+    type mem_t is array (0 to MEM_WORDS - 1) of std_logic_vector(63 downto 0);
+    type uart_capture_t is array (0 to UART_EXPECTED_COUNT - 1) of std_logic_vector(7 downto 0);
+
+    function init_mem return mem_t is
+        variable m : mem_t := (others => x"0000001300000013");
+        variable word_idx : integer;
+        variable byte_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+    begin
+        for i in 0 to FW_SIZE_BYTES - 1 loop
+            word_idx := i / 8;
+            byte_idx := i mod 8;
+            if word_idx < MEM_WORDS then
+                current_word := m(word_idx);
+                current_word((byte_idx * 8) + 7 downto byte_idx * 8) := FW_BYTES(i);
+                m(word_idx) := current_word;
+            end if;
+        end loop;
+        for i in 0 to PAYLOAD_SIZE_BYTES - 1 loop
+            word_idx := (16#200000# + i) / 8;
+            byte_idx := (16#200000# + i) mod 8;
+            if word_idx < MEM_WORDS then
+                current_word := m(word_idx);
+                current_word((byte_idx * 8) + 7 downto byte_idx * 8) := PAYLOAD_BYTES(i);
+                m(word_idx) := current_word;
+            end if;
+        end loop;
+        m(16#202000# / 8) := x"1111111111111111";
+        m(16#202008# / 8) := x"2222222222222222";
+        m(16#202010# / 8) := x"3333333333333333";
+        m(16#202018# / 8) := x"4444444444444444";
+        return m;
+    end function;
+
+    function safe_index(bits : std_logic_vector) return integer is
+    begin
+        for i in bits'range loop
+            if bits(i) /= '0' and bits(i) /= '1' then
+                return 0;
+            end if;
+        end loop;
+        return to_integer(unsigned(bits));
+    end function;
+
+    function word32_to_report_int(word_val : std_logic_vector(31 downto 0)) return integer is
+    begin
+        if word_val(31) = '1' then
+            return -1;
+        end if;
+        return safe_index(word_val(30 downto 0));
+    end function;
+
+    function mem_index(addr : std_logic_vector(63 downto 0)) return integer is
+    begin
+        return safe_index(addr(21 downto 3));
+    end function;
+
+    function uart_matches_banner(bytes : uart_capture_t) return boolean is
+    begin
+        return bytes(0) = x"53" and bytes(1) = x"69" and bytes(2) = x"6D" and
+            bytes(3) = x"70" and bytes(4) = x"6C" and bytes(5) = x"65" and
+            bytes(6) = x"4F" and bytes(7) = x"53" and bytes(8) = x"20" and
+            bytes(9) = x"52" and bytes(10) = x"56" and bytes(11) = x"36" and
+            bytes(12) = x"34" and bytes(13) = x"0D" and bytes(14) = x"0A";
+    end function;
+
+    function fetch_imem_word(mem_state : mem_t; addr : std_logic_vector(63 downto 0)) return std_logic_vector is
+        variable idx : integer;
+        variable next_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+        variable next_word : std_logic_vector(63 downto 0) := x"0000001300000013";
+        variable result : std_logic_vector(31 downto 0) := x"00000013";
+    begin
+        idx := mem_index(addr);
+        if idx >= MEM_WORDS then
+            return result;
+        end if;
+        current_word := mem_state(idx);
+        case addr(2 downto 1) is
+            when "00" => result := current_word(31 downto 0);
+            when "01" => result := current_word(47 downto 16);
+            when "10" => result := current_word(63 downto 32);
+            when others =>
+                next_idx := idx + 1;
+                if next_idx < MEM_WORDS then
+                    next_word := mem_state(next_idx);
+                end if;
+                result(15 downto 0) := current_word(63 downto 48);
+                result(31 downto 16) := next_word(15 downto 0);
+        end case;
+        return result;
+    end function;
+
+    signal mem : mem_t := init_mem;
+    signal uart_bytes : uart_capture_t := (others => (others => '0'));
+    signal uart_count : integer range 0 to UART_EXPECTED_COUNT := 0;
+    signal done : boolean := false;
+begin
+    u_cpu : entity work.simple_rv64gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb,
+            irq_software => irq_software,
+            irq_timer  => irq_timer,
+            irq_external => irq_external,
+            mmu_dmem_l2_pte => (others => '0'),
+            mmu_dmem_l1_pte => (others => '0'),
+            mmu_dmem_l0_pte => (others => '0'),
+            debug_priv_mode => debug_priv_mode,
+            debug_last_load_value => open,
+            debug_pc   => debug_pc,
+            trap       => trap,
+            halt       => halt
+        );
+
+    clk <= not clk after CLK_PERIOD / 2 when not done else '0';
+    imem_data <= fetch_imem_word(mem, imem_addr);
+
+    process(clk)
+        variable word_idx : integer;
+        variable current_word : std_logic_vector(63 downto 0);
+    begin
+        if rising_edge(clk) then
+            if dmem_we = '1' and dmem_addr = UART_ADDR and dmem_wstrb(0) = '1' then
+                if uart_count < UART_EXPECTED_COUNT then
+                    uart_bytes(uart_count) <= dmem_wdata(7 downto 0);
+                    uart_count <= uart_count + 1;
+                end if;
+            elsif dmem_we = '1' then
+                word_idx := mem_index(dmem_addr);
+                if word_idx < MEM_WORDS then
+                    current_word := mem(word_idx);
+                    for i in 0 to 7 loop
+                        if dmem_wstrb(i) = '1' then
+                            current_word((i * 8) + 7 downto i * 8) := dmem_wdata((i * 8) + 7 downto i * 8);
+                        end if;
+                    end loop;
+                    mem(word_idx) <= current_word;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    dmem_rdata <= mem(mem_index(dmem_addr))
+        when mem_index(dmem_addr) < MEM_WORDS
+        else (others => '0');
+
+    process
+        variable cycles : integer := 0;
+        variable pass_value : integer;
+        variable a0_low_value : integer;
+        variable a1_low_value : integer;
+        variable a1_high_value : integer;
+        variable bss_cleared : boolean;
+        variable uart_ok : boolean;
+    begin
+        reset_n <= '0';
+        wait for CLK_PERIOD * 5;
+        reset_n <= '1';
+
+        while halt = '0' and trap = '0' and cycles < MAX_CYCLES loop
+            wait for CLK_PERIOD;
+            cycles := cycles + 1;
+        end loop;
+
+        pass_value := word32_to_report_int(mem(mem_index(PASS_ADDR_BITS))(31 downto 0));
+        a0_low_value := word32_to_report_int(mem(mem_index(A0_ADDR_BITS))(31 downto 0));
+        a1_low_value := word32_to_report_int(mem(mem_index(A1_ADDR_BITS))(31 downto 0));
+        a1_high_value := word32_to_report_int(mem(mem_index(A1_ADDR_BITS))(63 downto 32));
+        bss_cleared := mem(mem_index(BSS0_ADDR_BITS)) = x"0000000000000000" and
+            mem(mem_index(BSS1_ADDR_BITS)) = x"0000000000000000" and
+            mem(mem_index(BSS2_ADDR_BITS)) = x"0000000000000000" and
+            mem(mem_index(BSS3_ADDR_BITS)) = x"0000000000000000";
+        uart_ok := uart_count = UART_EXPECTED_COUNT and uart_matches_banner(uart_bytes);
+
+        report "CYCLES: " & integer'image(cycles);
+        report "PASS_WORD: " & integer'image(pass_value);
+        report "A0_LOW32: " & integer'image(a0_low_value);
+        report "A1_LOW32: " & integer'image(a1_low_value);
+        report "A1_HIGH32: " & integer'image(a1_high_value);
+        report "UART_COUNT: " & integer'image(uart_count);
+        report "BSS_CLEARED: " & boolean'image(bss_cleared);
+        report "PRIV_MODE: " & integer'image(safe_index(debug_priv_mode));
+        report "PC_LOW32: " & integer'image(word32_to_report_int(debug_pc(31 downto 0)));
+        if halt = '1' and pass_value = 42 and mem(mem_index(A0_ADDR_BITS)) = BOOT_A0 and mem(mem_index(A1_ADDR_BITS)) = BOOT_A1 and debug_priv_mode = "01" and uart_ok and bss_cleared then
+            report "GENERATED_RV64_BOOT_BANNER: PASS";
+        else
+            report "GENERATED_RV64_BOOT_BANNER: FAIL";
+        end if;
+        done <= true;
+        wait;
+    end process;
+end architecture sim;
+"""
+
 pub fn generated_rv64_boot_info_real_dtb_testbench_template() -> text:
     """library ieee;
 use ieee.std_logic_1164.all;
