@@ -10,8 +10,8 @@
 #   posix_pipe() allocates two FDs and a PipeState entry.
 #   The FD table entry's ipc_port field stores the pipe index.
 
-use os.posix.errno.{EINVAL, EMFILE, EPIPE, EAGAIN, ENOSYS}
-use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_refcount, fd_get_status_flags, fd_set_poll_notification, fd_update_ready, fd_update_ready_by_backend, fd_get_type, fd_get_backend_handle, MAX_FDS}
+use os.posix.errno.{EINVAL, EMFILE, EPIPE, ENOSYS}
+use os.posix.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_refcount, fd_get_status_flags, fd_set_poll_notification, fd_update_ready, fd_update_ready_by_backend, fd_get_type, fd_get_backend_handle}
 use os.userlib.syscall_raw.{syscall}
 
 extern fn mmio_write32(addr: u64, val_: u32)
@@ -32,6 +32,7 @@ val _POLLIN: i16 = 1
 val _POLLOUT: i16 = 4
 val _POLLERR: i16 = 8
 val _POLLHUP: i16 = 16
+val _PIPE_EAGAIN: i32 = 11
 
 # ============================================================================
 # Pipe State — ring buffer + notification pair
@@ -169,7 +170,7 @@ fn pipe_read(fd: i32, buf_addr: u64, count: u64) -> i64:
         if _pipe_write_closed[pidx]:
             return 0  # EOF: write end closed, no more data
         if (fd_get_status_flags(fd) & 2048) != 0:
-            return 0 - EAGAIN as i64
+            return 0 - _PIPE_EAGAIN as i64
         # Wait on data notification
         syscall(_SYS_NOTIF_WAIT, _pipe_data_notif[pidx], 0, 0, 0, 0)
 
@@ -222,7 +223,7 @@ fn pipe_write(fd: i32, buf_addr: u64, count: u64) -> i64:
             if (fd_get_status_flags(fd) & 2048) != 0:
                 if bytes_written > 0:
                     return bytes_written as i64
-                return 0 - EAGAIN as i64
+                return 0 - _PIPE_EAGAIN as i64
             syscall(_SYS_NOTIF_WAIT, _pipe_space_notif[pidx], 0, 0, 0, 0)
 
         # Write bytes into ring buffer
