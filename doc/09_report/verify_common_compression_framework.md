@@ -4,7 +4,7 @@
 [PASS] doc/05_design/common_compression_framework.md:1 — design now documents the actual facade restrictions, supported checksums, and known unsupported codec paths.
 [PASS] test/unit/lib/common/compress_framework_spec.spl:1 — focused facade tests still align with the current checked/fail-fast API surface.
 [PASS] test/unit/lib/common/lz4_spec.spl:1 — focused LZ4 tests cover block/frame round-trip behavior, corruption typing, and forced-tier parity.
-[PASS] test/unit/lib/common/zstd_frame_variants_spec.spl:1 — focused Zstd tests cover the current framed subset, checksum handling, concatenated frames, and forced-tier parity.
+[WARN] test/unit/lib/common/zstd_frame_variants_spec.spl:1 — the spec still documents the current framed-subset expectations, but repeated fresh runs in this session stalled after the first four passing cases instead of completing, so this lane cannot claim a clean current PASS for it.
 [PASS] test/unit/lib/common/xz_lzma2_spec.spl:1 — focused XZ/LZMA2 tests cover emitted-stream interoperability, concatenated streams, and explicit unsupported compressed-chunk handling.
 [PASS] src/os/kernel/loader/zstd_decompress.spl:1 — the kernel loader remains a thin adapter over `std.common.compress`.
 
@@ -19,4 +19,4 @@
 [WARN] src/lib/common/compress/zstd.spl:1 — the Zstd implementation remains large and multi-responsibility, which raises maintenance risk even though this lane did not modify code.
 [WARN] doc/01_research/local/common_compression_framework.md:1 — the research artifacts still describe the original full completion target; that may be fine as intent, but they should not be read as current-state support documentation.
 
-STATUS: FAIL (7 failures, 2 warnings)
+STATUS: FAIL (7 failures, 3 warnings)

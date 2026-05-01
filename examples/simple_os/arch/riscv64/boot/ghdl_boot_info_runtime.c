@@ -48,6 +48,19 @@ typedef struct {
 static unsigned char g_heap[64 * 1024] __attribute__((aligned(16)));
 static uintptr_t g_heap_off = 0;
 
+extern RuntimeValue spl_start(void);
+extern char _stack_top[];
+
+__attribute__((naked, section(".text.entry"))) void _start(void)
+{
+    __asm__ volatile(
+        "la sp, _stack_top\n"
+        "call spl_start\n"
+        "1: wfi\n"
+        "j 1b\n"
+    );
+}
+
 static void *rv_alloc(size_t size)
 {
     size = (size + 15U) & ~(size_t)15U;
