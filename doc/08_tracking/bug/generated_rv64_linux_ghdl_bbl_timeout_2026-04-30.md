@@ -330,3 +330,47 @@ runtime crash and will be needed again after the bench is stable.
   - execution now returns from `boot_main` and halts cleanly
   - but the proof mailbox still does not receive the expected boot-info fields even though DTB parsing and UART progress are clearly happening
 - The next target is no longer memory-model plumbing. It is the boot-info proof/output path between successful boot parsing and the mailbox writes checked by the bounded DTB contract.
+
+## New Verification After Narrow RV64 Proof Runtime
+
+- Date:
+  - 2026-05-01
+- Commands:
+  - `cargo build -p simple-driver --bin simple --features llvm` (from `src/compiler_rust`)
+  - `SIMPLE_LINKER_DEBUG=1 SIMPLE_BOOT_MINIMAL=1 src/compiler_rust/target/debug/simple native-build --verbose --backend llvm --timeout 120 --entry-closure --source examples/simple_os/arch/riscv64 --source src/os --entry examples/simple_os/arch/riscv64/ghdl_boot_info_entry.spl --target riscv64-unknown-none -o /tmp/ghdl_boot_info_payload_new.elf --linker-script examples/simple_os/arch/riscv64/linker.ld`
+  - `bash src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_boot_info_dtb_runner.shs --payload-elf /tmp/ghdl_boot_info_payload_new.elf --timeout=20 --max-cycles 200000 --log-path /tmp/rv64_proof_trace6.log --uart-log-path /tmp/rv64_proof_trace6.uart`
+  - `bin/simple test --clean test/unit/hardware/fpga_linux/riscv_fpga_linux_spec.spl`
+- Change under test:
+  - replaced broad RV64 boot auto-discovery for `ghdl_boot_info*` proof entries with a proof-only runtime object `examples/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c`
+  - restored the required C `_start` trampoline in `.text.entry` while keeping only the minimal runtime symbols needed by the narrow proof payload
+- Result:
+  - the LLVM-enabled build now proves the linker is taking the narrow path:
+    - `Boot autodiscovery skipped for .../ghdl_boot_info_entry.spl`
+    - `Boot C source: .../boot/ghdl_boot_info_runtime.c`
+    - `Freestanding unresolved symbol check: 0 unexpected symbol(s)`
+    - payload size dropped to `69 KB`
+  - the first narrow-runtime attempt without `_start` failed immediately because execution started at `80200000 <malloc>`; adding the `_start -> spl_start` trampoline fixed that false failure mode
+  - the corrected narrow payload now enters the intended SPL path:
+    - `HEARTBEAT_PC_HEX32: 80208244` (`ghdl_boot_info_entry__boot_main`)
+    - execution advances through the prologue and the first `proof_store_u64` call site
+  - the bounded run still fails, but much later than the entry/runtime shape failures:
+    - progress reaches `PC_HEX32` through `0x802082C0`
+    - `TRAP_SEEN: '1'`
+    - final summary still leaves mailbox fields zeroed:
+      - `MAGIC_LOW32: 0`
+      - `DONE_LOW32: 0`
+      - `DTB_PROBE_SEEN: false`
+      - `UART_MARKER_SEEN: false`
+  - DMEM traces show regular stack/heap traffic and a successful readback of `0x524F4F46`, so this is no longer an “entry never ran” failure
+
+## Current Interpretation After Narrow Proof Runtime
+
+- The narrow RV64 proof lane is now software-correct enough to:
+  - link cleanly with an LLVM-enabled compiler
+  - start at the proper `_start`
+  - reach `ghdl_boot_info_entry__boot_main`
+- The remaining failure is after entry/runtime bring-up, not before it.
+- The next target is to determine why the first proof-output path still does not surface as a mailbox write at `0x80600000` even though:
+  - `ghdl_boot_info_proof_layout__proof_store_u64` computes `0x80600000 + slot * 8`
+  - `rt_mmio_write_u64` itself compiles to the expected `sd a0, 0(a1)` store sequence
+- That points the next pass back toward the generated RV64 execution/bench interaction on this later narrow proof path, rather than linker wiring or missing freestanding support.
