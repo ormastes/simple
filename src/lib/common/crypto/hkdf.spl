@@ -1,0 +1,156 @@
+# HKDF (HMAC-based Key Derivation Function) — RFC 5869
+#
+# Two-step KDF built on top of HMAC-SHA-256 and HMAC-SHA-512.
+# Extract step: PRK = HMAC-Hash(salt, IKM)
+# Expand step:  OKM = T(1) || T(2) || ... truncated to `length` bytes
+#
+# RFC 5869 Appendix A canonical test vectors are in:
+# test/unit/lib/crypto/hkdf_rfc5869_spec.spl
+
+mod crypto.types
+mod crypto.hmac
+
+use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha512_bytes}
+
+# =============================================================================
+# Internal helper
+# =============================================================================
+
+# Build a list of `n` zero bytes
+fn _zeros(n: i64) -> list:
+    var out = []
+    var i = 0
+    while i < n:
+        out.push(0)
+        i = i + 1
+    out
+
+# =============================================================================
+# HKDF-SHA-256
+# =============================================================================
+
+# RFC 5869 §2.2 Extract step using SHA-256
+# PRK = HMAC-SHA-256(salt, IKM)
+# If salt is empty, RFC 5869 §2.2 says use a string of HashLen (32) zero bytes.
+# reason: positional crypto hkdf API
+fn hkdf_extract_sha256(salt: list, ikm: list) -> list:
+    var effective_salt = []
+    if salt.len() == 0:
+        effective_salt = _zeros(32)
+    else:
+        var i = 0
+        while i < salt.len():
+            effective_salt.push(salt.get(i))
+            i = i + 1
+    hmac_sha256_bytes(effective_salt, ikm)
+
+# RFC 5869 §2.3 Expand step using SHA-256
+# OKM = T(1) || T(2) || ... || T(N), first `length` bytes
+# T(0) = empty
+# T(i) = HMAC-SHA-256(PRK, T(i-1) || info || [i])
+# length must be > 0 and <= 255 * 32 (8160)
+# reason: positional crypto hkdf API
+fn hkdf_expand_sha256(prk: list, info: list, length: i64) -> list:
+    if length <= 0:
+        []
+    else:
+        val max_len = 255 * 32
+        if length > max_len:
+            []
+        else:
+            var output = []
+            var prev_t = []
+            var counter = 1
+            while output.len() < length:
+                # Build HMAC input: T(i-1) || info || counter_byte
+                var hmac_input = []
+                var j = 0
+                while j < prev_t.len():
+                    hmac_input.push(prev_t.get(j))
+                    j = j + 1
+                j = 0
+                while j < info.len():
+                    hmac_input.push(info.get(j))
+                    j = j + 1
+                hmac_input.push(counter & 0xFF)
+                prev_t = hmac_sha256_bytes(prk, hmac_input)
+                j = 0
+                while j < prev_t.len():
+                    output.push(prev_t.get(j))
+                    j = j + 1
+                counter = counter + 1
+            # Truncate to exact length
+            var result = []
+            var i = 0
+            while i < length:
+                result.push(output.get(i))
+                i = i + 1
+            result
+
+# Combined convenience: Extract then Expand with SHA-256
+# reason: positional crypto hkdf API
+fn hkdf_sha256(salt: list, ikm: list, info: list, length: i64) -> list:
+    hkdf_expand_sha256(hkdf_extract_sha256(salt, ikm), info, length)
+
+# =============================================================================
+# HKDF-SHA-512
+# =============================================================================
+
+# RFC 5869 §2.2 Extract step using SHA-512
+# PRK = HMAC-SHA-512(salt, IKM)
+# If salt is empty, use HashLen (64) zero bytes per RFC 5869 §2.2.
+# reason: positional crypto hkdf API
+fn hkdf_extract_sha512(salt: list, ikm: list) -> list:
+    var effective_salt = []
+    if salt.len() == 0:
+        effective_salt = _zeros(64)
+    else:
+        var i = 0
+        while i < salt.len():
+            effective_salt.push(salt.get(i))
+            i = i + 1
+    hmac_sha512_bytes(effective_salt, ikm)
+
+# RFC 5869 §2.3 Expand step using SHA-512
+# OKM = T(1) || T(2) || ... || T(N), first `length` bytes
+# length must be > 0 and <= 255 * 64 (16320)
+# reason: positional crypto hkdf API
+fn hkdf_expand_sha512(prk: list, info: list, length: i64) -> list:
+    if length <= 0:
+        []
+    else:
+        val max_len = 255 * 64
+        if length > max_len:
+            []
+        else:
+            var output = []
+            var prev_t = []
+            var counter = 1
+            while output.len() < length:
+                var hmac_input = []
+                var j = 0
+                while j < prev_t.len():
+                    hmac_input.push(prev_t.get(j))
+                    j = j + 1
+                j = 0
+                while j < info.len():
+                    hmac_input.push(info.get(j))
+                    j = j + 1
+                hmac_input.push(counter & 0xFF)
+                prev_t = hmac_sha512_bytes(prk, hmac_input)
+                j = 0
+                while j < prev_t.len():
+                    output.push(prev_t.get(j))
+                    j = j + 1
+                counter = counter + 1
+            var result = []
+            var i = 0
+            while i < length:
+                result.push(output.get(i))
+                i = i + 1
+            result
+
+# Combined convenience: Extract then Expand with SHA-512
+# reason: positional crypto hkdf API
+fn hkdf_sha512(salt: list, ikm: list, info: list, length: i64) -> list:
+    hkdf_expand_sha512(hkdf_extract_sha512(salt, ikm), info, length)
