@@ -20,6 +20,49 @@ use crate::hir::types::*;
 use crate::value::BUILTIN_SPAWN;
 
 impl Lowerer {
+    fn enum_payload_type_for_builtin_method(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { variants, .. }) => variants
+                .iter()
+                .find_map(|(_, payload)| payload.as_ref().and_then(|fields| fields.first()).copied()),
+            Some(HirType::Pointer { inner, .. }) => self.enum_payload_type_for_builtin_method(*inner),
+            _ => None,
+        }
+    }
+
+    fn enum_variant_payload_type_for_builtin_method(&self, ty: TypeId, variant_name: &str) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { variants, .. }) => variants.iter().find_map(|(name, payload)| {
+                if name == variant_name {
+                    payload.as_ref().and_then(|fields| fields.first()).copied()
+                } else {
+                    None
+                }
+            }),
+            Some(HirType::Pointer { inner, .. }) => {
+                self.enum_variant_payload_type_for_builtin_method(*inner, variant_name)
+            }
+            _ => None,
+        }
+    }
+
+    fn enum_has_variant_for_builtin_method(&self, ty: TypeId, variant_name: &str) -> bool {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { variants, .. }) => variants.iter().any(|(name, _)| name == variant_name),
+            Some(HirType::Pointer { inner, .. }) => self.enum_has_variant_for_builtin_method(*inner, variant_name),
+            _ => false,
+        }
+    }
+
+    fn enum_variant_discriminant_for_builtin_method(&self, variant_name: &str) -> i64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        variant_name.hash(&mut hasher);
+        (hasher.finish() & 0xFFFF_FFFF) as i64
+    }
+
     /// Main expression lowering dispatcher
     ///
     /// This method delegates to specialized helper methods for each expression type,
@@ -377,6 +420,88 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
+        if args.is_empty() {
+            match method {
+                "unwrap" => {
+                    if let Some(payload_ty) = self.enum_payload_type_for_builtin_method(receiver.ty) {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_enum_payload".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: payload_ty,
+                        }));
+                    }
+                }
+                "unwrap_err" => {
+                    if let Some(payload_ty) =
+                        self.enum_variant_payload_type_for_builtin_method(receiver.ty, "Err")
+                    {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_enum_payload".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: payload_ty,
+                        }));
+                    }
+                }
+                "is_some" if self.enum_has_variant_for_builtin_method(receiver.ty, "Some") => {
+                    return Ok(Some(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_some".to_string(),
+                            args: vec![receiver.clone()],
+                        },
+                        ty: TypeId::BOOL,
+                    }));
+                }
+                "is_none" if self.enum_has_variant_for_builtin_method(receiver.ty, "None") => {
+                    return Ok(Some(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_none".to_string(),
+                            args: vec![receiver.clone()],
+                        },
+                        ty: TypeId::BOOL,
+                    }));
+                }
+                "is_ok" if self.enum_has_variant_for_builtin_method(receiver.ty, "Ok") => {
+                    return Ok(Some(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_enum_check_discriminant".to_string(),
+                            args: vec![
+                                receiver.clone(),
+                                HirExpr {
+                                    kind: HirExprKind::Integer(
+                                        self.enum_variant_discriminant_for_builtin_method("Ok"),
+                                    ),
+                                    ty: TypeId::I64,
+                                },
+                            ],
+                        },
+                        ty: TypeId::BOOL,
+                    }));
+                }
+                "is_err" if self.enum_has_variant_for_builtin_method(receiver.ty, "Err") => {
+                    return Ok(Some(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_enum_check_discriminant".to_string(),
+                            args: vec![
+                                receiver.clone(),
+                                HirExpr {
+                                    kind: HirExprKind::Integer(
+                                        self.enum_variant_discriminant_for_builtin_method("Err"),
+                                    ),
+                                    ty: TypeId::I64,
+                                },
+                            ],
+                        },
+                        ty: TypeId::BOOL,
+                    }));
+                }
+                _ => {}
+            }
+        }
+
         // Get receiver type to determine which builtin methods are available
         let is_string = matches!(self.module.types.get(receiver.ty), Some(HirType::String));
         let is_array = matches!(self.module.types.get(receiver.ty), Some(HirType::Array { .. }));

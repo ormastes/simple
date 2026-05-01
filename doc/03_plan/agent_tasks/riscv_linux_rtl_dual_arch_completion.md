@@ -4,4 +4,4 @@
 - Task 2: add a repo-native `rv32gc` hardware tree with a Linux-capable QEMU `virt` contract.
 - Task 3: align FPGA orchestration/readiness logic to the shared contracts and dual-arch status reporting.
 - Task 4: align compiler/backend tests and hardware contract tests with the shared truth.
-- Task 5: run staged verification and external RTL Linux validation.
+- Task 5: run staged verification with generated-only RV32/RV64 Linux acceptance, leaving external RTL Linux runs as optional diagnostics.

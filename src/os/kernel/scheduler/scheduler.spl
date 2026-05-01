@@ -32,6 +32,7 @@ use os.kernel.ipc.notif_global.{notification_clear_waiter_global}
 # Called after every task creation so the capability subsystem has an
 # explicit record for the new task instead of relying on default-ALLOW.
 extern fn cap_init_task_record(task: TaskId, full: bool)
+extern fn serial_println(msg: text)
 use os.kernel.log.klog_api.{log_raw_println}
 
 @cfg(arm64)
@@ -557,6 +558,10 @@ class Scheduler:
     deadline_period_start_ns_by_slot: [u64]
     deadline_miss_count_by_slot: [u64]
     deadline_overrun_count_by_slot: [u64]
+
+pub struct SchedulerBootstrapUserTaskResult:
+    scheduler: Scheduler
+    pid: u64
     rt_base_priority_by_slot: [i64]     # Saved priority for PI restoration
     trace_events: [SchedulerTraceEvent]
     trace_head: i32
@@ -940,12 +945,13 @@ pub fn scheduler_create_bootstrap_user_task_pid(
     image: UserProcessImage,
     priority: TaskPriority,
     caps: CapabilitySet
-) -> (Scheduler, u64):
+) -> SchedulerBootstrapUserTaskResult:
     """ARM fs-exec helper that avoids weak dot-method dispatch stubs."""
     var scheduler = scheduler_in
     if scheduler.tasks[0] != nil:
+        serial_println("[scheduler-arm] slot-busy")
         log_raw_println("[scheduler] bootstrap_user_task: slot busy")
-        return (scheduler, 0)
+        return SchedulerBootstrapUserTaskResult(scheduler: scheduler, pid: 0)
 
     val entry = user_process_image_entry(image)
     val stack_top = user_process_image_stack_top(image)
@@ -954,30 +960,40 @@ pub fn scheduler_create_bootstrap_user_task_pid(
     val initial_stack_bytes = user_process_image_initial_stack_bytes(image)
     val segments = user_process_image_segments(image)
     val file_bytes = user_process_image_file_bytes(image)
+    serial_println("[scheduler-arm] image entry={entry} stack_top={stack_top} stack_size={stack_size} user_sp={user_sp} segs={segments.len()} file_len={file_bytes.len()}")
     if stack_top == 0 or stack_size == 0 or user_sp == 0:
+        serial_println("[scheduler-arm] invalid-image")
         log_raw_println("[scheduler] bootstrap_user_task: invalid image")
-        return (scheduler, 0)
+        return SchedulerBootstrapUserTaskResult(scheduler: scheduler, pid: 0)
     if (initial_stack_bytes.len() as u64) > stack_size:
+        serial_println("[scheduler-arm] initial-stack-too-large")
         log_raw_println("[scheduler] bootstrap_user_task: initial stack too large")
-        return (scheduler, 0)
+        return SchedulerBootstrapUserTaskResult(scheduler: scheduler, pid: 0)
 
     val user_as: AddressSpace = create_user_address_space()
+    serial_println("[scheduler-arm] address-space root={user_as.phys_root} id={user_as.id}")
     val map_result = if _address_space_can_map(user_as):
         _map_user_process_image(user_as, segments, file_bytes, stack_top, stack_size, initial_stack_bytes)
     else:
+        serial_println("[scheduler-arm] synthetic-address-space")
         log_raw_println("[scheduler] bootstrap_user_task: synthetic address space root={user_as.phys_root} id={user_as.id}")
         0
+    serial_println("[scheduler-arm] map-result={map_result}")
     if map_result < 0:
         destroy_user_address_space(user_as)
+        serial_println("[scheduler-arm] map-failed")
         log_raw_println("[scheduler] bootstrap_user_task: map failed")
-        return (scheduler, 0)
+        return SchedulerBootstrapUserTaskResult(scheduler: scheduler, pid: 0)
     val mapped_entry = _scheduler_mapped_entry(user_as, file_bytes, entry)
+    serial_println("[scheduler-arm] mapped-entry={mapped_entry}")
     if mapped_entry != entry:
+        serial_println("[scheduler-arm] direct-entry-mapped")
         log_raw_println("[scheduler] bootstrap_user_task: direct entry mapped")
         if not verify_direct_load_entry(user_as, file_bytes, entry):
             destroy_user_address_space(user_as)
+            serial_println("[scheduler-arm] direct-entry-verify-failed")
             log_raw_println("[scheduler] bootstrap_user_task: direct entry verify failed")
-            return (scheduler, 0)
+            return SchedulerBootstrapUserTaskResult(scheduler: scheduler, pid: 0)
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
 
     var user_next_id = g_scheduler_next_task_id
@@ -985,6 +1001,7 @@ pub fn scheduler_create_bootstrap_user_task_pid(
         user_next_id = 1
     g_scheduler_next_task_id = user_next_id + 1
     val id = TaskId(id: user_next_id)
+    serial_println("[scheduler-arm] pid={user_next_id}")
 
     val tcb = TaskControlBlock(
         id: id,
@@ -1012,10 +1029,13 @@ pub fn scheduler_create_bootstrap_user_task_pid(
     cap_init_task_record(id, true)
 
     val queue_idx = _priority_to_index(priority)
+    serial_println("[scheduler-arm] queue-idx={queue_idx}")
     scheduler.ready_queues[queue_idx].enqueue(id)
     val cpu = if scheduler.cpu_runqueues.len() == 0: 0u32 else: 0u32
+    serial_println("[scheduler-arm] cpu={cpu} runqueues={scheduler.cpu_runqueues.len()}")
     scheduler.cpu_runqueues[cpu as i64].enqueue(id, tcb.schedule)
-    (scheduler, user_next_id)
+    serial_println("[scheduler-arm] success pid={user_next_id}")
+    SchedulerBootstrapUserTaskResult(scheduler: scheduler, pid: user_next_id)
 
     me _enqueue_ready_at_slot(id: TaskId, slot: i32):
         """Enqueue a task whose slot is already known. Avoids _find_slot."""

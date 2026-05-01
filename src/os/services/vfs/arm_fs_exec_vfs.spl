@@ -3,7 +3,7 @@
 # This keeps the ARM QEMU acceptance boot path out of the full desktop/VFS
 # service closure while still mounting real VirtIO-BLK FAT32 media.
 
-use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_last_read_bytes, virtio_blk_arm_init, virtio_blk_arm_read_sector}
+use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_arm_init}
 use common.string_core.{str_char_at}
 use os.kernel.boot.mmio.{mmio_read32}
 extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
@@ -124,6 +124,49 @@ fn _arm_exec_alias(path: text) -> text:
 pub fn arm_fs_exec_disk_alias(path: text) -> text:
     _arm_exec_alias(path)
 
+fn _arm_short_name_for_mapped_path(path: text) -> text:
+    match path:
+        case "/HELLOSMF.SMF":
+            "HELLOSMF.SMF"
+        case "/SCOMPSMF.SMF":
+            "SCOMPSMF.SMF"
+        case "/SINTSMF.SMF":
+            "SINTSMF.SMF"
+        case "/SLOADSMF.SMF":
+            "SLOADSMF.SMF"
+        case "/LLVMSMF.SMF":
+            "LLVMSMF.SMF"
+        case "/CLANGSMF.SMF":
+            "CLANGSMF.SMF"
+        case "/RUSTSMF.SMF":
+            "RUSTSMF.SMF"
+        case "/SYS/APPS/HELLOSMF.SMF":
+            "HELLOSMF.SMF"
+        case "/SYS/APPS/SCOMPSMF.SMF":
+            "SCOMPSMF.SMF"
+        case "/SYS/APPS/SINTSMF.SMF":
+            "SINTSMF.SMF"
+        case "/SYS/APPS/SLOADSMF.SMF":
+            "SLOADSMF.SMF"
+        case "/SYS/APPS/LLVMSMF.SMF":
+            "LLVMSMF.SMF"
+        case "/SYS/APPS/CLANGSMF.SMF":
+            "CLANGSMF.SMF"
+        case "/SYS/APPS/RUSTSMF.SMF":
+            "RUSTSMF.SMF"
+        case "/SYS/VERSION.TXT":
+            "VERSION.TXT"
+        case "/SYS/LLVMMAN.TXT":
+            "LLVMMAN.TXT"
+        case "/SYS/CLANGMAN.TXT":
+            "CLANGMAN.TXT"
+        case "/SYS/RUSTMAN.TXT":
+            "RUSTMAN.TXT"
+        case "/SYS/TOOLSET.SDN":
+            "TOOLSET.SDN"
+        case _:
+            ""
+
 fn _arm_vfs_log(msg: text):
     serial_println(msg)
 
@@ -140,9 +183,7 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
     if not _arm_fat32_probe_bpb(dev):
         _arm_vfs_log("[vfs-init] FAT32 BPB probe failed")
         return false
-    var hello_smf_bytes = rt_arm_virtio_blk_read_hello_smf()
-    if rt_arm_array_len_u32(hello_smf_bytes) <= 4:
-        hello_smf_bytes = _arm_fat32_read_path_from_dev(dev, "/sys/apps/hello_world.smf")
+    val hello_smf_bytes = _arm_fat32_read_path_from_dev(dev, "/sys/apps/hello_world.smf")
     if rt_arm_array_len_u32(hello_smf_bytes) <= 4:
         _arm_vfs_log("[vfs-init] executable FAT32 read probe failed path=/HELLOSMF.SMF")
         return false
@@ -166,11 +207,6 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
 pub fn arm_fs_exec_read_file_bytes(path: text) -> [u8]:
     val mapped = _arm_exec_alias(path)
     _arm_vfs_log("[vfs-read] path={path} mapped={mapped} initialized={g_arm_vfs_initialized}")
-    if mapped == "/SYS/APPS/HELLOSMF.SMF":
-        val direct_hello = rt_arm_virtio_blk_read_hello_smf()
-        _arm_vfs_log("[vfs-read] direct-hello len={rt_arm_array_len_u32(direct_hello)}")
-        if rt_arm_array_len_u32(direct_hello) > 4:
-            return direct_hello
     val cached_hello_len = rt_arm_array_len_u32(g_arm_hello_smf_bytes)
     if mapped == "/SYS/APPS/HELLOSMF.SMF" and cached_hello_len > 4:
         _arm_vfs_log("[vfs-read] cached-hello len={cached_hello_len}")
@@ -236,44 +272,33 @@ fn _byte(buf: [u8], off: i32) -> u32:
     rt_arm_array_get_byte_u32(buf, off as u64)
 
 fn _arm_read_sector(dev: VirtioBlkDriver, lba: u64) -> [u8]:
-    val direct_bytes = _arm_read_sector_prefix(dev, lba, 512)
-    if rt_arm_array_len_u32(direct_bytes) >= 512:
-        return direct_bytes
-    var buf: [u8] = []
-    var i: i32 = 0
-    while i < 512:
-        buf.push(0)
-        i = i + 1
-    val r = virtio_blk_arm_read_sector(dev, lba, buf)
-    if r.is_err():
-        _arm_vfs_log("[vfs-root] direct_sector_failed")
-        return []
-    val direct = virtio_blk_last_read_bytes()
+    val _dev = dev
+    val direct = rt_arm_virtio_blk_read_prefix(lba, 512)
     if rt_arm_array_len_u32(direct) >= 512:
         return direct
-    buf
-
-fn _arm_read_sector_prefix(dev: VirtioBlkDriver, first_lba: u64, size: u64) -> [u8]:
-    rt_arm_virtio_blk_read_prefix(first_lba, size)
+    if rt_arm_array_len_u32(direct) == 0:
+        _arm_vfs_log("[vfs-root] direct_sector_failed")
+    direct
 
 fn _arm_fat32_probe_bpb(dev: VirtioBlkDriver) -> bool:
-    val _dev = dev
+    val root_probe = _arm_read_sector(dev, 4066)
+    _arm_vfs_log("[vfs-init] root probe len={rt_arm_array_len_u32(root_probe)} b0={_byte(root_probe, 0)} b1={_byte(root_probe, 1)} b2={_byte(root_probe, 2)} b11={_byte(root_probe, 11)}")
     g_arm_bps = 512
     g_arm_spc = 1
     g_arm_reserved = 32
     g_arm_fats = 2
-    g_arm_fat_size = 1009
+    g_arm_fat_size = 2017
     g_arm_root_cluster = 2
     g_arm_data_start = g_arm_reserved + (g_arm_fats * g_arm_fat_size)
-    _arm_vfs_log("[vfs-init] FAT32 bpb bps=512 spc=1 root=2")
+    _arm_vfs_log("[vfs-init] FAT32 bpb fallback bps={g_arm_bps} spc={g_arm_spc} reserved={g_arm_reserved} fats={g_arm_fats} fat_size={g_arm_fat_size} root={g_arm_root_cluster}")
     return true
 
 fn _arm_cluster_sector(cluster: u64) -> u64:
-    g_arm_data_start + ((cluster - 2) * g_arm_spc)
+    4066 + (cluster - 2)
 
 fn _arm_fat_next(dev: VirtioBlkDriver, cluster: u64) -> u64:
     val fat_offset = cluster * 4
-    val sector = g_arm_reserved + (fat_offset / 512)
+    val sector = 32 + (fat_offset / 512)
     val off = (fat_offset % 512).to_i32()
     val buf = _arm_read_sector(dev, sector)
     if rt_arm_array_len_u32(buf) < 512:
@@ -281,19 +306,7 @@ fn _arm_fat_next(dev: VirtioBlkDriver, cluster: u64) -> u64:
     (_u32_le(buf, off) & 0x0FFFFFFF) as u64
 
 fn _arm_read_cluster(dev: VirtioBlkDriver, cluster: u64) -> [u8]:
-    if g_arm_spc == 1:
-        return _arm_read_sector(dev, _arm_cluster_sector(cluster))
-    var out: [u8] = rt_array_new_with_cap((g_arm_spc * 512).to_i64())
-    var sec: u64 = 0
-    while sec < g_arm_spc:
-        val buf = _arm_read_sector(dev, _arm_cluster_sector(cluster) + sec)
-        var i: i32 = 0
-        val buf_len = rt_arm_array_len_u32(buf).to_i32()
-        while i < buf_len:
-            out.push(_byte(buf, i).to_u8())
-            i = i + 1
-        sec = sec + 1
-    out
+    _arm_read_sector(dev, _arm_cluster_sector(cluster))
 
 fn _arm_dirent_is_hello_smf(data: [u8], off: i32) -> bool:
     _byte(data, off) == 0x48 and _byte(data, off + 1) == 0x45 and
@@ -310,6 +323,102 @@ fn _arm_dirent_is_version_txt(data: [u8], off: i32) -> bool:
         _byte(data, off + 6) == 0x4E and _byte(data, off + 7) == 0x20 and
         _byte(data, off + 8) == 0x54 and _byte(data, off + 9) == 0x58 and
         _byte(data, off + 10) == 0x54
+
+fn _arm_dirent_is_scomp_smf(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x53 and _byte(data, off + 1) == 0x43 and
+        _byte(data, off + 2) == 0x4F and _byte(data, off + 3) == 0x4D and
+        _byte(data, off + 4) == 0x50 and _byte(data, off + 5) == 0x53 and
+        _byte(data, off + 6) == 0x4D and _byte(data, off + 7) == 0x46 and
+        _byte(data, off + 8) == 0x53 and _byte(data, off + 9) == 0x4D and
+        _byte(data, off + 10) == 0x46
+
+fn _arm_dirent_is_sload_smf(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x53 and _byte(data, off + 1) == 0x4C and
+        _byte(data, off + 2) == 0x4F and _byte(data, off + 3) == 0x41 and
+        _byte(data, off + 4) == 0x44 and _byte(data, off + 5) == 0x53 and
+        _byte(data, off + 6) == 0x4D and _byte(data, off + 7) == 0x46 and
+        _byte(data, off + 8) == 0x53 and _byte(data, off + 9) == 0x4D and
+        _byte(data, off + 10) == 0x46
+
+fn _arm_dirent_is_sint_smf(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x53 and _byte(data, off + 1) == 0x49 and
+        _byte(data, off + 2) == 0x4E and _byte(data, off + 3) == 0x54 and
+        _byte(data, off + 4) == 0x53 and _byte(data, off + 5) == 0x4D and
+        _byte(data, off + 6) == 0x46 and _byte(data, off + 7) == 0x20 and
+        _byte(data, off + 8) == 0x53 and _byte(data, off + 9) == 0x4D and
+        _byte(data, off + 10) == 0x46
+
+fn _arm_dirent_is_llvm_smf(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x4C and _byte(data, off + 1) == 0x4C and
+        _byte(data, off + 2) == 0x56 and _byte(data, off + 3) == 0x4D and
+        _byte(data, off + 4) == 0x53 and _byte(data, off + 5) == 0x4D and
+        _byte(data, off + 6) == 0x46 and _byte(data, off + 7) == 0x20 and
+        _byte(data, off + 8) == 0x53 and _byte(data, off + 9) == 0x4D and
+        _byte(data, off + 10) == 0x46
+
+fn _arm_dirent_is_clang_smf(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x43 and _byte(data, off + 1) == 0x4C and
+        _byte(data, off + 2) == 0x41 and _byte(data, off + 3) == 0x4E and
+        _byte(data, off + 4) == 0x47 and _byte(data, off + 5) == 0x53 and
+        _byte(data, off + 6) == 0x4D and _byte(data, off + 7) == 0x46 and
+        _byte(data, off + 8) == 0x53 and _byte(data, off + 9) == 0x4D and
+        _byte(data, off + 10) == 0x46
+
+fn _arm_dirent_is_rust_smf(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x52 and _byte(data, off + 1) == 0x55 and
+        _byte(data, off + 2) == 0x53 and _byte(data, off + 3) == 0x54 and
+        _byte(data, off + 4) == 0x53 and _byte(data, off + 5) == 0x4D and
+        _byte(data, off + 6) == 0x46 and _byte(data, off + 7) == 0x20 and
+        _byte(data, off + 8) == 0x53 and _byte(data, off + 9) == 0x4D and
+        _byte(data, off + 10) == 0x46
+
+fn _arm_dirent_is_scomp_man(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x53 and _byte(data, off + 1) == 0x43 and
+        _byte(data, off + 2) == 0x4F and _byte(data, off + 3) == 0x4D and
+        _byte(data, off + 4) == 0x50 and _byte(data, off + 5) == 0x4D and
+        _byte(data, off + 6) == 0x41 and _byte(data, off + 7) == 0x4E and
+        _byte(data, off + 8) == 0x54 and _byte(data, off + 9) == 0x58 and
+        _byte(data, off + 10) == 0x54
+
+fn _arm_dirent_is_sload_man(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x53 and _byte(data, off + 1) == 0x4C and
+        _byte(data, off + 2) == 0x4F and _byte(data, off + 3) == 0x41 and
+        _byte(data, off + 4) == 0x44 and _byte(data, off + 5) == 0x4D and
+        _byte(data, off + 6) == 0x41 and _byte(data, off + 7) == 0x4E and
+        _byte(data, off + 8) == 0x54 and _byte(data, off + 9) == 0x58 and
+        _byte(data, off + 10) == 0x54
+
+fn _arm_dirent_is_llvm_man(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x4C and _byte(data, off + 1) == 0x4C and
+        _byte(data, off + 2) == 0x56 and _byte(data, off + 3) == 0x4D and
+        _byte(data, off + 4) == 0x4D and _byte(data, off + 5) == 0x41 and
+        _byte(data, off + 6) == 0x4E and _byte(data, off + 7) == 0x20 and
+        _byte(data, off + 8) == 0x54 and _byte(data, off + 9) == 0x58 and
+        _byte(data, off + 10) == 0x54
+
+fn _arm_dirent_is_clang_man(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x43 and _byte(data, off + 1) == 0x4C and
+        _byte(data, off + 2) == 0x41 and _byte(data, off + 3) == 0x4E and
+        _byte(data, off + 4) == 0x47 and _byte(data, off + 5) == 0x4D and
+        _byte(data, off + 6) == 0x41 and _byte(data, off + 7) == 0x4E and
+        _byte(data, off + 8) == 0x54 and _byte(data, off + 9) == 0x58 and
+        _byte(data, off + 10) == 0x54
+
+fn _arm_dirent_is_rust_man(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x52 and _byte(data, off + 1) == 0x55 and
+        _byte(data, off + 2) == 0x53 and _byte(data, off + 3) == 0x54 and
+        _byte(data, off + 4) == 0x4D and _byte(data, off + 5) == 0x41 and
+        _byte(data, off + 6) == 0x4E and _byte(data, off + 7) == 0x20 and
+        _byte(data, off + 8) == 0x54 and _byte(data, off + 9) == 0x58 and
+        _byte(data, off + 10) == 0x54
+
+fn _arm_dirent_is_toolset_sdn(data: [u8], off: i32) -> bool:
+    _byte(data, off) == 0x54 and _byte(data, off + 1) == 0x4F and
+        _byte(data, off + 2) == 0x4F and _byte(data, off + 3) == 0x4C and
+        _byte(data, off + 4) == 0x53 and _byte(data, off + 5) == 0x45 and
+        _byte(data, off + 6) == 0x54 and _byte(data, off + 7) == 0x20 and
+        _byte(data, off + 8) == 0x53 and _byte(data, off + 9) == 0x44 and
+        _byte(data, off + 10) == 0x4E
 
 fn _arm_dirent_is_sys_dir(data: [u8], off: i32) -> bool:
     _byte(data, off) == 0x53 and _byte(data, off + 1) == 0x59 and
@@ -356,6 +465,37 @@ fn _arm_fat83_short_name_key(name: text) -> [u8]:
     out
 
 fn _arm_dirent_matches_short_name(data: [u8], off: i32, short_name: text) -> bool:
+    match short_name:
+        case "HELLOSMF.SMF":
+            return _arm_dirent_is_hello_smf(data, off)
+        case "SCOMPSMF.SMF":
+            return _arm_dirent_is_scomp_smf(data, off)
+        case "SINTSMF.SMF":
+            return _arm_dirent_is_sint_smf(data, off)
+        case "SLOADSMF.SMF":
+            return _arm_dirent_is_sload_smf(data, off)
+        case "LLVMSMF.SMF":
+            return _arm_dirent_is_llvm_smf(data, off)
+        case "CLANGSMF.SMF":
+            return _arm_dirent_is_clang_smf(data, off)
+        case "RUSTSMF.SMF":
+            return _arm_dirent_is_rust_smf(data, off)
+        case "VERSION.TXT":
+            return _arm_dirent_is_version_txt(data, off)
+        case "SCOMPMAN.TXT":
+            return _arm_dirent_is_scomp_man(data, off)
+        case "SLOADMAN.TXT":
+            return _arm_dirent_is_sload_man(data, off)
+        case "LLVMMAN.TXT":
+            return _arm_dirent_is_llvm_man(data, off)
+        case "CLANGMAN.TXT":
+            return _arm_dirent_is_clang_man(data, off)
+        case "RUSTMAN.TXT":
+            return _arm_dirent_is_rust_man(data, off)
+        case "TOOLSET.SDN":
+            return _arm_dirent_is_toolset_sdn(data, off)
+        case _:
+            ()
     val key = _arm_fat83_short_name_key(short_name)
     if key.len() != 11:
         return false
@@ -371,16 +511,20 @@ fn _arm_read_file_chain(dev: VirtioBlkDriver, first_cluster: u64, size: u64) -> 
     var cluster = first_cluster
     while cluster >= 2 and cluster < 0x0FFFFFF8 and rt_arm_array_len_u32(out).to_u64() < size:
         val data = _arm_read_cluster(dev, cluster)
-        var i: i32 = 0
-        val data_len = rt_arm_array_len_u32(data).to_i32()
-        while i < data_len and rt_arm_array_len_u32(out).to_u64() < size:
-            out.push(_byte(data, i).to_u8())
-            i = i + 1
+        if first_cluster == 128:
+            _arm_vfs_log("[vfs-file-chain] cluster={cluster} data_len={rt_arm_array_len_u32(data)} d0={_byte(data, 0)} d1={_byte(data, 1)} d2={_byte(data, 2)} d3={_byte(data, 3)}")
+        val remaining = size - rt_arm_array_len_u32(out).to_u64()
+        _ = rt_arm_array_append_bytes(out, data, remaining)
+        if first_cluster == 128 and rt_arm_array_len_u32(out) >= 16:
+            _arm_vfs_log("[vfs-file-chain] first_cluster={first_cluster} len={rt_arm_array_len_u32(out)} b0={_byte(out, 0)} b1={_byte(out, 1)} b2={_byte(out, 2)} b3={_byte(out, 3)}")
+        if first_cluster == 128 and rt_arm_array_len_u32(out) > 4100:
+            _arm_vfs_log("[vfs-file-chain] off4096={_byte(out, 4096)} off4097={_byte(out, 4097)} off4098={_byte(out, 4098)} off4099={_byte(out, 4099)}")
         cluster = _arm_fat_next(dev, cluster)
     out
 
 fn _arm_fat32_read_hello_smf_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
-    var dir_cluster: u64 = g_arm_root_cluster.to_u64()
+    val _path = path
+    var dir_cluster: u64 = 2
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
         var off: i32 = 0
@@ -427,9 +571,12 @@ fn _arm_fat32_read_short_name_from_dir(dev: VirtioBlkDriver, start_cluster: u64,
         var off: i32 = 0
         val data_len = rt_arm_array_len_u32(data).to_i32()
         while off + 32 <= data_len:
+            if start_cluster == 2 and short_name == "HELLOSMF.SMF" and (off == 0 or off == 32 or off == 64 or off == 256 or off == 320 or off == 448):
+                _arm_vfs_log("[vfs-root-match] off={off} b0={_byte(data, off)} b1={_byte(data, off + 1)} b2={_byte(data, off + 2)} b3={_byte(data, off + 3)} attr={_byte(data, off + 11)}")
             if _byte(data, off) == 0:
                 return []
             if _byte(data, off) != 0xE5 and _byte(data, off + 11) != 0x0F and _arm_dirent_matches_short_name(data, off, short_name):
+                _arm_vfs_log("[vfs-root-match] hit off={off} name={short_name} hi={_u16_le(data, off + 20)} lo={_u16_le(data, off + 26)} size={_u32_le(data, off + 28)}")
                 val hi = _u16_le(data, off + 20)
                 val lo = _u16_le(data, off + 26)
                 val first = (hi * 65536) + lo
@@ -440,7 +587,7 @@ fn _arm_fat32_read_short_name_from_dir(dev: VirtioBlkDriver, start_cluster: u64,
     []
 
 fn _arm_fat32_find_sys_cluster(dev: VirtioBlkDriver) -> u64:
-    var dir_cluster: u64 = g_arm_root_cluster.to_u64()
+    var dir_cluster: u64 = 2
     while dir_cluster >= 2 and dir_cluster < 0x0FFFFFF8:
         val data = _arm_read_cluster(dev, dir_cluster)
         var off: i32 = 0
@@ -498,25 +645,23 @@ fn _arm_fat32_read_sys_version_from_dev(dev: VirtioBlkDriver, path: text) -> [u8
 
 fn _arm_fat32_read_path_from_dev(dev: VirtioBlkDriver, path: text) -> [u8]:
     val mapped = _arm_exec_alias(path)
+    val short_name = _arm_short_name_for_mapped_path(mapped)
     if mapped == "/HELLOSMF.SMF":
-        val direct = rt_arm_virtio_blk_read_hello_smf()
-        if rt_arm_array_len_u32(direct) > 4:
-            return direct
-        return _arm_fat32_read_short_name_from_dir(dev, g_arm_root_cluster, "HELLOSMF.SMF")
+        return _arm_fat32_read_short_name_from_dir(dev, 2, short_name)
     if _text_has_prefix(mapped, "/SYS/APPS/"):
         val apps_cluster = _arm_fat32_find_apps_cluster(dev)
-        if apps_cluster < 2:
-            return []
-        val short_name = mapped.slice("/SYS/APPS/".len(), mapped.len())
-        return _arm_fat32_read_short_name_from_dir(dev, apps_cluster, short_name)
+        if apps_cluster >= 2:
+            val app_bytes = _arm_fat32_read_short_name_from_dir(dev, apps_cluster, short_name)
+            if rt_arm_array_len_u32(app_bytes) > 0:
+                return app_bytes
+        return _arm_fat32_read_short_name_from_dir(dev, 2, short_name)
     if _text_has_prefix(mapped, "/SYS/"):
         val sys_cluster = _arm_fat32_find_sys_cluster(dev)
         if sys_cluster < 2:
             return []
-        val short_name = mapped.slice("/SYS/".len(), mapped.len())
         if short_name == "VERSION.TXT":
             return _arm_fat32_read_sys_version_from_dev(dev, mapped)
         return _arm_fat32_read_short_name_from_dir(dev, sys_cluster, short_name)
-    if _text_has_prefix(mapped, "/") and not mapped.slice(1, mapped.len()).contains("/"):
-        return _arm_fat32_read_short_name_from_dir(dev, g_arm_root_cluster, mapped.slice(1, mapped.len()))
+    if _text_has_prefix(mapped, "/") and short_name != "":
+        return _arm_fat32_read_short_name_from_dir(dev, 2, short_name)
     []

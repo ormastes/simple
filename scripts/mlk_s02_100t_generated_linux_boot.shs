@@ -1,0 +1,75 @@
+#!/bin/sh
+# Capture UART for an MLK-S02-100T generated Linux boot and verify markers.
+
+set -eu
+
+UART_PORT="${MLK_UART_PORT:-/dev/ttyUSB0}"
+UART_BAUD="${MLK_UART_BAUD:-115200}"
+UART_LOG=""
+TIMEOUT_SEC="${MLK_UART_TIMEOUT_SEC:-120}"
+COLD_BOOTS=1
+MARKERS="OpenSBI|Linux version|OF: fdt|init started"
+BOOT_LOADER_CMD=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --uart-port=*) UART_PORT="${1#--uart-port=}" ;;
+        --uart-baud=*) UART_BAUD="${1#--uart-baud=}" ;;
+        --uart-log=*) UART_LOG="${1#--uart-log=}" ;;
+        --timeout=*) TIMEOUT_SEC="${1#--timeout=}" ;;
+        --cold-boots=*) COLD_BOOTS="${1#--cold-boots=}" ;;
+        --markers=*) MARKERS="${1#--markers=}" ;;
+        --boot-loader-cmd=*) BOOT_LOADER_CMD="${1#--boot-loader-cmd=}" ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+[ -n "$UART_LOG" ] || { echo "missing --uart-log" >&2; exit 2; }
+mkdir -p "$(dirname "$UART_LOG")"
+
+configure_uart() {
+    stty -F "$UART_PORT" "$UART_BAUD" cs8 -cstopb -parenb -ixon -ixoff -icanon -echo min 1 time 0
+}
+
+check_markers() {
+    old_ifs="$IFS"
+    IFS='|'
+    for marker in $MARKERS; do
+        if ! grep -a -q "$marker" "$UART_LOG"; then
+            IFS="$old_ifs"
+            return 1
+        fi
+    done
+    IFS="$old_ifs"
+    return 0
+}
+
+attempt=1
+while [ "$attempt" -le "$COLD_BOOTS" ]; do
+    : > "$UART_LOG"
+    configure_uart
+    cat < "$UART_PORT" > "$UART_LOG" &
+    cat_pid=$!
+    if [ -n "$BOOT_LOADER_CMD" ]; then
+        sh -c "$BOOT_LOADER_CMD"
+    fi
+    deadline=$(( $(date +%s) + TIMEOUT_SEC ))
+    ok=0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if check_markers; then
+            ok=1
+            break
+        fi
+        sleep 1
+    done
+    kill "$cat_pid" 2>/dev/null || true
+    wait "$cat_pid" 2>/dev/null || true
+    if [ "$ok" -ne 1 ]; then
+        echo "FAIL: UART markers missing in $UART_LOG for cold boot $attempt/$COLD_BOOTS" >&2
+        exit 1
+    fi
+    attempt=$((attempt + 1))
+done
+
+echo "PASS: UART markers found for $COLD_BOOTS cold boot(s)"

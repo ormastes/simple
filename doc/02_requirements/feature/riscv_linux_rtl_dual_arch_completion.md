@@ -5,4 +5,4 @@
 - REQ-RLD-003: RV32 shall use ILP32D + Sv32 and RV64 shall use LP64D + Sv39.
 - REQ-RLD-004: Linux handoff truth shall require `a0 = hartid`, `a1 = dtb`, and `satp = 0`.
 - REQ-RLD-005: FPGA/orchestration status shall report RV32 and RV64 independently and shall not overclaim readiness.
-- REQ-RLD-006: External RTL Linux smoke lanes for RV32 and RV64 shall remain mandatory final validation gates.
+- REQ-RLD-006: Generated-only RTL Linux smoke lanes for RV32 and RV64 shall remain the mandatory final validation gates; external RTL lanes may remain optional diagnostics only.

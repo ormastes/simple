@@ -13,6 +13,16 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
+    fn static_enum_payload_type(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { variants, .. }) => variants
+                .iter()
+                .find_map(|(_, payload)| payload.as_ref().and_then(|fields| fields.first()).copied()),
+            Some(HirType::Pointer { inner, .. }) => self.static_enum_payload_type(*inner),
+            _ => None,
+        }
+    }
+
     pub(super) fn parse_simd_type_name(&self, type_name: &str) -> Option<(TypeId, u32)> {
         let (element, lane_suffix) = if let Some(rest) = type_name.strip_prefix("f32x") {
             (TypeId::F32, rest)
@@ -273,9 +283,26 @@ impl Lowerer {
             return Ok(result);
         }
 
-        if let Some(type_id) = self.module.types.lookup(class_name) {
+        let class_ty = self.module.types.lookup(class_name).or_else(|| self.globals.get(class_name).copied());
+
+        if let Some(type_id) = class_ty {
             if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) && method == "new" {
                 return self.lower_bitfield_constructor(type_id, args, ctx);
+            }
+        }
+
+        if method == "unwrap" && args.len() == 1 {
+            if let Some(type_id) = class_ty {
+                if let Some(payload_ty) = self.static_enum_payload_type(type_id) {
+                    let receiver_hir = self.lower_expr(&args[0].value, ctx)?;
+                    return Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_enum_payload".to_string(),
+                            args: vec![receiver_hir],
+                        },
+                        ty: payload_ty,
+                    });
+                }
             }
         }
 

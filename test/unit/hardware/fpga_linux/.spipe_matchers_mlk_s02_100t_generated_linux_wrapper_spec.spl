@@ -1,0 +1,42 @@
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn read_text(path: text) -> text:
+    rt_file_read_text(path)
+
+describe "MLK-S02-100T generated Linux wrapper scripts":
+    it "publishes the board wrapper and boot verifier script names":
+        val wrapper = read_text("scripts/mlk_s02_100t_generated_linux.shs")
+        expect (wrapper).contains("scripts/mlk_s02_100t_generated_linux_boot.shs")
+        expect (wrapper).contains("scripts/vivado_mlk_s02_100t_generated_linux.tcl")
+        expect (wrapper).contains("scripts/rtl_riscv32_linux_generated.shs")
+        expect (wrapper).contains("scripts/rtl_riscv64_linux_generated.shs")
+
+    it "maps each arch to the expected MLK product id and generated bundle flow":
+        val wrapper = read_text("scripts/mlk_s02_100t_generated_linux.shs")
+        expect (wrapper).contains("echo \"mlk_s02_100t_$1_linux\"")
+        expect (wrapper).contains("--board=mlk_s02_100t")
+        expect (wrapper).contains("src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl")
+        expect (wrapper).contains("ARCH_MODE=\"both\"")
+        expect (wrapper).contains("rv32 rv64")
+
+    it "hands synthesis to the MLK Vivado TCL with board-specific arguments":
+        val wrapper = read_text("scripts/mlk_s02_100t_generated_linux.shs")
+        val vivado_tcl = read_text("scripts/vivado_mlk_s02_100t_generated_linux.tcl")
+        expect (wrapper).contains("vivado -mode batch")
+        expect (wrapper).contains("-source \"$REPO_ROOT/scripts/vivado_mlk_s02_100t_generated_linux.tcl\"")
+        expect (wrapper).contains("-tclargs \"$product_id\" \"$arch\" \"$BUNDLE_ROOT\" \"$product_dir\" \"$(resolve_xdc)\"")
+        expect (vivado_tcl).contains("create_project -force $product_id $project_dir -part xc7a100t-2ffg484i")
+        expect (vivado_tcl).contains("set rtl_dir [file join $bundle_root \"rv32\" \"rtl\"]")
+        expect (vivado_tcl).contains("set rtl_dir [file join $bundle_root \"rv64\" \"rtl\"]")
+
+    it "uses the UART verification helper with deterministic Linux boot markers":
+        val wrapper = read_text("scripts/mlk_s02_100t_generated_linux.shs")
+        val boot = read_text("scripts/mlk_s02_100t_generated_linux_boot.shs")
+        expect (wrapper).contains("sh \"$REPO_ROOT/scripts/mlk_s02_100t_generated_linux_boot.shs\"")
+        expect (wrapper).contains("--markers=\"OpenSBI|Linux version|OF: fdt|init started\"")
+        expect (wrapper).contains("\"--boot-loader-cmd=$BOOT_LOADER_CMD\"")
+        expect (boot).contains("MARKERS=\"OpenSBI|Linux version|OF: fdt|init started\"")
+        expect (boot).contains("FAIL: UART markers missing")
+        expect (boot).contains("PASS: UART markers found for $COLD_BOOTS cold boot(s)")

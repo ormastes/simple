@@ -5,7 +5,7 @@ Status: Draft
 
 ## Overview
 
-This feature establishes one authoritative RV64-first Linux-capable RTL pipeline. RV64 hardware and compiler contracts become the source of truth. RV32 remains supported for compiler-target parity only and is explicitly out of scope for first-class Linux CPU/RTL claims.
+This feature establishes the original RV64 Linux-capable RTL pipeline contract that later feeds the dual-arch generated Linux board flow. RV64 hardware and compiler contracts remain part of the source of truth, but they no longer imply RV32 is parity-only or non-authoritative for generated Linux acceptance.
 
 ## Functional Requirements
 
@@ -27,7 +27,7 @@ REQ-RV64-LINUX-RTL-004
 - `fpga-validated`
 
 REQ-RV64-LINUX-RTL-005
-Default FPGA/Linux orchestration output shall be RV64-first and must not imply first-class RV32 Linux CPU/RTL support.
+Default FPGA/Linux orchestration output for this feature shall remain RV64-focused, but it must not contradict the repo-wide dual-arch generated Linux acceptance contract.
 
 REQ-RV64-LINUX-RTL-006
 LLVM shall expose explicit RV64 Linux triple, ABI, and feature policy through a shared RISC-V backend target contract.
@@ -36,7 +36,7 @@ REQ-RV64-LINUX-RTL-007
 The shared RISC-V backend target contract shall define RV64 Linux as `riscv64-unknown-linux-gnu`, `LP64D`, and `rv64gc`.
 
 REQ-RV64-LINUX-RTL-008
-The shared RISC-V backend target contract shall define RV32 Linux as config-only parity support using `riscv32-unknown-linux-gnu`, `ILP32D`, and `rv32gc`.
+The shared RISC-V backend target contract shall define RV32 Linux using `riscv32-unknown-linux-gnu`, `ILP32D`, and `rv32gc` in a way that remains compatible with authoritative generated-Linux board flows.
 
 REQ-RV64-LINUX-RTL-009
 Native RV32/RV64 backend modules shall consume the shared RISC-V target contract for stack/ABI/relocation assumptions instead of drifting local constants.

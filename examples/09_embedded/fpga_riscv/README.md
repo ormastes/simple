@@ -5,8 +5,7 @@ Handwritten RV32I single-cycle CPU with semihosting, validated in GHDL simulatio
 This directory is the current in-repo runnable RTL CPU lane. It is not generated from
 Simple today. Repo-native generated RV32/RV64 work lives under `src/hardware/` as
 contract/orchestration code. The default generated-core proof lanes remain
-`generated_rv32_baremetal` and `generated_rv64_linux`, while RV32 Linux exists
-only as an explicit experimental generated bundle lane under `rv32_linux/rtl`.
+`generated_rv32_linux` and `generated_rv64_linux`.
 External Linux-capable RTL lanes (`reference_external_rv32_linux`,
 `reference_external_rv64_linux`) remain cross-checks, not substitutes.
 
@@ -14,9 +13,9 @@ External Linux-capable RTL lanes (`reference_external_rv32_linux`,
 
 - GHDL simulation is the verified path for this handwritten RV32I lane.
 - `build.tcl`, `program.tcl`, and `constraints/zedboard.xdc` are ZedBoard-specific historical bring-up assets.
-- The repo now records known board facts for `MLK-S02-100T` in `config/resources/boards/mlk_s02_100t.sdn` and ships a commented constraint scaffold in `constraints/mlk_s02_100t.xdc`, but it does not yet ship a verified `MLK-S02-100T` pin map or programming flow.
-- The repo also ships board-wrapper and Vivado script scaffolds for `MLK-S02-100T`, but they remain non-verified templates until the real XDC and top-level wiring land.
-- The repo-native generated FPGA manifest still defaults to `xilinx_generic` with `BOARD_PART_TBD`, so a concrete board must be selected before claiming hardware boot support.
+- The repo now records known board facts for `MLK-S02-100T`, emits per-arch generated Linux boot product manifests, and ships a board wrapper at `scripts/mlk_s02_100t_generated_linux.shs`.
+- The checked-in `MLK-S02-100T` XDC is still a scaffold fallback. A real hardware run still needs authoritative local board constraints or vendor files.
+- The repo-native generated FPGA manifest still supports `xilinx_generic`, but `--board=mlk_s02_100t` now emits explicit `mlk_s02_100t_rv32_linux` and `mlk_s02_100t_rv64_linux` product contracts.
 
 ## Quick Start
 
@@ -101,6 +100,8 @@ Current `MLK-S02-100T` scaffolds:
 - `rtl/mlk_s02_100t_wrapper_stub.vhd`
 - `build_mlk_s02_100t.tcl`
 - `program_mlk_s02_100t.tcl`
+- `../../scripts/mlk_s02_100t_generated_linux.shs`
+- `../../scripts/mlk_s02_100t_generated_linux_boot.shs`
 
 ## Platform Cable USB II
 

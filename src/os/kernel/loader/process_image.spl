@@ -25,6 +25,7 @@ use os.kernel.types.task_types.{UserLoadSegment, UserProcessImage}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn serial_println(msg: text)
 
 @cfg(arm64)
 extern fn rt_arm_elf64_pt_load_count(bytes: [u8]) -> u32
@@ -194,6 +195,47 @@ fn _default_stack_top(arch: Architecture) -> Result<u64, text>:
         case _:
             Err("unsupported architecture for process image")
 
+fn _default_stack_top_unchecked(arch: Architecture) -> u64:
+    match arch:
+        case Architecture.X86_64:
+            X86_64_USER_STACK_TOP
+        case Architecture.X86:
+            X86_32_USER_STACK_TOP
+        case Architecture.Arm64:
+            ARM64_USER_STACK_TOP
+        case Architecture.Arm32:
+            ARM32_USER_STACK_TOP
+        case Architecture.Riscv64:
+            RV64_USER_STACK_TOP
+        case Architecture.Riscv32:
+            RV32_USER_STACK_TOP
+        case _:
+            0
+
+@cfg(arm64)
+fn _native_default_stack_top(_arch: Architecture) -> u64:
+    ARM64_USER_STACK_TOP
+
+@cfg(arm32)
+fn _native_default_stack_top(_arch: Architecture) -> u64:
+    ARM32_USER_STACK_TOP
+
+@cfg(x86_64)
+fn _native_default_stack_top(_arch: Architecture) -> u64:
+    X86_64_USER_STACK_TOP
+
+@cfg(x86)
+fn _native_default_stack_top(_arch: Architecture) -> u64:
+    X86_32_USER_STACK_TOP
+
+@cfg(riscv64)
+fn _native_default_stack_top(_arch: Architecture) -> u64:
+    RV64_USER_STACK_TOP
+
+@cfg(riscv32)
+fn _native_default_stack_top(_arch: Architecture) -> u64:
+    RV32_USER_STACK_TOP
+
 fn _normalise_executable_bytes(data: [u8], arch: Architecture) -> Result<[u8], text>:
     """Unwrap supported executable containers to the native image bytes."""
     if smf_has_header(data):
@@ -205,7 +247,12 @@ fn _normalise_executable_bytes(data: [u8], arch: Architecture) -> Result<[u8], t
 fn _normalise_executable_bytes_unchecked(data: [u8]) -> [u8]:
     """Unchecked ARM bridge variant used where Result predicates are unreliable."""
     if smf_has_header(data):
-        return smf_extract_executable_stub_unchecked(data)
+        val stub = smf_extract_executable_stub_unchecked(data)
+        if stub.len() > 0:
+            return stub
+        if _has_elf_magic(data):
+            return data
+        return data
     data
 
 fn _build_user_process_image_from_elf(
@@ -218,7 +265,7 @@ fn _build_user_process_image_from_elf(
     elf_segments: [ElfLoadSegment],
     source_len: u64
 ) -> UserProcessImage:
-    val stack_top = _default_stack_top(arch).unwrap()
+    val stack_top = _native_default_stack_top(arch)
     var stack_size = compute_stack_size(source_len)
     if stack_size == 0:
         stack_size = 8388608
@@ -250,6 +297,7 @@ fn _build_user_process_image_from_elf(
     val stack_frame = build_initial_stack(stack_top, effective_argv, envp, extra_aux)
     val initial_sp = stack_build_result_sp(stack_frame)
     val initial_stack_bytes = stack_build_result_bytes(stack_frame)
+    serial_println("[process-image] build entry={elf_entry} stack_top={stack_top} stack_size={stack_size} initial_sp={initial_sp} segs={segments.len()}")
 
     UserProcessImage(
         binary_path: path,
@@ -296,7 +344,9 @@ fn build_user_process_image_unchecked(
     envp: [text]
 ) -> UserProcessImage:
     """Build a process image without Result predicates for ARM freestanding tests."""
-    val native_data = _normalise_executable_bytes_unchecked(data)
+    val owned_input = _owned_bytes(data)
+    val native_data = _normalise_executable_bytes_unchecked(owned_input)
+    serial_println("[process-image] unchecked src_elf={_has_elf_magic(owned_input)} native_len={native_data.len()} native_elf={_has_elf_magic(native_data)} arch={arch}")
     val elf = load_user_executable_unchecked(native_data, arch)
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
     _build_user_process_image_from_elf(
@@ -311,7 +361,8 @@ fn probe_user_process_image_unchecked(
     envp: [text]
 ) -> i64:
     """Exercise the process-image build path and return a scalar ARM-safe status."""
-    val native_data = _normalise_executable_bytes_unchecked(data)
+    val owned_input = _owned_bytes(data)
+    val native_data = _normalise_executable_bytes_unchecked(owned_input)
     val elf = load_user_executable_unchecked(native_data, arch)
     val entry = _user_entry_for_image(elf_image_entry(elf), native_data)
     val stack_top = _default_stack_top(arch).unwrap()

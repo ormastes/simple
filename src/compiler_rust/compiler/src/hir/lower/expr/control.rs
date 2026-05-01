@@ -12,7 +12,7 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
-    fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
+    pub(super) fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Enum { name, variants, .. }) if name == "Result" => {
                 variants.iter().find_map(|(variant, payload)| {

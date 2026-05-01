@@ -4,12 +4,13 @@ Date: 2026-04-29
 
 ## Current Truth
 
-- The only in-repo runnable RTL CPU lane is the handwritten RV32I VHDL core under `examples/09_embedded/fpga_riscv/rtl/`.
-- `src/hardware/fpga_linux/riscv_fpga_linux.spl` is the repo-native generated-core contract/orchestration layer for the generated RV64 Linux smoke lane.
-- Linux RTL smokes remain external reference lanes:
+- `src/hardware/fpga_linux/riscv_fpga_linux.spl` is the repo-native generated-core contract/orchestration layer for both generated Linux smoke lanes.
+- `generated_rv32_linux` and `generated_rv64_linux` are the authoritative repo-native generated Linux proof lanes.
+- External Linux RTL smokes remain optional reference diagnostics only:
   - `reference_external_rv32_linux` via LiteX/VexRiscv
   - `reference_external_rv64_linux` via CVA6
-- The repo-native `generated_rv64_linux` lane is now the primary generated Linux proof path; CVA6 remains a required cross-check, not a substitute.
+- The handwritten VHDL under `examples/09_embedded/fpga_riscv/rtl/` remains useful historical/reference material, but it is not the acceptance source of truth for repo-native generated Linux boot.
+- The MLK-S02-100T board wrapper/products now exist as the first concrete board packaging target, but physical-board truth still depends on locally authoritative constraints, part selection, and vendor/programming files.
 
 ## Frozen Seam
 
@@ -25,9 +26,9 @@ The public contract lives in `hardware.riscv_common.pkg.riscv_generated_core_pkg
 
 ## Proof Taxonomy
 
-- `generated_rv32_baremetal` is the repo-native proof target for RV32 first.
-- `generated_rv64_linux` is the repo-native proof target for RV64 Linux and is validated by generated GHDL UART boot markers.
-- `generated_rv32_linux` is now available only as an explicit experimental lane under the emitted `rv32_linux/rtl` bundle root. It remains non-authoritative and exists to advance Linux handoff and DTB bring-up without changing the default RV32 proof target.
+- `generated_rv32_linux` is the repo-native proof target for RV32 Linux and is validated by generated GHDL/Linux handoff and DTB proof gates under the emitted `rv32/rtl` bundle root.
+- `generated_rv64_linux` is the repo-native proof target for RV64 Linux and is validated by generated GHDL UART boot markers under the emitted `rv64/rtl` bundle root.
+- `generated_rv32_baremetal` may remain as a narrower diagnostic lane, but it is not the acceptance source of truth for FPGA Linux bring-up.
 - External LiteX/CVA6 lanes never count as generated-core proof.
 
 ## Migration Rule

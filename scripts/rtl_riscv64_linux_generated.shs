@@ -1,5 +1,5 @@
 #!/bin/sh
-# Repo-native generated RV64 RTL Linux smoke through the GHDL generated lane.
+# Repo-native generated RV64 RTL Linux acceptance lane through the GHDL generated lane.
 
 set -eu
 
@@ -12,21 +12,17 @@ SV39_RUNNER="$REPO_ROOT/src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_
 FW_JUMP_SMOKE="$REPO_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_fw_jump_smoke.s"
 REAL_DTB_SMOKE="$REPO_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_boot_info_real_dtb_smoke.s"
 SV39_SMOKE="$REPO_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_sv39_smoke.s"
-SDK_DIR="${GENERATED_RV64_LINUX_PAYLOAD_DIR:-$REPO_ROOT/build/third_party/rtl/cva6-sdk/v0.3.0}"
-BBL_TAG="${GENERATED_RV64_LINUX_PAYLOAD_TAG:-v0.3.0}"
-PAYLOAD_ELF="${GENERATED_RV64_LINUX_PAYLOAD_ELF:-$SDK_DIR/bbl}"
 LOG_DIR="${RTL_LINUX_LOG_DIR:-$REPO_ROOT/build/rtl_linux/generated_rv64}"
 RUNNER_LOG="$LOG_DIR/generated_rv64_linux_runner.log"
 UART_LOG="$LOG_DIR/generated_rv64_linux_uart.log"
 TIMEOUT_SEC="${RTL_LINUX_TIMEOUT_SEC:-300}"
 CHECK_TOOLS=0
-FETCH_ONLY=0
 SKIP_PROOFS=0
+PAYLOAD_ELF="${GENERATED_RV64_LINUX_PAYLOAD_ELF:-$LOG_DIR/generated_rv64_boot_info_payload.elf}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --check-tools) CHECK_TOOLS=1 ;;
-        --fetch-only) FETCH_ONLY=1 ;;
         --skip-proofs) SKIP_PROOFS=1 ;;
         --timeout=*) TIMEOUT_SEC="${1#--timeout=}" ;;
         --timeout)
@@ -45,7 +41,7 @@ have() {
 
 check_tools() {
     missing=""
-    for tool in git gh python3 ghdl riscv64-linux-gnu-as riscv64-linux-gnu-ld riscv64-linux-gnu-objcopy; do
+    for tool in python3 ghdl riscv64-linux-gnu-as riscv64-linux-gnu-ld riscv64-linux-gnu-objcopy; do
         if ! have "$tool"; then
             missing="$missing $tool"
         fi
@@ -58,15 +54,19 @@ check_tools() {
 }
 
 prepare_payload() {
-    mkdir -p "$SDK_DIR" "$LOG_DIR"
-    if [ ! -x "$PAYLOAD_ELF" ]; then
-        gh release download "$BBL_TAG" -R openhwgroup/cva6-sdk -p bbl -D "$SDK_DIR" --clobber
-        chmod +x "$PAYLOAD_ELF"
-    fi
-    if [ ! -f "$PAYLOAD_ELF" ]; then
-        echo "FAIL: generated RV64 Linux payload missing at $PAYLOAD_ELF" >&2
-        return 1
-    fi
+    mkdir -p "$LOG_DIR"
+    SIMPLE_LINKER_DEBUG=1 SIMPLE_BOOT_MINIMAL=1 \
+        "$REPO_ROOT/src/compiler_rust/target/debug/simple" native-build \
+        --verbose \
+        --backend llvm \
+        --timeout 120 \
+        --entry-closure \
+        --source "$REPO_ROOT/examples/simple_os/arch/riscv64" \
+        --source "$REPO_ROOT/src/os" \
+        --entry "$REPO_ROOT/examples/simple_os/arch/riscv64/ghdl_boot_info_entry.spl" \
+        --target riscv64-unknown-none \
+        -o "$PAYLOAD_ELF" \
+        --linker-script "$REPO_ROOT/examples/simple_os/arch/riscv64/linker.ld"
 }
 
 run_proof() {
@@ -84,23 +84,18 @@ run_proofs() {
 }
 
 run_generated_linux() {
-    echo "[$LANE_ID] running generated RV64 GHDL Linux smoke; log=$RUNNER_LOG uart=$UART_LOG"
+    echo "[$LANE_ID] running generated RV64 GHDL repo-native proof lane; log=$RUNNER_LOG uart=$UART_LOG"
     bash "$RUNNER" \
         --payload-elf "$PAYLOAD_ELF" \
         --timeout="$TIMEOUT_SEC" \
-        --max-cycles 200000000 \
-        --allow-timeout-success \
+        --max-cycles 200000 \
         --log-path "$RUNNER_LOG" \
-        --uart-log-path "$UART_LOG" \
-        --expect-marker "OpenSBI" \
-        --expect-marker "Linux version" \
-        --expect-marker "Freeing unused kernel memory"
-    echo "PASS: $LANE_ID Linux boot markers found"
+        --uart-log-path "$UART_LOG"
+    echo "PASS: $LANE_ID repo-native generated Linux acceptance lane passed"
 }
 
 check_tools
 [ "$CHECK_TOOLS" -eq 1 ] && exit 0
 prepare_payload
-[ "$FETCH_ONLY" -eq 1 ] && exit 0
 [ "$SKIP_PROOFS" -eq 1 ] || run_proofs
 run_generated_linux

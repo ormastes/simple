@@ -4,9 +4,9 @@ This guide defines the minimum work required before claiming a new Xilinx FPGA b
 
 ## Current Boundary
 
-- The repo-native FPGA orchestration layer in `src/hardware/fpga_linux/` is real, but its default board is still `xilinx_generic` with `BOARD_PART_TBD`.
+- The repo-native FPGA orchestration layer in `src/hardware/fpga_linux/` is real, and MLK-S02-100T board wrapper/products now exist for both `mlk_s02_100t_rv32_linux` and `mlk_s02_100t_rv64_linux`.
 - The concrete handwritten Vivado wrapper under `examples/09_embedded/fpga_riscv/` is ZedBoard-specific.
-- `MLK-S02-100T` is now identified as the attached board model, but it is still not a verified build/program/run target in this repo.
+- `MLK-S02-100T` is the first concrete generated-board target, but it is still not a fully verified build/program/run target in this repo until local authoritative constraints, exact part/vendor files, and hardware programming evidence are in place.
 
 ## Exact Board First
 
@@ -26,13 +26,13 @@ Those boards differ in:
 
 ## Required Repo Changes
 
-1. Add a concrete board profile in `src/hardware/fpga_linux/riscv_fpga_linux.spl`.
-2. Replace `BOARD_PART_TBD` with the actual Xilinx part for that board.
-3. Add a board-specific XDC file with real clock, reset, UART, and any MMIO demo pins.
-4. Add a Vivado build path that points at the correct top module and constraint file.
-5. Add a programming path that selects the expected hardware target.
+1. Keep the concrete board profile in `src/hardware/fpga_linux/riscv_fpga_linux.spl` aligned with the real board.
+2. Confirm the committed part selection matches the exact MLK-S02-100T variant in use.
+3. Replace any scaffold XDC content with locally authoritative clock, reset, UART, and memory pin assignments.
+4. Keep the Vivado build path pointed at the correct generated top module and constraint file.
+5. Keep the programming path aligned with the expected hardware target and lab tooling.
 6. Update docs so the board name is explicit everywhere support is claimed.
-7. Add or update a board facts file such as `config/resources/boards/mlk_s02_100t.sdn`.
+7. Keep `config/resources/boards/mlk_s02_100t.sdn` and vendor acquisition notes synchronized with reality.
 
 ## Minimum Verification
 

@@ -5,6 +5,31 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    pub(super) fn resolve_global_type_spec(&mut self, spec: &str) -> Option<TypeId> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return None;
+        }
+        if let Some(inner) = spec.strip_suffix('?') {
+            let inner_ty = self.resolve_global_type_spec(inner.trim())?;
+            return Some(self.module.types.register(HirType::Enum {
+                name: "Option".to_string(),
+                variants: vec![("Some".to_string(), Some(vec![inner_ty])), ("None".to_string(), None)],
+                generic_params: vec!["T".to_string()],
+                is_generic_template: false,
+                type_bindings: std::collections::HashMap::from([("T".to_string(), inner_ty)]),
+            }));
+        }
+        if let Some(inner) = spec.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            let element_ty = self.resolve_global_type_spec(inner.trim())?;
+            return Some(self.module.types.register(HirType::Array {
+                element: element_ty,
+                size: None,
+            }));
+        }
+        self.resolve_type(&Type::Simple(spec.to_string())).ok()
+    }
+
     fn instantiate_builtin_generic_enum(&mut self, family: &str, args: &[Type]) -> Option<LowerResult<TypeId>> {
         match (family, args.len()) {
             ("Option", 1) => {
@@ -412,7 +437,6 @@ impl Lowerer {
                         eprintln!("[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
                     }
                     let _ = count;
-                    let _ = sname;
                     return Ok((idx, TypeId::ANY));
                 }
             }
@@ -585,7 +609,6 @@ impl Lowerer {
                                     );
                                 }
                                 let _ = count;
-                                let _ = sname;
                                 return Ok((idx, TypeId::ANY));
                             }
                         }

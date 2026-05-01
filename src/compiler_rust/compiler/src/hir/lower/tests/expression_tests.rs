@@ -236,6 +236,46 @@ fn test_lower_ambiguous_global_field_chain_as_field_access() {
 }
 
 #[test]
+fn test_lower_ambiguous_loop_element_field_access_with_global_array_type() {
+    let source = "fn test(report: Report) -> text:\n    for s in report.suggestions:\n        return s.new_text\n    return ''\n";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([
+        (
+            "Report".to_string(),
+            vec![("suggestions".to_string(), "[Suggestion]".to_string())],
+        ),
+        (
+            "Suggestion".to_string(),
+            vec![
+                ("message".to_string(), "text".to_string()),
+                ("location".to_string(), "SourceLocation".to_string()),
+                ("new_text".to_string(), "text".to_string()),
+                ("confidence".to_string(), "FixConfidence".to_string()),
+            ],
+        ),
+        (
+            "Replacement".to_string(),
+            vec![("new_text".to_string(), "text".to_string())],
+        ),
+    ])));
+    lowerer.set_ambiguous_field_names(Arc::new(HashSet::from(["new_text".to_string()])));
+
+    let lowered = lowerer.lower_module(&module).unwrap();
+    let func = &lowered.functions[0];
+    let HirStmt::For { body, .. } = &func.body[0] else {
+        panic!("Expected for loop");
+    };
+    let HirStmt::Return(Some(expr)) = &body[0] else {
+        panic!("Expected return inside loop");
+    };
+    assert!(matches!(expr.kind, HirExprKind::FieldAccess { .. }));
+    assert_eq!(expr.ty, TypeId::STRING);
+}
+
+#[test]
 fn test_lower_assignment() {
     let module = parse_and_lower("fn test() -> i64:\n    let mut x: i64 = 0\n    x = 42\n    return x\n").unwrap();
 

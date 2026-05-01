@@ -7,8 +7,13 @@
 
 use std.spipe.*
 use std.common.compress.{CompressionCodec, decompress_bytes}
+use std.http_server.types.{HttpResponseData}
+use std.nogc_sync_mut.compression.gzip.{gzip_decompress}
+use std.nogc_sync_mut.compression.deflate.{deflate_decompress}
+use std.nogc_sync_mut.compression.zlib.{zlib_decompress}
 use std.nogc_async_mut.http_server.compression.{
     compress_response_body,
+    compress_response_for,
     supported_encodings,
 }
 
@@ -29,11 +34,13 @@ fn _make_payload() -> [u8]:
 
 describe "Response-body compression dispatcher":
 
-    it "lists zstd and lz4 as supported encodings":
+    it "lists zstd, lz4, gzip, and deflate as supported encodings":
         val codecs = supported_encodings()
-        expect codecs.len() == 2
+        expect codecs.len() == 4
         expect codecs[0] == "zstd"
         expect codecs[1] == "lz4"
+        expect codecs[2] == "gzip"
+        expect codecs[3] == "deflate"
 
     it "compresses with zstd and round-trips back to identical bytes":
         val payload = _make_payload()
@@ -60,17 +67,34 @@ describe "Response-body compression dispatcher":
         val decoded = round_trip.unwrap()
         expect decoded.len() == payload.len()
 
-    it "returns Err with a specific reason for gzip (not yet wired)":
-        val out = compress_response_body([0x68u8, 0x69u8], "gzip")
-        expect out.is_err() == true
+    it "compresses with gzip and round-trips via gzip_decompress":
+        val payload = _make_payload()
+        val compressed_res = compress_response_body(payload, "gzip")
+        expect compressed_res.is_ok() == true
+        val compressed = compressed_res.unwrap()
+        # Gzip frame magic 1f 8b — verify the bytes look like RFC 1952 gzip.
+        expect compressed.len() > 0 == true
+        expect compressed[0] == 0x1fu8
+        expect compressed[1] == 0x8bu8
+        # Round-trip via the gzip module's own decompress.
+        val decoded = gzip_decompress(compressed) ?? []
+        expect decoded.len() == payload.len()
 
     it "returns Err with a specific reason for br (Phase 3)":
         val out = compress_response_body([0x68u8, 0x69u8], "br")
         expect out.is_err() == true
 
-    it "returns Err with a specific reason for deflate":
-        val out = compress_response_body([0x68u8, 0x69u8], "deflate")
-        expect out.is_err() == true
+    it "compresses with deflate (zlib-wrapped) and round-trips via zlib_decompress":
+        val payload = _make_payload()
+        val compressed_res = compress_response_body(payload, "deflate")
+        expect compressed_res.is_ok() == true
+        val compressed = compressed_res.unwrap()
+        expect compressed.len() > 0 == true
+        # Zlib CMF byte: 0x78 = deflate method (CM=8) + 32 KB window (CINFO=7).
+        expect compressed[0] == 0x78u8
+        # Round-trip via zlib_decompress.
+        val decoded = zlib_decompress(compressed) ?? []
+        expect decoded.len() == payload.len()
 
     it "returns Err for empty encoding (caller should skip)":
         val out = compress_response_body([0x68u8, 0x69u8], "")
@@ -83,3 +107,186 @@ describe "Response-body compression dispatcher":
     it "returns Err for unknown encoding":
         val out = compress_response_body([0x68u8, 0x69u8], "snappy")
         expect out.is_err() == true
+
+# ----------------------------------------------------------------------------
+# compress_response_for — response-level compression decision
+# ----------------------------------------------------------------------------
+
+fn _resp_with_text_body(body: text) -> HttpResponseData:
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [("Content-Type", "text/plain")],
+        body: body,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _resp_with_byte_body(body_bytes: [u8]) -> HttpResponseData:
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [("Content-Type", "application/octet-stream")],
+        body: "",
+        body_bytes: body_bytes,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+# 300 bytes of repetitive ASCII — above the 256-byte minimum so eligible.
+fn _make_eligible_payload() -> [u8]:
+    val unit: [u8] = [
+        0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8, 0x67u8, 0x68u8,
+        0x69u8, 0x6au8
+    ]
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < 30:
+        bytes = bytes + unit
+        i = i + 1
+    bytes
+
+fn _has_header(headers: [(text, text)], name: text) -> bool:
+    for h in headers:
+        if h.0.lower() == name.lower():
+            return true
+    false
+
+fn _get_header(headers: [(text, text)], name: text) -> text:
+    for h in headers:
+        if h.0.lower() == name.lower():
+            return h.1
+    ""
+
+describe "compress_response_for — response-level decision":
+
+    it "compresses with zstd when Accept-Encoding includes zstd":
+        val payload = _make_eligible_payload()
+        val resp = _resp_with_byte_body(payload)
+        val out = compress_response_for(resp, "zstd, lz4")
+        expect out.body_bytes.len() > 0 == true
+        expect out.body_bytes.len() < payload.len() == true
+        expect _get_header(out.headers, "content-encoding") == "zstd"
+        expect out.body == ""
+
+    it "prefers zstd over lz4 (server preference order)":
+        val payload = _make_eligible_payload()
+        val resp = _resp_with_byte_body(payload)
+        val out = compress_response_for(resp, "lz4, zstd")
+        expect _get_header(out.headers, "content-encoding") == "zstd"
+
+    it "falls back to lz4 when client does not accept zstd":
+        val payload = _make_eligible_payload()
+        val resp = _resp_with_byte_body(payload)
+        val out = compress_response_for(resp, "lz4")
+        expect _get_header(out.headers, "content-encoding") == "lz4"
+
+    it "leaves response unchanged when no Accept-Encoding header is supplied":
+        val payload = _make_eligible_payload()
+        val resp = _resp_with_byte_body(payload)
+        val out = compress_response_for(resp, "")
+        expect out.body_bytes.len() == payload.len()
+        expect _has_header(out.headers, "content-encoding") == false
+
+    it "leaves response unchanged when client only accepts unsupported codecs":
+        val payload = _make_eligible_payload()
+        val resp = _resp_with_byte_body(payload)
+        # br is still Err in the dispatcher (Phase 3 brotli encoder pending).
+        val out = compress_response_for(resp, "br")
+        expect _has_header(out.headers, "content-encoding") == false
+        expect out.body_bytes.len() == payload.len()
+
+    it "compresses with deflate when Accept-Encoding offers only deflate":
+        val payload = _make_eligible_payload()
+        val resp = _resp_with_byte_body(payload)
+        val out = compress_response_for(resp, "deflate")
+        expect _get_header(out.headers, "content-encoding") == "deflate"
+        expect out.body_bytes.len() > 0 == true
+
+    it "skips compression when body is too small":
+        # 100-byte payload, below the 256-byte minimum.
+        val small: [u8] = [
+            0x41u8, 0x42u8, 0x43u8, 0x44u8, 0x45u8, 0x46u8, 0x47u8, 0x48u8,
+            0x49u8, 0x4Au8
+        ]
+        var tiny: [u8] = []
+        var i: i64 = 0
+        while i < 10:
+            tiny = tiny + small
+            i = i + 1
+        val resp = _resp_with_byte_body(tiny)
+        val out = compress_response_for(resp, "zstd")
+        expect _has_header(out.headers, "content-encoding") == false
+        expect out.body_bytes.len() == tiny.len()
+
+    it "skips compression when chunked":
+        var resp = _resp_with_byte_body(_make_eligible_payload())
+        resp = HttpResponseData(
+            status: resp.status,
+            reason: resp.reason,
+            headers: resp.headers,
+            body: resp.body,
+            body_bytes: resp.body_bytes,
+            body_file: resp.body_file,
+            body_offset: resp.body_offset,
+            body_length: resp.body_length,
+            chunked: true
+        )
+        val out = compress_response_for(resp, "zstd")
+        expect _has_header(out.headers, "content-encoding") == false
+
+    it "skips compression when body_file is set (sendfile path)":
+        var resp = _resp_with_byte_body(_make_eligible_payload())
+        resp = HttpResponseData(
+            status: resp.status,
+            reason: resp.reason,
+            headers: resp.headers,
+            body: "",
+            body_bytes: [],
+            body_file: "/tmp/static.html",
+            body_offset: 0,
+            body_length: 1024,
+            chunked: false
+        )
+        val out = compress_response_for(resp, "zstd")
+        expect _has_header(out.headers, "content-encoding") == false
+        expect out.body_file == "/tmp/static.html"
+
+    it "skips compression when Content-Encoding header is already present":
+        var resp = _resp_with_byte_body(_make_eligible_payload())
+        resp = HttpResponseData(
+            status: resp.status,
+            reason: resp.reason,
+            headers: [("Content-Type", "image/png"), ("Content-Encoding", "gzip")],
+            body: resp.body,
+            body_bytes: resp.body_bytes,
+            body_file: resp.body_file,
+            body_offset: resp.body_offset,
+            body_length: resp.body_length,
+            chunked: resp.chunked
+        )
+        val out = compress_response_for(resp, "zstd")
+        # Encoding stays as the original "gzip" — we don't double-compress.
+        expect _get_header(out.headers, "content-encoding") == "gzip"
+
+    it "removes any pre-existing Content-Length when compressing":
+        var resp = _resp_with_byte_body(_make_eligible_payload())
+        resp = HttpResponseData(
+            status: resp.status,
+            reason: resp.reason,
+            headers: [("Content-Type", "text/plain"), ("Content-Length", "300")],
+            body: resp.body,
+            body_bytes: resp.body_bytes,
+            body_file: resp.body_file,
+            body_offset: resp.body_offset,
+            body_length: resp.body_length,
+            chunked: resp.chunked
+        )
+        val out = compress_response_for(resp, "zstd")
+        expect _has_header(out.headers, "content-length") == false
+        expect _get_header(out.headers, "content-encoding") == "zstd"

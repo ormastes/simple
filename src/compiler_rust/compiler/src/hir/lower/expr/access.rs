@@ -241,7 +241,7 @@ impl Lowerer {
                 .iter()
                 .find_map(|(fname, ftype)| if fname == field_name { Some(ftype.clone()) } else { None })?
         };
-        self.resolve_type(&simple_parser::Type::Simple(field_type_name)).ok()
+        self.resolve_global_type_spec(&field_type_name)
     }
 
     fn try_resolve_global_field_index_by_name(&self, struct_name: &str, field_name: &str) -> Option<usize> {

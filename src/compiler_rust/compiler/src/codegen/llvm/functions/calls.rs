@@ -322,6 +322,7 @@ impl LlvmBackend {
             "set" => Some("rt_index_set"),
             "keys" => Some("rt_dict_keys"),
             "values" => Some("rt_dict_values"),
+            "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
             _ => None,
         };
 
@@ -501,6 +502,30 @@ impl LlvmBackend {
             .unwrap_or(func_name_raw);
         let resolved_dotted = resolved_name.replace("_dot_", ".");
         let raw_dotted = func_name_raw.replace("_dot_", ".");
+        let direct_method_name = resolved_dotted
+            .rsplit('.')
+            .next()
+            .or_else(|| raw_dotted.rsplit('.').next());
+
+        if matches!(direct_method_name, Some("unwrap")) && args.len() == 1 {
+            let rt_func = module.get_function("rt_enum_payload").unwrap_or_else(|| {
+                let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                module.add_function("rt_enum_payload", fn_type, None)
+            });
+            let recv = self.get_vreg(&args[0], vreg_map)?;
+            let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
+            let call_site = builder
+                .build_call(rt_func, &[recv.into()], "direct_enum_unwrap")
+                .map_err(|e| crate::error::factory::llvm_build_failed("direct enum unwrap call", &e))?;
+            if let Some(d) = dest {
+                if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    vreg_map.insert(d, ret_val);
+                } else {
+                    vreg_map.insert(d, i64_type.const_int(0, false).into());
+                }
+            }
+            return Ok(());
+        }
 
         // Get or declare the called function (with suffix matching safety net)
         let called_func = module

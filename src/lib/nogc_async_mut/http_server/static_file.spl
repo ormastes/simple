@@ -11,6 +11,7 @@ zero-copy when available via IoDriver.submit_sendfile().
 - Path traversal protection
 - sendfile zero-copy for large files
 - Last-Modified / If-Modified-Since support
+- Pre-compression LRU cache via `StaticCompressionCache`
 
 ## Usage
 
@@ -31,6 +32,127 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_is_dir(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_read_text(path: text) -> text
+
+# ============================================================================
+# Static Compression Cache
+# ============================================================================
+
+# Default limits for StaticCompressionCache.
+val STATIC_CACHE_DEFAULT_CAPACITY: i64 = 128
+val STATIC_CACHE_DEFAULT_MAX_BYTES: i64 = 16777216  # 16 MiB
+
+class CacheEntry:
+    """One cached compressed payload keyed by (path, encoding)."""
+    path: text
+    encoding: text
+    compressed: [u8]
+    size: i64
+
+class StaticCompressionCache:
+    """LRU cache of pre-compressed static file payloads.
+
+    Keyed by `(path, encoding)`. Capacity is bounded both by entry count
+    (`capacity`) and by total compressed bytes (`max_bytes`). Eviction is
+    LRU by access order: the least-recently-used entry is at index 0;
+    the most-recently-used entry is at the end of the list.
+
+    The cache is dumb storage — it stores ALREADY-compressed bytes.
+    Compression is never performed here; callers compress and then `put`.
+
+    ## Usage
+
+    ```simple
+    val cache = StaticCompressionCache(
+        capacity: 128,
+        max_bytes: 16777216,
+        entries: [],
+        current_size: 0
+    )
+    val hit = cache.get("/index.html", "gzip")
+    if hit != nil:
+        # serve cached bytes
+    else:
+        # compress, then cache.put("/index.html", "gzip", compressed_bytes)
+    ```
+    """
+    capacity: i64
+    max_bytes: i64
+    entries: [CacheEntry]
+    current_size: i64
+
+    static fn new(capacity: i64, max_bytes: i64) -> StaticCompressionCache:
+        """Create an empty cache with the given bounds."""
+        StaticCompressionCache(
+            capacity: capacity,
+            max_bytes: max_bytes,
+            entries: [],
+            current_size: 0
+        )
+
+    fn get(self, path: text, encoding: text) -> Option<[u8]>:
+        """Look up a cached compressed payload.
+
+        On a hit, promotes the entry to most-recently-used (end of list).
+        Returns nil on a miss.
+        """
+        var idx: i64 = 0
+        var found_idx: i64 = -1
+        while idx < self.entries.len():
+            val e = self.entries[idx]
+            if e.path == path and e.encoding == encoding:
+                found_idx = idx
+            idx = idx + 1
+        if found_idx == -1:
+            return nil
+        # Promote to MRU: remove from position, append to end.
+        val hit = self.entries[found_idx]
+        var new_entries: [CacheEntry] = []
+        var i: i64 = 0
+        while i < self.entries.len():
+            if i != found_idx:
+                new_entries = new_entries + [self.entries[i]]
+            i = i + 1
+        new_entries = new_entries + [hit]
+        self.entries = new_entries
+        Some(hit.compressed)
+
+    fn put(self, path: text, encoding: text, compressed: [u8]):
+        """Store a compressed payload.
+
+        If `compressed.len() > max_bytes`, the entry is too large to ever
+        fit and is silently rejected. Otherwise, evicts LRU entries until
+        there is room, then appends.
+        """
+        val sz = compressed.len()
+        # Reject entries that can never fit.
+        if sz > self.max_bytes:
+            return
+        # Evict until both count and byte bounds have room.
+        while (self.entries.len() >= self.capacity) or (self.current_size + sz > self.max_bytes):
+            if self.entries.len() == 0:
+                return
+            self.evict_oldest()
+        val entry = CacheEntry(path: path, encoding: encoding, compressed: compressed, size: sz)
+        self.entries = self.entries + [entry]
+        self.current_size = self.current_size + sz
+
+    fn evict_oldest(self):
+        """Remove the least-recently-used entry (index 0)."""
+        if self.entries.len() == 0:
+            return
+        val oldest = self.entries[0]
+        self.current_size = self.current_size - oldest.size
+        var new_entries: [CacheEntry] = []
+        var i: i64 = 1
+        while i < self.entries.len():
+            new_entries = new_entries + [self.entries[i]]
+            i = i + 1
+        self.entries = new_entries
+
+    fn clear(self):
+        """Remove all entries from the cache."""
+        self.entries = []
+        self.current_size = 0
 
 # ============================================================================
 # MIME Type Detection

@@ -2,7 +2,7 @@
 #
 # Levels 1-9 use fixed-Huffman DEFLATE blocks (RFC 1951 §3.2.6).
 # Level 0 uses stored (uncompressed) blocks.
-# Dynamic-Huffman blocks (BTYPE=10) are not yet supported; returns Err.
+# Dynamic-Huffman blocks (BTYPE=10) are supported via inflate_block_dynamic.
 # See doc/08_tracking/bug/gzip_module_crc32_unresolved_2026-05-01.md § Resolution.
 
 use std.spec.{describe, it, expect}
@@ -63,6 +63,39 @@ fn _make_random_64() -> [u8]:
         0xd1u8, 0x8au8, 0x57u8, 0x2eu8, 0x93u8, 0x48u8, 0xc5u8, 0x7bu8,
         0x16u8, 0xe8u8, 0x3du8, 0xa2u8, 0x5fu8, 0x0bu8, 0xd4u8, 0x69u8,
         0x82u8, 0x25u8, 0xfbu8, 0x50u8, 0xc7u8, 0x3eu8, 0x9au8, 0x61u8
+    ]
+
+# Build the expected plaintext for _make_dyn_fixture: 50-byte phrase repeated, first 4096 bytes.
+fn _make_dyn_plaintext() -> [u8]:
+    # b'This is a test of the emergency broadcast system. ' = 50 bytes, repeated to 4096 bytes
+    val phrase: [u8] = [
+        0x54u8, 0x68u8, 0x69u8, 0x73u8, 0x20u8, 0x69u8, 0x73u8, 0x20u8, 0x61u8, 0x20u8,
+        0x74u8, 0x65u8, 0x73u8, 0x74u8, 0x20u8, 0x6fu8, 0x66u8, 0x20u8, 0x74u8, 0x68u8,
+        0x65u8, 0x20u8, 0x65u8, 0x6du8, 0x65u8, 0x72u8, 0x67u8, 0x65u8, 0x6eu8, 0x63u8,
+        0x79u8, 0x20u8, 0x62u8, 0x72u8, 0x6fu8, 0x61u8, 0x64u8, 0x63u8, 0x61u8, 0x73u8,
+        0x74u8, 0x20u8, 0x73u8, 0x79u8, 0x73u8, 0x74u8, 0x65u8, 0x6du8, 0x2eu8, 0x20u8
+    ]
+    var out: [u8] = []
+    var i = 0
+    while i < 4096:
+        out.push(phrase[i % 50])
+        i = i + 1
+    out
+
+# Dynamic-Huffman gzip fixture (92 bytes, BTYPE=10 / btype=2).
+# Produced by: python3 -c "import zlib,struct,gzip; ..."
+# Plaintext: b'This is a test of the emergency broadcast system. ' * 82  (first 4096 bytes)
+# Verified with gzip.decompress() == original.
+fn _make_dyn_fixture() -> [u8]:
+    return [
+        0x1fu8, 0x8bu8, 0x08u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0xffu8, 0xedu8, 0xcbu8,
+        0xc1u8, 0x0du8, 0x80u8, 0x20u8, 0x10u8, 0x05u8, 0xd1u8, 0x56u8, 0x7eu8, 0x05u8, 0x56u8, 0x43u8,
+        0x03u8, 0x88u8, 0x8bu8, 0x78u8, 0x40u8, 0x12u8, 0x76u8, 0x2fu8, 0x74u8, 0x2fu8, 0x6du8, 0x98u8,
+        0x4cu8, 0x32u8, 0xb7u8, 0xc9u8, 0x4bu8, 0xedu8, 0x71u8, 0xedu8, 0xb2u8, 0xc2u8, 0x3cu8, 0x34u8,
+        0xaau8, 0xa2u8, 0x99u8, 0xacu8, 0xdbu8, 0xbcu8, 0xedu8, 0x2du8, 0x4bu8, 0xe7u8, 0x1cu8, 0xf9u8,
+        0x2au8, 0x79u8, 0x2fu8, 0x5fu8, 0x1eu8, 0xd6u8, 0x0fu8, 0x25u8, 0x04u8, 0x02u8, 0x81u8, 0x40u8,
+        0x20u8, 0x10u8, 0x08u8, 0x04u8, 0x02u8, 0x81u8, 0x40u8, 0x20u8, 0x10u8, 0x3fu8, 0x13u8, 0x1fu8,
+        0x33u8, 0x2fu8, 0x1du8, 0xf3u8, 0x00u8, 0x10u8, 0x00u8, 0x00u8
     ]
 
 describe("gzip round-trip"):
@@ -198,3 +231,31 @@ describe("gzip round-trip"):
         val compressed = gzip_compress(payload, 0)
         # stored block: 10 header + 5 block header + 256 data + 8 footer = 279 bytes
         expect compressed.len() > payload.len() == true
+
+    # --- dynamic-Huffman (BTYPE=10) tests ---
+    # Fixture produced by Python's zlib.compressobj(9, DEFLATED, -15) wrapped in
+    # a hand-built gzip frame (RFC 1952).  Verified: btype==2, gzip.decompress()==original.
+    # Source: python3 -c "import zlib,struct; ..."
+    # Plaintext: b'This is a test of the emergency broadcast system. ' * 82  (first 4096 bytes)
+
+    it("dynamic-Huffman: decompresses known gzip fixture (btype=2) to correct length"):
+        val fixture = _make_dyn_fixture()
+        val decoded = gzip_decompress(fixture)
+        expect decoded == nil == false
+        val out = decoded ?? []
+        expect out.len() == 4096
+
+    it("dynamic-Huffman: fixture decodes to exact expected plaintext (full byte comparison)"):
+        val fixture = _make_dyn_fixture()
+        val expected = _make_dyn_plaintext()
+        val decoded = gzip_decompress(fixture)
+        expect decoded == nil == false
+        val out = decoded ?? []
+        expect out.len() == expected.len()
+        var i = 0
+        var all_match = true
+        while i < expected.len():
+            if out[i] != expected[i]:
+                all_match = false
+            i = i + 1
+        expect all_match == true

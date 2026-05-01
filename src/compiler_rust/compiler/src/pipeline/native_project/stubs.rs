@@ -166,7 +166,19 @@ pub(crate) fn generate_stub_object_freestanding(
     let mut unresolved = Vec::new();
     for sym in needs_stub {
         match sym.as_str() {
-            "i64.max" | "i64.min" | "str.repeat" | "bytes_to_u16_le" => {
+            "i64.max"
+            | "i64.min"
+            | "str.repeat"
+            | "bytes_to_u16_le"
+            | "bytes_to_u16_be"
+            | "bytes_to_u32_le"
+            | "bytes_to_u32_be"
+            | "rt_str_hash"
+            | "rt_range"
+            | "rt_value_bool"
+            | "rt_unwrap_or_self"
+            | "rt_is_none"
+            | "rt_is_some" => {
                 compat_symbols.insert(sym);
             }
             _ => unresolved.push(sym),
@@ -190,16 +202,14 @@ pub(crate) fn generate_stub_object_freestanding(
     if unresolved.is_empty() && compat_symbols.is_empty() {
         return Ok(None);
     }
-    match freestanding_unresolved_mode() {
+    let unresolved_mode = freestanding_unresolved_mode();
+    match unresolved_mode {
         FreestandingUnresolvedMode::DeferToLinker => {
             eprintln!(
                 "Freestanding unresolved precheck deferred to linker: {} candidate symbol(s)",
                 unresolved.len()
             );
-            if unresolved.is_empty() && !compat_symbols.is_empty() {
-                // Continue below to emit the compatibility object even when strict
-                // freestanding stubs are otherwise disabled.
-            } else {
+            if compat_symbols.is_empty() {
                 return Ok(None);
             }
         }
@@ -253,16 +263,119 @@ pub(crate) fn generate_stub_object_freestanding(
              }\n\n",
         );
     }
-    for (i, sym) in unresolved.iter().enumerate() {
-        // Sanitize C identifier for the wrapper name; keep the external symbol
-        // name exact via an __asm__ label so the linker sees the mangled form.
-        let wrapper = format!("__stub_fs_{}", i);
-        code.push_str(&format!(
-            "__attribute__((weak)) __stub_i64 {wrap}(void) __asm__(\"{sym}\");\n\
-             __attribute__((weak)) __stub_i64 {wrap}(void) {{ return 0; }}\n\n",
-            wrap = wrapper,
-            sym = sym
-        ));
+    if compat_symbols.contains("bytes_to_u16_be") {
+        code.push_str(
+            "unsigned short __stub_compat_bytes_to_u16_be(unsigned char b0, unsigned char b1) __asm__(\"bytes_to_u16_be\");\n\
+             unsigned short __stub_compat_bytes_to_u16_be(unsigned char b0, unsigned char b1) {\n\
+                 return (unsigned short)(((unsigned short)b0 << 8) | (unsigned short)b1);\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("bytes_to_u32_le") {
+        code.push_str(
+            "unsigned int __stub_compat_bytes_to_u32_le(unsigned char b0, unsigned char b1, unsigned char b2, unsigned char b3) __asm__(\"bytes_to_u32_le\");\n\
+             unsigned int __stub_compat_bytes_to_u32_le(unsigned char b0, unsigned char b1, unsigned char b2, unsigned char b3) {\n\
+                 return ((unsigned int)b0) | ((unsigned int)b1 << 8) | ((unsigned int)b2 << 16) | ((unsigned int)b3 << 24);\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("bytes_to_u32_be") {
+        code.push_str(
+            "unsigned int __stub_compat_bytes_to_u32_be(unsigned char b0, unsigned char b1, unsigned char b2, unsigned char b3) __asm__(\"bytes_to_u32_be\");\n\
+             unsigned int __stub_compat_bytes_to_u32_be(unsigned char b0, unsigned char b1, unsigned char b2, unsigned char b3) {\n\
+                 return ((unsigned int)b3) | ((unsigned int)b2 << 8) | ((unsigned int)b1 << 16) | ((unsigned int)b0 << 24);\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("rt_str_hash") {
+        code.push_str(
+            "__stub_i64 __stub_compat_rt_str_hash(__stub_i64 s) __asm__(\"rt_str_hash\");\n\
+             __stub_i64 __stub_compat_rt_str_hash(__stub_i64 s) {\n\
+                 const unsigned long long offset = 14695981039346656037ULL;\n\
+                 const unsigned long long prime = 1099511628211ULL;\n\
+                 const unsigned char* p = (const unsigned char*)(unsigned long long)s;\n\
+                 unsigned long long h = offset;\n\
+                 if (!p) {\n\
+                     return (__stub_i64)h;\n\
+                 }\n\
+                 while (*p) {\n\
+                     h ^= (unsigned long long)(*p++);\n\
+                     h *= prime;\n\
+                 }\n\
+                 return (__stub_i64)h;\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("rt_range") {
+        code.push_str(
+            "__stub_i64 rt_array_new(__stub_i64 cap);\n\
+             signed char rt_array_push(__stub_i64 arr, __stub_i64 val);\n\
+             __stub_i64 __stub_compat_rt_range(__stub_i64 start, __stub_i64 end) __asm__(\"rt_range\");\n\
+             __stub_i64 __stub_compat_rt_range(__stub_i64 start, __stub_i64 end) {\n\
+                 if (end <= start) return rt_array_new(0);\n\
+                 __stub_i64 result = rt_array_new(end - start);\n\
+                 if (result == 3) return result;\n\
+                 for (__stub_i64 value = start; value < end; value++) {\n\
+                     (void)rt_array_push(result, value << 3);\n\
+                 }\n\
+                 return result;\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("rt_value_bool") {
+        code.push_str(
+            "__stub_i64 __stub_compat_rt_value_bool(unsigned char b) __asm__(\"rt_value_bool\");\n\
+             __stub_i64 __stub_compat_rt_value_bool(unsigned char b) {\n\
+                return b ? 11 : 19;\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("rt_unwrap_or_self") {
+        code.push_str(
+            "__stub_i64 __stub_compat_rt_unwrap_or_self(__stub_i64 val) __asm__(\"rt_unwrap_or_self\");\n\
+             __stub_i64 __stub_compat_rt_unwrap_or_self(__stub_i64 val) {\n\
+                 if (val == 3) return 3;\n\
+                 if ((((unsigned long long)val) & 0x7ULL) != 0x1ULL) return val;\n\
+                 __stub_i64* p = (__stub_i64*)((((unsigned long long)val) & ~0x7ULL));\n\
+                 if (!p) return val;\n\
+                 if (((unsigned int)p[0]) != 7U) return val;\n\
+                 return p[2] == 3 ? val : p[2];\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("rt_is_none") {
+        code.push_str(
+            "__stub_i64 __stub_compat_rt_is_none(__stub_i64 val) __asm__(\"rt_is_none\");\n\
+             __stub_i64 __stub_compat_rt_is_none(__stub_i64 val) {\n\
+                 if (val == 3) return 1;\n\
+                 if ((((unsigned long long)val) & 0x7ULL) != 0x1ULL) return 0;\n\
+                 __stub_i64* p = (__stub_i64*)((((unsigned long long)val) & ~0x7ULL));\n\
+                 if (!p) return 0;\n\
+                 if (((unsigned int)p[0]) != 7U) return 0;\n\
+                 return p[2] == 3 ? 1 : 0;\n\
+             }\n\n",
+        );
+    }
+    if compat_symbols.contains("rt_is_some") {
+        code.push_str(
+            "__stub_i64 __stub_compat_rt_is_some(__stub_i64 val) __asm__(\"rt_is_some\");\n\
+             __stub_i64 __stub_compat_rt_is_some(__stub_i64 val) {\n\
+                 return __stub_compat_rt_is_none(val) ? 0 : 1;\n\
+             }\n\n",
+        );
+    }
+    if matches!(unresolved_mode, FreestandingUnresolvedMode::EmitStubs) {
+        for (i, sym) in unresolved.iter().enumerate() {
+            // Sanitize C identifier for the wrapper name; keep the external symbol
+            // name exact via an __asm__ label so the linker sees the mangled form.
+            let wrapper = format!("__stub_fs_{}", i);
+            code.push_str(&format!(
+                "__attribute__((weak)) __stub_i64 {wrap}(void) __asm__(\"{sym}\");\n\
+                 __attribute__((weak)) __stub_i64 {wrap}(void) {{ return 0; }}\n\n",
+                wrap = wrapper,
+                sym = sym
+            ));
+        }
     }
 
     std::fs::write(&stub_c, &code).map_err(|e| format!("write freestanding stubs: {e}"))?;

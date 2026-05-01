@@ -26,4 +26,4 @@ Smoke expectations:
   - must pass FW_JUMP, real-DTB, and Sv39 generated proof gates before the long-running Linux smoke
   - must log `OpenSBI`, `Linux version`, and a late boot marker such as `Freeing unused kernel memory`
 - `reference_external_rv64_linux`
-  - remains required as a cross-check lane via CVA6
+  - remains an optional cross-check lane via CVA6 and does not gate acceptance

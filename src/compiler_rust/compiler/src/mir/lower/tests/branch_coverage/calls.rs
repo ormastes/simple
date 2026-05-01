@@ -19,6 +19,44 @@ fn method_call_static_dispatch() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::MethodCallStatic { .. })));
 }
 
+#[test]
+fn static_style_enum_unwrap_call_lowers_to_enum_payload() {
+    let mir = compile_to_mir(
+        "enum Boxed:\n    Some(i64)\n    None\n\n    fn unwrap() -> i64:\n        match self:\n            case Some(v): v\n            case None: 0\n\nfn mk() -> Boxed:\n    return Boxed.Some(7)\n\nfn test() -> i64:\n    return Boxed.unwrap(mk())\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload")
+    )));
+    assert!(
+        !has_inst(&mir, |i| matches!(
+            i,
+            MirInst::Call { target, .. } if target.name().ends_with(".unwrap")
+        )),
+        "static enum unwrap should not survive as a dotted direct call target"
+    );
+}
+
+#[test]
+fn imported_style_result_unwrap_call_lowers_to_enum_payload() {
+    let mir = compile_to_mir(
+        "enum FailSafeResult:\n    Ok(i64)\n    Err(text)\n\n    fn unwrap() -> i64:\n        match self:\n            case Ok(v): v\n            case Err(_): 0\n\nfn make() -> FailSafeResult:\n    return FailSafeResult.Ok(9)\n\nfn test() -> i64:\n    return FailSafeResult.unwrap(make())\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload")
+    )));
+    assert!(
+        !has_inst(&mir, |i| matches!(
+            i,
+            MirInst::Call { target, .. } if target.name().contains("FailSafeResult.unwrap")
+        )),
+        "FailSafeResult.unwrap should lower to rt_enum_payload, not a direct dotted call"
+    );
+}
+
 // =============================================================================
 // Lambda / closure (lowering_expr.rs - ClosureCreate, IndirectCall)
 // =============================================================================

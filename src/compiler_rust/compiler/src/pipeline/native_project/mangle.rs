@@ -238,6 +238,11 @@ pub(crate) fn mangle_mir(
                                 &mut unresolved_count,
                             );
                         }
+                        let mut canonical_name = target.name().to_string();
+                        canonicalize_equivalent_dot_name(&mut canonical_name, &known_mangled);
+                        if canonical_name != target.name() {
+                            *target = target.with_name(canonical_name);
+                        }
                     }
                     MirInst::InterpCall { func_name, .. } => {
                         if is_runtime_or_builtin(func_name) || known_mangled.contains(func_name.as_str()) {
@@ -315,6 +320,7 @@ pub(crate) fn mangle_mir(
                                 suffix_index,
                             );
                         }
+                        canonicalize_equivalent_dot_name(func_name, &known_mangled);
                     }
                     _ => {}
                 }
@@ -397,6 +403,20 @@ fn resolve_call_target(
         name
     };
 
+    if !lookup_name.contains('.')
+        && matches!(
+            lookup_name,
+            "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+        )
+    {
+        // Preserve bare enum-helper call targets so codegen can route them to the
+        // runtime builtins. If we suffix-resolve bare `unwrap` here, ordinary
+        // option-like field access in local code can be rebound to an imported
+        // `FailSafeResult.unwrap` symbol, which is exactly the hosted RV64 leak
+        // observed from Report.get_file/get_line/format and LevelConfig.effective_level.
+        return;
+    }
+
     if let Some(resolved) = resolve_name_variants(lookup_name, use_map, import_map) {
         *target = target.with_name(resolved);
     } else if lookup_name.contains('.') {
@@ -478,6 +498,20 @@ fn resolve_method_call_static(
         let method = lookup_name.rsplit('.').next().unwrap_or(lookup_name);
         let type_part = lookup_name.split('.').next().unwrap_or("");
         let has_type_qualifier = lookup_name.contains('.');
+        if !has_type_qualifier
+            && matches!(
+                method,
+                "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+            )
+        {
+            // Preserve enum helper method names when the receiver type could not be
+            // recovered. Rebinding bare `unwrap` by suffix to an imported
+            // `FailSafeResult.unwrap` symbol causes option/result-style field access
+            // in local code (for example Report.location.unwrap()) to become a fake
+            // cross-module call target instead of flowing through the builtin enum
+            // payload/discriminant lowering paths.
+            return;
+        }
         let type_part_lower = type_part.to_lowercase();
         let candidates = local_suffix_index.get(method).or_else(|| suffix_index.get(method));
         if let Some(candidates) = candidates {
@@ -522,6 +556,18 @@ fn resolve_method_call_static(
             .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
         {
             *func_name = resolved;
+        }
+    }
+}
+
+fn canonicalize_equivalent_dot_name(
+    name: &mut String,
+    known_mangled: &std::collections::HashSet<String>,
+) {
+    if name.contains("_dot_") {
+        let dotted = name.replace("_dot_", ".");
+        if known_mangled.contains(dotted.as_str()) {
+            *name = dotted;
         }
     }
 }

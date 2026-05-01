@@ -9,7 +9,7 @@ The feature adds a small preparation layer above existing RISC-V hardware and VH
 Core architecture:
 
 - `XilinxBoardProfile` owns board-specific data and separates prepare-time validation from hardware-boot validation.
-- `RiscvFpgaLane` owns the strict lane contract: RV32 remains the repo-native generated-core baremetal lane, RV64 remains the repo-native generated-core Linux lane, and any RV32 Linux bring-up stays opt-in as an explicit experimental lane.
+- `RiscvFpgaLane` owns the strict lane contract: both RV32 and RV64 are repo-native generated-core Linux lanes, with generated RTL consumed only from emitted bundle roots.
 - `FpgaPrepareManifest` combines one board profile with one or more lanes and emits deterministic Vivado project intent.
 - `FpgaPrepareManifest` records both the stable `build/.../rtl` contract path and the emitted `authoritative_rtl_root` consumed by generated runners from `GEN_DIR/.../rtl`.
 - MIR bitfield lowering owns the first compiler hook for RISC-V instruction field extraction. It must preserve width, offset, signedness, and source span metadata as structured MIR facts rather than as VHDL strings.
@@ -27,7 +27,7 @@ Traceability handoff:
 - REQ-RFL-010 is satisfied for the implemented helper set: generated RISC-V hardware source now parses and lowers through the real frontend -> HIR -> MIR path, and bounded specs prove typed bitfield reads and dedicated writeback/branch/store/I-type/upper/execute-control/execute-datapath/branch-datapath/control-flow-datapath/memory-access/jump/dispatch/trap-halt helper recomposition.
 - REQ-RFL-011 is satisfied for the same helper set: specs show those typed MIR extracts lower to stable slices, exact guard structure, concat/update expressions, and source-map records without re-parsing facade source strings, including execute-datapath, branch-datapath, control-flow-datapath, dispatch-class, and trap-halt contracts.
 - Generated-core provenance now has an explicit architectural rule: generated runners may compile only the bundle-emitted RTL rooted at `GEN_DIR/.../rtl`, and `examples/09_embedded/fpga_riscv/rtl` is non-authoritative for repo-native generated-core lanes.
-- The optional `generated_rv32_linux` lane is intentionally non-authoritative. Its emitted `rv32_linux/rtl` bundle exists only to cross-check Linux handoff and DTB bring-up on the generated RV32 shell without upgrading RV32 Linux to the repo-native proof claim.
+- `generated_rv32_linux` and `generated_rv64_linux` are both authoritative generated-core proof lanes. The emitted `rv32/rtl` and `rv64/rtl` bundle roots are the only accepted runner inputs for those lanes.
 - Future decode families should extend the same contract rather than bypass it with handwritten bit slicing or backend-specific special cases.
 - MIR JSON export is the trace boundary between compiler lowering and RTL/VHDL tests. It must expose enough structured module shape for specs to identify functions, basic blocks, emitted instructions, and terminators without depending on raw debug logs.
 - The handwritten VHDL shell is now internally separated into decode staging, execute/load-store behavior, and control-flow/trap-halt orchestration regions so bounded follow-on cleanup can land without re-editing one monolithic string block.

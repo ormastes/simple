@@ -150,6 +150,38 @@ fn codegen_builtin_method() {
 }
 
 #[test]
+fn codegen_direct_dotted_unwrap_redirects_to_runtime() {
+    assert!(aot_compiles("direct_dotted_unwrap", |f| {
+        let recv = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: recv, value: 42 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("lib__nogc_sync_mut__failsafe__core__FailSafeResult.unwrap"),
+            args: vec![recv],
+        });
+        dest
+    }));
+}
+
+#[test]
+fn codegen_direct_bare_unwrap_redirects_to_runtime() {
+    assert!(aot_compiles("direct_bare_unwrap", |f| {
+        let recv = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: recv, value: 42 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("unwrap"),
+            args: vec![recv],
+        });
+        dest
+    }));
+}
+
+#[test]
 fn codegen_extern_method_call() {
     assert!(aot_compiles("extern_m", |f| {
         let dest = f.new_vreg();

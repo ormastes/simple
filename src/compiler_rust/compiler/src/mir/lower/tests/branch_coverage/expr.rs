@@ -256,6 +256,49 @@ fn direct_result_unwrap_lowers_to_enum_payload_not_method_dispatch() {
     }));
 }
 
+#[test]
+fn optional_field_unwrap_lowers_to_enum_payload_not_named_method() {
+    let mir = compile_to_mir(
+        "class Report:\n    code: text?\n\nimpl Report:\n    fn get_code() -> text:\n        if self.code.?:\n            return self.code.unwrap()\n        else:\n            return \"\"\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload")
+    )));
+    assert!(
+        !has_inst(&mir, |i| matches!(
+            i,
+            MirInst::MethodCallStatic { func_name, .. } if func_name == "unwrap" || func_name.ends_with(".unwrap")
+        )),
+        "optional field unwrap should not lower to a named method dispatch"
+    );
+}
+
+#[test]
+fn result_helpers_lower_to_builtin_enum_ops() {
+    let mir = compile_to_mir(
+        "fn load(flag: bool) -> Result<i64, text>:\n    if flag:\n        return Ok(7)\n    return Err(\"bad\")\n\nfn test(flag: bool) -> text:\n    val result = load(flag)\n    if result.is_err():\n        return result.unwrap_err()\n    \"ok\"\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_check_discriminant")
+    )));
+    assert!(has_inst(&mir, |i| matches!(
+        i,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_enum_payload")
+    )));
+    assert!(!has_inst(&mir, |i| matches!(
+        i,
+        MirInst::MethodCallStatic { func_name, .. }
+            if func_name == "is_err"
+                || func_name.ends_with(".is_err")
+                || func_name == "unwrap_err"
+                || func_name.ends_with(".unwrap_err")
+    )));
+}
+
 // =============================================================================
 // Cast operations
 // =============================================================================

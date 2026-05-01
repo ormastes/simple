@@ -3,31 +3,32 @@ use std.spec.*
 use hardware.riscv_common.pkg.riscv_generated_core_pkg.{RiscvProofLane, GeneratedCoreShellContract}
 
 describe "RISC-V generated core proof lanes":
-    it "labels external reference lanes explicitly":
-        expect(RiscvProofLane.ReferenceExternalRv32Linux.to_text()).to_equal("reference_external_rv32_linux")
-        expect(RiscvProofLane.ReferenceExternalRv64Linux.to_text()).to_equal("reference_external_rv64_linux")
-        expect(RiscvProofLane.ReferenceExternalRv32Linux.is_external_reference()).to_equal(true)
-        expect(RiscvProofLane.ReferenceExternalRv64Linux.requires_linux_boot()).to_equal(true)
-
-    it "labels generated proof lanes separately from external Linux references":
-        expect(RiscvProofLane.GeneratedRv32Baremetal.to_text()).to_equal("generated_rv32_baremetal")
+    it "keeps generated RV32 and RV64 Linux lanes public and Linux-capable":
+        expect(RiscvProofLane.GeneratedRv32Linux.to_text()).to_equal("generated_rv32_linux")
         expect(RiscvProofLane.GeneratedRv64Linux.to_text()).to_equal("generated_rv64_linux")
-        expect(RiscvProofLane.GeneratedRv32Baremetal.requires_linux_boot()).to_equal(false)
+        expect(RiscvProofLane.GeneratedRv32Linux.requires_linux_boot()).to_equal(true)
         expect(RiscvProofLane.GeneratedRv64Linux.is_external_reference()).to_equal(false)
 
 describe "RISC-V generated core shell contracts":
-    it "keeps RV32 semihost and mailbox at the shell seam":
-        val shell = GeneratedCoreShellContract.rv32_baremetal()
+    it "defines RV32 on the Linux fw_jump/OpenSBI proof path":
+        val shell = GeneratedCoreShellContract.rv32_linux()
+        val metadata = shell.debug_metadata("rv32_linux")
         expect(shell.xlen_bits).to_equal(32)
-        expect(shell.proof_lane).to_equal(RiscvProofLane.GeneratedRv32Baremetal)
-        expect(shell.semihost_shell_service).to_equal(true)
-        expect(shell.mailbox_shell_service).to_equal(true)
-        expect(shell.shell_services_summary()).to_equal("semihost+mailbox")
-        expect(shell.acceptance_markers()).to_contain("mailbox-sentinel")
-        expect(shell.debug_outputs).to_contain("semihost_trigger")
+        expect(shell.proof_lane).to_equal(RiscvProofLane.GeneratedRv32Linux)
+        expect(shell.boot.opensbi_fw_jump).to_equal(true)
+        expect(shell.boot.hartid_register).to_equal("a0")
+        expect(shell.boot.dtb_register).to_equal("a1")
+        expect(shell.acceptance_markers()).to_contain("Linux version")
+        expect(shell.shell_services_summary()).to_equal("none")
+        expect(metadata.schema_version).to_equal("riscv_rtl_debuggability_lint/v1")
+        expect(metadata.debug_outputs).to_contain("semi_trigger")
+        expect(metadata.source_map.len()).to_be_greater_than(10)
+        expect(metadata.report_markers).to_contain("DTB_PROBE_SEEN:")
+        expect(metadata.report_markers).to_contain("FINAL_PC_HEX32:")
 
-    it "keeps RV64 on the Linux fw_jump/OpenSBI proof path":
+    it "defines RV64 on the Linux fw_jump/OpenSBI proof path":
         val shell = GeneratedCoreShellContract.rv64_linux()
+        val metadata = shell.debug_metadata("rv64")
         expect(shell.xlen_bits).to_equal(64)
         expect(shell.proof_lane).to_equal(RiscvProofLane.GeneratedRv64Linux)
         expect(shell.boot.opensbi_fw_jump).to_equal(true)
@@ -35,3 +36,8 @@ describe "RISC-V generated core shell contracts":
         expect(shell.boot.dtb_register).to_equal("a1")
         expect(shell.acceptance_markers()).to_contain("Linux version")
         expect(shell.interrupt_inputs).to_contain("supervisor_external")
+        expect(shell.debug_outputs).to_contain("semi_trigger")
+        expect(metadata.debug_outputs).to_contain("debug_pc")
+        expect(metadata.report_markers).to_contain("TRAP_EDGE_PC_HEX32")
+        expect(metadata.report_markers).to_contain("PC_LOW32:")
+        expect(metadata.report_markers).to_contain("TRAP_CAUSE_WORD:")

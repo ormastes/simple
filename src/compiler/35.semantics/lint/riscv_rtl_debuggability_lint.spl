@@ -1,0 +1,281 @@
+#![allow(unnamed_duplicate_typed_args)]
+# RISC-V RTL debuggability lint for generated-core bundle artifacts.
+
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+
+pub struct RiscvRtlDebugLintWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    line_num: i64
+    file_path: text
+
+pub fn lint_riscv_rtl_debuggability(source: text, path: text) -> [RiscvRtlDebugLintWarning]:
+    var warnings: [RiscvRtlDebugLintWarning] = []
+    if not _is_generated_riscv_core_vhdl(path):
+        return warnings
+
+    val sidecar_path = _replace_suffix(path, ".vhd", ".debug.json")
+    if not file_exists(sidecar_path):
+        warnings.push(_warn("RTLDBG001", "ERROR", path, "missing debug sidecar for generated RISC-V RTL", "emit {sidecar_path} next to the generated core before linting"))
+        return warnings
+
+    val sidecar = _compact_json(file_read(sidecar_path))
+    if not _sidecar_has_required_shape(sidecar):
+        warnings.push(_warn("RTLDBG001", "ERROR", path, "debug sidecar is malformed or missing required keys", "write schemaVersion, laneId, proofLane, xlen, debugOutputs, sourceMap, observability, reportMarkers, and runnerTestbenches"))
+        return warnings
+
+    val proof_lane = _extract_vhdl_header_value(source, "-- proof-lane: ", " shell=")
+    if proof_lane == "":
+        warnings.push(_warn("RTLDBG002", "ERROR", path, "generated core is missing the proof-lane header", "preserve the VHDL comment header emitted by source_map_header"))
+        return warnings
+
+    val sidecar_proof_lane = _extract_json_string(sidecar, "proofLane")
+    if sidecar_proof_lane != proof_lane:
+        warnings.push(_warn("RTLDBG002", "ERROR", path, "sidecar proofLane does not match the VHDL proof-lane header", "regenerate the sidecar and VHDL header from the same shared debug metadata"))
+    val header_entries = _extract_source_map_entries(source)
+    val sidecar_entry_count = _count_substring(sidecar, "\"signal\":\"")
+    if header_entries.len() == 0 or sidecar_entry_count != header_entries.len():
+        warnings.push(_warn("RTLDBG002", "ERROR", path, "sidecar/source-map entry counts do not match the VHDL header", "keep sourceMap entries in the JSON sidecar aligned with every -- source-map header line"))
+    else:
+        for entry in header_entries:
+            val signal = _before(entry, " => ")
+            val slice_text = _after(entry, " => ")
+            if not _source_map_contains(sidecar, signal, slice_text):
+                warnings.push(_warn("RTLDBG002", "ERROR", path, "sidecar/source-map mismatch for {signal}", "keep JSON sourceMap objects byte-stable with the emitted VHDL source-map comments"))
+                break
+
+    val manifest_path = "{_parent_dir(_parent_dir(_parent_dir(path)))}/riscv_fpga_rtl_manifest.sdn"
+    if not file_exists(manifest_path):
+        warnings.push(_warn("RTLDBG003", "ERROR", path, "bundle manifest is missing for generated RISC-V RTL", "emit riscv_fpga_rtl_manifest.sdn at the bundle root"))
+        return warnings
+    val manifest = file_read(manifest_path)
+    val manifest_mismatch =
+        not manifest.contains("core_file = \"{path}\"") or
+        not manifest.contains("debug_sidecar_file = \"{sidecar_path}\"") or
+        not manifest.contains("proof_lane = \"{proof_lane}\"")
+    if manifest_mismatch:
+        warnings.push(_warn("RTLDBG003", "ERROR", path, "bundle manifest disagrees with emitted core/sidecar/proof-lane metadata", "keep manifest core_file, debug_sidecar_file, and proof_lane in sync with the emitted lane artifacts"))
+    val debug_outputs = _extract_json_text_array(sidecar, "debugOutputs")
+    for debug_output in debug_outputs:
+        if not manifest.contains("debug_output = \"{debug_output}\""):
+            warnings.push(_warn("RTLDBG003", "ERROR", path, "manifest is missing debug output {debug_output}", "emit one debug_output entry per declared debug signal"))
+            break
+        if not _has_output_port(source, debug_output):
+            warnings.push(_warn("RTLDBG003", "ERROR", path, "generated VHDL does not expose declared debug output {debug_output}", "align GeneratedCoreShellContract.debug_outputs with the emitted core ports"))
+            break
+
+    val observability_keys = ["fetch", "trap", "halt", "memoryAccess", "registerProbes", "debugProbes", "proofFailureReports"]
+    for key in observability_keys:
+        if not _extract_json_bool(sidecar, key):
+            warnings.push(_warn("RTLDBG101", "WARNING", path, "debug sidecar marks {key} coverage as false", "fill the gap or record the lane-specific limitation before claiming debuggability coverage"))
+
+    val report_markers = _extract_json_text_array(sidecar, "reportMarkers")
+    val runner_files = _extract_runner_testbench_files(sidecar)
+    var runner_text = ""
+    var present_pass_markers = 0
+    for runner_file in runner_files:
+        val runner_path = "{_parent_dir(path)}/{runner_file}"
+        if not file_exists(runner_path):
+            warnings.push(_warn("RTLDBG003", "ERROR", path, "runner testbench listed in sidecar is missing: {runner_file}", "keep runnerTestbenches aligned with emitted testbench files"))
+            continue
+        val text = file_read(runner_path)
+        runner_text = runner_text + "\n" + text
+        val pass_marker = _extract_runner_pass_marker(sidecar, runner_file)
+        if pass_marker != "" and text.contains("report \"{pass_marker}\""):
+            present_pass_markers = present_pass_markers + 1
+    if present_pass_markers < runner_files.len():
+        warnings.push(_warn("RTLDBG102", "WARNING", path, "one or more runner testbenches are missing their declared PASS marker", "keep runnerTestbenches[file].passMarker aligned with emitted report strings"))
+    var present_report_markers = 0
+    for marker in report_markers:
+        if runner_text.contains(marker):
+            present_report_markers = present_report_markers + 1
+    if report_markers.len() < 3 or present_report_markers < 3:
+        warnings.push(_warn("RTLDBG102", "WARNING", path, "proof/testbench report markers do not expose enough post-failure context", "emit at least three stable failure-context report markers and keep them in the sidecar"))
+
+    warnings
+
+fn _warn(code: text, severity: text, path: text, message: text, hint: text) -> RiscvRtlDebugLintWarning:
+    RiscvRtlDebugLintWarning(code: code, severity: severity, message: message, hint: hint, line_num: 1, file_path: path)
+
+fn _is_generated_riscv_core_vhdl(path: text) -> bool:
+    path.ends_with(".vhd") and path.contains("/rtl/") and (_basename(path).starts_with("simple_rv32") or _basename(path).starts_with("simple_rv64"))
+
+fn _basename(path: text) -> text:
+    val idx = path.rfind("/")
+    if idx < 0:
+        return path
+    path.slice(idx + 1)
+
+fn _parent_dir(path: text) -> text:
+    val idx = path.rfind("/")
+    if idx < 0:
+        return "."
+    path.slice(0, idx)
+
+fn _replace_suffix(path: text, old_suffix: text, new_suffix: text) -> text:
+    if not path.ends_with(old_suffix):
+        return path
+    path.slice(0, path.len() - old_suffix.len()) + new_suffix
+
+fn _sidecar_has_required_shape(sidecar: text) -> bool:
+    val has_all =
+        sidecar.contains("\"schemaVersion\":") and
+        sidecar.contains("\"laneId\":") and
+        sidecar.contains("\"proofLane\":") and
+        sidecar.contains("\"xlen\":") and
+        sidecar.contains("\"debugOutputs\":") and
+        sidecar.contains("\"sourceMap\":") and
+        sidecar.contains("\"observability\":") and
+        sidecar.contains("\"reportMarkers\":") and
+        sidecar.contains("\"runnerTestbenches\":")
+    has_all
+
+fn _extract_vhdl_header_value(source: text, prefix: text, suffix: text) -> text:
+    val start = source.find(prefix)
+    if start < 0:
+        return ""
+    val tail = source.slice(start + prefix.len())
+    val end = tail.find(suffix)
+    if end < 0:
+        return ""
+    tail.slice(0, end)
+
+fn _extract_source_map_entries(source: text) -> [text]:
+    var entries: [text] = []
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("-- source-map: "):
+            entries.push(trimmed.slice(14))
+    entries
+
+fn _extract_json_string(source: text, key: text) -> text:
+    val prefix = "\"{key}\":\""
+    val start = source.find(prefix)
+    if start < 0:
+        return ""
+    val tail = source.slice(start + prefix.len())
+    val end = tail.find("\"")
+    if end < 0:
+        return ""
+    tail.slice(0, end)
+
+fn _extract_json_bool(source: text, key: text) -> bool:
+    if source.contains("\"{key}\": true"):
+        return true
+    false
+
+fn _extract_json_text_array(source: text, key: text) -> [text]:
+    var values: [text] = []
+    val prefix = "\"{key}\":["
+    val start = source.find(prefix)
+    if start < 0:
+        return values
+    val tail = source.slice(start + prefix.len())
+    val end = tail.find("]")
+    if end < 0:
+        return values
+    val inner = tail.slice(0, end)
+    if inner.trim() == "":
+        return values
+    val parts = inner.split(",")
+    for part in parts:
+        var clean = part.trim()
+        if clean.starts_with("\""):
+            clean = clean.slice(1)
+        if clean.ends_with("\""):
+            clean = clean.slice(0, clean.len() - 1)
+        if clean != "":
+            values.push(clean)
+    values
+
+fn _extract_runner_testbench_files(sidecar: text) -> [text]:
+    var files: [text] = []
+    val parts = sidecar.split("\"file\":\"")
+    var i = 1
+    while i < parts.len():
+        val tail = parts[i]
+        val end = tail.find("\"")
+        if end > 0:
+            files.push(tail.slice(0, end))
+        i = i + 1
+    files
+
+fn _extract_runner_pass_marker(sidecar: text, file_name: text) -> text:
+    val needle = "\"file\":\"{file_name}\",\"passMarker\":\""
+    val start = sidecar.find(needle)
+    if start < 0:
+        return ""
+    val tail = sidecar.slice(start + needle.len())
+    val end = tail.find("\"")
+    if end < 0:
+        return ""
+    tail.slice(0, end)
+
+fn _count_substring(source: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    var count = 0
+    var start = 0
+    while start < source.len():
+        val tail = source.slice(start)
+        val idx = tail.find(needle)
+        if idx < 0:
+            return count
+        count = count + 1
+        start = start + idx + needle.len()
+    count
+
+fn _before(value: text, needle: text) -> text:
+    val idx = value.find(needle)
+    if idx < 0:
+        return value
+    value.slice(0, idx)
+
+fn _after(value: text, needle: text) -> text:
+    val idx = value.find(needle)
+    if idx < 0:
+        return ""
+    value.slice(idx + needle.len())
+
+fn _compact_json(source: text) -> text:
+    var out = ""
+    var in_string = false
+    var escaped = false
+    for ch in source:
+        if in_string:
+            out = out + ch
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                in_string = false
+            continue
+        if ch == "\"":
+            in_string = true
+            out = out + ch
+        elif ch != " " and ch != "\n" and ch != "\r" and ch != "\t":
+            out = out + ch
+    out
+
+fn _source_map_contains(sidecar: text, signal: text, slice_text: text) -> bool:
+    val signal_idx = sidecar.find("\"signal\":\"{signal}\"")
+    if signal_idx < 0:
+        return false
+    val tail = sidecar.slice(signal_idx)
+    val object_end = tail.find("}")
+    if object_end < 0:
+        return false
+    val object_text = tail.slice(0, object_end)
+    object_text.contains("\"slice\":\"{slice_text}\"")
+
+fn _has_output_port(source: text, debug_output: text) -> bool:
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("{debug_output}") and trimmed.contains(": out "):
+            return true
+    false

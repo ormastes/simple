@@ -651,33 +651,134 @@ extern fn is_little_endian() -> bool
 # Byte conversion (little-endian)
 extern fn bytes_to_u16_le(b0: u8, b1: u8) -> u16
 extern fn bytes_to_u32_le(bytes: [u8]) -> u32
-extern fn bytes_to_u64_le(bytes: [u8]) -> u64
-extern fn u16_to_bytes_le(value: u16) -> [u8]
-extern fn u32_to_bytes_le(value: u32) -> [u8]
-extern fn u64_to_bytes_le(value: u64) -> [u8]
+fn bytes_to_u64_le(bytes: [u8]) -> u64:
+    if bytes.len() < 8:
+        return 0
+    (bytes[0] as u64) |
+    ((bytes[1] as u64) << 8) |
+    ((bytes[2] as u64) << 16) |
+    ((bytes[3] as u64) << 24) |
+    ((bytes[4] as u64) << 32) |
+    ((bytes[5] as u64) << 40) |
+    ((bytes[6] as u64) << 48) |
+    ((bytes[7] as u64) << 56)
+fn u16_to_bytes_le(value: u16) -> [u8]:
+    [
+        (value and 0xFF) as u8,
+        ((value >> 8) and 0xFF) as u8
+    ]
+
+fn u32_to_bytes_le(value: u32) -> [u8]:
+    [
+        (value and 0xFF) as u8,
+        ((value >> 8) and 0xFF) as u8,
+        ((value >> 16) and 0xFF) as u8,
+        ((value >> 24) and 0xFF) as u8
+    ]
+
+fn u64_to_bytes_le(value: u64) -> [u8]:
+    [
+        (value and 0xFF) as u8,
+        ((value >> 8) and 0xFF) as u8,
+        ((value >> 16) and 0xFF) as u8,
+        ((value >> 24) and 0xFF) as u8,
+        ((value >> 32) and 0xFF) as u8,
+        ((value >> 40) and 0xFF) as u8,
+        ((value >> 48) and 0xFF) as u8,
+        ((value >> 56) and 0xFF) as u8
+    ]
 
 # Byte conversion (big-endian)
 extern fn bytes_to_u16_be(b0: u8, b1: u8) -> u16
 extern fn bytes_to_u32_be(bytes: [u8]) -> u32
-extern fn bytes_to_u64_be(bytes: [u8]) -> u64
-extern fn u16_to_bytes_be(value: u16) -> [u8]
-extern fn u32_to_bytes_be(value: u32) -> [u8]
-extern fn u64_to_bytes_be(value: u64) -> [u8]
+fn bytes_to_u64_be(bytes: [u8]) -> u64:
+    if bytes.len() < 8:
+        return 0
+    ((bytes[0] as u64) << 56) |
+    ((bytes[1] as u64) << 48) |
+    ((bytes[2] as u64) << 40) |
+    ((bytes[3] as u64) << 32) |
+    ((bytes[4] as u64) << 24) |
+    ((bytes[5] as u64) << 16) |
+    ((bytes[6] as u64) << 8) |
+    (bytes[7] as u64)
+fn u16_to_bytes_be(value: u16) -> [u8]:
+    [
+        ((value >> 8) and 0xFF) as u8,
+        (value and 0xFF) as u8
+    ]
+
+fn u32_to_bytes_be(value: u32) -> [u8]:
+    [
+        ((value >> 24) and 0xFF) as u8,
+        ((value >> 16) and 0xFF) as u8,
+        ((value >> 8) and 0xFF) as u8,
+        (value and 0xFF) as u8
+    ]
+
+fn u64_to_bytes_be(value: u64) -> [u8]:
+    [
+        ((value >> 56) and 0xFF) as u8,
+        ((value >> 48) and 0xFF) as u8,
+        ((value >> 40) and 0xFF) as u8,
+        ((value >> 32) and 0xFF) as u8,
+        ((value >> 24) and 0xFF) as u8,
+        ((value >> 16) and 0xFF) as u8,
+        ((value >> 8) and 0xFF) as u8,
+        (value and 0xFF) as u8
+    ]
 
 # Float conversion
 extern fn f32_from_bits(bits: u32) -> f32
 extern fn f64_from_bits(bits: u64) -> f64
-extern fn f32_to_bits(value: f32) -> u32
-extern fn f64_to_bits(value: f64) -> u64
+extern fn spl_f64_to_bits(value: f64) -> i64
+
+fn f64_to_bits(value: f64) -> u64:
+    spl_f64_to_bits(value) as u64
+
+fn f32_to_bits(value: f32) -> u32:
+    val bits64 = spl_f64_to_bits(value as f64) as u64
+    val sign = ((bits64 >> 63) & 1u64) as u32
+    val exp64 = ((bits64 >> 52) & 0x7FFu64) as i64
+    val frac64 = bits64 & 0xFFFFFFFFFFFFFu64
+
+    if exp64 == 0 and frac64 == 0u64:
+        return sign << 31
+
+    if exp64 == 0x7FF:
+        if frac64 == 0u64:
+            return (sign << 31) | (0xFFu32 << 23)
+        val frac32 = (frac64 >> 29) as u32
+        val payload = if frac32 == 0u32: 1u32 else: frac32
+        return (sign << 31) | (0xFFu32 << 23) | payload
+
+    val mant64 = (1u64 << 52) | frac64
+    val exp32_unbiased = exp64 - 1023
+
+    if exp32_unbiased >= -126:
+        val frac32 = ((mant64 - (1u64 << 52)) >> 29) as u32
+        return (sign << 31) | (((exp32_unbiased + 127) as u32) << 23) | (frac32 & 0x7FFFFFu32)
+
+    val shift = exp64 - 926
+    if shift >= 0:
+        return (sign << 31) | (((mant64 << (shift as u64)) as u32) & 0x7FFFFFu32)
+    (sign << 31) | (((mant64 >> ((0i64 - shift) as u64)) as u32) & 0x7FFFFFu32)
 
 # String conversion
 extern fn bytes_to_string(bytes: [u8]) -> text
-extern fn string_to_bytes(text: text) -> [u8]
+fn string_to_bytes(text: text) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < text.length():
+        bytes = bytes.push(text.char_at(i).ord() as u8)
+        i = i + 1
+    bytes
 
 # Buffer allocation
-extern fn allocate_buffer(capacity: usize) -> [u8]
+fn allocate_buffer(capacity: usize) -> [u8]:
+    val _ = capacity
+    []
 
 # ============================================================================
 # Exports
 # ============================================================================
-

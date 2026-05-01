@@ -92,6 +92,19 @@ static void *rv_alloc(size_t size)
     return p;
 }
 
+static void *rv_alloc_aligned(size_t size, size_t align)
+{
+    if (align == 0) align = 16U;
+    size_t offset = g_heap_off;
+    size_t rem = offset % align;
+    if (rem != 0) offset += align - rem;
+    size = (size + 15U) & ~(size_t)15U;
+    if (offset + size > sizeof(g_heap)) return 0;
+    void *p = &g_heap[offset];
+    g_heap_off = offset + size;
+    return p;
+}
+
 static RuntimeValue *runtime_array_inline_items(RuntimeArray *a)
 {
     return (RuntimeValue *)((unsigned char *)a + sizeof(RuntimeArray));
@@ -161,6 +174,14 @@ RuntimeValue rt_alloc(RuntimeValue sz)
 {
     size_t bytes = (size_t)sz;
     void *ptr = calloc(1, bytes);
+    return ptr ? (RuntimeValue)(uintptr_t)ptr : 0;
+}
+
+RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue align)
+{
+    size_t bytes = (size_t)simpleos_raw_or_encoded_int(size);
+    size_t alignment = (size_t)simpleos_raw_or_encoded_int(align);
+    void *ptr = rv_alloc_aligned(bytes, alignment);
     return ptr ? (RuntimeValue)(uintptr_t)ptr : 0;
 }
 
@@ -287,6 +308,11 @@ RuntimeValue rt_value_to_string(RuntimeValue value)
     return ENCODE_PTR(out);
 }
 
+RuntimeValue rt_to_string(RuntimeValue value)
+{
+    return rt_value_to_string(value);
+}
+
 static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue value)
 {
     if (!IS_HEAP(arr)) return NIL_VALUE;
@@ -316,6 +342,18 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
 int8_t rt_array_push(RuntimeValue arr, RuntimeValue value)
 {
     return rt_array_push_handle(arr, value) != NIL_VALUE;
+}
+
+RuntimeValue rt_array_pop(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY || a->len == 0) return NIL_VALUE;
+    RuntimeValue *items = runtime_array_items(a);
+    a->len--;
+    RuntimeValue value = items[a->len];
+    items[a->len] = NIL_VALUE;
+    return value;
 }
 
 RuntimeValue rt_array_get(RuntimeValue arr, RuntimeValue idx)
@@ -468,6 +506,83 @@ RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)
     int64_t i = (int64_t)idx;
     if (!s || s->hdr.type != HEAP_STRING || i < 0 || (uint32_t)i >= s->len) return NIL_VALUE;
     return rt_string_new((RuntimeValue)(uintptr_t)(s->data + i), 1);
+}
+
+RuntimeValue rt_string_eq(RuntimeValue a, RuntimeValue b)
+{
+    if (!IS_HEAP(a) || !IS_HEAP(b)) return 0;
+    RuntimeString *sa = (RuntimeString *)DECODE_PTR(a);
+    RuntimeString *sb = (RuntimeString *)DECODE_PTR(b);
+    if (!sa || !sb || sa->hdr.type != HEAP_STRING || sb->hdr.type != HEAP_STRING) return 0;
+    if (sa->len != sb->len) return 0;
+    for (uint32_t i = 0; i < sa->len; i++) {
+        if (sa->data[i] != sb->data[i]) return 0;
+    }
+    return 1;
+}
+
+RuntimeValue rt_string_to_upper(RuntimeValue str)
+{
+    if (!IS_HEAP(str)) return str;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return str;
+    RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + s->len + 1U);
+    if (!out) return str;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1U);
+    out->len = s->len;
+    for (uint32_t i = 0; i < s->len; i++) {
+        char c = s->data[i];
+        out->data[i] = (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
+    }
+    out->data[s->len] = 0;
+    return ENCODE_PTR(out);
+}
+
+RuntimeValue rt_string_to_lower(RuntimeValue str)
+{
+    if (!IS_HEAP(str)) return str;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return str;
+    RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + s->len + 1U);
+    if (!out) return str;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + s->len + 1U);
+    out->len = s->len;
+    for (uint32_t i = 0; i < s->len; i++) {
+        char c = s->data[i];
+        out->data[i] = (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+    }
+    out->data[s->len] = 0;
+    return ENCODE_PTR(out);
+}
+
+static int rt_is_ascii_whitespace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+RuntimeValue rt_string_trim(RuntimeValue str)
+{
+    if (!IS_HEAP(str)) return str;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING || s->len == 0) return str;
+
+    uint32_t start = 0;
+    while (start < s->len && rt_is_ascii_whitespace(s->data[start])) start++;
+
+    uint32_t end = s->len;
+    while (end > start && rt_is_ascii_whitespace(s->data[end - 1])) end--;
+
+    uint32_t out_len = end - start;
+    RuntimeString *out = (RuntimeString *)rv_alloc(sizeof(RuntimeString) + out_len + 1U);
+    if (!out) return str;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + out_len + 1U);
+    out->len = out_len;
+    for (uint32_t i = 0; i < out_len; i++) out->data[i] = s->data[start + i];
+    out->data[out_len] = 0;
+    return ENCODE_PTR(out);
 }
 
 RuntimeValue str_byte_at_impl(RuntimeValue str, RuntimeValue idx) __asm__("str.byte_at");

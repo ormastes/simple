@@ -3,21 +3,21 @@
 Historical helper-proof scope:
 
 - Unit: board profiles validate prepare-only versus hardware-boot requirements.
-- Unit: RV64 exposes the authoritative contract lane and RV32 remains compiler-parity only.
+- Unit: both generated RV32 and RV64 lanes expose authoritative Linux contract coverage.
 - Unit: Linux boot validation fails until readiness and required artifacts are configured.
 - Unit: MIR lowering exposes a bounded bitfield extraction hook for RISC-V instruction decode fields before any VHDL text is emitted.
 - Integration: Vivado TCL plan generation is deterministic for `xilinx_generic`.
 - Integration: generated Simple hardware source preserves `@hardware`, `@clocked`, instruction bitfields, opcode width, dispatch/trap helper overlays, and decode source traces for the implemented helper set.
 - Integration: generated VHDL includes source-map comments, typed slice emission for decoded instruction fields, helper-aligned manifest records for the bounded lane artifacts, helper-derived top-level dispatch, and helper-driven halt/trap intent.
 - Regression: existing VHDL backend E2E and targeted RISC-V hardware/compiler specs remain green.
-- Hardware: future FPGA runs should validate only the canonical RV64 lane unless RV32 later graduates from parity-only status.
+- Hardware: future FPGA runs should validate both canonical generated Linux lanes on the board-level boot wrappers.
 
 ## Traceability
 
 | REQ | Executable Spec | Coverage |
 |-----|-----------------|----------|
 | REQ-RFL-001..002 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` board profile prepare/boot validation | Full |
-| REQ-RFL-003..005 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` historical lane defaults and current RV64-first truthfulness checks | Full |
+| REQ-RFL-003..005 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` historical lane defaults and current dual-arch generated-Linux truthfulness checks | Full |
 | REQ-RFL-006..007 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` deterministic prepare manifest and Vivado plan | Full |
 | REQ-RFL-008 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` generated Simple hardware source expectations for the implemented helper set | Full |
 | REQ-RFL-009 | `doc/06_spec/app/hardware/feature/riscv_fpga_linux_spec.spl` VHDL source-map and RTL manifest expectations for the implemented helper set | Full |

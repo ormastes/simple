@@ -1,0 +1,113 @@
+use std.spec.*
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+use compiler.tools.lint.main.{Linter, LintLevel}
+use hardware.fpga_linux.riscv_fpga_linux.{generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
+
+fn shell(command: text) -> i64:
+    val (_stdout, _stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    code
+
+fn has_code(results, code: text) -> bool:
+    for result in results:
+        if result.lint.code == code:
+            return true
+    false
+
+fn has_warn_code(results, code: text) -> bool:
+    for result in results:
+        if result.lint.code == code and result.lint.level == LintLevel.Warn:
+            return true
+    false
+
+fn lint_core(path: text) -> any:
+    var linter = Linter.new()
+    linter.lint_source(path, read_generated_riscv_fpga_rtl_file(path))
+
+describe "RISC-V RTL debuggability lint":
+    it "accepts clean generated RV64 debug sidecars":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_clean'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_clean")
+        expect result.is_ok() == true
+        val core_path = "/tmp/riscv_rtl_debug_lint_clean/rv64/rtl/simple_rv64gc_core.vhd"
+        val results = lint_core(core_path)
+        expect has_code(results, "RTLDBG001") == false
+        expect has_code(results, "RTLDBG002") == false
+        expect has_code(results, "RTLDBG003") == false
+
+    it "emits RTLDBG001 for malformed sidecars":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_001'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_001")
+        expect result.is_ok() == true
+        val sidecar_path = "/tmp/riscv_rtl_debug_lint_001/rv64/rtl/simple_rv64gc_core.debug.json"
+        expect rt_file_write_text(sidecar_path, "{}\n") == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_001/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG001") == true
+
+    it "emits RTLDBG002 for source-map mismatches":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_002'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_002")
+        expect result.is_ok() == true
+        val sidecar_path = "/tmp/riscv_rtl_debug_lint_002/rv64/rtl/simple_rv64gc_core.debug.json"
+        val sidecar = read_generated_riscv_fpga_rtl_file(sidecar_path)
+        val broken = sidecar.replace("\"signal\":\"Rv64Instruction.opcode\",\"slice\":\"imem_rdata(6 downto 0)\"", "\"signal\":\"Rv64Instruction.opcode\",\"slice\":\"imem_rdata(5 downto 0)\"")
+        expect rt_file_write_text(sidecar_path, broken) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_002/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG002") == true
+
+    it "emits RTLDBG003 for manifest/sidecar debug output drift":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_003'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_003")
+        expect result.is_ok() == true
+        val manifest_path = "/tmp/riscv_rtl_debug_lint_003/riscv_fpga_rtl_manifest.sdn"
+        val manifest = read_generated_riscv_fpga_rtl_file(manifest_path)
+        val broken = manifest.replace("debug_output = \"debug_pc\"\n", "")
+        expect rt_file_write_text(manifest_path, broken) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_003/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG003") == true
+
+    it "accepts sidecars with non-canonical whitespace":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_ws'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_ws")
+        expect result.is_ok() == true
+        val sidecar_path = "/tmp/riscv_rtl_debug_lint_ws/rv64/rtl/simple_rv64gc_core.debug.json"
+        val sidecar = read_generated_riscv_fpga_rtl_file(sidecar_path)
+        var spaced = sidecar.replace("\"proofLane\":", "\"proofLane\" : ")
+        spaced = spaced.replace("\"debugOutputs\":", "\"debugOutputs\"  : ")
+        spaced = spaced.replace("\"runnerTestbenches\":", "\"runnerTestbenches\" : ")
+        expect rt_file_write_text(sidecar_path, spaced) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_ws/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG001") == false
+        expect has_code(results, "RTLDBG002") == false
+
+    it "emits RTLDBG101 when observability coverage is incomplete":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_101'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_101")
+        expect result.is_ok() == true
+        val sidecar_path = "/tmp/riscv_rtl_debug_lint_101/rv64/rtl/simple_rv64gc_core.debug.json"
+        val sidecar = read_generated_riscv_fpga_rtl_file(sidecar_path)
+        val broken = sidecar.replace("\"registerProbes\": true", "\"registerProbes\": false")
+        expect rt_file_write_text(sidecar_path, broken) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_101/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_warn_code(results, "RTLDBG101") == true
+
+    it "emits RTLDBG102 when proof markers are too thin":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_102'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_102")
+        expect result.is_ok() == true
+        val sidecar_path = "/tmp/riscv_rtl_debug_lint_102/rv64/rtl/simple_rv64gc_core.debug.json"
+        val sidecar = read_generated_riscv_fpga_rtl_file(sidecar_path)
+        val broken = sidecar.replace("\"reportMarkers\": [\"TRAP_EDGE_PC_HEX32\", \"HALT_EDGE_PC_HEX32\", \"HEARTBEAT_PC_HEX32\", \"PROGRESS_PC_HEX32\"]", "\"reportMarkers\": [\"TRAP_EDGE_PC_HEX32\"]")
+        expect rt_file_write_text(sidecar_path, broken) == true
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_102/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_warn_code(results, "RTLDBG102") == true
+
+    it "emits RTLDBG003 when a runner file listed in the sidecar is missing":
+        expect shell("rm -rf '/tmp/riscv_rtl_debug_lint_runner_missing'") == 0
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_rtl_debug_lint_runner_missing")
+        expect result.is_ok() == true
+        expect shell("rm -f '/tmp/riscv_rtl_debug_lint_runner_missing/rv64/rtl/tb_generated_rv64_fw_jump.vhd'") == 0
+        val results = lint_core("/tmp/riscv_rtl_debug_lint_runner_missing/rv64/rtl/simple_rv64gc_core.vhd")
+        expect has_code(results, "RTLDBG003") == true
