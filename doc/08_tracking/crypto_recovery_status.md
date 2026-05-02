@@ -76,6 +76,8 @@ Green after these fixes:
 
 **HRR support landed 2026-05-01** — see `src/os/tls13/handshake13.spl` and `test/unit/os/tls13/hello_retry_request_spec.spl`.
 
+**HRR connect-flow integration LANDED 2026-05-01** — closes I-Wave1's deferred AC. M3 milestone advances. `tls13_connect_io_with_config` now detects HRR via `is_hello_retry_request(sh)` after `parse_server_hello`, calls the new pure helper `process_hrr_after_serverhello` (in `src/os/tls13/handshake13.spl`) which enforces RFC 8446 §4.1.4 rejections (only one HRR per handshake; HRR must change group; selected_group must be one the client advertised) and produces the §4.4.1 transcript seed `synthetic_message_hash || HRR-handshake-bytes`. CH2 is routed to `build_client_hello2_bytes_with_p256` for `GROUP_SECP256R1` and `build_client_hello2_bytes` for `GROUP_X25519` (latter currently unreachable from live connect because CH1 advertises X25519 → same-group rejection; retained for future). Deferred per AC-7: full P-256 ECDHE shared-secret derivation + key_schedule integration after CH2 send — connect returns `Failed("HRR P-256 ECDHE deferred — see crypto_recovery_status.md M3")` until that lands. Spec coverage: 9/9 PASS in `test/unit/os/tls13/hrr_connect_flow_spec.spl` (interpreter mode).
+
 ## Next Execution Order
 
 1. Repair the TLS M3 live gaps on the existing `src/os/tls13` stack, starting with hosted mTLS and the env-gated QEMU live failures.
