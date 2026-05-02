@@ -1,7 +1,16 @@
 # Bug: Ed25519 implementation does not match RFC 8032 §7.1 byte-for-byte
 
+**Status: FIXED 2026-05-01 — root cause: `ed25519_keypair_from_seed`/`ed25519_sign`/`ed25519_verify` delegated to baremetal-only C externs (`rt_ed25519_*`) with no interpreter dispatch, so the public API silently produced zero pubkeys / empty signatures (NOT a clamp/endian/SHA bug — the pure-Simple primitives in the same file were already RFC-correct, just unwired).**
+
+Resolution: rewired the public API to the existing pure-Simple primitives (`_ed25519_clamp`, `ed_scalar_mul`, `ed_point_encode`, `sc_muladd`, `_sha512_modl`, `ed_point_decode`, `ed_point_add`); routed SHA-512 through `std.crypto.sha512.sha512_bytes` (pure-Simple FIPS 180-4) instead of the unwired `rt_sha512_*` externs.
+
+Verification: all 15 examples in `test/unit/lib/crypto/ed25519_rfc8032_spec.spl` pass byte-exact (4 vectors × derived-pubkey, sign-byte-match, verify-correct, verify-rejects). Interpreter mode, ~5.8 s.
+
+Hypotheses below (clamp/endian/SHA-256) were all wrong — kept for forensic record. Per `feedback_bug_doc_fixes_are_guesses.md`.
+
+Follow-up: `ed_scalar_mul` is not constant-time (`if bit==1: add`), pre-existing leak now exposed on the sign hot path. See `doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md`. Baremetal Ed25519 has not been re-validated post-rewire (was previously routed through C-side `_ed25519_*` helpers).
+
 - **Date:** 2026-05-01
-- **Status:** Open
 - **Module:** `src/os/crypto/ed25519.spl`
 - **Found by:** RFC 8032 §7.1 test vector spec (FF agent run, draft spec at `test/unit/lib/crypto/ed25519_rfc8032_spec.spl` left uncommitted)
 
