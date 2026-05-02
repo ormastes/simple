@@ -21,3 +21,4 @@
 [WARN] doc/01_research/local/common_compression_framework.md:1 — the research artifacts still describe the original full completion target; that may be fine as intent, but they should not be read as current-state support documentation.
 
 STATUS: FAIL (5 failures, 5 warnings)
+[AUDIT 2026-05-01 evening, T25 Wave-4 sweep] STATUS line re-verified post-Wave-3 pre-T24: counts match line-by-line tallies (5 FAIL, 5 WARN, 7 PASS). T24 dict-frame end-to-end test is in flight at audit time but has not yet landed; if it lands and flips zstd.spl:1265 from WARN to PASS, this status becomes `FAIL (5 failures, 4 warnings)`. See `doc/09_report/verify/wave_1to3_audit_2026-05-01.md`.
