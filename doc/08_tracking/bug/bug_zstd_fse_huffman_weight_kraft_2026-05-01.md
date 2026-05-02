@@ -1,7 +1,19 @@
 # Zstd FSE-compressed Huffman-weight decode: Kraft sum failure on real fixtures
 
 Date: 2026-05-01
-Status: **Open**
+Status: **FIXED 2026-05-01 -- root cause: `ZstdBackwardBits` reads bits LSB-first
+within each byte, but RFC 8478 Annex A mandates MSB-first for the FSE state
+bitstream; Huffman literal decode masked the bug via `zstd_huf_reverse_bits`
+table compensation while the FSE state machine had no compensation. Fixed by
+adding a dedicated MSB-first backward bit reader (`ZstdMsbBackwardBits` in
+`src/lib/common/compress/zstd_bits.spl`) used only by
+`_zstd_parse_fse_compressed_weights`, plus a Kraft-sum-derived `max_bits` in
+`zstd_huf_weights_to_symbols` (the previous max_weight-based derivation
+silently mis-categorised weights when no symbol had the longest codeword
+length, producing spurious "oversubscribed" rejects on the corrected weight
+sets). 6/6 PASS in `test/unit/lib/common/zstd_fse_weights_spec.spl`,
+including byte-exact decode of FX1 -> 123 weights/sum 128=2^7 and a fresh
+host-zstd fixture FX_HOST_FRESH -> 123 weights/sum 256=2^8.**
 Source: discovered while writing `test/unit/lib/common/zstd_fse_weights_spec.spl`
 to discharge `verify_common_compression_framework.md` line 13 (FAIL on
 `src/lib/common/compress/zstd.spl:704` -- "verification still cannot claim
