@@ -1,0 +1,182 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.zstd.{
+    zstd_decompress_frame_with_dictionary,
+    zstd_decompress_frame,
+    zstd_parse_dictionary_for_test
+}
+use std.common.compress.{CompressionError}
+
+# RFC 8478 §6 dictionary-frame decode coverage.
+#
+# This spec exercises the pure-Simple Zstd dictionary-frame decoder
+# (`_zstd_parse_dictionary` + `_zstd_frame_dictionary_state`) using a
+# hand-crafted dictionary blob. The dictionary uses the *direct* Huffman
+# weight encoding (header_byte >= 128) to side-step the FSE-compressed
+# Huffman-weight Kraft completion bug tracked under
+# `doc/08_tracking/bug/bug_zstd_fse_huffman_weight_kraft_2026-05-01.md`.
+# Once that bug is fixed, an additional fixture using host `zstd --train`
+# output can be added.
+#
+# Layout of `DICT_OK` per RFC 8478 §6:
+#   bytes [0..4):    Magic_Number 0xEC30A437 little-endian
+#   bytes [4..8):    Dictionary_ID 0x12345678 little-endian
+#   bytes [8..11):   Huffman_Table_Description (direct mode, header=130,
+#                    weights [3,2,1] with deduced 4th weight = 1; max_bits = 3)
+#   bytes [11..13):  FSE table for Offsets       (counts [16,16], log=5)
+#   bytes [13..15):  FSE table for Match_Lengths (counts [16,16], log=5)
+#   bytes [15..17):  FSE table for Literals_Lengths (counts [16,16], log=5)
+#   bytes [17..29):  3 little-endian u32 recommended offsets (1, 4, 8)
+#   bytes [29..45):  Content "dict-prefix-data" (16 bytes)
+val DICT_OK: [u8] = [
+    0x37u8, 0xA4u8, 0x30u8, 0xECu8,
+    0x78u8, 0x56u8, 0x34u8, 0x12u8,
+    0x82u8, 0x32u8, 0x10u8,
+    0x10u8, 0x3Fu8,
+    0x10u8, 0x3Fu8,
+    0x10u8, 0x3Fu8,
+    0x01u8, 0x00u8, 0x00u8, 0x00u8,
+    0x04u8, 0x00u8, 0x00u8, 0x00u8,
+    0x08u8, 0x00u8, 0x00u8, 0x00u8,
+    0x64u8, 0x69u8, 0x63u8, 0x74u8,
+    0x2Du8, 0x70u8, 0x72u8, 0x65u8,
+    0x66u8, 0x69u8, 0x78u8, 0x2Du8,
+    0x64u8, 0x61u8, 0x74u8, 0x61u8
+]
+val DICT_OK_ID: i64 = 0x12345678
+
+# Bad magic byte 0 is 0x00 instead of 0x37 -> InvalidHeader("zstd dictionary magic").
+val DICT_BAD_MAGIC: [u8] = [
+    0x00u8, 0xA4u8, 0x30u8, 0xECu8,
+    0x78u8, 0x56u8, 0x34u8, 0x12u8,
+    0x82u8, 0x32u8, 0x10u8,
+    0x10u8, 0x3Fu8, 0x10u8, 0x3Fu8, 0x10u8, 0x3Fu8,
+    0x01u8, 0x00u8, 0x00u8, 0x00u8,
+    0x04u8, 0x00u8, 0x00u8, 0x00u8,
+    0x08u8, 0x00u8, 0x00u8, 0x00u8,
+    0x64u8
+]
+
+# Truncated after Huffman section -- FSE_Offsets header missing.
+val DICT_TRUNCATED: [u8] = [
+    0x37u8, 0xA4u8, 0x30u8, 0xECu8,
+    0x78u8, 0x56u8, 0x34u8, 0x12u8,
+    0x82u8, 0x32u8, 0x10u8
+]
+
+# Truncated mid recommended-offsets block (only 2 of the 12 expected bytes).
+val DICT_TRUNCATED_REPS: [u8] = [
+    0x37u8, 0xA4u8, 0x30u8, 0xECu8,
+    0x78u8, 0x56u8, 0x34u8, 0x12u8,
+    0x82u8, 0x32u8, 0x10u8,
+    0x10u8, 0x3Fu8, 0x10u8, 0x3Fu8, 0x10u8, 0x3Fu8,
+    0x01u8, 0x00u8
+]
+
+# Recommended offset rep1 = 0 -> CorruptStream("recommended offset must be positive").
+val DICT_ZERO_REP: [u8] = [
+    0x37u8, 0xA4u8, 0x30u8, 0xECu8,
+    0x78u8, 0x56u8, 0x34u8, 0x12u8,
+    0x82u8, 0x32u8, 0x10u8,
+    0x10u8, 0x3Fu8, 0x10u8, 0x3Fu8, 0x10u8, 0x3Fu8,
+    0x00u8, 0x00u8, 0x00u8, 0x00u8,
+    0x04u8, 0x00u8, 0x00u8, 0x00u8,
+    0x08u8, 0x00u8, 0x00u8, 0x00u8,
+    0x64u8
+]
+
+# Zstd frame that references DICT_OK by id and carries a single Raw_Block payload
+# "HELLO_DICT!!" (12 bytes). The frame uses single-segment, FCS=4 bytes, DID=4 bytes.
+# Layout:
+#   [0..4):  Magic 0xFD2FB528
+#   [4]:     FHD 0xA3 (FCS_flag=2, single_segment=1, DID_flag=3)
+#   [5..9):  Dictionary_ID 0x12345678 little-endian
+#   [9..13): Frame_Content_Size 12 (u32 LE)
+#   [13..16): Block header (last_block=1, type=0 raw, size=12) little-endian 24-bit
+#   [16..28): Raw payload bytes
+val FRAME_RAW_WITH_DICT: [u8] = [
+    0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8,
+    0xA3u8,
+    0x78u8, 0x56u8, 0x34u8, 0x12u8,
+    0x0Cu8, 0x00u8, 0x00u8, 0x00u8,
+    0x61u8, 0x00u8, 0x00u8,
+    0x48u8, 0x45u8, 0x4Cu8, 0x4Cu8,
+    0x4Fu8, 0x5Fu8, 0x44u8, 0x49u8,
+    0x43u8, 0x54u8, 0x21u8, 0x21u8
+]
+
+fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
+    match err:
+        CompressionError.InvalidHeader(message):
+            expect kind == "InvalidHeader"
+            expect (message).contains(message_part)
+        CompressionError.UnsupportedFeature(message):
+            expect kind == "UnsupportedFeature"
+            expect (message).contains(message_part)
+        CompressionError.TruncatedInput(message):
+            expect kind == "TruncatedInput"
+            expect (message).contains(message_part)
+        CompressionError.ChecksumMismatch(message):
+            expect kind == "ChecksumMismatch"
+            expect (message).contains(message_part)
+        CompressionError.CorruptStream(message):
+            expect kind == "CorruptStream"
+            expect (message).contains(message_part)
+        CompressionError.SizeLimitExceeded(limit):
+            expect kind == "SizeLimitExceeded"
+            expect limit >= 0 == true
+
+# Module-level evaluation forces parser invocation at file-load time so that
+# even under interpreter-mode (which only runs file-load, not `it` bodies per
+# `.claude/memory/feedback_interpreter_test_limits.md`) we still exercise the
+# dictionary parser code path.
+val MODULE_PARSE_OK = zstd_parse_dictionary_for_test(DICT_OK, DICT_OK_ID)
+val MODULE_PARSE_BAD_MAGIC = zstd_parse_dictionary_for_test(DICT_BAD_MAGIC, DICT_OK_ID)
+val MODULE_PARSE_BAD_ID = zstd_parse_dictionary_for_test(DICT_OK, 0xDEADBEEF)
+val MODULE_PARSE_TRUNC = zstd_parse_dictionary_for_test(DICT_TRUNCATED, DICT_OK_ID)
+val MODULE_PARSE_TRUNC_REPS = zstd_parse_dictionary_for_test(DICT_TRUNCATED_REPS, DICT_OK_ID)
+val MODULE_PARSE_ZERO_REP = zstd_parse_dictionary_for_test(DICT_ZERO_REP, DICT_OK_ID)
+val MODULE_DECODE_FRAME = zstd_decompress_frame_with_dictionary(FRAME_RAW_WITH_DICT, DICT_OK, DICT_OK_ID)
+val MODULE_DECODE_FRAME_NO_DICT = zstd_decompress_frame(FRAME_RAW_WITH_DICT)
+
+describe "zstd dictionary-frame decode (RFC 8478 §6)":
+    it "parses a well-formed dictionary blob and seeds entropy state":
+        expect MODULE_PARSE_OK.is_ok() == true
+        val state = MODULE_PARSE_OK.unwrap()
+        expect state.repeat_offsets.rep1 == 1
+        expect state.repeat_offsets.rep2 == 4
+        expect state.repeat_offsets.rep3 == 8
+        expect state.content_prefix.len() == 16
+        expect state.huffman.is_some() == true
+
+    it "rejects a dictionary with a wrong Magic_Number":
+        expect MODULE_PARSE_BAD_MAGIC.is_err() == true
+        _expect_compression_error(MODULE_PARSE_BAD_MAGIC.unwrap_err(), "InvalidHeader", "dictionary magic")
+
+    it "rejects a Dictionary_ID mismatch":
+        expect MODULE_PARSE_BAD_ID.is_err() == true
+        _expect_compression_error(MODULE_PARSE_BAD_ID.unwrap_err(), "CorruptStream", "dictionary id mismatch")
+
+    it "rejects a dictionary truncated after the Huffman section":
+        expect MODULE_PARSE_TRUNC.is_err() == true
+        _expect_compression_error(MODULE_PARSE_TRUNC.unwrap_err(), "TruncatedInput", "FSE")
+
+    it "rejects a dictionary truncated mid recommended offsets":
+        expect MODULE_PARSE_TRUNC_REPS.is_err() == true
+        _expect_compression_error(MODULE_PARSE_TRUNC_REPS.unwrap_err(), "TruncatedInput", "recommended offsets")
+
+    it "rejects a dictionary with a zero recommended offset":
+        expect MODULE_PARSE_ZERO_REP.is_err() == true
+        _expect_compression_error(MODULE_PARSE_ZERO_REP.unwrap_err(), "CorruptStream", "recommended offset")
+
+    it "decodes a Raw_Block frame referencing the dictionary by id":
+        expect MODULE_DECODE_FRAME.is_ok() == true
+        val out = MODULE_DECODE_FRAME.unwrap()
+        expect out.len() == 12
+        # "HELLO_DICT!!" - 0x48 0x45 0x4C 0x4C 0x4F 0x5F 0x44 0x49 0x43 0x54 0x21 0x21
+        expect out[0] == 0x48u8
+        expect out[5] == 0x5Fu8
+        expect out[10] == 0x21u8
+
+    it "rejects a dict-referencing frame when no dictionary is supplied":
+        expect MODULE_DECODE_FRAME_NO_DICT.is_err() == true
+        _expect_compression_error(MODULE_DECODE_FRAME_NO_DICT.unwrap_err(), "UnsupportedFeature", "dictionary-backed frames require")
