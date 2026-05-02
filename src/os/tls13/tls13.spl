@@ -199,6 +199,28 @@ fn _bytes_equal(a: [u8], b: [u8]) -> bool:
         i = i + 1
     true
 
+# Constant-time byte compare for MAC/verify_data — RFC 8446 §4.4.4 advises
+# implementations not to leak verify_data mismatch position via early-exit.
+# We accumulate `acc |= a[i] ^ b[i]` over the full length and only branch on
+# the final accumulator. Length-mismatch still returns false up front (length
+# is not secret in TLS 1.3 Finished — verify_data length is fixed by the
+# negotiated hash: 32 for SHA-256, 48 for SHA-384), but the byte-by-byte loop
+# never short-circuits on the first differing byte.
+#
+# Cross-link (W7-B / W8-2 closeout): the byte-exact MAC round-trip remains
+# blocked on `rt_tls13_sha256` / `rt_tls13_hkdf_expand_label_*` extern
+# registration tracked under W8-6; this helper hardens the in-Simple compare
+# path that runs for non-fd kinds today.
+fn _tls13_ct_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var acc: u8 = 0u8
+    var i: u64 = 0
+    while i < a.len():
+        acc = acc | (_u8_at(a, i) ^ _u8_at(b, i))
+        i = i + 1
+    acc == 0u8
+
 fn _debug_bytes4(label: text, buf: [u8]):
     if buf.len() >= 4:
         _tls_debug("{label} b0={_u8_at(buf, 0)} b1={_u8_at(buf, 1)} b2={_u8_at(buf, 2)} b3={_u8_at(buf, 3)} len={buf.len()}")
@@ -1136,17 +1158,13 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         return Tls13ConnectResult.Failed(reason: "server Finished: length mismatch")
 
     if io.kind == "fd":
+        # Runtime-side compare — rt_tls13_bytes_equal is constant-time in C.
         if rt_tls13_bytes_equal(expected_fin, server_verify_data) != 1:
             return Tls13ConnectResult.Failed(reason: "server Finished: verify_data mismatch")
     else:
-        var fin_ok: bool = true
-        var fi: u64 = 0
-        while fi < expected_fin.len():
-            if expected_fin[fi] != server_verify_data[fi]:
-                fin_ok = false
-            fi = fi + 1
-
-        if not fin_ok:
+        # Pure-Simple constant-time compare per RFC 8446 §4.4.4 / B6 — no early
+        # exit on first differing byte. See _tls13_ct_bytes_equal above.
+        if not _tls13_ct_bytes_equal(expected_fin, server_verify_data):
             return Tls13ConnectResult.Failed(reason: "server Finished: verify_data mismatch")
     _tls_debug("after server finished verify")
 

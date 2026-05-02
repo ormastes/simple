@@ -35,8 +35,29 @@ fn compute_slice_indices(start: i64, end: Option<i64>, len: i64, inclusive: bool
 }
 
 fn require_integer_index_value(value: &Value, context: &str) -> Result<i64, CompileError> {
-    if let Value::Int(i) = value {
-        return Ok(*i);
+    match value {
+        Value::Int(i) => return Ok(*i),
+        Value::UInt { value, .. } => {
+            return i64::try_from(*value).map_err(|_| {
+                let help = match context {
+                    "array" | "frozen array" | "fixed-size array" | "tuple" | "string" => {
+                        format!("{context} indices must fit in signed 64-bit range")
+                    }
+                    "slice start" | "slice end" | "slice step" => {
+                        format!("{context} must fit in signed 64-bit range")
+                    }
+                    _ => format!("{context} must fit in signed 64-bit range"),
+                };
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_INDEX_TYPE)
+                    .with_help(help);
+                CompileError::semantic_with_context(
+                    format!("cannot index {context} with value `{}`", value.type_name()),
+                    ctx,
+                )
+            });
+        }
+        _ => {}
     }
 
     let help = match context {

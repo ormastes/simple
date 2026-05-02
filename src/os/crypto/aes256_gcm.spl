@@ -11,11 +11,12 @@
 #
 # Required by TLS_AES_256_GCM_SHA384 (RFC 8446 §9.1, code point 0x1302).
 
+use std.simd.{Vec16u8, simd_aes_round, simd_aes_round_last}
+
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn rt_aes_sbox(i: i64) -> i64
 extern fn rt_aes_rcon(i: i64) -> i64
-extern fn rt_aes256_encrypt_block_into(key: [u8], block: [u8], out: [u8]) -> i64
 extern fn rt_tls13_aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
 extern fn rt_tls13_aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
 
@@ -104,24 +105,90 @@ fn aes256_key_expansion(key: [u8]) -> [u8]:
     expanded
 
 # ============================================================================
-# AES-256 Encryption (single block) — extern-backed
+# AES-256 Encryption (single block) — SIMD round path via W6-A AES-NI primitives
 # ============================================================================
 
-fn aes256_encrypt_block(plaintext: [u8], key: [u8]) -> [u8]:
-    """Encrypt one 16-byte block with AES-256 using the runtime helper.
-
-    Note: unlike AES-128, the extern takes the raw 32-byte key (not the
-    expanded schedule), since rt_aes256_encrypt_block_into runs key
-    expansion internally.
+fn _xor_v16(a: Vec16u8, b: Vec16u8) -> Vec16u8:
+    """Lane-wise XOR of two Vec16u8 vectors. Used for the initial AddRoundKey
+    (state XOR K0) before round 1 of AES-256 encrypt.
     """
-    var output: [u8] = rt_array_new_with_cap(16)
-    var i: u64 = 0
-    while i < 16:
-        output.push(0x00)
-        i = i + 1
-    if rt_aes256_encrypt_block_into(key, plaintext, output) != 0:
-        return []
-    output
+    Vec16u8(
+        u0:  a.u0  ^ b.u0,
+        u1:  a.u1  ^ b.u1,
+        u2:  a.u2  ^ b.u2,
+        u3:  a.u3  ^ b.u3,
+        u4:  a.u4  ^ b.u4,
+        u5:  a.u5  ^ b.u5,
+        u6:  a.u6  ^ b.u6,
+        u7:  a.u7  ^ b.u7,
+        u8_: a.u8_ ^ b.u8_,
+        u9:  a.u9  ^ b.u9,
+        u10: a.u10 ^ b.u10,
+        u11: a.u11 ^ b.u11,
+        u12: a.u12 ^ b.u12,
+        u13: a.u13 ^ b.u13,
+        u14: a.u14 ^ b.u14,
+        u15: a.u15 ^ b.u15,
+    )
+
+fn _load_round_key_v(schedule: [u8], round_idx: u64) -> Vec16u8:
+    """Load the 16-byte round key R from the 240-byte AES-256 schedule
+    into a Vec16u8 (round_idx in 0..=14).
+    """
+    val base = round_idx * 16
+    Vec16u8(
+        u0:  _u8_at(schedule, base + 0),
+        u1:  _u8_at(schedule, base + 1),
+        u2:  _u8_at(schedule, base + 2),
+        u3:  _u8_at(schedule, base + 3),
+        u4:  _u8_at(schedule, base + 4),
+        u5:  _u8_at(schedule, base + 5),
+        u6:  _u8_at(schedule, base + 6),
+        u7:  _u8_at(schedule, base + 7),
+        u8_: _u8_at(schedule, base + 8),
+        u9:  _u8_at(schedule, base + 9),
+        u10: _u8_at(schedule, base + 10),
+        u11: _u8_at(schedule, base + 11),
+        u12: _u8_at(schedule, base + 12),
+        u13: _u8_at(schedule, base + 13),
+        u14: _u8_at(schedule, base + 14),
+        u15: _u8_at(schedule, base + 15),
+    )
+
+fn _aes256_encrypt_block_with_schedule(plaintext: [u8], schedule: [u8]) -> [u8]:
+    """Encrypt one 16-byte block with AES-256 using the SIMD round path,
+    given a pre-computed 240-byte key schedule.
+
+    AES-256 = 14 rounds = 1 initial AddRoundKey + 13 simd_aes_round + 1
+    simd_aes_round_last. The round kernel matches Intel _mm_aesenc_si128 /
+    ARM vaeseq_u8 + vaesmcq_u8; it is byte-identical to AES-128 — only the
+    round count and schedule length (240 B vs 176 B) differ.
+
+    Use this in tight loops (e.g. gctr256) to amortize the key-expansion
+    cost across many blocks; for one-shot calls, see aes256_encrypt_block.
+    """
+    val pt_v = Vec16u8.from_array(plaintext)
+    val k0 = _load_round_key_v(schedule, 0)
+    var state = _xor_v16(pt_v, k0)
+    var r: u64 = 1
+    while r < 14:
+        val rk = _load_round_key_v(schedule, r)
+        state = simd_aes_round(state, rk)
+        r = r + 1
+    val k14 = _load_round_key_v(schedule, 14)
+    state = simd_aes_round_last(state, k14)
+    state.to_array()
+
+fn aes256_encrypt_block(plaintext: [u8], key: [u8]) -> [u8]:
+    """Encrypt one 16-byte block with AES-256 via the SIMD round path.
+
+    Expands the 32-byte key to a 240-byte schedule (15 × 16-byte round keys
+    via aes256_key_expansion), then performs the 14-round encryption using
+    std.simd.simd_aes_round / simd_aes_round_last (W6-A Phase 2 AES-NI
+    primitives).
+    """
+    val schedule = aes256_key_expansion(key)
+    _aes256_encrypt_block_with_schedule(plaintext, schedule)
 
 # ============================================================================
 # GF(2^128) Multiplication for GHASH

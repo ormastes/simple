@@ -1040,6 +1040,12 @@ pub(super) fn eval_op_expr(
                         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
                         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
                         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
+                        // f32 scalar arms — preserve Float32 precision; mixed Float32/Float64 widens to Float64.
+                        (Value::Float32(a), Value::Float32(b)) => Ok(Value::Float32(a * b)),
+                        (Value::Int(a), Value::Float32(b)) => Ok(Value::Float32(*a as f32 * b)),
+                        (Value::Float32(a), Value::Int(b)) => Ok(Value::Float32(a * *b as f32)),
+                        (Value::Float(a), Value::Float32(b)) => Ok(Value::Float(a * (*b as f64))),
+                        (Value::Float32(a), Value::Float(b)) => Ok(Value::Float((*a as f64) * b)),
 
                         // Array @ Array - proper matrix multiplication
                         (Value::Array(a), Value::Array(b)) => {
@@ -1397,11 +1403,15 @@ fn matmul_dot_product_1d(a: &[Value], b: &[Value]) -> Result<Value, CompileError
 
     let mut sum = Value::Int(0);
     let mut is_float = false;
+    let mut is_f32 = false;
 
     for (ai, bi) in a.iter().zip(b.iter()) {
-        // Check if we need float mode
+        // Check precision mode: Float64 wins over Float32 (matches scalar Add/Sub/Mul).
         if matches!(ai, Value::Float(_)) || matches!(bi, Value::Float(_)) {
             is_float = true;
+        }
+        if matches!(ai, Value::Float32(_)) || matches!(bi, Value::Float32(_)) {
+            is_f32 = true;
         }
 
         let prod = match (ai, bi) {
@@ -1409,6 +1419,12 @@ fn matmul_dot_product_1d(a: &[Value], b: &[Value]) -> Result<Value, CompileError
             (Value::Float(x), Value::Float(y)) => Value::Float(x * y),
             (Value::Int(x), Value::Float(y)) => Value::Float(*x as f64 * y),
             (Value::Float(x), Value::Int(y)) => Value::Float(x * *y as f64),
+            // f32 arms — preserve precision; widen to f64 when mixed with Float.
+            (Value::Float32(x), Value::Float32(y)) => Value::Float32(x * y),
+            (Value::Int(x), Value::Float32(y)) => Value::Float32(*x as f32 * y),
+            (Value::Float32(x), Value::Int(y)) => Value::Float32(x * *y as f32),
+            (Value::Float(x), Value::Float32(y)) => Value::Float(x * (*y as f64)),
+            (Value::Float32(x), Value::Float(y)) => Value::Float((*x as f64) * y),
             _ => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -1425,13 +1441,26 @@ fn matmul_dot_product_1d(a: &[Value], b: &[Value]) -> Result<Value, CompileError
             (Value::Float(s), Value::Float(p)) => Value::Float(s + p),
             (Value::Int(s), Value::Float(p)) => Value::Float(s as f64 + p),
             (Value::Float(s), Value::Int(p)) => Value::Float(s + p as f64),
+            // f32 sum arms.
+            (Value::Float32(s), Value::Float32(p)) => Value::Float32(s + p),
+            (Value::Int(s), Value::Float32(p)) => Value::Float32(s as f32 + p),
+            (Value::Float32(s), Value::Int(p)) => Value::Float32(s + p as f32),
+            // Mixed Float32/Float — widen to Float64.
+            (Value::Float(s), Value::Float32(p)) => Value::Float(s + p as f64),
+            (Value::Float32(s), Value::Float(p)) => Value::Float(s as f64 + p),
             _ => unreachable!(),
         };
     }
 
-    // Convert to float if needed
-    if is_float && matches!(sum, Value::Int(_)) {
-        sum = Value::Float(sum.as_int()? as f64);
+    // Convert to float if needed. Float64 wins over Float32 in mixed mode.
+    if is_float {
+        if matches!(sum, Value::Int(_)) {
+            sum = Value::Float(sum.as_int()? as f64);
+        } else if let Value::Float32(f) = sum {
+            sum = Value::Float(f as f64);
+        }
+    } else if is_f32 && matches!(sum, Value::Int(_)) {
+        sum = Value::Float32(sum.as_int()? as f32);
     }
 
     Ok(sum)
@@ -1494,6 +1523,7 @@ fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileE
         for j in 0..q {
             let mut sum = Value::Int(0);
             let mut is_float = false;
+            let mut is_f32 = false;
 
             for k in 0..n {
                 let a_ik = &a_row[k];
@@ -1508,9 +1538,12 @@ fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileE
                 };
                 let b_kj = &b_row[j];
 
-                // Check if we need float mode
+                // Check precision mode: Float64 wins over Float32.
                 if matches!(a_ik, Value::Float(_)) || matches!(b_kj, Value::Float(_)) {
                     is_float = true;
+                }
+                if matches!(a_ik, Value::Float32(_)) || matches!(b_kj, Value::Float32(_)) {
+                    is_f32 = true;
                 }
 
                 let prod = match (a_ik, b_kj) {
@@ -1518,6 +1551,12 @@ fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileE
                     (Value::Float(x), Value::Float(y)) => Value::Float(x * y),
                     (Value::Int(x), Value::Float(y)) => Value::Float(*x as f64 * y),
                     (Value::Float(x), Value::Int(y)) => Value::Float(x * *y as f64),
+                    // f32 arms.
+                    (Value::Float32(x), Value::Float32(y)) => Value::Float32(x * y),
+                    (Value::Int(x), Value::Float32(y)) => Value::Float32(*x as f32 * y),
+                    (Value::Float32(x), Value::Int(y)) => Value::Float32(x * *y as f32),
+                    (Value::Float(x), Value::Float32(y)) => Value::Float(x * (*y as f64)),
+                    (Value::Float32(x), Value::Float(y)) => Value::Float((*x as f64) * y),
                     _ => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
@@ -1534,13 +1573,26 @@ fn matmul_matrix_multiply_2d(a: &[Value], b: &[Value]) -> Result<Value, CompileE
                     (Value::Float(s), Value::Float(p)) => Value::Float(s + p),
                     (Value::Int(s), Value::Float(p)) => Value::Float(s as f64 + p),
                     (Value::Float(s), Value::Int(p)) => Value::Float(s + p as f64),
+                    // f32 sum arms.
+                    (Value::Float32(s), Value::Float32(p)) => Value::Float32(s + p),
+                    (Value::Int(s), Value::Float32(p)) => Value::Float32(s as f32 + p),
+                    (Value::Float32(s), Value::Int(p)) => Value::Float32(s + p as f32),
+                    // Mixed Float32/Float — widen to Float64.
+                    (Value::Float(s), Value::Float32(p)) => Value::Float(s + p as f64),
+                    (Value::Float32(s), Value::Float(p)) => Value::Float(s as f64 + p),
                     _ => unreachable!(),
                 };
             }
 
-            // Convert to float if needed
-            if is_float && matches!(sum, Value::Int(_)) {
-                sum = Value::Float(sum.as_int()? as f64);
+            // Convert to float if needed. Float64 wins over Float32 in mixed mode.
+            if is_float {
+                if matches!(sum, Value::Int(_)) {
+                    sum = Value::Float(sum.as_int()? as f64);
+                } else if let Value::Float32(f) = sum {
+                    sum = Value::Float(f as f64);
+                }
+            } else if is_f32 && matches!(sum, Value::Int(_)) {
+                sum = Value::Float32(sum.as_int()? as f32);
             }
 
             row.push(sum);
@@ -1590,6 +1642,7 @@ fn matmul_matrix_vector(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
         };
         let mut sum = Value::Int(0);
         let mut is_float = false;
+        let mut is_f32 = false;
 
         for k in 0..n {
             let a_ik = &a_row[k];
@@ -1598,12 +1651,21 @@ fn matmul_matrix_vector(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
             if matches!(a_ik, Value::Float(_)) || matches!(b_k, Value::Float(_)) {
                 is_float = true;
             }
+            if matches!(a_ik, Value::Float32(_)) || matches!(b_k, Value::Float32(_)) {
+                is_f32 = true;
+            }
 
             let prod = match (a_ik, b_k) {
                 (Value::Int(x), Value::Int(y)) => Value::Int(x * y),
                 (Value::Float(x), Value::Float(y)) => Value::Float(x * y),
                 (Value::Int(x), Value::Float(y)) => Value::Float(*x as f64 * y),
                 (Value::Float(x), Value::Int(y)) => Value::Float(x * *y as f64),
+                // f32 arms.
+                (Value::Float32(x), Value::Float32(y)) => Value::Float32(x * y),
+                (Value::Int(x), Value::Float32(y)) => Value::Float32(*x as f32 * y),
+                (Value::Float32(x), Value::Int(y)) => Value::Float32(x * *y as f32),
+                (Value::Float(x), Value::Float32(y)) => Value::Float(x * (*y as f64)),
+                (Value::Float32(x), Value::Float(y)) => Value::Float((*x as f64) * y),
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::TYPE_MISMATCH)
@@ -1620,12 +1682,25 @@ fn matmul_matrix_vector(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
                 (Value::Float(s), Value::Float(p)) => Value::Float(s + p),
                 (Value::Int(s), Value::Float(p)) => Value::Float(s as f64 + p),
                 (Value::Float(s), Value::Int(p)) => Value::Float(s + p as f64),
+                // f32 sum arms.
+                (Value::Float32(s), Value::Float32(p)) => Value::Float32(s + p),
+                (Value::Int(s), Value::Float32(p)) => Value::Float32(s as f32 + p),
+                (Value::Float32(s), Value::Int(p)) => Value::Float32(s + p as f32),
+                // Mixed Float32/Float — widen to Float64.
+                (Value::Float(s), Value::Float32(p)) => Value::Float(s + p as f64),
+                (Value::Float32(s), Value::Float(p)) => Value::Float(s as f64 + p),
                 _ => unreachable!(),
             };
         }
 
-        if is_float && matches!(sum, Value::Int(_)) {
-            sum = Value::Float(sum.as_int()? as f64);
+        if is_float {
+            if matches!(sum, Value::Int(_)) {
+                sum = Value::Float(sum.as_int()? as f64);
+            } else if let Value::Float32(f) = sum {
+                sum = Value::Float(f as f64);
+            }
+        } else if is_f32 && matches!(sum, Value::Int(_)) {
+            sum = Value::Float32(sum.as_int()? as f32);
         }
 
         result.push(sum);
@@ -1665,6 +1740,7 @@ fn matmul_vector_matrix(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
     for j in 0..q {
         let mut sum = Value::Int(0);
         let mut is_float = false;
+        let mut is_f32 = false;
 
         for k in 0..m {
             let a_k = &a[k];
@@ -1682,12 +1758,21 @@ fn matmul_vector_matrix(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
             if matches!(a_k, Value::Float(_)) || matches!(b_kj, Value::Float(_)) {
                 is_float = true;
             }
+            if matches!(a_k, Value::Float32(_)) || matches!(b_kj, Value::Float32(_)) {
+                is_f32 = true;
+            }
 
             let prod = match (a_k, b_kj) {
                 (Value::Int(x), Value::Int(y)) => Value::Int(x * y),
                 (Value::Float(x), Value::Float(y)) => Value::Float(x * y),
                 (Value::Int(x), Value::Float(y)) => Value::Float(*x as f64 * y),
                 (Value::Float(x), Value::Int(y)) => Value::Float(x * *y as f64),
+                // f32 arms.
+                (Value::Float32(x), Value::Float32(y)) => Value::Float32(x * y),
+                (Value::Int(x), Value::Float32(y)) => Value::Float32(*x as f32 * y),
+                (Value::Float32(x), Value::Int(y)) => Value::Float32(x * *y as f32),
+                (Value::Float(x), Value::Float32(y)) => Value::Float(x * (*y as f64)),
+                (Value::Float32(x), Value::Float(y)) => Value::Float((*x as f64) * y),
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::TYPE_MISMATCH)
@@ -1704,12 +1789,25 @@ fn matmul_vector_matrix(a: &[Value], b: &[Value]) -> Result<Value, CompileError>
                 (Value::Float(s), Value::Float(p)) => Value::Float(s + p),
                 (Value::Int(s), Value::Float(p)) => Value::Float(s as f64 + p),
                 (Value::Float(s), Value::Int(p)) => Value::Float(s + p as f64),
+                // f32 sum arms.
+                (Value::Float32(s), Value::Float32(p)) => Value::Float32(s + p),
+                (Value::Int(s), Value::Float32(p)) => Value::Float32(s as f32 + p),
+                (Value::Float32(s), Value::Int(p)) => Value::Float32(s + p as f32),
+                // Mixed Float32/Float — widen to Float64.
+                (Value::Float(s), Value::Float32(p)) => Value::Float(s + p as f64),
+                (Value::Float32(s), Value::Float(p)) => Value::Float(s as f64 + p),
                 _ => unreachable!(),
             };
         }
 
-        if is_float && matches!(sum, Value::Int(_)) {
-            sum = Value::Float(sum.as_int()? as f64);
+        if is_float {
+            if matches!(sum, Value::Int(_)) {
+                sum = Value::Float(sum.as_int()? as f64);
+            } else if let Value::Float32(f) = sum {
+                sum = Value::Float(f as f64);
+            }
+        } else if is_f32 && matches!(sum, Value::Int(_)) {
+            sum = Value::Float32(sum.as_int()? as f32);
         }
 
         result.push(sum);

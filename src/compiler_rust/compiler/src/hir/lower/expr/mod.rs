@@ -20,6 +20,40 @@ use crate::hir::types::*;
 use crate::value::BUILTIN_SPAWN;
 
 impl Lowerer {
+    fn builtin_numeric_method_result_type(&self, receiver_ty: TypeId, method: &str) -> Option<TypeId> {
+        let is_numeric = matches!(
+            receiver_ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+        );
+        if !is_numeric {
+            return None;
+        }
+
+        match method {
+            "to_string" | "to_text" => Some(TypeId::STRING),
+            "to_int" | "to_i64" => Some(TypeId::I64),
+            "to_i8" => Some(TypeId::I8),
+            "to_i16" => Some(TypeId::I16),
+            "to_i32" => Some(TypeId::I32),
+            "to_u8" => Some(TypeId::U8),
+            "to_u16" => Some(TypeId::U16),
+            "to_u32" => Some(TypeId::U32),
+            "to_u64" => Some(TypeId::U64),
+            "to_f32" => Some(TypeId::F32),
+            "to_float" | "to_f64" => Some(TypeId::F64),
+            _ => None,
+        }
+    }
+
     fn enum_payload_type_for_builtin_method(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Enum { variants, .. }) => variants
@@ -508,6 +542,18 @@ impl Lowerer {
 
         // Lower arguments
         let hir_args = self.lower_call_args(args, ctx)?;
+
+        if let Some(ty) = self.builtin_numeric_method_result_type(receiver.ty, method) {
+            return Ok(Some(HirExpr {
+                kind: HirExprKind::MethodCall {
+                    receiver: Box::new(receiver.clone()),
+                    method: method.to_string(),
+                    args: hir_args,
+                    dispatch: DispatchMode::Static,
+                },
+                ty,
+            }));
+        }
 
         // String methods
         if is_string {

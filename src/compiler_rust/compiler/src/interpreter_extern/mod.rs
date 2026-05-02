@@ -78,6 +78,7 @@ pub mod pbkdf2;
 pub mod ffi_string;
 pub mod collections;
 pub mod lexer_ffi;
+pub mod tls13;
 pub mod i18n;
 pub mod native_ffi;
 pub mod package;
@@ -457,6 +458,20 @@ pub(crate) fn call_extern_function(
         "rt_pbkdf2_hmac_sha256" => pbkdf2::rt_pbkdf2_hmac_sha256(&evaluated),
         "rt_pbkdf2_hmac_sha384" => pbkdf2::rt_pbkdf2_hmac_sha384(&evaluated),
         "rt_pbkdf2_hmac_sha512" => pbkdf2::rt_pbkdf2_hmac_sha512(&evaluated),
+        "rt_tls13_sha256" => tls13::rt_tls13_sha256(&evaluated),
+        "rt_tls13_hkdf_extract" => tls13::rt_tls13_hkdf_extract(&evaluated),
+        "rt_tls13_hkdf_extract_into" => tls13::rt_tls13_hkdf_extract_into(&evaluated),
+        "rt_tls13_hkdf_expand_into" => tls13::rt_tls13_hkdf_expand_into(&evaluated),
+        "rt_tls13_hkdf_expand_label" => tls13::rt_tls13_hkdf_expand_label(&evaluated),
+        "rt_tls13_hkdf_expand_label_into" => tls13::rt_tls13_hkdf_expand_label_into(&evaluated),
+        "rt_tls13_hkdf_expand_label_derived" => tls13::rt_tls13_hkdf_expand_label_derived(&evaluated),
+        "rt_tls13_hkdf_expand_label_key" => tls13::rt_tls13_hkdf_expand_label_key(&evaluated),
+        "rt_tls13_hkdf_expand_label_iv" => tls13::rt_tls13_hkdf_expand_label_iv(&evaluated),
+        "rt_tls13_hkdf_expand_label_finished" => tls13::rt_tls13_hkdf_expand_label_finished(&evaluated),
+        "rt_tls13_hkdf_expand_label_client_hs" => tls13::rt_tls13_hkdf_expand_label_client_hs(&evaluated),
+        "rt_tls13_hkdf_expand_label_server_hs" => tls13::rt_tls13_hkdf_expand_label_server_hs(&evaluated),
+        "rt_tls13_hkdf_expand_label_client_app" => tls13::rt_tls13_hkdf_expand_label_client_app(&evaluated),
+        "rt_tls13_hkdf_expand_label_server_app" => tls13::rt_tls13_hkdf_expand_label_server_app(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)
