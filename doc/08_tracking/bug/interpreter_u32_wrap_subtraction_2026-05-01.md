@@ -1,10 +1,13 @@
 # Interpreter `0u32 - (x >> 31u32)` does not wrap to `0xFFFFFFFF`
 
-**Status:** Open (worked around in F's LZMA2 lane)
+**Status: FIXED 2026-05-01 — root cause: Rust seed interpreter held all integers as `Value::Int(i64)` with no width tag, so unsigned arithmetic on u32-typed expressions did not wrap modulo 2^32; fix: Path B — added `Value::UInt { value: u64, width: u8 }` variant. Literals/casts/u32-typed `val` annotations now produce UInt; `Add`/`Sub`/`Mul`/`Neg` + bitwise/shift in `interpreter/expr/ops.rs` apply `wrapping_*` at width when at least one operand is UInt. `as_int()` falls through (UInt→i64) so existing `Value::Int` read sites keep working. Verified via `bin/release/x86_64-unknown-linux-gnu/simple run /tmp/u32_wrap_repro/main.spl` and seed binary; regression spec at `test/unit/compiler/interpreter/u32_wrap_arith_spec.spl`. F's LZMA2 branchful workaround in `_lzma_decode_direct` is retained for backend portability.**
+
 **Date filed:** 2026-05-01
+**Date fixed:** 2026-05-01
 **Discovered by:** F's range-coder work in `src/lib/common/compress/lzma2.spl`
   (commit `ede1266ef3` — `feat(lzma2): pure-Simple range coder + LZMA2
   compressed chunk decode`; jj change `oxtxxvlsylxo`).
+**Fixed by:** seed interpreter Value::UInt variant + ops.rs wrap helpers.
 
 ## Symptom
 
