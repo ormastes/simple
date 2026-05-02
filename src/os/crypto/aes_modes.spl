@@ -1,0 +1,240 @@
+#![allow(unnamed_duplicate_typed_args)]
+# AES-OFB and AES-CFB Block Cipher Modes
+# NIST SP 800-38A §6.3 (CFB) and §6.4 (OFB)
+# Pure Simple — delegates AES block encrypt to rt_aes128/256_encrypt_block_pure.
+# IMPORTANT: arrays passed to rt_aes*_encrypt_block_pure must contain Value::Int
+# elements. Use rt_bytes_u8_at (returns i64) and push i64 directly. No .to_u8().
+# See bug: doc/08_tracking/bug/aes_extern_expect_byte_array_u8_reject_2026-05-02.md
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_aes128_encrypt_block_pure(key: [u8], block: [u8]) -> [u8]
+extern fn rt_aes256_encrypt_block_pure(key: [u8], block: [u8]) -> [u8]
+
+fn _b(buf: [u8], idx: i64) -> i64:
+    rt_bytes_u8_at(buf, idx)
+
+fn _block16(buf: [u8], start: i64) -> [u8]:
+    var b: [u8] = rt_array_new_with_cap(16)
+    var i: i64 = 0
+    while i < 16:
+        b.push(_b(buf, start + i))
+        i = i + 1
+    b
+
+fn _key_block(key: [u8], klen: i64) -> [u8]:
+    var b: [u8] = rt_array_new_with_cap(klen)
+    var i: i64 = 0
+    while i < klen:
+        b.push(_b(key, i))
+        i = i + 1
+    b
+
+fn _shift_left_1(reg: [u8], new_byte: i64) -> [u8]:
+    var r: [u8] = rt_array_new_with_cap(16)
+    var i: i64 = 1
+    while i < 16:
+        r.push(_b(reg, i))
+        i = i + 1
+    r.push(new_byte)
+    r
+
+fn _aes128_ofb_core(key: [u8], iv: [u8], data: [u8]) -> [u8]:
+    val kblock = _key_block(key, 16)
+    val n: i64 = data.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var oi: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        oi = rt_aes128_encrypt_block_pure(kblock, oi)
+        var seg: i64 = 16
+        if n - pos < 16:
+            seg = n - pos
+        var j: i64 = 0
+        while j < seg:
+            result.push(_b(data, pos + j) ^ _b(oi, j))
+            j = j + 1
+        pos = pos + 16
+    result
+
+fn aes128_ofb_encrypt(key: [u8], iv: [u8], pt: [u8]) -> [u8]:
+    _aes128_ofb_core(key, iv, pt)
+
+fn aes128_ofb_decrypt(key: [u8], iv: [u8], ct: [u8]) -> [u8]:
+    _aes128_ofb_core(key, iv, ct)
+
+fn _aes256_ofb_core(key: [u8], iv: [u8], data: [u8]) -> [u8]:
+    val kblock = _key_block(key, 32)
+    val n: i64 = data.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var oi: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        oi = rt_aes256_encrypt_block_pure(kblock, oi)
+        var seg: i64 = 16
+        if n - pos < 16:
+            seg = n - pos
+        var j: i64 = 0
+        while j < seg:
+            result.push(_b(data, pos + j) ^ _b(oi, j))
+            j = j + 1
+        pos = pos + 16
+    result
+
+fn aes256_ofb_encrypt(key: [u8], iv: [u8], pt: [u8]) -> [u8]:
+    _aes256_ofb_core(key, iv, pt)
+
+fn aes256_ofb_decrypt(key: [u8], iv: [u8], ct: [u8]) -> [u8]:
+    _aes256_ofb_core(key, iv, ct)
+
+fn aes128_cfb128_encrypt(key: [u8], iv: [u8], pt: [u8]) -> [u8]:
+    val kblock = _key_block(key, 16)
+    val n: i64 = pt.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var shift_reg: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        val oj: [u8] = rt_aes128_encrypt_block_pure(kblock, shift_reg)
+        var seg: i64 = 16
+        if n - pos < 16:
+            seg = n - pos
+        var ct_seg: [u8] = rt_array_new_with_cap(seg)
+        var j: i64 = 0
+        while j < seg:
+            ct_seg.push(_b(pt, pos + j) ^ _b(oj, j))
+            j = j + 1
+        j = 0
+        while j < seg:
+            result.push(_b(ct_seg, j))
+            j = j + 1
+        shift_reg = ct_seg
+        pos = pos + 16
+    result
+
+fn aes128_cfb128_decrypt(key: [u8], iv: [u8], ct: [u8]) -> [u8]:
+    val kblock = _key_block(key, 16)
+    val n: i64 = ct.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var shift_reg: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        val oj: [u8] = rt_aes128_encrypt_block_pure(kblock, shift_reg)
+        var seg: i64 = 16
+        if n - pos < 16:
+            seg = n - pos
+        var ct_seg: [u8] = rt_array_new_with_cap(seg)
+        var j: i64 = 0
+        while j < seg:
+            ct_seg.push(_b(ct, pos + j))
+            j = j + 1
+        j = 0
+        while j < seg:
+            result.push(_b(ct_seg, j) ^ _b(oj, j))
+            j = j + 1
+        shift_reg = ct_seg
+        pos = pos + 16
+    result
+
+fn aes256_cfb128_encrypt(key: [u8], iv: [u8], pt: [u8]) -> [u8]:
+    val kblock = _key_block(key, 32)
+    val n: i64 = pt.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var shift_reg: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        val oj: [u8] = rt_aes256_encrypt_block_pure(kblock, shift_reg)
+        var seg: i64 = 16
+        if n - pos < 16:
+            seg = n - pos
+        var ct_seg: [u8] = rt_array_new_with_cap(seg)
+        var j: i64 = 0
+        while j < seg:
+            ct_seg.push(_b(pt, pos + j) ^ _b(oj, j))
+            j = j + 1
+        j = 0
+        while j < seg:
+            result.push(_b(ct_seg, j))
+            j = j + 1
+        shift_reg = ct_seg
+        pos = pos + 16
+    result
+
+fn aes256_cfb128_decrypt(key: [u8], iv: [u8], ct: [u8]) -> [u8]:
+    val kblock = _key_block(key, 32)
+    val n: i64 = ct.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var shift_reg: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        val oj: [u8] = rt_aes256_encrypt_block_pure(kblock, shift_reg)
+        var seg: i64 = 16
+        if n - pos < 16:
+            seg = n - pos
+        var ct_seg: [u8] = rt_array_new_with_cap(seg)
+        var j: i64 = 0
+        while j < seg:
+            ct_seg.push(_b(ct, pos + j))
+            j = j + 1
+        j = 0
+        while j < seg:
+            result.push(_b(ct_seg, j) ^ _b(oj, j))
+            j = j + 1
+        shift_reg = ct_seg
+        pos = pos + 16
+    result
+
+fn aes128_cfb8_encrypt(key: [u8], iv: [u8], pt: [u8]) -> [u8]:
+    val kblock = _key_block(key, 16)
+    val n: i64 = pt.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var shift_reg: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        val oj: [u8] = rt_aes128_encrypt_block_pure(kblock, shift_reg)
+        val ct_byte = _b(pt, pos) ^ _b(oj, 0)
+        result.push(ct_byte)
+        shift_reg = _shift_left_1(shift_reg, ct_byte)
+        pos = pos + 1
+    result
+
+fn aes128_cfb8_decrypt(key: [u8], iv: [u8], ct: [u8]) -> [u8]:
+    val kblock = _key_block(key, 16)
+    val n: i64 = ct.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var shift_reg: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        val oj: [u8] = rt_aes128_encrypt_block_pure(kblock, shift_reg)
+        val ct_byte = _b(ct, pos)
+        result.push(ct_byte ^ _b(oj, 0))
+        shift_reg = _shift_left_1(shift_reg, ct_byte)
+        pos = pos + 1
+    result
+
+fn aes256_cfb8_encrypt(key: [u8], iv: [u8], pt: [u8]) -> [u8]:
+    val kblock = _key_block(key, 32)
+    val n: i64 = pt.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var shift_reg: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        val oj: [u8] = rt_aes256_encrypt_block_pure(kblock, shift_reg)
+        val ct_byte = _b(pt, pos) ^ _b(oj, 0)
+        result.push(ct_byte)
+        shift_reg = _shift_left_1(shift_reg, ct_byte)
+        pos = pos + 1
+    result
+
+fn aes256_cfb8_decrypt(key: [u8], iv: [u8], ct: [u8]) -> [u8]:
+    val kblock = _key_block(key, 32)
+    val n: i64 = ct.length().to_i64()
+    var result: [u8] = rt_array_new_with_cap(n)
+    var shift_reg: [u8] = _block16(iv, 0)
+    var pos: i64 = 0
+    while pos < n:
+        val oj: [u8] = rt_aes256_encrypt_block_pure(kblock, shift_reg)
+        val ct_byte = _b(ct, pos)
+        result.push(ct_byte ^ _b(oj, 0))
+        shift_reg = _shift_left_1(shift_reg, ct_byte)
+        pos = pos + 1
+    result

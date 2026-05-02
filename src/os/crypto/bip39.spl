@@ -1,0 +1,259 @@
+# BIP-39 Mnemonic Code for Generating Deterministic Keys
+#
+# Pure-Simple implementation of BIP-0039:
+#   https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+#
+# Entropy → Mnemonic:
+#   1. ENT bytes (128/160/192/224/256 bits)
+#   2. Checksum CS = SHA-256(ENT)[0..ENT_bits/32] bits
+#   3. ENT || CS → 11-bit groups → wordlist indices → words
+#
+# Mnemonic → Seed:
+#   seed = PBKDF2-HMAC-SHA-512(mnemonic_NFKD, "mnemonic" || passphrase, c=2048, dk=64)
+#   For English ASCII mnemonics NFKD = identity.
+#
+# References:
+#   BIP-0039: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+#   Test vectors: https://github.com/trezor/python-mnemonic/blob/master/vectors.json
+
+use os.crypto.bip39_wordlist.{bip39_word, bip39_word_index}
+use std.crypto.pbkdf2.{pbkdf2_sha512_bytes}
+use std.crypto.sha256.{sha256_bytes}
+
+# ============================================================================
+# Error type
+# ============================================================================
+
+enum Bip39Error:
+    InvalidEntropyLength
+    InvalidChecksum
+    UnknownWord
+    InvalidWordCount
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+# Convert a list of i64 bytes to [u8]
+fn _list_to_u8(buf: list) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < buf.len():
+        result.push(buf.get(i).to_i64().to_u8())
+        i = i + 1
+    result
+
+# Convert [u8] to list of i64
+fn _u8_to_list(buf: [u8]) -> list:
+    var result = []
+    var i: u64 = 0
+    while i < buf.len().to_u64():
+        result.push(buf[i].to_i64())
+        i = i + 1
+    result
+
+# Extract `count` bits starting at bit offset `bit_off` from a list of i64 bytes.
+# Returns the integer value of those bits.
+fn _extract_bits(bytes: list, bit_off: i64, count: i64) -> i64:
+    var acc = 0
+    var bi = 0
+    while bi < count:
+        val abs_bit = bit_off + bi
+        val byte_idx = abs_bit / 8
+        val bit_in_byte = 7 - (abs_bit & 7)
+        val byte_val = bytes.get(byte_idx)
+        val bit_val = (byte_val >> bit_in_byte) & 1
+        acc = (acc << 1) | bit_val
+        bi = bi + 1
+    acc
+
+# Get a single bit from list of i64 bytes.
+fn _get_bit(bytes: list, bit_idx: i64) -> i64:
+    val byte_idx = bit_idx / 8
+    val bit_in_byte = 7 - (bit_idx & 7)
+    (bytes.get(byte_idx) >> bit_in_byte) & 1
+
+# Set bit at `bit_idx` in a pre-allocated list of i64 bytes. Returns updated list.
+fn _set_bit(bytes: list, bit_idx: i64, bit_val: i64) -> list:
+    val byte_idx = bit_idx / 8
+    val bit_in_byte = 7 - (bit_idx & 7)
+    val old_byte = bytes.get(byte_idx)
+    val mask = 1 << bit_in_byte
+    var new_byte = 0
+    if bit_val == 1:
+        new_byte = old_byte | mask
+    else:
+        new_byte = old_byte & ((mask ^ 0xFF) & 0xFF)
+    bytes[byte_idx] = new_byte
+    bytes
+
+# Split mnemonic text on spaces, return list of word strings.
+# Handles leading/trailing spaces and multiple spaces by skipping empties.
+fn _split_mnemonic(s: text) -> list:
+    var result = []
+    var word: text = ""
+    var idx = 0
+    while idx < s.len():
+        val c = s.char_code_at(idx)
+        if c == 32:
+            if word.len() > 0:
+                result.push(word)
+                word = ""
+        else:
+            # Append character to word
+            val ch = s[idx:idx + 1]
+            word = word + ch
+        idx = idx + 1
+    if word.len() > 0:
+        result.push(word)
+    result
+
+# Encode ASCII text as list of i64 bytes.
+fn _text_to_list(s: text) -> list:
+    var result = []
+    var i = 0
+    while i < s.len():
+        result.push(s.char_code_at(i))
+        i = i + 1
+    result
+
+# ============================================================================
+# Entropy → Mnemonic
+# ============================================================================
+
+# Convert entropy bytes to BIP-39 mnemonic.
+# entropy must be 16, 20, 24, 28, or 32 bytes (128/160/192/224/256 bits).
+# Returns Ok(mnemonic_text) or Err(Bip39Error.InvalidEntropyLength).
+fn bip39_entropy_to_mnemonic(entropy: [u8]) -> Result<text, Bip39Error>:
+    """Convert entropy bytes to a BIP-39 mnemonic phrase."""
+    val ent_len = entropy.len().to_i64()
+    if ent_len != 16 and ent_len != 20 and ent_len != 24 and ent_len != 28 and ent_len != 32:
+        return Err(Bip39Error.InvalidEntropyLength)
+
+    val ent_bits = ent_len * 8
+    val cs_bits = ent_bits / 32
+    val total_bits = ent_bits + cs_bits
+    val word_count = total_bits / 11
+
+    # Compute SHA-256 checksum of entropy
+    val ent_list = _u8_to_list(entropy)
+    val hash_list = sha256_bytes(ent_list)
+
+    # Build extended byte list: entropy bytes followed by hash bytes
+    var ext = []
+    var ei = 0
+    while ei < ent_list.len():
+        ext.push(ent_list.get(ei))
+        ei = ei + 1
+    var hi = 0
+    while hi < hash_list.len():
+        ext.push(hash_list.get(hi))
+        hi = hi + 1
+
+    # Extract 11-bit groups, look up words, build mnemonic directly
+    var mnemonic: text = ""
+    var wi = 0
+    while wi < word_count:
+        val bit_start = wi * 11
+        val widx = _extract_bits(ext, bit_start, 11)
+        val wrd = bip39_word(widx)
+        if wi == 0:
+            mnemonic = wrd
+        else:
+            mnemonic = mnemonic + " " + wrd
+        wi = wi + 1
+
+    Ok(mnemonic)
+
+# ============================================================================
+# Mnemonic → Entropy
+# ============================================================================
+
+# Convert a BIP-39 mnemonic phrase back to entropy bytes.
+# Verifies the embedded checksum.
+# Returns Ok(entropy_bytes) or Err(Bip39Error.*).
+fn bip39_mnemonic_to_entropy(mnemonic: text) -> Result<[u8], Bip39Error>:
+    """Decode a BIP-39 mnemonic phrase to entropy bytes, verifying checksum."""
+    val word_list = _split_mnemonic(mnemonic)
+    val wc = word_list.len().to_i64()
+
+    # Valid word counts: 12, 15, 18, 21, 24
+    if wc != 12 and wc != 15 and wc != 18 and wc != 21 and wc != 24:
+        return Err(Bip39Error.InvalidWordCount)
+
+    # Resolve each word to its 11-bit index
+    var indices = []
+    var wri = 0
+    while wri < wc:
+        val word = word_list.get(wri)
+        val idx = bip39_word_index(word)
+        if idx == -1:
+            return Err(Bip39Error.UnknownWord)
+        indices.push(idx)
+        wri = wri + 1
+
+    # Total bits = word_count * 11
+    val total_bits = wc * 11
+    val ent_bits = total_bits * 32 / 33
+    val cs_bits = total_bits / 33
+    val ent_bytes = ent_bits / 8
+
+    # Allocate zero-filled byte stream
+    val stream_bytes_needed = (total_bits + 7) / 8
+    var stream = []
+    var si = 0
+    while si < stream_bytes_needed:
+        stream.push(0)
+        si = si + 1
+
+    # Write bits from word indices into stream
+    var bit_pos = 0
+    var iidx = 0
+    while iidx < indices.len().to_i64():
+        val word_val = indices.get(iidx)
+        var b = 10
+        while b >= 0:
+            val bit = (word_val >> b) & 1
+            stream = _set_bit(stream, bit_pos, bit)
+            bit_pos = bit_pos + 1
+            b = b - 1
+        iidx = iidx + 1
+
+    # Extract entropy bytes
+    var entropy_list = []
+    var eni = 0
+    while eni < ent_bytes:
+        entropy_list.push(stream.get(eni))
+        eni = eni + 1
+
+    # Compute SHA-256 of entropy and verify checksum bits
+    val hash_list = sha256_bytes(entropy_list)
+
+    var cs_ok = true
+    var ci = 0
+    while ci < cs_bits:
+        val stream_bit = _get_bit(stream, ent_bits + ci)
+        val hash_bit = _get_bit(hash_list, ci)
+        if stream_bit != hash_bit:
+            cs_ok = false
+        ci = ci + 1
+
+    if not cs_ok:
+        return Err(Bip39Error.InvalidChecksum)
+
+    Ok(_list_to_u8(entropy_list))
+
+# ============================================================================
+# Mnemonic → Seed
+# ============================================================================
+
+# Derive a 64-byte seed from a BIP-39 mnemonic phrase and optional passphrase.
+# seed = PBKDF2-HMAC-SHA-512(mnemonic_NFKD, "mnemonic" || passphrase, 2048, 64)
+# For ASCII mnemonics NFKD normalization is identity.
+fn bip39_mnemonic_to_seed(mnemonic: text, passphrase: text) -> [u8]:
+    """Derive 64-byte seed from BIP-39 mnemonic and passphrase."""
+    val password_list = _text_to_list(mnemonic)
+    val salt_text = "mnemonic" + passphrase
+    val salt_list = _text_to_list(salt_text)
+    val seed_list = pbkdf2_sha512_bytes(password_list, salt_list, 2048, 64)
+    _list_to_u8(seed_list)

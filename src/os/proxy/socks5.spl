@@ -1,0 +1,516 @@
+#![allow(unnamed_duplicate_typed_args)]
+"""SOCKS5 protocol framing — RFC 1928 + RFC 1929.
+
+Pure-Simple parse + emit for SOCKS5 greeting, connect request/response,
+and username/password sub-negotiation.  No I/O; all functions operate
+on [u8] byte buffers.
+
+Wire formats implemented:
+  - Greeting (client→server): VER NMETHODS METHOD...
+  - Greeting response (server→client): VER METHOD
+  - Connect request (client→server): VER CMD RSV ATYP DST.ADDR DST.PORT
+  - Connect response (server→client): VER REP RSV ATYP BND.ADDR BND.PORT
+  - UserPass sub-negotiation request (RFC 1929): VER ULEN UNAME PLEN PASSWD
+  - UserPass sub-negotiation response (RFC 1929): VER STATUS
+
+Reference: RFC 1928 (SOCKS5), RFC 1929 (username/password auth)
+
+Implementation note: all [u8] builders follow the tls12_record.spl pattern —
+_pb mutates-and-returns buf so callers reassign.  Avoids interpreter-mode
+silent drops on deeper call chains.
+
+All byte arrays are built via .push(v.to_u8()) — never [u8] literals, which
+decode as zero bytes through rt_bytes_u8_at under the interpreter.
+"""
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SOCKS5_VER: i64       = 0x05
+val SOCKS5_RSV: i64       = 0x00
+val SOCKS5_USERPASS_VER: i64 = 0x01
+
+# Method codes
+val SOCKS5_METHOD_NOAUTH: i64       = 0x00
+val SOCKS5_METHOD_GSSAPI: i64       = 0x01
+val SOCKS5_METHOD_USERPASS: i64     = 0x02
+val SOCKS5_METHOD_NOACCEPTABLE: i64 = 0xFF
+
+# Command codes
+val SOCKS5_CMD_CONNECT: i64       = 0x01
+val SOCKS5_CMD_BIND: i64          = 0x02
+val SOCKS5_CMD_UDP_ASSOCIATE: i64 = 0x03
+
+# Address type codes
+val SOCKS5_ATYP_IPV4: i64   = 0x01
+val SOCKS5_ATYP_DOMAIN: i64 = 0x03
+val SOCKS5_ATYP_IPV6: i64   = 0x04
+
+# Reply codes
+val SOCKS5_REP_SUCCESS: i64          = 0x00
+val SOCKS5_REP_GENERAL_FAIL: i64     = 0x01
+val SOCKS5_REP_NOT_ALLOWED: i64      = 0x02
+val SOCKS5_REP_NET_UNREACHABLE: i64  = 0x03
+val SOCKS5_REP_HOST_UNREACHABLE: i64 = 0x04
+val SOCKS5_REP_CONN_REFUSED: i64     = 0x05
+val SOCKS5_REP_TTL_EXPIRED: i64      = 0x06
+val SOCKS5_REP_CMD_NOT_SUPPORTED: i64  = 0x07
+val SOCKS5_REP_ATYP_NOT_SUPPORTED: i64 = 0x08
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum Socks5Method:
+    NoAuth
+    GssApi
+    UserPass
+    NoAcceptable
+
+enum Socks5Cmd:
+    Connect
+    Bind
+    UdpAssociate
+
+enum Socks5Atyp:
+    Ipv4(addr: [u8])
+    Domain(name: text)
+    Ipv6(addr: [u8])
+
+enum Socks5Reply:
+    Success
+    GeneralFail
+    NotAllowed
+    NetUnreachable
+    HostUnreachable
+    ConnRefused
+    TtlExpired
+    CmdNotSupported
+    AtypNotSupported
+
+enum Socks5Error:
+    InvalidVersion(got: i64)
+    InvalidAtyp(got: i64)
+    InvalidMethod(got: i64)
+    InvalidCmd(got: i64)
+    InvalidReply(got: i64)
+    UnexpectedEnd
+    DomainTooLong(len: i64)
+
+# ============================================================================
+# Parse result types (named-field Ok/Err following existing os/ convention)
+# ============================================================================
+
+enum GreetingResult:
+    Ok(methods: [Socks5Method])
+    Err(reason: Socks5Error)
+
+enum GreetingResponseResult:
+    Ok(method: Socks5Method)
+    Err(reason: Socks5Error)
+
+enum RequestResult:
+    Ok(cmd: Socks5Cmd, atyp: Socks5Atyp, port: i64)
+    Err(reason: Socks5Error)
+
+enum ResponseResult:
+    Ok(reply: Socks5Reply, atyp: Socks5Atyp, port: i64)
+    Err(reason: Socks5Error)
+
+enum UserPassResponseResult:
+    Ok(success: bool)
+    Err(reason: Socks5Error)
+
+# ============================================================================
+# Low-level byte helpers (mutate + return — interpreter-safe)
+# ============================================================================
+
+fn _pb(buf: [u8], byte_val: i64) -> [u8]:
+    """Push the low 8 bits of byte_val onto buf; return buf."""
+    buf.push((byte_val & 0xFF).to_u8())
+    return buf
+
+fn _push_u16_be(buf: [u8], value: i64) -> [u8]:
+    """Append value as 2 big-endian bytes; return buf."""
+    buf = _pb(buf, (value >> 8) & 0xFF)
+    buf = _pb(buf, value & 0xFF)
+    return buf
+
+fn _append_bytes(buf: [u8], src: [u8]) -> [u8]:
+    """Append all bytes of src onto buf; return buf."""
+    var i: i64 = 0
+    val n = src.len()
+    while i < n:
+        buf.push(src[i])
+        i = i + 1
+    return buf
+
+fn _read_u16_be(data: [u8], offset: i64) -> i64:
+    """Read a big-endian u16 from data at offset."""
+    val b0 = rt_bytes_u8_at(data, offset)
+    val b1 = rt_bytes_u8_at(data, offset + 1)
+    return (b0 << 8) | b1
+
+# ============================================================================
+# Method encode / decode helpers
+# ============================================================================
+
+fn _method_to_byte(m: Socks5Method) -> i64:
+    match m:
+        case NoAuth:
+            return SOCKS5_METHOD_NOAUTH
+        case GssApi:
+            return SOCKS5_METHOD_GSSAPI
+        case UserPass:
+            return SOCKS5_METHOD_USERPASS
+        case NoAcceptable:
+            return SOCKS5_METHOD_NOACCEPTABLE
+
+fn _byte_to_method(b: i64) -> Socks5Method?:
+    if b == SOCKS5_METHOD_NOAUTH:
+        return Socks5Method.NoAuth
+    elif b == SOCKS5_METHOD_GSSAPI:
+        return Socks5Method.GssApi
+    elif b == SOCKS5_METHOD_USERPASS:
+        return Socks5Method.UserPass
+    elif b == SOCKS5_METHOD_NOACCEPTABLE:
+        return Socks5Method.NoAcceptable
+    else:
+        return nil
+
+# ============================================================================
+# Greeting (client → server): VER NMETHODS METHOD...
+# RFC 1928 §3
+# ============================================================================
+
+fn socks5_build_greeting(methods: [Socks5Method]) -> [u8]:
+    """Encode SOCKS5 greeting: VER(0x05) NMETHODS METHOD..."""
+    var buf: [u8] = []
+    buf = _pb(buf, SOCKS5_VER)
+    buf = _pb(buf, methods.len())
+    var i: i64 = 0
+    while i < methods.len():
+        buf = _pb(buf, _method_to_byte(methods[i]))
+        i = i + 1
+    return buf
+
+fn socks5_parse_greeting(data: [u8]) -> GreetingResult:
+    """Parse SOCKS5 greeting from client. Returns list of offered methods."""
+    if data.len() < 2:
+        return GreetingResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val ver = rt_bytes_u8_at(data, 0)
+    if ver != SOCKS5_VER:
+        return GreetingResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
+    val nmethods = rt_bytes_u8_at(data, 1)
+    if data.len() < 2 + nmethods:
+        return GreetingResult.Err(reason: Socks5Error.UnexpectedEnd)
+    var methods: [Socks5Method] = []
+    var i: i64 = 0
+    while i < nmethods:
+        val b = rt_bytes_u8_at(data, 2 + i)
+        val m = _byte_to_method(b)
+        if m != nil:
+            methods.push(m)
+        i = i + 1
+    return GreetingResult.Ok(methods: methods)
+
+# ============================================================================
+# Greeting response (server → client): VER METHOD
+# RFC 1928 §3
+# ============================================================================
+
+fn socks5_build_greeting_response(method: Socks5Method) -> [u8]:
+    """Encode SOCKS5 server greeting response: VER(0x05) METHOD."""
+    var buf: [u8] = []
+    buf = _pb(buf, SOCKS5_VER)
+    buf = _pb(buf, _method_to_byte(method))
+    return buf
+
+fn socks5_parse_greeting_response(data: [u8]) -> GreetingResponseResult:
+    """Parse SOCKS5 server greeting response."""
+    if data.len() < 2:
+        return GreetingResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val ver = rt_bytes_u8_at(data, 0)
+    if ver != SOCKS5_VER:
+        return GreetingResponseResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
+    val b = rt_bytes_u8_at(data, 1)
+    val m = _byte_to_method(b)
+    if m == nil:
+        return GreetingResponseResult.Err(reason: Socks5Error.InvalidMethod(got: b))
+    return GreetingResponseResult.Ok(method: m)
+
+# ============================================================================
+# Address (ATYP + DST.ADDR) encode / decode helpers
+# ============================================================================
+
+fn _build_atyp_addr(buf: [u8], atyp: Socks5Atyp) -> [u8]:
+    """Append ATYP byte + address bytes; return buf.
+    Uses native array index push to avoid rt_bytes_u8_at cross-module issues."""
+    match atyp:
+        case Ipv4(addr):
+            buf = _pb(buf, SOCKS5_ATYP_IPV4)
+            var i: i64 = 0
+            while i < addr.len():
+                buf.push(addr[i])
+                i = i + 1
+        case Domain(name):
+            val name_bytes = rt_text_to_bytes(name)
+            buf = _pb(buf, SOCKS5_ATYP_DOMAIN)
+            buf = _pb(buf, name_bytes.len())
+            var i: i64 = 0
+            while i < name_bytes.len():
+                buf.push(name_bytes[i])
+                i = i + 1
+        case Ipv6(addr):
+            buf = _pb(buf, SOCKS5_ATYP_IPV6)
+            var i: i64 = 0
+            while i < addr.len():
+                buf.push(addr[i])
+                i = i + 1
+    return buf
+
+class _AtypParseResult:
+    """Internal: parsed ATYP + address and the byte offset after them."""
+    atyp: Socks5Atyp
+    next_offset: i64
+
+fn _parse_atyp_addr(data: [u8], offset: i64) -> _AtypParseResult?:
+    """Parse ATYP byte + address at offset. Returns nil on error."""
+    if data.len() <= offset:
+        return nil
+    val atyp_byte = rt_bytes_u8_at(data, offset)
+    if atyp_byte == SOCKS5_ATYP_IPV4:
+        if data.len() < offset + 1 + 4:
+            return nil
+        var addr: [u8] = []
+        var i: i64 = 0
+        while i < 4:
+            addr.push(rt_bytes_u8_at(data, offset + 1 + i).to_u8())
+            i = i + 1
+        return _AtypParseResult(
+            atyp: Socks5Atyp.Ipv4(addr: addr),
+            next_offset: offset + 1 + 4
+        )
+    elif atyp_byte == SOCKS5_ATYP_DOMAIN:
+        if data.len() < offset + 2:
+            return nil
+        val dlen = rt_bytes_u8_at(data, offset + 1)
+        if data.len() < offset + 2 + dlen:
+            return nil
+        var name_bytes: [u8] = []
+        var i: i64 = 0
+        while i < dlen:
+            name_bytes.push(rt_bytes_u8_at(data, offset + 2 + i).to_u8())
+            i = i + 1
+        val name = rt_bytes_to_text(name_bytes)
+        return _AtypParseResult(
+            atyp: Socks5Atyp.Domain(name: name),
+            next_offset: offset + 2 + dlen
+        )
+    elif atyp_byte == SOCKS5_ATYP_IPV6:
+        if data.len() < offset + 1 + 16:
+            return nil
+        var addr: [u8] = []
+        var i: i64 = 0
+        while i < 16:
+            addr.push(rt_bytes_u8_at(data, offset + 1 + i).to_u8())
+            i = i + 1
+        return _AtypParseResult(
+            atyp: Socks5Atyp.Ipv6(addr: addr),
+            next_offset: offset + 1 + 16
+        )
+    else:
+        return nil
+
+# ============================================================================
+# Connect request (client → server)
+# RFC 1928 §4: VER CMD RSV ATYP DST.ADDR DST.PORT
+# ============================================================================
+
+fn _cmd_to_byte(cmd: Socks5Cmd) -> i64:
+    match cmd:
+        case Connect:
+            return SOCKS5_CMD_CONNECT
+        case Bind:
+            return SOCKS5_CMD_BIND
+        case UdpAssociate:
+            return SOCKS5_CMD_UDP_ASSOCIATE
+
+fn _byte_to_cmd(b: i64) -> Socks5Cmd?:
+    if b == SOCKS5_CMD_CONNECT:
+        return Socks5Cmd.Connect
+    elif b == SOCKS5_CMD_BIND:
+        return Socks5Cmd.Bind
+    elif b == SOCKS5_CMD_UDP_ASSOCIATE:
+        return Socks5Cmd.UdpAssociate
+    else:
+        return nil
+
+fn socks5_build_request(cmd: Socks5Cmd, atyp: Socks5Atyp, port: i64) -> [u8]:
+    """Encode SOCKS5 connect request: VER CMD RSV ATYP DST.ADDR DST.PORT(BE)."""
+    var buf: [u8] = []
+    buf = _pb(buf, SOCKS5_VER)
+    buf = _pb(buf, _cmd_to_byte(cmd))
+    buf = _pb(buf, SOCKS5_RSV)
+    buf = _build_atyp_addr(buf, atyp)
+    buf = _push_u16_be(buf, port)
+    return buf
+
+fn socks5_parse_request(data: [u8]) -> RequestResult:
+    """Parse SOCKS5 connect request from client.
+    Returns (cmd, atyp, port) on success."""
+    if data.len() < 4:
+        return RequestResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val ver = rt_bytes_u8_at(data, 0)
+    if ver != SOCKS5_VER:
+        return RequestResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
+    val cmd_byte = rt_bytes_u8_at(data, 1)
+    val cmd = _byte_to_cmd(cmd_byte)
+    if cmd == nil:
+        return RequestResult.Err(reason: Socks5Error.InvalidCmd(got: cmd_byte))
+    # byte 2 is RSV — ignored on parse per RFC 1928 §4
+    val atyp_result = _parse_atyp_addr(data, 3)
+    if atyp_result == nil:
+        val atyp_byte = rt_bytes_u8_at(data, 3)
+        if atyp_byte != SOCKS5_ATYP_IPV4 and atyp_byte != SOCKS5_ATYP_DOMAIN and atyp_byte != SOCKS5_ATYP_IPV6:
+            return RequestResult.Err(reason: Socks5Error.InvalidAtyp(got: atyp_byte))
+        return RequestResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val next = atyp_result.next_offset
+    if data.len() < next + 2:
+        return RequestResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val port = _read_u16_be(data, next)
+    return RequestResult.Ok(cmd: cmd, atyp: atyp_result.atyp, port: port)
+
+# ============================================================================
+# Connect response (server → client)
+# RFC 1928 §6: VER REP RSV ATYP BND.ADDR BND.PORT
+# ============================================================================
+
+fn _reply_to_byte(rep: Socks5Reply) -> i64:
+    match rep:
+        case Success:
+            return SOCKS5_REP_SUCCESS
+        case GeneralFail:
+            return SOCKS5_REP_GENERAL_FAIL
+        case NotAllowed:
+            return SOCKS5_REP_NOT_ALLOWED
+        case NetUnreachable:
+            return SOCKS5_REP_NET_UNREACHABLE
+        case HostUnreachable:
+            return SOCKS5_REP_HOST_UNREACHABLE
+        case ConnRefused:
+            return SOCKS5_REP_CONN_REFUSED
+        case TtlExpired:
+            return SOCKS5_REP_TTL_EXPIRED
+        case CmdNotSupported:
+            return SOCKS5_REP_CMD_NOT_SUPPORTED
+        case AtypNotSupported:
+            return SOCKS5_REP_ATYP_NOT_SUPPORTED
+
+fn _byte_to_reply(b: i64) -> Socks5Reply?:
+    if b == SOCKS5_REP_SUCCESS:
+        return Socks5Reply.Success
+    elif b == SOCKS5_REP_GENERAL_FAIL:
+        return Socks5Reply.GeneralFail
+    elif b == SOCKS5_REP_NOT_ALLOWED:
+        return Socks5Reply.NotAllowed
+    elif b == SOCKS5_REP_NET_UNREACHABLE:
+        return Socks5Reply.NetUnreachable
+    elif b == SOCKS5_REP_HOST_UNREACHABLE:
+        return Socks5Reply.HostUnreachable
+    elif b == SOCKS5_REP_CONN_REFUSED:
+        return Socks5Reply.ConnRefused
+    elif b == SOCKS5_REP_TTL_EXPIRED:
+        return Socks5Reply.TtlExpired
+    elif b == SOCKS5_REP_CMD_NOT_SUPPORTED:
+        return Socks5Reply.CmdNotSupported
+    elif b == SOCKS5_REP_ATYP_NOT_SUPPORTED:
+        return Socks5Reply.AtypNotSupported
+    else:
+        return nil
+
+fn socks5_build_response(rep: Socks5Reply, atyp: Socks5Atyp, port: i64) -> [u8]:
+    """Encode SOCKS5 connect response: VER REP RSV ATYP BND.ADDR BND.PORT(BE)."""
+    var buf: [u8] = []
+    buf = _pb(buf, SOCKS5_VER)
+    buf = _pb(buf, _reply_to_byte(rep))
+    buf = _pb(buf, SOCKS5_RSV)
+    buf = _build_atyp_addr(buf, atyp)
+    buf = _push_u16_be(buf, port)
+    return buf
+
+fn socks5_parse_response(data: [u8]) -> ResponseResult:
+    """Parse SOCKS5 connect response from server.
+    Returns (reply, atyp, port) on success."""
+    if data.len() < 4:
+        return ResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val ver = rt_bytes_u8_at(data, 0)
+    if ver != SOCKS5_VER:
+        return ResponseResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
+    val rep_byte = rt_bytes_u8_at(data, 1)
+    val rep = _byte_to_reply(rep_byte)
+    if rep == nil:
+        return ResponseResult.Err(reason: Socks5Error.InvalidReply(got: rep_byte))
+    # byte 2 is RSV — ignored on parse
+    val atyp_result = _parse_atyp_addr(data, 3)
+    if atyp_result == nil:
+        val atyp_byte = rt_bytes_u8_at(data, 3)
+        if atyp_byte != SOCKS5_ATYP_IPV4 and atyp_byte != SOCKS5_ATYP_DOMAIN and atyp_byte != SOCKS5_ATYP_IPV6:
+            return ResponseResult.Err(reason: Socks5Error.InvalidAtyp(got: atyp_byte))
+        return ResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val next = atyp_result.next_offset
+    if data.len() < next + 2:
+        return ResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val port = _read_u16_be(data, next)
+    return ResponseResult.Ok(reply: rep, atyp: atyp_result.atyp, port: port)
+
+# ============================================================================
+# Username/Password sub-negotiation — RFC 1929
+# Request:  VER(0x01) ULEN(1) UNAME PLEN(1) PASSWD
+# Response: VER(0x01) STATUS  — 0x00=success, non-zero=failure
+# ============================================================================
+
+fn _userpass_build_buf(user_bytes: [u8], pass_bytes: [u8]) -> [u8]:
+    """Internal: build the RFC 1929 request from pre-encoded byte arrays.
+    Separated from socks5_userpass_request to isolate cross-module
+    rt_text_to_bytes interaction issues."""
+    val ulen: i64 = user_bytes.len().to_i64()
+    val plen: i64 = pass_bytes.len().to_i64()
+    var buf: [u8] = []
+    buf = _pb(buf, SOCKS5_USERPASS_VER)
+    buf = _pb(buf, ulen)
+    var i: i64 = 0
+    while i < ulen:
+        buf = _pb(buf, rt_bytes_u8_at(user_bytes, i))
+        i = i + 1
+    buf = _pb(buf, plen)
+    var j: i64 = 0
+    while j < plen:
+        buf = _pb(buf, rt_bytes_u8_at(pass_bytes, j))
+        j = j + 1
+    return buf
+
+fn socks5_userpass_request(user: text, pass: text) -> [u8]:
+    """Encode RFC 1929 username/password auth request.
+    Delegates to _userpass_build_buf after converting text → bytes."""
+    return _userpass_build_buf(rt_text_to_bytes(user), rt_text_to_bytes(pass))
+
+fn socks5_userpass_parse_response(data: [u8]) -> UserPassResponseResult:
+    """Parse RFC 1929 username/password auth response.
+    Returns Ok(true) on success (STATUS=0x00), Ok(false) on rejection (well-
+    formed but non-zero STATUS), Err on malformed input."""
+    if data.len() < 2:
+        return UserPassResponseResult.Err(reason: Socks5Error.UnexpectedEnd)
+    val ver = rt_bytes_u8_at(data, 0)
+    if ver != SOCKS5_USERPASS_VER:
+        return UserPassResponseResult.Err(reason: Socks5Error.InvalidVersion(got: ver))
+    val status = rt_bytes_u8_at(data, 1)
+    if status == 0:
+        return UserPassResponseResult.Ok(success: true)
+    else:
+        return UserPassResponseResult.Ok(success: false)

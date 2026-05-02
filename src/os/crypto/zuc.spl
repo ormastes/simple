@@ -1,0 +1,1009 @@
+#![allow(unnamed_duplicate_typed_args)]
+# ZUC-128 Stream Cipher — Pure Simple Implementation
+#
+# Implements ZUC-128 keystream generator per 3GPP TS 35.221,
+# plus EEA3 (confidentiality) per 3GPP TS 35.222 §5
+# and EIA3 (integrity MAC) per 3GPP TS 35.222 §6.
+#
+# References:
+#   3GPP TS 35.221 v15 — ZUC specification
+#   3GPP TS 35.222 v15 — EEA3 & EIA3; Document 2: ZUC Specification
+#   3GPP TS 35.223     — EEA3 and EIA3 test data
+#
+# NOTE: verified in interpreter mode per
+# .claude/memory/feedback_compile_mode_false_greens.md
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _logical_shr64(x: u64, n: u64) -> u64:
+    """Logical (zero-extending) right shift for u64 — works around interpreter
+    arithmetic-shift bug on u64 fn parameters (see bug u64_right_shift_fn_param_arithmetic_2026-05-02)."""
+    val mask: u64 = (1u64 << (64u64 - n)) - 1u64
+    (x >> n) & mask
+
+fn _mod31(x: u64) -> u32:
+    """Reduction mod (2^31 - 1) — the ZUC prime field.
+
+    Uses the identity: v mod (2^31-1) where v can be up to ~2^62.
+    Applies iterative halving trick until < 2^31-1.
+    """
+    var v = x
+    # First pass: fold bits above 31 — use logical shr to avoid interpreter sign-extend bug
+    v = (v & 0x7FFFFFFFu64) + _logical_shr64(v, 31u64)
+    # Second pass: might still be >= 2^31-1 after first fold
+    if v >= 0x7FFFFFFFu64:
+        v = v - 0x7FFFFFFFu64
+    v.to_u32()
+
+fn _rotl32(x: u32, n: u32) -> u32:
+    """32-bit left rotation — pure u32 (avoids u64 shr interpreter bug)."""
+    (x << n) | (x >> (32u32 - n))
+
+fn _add32(a: u32, b: u32) -> u32:
+    """32-bit addition mod 2^32."""
+    ((a.to_u64() + b.to_u64()) & 0xFFFFFFFFu64).to_u32()
+
+# ============================================================================
+# L1 and L2 linear transforms (TS 35.221 §3.1)
+# ============================================================================
+
+fn _l1(x: u32) -> u32:
+    """L1 linear transform for F (TS 35.221 §3.1 Table 1)."""
+    x ^ _rotl32(x, 2u32) ^ _rotl32(x, 10u32) ^ _rotl32(x, 18u32) ^ _rotl32(x, 24u32)
+
+fn _l2(x: u32) -> u32:
+    """L2 linear transform for F (TS 35.221 §3.1 Table 1)."""
+    x ^ _rotl32(x, 8u32) ^ _rotl32(x, 14u32) ^ _rotl32(x, 22u32) ^ _rotl32(x, 30u32)
+
+# ============================================================================
+# ZUC S-boxes (TS 35.221 Annex A)
+# S0 = AES SubBytes (Rijndael S-box)
+# S1 = ZUC-specific S-box
+# ============================================================================
+
+fn _s0(x: u8) -> u8:
+    """ZUC S0 — same as AES SubBytes (Rijndael S-box, FIPS 197)."""
+    val t = x.to_u64()
+    if t == 0u64: 0x63u8
+    else if t == 1u64: 0x7cu8
+    else if t == 2u64: 0x77u8
+    else if t == 3u64: 0x7bu8
+    else if t == 4u64: 0xf2u8
+    else if t == 5u64: 0x6bu8
+    else if t == 6u64: 0x6fu8
+    else if t == 7u64: 0xc5u8
+    else if t == 8u64: 0x30u8
+    else if t == 9u64: 0x01u8
+    else if t == 10u64: 0x67u8
+    else if t == 11u64: 0x2bu8
+    else if t == 12u64: 0xfeu8
+    else if t == 13u64: 0xd7u8
+    else if t == 14u64: 0xabu8
+    else if t == 15u64: 0x76u8
+    else if t == 16u64: 0xcau8
+    else if t == 17u64: 0x82u8
+    else if t == 18u64: 0xc9u8
+    else if t == 19u64: 0x7du8
+    else if t == 20u64: 0xfau8
+    else if t == 21u64: 0x59u8
+    else if t == 22u64: 0x47u8
+    else if t == 23u64: 0xf0u8
+    else if t == 24u64: 0xadu8
+    else if t == 25u64: 0xd4u8
+    else if t == 26u64: 0xa2u8
+    else if t == 27u64: 0xafu8
+    else if t == 28u64: 0x9cu8
+    else if t == 29u64: 0xa4u8
+    else if t == 30u64: 0x72u8
+    else if t == 31u64: 0xc0u8
+    else if t == 32u64: 0xb7u8
+    else if t == 33u64: 0xfdu8
+    else if t == 34u64: 0x93u8
+    else if t == 35u64: 0x26u8
+    else if t == 36u64: 0x36u8
+    else if t == 37u64: 0x3fu8
+    else if t == 38u64: 0xf7u8
+    else if t == 39u64: 0xccu8
+    else if t == 40u64: 0x34u8
+    else if t == 41u64: 0xa5u8
+    else if t == 42u64: 0xe5u8
+    else if t == 43u64: 0xf1u8
+    else if t == 44u64: 0x71u8
+    else if t == 45u64: 0xd8u8
+    else if t == 46u64: 0x31u8
+    else if t == 47u64: 0x15u8
+    else if t == 48u64: 0x04u8
+    else if t == 49u64: 0xc7u8
+    else if t == 50u64: 0x23u8
+    else if t == 51u64: 0xc3u8
+    else if t == 52u64: 0x18u8
+    else if t == 53u64: 0x96u8
+    else if t == 54u64: 0x05u8
+    else if t == 55u64: 0x9au8
+    else if t == 56u64: 0x07u8
+    else if t == 57u64: 0x12u8
+    else if t == 58u64: 0x80u8
+    else if t == 59u64: 0xe2u8
+    else if t == 60u64: 0xebu8
+    else if t == 61u64: 0x27u8
+    else if t == 62u64: 0xb2u8
+    else if t == 63u64: 0x75u8
+    else if t == 64u64: 0x09u8
+    else if t == 65u64: 0x83u8
+    else if t == 66u64: 0x2cu8
+    else if t == 67u64: 0x1au8
+    else if t == 68u64: 0x1bu8
+    else if t == 69u64: 0x6eu8
+    else if t == 70u64: 0x5au8
+    else if t == 71u64: 0xa0u8
+    else if t == 72u64: 0x52u8
+    else if t == 73u64: 0x3bu8
+    else if t == 74u64: 0xd6u8
+    else if t == 75u64: 0xb3u8
+    else if t == 76u64: 0x29u8
+    else if t == 77u64: 0xe3u8
+    else if t == 78u64: 0x2fu8
+    else if t == 79u64: 0x84u8
+    else if t == 80u64: 0x53u8
+    else if t == 81u64: 0xd1u8
+    else if t == 82u64: 0x00u8
+    else if t == 83u64: 0xedu8
+    else if t == 84u64: 0x20u8
+    else if t == 85u64: 0xfcu8
+    else if t == 86u64: 0xb1u8
+    else if t == 87u64: 0x5bu8
+    else if t == 88u64: 0x6au8
+    else if t == 89u64: 0xcbu8
+    else if t == 90u64: 0xbeu8
+    else if t == 91u64: 0x39u8
+    else if t == 92u64: 0x4au8
+    else if t == 93u64: 0x4cu8
+    else if t == 94u64: 0x58u8
+    else if t == 95u64: 0xcfu8
+    else if t == 96u64: 0xd0u8
+    else if t == 97u64: 0xefu8
+    else if t == 98u64: 0xaau8
+    else if t == 99u64: 0xfbu8
+    else if t == 100u64: 0x43u8
+    else if t == 101u64: 0x4du8
+    else if t == 102u64: 0x33u8
+    else if t == 103u64: 0x85u8
+    else if t == 104u64: 0x45u8
+    else if t == 105u64: 0xf9u8
+    else if t == 106u64: 0x02u8
+    else if t == 107u64: 0x7fu8
+    else if t == 108u64: 0x50u8
+    else if t == 109u64: 0x3cu8
+    else if t == 110u64: 0x9fu8
+    else if t == 111u64: 0xa8u8
+    else if t == 112u64: 0x51u8
+    else if t == 113u64: 0xa3u8
+    else if t == 114u64: 0x40u8
+    else if t == 115u64: 0x8fu8
+    else if t == 116u64: 0x92u8
+    else if t == 117u64: 0x9du8
+    else if t == 118u64: 0x38u8
+    else if t == 119u64: 0xf5u8
+    else if t == 120u64: 0xbcu8
+    else if t == 121u64: 0xb6u8
+    else if t == 122u64: 0xdau8
+    else if t == 123u64: 0x21u8
+    else if t == 124u64: 0x10u8
+    else if t == 125u64: 0xffu8
+    else if t == 126u64: 0xf3u8
+    else if t == 127u64: 0xd2u8
+    else if t == 128u64: 0xcdu8
+    else if t == 129u64: 0x0cu8
+    else if t == 130u64: 0x13u8
+    else if t == 131u64: 0xecu8
+    else if t == 132u64: 0x5fu8
+    else if t == 133u64: 0x97u8
+    else if t == 134u64: 0x44u8
+    else if t == 135u64: 0x17u8
+    else if t == 136u64: 0xc4u8
+    else if t == 137u64: 0xa7u8
+    else if t == 138u64: 0x7eu8
+    else if t == 139u64: 0x3du8
+    else if t == 140u64: 0x64u8
+    else if t == 141u64: 0x5du8
+    else if t == 142u64: 0x19u8
+    else if t == 143u64: 0x73u8
+    else if t == 144u64: 0x60u8
+    else if t == 145u64: 0x81u8
+    else if t == 146u64: 0x4fu8
+    else if t == 147u64: 0xdcu8
+    else if t == 148u64: 0x22u8
+    else if t == 149u64: 0x2au8
+    else if t == 150u64: 0x90u8
+    else if t == 151u64: 0x88u8
+    else if t == 152u64: 0x46u8
+    else if t == 153u64: 0xeeu8
+    else if t == 154u64: 0xb8u8
+    else if t == 155u64: 0x14u8
+    else if t == 156u64: 0xdeu8
+    else if t == 157u64: 0x5eu8
+    else if t == 158u64: 0x0bu8
+    else if t == 159u64: 0xdbu8
+    else if t == 160u64: 0xe0u8
+    else if t == 161u64: 0x32u8
+    else if t == 162u64: 0x3au8
+    else if t == 163u64: 0x0au8
+    else if t == 164u64: 0x49u8
+    else if t == 165u64: 0x06u8
+    else if t == 166u64: 0x24u8
+    else if t == 167u64: 0x5cu8
+    else if t == 168u64: 0xc2u8
+    else if t == 169u64: 0xd3u8
+    else if t == 170u64: 0xacu8
+    else if t == 171u64: 0x62u8
+    else if t == 172u64: 0x91u8
+    else if t == 173u64: 0x95u8
+    else if t == 174u64: 0xe4u8
+    else if t == 175u64: 0x79u8
+    else if t == 176u64: 0xe7u8
+    else if t == 177u64: 0xc8u8
+    else if t == 178u64: 0x37u8
+    else if t == 179u64: 0x6du8
+    else if t == 180u64: 0x8du8
+    else if t == 181u64: 0xd5u8
+    else if t == 182u64: 0x4eu8
+    else if t == 183u64: 0xa9u8
+    else if t == 184u64: 0x6cu8
+    else if t == 185u64: 0x56u8
+    else if t == 186u64: 0xf4u8
+    else if t == 187u64: 0xeau8
+    else if t == 188u64: 0x65u8
+    else if t == 189u64: 0x7au8
+    else if t == 190u64: 0xaeu8
+    else if t == 191u64: 0x08u8
+    else if t == 192u64: 0xbau8
+    else if t == 193u64: 0x78u8
+    else if t == 194u64: 0x25u8
+    else if t == 195u64: 0x2eu8
+    else if t == 196u64: 0x1cu8
+    else if t == 197u64: 0xa6u8
+    else if t == 198u64: 0xb4u8
+    else if t == 199u64: 0xc6u8
+    else if t == 200u64: 0xe8u8
+    else if t == 201u64: 0xddu8
+    else if t == 202u64: 0x74u8
+    else if t == 203u64: 0x1fu8
+    else if t == 204u64: 0x4bu8
+    else if t == 205u64: 0xbdu8
+    else if t == 206u64: 0x8bu8
+    else if t == 207u64: 0x8au8
+    else if t == 208u64: 0x70u8
+    else if t == 209u64: 0x3eu8
+    else if t == 210u64: 0xb5u8
+    else if t == 211u64: 0x66u8
+    else if t == 212u64: 0x48u8
+    else if t == 213u64: 0x03u8
+    else if t == 214u64: 0xf6u8
+    else if t == 215u64: 0x0eu8
+    else if t == 216u64: 0x61u8
+    else if t == 217u64: 0x35u8
+    else if t == 218u64: 0x57u8
+    else if t == 219u64: 0xb9u8
+    else if t == 220u64: 0x86u8
+    else if t == 221u64: 0xc1u8
+    else if t == 222u64: 0x1du8
+    else if t == 223u64: 0x9eu8
+    else if t == 224u64: 0xe1u8
+    else if t == 225u64: 0xf8u8
+    else if t == 226u64: 0x98u8
+    else if t == 227u64: 0x11u8
+    else if t == 228u64: 0x69u8
+    else if t == 229u64: 0xd9u8
+    else if t == 230u64: 0x8eu8
+    else if t == 231u64: 0x94u8
+    else if t == 232u64: 0x9bu8
+    else if t == 233u64: 0x1eu8
+    else if t == 234u64: 0x87u8
+    else if t == 235u64: 0xe9u8
+    else if t == 236u64: 0xceu8
+    else if t == 237u64: 0x55u8
+    else if t == 238u64: 0x28u8
+    else if t == 239u64: 0xdfu8
+    else if t == 240u64: 0x8cu8
+    else if t == 241u64: 0xa1u8
+    else if t == 242u64: 0x89u8
+    else if t == 243u64: 0x0du8
+    else if t == 244u64: 0xbfu8
+    else if t == 245u64: 0xe6u8
+    else if t == 246u64: 0x42u8
+    else if t == 247u64: 0x68u8
+    else if t == 248u64: 0x41u8
+    else if t == 249u64: 0x99u8
+    else if t == 250u64: 0x2du8
+    else if t == 251u64: 0x0fu8
+    else if t == 252u64: 0xb0u8
+    else if t == 253u64: 0x54u8
+    else if t == 254u64: 0xbbu8
+    else: 0x16u8
+
+fn _s1(x: u8) -> u8:
+    """ZUC S1 box — TS 35.221 Annex A, Table 2."""
+    val t = x.to_u64()
+    if t == 0u64:   0x55u8
+    else if t == 1u64:   0xc2u8
+    else if t == 2u64:   0x63u8
+    else if t == 3u64:   0x71u8
+    else if t == 4u64:   0x3bu8
+    else if t == 5u64:   0xc8u8
+    else if t == 6u64:   0x47u8
+    else if t == 7u64:   0x86u8
+    else if t == 8u64:   0x9cu8
+    else if t == 9u64:   0xa5u8
+    else if t == 10u64:  0xe4u8
+    else if t == 11u64:  0x78u8
+    else if t == 12u64:  0xddu8
+    else if t == 13u64:  0xd4u8
+    else if t == 14u64:  0x1bu8
+    else if t == 15u64:  0xfau8
+    else if t == 16u64:  0x59u8
+    else if t == 17u64:  0x12u8
+    else if t == 18u64:  0xa7u8
+    else if t == 19u64:  0x54u8
+    else if t == 20u64:  0x7eu8
+    else if t == 21u64:  0x41u8
+    else if t == 22u64:  0x3eu8
+    else if t == 23u64:  0xd0u8
+    else if t == 24u64:  0x7au8
+    else if t == 25u64:  0x5au8
+    else if t == 26u64:  0x6fu8
+    else if t == 27u64:  0x7bu8
+    else if t == 28u64:  0x45u8
+    else if t == 29u64:  0xe8u8
+    else if t == 30u64:  0x2du8
+    else if t == 31u64:  0xbfu8
+    else if t == 32u64:  0xa8u8
+    else if t == 33u64:  0x34u8
+    else if t == 34u64:  0x4bu8
+    else if t == 35u64:  0xd7u8
+    else if t == 36u64:  0x60u8
+    else if t == 37u64:  0xf1u8
+    else if t == 38u64:  0x2bu8
+    else if t == 39u64:  0x82u8
+    else if t == 40u64:  0xbbu8
+    else if t == 41u64:  0x56u8
+    else if t == 42u64:  0x2eu8
+    else if t == 43u64:  0x9eu8
+    else if t == 44u64:  0xabu8
+    else if t == 45u64:  0x4eu8
+    else if t == 46u64:  0xa4u8
+    else if t == 47u64:  0xf7u8
+    else if t == 48u64:  0x6eu8
+    else if t == 49u64:  0x3au8
+    else if t == 50u64:  0xf3u8
+    else if t == 51u64:  0x8du8
+    else if t == 52u64:  0x89u8
+    else if t == 53u64:  0x07u8
+    else if t == 54u64:  0x28u8
+    else if t == 55u64:  0x06u8
+    else if t == 56u64:  0x44u8
+    else if t == 57u64:  0x2fu8
+    else if t == 58u64:  0x00u8
+    else if t == 59u64:  0x83u8
+    else if t == 60u64:  0x99u8
+    else if t == 61u64:  0x20u8
+    else if t == 62u64:  0x14u8
+    else if t == 63u64:  0xf5u8
+    else if t == 64u64:  0x48u8
+    else if t == 65u64:  0x7cu8
+    else if t == 66u64:  0x27u8
+    else if t == 67u64:  0x4fu8
+    else if t == 68u64:  0xc1u8
+    else if t == 69u64:  0x10u8
+    else if t == 70u64:  0xb8u8
+    else if t == 71u64:  0xe0u8
+    else if t == 72u64:  0x15u8
+    else if t == 73u64:  0xb7u8
+    else if t == 74u64:  0xbau8
+    else if t == 75u64:  0xadu8
+    else if t == 76u64:  0x0fu8
+    else if t == 77u64:  0x36u8
+    else if t == 78u64:  0x1eu8
+    else if t == 79u64:  0x0du8
+    else if t == 80u64:  0xf4u8
+    else if t == 81u64:  0xb9u8
+    else if t == 82u64:  0x5bu8
+    else if t == 83u64:  0x26u8
+    else if t == 84u64:  0x5eu8
+    else if t == 85u64:  0x17u8
+    else if t == 86u64:  0x94u8
+    else if t == 87u64:  0xa1u8
+    else if t == 88u64:  0xbdu8
+    else if t == 89u64:  0xebu8
+    else if t == 90u64:  0x13u8
+    else if t == 91u64:  0x79u8
+    else if t == 92u64:  0x50u8
+    else if t == 93u64:  0xceu8
+    else if t == 94u64:  0x3eu8
+    else if t == 95u64:  0xe7u8
+    else if t == 96u64:  0x08u8
+    else if t == 97u64:  0x8eu8
+    else if t == 98u64:  0x66u8
+    else if t == 99u64:  0xaau8
+    else if t == 100u64: 0x98u8
+    else if t == 101u64: 0x7fu8
+    else if t == 102u64: 0xc9u8
+    else if t == 103u64: 0xfdu8
+    else if t == 104u64: 0x23u8
+    else if t == 105u64: 0x38u8
+    else if t == 106u64: 0xacu8
+    else if t == 107u64: 0x40u8
+    else if t == 108u64: 0x18u8
+    else if t == 109u64: 0x53u8
+    else if t == 110u64: 0xdcu8
+    else if t == 111u64: 0x7du8
+    else if t == 112u64: 0xf0u8
+    else if t == 113u64: 0x19u8
+    else if t == 114u64: 0x30u8
+    else if t == 115u64: 0x22u8
+    else if t == 116u64: 0x9fu8
+    else if t == 117u64: 0x37u8
+    else if t == 118u64: 0xe5u8
+    else if t == 119u64: 0x68u8
+    else if t == 120u64: 0x0cu8
+    else if t == 121u64: 0xd6u8
+    else if t == 122u64: 0xd8u8
+    else if t == 123u64: 0xf8u8
+    else if t == 124u64: 0x87u8
+    else if t == 125u64: 0x3fu8
+    else if t == 126u64: 0x25u8
+    else if t == 127u64: 0x02u8
+    else if t == 128u64: 0xccu8
+    else if t == 129u64: 0x01u8
+    else if t == 130u64: 0x9au8
+    else if t == 131u64: 0x73u8
+    else if t == 132u64: 0xe6u8
+    else if t == 133u64: 0x09u8
+    else if t == 134u64: 0x6au8
+    else if t == 135u64: 0x85u8
+    else if t == 136u64: 0x92u8
+    else if t == 137u64: 0xa6u8
+    else if t == 138u64: 0x0eu8
+    else if t == 139u64: 0x05u8
+    else if t == 140u64: 0x96u8
+    else if t == 141u64: 0xa9u8
+    else if t == 142u64: 0xc3u8
+    else if t == 143u64: 0x21u8
+    else if t == 144u64: 0x49u8
+    else if t == 145u64: 0x4au8
+    else if t == 146u64: 0xe9u8
+    else if t == 147u64: 0x76u8
+    else if t == 148u64: 0x97u8
+    else if t == 149u64: 0x6bu8
+    else if t == 150u64: 0xa0u8
+    else if t == 151u64: 0x16u8
+    else if t == 152u64: 0xefu8
+    else if t == 153u64: 0x52u8
+    else if t == 154u64: 0x3cu8
+    else if t == 155u64: 0xf2u8
+    else if t == 156u64: 0xfeu8
+    else if t == 157u64: 0xc4u8
+    else if t == 158u64: 0x42u8
+    else if t == 159u64: 0xe3u8
+    else if t == 160u64: 0xe1u8
+    else if t == 161u64: 0x32u8
+    else if t == 162u64: 0xcau8
+    else if t == 163u64: 0x5cu8
+    else if t == 164u64: 0x8fu8
+    else if t == 165u64: 0x6cu8
+    else if t == 166u64: 0xcbu8
+    else if t == 167u64: 0x03u8
+    else if t == 168u64: 0x57u8
+    else if t == 169u64: 0xb1u8
+    else if t == 170u64: 0x11u8
+    else if t == 171u64: 0xecu8
+    else if t == 172u64: 0xc6u8
+    else if t == 173u64: 0x9du8
+    else if t == 174u64: 0x77u8
+    else if t == 175u64: 0xd2u8
+    else if t == 176u64: 0x62u8
+    else if t == 177u64: 0xe2u8
+    else if t == 178u64: 0x9bu8
+    else if t == 179u64: 0x29u8
+    else if t == 180u64: 0x1au8
+    else if t == 181u64: 0xbcu8
+    else if t == 182u64: 0x4cu8
+    else if t == 183u64: 0x0bu8
+    else if t == 184u64: 0xd3u8
+    else if t == 185u64: 0x74u8
+    else if t == 186u64: 0xc7u8
+    else if t == 187u64: 0xb4u8
+    else if t == 188u64: 0x43u8
+    else if t == 189u64: 0xb6u8
+    else if t == 190u64: 0xdau8
+    else if t == 191u64: 0xeeu8
+    else if t == 192u64: 0x04u8
+    else if t == 193u64: 0x71u8
+    else if t == 194u64: 0x8bu8
+    else if t == 195u64: 0x5fu8
+    else if t == 196u64: 0x26u8
+    else if t == 197u64: 0xf9u8
+    else if t == 198u64: 0x8cu8
+    else if t == 199u64: 0x58u8
+    else if t == 200u64: 0x24u8
+    else if t == 201u64: 0x64u8
+    else if t == 202u64: 0x31u8
+    else if t == 203u64: 0x54u8
+    else if t == 204u64: 0xdfu8
+    else if t == 205u64: 0xa2u8
+    else if t == 206u64: 0x1cu8
+    else if t == 207u64: 0x80u8
+    else if t == 208u64: 0x33u8
+    else if t == 209u64: 0x0au8
+    else if t == 210u64: 0x91u8
+    else if t == 211u64: 0x93u8
+    else if t == 212u64: 0xa3u8
+    else if t == 213u64: 0x39u8
+    else if t == 214u64: 0xe0u8
+    else if t == 215u64: 0x4du8
+    else if t == 216u64: 0xf6u8
+    else if t == 217u64: 0x65u8
+    else if t == 218u64: 0x46u8
+    else if t == 219u64: 0x8au8
+    else if t == 220u64: 0xd1u8
+    else if t == 221u64: 0xedu8
+    else if t == 222u64: 0xd9u8
+    else if t == 223u64: 0x90u8
+    else if t == 224u64: 0x61u8
+    else if t == 225u64: 0xb5u8
+    else if t == 226u64: 0x6eu8
+    else if t == 227u64: 0xf3u8
+    else if t == 228u64: 0x75u8
+    else if t == 229u64: 0xa4u8
+    else if t == 230u64: 0x70u8
+    else if t == 231u64: 0x5du8
+    else if t == 232u64: 0x03u8
+    else if t == 233u64: 0x9au8
+    else if t == 234u64: 0x72u8
+    else if t == 235u64: 0x0au8
+    else if t == 236u64: 0x14u8
+    else if t == 237u64: 0x95u8
+    else if t == 238u64: 0xcfu8
+    else if t == 239u64: 0x55u8
+    else if t == 240u64: 0x3du8
+    else if t == 241u64: 0xe5u8
+    else if t == 242u64: 0xdbu8
+    else if t == 243u64: 0xb7u8
+    else if t == 244u64: 0xabu8
+    else if t == 245u64: 0x6du8
+    else if t == 246u64: 0x16u8
+    else if t == 247u64: 0xfau8
+    else if t == 248u64: 0x51u8
+    else if t == 249u64: 0xbeu8
+    else if t == 250u64: 0xb3u8
+    else if t == 251u64: 0x47u8
+    else if t == 252u64: 0x67u8
+    else if t == 253u64: 0x90u8
+    else if t == 254u64: 0x34u8
+    else: 0x2bu8
+
+# ============================================================================
+# ZUC nonlinear function F (TS 35.221 §3.1)
+# ============================================================================
+
+fn _make32(b0: u8, b1: u8, b2: u8, b3: u8) -> u32:
+    """Pack 4 bytes big-endian into u32."""
+    (b0.to_u32() << 24) | (b1.to_u32() << 16) | (b2.to_u32() << 8) | b3.to_u32()
+
+fn _b0(x: u32) -> u8:
+    ((x >> 24) & 0xFFu32).to_u8()
+
+fn _b1(x: u32) -> u8:
+    ((x >> 16) & 0xFFu32).to_u8()
+
+fn _b2(x: u32) -> u8:
+    ((x >> 8) & 0xFFu32).to_u8()
+
+fn _b3(x: u32) -> u8:
+    (x & 0xFFu32).to_u8()
+
+fn _f_out_w(x0: u32, r1: u32, r2: u32) -> u32:
+    """W = (X0 XOR R1) + R2 (XOR first, then 32-bit addition)."""
+    _add32(x0 ^ r1, r2)
+
+fn _f_update(x1: u32, x2: u32, r1: u32, r2: u32) -> [u32]:
+    """Compute new R1 and R2.
+
+    Per TS 35.221 §3.1:
+    W1 = R1 + X1  (32-bit mod 2^32 addition)
+    W2 = R2 XOR X2
+    u  = L1((W1 << 16) | (W2 >> 16))   (L applied first to bit-concat)
+    v  = L2((W2 << 16) | (W1 >> 16))
+    R1'= S(u)   (S applied after L: byte 0,2 → S0; byte 1,3 → S1)
+    R2'= S(v)
+    """
+    val w1 = _add32(r1, x1)
+    val w2 = r2 ^ x2
+
+    # Bit-concatenation: (W1 << 16) | (W2 >> 16) — low 16 of W1 || high 16 of W2
+    val w1u = w1.to_u64()
+    val w2u = w2.to_u64()
+    val u_raw = (((w1u << 16) | _logical_shr64(w2u, 16u64)) & 0xFFFFFFFFu64).to_u32()
+    val v_raw = (((w2u << 16) | _logical_shr64(w1u, 16u64)) & 0xFFFFFFFFu64).to_u32()
+
+    # L transform first, then S-box
+    val lu = _l1(u_raw)
+    val lv = _l2(v_raw)
+
+    # S-box application: byte 0,2 → S0; byte 1,3 → S1
+    val r1_new = _make32(_s0(_b0(lu)), _s1(_b1(lu)), _s0(_b2(lu)), _s1(_b3(lu)))
+    val r2_new = _make32(_s0(_b0(lv)), _s1(_b1(lv)), _s0(_b2(lv)), _s1(_b3(lv)))
+
+    var res: [u32] = []
+    res.push(r1_new)
+    res.push(r2_new)
+    res
+
+# ============================================================================
+# ZUC LFSR update (TS 35.221 §3.1)
+# LFSR feedback polynomial:
+#   s_{16} = 2^15*s_{15} + 2^17*s_{13} + 2^21*s_{10} + 2^20*s_4 + (2^8+1)*s_0  mod (2^31-1)
+# ============================================================================
+
+fn _lfsr_shift(s: [u32], new_s16: u32):
+    """Shift LFSR: discard s[0], shift s[1..15] down, insert new_s16 at s[15]."""
+    var i: u64 = 0
+    while i < 15:
+        s[i] = s[i + 1u64]
+        i = i + 1
+    s[15] = new_s16
+
+fn _lfsr_feedback(s: [u32]) -> u64:
+    """Compute the raw LFSR feedback sum (before mod)."""
+    val s15 = s[15].to_u64()
+    val s13 = s[13].to_u64()
+    val s10 = s[10].to_u64()
+    val s4  = s[4].to_u64()
+    val s0  = s[0].to_u64()
+    (s15 << 15) + (s13 << 17) + (s10 << 21) + (s4 << 20) + (s0 << 8) + s0
+
+fn _lfsr_with_init_mode(s: [u32], u: u32):
+    """LFSR update in initialization mode with feedback word u."""
+    val fb = _lfsr_feedback(s) + (u & 0x7FFFFFFFu32).to_u64()
+    val new_s = _mod31(fb)
+    _lfsr_shift(s, new_s)
+
+fn _lfsr_with_work_mode(s: [u32]):
+    """LFSR update in working mode (no external feedback)."""
+    val fb = _lfsr_feedback(s)
+    var new_s = _mod31(fb)
+    if new_s == 0u32:
+        new_s = 0x7FFFFFFFu32
+    _lfsr_shift(s, new_s)
+
+# ============================================================================
+# Bit reorganization BR (TS 35.221 §3.1)
+# ============================================================================
+
+fn _bit_reorg(s: [u32]) -> [u32]:
+    """Extract X0..X3 from LFSR state.
+
+    X0 = s15[30:15] || s14[15:0]   (high 16 of 31-bit s15, low 16 of 31-bit s14)
+    X1 = s11[15:0]  || s9[30:15]
+    X2 = s7[15:0]   || s5[30:15]
+    X3 = s2[15:0]   || s0[30:15]
+
+    High 16 = bits 30..15, Low 16 = bits 15..0 of 31-bit cell.
+    """
+    val x0 = ((s[15] & 0x7FFF8000u32) << 1) | (s[14] & 0x0000FFFFu32)
+    val x1 = ((s[11] & 0x0000FFFFu32) << 16) | (s[9]  >> 15)
+    val x2 = ((s[7]  & 0x0000FFFFu32) << 16) | (s[5]  >> 15)
+    val x3 = ((s[2]  & 0x0000FFFFu32) << 16) | (s[0]  >> 15)
+
+    var res: [u32] = []
+    res.push(x0)
+    res.push(x1)
+    res.push(x2)
+    res.push(x3)
+    res
+
+# ============================================================================
+# ZUC d_i constants (TS 35.221 Annex A, Table 3)
+# Each d_i is a 15-bit value embedded in the LFSR initial state.
+# ============================================================================
+
+fn _d_const(i: u64) -> u32:
+    """15-bit d constant for LFSR cell i (from TS 35.221 Annex A Table 3)."""
+    if i == 0u64:  0x44D7u32
+    else if i == 1u64:  0x26BCu32
+    else if i == 2u64:  0x626Bu32
+    else if i == 3u64:  0x135Eu32
+    else if i == 4u64:  0x5789u32
+    else if i == 5u64:  0x35E2u32
+    else if i == 6u64:  0x7135u32
+    else if i == 7u64:  0x09AFu32
+    else if i == 8u64:  0x4D78u32
+    else if i == 9u64:  0x2F13u32
+    else if i == 10u64: 0x6BC4u32
+    else if i == 11u64: 0x1AF1u32
+    else if i == 12u64: 0x5E26u32
+    else if i == 13u64: 0x3C4Du32
+    else if i == 14u64: 0x789Au32
+    else: 0x47ACu32
+
+# ============================================================================
+# ZUC state initialization (TS 35.221 §3.3)
+# s_i = k_i || d_i || iv_i  (bit concatenation: 8 || 15 || 8 = 31 bits)
+# s[16]=R1, s[17]=R2 (32-bit memory registers)
+# ============================================================================
+
+fn _zuc_load_state(key: [u8], iv: [u8]) -> [u32]:
+    """Load ZUC initial state from 16-byte key and 16-byte IV."""
+    var state: [u32] = []
+    var i: u64 = 0
+    while i < 16:
+        val ki  = _u8_at(key, i).to_u32()
+        val di  = _d_const(i) & 0x7FFFu32
+        val ivi = _u8_at(iv, i).to_u32()
+        # 31-bit cell: [bits 30..23] = k_i, [bits 22..8] = d_i, [bits 7..0] = iv_i
+        val si = (ki << 23) | (di << 8) | ivi
+        state.push(si)
+        i = i + 1
+    # R1 and R2 start at 0
+    state.push(0u32)
+    state.push(0u32)
+    state
+
+fn _zuc_initialize(state: [u32]):
+    """Run 32 initialization rounds (modifies state in place)."""
+    var round: u64 = 0
+    while round < 32:
+        val r1 = state[16]
+        val r2 = state[17]
+
+        val x = _bit_reorg(state)
+        val w = _f_out_w(x[0u64], r1, r2)
+        val nr = _f_update(x[1u64], x[2u64], r1, r2)
+
+        # Init mode: feed (W >> 1) back into LFSR
+        _lfsr_with_init_mode(state, w >> 1)
+
+        state[16] = nr[0u64]
+        state[17] = nr[1u64]
+
+        round = round + 1
+
+fn _zuc_run_32(state: [u32]) -> u32:
+    """Run one ZUC step in working mode, returning one 32-bit keystream word."""
+    val r1 = state[16]
+    val r2 = state[17]
+
+    val x = _bit_reorg(state)
+    val w = _f_out_w(x[0u64], r1, r2)
+    val nr = _f_update(x[1u64], x[2u64], r1, r2)
+
+    # Keystream word = W XOR X3
+    val z = w ^ x[3u64]
+
+    _lfsr_with_work_mode(state)
+
+    state[16] = nr[0u64]
+    state[17] = nr[1u64]
+
+    z
+
+# ============================================================================
+# Public API: zuc_keystream
+# ============================================================================
+
+fn zuc_keystream(key: [u8], iv: [u8], num_words: u64) -> [u32]:
+    """Generate ZUC keystream words.
+
+    Args:
+        key:       16-byte key (ZUC-128).
+        iv:        16-byte IV.
+        num_words: number of 32-bit keystream words to generate.
+
+    Returns: list of num_words u32 keystream words (big-endian word order,
+             MSB of each word is the first bit of the keystream).
+    """
+    var state = _zuc_load_state(key, iv)
+    _zuc_initialize(state)
+    var ks: [u32] = []
+    var i: u64 = 0
+    while i < num_words:
+        ks.push(_zuc_run_32(state))
+        i = i + 1
+    ks
+
+# ============================================================================
+# EEA3 — Confidentiality (TS 35.222 §5)
+# ============================================================================
+
+fn _eea3_iv(count: u32, bearer: u8, direction: u8) -> [u8]:
+    """Build 16-byte EEA3 IV.
+
+    Per TS 35.222 §5.1:
+    IV[0..3] = COUNT
+    IV[4]    = (BEARER<<3) | (DIRECTION<<2)
+    IV[5..7] = 0x00
+    IV[8..15]= IV[0..7]   (duplicate)
+    """
+    var iv: [u8] = []
+    iv.push(((count >> 24) & 0xFFu32).to_u8())
+    iv.push(((count >> 16) & 0xFFu32).to_u8())
+    iv.push(((count >> 8)  & 0xFFu32).to_u8())
+    iv.push((count         & 0xFFu32).to_u8())
+    iv.push(((bearer.to_u32() << 3) | (direction.to_u32() << 2)).to_u8())
+    iv.push(0u8)
+    iv.push(0u8)
+    iv.push(0u8)
+    # Duplicate bytes 0..7
+    var j: u64 = 0
+    while j < 8:
+        iv.push(iv[j])
+        j = j + 1
+    iv
+
+fn eea3_encrypt(count: u32, bearer: u8, direction: u8, key: [u8], message: [u8], length_bits: u64) -> [u8]:
+    """EEA3 confidentiality encrypt/decrypt (same operation — XOR with keystream).
+
+    Args:
+        count:       32-bit COUNT.
+        bearer:      5-bit BEARER.
+        direction:   1-bit DIRECTION.
+        key:         16-byte CK.
+        message:     input bytes (ceil(length_bits/8) bytes).
+        length_bits: bit-length of message to process.
+
+    Returns: ciphertext (same length as input).
+    """
+    val iv = _eea3_iv(count, bearer, direction)
+    val num_words = (length_bits + 31u64) / 32u64
+    val ks = zuc_keystream(key, iv, num_words)
+
+    var ciphertext: [u8] = []
+    val num_bytes = (length_bits + 7u64) / 8u64
+    var i: u64 = 0
+    while i < num_bytes:
+        val word_idx = i / 4u64
+        val byte_pos = 3u64 - (i & 3u64)
+        val shift = (byte_pos * 8u64).to_u32()
+        val ks_byte = ((ks[word_idx] >> shift) & 0xFFu32).to_u8()
+        ciphertext.push(_u8_at(message, i) ^ ks_byte)
+        i = i + 1
+
+    # Zero the trailing bits in last byte if length_bits not byte-aligned
+    val trailing = length_bits & 7u64
+    if trailing != 0u64:
+        val last = num_bytes - 1u64
+        val mask = (0xFFu32 << (8u32 - trailing.to_u32())).to_u8()
+        ciphertext[last] = ciphertext[last] & mask
+
+    ciphertext
+
+# ============================================================================
+# EIA3 — Integrity MAC (TS 35.222 §6)
+# ============================================================================
+
+fn _eia3_iv(count: u32, bearer: u8, direction: u8) -> [u8]:
+    """Build 16-byte EIA3 IV.
+
+    Per TS 35.222 §6.1:
+    IV[0..3]   = COUNT
+    IV[4]      = BEARER << 3
+    IV[5..7]   = 0x00
+    IV[8..11]  = COUNT
+    IV[12]     = (BEARER<<3) | (DIRECTION<<2)
+    IV[13..15] = 0x00
+    """
+    var iv: [u8] = []
+    iv.push(((count >> 24) & 0xFFu32).to_u8())
+    iv.push(((count >> 16) & 0xFFu32).to_u8())
+    iv.push(((count >> 8)  & 0xFFu32).to_u8())
+    iv.push((count         & 0xFFu32).to_u8())
+    iv.push((bearer.to_u32() << 3).to_u8())
+    iv.push(0u8)
+    iv.push(0u8)
+    iv.push(0u8)
+    iv.push(((count >> 24) & 0xFFu32).to_u8())
+    iv.push(((count >> 16) & 0xFFu32).to_u8())
+    iv.push(((count >> 8)  & 0xFFu32).to_u8())
+    iv.push((count         & 0xFFu32).to_u8())
+    iv.push(((bearer.to_u32() << 3) | (direction.to_u32() << 2)).to_u8())
+    iv.push(0u8)
+    iv.push(0u8)
+    iv.push(0u8)
+    iv
+
+fn eia3_mac(count: u32, bearer: u8, direction: u8, key: [u8], message: [u8], length_bits: u64) -> u32:
+    """EIA3 integrity MAC-I computation.
+
+    Args:
+        count:       32-bit COUNT.
+        bearer:      5-bit BEARER.
+        direction:   1-bit DIRECTION.
+        key:         16-byte IK.
+        message:     input bytes (ceil(length_bits/8) bytes).
+        length_bits: number of bits in message.
+
+    Returns: 32-bit MAC-I.
+    """
+    val iv = _eia3_iv(count, bearer, direction)
+
+    # Need floor(length_bits/32) + 2 keystream words
+    val num_ks_words = (length_bits / 32u64) + 2u64
+    val ks = zuc_keystream(key, iv, num_ks_words)
+
+    # T is the running MAC accumulator
+    var t: u32 = 0u32
+
+    # For each message bit i (0..length_bits-1):
+    #   if message bit i is 1, T ^= keystream_word_at_bit_position_i
+    # Per TS 35.222 §6.2: T ^= z_i for each bit i where bit i of M is 1
+    # z_i here is the 32-bit keystream "T-value" at bit index i:
+    #   z_i = z[floor(i/32)] with bit position (31-i%32) in that word contributing ks word value
+    # Wait — the spec says T ^= z[i] meaning the i-th WORD of keystream if bit is set
+    # No: z is a bit array from keystream. But T ^= z[i] where z[i] is a whole word.
+    # Per TS 35.222 §6.2 precisely:
+    #   T = XOR of z[i] for i in 0..L-1 where bit i of M is 1
+    # and z[i] is the i-th 32-bit keystream word of a DERIVED bit array:
+    # The 32-bit keystream words at position floor(i/32) overlap, but each bit position
+    # of message picks a different 32-bit value — that's the keystream bit at position i
+    # AND the surrounding word. This is the multi-bit-at-a-time formulation.
+    #
+    # The simplest correct interpretation is:
+    # For bit position i in message M (0-indexed from MSB):
+    #   if M_bit_i == 1: T ^= keystream_word(i)
+    # where keystream_word(i) = z[floor(i/32)] for word-aligned interpretation.
+    #
+    # BUT the spec actually defines: for each bit position i, if m_i=1 then
+    # T XOR= z_i, where z_i is a 32-bit value formed from the keystream BIT ARRAY
+    # at consecutive bit positions i..i+31. This is analogous to Galois LFSR MAC.
+    #
+    # A cleaner reading: the "keystream" for EIA3 is treated as a sequence of bits,
+    # and T accumulates word-wide chunks. The standard reference code is:
+    #
+    #   for i in 0..L-1: if m_i == 1: T ^= GET_WORD(ks_bits, i)
+    # where GET_WORD(ks_bits, i) picks 32 bits starting at bit position i.
+    # This requires generating enough keystream (L+32 bits = ceil((L+32)/32) words).
+    #
+    # Let's implement this correctly:
+    var bit_i: u64 = 0
+    while bit_i < length_bits:
+        # Get message bit at position bit_i (MSB first)
+        val byte_idx = bit_i / 8u64
+        val bit_in_byte = 7u64 - (bit_i & 7u64)
+        val msg_byte = _u8_at(message, byte_idx).to_u64()
+        val msg_bit = (msg_byte >> bit_in_byte) & 1u64
+
+        if msg_bit == 1u64:
+            # Get 32-bit keystream word starting at bit position bit_i
+            val word_idx = bit_i / 32u64
+            val bit_off  = bit_i & 31u64
+            var z_i: u32 = 0u32
+            if bit_off == 0u64:
+                z_i = ks[word_idx]
+            else:
+                # Straddles two words: upper part from ks[word_idx], lower from ks[word_idx+1]
+                val shift_up = bit_off.to_u32()
+                val shift_dn = (32u64 - bit_off).to_u32()
+                z_i = (ks[word_idx] << shift_up) | (ks[word_idx + 1u64] >> shift_dn)
+            t = t ^ z_i
+
+        bit_i = bit_i + 1
+
+    # Final: T ^= z[L..L+31] (the word at bit position L)
+    val l_word = length_bits / 32u64
+    val l_off  = length_bits & 31u64
+    var z_l: u32 = 0u32
+    if l_off == 0u64:
+        z_l = ks[l_word]
+    else:
+        val shift_up = l_off.to_u32()
+        val shift_dn = (32u64 - l_off).to_u32()
+        z_l = (ks[l_word] << shift_up) | (ks[l_word + 1u64] >> shift_dn)
+    t = t ^ z_l
+
+    t

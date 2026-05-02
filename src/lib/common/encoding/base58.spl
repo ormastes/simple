@@ -1,0 +1,331 @@
+# Base58 and Base58Check encoding/decoding.
+#
+# Implements the Bitcoin BIP-0058 Base58Check encoding used in
+# cryptocurrency addresses and keys (BIP-32, BIP-44, etc.).
+#
+# Base58 alphabet (58 chars): 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+# Excluded: 0 (zero), O (capital o), I (capital i), l (lowercase L).
+#
+# Usage:
+#   use std.common.encoding.base58.{base58_encode, base58_decode,
+#       base58check_encode, base58check_decode, Base58Error}
+#   val encoded = base58_encode(bytes)
+#   val r = base58check_decode(address_text)
+#
+# References:
+#   https://en.bitcoin.it/wiki/Base58Check_encoding
+#   BIP-0058, BIP-0032
+#
+use std.crypto.sha256.{sha256_bytes}
+use std.crypto.types.{add_mod32}
+
+# ============================================================================
+# Public types
+# ============================================================================
+
+enum Base58Error:
+    """Error variants for base58 decoding operations."""
+    InvalidChar
+    InvalidChecksum
+    TooShort
+
+# ============================================================================
+# Internal helpers — alphabet
+# ============================================================================
+
+fn _b58_alphabet_ord(pos: i64) -> i64:
+    """Return the ASCII ordinal of alphabet[pos] (0..57).
+    reason: positional base58 alphabet lookup"""
+    # Alphabet: 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+    # Stored as a table of ordinals to avoid text indexing complexity.
+    val a = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    a[pos].ord()
+
+fn _b58_alpha_index_ord(char_ord: i64) -> i64:
+    """Return base58 alphabet index of character with ASCII value char_ord,
+    or -1 if not in alphabet.
+    reason: positional base58 alphabet decode"""
+    # Digit chars: '1'=49 .. '9'=57 → index 0..8
+    if char_ord >= 49 and char_ord <= 57:
+        return char_ord - 49
+    # Uppercase: A=65..Z=90, skip I(73) and O(79)
+    # A-H (65..72) → indices 9..16
+    if char_ord >= 65 and char_ord <= 72:
+        return 9 + (char_ord - 65)
+    # J-N (74..78) → indices 17..21
+    if char_ord >= 74 and char_ord <= 78:
+        return 17 + (char_ord - 74)
+    # P-Z (80..90) → indices 22..32
+    if char_ord >= 80 and char_ord <= 90:
+        return 22 + (char_ord - 80)
+    # Lowercase: a=97..z=122, skip l(108)
+    # a-k (97..107) → indices 33..43
+    if char_ord >= 97 and char_ord <= 107:
+        return 33 + (char_ord - 97)
+    # m-z (109..122) → indices 44..57
+    if char_ord >= 109 and char_ord <= 122:
+        return 44 + (char_ord - 109)
+    -1
+
+fn _b58_list_all_zero(lst: list) -> bool:
+    """Return true if all elements in list are zero."""
+    var i = 0
+    while i < lst.len():
+        if (lst.get(i) & 0xFF) != 0:
+            return false
+        i = i + 1
+    true
+
+fn _b58_u8arr_to_list(bytes: [u8]) -> list:
+    """Convert [u8] to untyped list for sha256_bytes interface.
+    reason: positional base58 sha256 bridge"""
+    var l = []
+    var i = 0
+    while i < bytes.len():
+        l.push(bytes[i].to_i64() & 0xFF)
+        i = i + 1
+    l
+
+fn _b58_list_get_byte(l: list, i: i64) -> i64:
+    """Get element i from untyped list as i64 byte value."""
+    l.get(i) & 0xFF
+
+# ============================================================================
+# Base58 encode
+# ============================================================================
+
+fn base58_encode(input: [u8]) -> text:
+    """Encode a byte array as a base58 string.
+    Leading zero bytes map to leading '1' characters.
+    reason: positional base58 encode"""
+    val n = input.len()
+
+    if n == 0:
+        return ""
+
+    # Count leading zero bytes
+    var lzb = 0
+    var i = 0
+    var counting = true
+    while counting and i < n:
+        if (input[i].to_i64() & 0xFF) == 0:
+            lzb = lzb + 1
+            i = i + 1
+        else:
+            counting = false
+
+    # Copy input to an untyped list for in-place indexed assignment
+    var work = []
+    var j = 0
+    while j < n:
+        work.push(input[j].to_i64() & 0xFF)
+        j = j + 1
+
+    # Collect base58 digits (LSB first) by repeated divmod-58 on byte array.
+    # One pass: walk MSB→LSB with carry = (carry*256 + byte[k]) divmod 58;
+    # quotient replaces byte[k], remainder is the next carry.
+    var digits = []
+    var all_done = false
+    while not all_done:
+        if _b58_list_all_zero(work):
+            all_done = true
+        else:
+            var carry: i64 = 0
+            var k = 0
+            while k < work.len():
+                val x = carry * 256 + (work.get(k) & 0xFF)
+                work[k] = x / 58
+                carry = x % 58
+                k = k + 1
+            digits.push(carry)
+
+    # Build result: leading '1's for zero bytes, then digits MSB-first
+    var result = ""
+    var z = 0
+    while z < lzb:
+        result = result + "1"
+        z = z + 1
+
+    # Append digits in reverse (they were collected LSB-first)
+    var d = digits.len() - 1
+    while d >= 0:
+        val alpha_ord = _b58_alphabet_ord(digits.get(d))
+        result = result + alpha_ord.chr()
+        d = d - 1
+
+    result
+
+# ============================================================================
+# Base58 decode
+# ============================================================================
+
+fn base58_decode(input: text) -> Result<[u8], Base58Error>:
+    """Decode a base58-encoded string to a byte array.
+    Returns Err(InvalidChar) if any character is not in the alphabet.
+    reason: positional base58 decode"""
+    val n = input.length()
+
+    if n == 0:
+        return Ok([])
+
+    # Count leading '1' characters (ordinal 49)
+    var lz1: i64 = 0
+    var i: i64 = 0
+    var counting_ones = true
+    while counting_ones and i < n:
+        if input[i].ord() == 49:
+            lz1 = lz1 + 1
+            i = i + 1
+        else:
+            counting_ones = false
+
+    # Validate remaining chars and build index array
+    var indices = []
+    var k: i64 = lz1
+    while k < n:
+        val char_ord = input[k].ord()
+        val idx = _b58_alpha_index_ord(char_ord)
+        if idx == -1:
+            return Err(Base58Error.InvalidChar)
+        indices.push(idx)
+        k = k + 1
+
+    # Build big-endian byte buffer from base58 digits.
+    # For each digit: multiply entire work buffer by 58 and add digit.
+    # work is an untyped list; each element is 0..255.
+    var work = []
+
+    var di = 0
+    while di < indices.len():
+        val digit = indices.get(di)
+        # Multiply by 58 and add digit (LSB→MSB carry propagation through work)
+        var carry: i64 = digit
+        var wi: i64 = work.len() - 1
+        while wi >= 0:
+            val x = work.get(wi) * 58 + carry
+            work[wi] = x & 0xFF
+            carry = x / 256
+            wi = wi - 1
+        # Prepend any remaining carry bytes (MSB-first)
+        while carry > 0:
+            var new_work = []
+            new_work.push(carry & 0xFF)
+            var ci = 0
+            while ci < work.len():
+                new_work.push(work.get(ci))
+                ci = ci + 1
+            work = new_work
+            carry = carry / 256
+        di = di + 1
+
+    # Build result: lz1 zero bytes + work bytes
+    var result: [u8] = []
+    var z = 0
+    while z < lz1:
+        result.push(0)
+        z = z + 1
+    var wi2 = 0
+    while wi2 < work.len():
+        result.push(work.get(wi2))
+        wi2 = wi2 + 1
+
+    Ok(result)
+
+# ============================================================================
+# SHA-256 bridge (for base58check)
+# ============================================================================
+
+fn _b58_double_sha256_first4(data: [u8]) -> [u8]:
+    """Compute SHA-256(SHA-256(data)) and return first 4 bytes.
+    reason: positional base58check checksum"""
+    val l1 = _b58_u8arr_to_list(data)
+    val h1 = sha256_bytes(l1)
+    val h2 = sha256_bytes(h1)
+    var result: [u8] = []
+    result.push(_b58_list_get_byte(h2, 0))
+    result.push(_b58_list_get_byte(h2, 1))
+    result.push(_b58_list_get_byte(h2, 2))
+    result.push(_b58_list_get_byte(h2, 3))
+    result
+
+# ============================================================================
+# Base58Check encode/decode
+# ============================================================================
+
+fn base58check_encode(payload: [u8], version: i64) -> text:
+    """Encode payload with version byte using Base58Check.
+    prefix = [version] || payload; appends 4-byte double-SHA256 checksum.
+    reason: positional base58check encode"""
+    # Build prefix = [version_byte] || payload
+    var prefix: [u8] = []
+    prefix.push(version & 0xFF)
+    var i = 0
+    while i < payload.len():
+        prefix.push(payload[i])
+        i = i + 1
+
+    # Compute checksum: first 4 bytes of SHA256(SHA256(prefix))
+    val checksum = _b58_double_sha256_first4(prefix)
+
+    # Build full = prefix || checksum
+    var full: [u8] = []
+    var j = 0
+    while j < prefix.len():
+        full.push(prefix[j])
+        j = j + 1
+    var kk = 0
+    while kk < checksum.len():
+        full.push(checksum[kk])
+        kk = kk + 1
+
+    base58_encode(full)
+
+fn base58check_decode(input: text) -> Result<(i64, [u8]), Base58Error>:
+    """Decode a Base58Check string into (version, payload).
+    Returns Err(TooShort) if fewer than 5 bytes, Err(InvalidChecksum) on mismatch.
+    reason: positional base58check decode"""
+    val r = base58_decode(input)
+    if not r.is_ok():
+        return Err(r.unwrap_err())
+
+    val bytes = r.unwrap()
+    if bytes.len() < 5:
+        return Err(Base58Error.TooShort)
+
+    val total = bytes.len()
+    val prefix_len = total - 4
+
+    # Extract prefix and expected checksum
+    var prefix: [u8] = []
+    var pi = 0
+    while pi < prefix_len:
+        prefix.push(bytes[pi])
+        pi = pi + 1
+
+    var expected_cs: [u8] = []
+    var ci = prefix_len
+    while ci < total:
+        expected_cs.push(bytes[ci])
+        ci = ci + 1
+
+    # Compute actual checksum
+    val actual_cs = _b58_double_sha256_first4(prefix)
+
+    # Compare all 4 checksum bytes
+    if (expected_cs[0].to_i64() & 0xFF) != (actual_cs[0].to_i64() & 0xFF):
+        return Err(Base58Error.InvalidChecksum)
+    if (expected_cs[1].to_i64() & 0xFF) != (actual_cs[1].to_i64() & 0xFF):
+        return Err(Base58Error.InvalidChecksum)
+    if (expected_cs[2].to_i64() & 0xFF) != (actual_cs[2].to_i64() & 0xFF):
+        return Err(Base58Error.InvalidChecksum)
+    if (expected_cs[3].to_i64() & 0xFF) != (actual_cs[3].to_i64() & 0xFF):
+        return Err(Base58Error.InvalidChecksum)
+
+    val version = prefix[0].to_i64() & 0xFF
+    var payload_out: [u8] = []
+    var xi = 1
+    while xi < prefix.len():
+        payload_out.push(prefix[xi])
+        xi = xi + 1
+
+    Ok((version, payload_out))
