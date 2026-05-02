@@ -181,3 +181,65 @@ TLS 1.3 / M3 narrow-surface gaps (still): no ECDSA TLS-side verification, Encryp
 ## Wave 5 Outcomes (2026-05-01 evening)
 
 - **TLS_CHACHA20_POLY1305_SHA256 (0x1303) cipher suite LANDED 2026-05-01** — third TLS 1.3 mandatory cipher suite per RFC 8446 §9.1 now advertised + record-layer wired. Pure-Simple end-to-end: ChaCha20 (with T1's SIMD speedup, 1.7-1.8×) + Poly1305 + RFC 8439 AEAD wrapper + SHA-256 + HKDF-SHA-256 already in tree; this wave only added the cipher-suite advertise + record-layer dispatch + key-schedule traffic-key sibling. **No new Rust extern.** Wire: ClientHello cipher_suites now advertises `{0x1301, 0x1302, 0x1303}` per RFC 8446 §9.1 with `cipher_suites_len` bumped 0x0004→0x0006. Dispatch: `record13_encrypt_chacha20_poly1305` + `record13_decrypt_chacha20_poly1305` + `record13_encrypt_for_suite(suite, ...)` + `record13_decrypt_for_suite(suite, ...)` in `src/os/tls13/record13.spl` route to the new path when `0x1303` is negotiated and fall back to the existing AES-128-GCM path otherwise. Per-record nonce derived per RFC 8446 §5.3 via the existing `record13_make_nonce` (IV XOR seq_num, right-aligned big-endian). Key schedule: `tls13_traffic_keys_chacha20(traffic_secret) -> TrafficKeys` (32B ChaCha20 key + 12B IV) added to `src/os/tls13/key_schedule.spl`; existing SHA-256 helpers (`tls13_early_secret`, `tls13_handshake_secret`, `tls13_master_secret`, `tls13_finished_key`, `tls13_verify_data`) reused unchanged per RFC 8446 §B.4 (SHA-256 shared with `TLS_AES_128_GCM_SHA256`). Specs: `test/unit/os/tls13/chacha20_poly1305_cipher_suite_spec.spl` 14/14 PASS in interpreter mode (`bin/simple <spec>` direct, per `feedback_compile_mode_false_greens.md`) — covers constant value, advertise byte-format, AEAD encrypt + round-trip + tag-corruption rejection, RFC 8446 §5.3 nonce derivation (seq_num=0 vs seq_num=1), record-layer round-trip with both seq_num values, mismatched-seq_num rejection, and `record13_encrypt_for_suite` dispatch identity. **DEFERRED**: `tls13_traffic_keys_chacha20` shape-test + SHA-256 handshake_secret regression — both transitively invoke `rt_tls13_hkdf_*` runtime externs unresolved in interpreter mode (same pattern as T21's AES-256-GCM decrypt path); covered by compiled-mode runs. Full server-side negotiation fixture + rustls/openssl interop also deferred. Closes the last "narrow-surface cipher suite" line item from Wave 1.
+
+## Wave 9 (2026-05-02) — M5 PQ seed: ML-KEM-768 (FIPS 203) pure-Simple landing
+
+**M5 PQ — ML-KEM-768 seeded; ready for hybrid TLS 1.3 wiring next wave.**
+
+Wave 9 lands the pure-Simple foundation for post-quantum key encapsulation
+per NIST FIPS 203 (Module-Lattice-Based Key-Encapsulation Mechanism Standard,
+August 2024). This unblocks TLS 1.3 hybrid key exchange (X25519 + ML-KEM-768)
+per draft-ietf-tls-hybrid-design in a future wave.
+
+Files added:
+
+- `src/os/crypto/ml_kem_ntt.spl` — Z_q polynomial arithmetic over q=3329, NTT
+  with primitive 256th root ζ=17, INTT with the 128⁻¹ scale (3303),
+  pointwise multiply in NTT domain, Compress_d / Decompress_d (Algorithm
+  4 / 5), ByteEncode_d / ByteDecode_d (Algorithm 6 / 7). The zeta and
+  gamma tables were Python-cross-checked before commit. (Landed in the
+  parallel-agent wip-snapshot `ffbb6597cf` per
+  `feedback_wip_snapshot_half_ship.md`; committed without a subject due
+  to the auto-snapshot hook firing during edits.)
+- `src/os/crypto/ml_kem_kpke.spl` — SHAKE-128 (rate=168) and SHAKE-256
+  (rate=136) wrappers built on the shared `keccak_f1600` from
+  `lib/common/crypto/sha3.spl` with FIPS 202 §B.2 domain byte 0x1F;
+  G/H/J helpers; SamplePolyCBD η=2 (Algorithm 8); SampleNTT rejection
+  sampling for Â (Algorithm 7); PRF_eta = SHAKE-256(s||b, 64·eta)
+  (Algorithm 11); K-PKE.KeyGen / Encrypt / Decrypt (Algorithms 13/14/15)
+  for k=3, eta1=eta2=2, du=10, dv=4. Sizes: ekPKE=1184B, dkPKE=1152B,
+  c=1088B.
+- `src/os/crypto/ml_kem.spl` — IND-CCA wrapper. ML-KEM.KeyGen wraps
+  K-PKE.KeyGen and emits dk = dk_pke || ek || H(ek) || z (2400B).
+  ML-KEM.Encaps derives (K, r) = G(m || H(ek)) and emits c = K-PKE.Encrypt
+  (Algorithm 17). ML-KEM.Decaps runs the FO transform with **constant-time**
+  selection between K′ and the implicit-rejection key J(z || c) via
+  `_ct_bytes_eq` + `_ct_select_bytes` (no data-dependent branch on the
+  ciphertext-equality check; per `feedback_no_coverups.md` and the
+  ed25519 / p256 CT precedent).
+- `test/unit/lib/crypto/ml_kem_768_kat_spec.spl` — pure-Simple property
+  spec covering q sanity, FIPS 203 §4.2.1 Compress_1 boundary points
+  (832 → 0, 833 → 1, 2496 → 1, 2497 → 0), ByteEncode/Decode round-trip
+  shape, NTT round-trip shape, NTT pointwise multiply produces a
+  well-formed 256-coefficient result, ML-KEM-768 size invariants
+  (ek=1184, dk=2400, c=1088, K=32), and FIPS 202 SHAKE-128('') first
+  16 bytes byte-exact match
+  (`7F 9C 2B A4 E8 8F 82 7D 61 60 45 50 76 05 85 3E`).
+
+End-to-end correctness was verified during development in module-level
+top-level harnesses (interpreter mode, real execution rather than
+load-only spec PASS):
+
+- NTT round-trip on 256 coefficients (`ntt(p) → intt → p`): exact match.
+- NTT pointwise multiply matches Python schoolbook reference exactly
+  (a=3·k, b=5·k+1; c[0]=1621, c[1]=1901, c[255]=1471).
+- K-PKE.Decrypt(dk_pke, K-PKE.Encrypt(ek_pke, m, r)) recovers m exactly,
+  ~6 s end-to-end.
+- ML-KEM.Decaps(dk, c) produces the same K as ML-KEM.Encaps for
+  matching ciphertext, and a *different* K (via J(z || c)) when one
+  ciphertext bit is flipped, ~13 s end-to-end.
+
+Out of scope (Wave 10+): hybrid X25519+ML-KEM-768 TLS 1.3 wiring,
+ML-KEM-512, ML-KEM-1024, ML-DSA (signatures), SLH-DSA (hash-based
+signatures), NIST CCTV KAT vector injection (1184 B+ ek and 2400 B+ dk
+fixtures need a bytes-from-file helper).

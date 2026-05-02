@@ -7,8 +7,11 @@
 # Note: Simple does not yet parse `const N: usize` generics (see
 # src/compiler/00.common/simd_types.spl).  "Fixed-ness" is enforced as a
 # runtime invariant on the `lanes` field, not as a type-level parameter.
-# Back-compat aliases (Vec4f = FixedVec<f32> constructed with lanes=4) live
-# in aliases.spl and expose the same C2 §11.3 surface.
+#
+# Back-compat aliases (vec4f_splat etc.) live in aliases.spl.
+# Construction API: fixedvec_splat(), fixedvec_zero(), fixedvec_from_array(),
+# fixedvec_from_slice() — standalone fns because static dispatch on generic
+# classes is unsupported in interpreter mode.
 #
 # @tag:stdlib
 # @tag:simd
@@ -28,8 +31,7 @@ fn simd_check_lanes(n: i32):
         panic("E_SIMD_BAD_LANES: lanes={n} is not in {2,4,8,16,32,64}")
 
 # ============================================================================
-# FixedVec<T> — with Vector trait (C2 §1.1 + §1.2)
-# All bodies: interpreter-mode element-wise scalar loops.
+# FixedVec<T> — class body contains only instance methods (fn self)
 # ============================================================================
 
 class FixedVec<T: SimdElementType> with Vector:
@@ -42,6 +44,7 @@ class FixedVec<T: SimdElementType> with Vector:
     Enforced at construction via simd_check_lanes; raises E_SIMD_BAD_LANES.
 
     Note: Simple does not yet support `const N: usize` generics.
+    Construction: use fixedvec_splat(val, n) / fixedvec_from_array(arr).
     """
     elements: [T]
     lanes: i32
@@ -49,42 +52,6 @@ class FixedVec<T: SimdElementType> with Vector:
     # — Associated types —
     type Elem = T
     type Mask = Mask<FixedVec<T>>
-
-    # — Construction helpers (C2 §1.2) —
-
-    static fn splat(val: T, n: i32) -> Self:
-        """Create a vector with all lanes set to val. n must be in {2,4,8,16,32,64}."""
-        simd_check_lanes(n)
-        var out: [T] = []
-        var i = 0
-        while i < n:
-            out.push(val)
-            i = i + 1
-        FixedVec(elements: out, lanes: n)
-
-    static fn zero(n: i32) -> Self:
-        """Create a zero-filled vector of n lanes."""
-        FixedVec.splat(0 as T, n)
-
-    static fn from_slice(s: [T], n: i32) -> Self:
-        """Copy first n elements from slice s."""
-        simd_check_lanes(n)
-        if s.len() < n as usize:
-            panic("E_SIMD_BAD_LANES: from_slice requires >= {n} elements, got {s.len()}")
-        var out: [T] = []
-        var i = 0
-        while i < n:
-            out.push(s[i as usize])
-            i = i + 1
-        FixedVec(elements: out, lanes: n)
-
-    fn to_slice_into(self, out: [T]):
-        if out.len() < self.lanes as usize:
-            panic("E_SIMD_BAD_LANES: to_slice output buffer too small")
-        var i = 0
-        while i < self.lanes:
-            out[i as usize] = self.elements[i as usize]
-            i = i + 1
 
     # — Vector trait: lane count — (C2 §1.1)
 
@@ -192,7 +159,6 @@ class FixedVec<T: SimdElementType> with Vector:
     # — Vector trait: Float-only arithmetic — (C2 §1.1; E_SIMD_FLOAT_ONLY enforced by type checker)
 
     fn fma(self, b: Self, c: Self) -> Self:
-        # C2 §1.1: self*b + c
         val n = self.lanes
         var out: [T] = []
         var i = 0
@@ -202,7 +168,6 @@ class FixedVec<T: SimdElementType> with Vector:
         FixedVec(elements: out, lanes: n)
 
     fn fnmadd(self, b: Self, c: Self) -> Self:
-        # C2 §1.1: -(self*b) + c
         val n = self.lanes
         var out: [T] = []
         var i = 0
@@ -281,7 +246,6 @@ class FixedVec<T: SimdElementType> with Vector:
         FixedVec(elements: out, lanes: n)
 
     fn andnot(self, rhs: Self) -> Self:
-        # ~self & rhs
         val n = self.lanes
         var out: [T] = []
         var i = 0
@@ -300,7 +264,6 @@ class FixedVec<T: SimdElementType> with Vector:
         FixedVec(elements: out, lanes: n)
 
     fn shr_logical(self, count: u32) -> Self:
-        # C2 §1.1: zero-fill
         val n = self.lanes
         var out: [T] = []
         var i = 0
@@ -310,12 +273,11 @@ class FixedVec<T: SimdElementType> with Vector:
         FixedVec(elements: out, lanes: n)
 
     fn shr_arith(self, count: u32) -> Self:
-        # C2 §1.1: arithmetic right-shift; T: SignedInt only
         val n = self.lanes
         var out: [T] = []
         var i = 0
         while i < n:
-            out.push(self.elements[i as usize] >> count)   # signed >> is arith in Simple
+            out.push(self.elements[i as usize] >> count)
             i = i + 1
         FixedVec(elements: out, lanes: n)
 
@@ -426,7 +388,6 @@ class FixedVec<T: SimdElementType> with Vector:
         acc
 
     fn reduce_and(self) -> T:
-        # C2 §1.1: T: Integer only; E_SIMD_INT_ONLY enforced by type checker
         var acc = self.elements[0]
         var i = 1
         while i < self.lanes:
@@ -435,7 +396,6 @@ class FixedVec<T: SimdElementType> with Vector:
         acc
 
     fn reduce_or(self) -> T:
-        # C2 §1.1: T: Integer only
         var acc = self.elements[0]
         var i = 1
         while i < self.lanes:
@@ -446,7 +406,6 @@ class FixedVec<T: SimdElementType> with Vector:
     # — Vector trait: Permutation / shuffle — (C2 §1.1)
 
     fn shuffle(self, indices: Self) -> Self:
-        # indices must be an integer-element vector; interpreted as lane indices
         val n = self.lanes
         var out: [T] = []
         var i = 0
@@ -459,7 +418,6 @@ class FixedVec<T: SimdElementType> with Vector:
         FixedVec(elements: out, lanes: n)
 
     fn permute(self, ctrl: Self) -> Self:
-        # Interpreter: same as shuffle; backend uses compile-time constant path
         self.shuffle(ctrl)
 
     fn broadcast_lane(self, lane: u32) -> Self:
@@ -467,10 +425,9 @@ class FixedVec<T: SimdElementType> with Vector:
         if idx >= self.lanes as usize:
             panic("E_SIMD_LANE_OOB: broadcast_lane {lane} >= {self.lanes}")
         val v = self.elements[idx]
-        FixedVec.splat(v, self.lanes)
+        fixedvec_splat(v, self.lanes)
 
     fn interleave_lo(self, rhs: Self) -> Self:
-        # zip low lanes/2 elements: self[0],rhs[0],self[1],rhs[1],...
         val n = self.lanes
         val half = n / 2
         var out: [T] = []
@@ -482,7 +439,6 @@ class FixedVec<T: SimdElementType> with Vector:
         FixedVec(elements: out, lanes: n)
 
     fn interleave_hi(self, rhs: Self) -> Self:
-        # zip high lanes/2 elements
         val n = self.lanes
         val half = n / 2
         var out: [T] = []
@@ -493,51 +449,31 @@ class FixedVec<T: SimdElementType> with Vector:
             i = i + 1
         FixedVec(elements: out, lanes: n)
 
-    # — Vector trait: Memory — (C2 §1.1; interpreter-mode stubs)
+    # — Vector trait: Memory — (C2 §1.1)
+    # Pointer ops require compiled mode; interpreter stubs panic.
 
     fn load_unaligned(ptr: *T) -> Self:
-        # Interpreter: construct from pointer-based array copy (platform intrinsic in M1+)
-        val n = 4  # default; alias constructors use specific n
-        var out: [T] = []
-        var i = 0
-        while i < n:
-            out.push(rt_ptr_load(ptr, i as usize))
-            i = i + 1
-        FixedVec(elements: out, lanes: n)
+        panic("E_SIMD_COMPILE_ONLY: load_unaligned requires compiled mode")
 
     fn store_unaligned(self, ptr: *mut T):
-        var i = 0
-        while i < self.lanes:
-            rt_ptr_store(ptr, i as usize, self.elements[i as usize])
-            i = i + 1
+        panic("E_SIMD_COMPILE_ONLY: store_unaligned requires compiled mode")
 
     fn load_aligned(ptr: *T) -> Self:
-        # Same as unaligned in interpreter; alignment enforced by caller in compiled
-        FixedVec.load_unaligned(ptr)
+        panic("E_SIMD_COMPILE_ONLY: load_aligned requires compiled mode")
 
     fn store_aligned(self, ptr: *mut T):
-        self.store_unaligned(ptr)
+        panic("E_SIMD_COMPILE_ONLY: store_aligned requires compiled mode")
 
     fn gather(base: *T, indices: Self) -> Self:
-        val n = indices.lanes
-        var out: [T] = []
-        var i = 0
-        while i < n:
-            val idx = indices.elements[i as usize] as usize
-            out.push(rt_ptr_load(base, idx))
-            i = i + 1
-        FixedVec(elements: out, lanes: n)
+        panic("E_SIMD_COMPILE_ONLY: gather requires compiled mode")
 
     fn scatter(self, base: *mut T, indices: Self):
-        var i = 0
-        while i < self.lanes:
-            val idx = indices.elements[i as usize] as usize
-            rt_ptr_store(base, idx, self.elements[i as usize])
-            i = i + 1
+        panic("E_SIMD_COMPILE_ONLY: scatter requires compiled mode")
 
     # — Vector trait: Conversion — (C2 §1.1)
 
     fn from_array(arr: [T]) -> Self:
+        # no-self factory; delegates to module-level fixedvec_from_array
         val n = arr.len() as i32
         simd_check_lanes(n)
         FixedVec(elements: arr, lanes: n)
@@ -563,7 +499,7 @@ class FixedVec<T: SimdElementType> with Vector:
     fn iter(self) -> LaneIter<T>:
         LaneIter.new(self.elements)
 
-    # — C2 §1.2 own methods: type conversion —
+    # — C2 §1.2 own instance methods —
 
     fn cast<U: SimdElementType>(self) -> FixedVec<U>:
         val n = self.lanes
@@ -574,27 +510,66 @@ class FixedVec<T: SimdElementType> with Vector:
             i = i + 1
         FixedVec(elements: out, lanes: n)
 
-    # — C2 §1.2 own methods: zip aliases —
-
     fn zip_lo(self, rhs: Self) -> Self:
         self.interleave_lo(rhs)
 
     fn zip_hi(self, rhs: Self) -> Self:
         self.interleave_hi(rhs)
 
-    # — C2 §1.2 own methods: compile-time lane metadata —
-    # (Runtime equivalents since const generics aren't supported)
-
     fn lane_count(self) -> i32:
         self.lanes
 
-    fn byte_width_of_elem() -> usize:
-        # Interpreter fallback: use sizeof not available; known sizes for common types
-        # This is a best-effort; real byte width computed in M1+ backend
-        8  # conservative upper bound
-
-    # — C2 §1.2 own methods: preferred lanes for target (compile-time hint) —
-
     fn preferred_lanes_for_target(self) -> i32:
-        # Interpreter fallback: return self.lanes unchanged; backend supplies the real value
         self.lanes
+
+    fn to_slice_into(self, out: [T]):
+        if out.len() < self.lanes as usize:
+            panic("E_SIMD_BAD_LANES: to_slice output buffer too small")
+        var i = 0
+        while i < self.lanes:
+            out[i as usize] = self.elements[i as usize]
+            i = i + 1
+
+# ============================================================================
+# Module-level constructor functions (C2 §1.2)
+# Static methods on generic classes don't dispatch correctly in interpreter;
+# these standalone functions are the public construction API.
+# ============================================================================
+
+fn fixedvec_splat<T: SimdElementType>(val: T, n: i32) -> FixedVec<T>:
+    """Create a FixedVec with all lanes set to val. n must be in {2,4,8,16,32,64}."""
+    simd_check_lanes(n)
+    var out: [T] = []
+    var i = 0
+    while i < n:
+        out.push(val)
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+fn fixedvec_zero<T: SimdElementType>(n: i32) -> FixedVec<T>:
+    """Create a zero-filled FixedVec of n lanes."""
+    simd_check_lanes(n)
+    var out: [T] = []
+    var i = 0
+    while i < n:
+        out.push(0 as T)
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
+
+fn fixedvec_from_array<T: SimdElementType>(arr: [T]) -> FixedVec<T>:
+    """Create a FixedVec from an array. arr.len() must be in {2,4,8,16,32,64}."""
+    val n = arr.len() as i32
+    simd_check_lanes(n)
+    FixedVec(elements: arr, lanes: n)
+
+fn fixedvec_from_slice<T: SimdElementType>(s: [T], n: i32) -> FixedVec<T>:
+    """Create a FixedVec from first n elements of slice s."""
+    simd_check_lanes(n)
+    if s.len() < n as usize:
+        panic("E_SIMD_BAD_LANES: from_slice requires >= {n} elements, got {s.len()}")
+    var out: [T] = []
+    var i = 0
+    while i < n:
+        out.push(s[i as usize])
+        i = i + 1
+    FixedVec(elements: out, lanes: n)
