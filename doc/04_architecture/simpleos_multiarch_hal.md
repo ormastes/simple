@@ -183,7 +183,7 @@ the first kernel-thread spawn. It replaces the
 `__stack_chk_guard = 0xDEADBEEFDEADBEEFUL` constant in
 `src/os/libc/simpleos_cxxabi.c:158-160`.
 
-#### 2.3.5 `HalSmp` (RESERVED — impl deferred)
+#### 2.3.5 `HalSmp` (PARTIAL — test seams landed 2026-05-02; production bodies pending)
 
 ```
 trait HalSmp:
@@ -195,6 +195,14 @@ trait HalSmp:
 
 Trait shape locked NOW so Phase 5 ABI doesn't churn; impl is **deferred to a
 follow-up feature**. UP-only kernel for AC-4 smoke. (Codex recommendation.)
+
+**RV impl status (2026-05-02):** PARTIAL. Module files + `*_with_mock` test-seam
+helpers landed in `src/os/kernel/arch/riscv64/hal_smp.spl` and
+`src/os/kernel/arch/riscv32/hal_smp.spl`. Interpreter-mode unit specs pass
+(12/12 for rv64). Production bodies (`hal_smp_cpu_start`, `hal_smp_ipi_send`,
+`hal_smp_ipi_broadcast` without `_with_mock` suffix, calling real SBI) are
+absent — see FR-RISCV-HAL-PROD-WIRING-2026-05-02
+(`doc/08_tracking/feature_request/riscv_hal_smp_cache_prod_wiring_2026-05-02.md`).
 
 #### 2.3.6 `HalPerCpu` (RESERVED — impl deferred)
 
@@ -241,6 +249,16 @@ trait HalCache:
 x86 impl is mostly no-op (coherent). ARM uses `ic ivau` / `dc cvau` / `dc ivac`.
 RISC-V uses `fence.i` and Zicbom/Zicboz CMO instructions if available, else
 implementation-defined `cflush.d.l1`/SBI extension.
+
+**RV impl status (2026-05-02):** PARTIAL. Module files + `*_with_log` test-seam
+helpers landed in `src/os/kernel/arch/riscv64/hal_cache.spl` and
+`src/os/kernel/arch/riscv32/hal_cache.spl`. Interpreter-mode unit specs pass
+(15/15 for rv64). Production bodies (`hal_cache_sync_icache`,
+`hal_cache_clean_dcache`, `hal_cache_invalidate_dcache` without `_with_log`
+suffix, calling real `cmo.fence_i()` / `cbo_flush` / `cbo_clean` / `cbo_inval`)
+are absent — see FR-RISCV-HAL-PROD-WIRING-2026-05-02
+(`doc/08_tracking/feature_request/riscv_hal_smp_cache_prod_wiring_2026-05-02.md`).
+AC-4 (tp per-CPU wiring) is PARTIAL pending FR-RISCV-TP-INIT-2026-05-02.
 
 Required for: ELF loader writing then executing pages, JIT trampolines,
 user-trampoline patching.
