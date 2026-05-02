@@ -2,6 +2,7 @@ impl Value {
     pub fn as_int(&self) -> Result<i64, CompileError> {
         match self {
             Value::Int(i) => Ok(*i),
+            Value::UInt { value, .. } => Ok(*value as i64),
             Value::Float(f) => Ok(*f as i64),
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
             Value::Unit { value, .. } => value.as_int(),
@@ -51,6 +52,7 @@ impl Value {
         match self {
             Value::Float(f) => Ok(*f),
             Value::Int(i) => Ok(*i as f64),
+            Value::UInt { value, .. } => Ok(*value as f64),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
             Value::Unit { value, .. } => value.as_float(),
             Value::Unique(u) => u.inner().as_float(),
@@ -80,6 +82,7 @@ impl Value {
     pub fn to_key_string(&self) -> String {
         match self {
             Value::Int(i) => i.to_string(),
+            Value::UInt { value, .. } => value.to_string(),
             Value::Float(f) => f.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Str(s) => s.clone(),
@@ -147,6 +150,7 @@ impl Value {
             Value::Str(s) => s.clone(),
             Value::Symbol(s) => format!(":{s}"),
             Value::Int(i) => i.to_string(),
+            Value::UInt { value, .. } => value.to_string(),
             Value::Float(f) => f.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Array(items) => {
@@ -317,6 +321,13 @@ impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "i64",
+            Value::UInt { width, .. } => match *width {
+                8 => "u8",
+                16 => "u16",
+                32 => "u32",
+                64 => "u64",
+                _ => "uint",
+            },
             Value::Float(_) => "f64",
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",

@@ -222,6 +222,10 @@ impl Clone for Value {
     fn clone(&self) -> Self {
         match self {
             Value::Int(i) => Value::Int(*i),
+            Value::UInt { value, width } => Value::UInt {
+                value: *value,
+                width: *width,
+            },
             Value::Float(f) => Value::Float(*f),
             Value::Bool(b) => Value::Bool(*b),
             Value::Str(s) => Value::Str(s.clone()),
@@ -329,6 +333,12 @@ impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::UInt { value: a, width: wa }, Value::UInt { value: b, width: wb }) => a == b && wa == wb,
+            // Cross-variant: UInt vs Int compares by numeric value (same bit-pattern semantics).
+            // Allows `0u32 - 1u32 == 4294967295` (RHS is Int) to succeed.
+            (Value::UInt { value, .. }, Value::Int(b)) | (Value::Int(b), Value::UInt { value, .. }) => {
+                *value as i64 == *b
+            }
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
