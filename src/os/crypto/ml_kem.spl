@@ -1,0 +1,238 @@
+# ML-KEM-768 — IND-CCA Wrapper (FIPS 203 Algorithms 16/17/18)
+#
+# Module-Lattice-Based Key-Encapsulation Mechanism Standard (NIST FIPS 203,
+# August 2024). This file wires the K-PKE (`ml_kem_kpke.spl`) primitive into
+# the Fujisaki-Okamoto transform that gives ML-KEM its IND-CCA2 security.
+#
+# Public API:
+#   ml_kem_keygen(d: list, z: list) -> (ek, dk)
+#       d, z are 32-byte random seeds. Caller is responsible for entropy.
+#   ml_kem_encaps(ek: list, m: list) -> (K, c)
+#       m is a 32-byte random plaintext. Returns shared secret K and
+#       ciphertext c.
+#   ml_kem_decaps(dk: list, c: list) -> K
+#       Constant-time FO transform; on ciphertext mismatch returns the
+#       implicit-rejection key J(z || c) instead of leaking the failure.
+#
+# ML-KEM-768 sizes:
+#   ek = 1184 bytes, dk = 2400 bytes, c = 1088 bytes, K = 32 bytes.
+#
+# Reference: NIST FIPS 203 — Module-Lattice-Based Key-Encapsulation Mechanism
+#            Standard, https://csrc.nist.gov/pubs/fips/203/final §7.
+
+mod os.crypto.ml_kem
+
+use os.crypto.ml_kem_kpke.{kpke_keygen, kpke_encrypt, kpke_decrypt,
+    ml_kem_g, ml_kem_h, ml_kem_j}
+
+# ============================================================================
+# ML-KEM-768 sizes
+# ============================================================================
+
+fn ml_kem_768_ek_bytes() -> i64:
+    1184
+
+fn ml_kem_768_dk_bytes() -> i64:
+    2400
+
+fn ml_kem_768_ct_bytes() -> i64:
+    1088
+
+fn ml_kem_768_ss_bytes() -> i64:
+    32
+
+# ============================================================================
+# Constant-time byte helpers
+# ============================================================================
+#
+# `_ct_byte_eq(a, b)` returns 0xFF when a == b and 0x00 otherwise, computed
+# without data-dependent branches. The full-byte mask form is used directly
+# by `_ct_select_bytes`.
+#
+# This is the FO-transform constant-time selection per the precedent in
+# ed25519/p256 (`feedback_no_coverups.md`). A naïve `if equal: K' else: J`
+# would leak via timing.
+
+fn _ct_byte_eq(a: i64, b: i64) -> i64:
+    # x == 0 iff a == b. Convert to a full-byte mask using arithmetic only.
+    val x = (a ^ b) & 0xFF
+    # If x == 0 then x | -x == 0 → high bit 0 → ((x | -x) >> 7) == 0 → invert
+    # to get 0xFF. If x != 0 then x | -x has high bit 1 → 0x01 after >>7
+    # and 0xFF after subtract → invert to get 0x00.
+    val nz = ((x | (0 - x)) >> 7) & 1   # 0 if equal, 1 if differ
+    (1 - nz) * 0xFF                       # 0xFF if equal, 0x00 if differ
+
+# Constant-time bytes equality across whole arrays. Returns 0xFF if equal,
+# 0x00 otherwise. Always processes every byte regardless of mismatch position.
+fn _ct_bytes_eq(a: list, b: list) -> i64:
+    if a.len() != b.len():
+        return 0  # Length mismatch is not part of the secret.
+    var acc = 0xFF
+    var i = 0
+    while i < a.len():
+        acc = acc & _ct_byte_eq(a.get(i), b.get(i))
+        i = i + 1
+    acc
+
+# Select a or b byte-wise, controlled by `mask` (0xFF → a, 0x00 → b). The
+# mask is applied identically at every byte position so the side-channel
+# profile is independent of the chosen branch.
+fn _ct_select_bytes(mask: i64, a: list, b: list) -> list:
+    var out = []
+    var i = 0
+    val m = mask & 0xFF
+    val nm = (~m) & 0xFF
+    while i < a.len():
+        out.push(((a.get(i) & m) | (b.get(i) & nm)) & 0xFF)
+        i = i + 1
+    out
+
+# ============================================================================
+# ML-KEM.KeyGen — FIPS 203 Algorithm 16
+# ============================================================================
+#
+# (ekPKE, dkPKE) = K-PKE.KeyGen(d)
+# ek = ekPKE
+# dk = dkPKE || ek || H(ek) || z
+#
+# Inputs are 32-byte d and 32-byte z (independent random material). Per
+# FIPS 203 the caller may also call ml_kem_keygen_internal(seed) which
+# splits a 64-byte seed into (d, z); we keep them separate here so callers
+# can plug their own RNG / KAT seed without re-allocating bytes.
+
+fn ml_kem_keygen(d: list, z: list) -> tuple:
+    val kp = kpke_keygen(d)
+    val ek_pke = kp[0]
+    val dk_pke = kp[1]
+
+    # H(ek) — 32 bytes.
+    val h_ek = ml_kem_h(ek_pke)
+
+    # dk = dk_pke || ek || H(ek) || z
+    var dk = []
+    var i = 0
+    while i < dk_pke.len():
+        dk.push(dk_pke.get(i))
+        i = i + 1
+    var j = 0
+    while j < ek_pke.len():
+        dk.push(ek_pke.get(j))
+        j = j + 1
+    var k = 0
+    while k < h_ek.len():
+        dk.push(h_ek.get(k))
+        k = k + 1
+    var l = 0
+    while l < z.len():
+        dk.push(z.get(l))
+        l = l + 1
+
+    (ek_pke, dk)
+
+# ============================================================================
+# ML-KEM.Encaps — FIPS 203 Algorithm 17
+# ============================================================================
+#
+# Caller supplies a fresh 32-byte uniform m. Internally:
+#   (K, r) = G(m || H(ek))
+#   c = K-PKE.Encrypt(ek, m, r)
+# Returns (K, c).
+#
+# Per FIPS 203 §7.2 the message m must be sampled from a uniform 32-byte
+# distribution. KAT-driven test code can pin m for reproducibility; live
+# callers pass random_bytes(32).
+
+fn ml_kem_encaps(ek: list, m: list) -> tuple:
+    val h_ek = ml_kem_h(ek)
+    var input = []
+    var i = 0
+    while i < m.len():
+        input.push(m.get(i))
+        i = i + 1
+    var j = 0
+    while j < h_ek.len():
+        input.push(h_ek.get(j))
+        j = j + 1
+    val kr = ml_kem_g(input)
+    val k_shared = kr[0]
+    val r = kr[1]
+    val c = kpke_encrypt(ek, m, r)
+    (k_shared, c)
+
+# ============================================================================
+# ML-KEM.Decaps — FIPS 203 Algorithm 18
+# ============================================================================
+#
+# Constant-time FO transform. Input dk = dk_pke || ek || H(ek) || z.
+#
+#   m'         = K-PKE.Decrypt(dk_pke, c)
+#   (K', r')   = G(m' || H(ek))
+#   K_implicit = J(z || c)
+#   c'         = K-PKE.Encrypt(ek, m', r')
+#   if c == c' return K' else return K_implicit
+#
+# The final `if c == c'` MUST be a constant-time selection: a branch leaks
+# whether the ciphertext was forged. Per `feedback_no_coverups.md` and the
+# ed25519/p256 CT precedent, we use _ct_bytes_eq + _ct_select_bytes.
+
+fn ml_kem_decaps(dk: list, c: list) -> list:
+    # Slice fields out of dk by fixed offsets (ML-KEM-768).
+    val ek_bytes = ml_kem_768_ek_bytes()  # 1184
+    val dk_pke_bytes = 1152                # 384·k = 1152
+    # dk = [dk_pke (1152) || ek (1184) || H(ek) (32) || z (32)] = 2400.
+    var dk_pke = []
+    var i = 0
+    while i < dk_pke_bytes:
+        dk_pke.push(dk.get(i))
+        i = i + 1
+    var ek = []
+    var j = 0
+    while j < ek_bytes:
+        ek.push(dk.get(dk_pke_bytes + j))
+        j = j + 1
+    var h_ek = []
+    var k = 0
+    while k < 32:
+        h_ek.push(dk.get(dk_pke_bytes + ek_bytes + k))
+        k = k + 1
+    var z = []
+    var l = 0
+    while l < 32:
+        z.push(dk.get(dk_pke_bytes + ek_bytes + 32 + l))
+        l = l + 1
+
+    # m' = K-PKE.Decrypt(dk_pke, c)
+    val m_prime = kpke_decrypt(dk_pke, c)
+
+    # (K', r') = G(m' || H(ek))
+    var input = []
+    var ii = 0
+    while ii < m_prime.len():
+        input.push(m_prime.get(ii))
+        ii = ii + 1
+    var jj = 0
+    while jj < h_ek.len():
+        input.push(h_ek.get(jj))
+        jj = jj + 1
+    val kr = ml_kem_g(input)
+    val k_prime = kr[0]
+    val r_prime = kr[1]
+
+    # K_implicit = J(z || c)
+    var zc = []
+    var aa = 0
+    while aa < z.len():
+        zc.push(z.get(aa))
+        aa = aa + 1
+    var bb = 0
+    while bb < c.len():
+        zc.push(c.get(bb))
+        bb = bb + 1
+    val k_implicit = ml_kem_j(zc)
+
+    # c' = K-PKE.Encrypt(ek, m', r')
+    val c_prime = kpke_encrypt(ek, m_prime, r_prime)
+
+    # Constant-time select between K' and K_implicit by c ?= c'.
+    val mask = _ct_bytes_eq(c, c_prime)
+    _ct_select_bytes(mask, k_prime, k_implicit)

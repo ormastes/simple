@@ -1,0 +1,413 @@
+# =============================================================================
+# ML-DSA-65 — Polynomial Arithmetic + NTT (FIPS 204 §F / Appendix B.1)
+#
+# Module-Lattice-Based Digital Signature Standard (NIST FIPS 204, August 2024).
+# Counterpart to ML-KEM-768 (FIPS 203). This file provides the Z_q[X]/(X^256+1)
+# ring arithmetic, the NTT machinery, and the Power2Round / Decompose / HighBits
+# / LowBits / MakeHint / UseHint primitives that ML-DSA Sign/Verify build on.
+#
+# Parameter set: ML-DSA-65 (NIST security category 3)
+#   n       = 256             — polynomial degree
+#   q       = 8380417         — prime modulus  ( = 2^23 - 2^13 + 1 )
+#   d       = 13              — bits dropped by Power2Round
+#   tau     = 49              — Hamming weight of c
+#   gamma1  = 2^19 = 524288   — masking range for y
+#   gamma2  = (q-1)/32 = 261888— low-bits modulus
+#   k       = 6               — rows of A (and t, t1, t0, w, ...)
+#   l       = 5               — cols of A (and s1, y, z, ...)
+#   eta     = 4               — secret-key coefficient bound
+#   beta    = tau * eta = 196 — z-norm rejection bound (excluded)
+#   omega   = 55              — max ones in hint h
+#
+# The NTT here uses zeta = 1753 (primitive 512-th root of unity mod q) with
+# BitRev8 ordering of the zeta exponents, distinct from ML-KEM's ζ=17 / BitRev7.
+# Pointwise multiplication in NTT domain is plain coefficient-wise (FIPS 204
+# represents a poly in NTT as 256 elements; ML-KEM represents it as 128 pairs).
+#
+# Reference: NIST FIPS 204 — Module-Lattice-Based Digital Signature Standard,
+#   https://csrc.nist.gov/pubs/fips/204/final
+# Related:   src/os/crypto/ml_kem_ntt.spl (sibling KEM ring),
+#            doc/08_tracking/crypto_recovery_status.md M5 (post-quantum).
+# =============================================================================
+
+mod os.crypto.ml_dsa_ntt
+
+# -----------------------------------------------------------------------------
+# Parameter accessors (FIPS 204 §4 Table 1, ML-DSA-65 row).
+# -----------------------------------------------------------------------------
+
+fn ml_dsa_n() -> i64:
+    256
+
+fn ml_dsa_q() -> i64:
+    8380417
+
+fn ml_dsa_d() -> i64:
+    13
+
+fn ml_dsa_tau_65() -> i64:
+    49
+
+fn ml_dsa_gamma1_65() -> i64:
+    524288
+
+fn ml_dsa_gamma2_65() -> i64:
+    261888
+
+fn ml_dsa_k_65() -> i64:
+    6
+
+fn ml_dsa_l_65() -> i64:
+    5
+
+fn ml_dsa_eta_65() -> i64:
+    4
+
+fn ml_dsa_beta_65() -> i64:
+    196
+
+fn ml_dsa_omega_65() -> i64:
+    55
+
+# -----------------------------------------------------------------------------
+# Modular reduction helpers (Z_q with q = 8380417).
+# Caller-side discipline keeps intermediates within ±2^53, so a centred
+# `((x % q) + q) % q` is safe under i64 arithmetic.
+# -----------------------------------------------------------------------------
+
+fn modq(x: i64) -> i64:
+    val q = ml_dsa_q()
+    val r = x % q
+    if r < 0:
+        r + q
+    else:
+        r
+
+# Centred representative in (-q/2, q/2]. Used by Decompose / norm checks.
+fn modq_centered(x: i64) -> i64:
+    val q = ml_dsa_q()
+    val r = modq(x)
+    if r > q / 2:
+        r - q
+    else:
+        r
+
+# Infinity-norm of a polynomial under centred reduction.
+fn poly_infinity_norm(p: list) -> i64:
+    var m = 0
+    var i = 0
+    while i < 256:
+        val c = modq_centered(p.get(i))
+        val a = if c < 0: -c else: c
+        if a > m:
+            m = a
+        i = i + 1
+    m
+
+# -----------------------------------------------------------------------------
+# Zeta table — primitive 512-th root of unity mod q (FIPS 204 §F / App B.1).
+#
+# zeta = 1753.  zetas[i] = zeta^(BitRev8(i)) mod q for i in 0..255.
+# zetas[0] = 1 is unused (Algorithm 41 starts with k=0 and pre-increments k).
+# Verified: zeta^256 mod q = q - 1 (i.e. -1), zetas[1] = 4808194 matches
+# the FIPS 204 reference implementation Table 7.
+# -----------------------------------------------------------------------------
+
+fn _ntt_zetas() -> list:
+    [
+        1, 4808194, 3765607, 3761513, 5178923, 5496691, 5234739, 5178987,
+        7778734, 3542485, 2682288, 2129892, 3764867, 7375178, 557458, 7159240,
+        5010068, 4317364, 2663378, 6705802, 4855975, 7946292, 676590, 7044481,
+        5152541, 1714295, 2453983, 1460718, 7737789, 4795319, 2815639, 2283733,
+        3602218, 3182878, 2740543, 4793971, 5269599, 2101410, 3704823, 1159875,
+        394148, 928749, 1095468, 4874037, 2071829, 4361428, 3241972, 2156050,
+        3415069, 1759347, 7562881, 4805951, 3756790, 6444618, 6663429, 4430364,
+        5483103, 3192354, 556856, 3870317, 2917338, 1853806, 3345963, 1858416,
+        3073009, 1277625, 5744944, 3852015, 4183372, 5157610, 5258977, 8106357,
+        2508980, 2028118, 1937570, 4564692, 2811291, 5396636, 7270901, 4158088,
+        1528066, 482649, 1148858, 5418153, 7814814, 169688, 2462444, 5046034,
+        4213992, 4892034, 1987814, 5183169, 1736313, 235407, 5130263, 3258457,
+        5801164, 1787943, 5989328, 6125690, 3482206, 4197502, 7080401, 6018354,
+        7062739, 2461387, 3035980, 621164, 3901472, 7153756, 2925816, 3374250,
+        1356448, 5604662, 2683270, 5601629, 4912752, 2312838, 7727142, 7921254,
+        348812, 8052569, 1011223, 6026202, 4561790, 6458164, 6143691, 1744507,
+        1753, 6444997, 5720892, 6924527, 2660408, 6600190, 8321269, 2772600,
+        1182243, 87208, 636927, 4415111, 4423672, 6084020, 5095502, 4663471,
+        8352605, 822541, 1009365, 5926272, 6400920, 1596822, 4423473, 4620952,
+        6695264, 4969849, 2678278, 4611469, 4829411, 635956, 8129971, 5925040,
+        4234153, 6607829, 2192938, 6653329, 2387513, 4768667, 8111961, 5199961,
+        3747250, 2296099, 1239911, 4541938, 3195676, 2642980, 1254190, 8368000,
+        2998219, 141835, 8291116, 2513018, 7025525, 613238, 7070156, 6161950,
+        7921677, 6458423, 4040196, 4908348, 2039144, 6500539, 7561656, 6201452,
+        6757063, 2105286, 6006015, 6346610, 586241, 7200804, 527981, 5637006,
+        6903432, 1994046, 2491325, 6987258, 507927, 7192532, 7655613, 6545891,
+        5346675, 8041997, 2647994, 3009748, 5767564, 4148469, 749577, 4357667,
+        3980599, 2569011, 6764887, 1723229, 1665318, 2028038, 1163598, 5011144,
+        3994671, 8368538, 7009900, 3020393, 3363542, 214880, 545376, 7609976,
+        3105558, 7277073, 508145, 7826699, 860144, 3430436, 140244, 6866265,
+        6195333, 3123762, 2358373, 6187330, 5365997, 6663603, 2926054, 7987710,
+        8077412, 3531229, 4405932, 4606686, 1900052, 7598542, 1054478, 7648983
+    ]
+
+# -----------------------------------------------------------------------------
+# Forward NTT — FIPS 204 Algorithm 41 (NTT).
+#
+# Input:  f in Z_q^256 (coefficient domain).
+# Output: f̂ in Z_q^256 (NTT domain — element-wise representation).
+#
+# The Cooley-Tukey decimation-in-time butterfly walks layers from len=128
+# down to len=1, with k advancing 1..255 across the zetas table.
+# -----------------------------------------------------------------------------
+
+fn ntt(f_in: list) -> list:
+    val q = ml_dsa_q()
+    val zetas = _ntt_zetas()
+    var f = []
+    var i = 0
+    while i < 256:
+        f.push(f_in.get(i))
+        i = i + 1
+
+    var k = 0
+    var len = 128
+    while len >= 1:
+        var start = 0
+        while start < 256:
+            k = k + 1
+            val zeta = zetas.get(k)
+            var j = start
+            while j < start + len:
+                val t = (zeta * f.get(j + len)) % q
+                val fj = f.get(j)
+                f[j + len] = modq(fj - t)
+                f[j] = modq(fj + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    f
+
+# -----------------------------------------------------------------------------
+# Inverse NTT — FIPS 204 Algorithm 42 (NTT⁻¹).
+#
+# Walks zetas in reverse (k = 256, decrementing) and finishes with the
+# scaling factor f = 8347681 (= n^{-1} mod q for n=256 with negated zetas).
+# Per FIPS 204, the inverse NTT also negates each zeta read.
+# -----------------------------------------------------------------------------
+
+fn intt(f_in: list) -> list:
+    val q = ml_dsa_q()
+    val zetas = _ntt_zetas()
+    var f = []
+    var i = 0
+    while i < 256:
+        f.push(f_in.get(i))
+        i = i + 1
+
+    var k = 256
+    var len = 1
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            k = k - 1
+            # FIPS 204 Algorithm 42 line 7: zeta = -zetas[k]
+            val zeta = q - zetas.get(k)
+            var j = start
+            while j < start + len:
+                val t = f.get(j)
+                val fjl = f.get(j + len)
+                f[j] = modq(t + fjl)
+                f[j + len] = modq((zeta * (t - fjl)) % q)
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+
+    # Final scaling: multiply each coefficient by 256^{-1} mod q.
+    # 256^{-1} mod 8380417 = 8347681.
+    val n_inv = 8347681
+    var idx = 0
+    while idx < 256:
+        f[idx] = (f.get(idx) * n_inv) % q
+        idx = idx + 1
+    f
+
+# -----------------------------------------------------------------------------
+# Pointwise multiplication in NTT domain — FIPS 204 Algorithm 45.
+#
+# In ML-DSA's NTT representation each polynomial is held as 256 separate
+# Z_q elements; multiplication is straight coefficient-wise.
+# -----------------------------------------------------------------------------
+
+fn ntt_multiply(a: list, b: list) -> list:
+    val q = ml_dsa_q()
+    var c = []
+    var i = 0
+    while i < 256:
+        c.push((a.get(i) * b.get(i)) % q)
+        i = i + 1
+    c
+
+# -----------------------------------------------------------------------------
+# Polynomial add / sub in coefficient or NTT domain.
+# -----------------------------------------------------------------------------
+
+fn poly_add(a: list, b: list) -> list:
+    var c = []
+    var i = 0
+    while i < 256:
+        c.push(modq(a.get(i) + b.get(i)))
+        i = i + 1
+    c
+
+fn poly_sub(a: list, b: list) -> list:
+    var c = []
+    var i = 0
+    while i < 256:
+        c.push(modq(a.get(i) - b.get(i)))
+        i = i + 1
+    c
+
+# Multiply every coefficient by a small scalar mod q.
+fn poly_scalar_mul(p: list, s: i64) -> list:
+    val q = ml_dsa_q()
+    var c = []
+    var i = 0
+    while i < 256:
+        c.push(modq((p.get(i) * s) % q))
+        i = i + 1
+    c
+
+# -----------------------------------------------------------------------------
+# Power2Round — FIPS 204 Algorithm 35.
+#
+# Splits r ∈ Z_q into (r1, r0) with r = r1 * 2^d + r0, r0 ∈ (-2^(d-1), 2^(d-1)],
+# and r1 ∈ [0, 2^(23-d)). Returns tuple (r1, r0_centred).
+# -----------------------------------------------------------------------------
+
+fn power2round_int(r_in: i64) -> tuple:
+    val q = ml_dsa_q()
+    val d = ml_dsa_d()
+    val r = modq(r_in)
+    val pow_d = 8192            # 2^13
+    val half  = 4096            # 2^(d-1)
+    # r0 ∈ (-2^(d-1), 2^(d-1)]
+    val low = r % pow_d
+    var r0 = low
+    if r0 > half:
+        r0 = r0 - pow_d
+    # r1 = (r - r0) / 2^d  (note: r is in [0,q); r - r0 is a multiple of 2^d)
+    val r1 = (r - r0) / pow_d
+    (r1, r0)
+
+# Apply Power2Round to every coefficient. Returns tuple (r1_poly, r0_poly).
+fn power2round_poly(r: list) -> tuple:
+    var r1 = []
+    var r0 = []
+    var i = 0
+    while i < 256:
+        val pair = power2round_int(r.get(i))
+        r1.push(pair[0])
+        r0.push(pair[1])
+        i = i + 1
+    (r1, r0)
+
+# -----------------------------------------------------------------------------
+# Decompose — FIPS 204 Algorithm 36.
+#
+# Splits r ∈ Z_q into (r1, r0) with r ≡ r1 * 2γ2 + r0  (mod q),
+# r0 ∈ (-γ2, γ2] except boundary case where r1 wraps to 0 and r0 is corrected.
+# For ML-DSA-65: γ2 = (q-1)/32 = 261888, so 2γ2 divides q-1.
+# -----------------------------------------------------------------------------
+
+fn decompose_int(r_in: i64) -> tuple:
+    val q = ml_dsa_q()
+    val gamma2 = ml_dsa_gamma2_65()
+    val two_g  = 2 * gamma2     # 523776
+    val r = modq(r_in)
+    val low = r % two_g
+    var r0 = low
+    if r0 > gamma2:
+        r0 = r0 - two_g
+    var r1 = (r - r0) / two_g
+    # FIPS 204 §B.2 boundary: if r - r0 == q - 1 then r1 = 0, r0 = r0 - 1.
+    if r - r0 == q - 1:
+        r1 = 0
+        r0 = r0 - 1
+    (r1, r0)
+
+fn decompose_poly(r: list) -> tuple:
+    var r1 = []
+    var r0 = []
+    var i = 0
+    while i < 256:
+        val pair = decompose_int(r.get(i))
+        r1.push(pair[0])
+        r0.push(pair[1])
+        i = i + 1
+    (r1, r0)
+
+# HighBits / LowBits — projections of Decompose (Algorithms 37 & 38).
+fn high_bits_int(r: i64) -> i64:
+    val pair = decompose_int(r)
+    pair[0]
+
+fn low_bits_int(r: i64) -> i64:
+    val pair = decompose_int(r)
+    pair[1]
+
+fn high_bits_poly(r: list) -> list:
+    val parts = decompose_poly(r)
+    parts[0]
+
+fn low_bits_poly(r: list) -> list:
+    val parts = decompose_poly(r)
+    parts[1]
+
+# -----------------------------------------------------------------------------
+# MakeHint / UseHint — FIPS 204 Algorithms 39 & 40.
+#
+# MakeHint(z, r):  returns 1 if HighBits(r) != HighBits(r + z), else 0.
+# UseHint(h, r):   recovers the corrected high bits given hint bit h.
+# -----------------------------------------------------------------------------
+
+fn make_hint_int(z: i64, r: i64) -> i64:
+    val a = high_bits_int(r)
+    val b = high_bits_int(r + z)
+    if a == b:
+        0
+    else:
+        1
+
+fn make_hint_poly(z: list, r: list) -> list:
+    var h = []
+    var i = 0
+    while i < 256:
+        h.push(make_hint_int(z.get(i), r.get(i)))
+        i = i + 1
+    h
+
+# Cardinality m = (q-1)/(2γ2) = 16 for ML-DSA-65 → r1 ∈ [0, 16).
+fn _hint_modulus_65() -> i64:
+    val q = ml_dsa_q()
+    val gamma2 = ml_dsa_gamma2_65()
+    (q - 1) / (2 * gamma2)
+
+fn use_hint_int(h: i64, r: i64) -> i64:
+    val m = _hint_modulus_65()
+    val parts = decompose_int(r)
+    val r1 = parts[0]
+    val r0 = parts[1]
+    if h == 0:
+        r1
+    else:
+        if r0 > 0:
+            ((r1 + 1) % m + m) % m
+        else:
+            ((r1 - 1) % m + m) % m
+
+fn use_hint_poly(h: list, r: list) -> list:
+    var w1 = []
+    var i = 0
+    while i < 256:
+        w1.push(use_hint_int(h.get(i), r.get(i)))
+        i = i + 1
+    w1

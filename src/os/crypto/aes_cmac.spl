@@ -1,0 +1,287 @@
+#![allow(unnamed_duplicate_typed_args)]
+# AES-CMAC — Pure Simple Implementation
+#
+# AES-based Cipher-based Message Authentication Code per:
+#   - NIST SP 800-38B (May 2005)
+#   - RFC 4493 (June 2006) — AES-128-CMAC
+#
+# Block-cipher MAC used by IPsec (RFC 4494), IEEE 802.11i, TLS 1.2 PSK.
+# No SFFI/Rust FFI — pure Simple language, suitable for baremetal.
+#
+# Reuses block primitives from os.crypto.{aes128_gcm,aes256_gcm}:
+#   - aes128_key_expansion + aes128_encrypt_block
+#   - aes256_encrypt_block (takes raw key)
+#
+# Exposed surface:
+#   aes128_cmac_subkeys(key)            -> (k1, k2)
+#   aes128_cmac_compute(key, message)   -> 16-byte tag
+#   aes128_cmac_verify(key, msg, tag)   -> bool (constant-time tag compare)
+#   aes256_cmac_compute(key, message)   -> 16-byte tag
+#   aes256_cmac_verify(key, msg, tag)   -> bool (constant-time tag compare)
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+use os.crypto.aes128_gcm.{aes128_encrypt_block, aes128_key_expansion}
+use os.crypto.aes256_gcm.{aes256_encrypt_block}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# Allocate a 16-byte zero-initialized block.
+fn _zero_block16() -> [u8]:
+    var b: [u8] = rt_array_new_with_cap(16)
+    var i: i64 = 0
+    while i < 16:
+        b.push(0u8)
+        i = i + 1
+    b
+
+# XOR two 16-byte blocks into a fresh output block.
+fn _xor_block16(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        out.push(_u8_at(a, i) ^ _u8_at(b, i))
+        i = i + 1
+    out
+
+# 128-bit left-shift by 1 (big-endian, MSB-first byte ordering).
+# Input is `block[0..15]` where block[0] holds the most significant byte.
+# Carry from byte i flows into bit 0 of byte i-1; the MSB of byte 0 is dropped.
+fn _shift_left_one(block: [u8]) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(16)
+    # Build output left-to-right; carry comes from the next (lower-index in
+    # MS->LS sense, but higher-index in array layout) byte's MSB.
+    var i: i64 = 0
+    while i < 16:
+        val cur = _u8_at(block, i.to_u64())
+        var shifted: u8 = ((cur.to_u32() << 1) & 0xFFu32).to_u8()
+        if i < 15:
+            val nxt = _u8_at(block, (i + 1).to_u64())
+            val carry: u8 = ((nxt.to_u32() >> 7) & 0x01u32).to_u8()
+            shifted = shifted | carry
+        out.push(shifted)
+        i = i + 1
+    out
+
+# Constant-time byte compare for tag verification — RFC 4493 verify_mac
+# implementations must not leak match-prefix length via early-exit. Mirrors
+# the `_tls13_ct_bytes_equal` XOR-OR pattern from src/os/tls13/tls13.spl
+# (kept local to avoid the text-typed `constant_time_compare` byte-cliff —
+# see memory: feedback_text_only_byte_cliffs.md).
+fn _cmac_ct_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var acc: u8 = 0u8
+    var i: u64 = 0
+    while i < a.len():
+        acc = acc | (_u8_at(a, i) ^ _u8_at(b, i))
+        i = i + 1
+    acc == 0u8
+
+# ============================================================================
+# Subkey generation — RFC 4493 §2.3 / NIST SP 800-38B §6.1
+# ============================================================================
+#
+# const_Rb = 0x00..0x87 (128-bit constant for GF(2^128) reduction in this
+# representation — only the low byte 0x87 is non-zero, applied at byte[15]).
+#
+# L = AES_K(0^128)
+# K1 = (L << 1)         if MSB(L)  == 0
+#    = (L << 1) ^ Rb    if MSB(L)  == 1
+# K2 = (K1 << 1)        if MSB(K1) == 0
+#    = (K1 << 1) ^ Rb   if MSB(K1) == 1
+#
+# MSB(X) here means the most-significant bit of the 128-bit big-endian
+# value, i.e. bit 7 of byte[0].
+
+fn _generate_subkey(L: [u8]) -> [u8]:
+    val msb: u8 = ((_u8_at(L, 0).to_u32() >> 7) & 0x01u32).to_u8()
+    var shifted: [u8] = _shift_left_one(L)
+    if msb == 1u8:
+        # XOR Rb (= 0x87 in the last byte) into the shifted value.
+        val tail: u8 = _u8_at(shifted, 15)
+        shifted[15] = tail ^ 0x87u8
+    shifted
+
+# Public AES-128 subkey accessor — exposed so test code can verify §2.3
+# intermediate values directly.
+fn aes128_cmac_subkeys(key: [u8]) -> ([u8], [u8]):
+    val zero = _zero_block16()
+    val round_keys = aes128_key_expansion(key)
+    val L = aes128_encrypt_block(zero, round_keys)
+    val k1 = _generate_subkey(L)
+    val k2 = _generate_subkey(k1)
+    (k1, k2)
+
+# Public AES-256 subkey accessor — same algorithm, AES-256 block primitive.
+fn aes256_cmac_subkeys(key: [u8]) -> ([u8], [u8]):
+    val zero = _zero_block16()
+    val L = aes256_encrypt_block(zero, key)
+    val k1 = _generate_subkey(L)
+    val k2 = _generate_subkey(k1)
+    (k1, k2)
+
+# ============================================================================
+# CMAC core padding — RFC 4493 §2.4 step 4
+# ============================================================================
+#
+# pad(M_n) appends 0x80 followed by zero bytes to fill out to a 16-byte block.
+# For a partial-block last segment of length r (0 <= r < 16), the padded
+# block is M_n[0..r] || 0x80 || 0x00 * (16 - r - 1).
+
+fn _cmac_pad_last(last_partial: [u8]) -> [u8]:
+    var padded: [u8] = rt_array_new_with_cap(16)
+    val r: u64 = last_partial.len()
+    var i: u64 = 0
+    while i < r:
+        padded.push(_u8_at(last_partial, i))
+        i = i + 1
+    padded.push(0x80u8)
+    var j: u64 = r + 1
+    while j < 16:
+        padded.push(0u8)
+        j = j + 1
+    padded
+
+# Slice a 16-byte block out of `message` starting at `start` (must be in range).
+fn _slice_block16(message: [u8], start: u64) -> [u8]:
+    var block: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        block.push(_u8_at(message, start + i))
+        i = i + 1
+    block
+
+# Slice the partial last segment from `start` to end of message.
+fn _slice_tail(message: [u8], start: u64) -> [u8]:
+    var tail: [u8] = rt_array_new_with_cap((message.len() - start).to_i64())
+    var i: u64 = start
+    while i < message.len():
+        tail.push(_u8_at(message, i))
+        i = i + 1
+    tail
+
+# ============================================================================
+# AES-128-CMAC — RFC 4493 §2.4
+# ============================================================================
+#
+# Algorithm:
+#   1. (K1, K2) = subkeys(K)
+#   2. n = ceil(len/16); flag = (last block is complete and len > 0)
+#   3. Process blocks 1..n-1 through CBC-MAC (X = AES_K(X xor M_i))
+#   4. Form M_last = (M_n xor K1) if flag else (pad(M_n*) xor K2)
+#   5. T = AES_K(X xor M_last)
+
+fn aes128_cmac_compute(key: [u8], message: [u8]) -> [u8]:
+    val round_keys = aes128_key_expansion(key)
+    # Subkeys derived from the same expanded key — recompute L locally to
+    # share the expansion (avoid a redundant aes128_key_expansion call).
+    val zero = _zero_block16()
+    val L = aes128_encrypt_block(zero, round_keys)
+    val k1 = _generate_subkey(L)
+    val k2 = _generate_subkey(k1)
+
+    val msg_len: u64 = message.len()
+    # Partition message into n full 16-byte blocks; the last block may be
+    # full (flag=true) or partial (flag=false). Empty message: n=1, flag=false.
+    var n: u64 = 0
+    var flag_complete: bool = false
+    if msg_len == 0:
+        n = 1
+        flag_complete = false
+    else:
+        n = (msg_len + 15) / 16
+        flag_complete = (msg_len % 16 == 0)
+
+    # CBC-MAC over the first n-1 blocks: X = AES_K(X xor M_i).
+    var x: [u8] = _zero_block16()
+    var i: u64 = 0
+    while i < n - 1:
+        val block_i = _slice_block16(message, i * 16)
+        val xored = _xor_block16(x, block_i)
+        x = aes128_encrypt_block(xored, round_keys)
+        i = i + 1
+
+    # Form the last block.
+    var m_last: [u8] = _zero_block16()
+    if flag_complete:
+        # Last block is complete: M_n xor K1.
+        val last_full = _slice_block16(message, (n - 1) * 16)
+        m_last = _xor_block16(last_full, k1)
+    else:
+        # Partial last block (or empty): pad(M_n*) xor K2.
+        var partial: [u8] = rt_array_new_with_cap(16)
+        if msg_len > 0:
+            partial = _slice_tail(message, (n - 1) * 16)
+        # else: partial is empty — pad to single 0x80 || zeros block.
+        val padded = _cmac_pad_last(partial)
+        m_last = _xor_block16(padded, k2)
+
+    # Final block: T = AES_K(X xor M_last).
+    val final_in = _xor_block16(x, m_last)
+    aes128_encrypt_block(final_in, round_keys)
+
+# Constant-time tag verification — accepts only if compute(key, msg) == tag.
+fn aes128_cmac_verify(key: [u8], message: [u8], tag: [u8]) -> bool:
+    if tag.len() != 16:
+        return false
+    val computed = aes128_cmac_compute(key, message)
+    _cmac_ct_bytes_equal(computed, tag)
+
+# ============================================================================
+# AES-256-CMAC — same construction, AES-256 block cipher
+# ============================================================================
+#
+# NIST SP 800-38B is block-cipher-agnostic; substitute AES-256 for AES-128
+# everywhere (subkey gen still uses the same Rb=0x87 since block size is
+# unchanged at 128 bits).
+
+fn aes256_cmac_compute(key: [u8], message: [u8]) -> [u8]:
+    val zero = _zero_block16()
+    val L = aes256_encrypt_block(zero, key)
+    val k1 = _generate_subkey(L)
+    val k2 = _generate_subkey(k1)
+
+    val msg_len: u64 = message.len()
+    var n: u64 = 0
+    var flag_complete: bool = false
+    if msg_len == 0:
+        n = 1
+        flag_complete = false
+    else:
+        n = (msg_len + 15) / 16
+        flag_complete = (msg_len % 16 == 0)
+
+    var x: [u8] = _zero_block16()
+    var i: u64 = 0
+    while i < n - 1:
+        val block_i = _slice_block16(message, i * 16)
+        val xored = _xor_block16(x, block_i)
+        x = aes256_encrypt_block(xored, key)
+        i = i + 1
+
+    var m_last: [u8] = _zero_block16()
+    if flag_complete:
+        val last_full = _slice_block16(message, (n - 1) * 16)
+        m_last = _xor_block16(last_full, k1)
+    else:
+        var partial: [u8] = rt_array_new_with_cap(16)
+        if msg_len > 0:
+            partial = _slice_tail(message, (n - 1) * 16)
+        val padded = _cmac_pad_last(partial)
+        m_last = _xor_block16(padded, k2)
+
+    val final_in = _xor_block16(x, m_last)
+    aes256_encrypt_block(final_in, key)
+
+fn aes256_cmac_verify(key: [u8], message: [u8], tag: [u8]) -> bool:
+    if tag.len() != 16:
+        return false
+    val computed = aes256_cmac_compute(key, message)
+    _cmac_ct_bytes_equal(computed, tag)
