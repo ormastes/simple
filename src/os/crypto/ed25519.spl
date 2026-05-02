@@ -739,8 +739,18 @@ fn _sha512_modl(data: [u8]) -> [u8]:
 # Historically this module delegated to `rt_ed25519_keypair`/`rt_ed25519_sign`/
 # `rt_ed25519_verify` baremetal C externs. Those have no interpreter dispatch,
 # so the public API silently produced zero pubkeys / empty signatures and
-# could never byte-match RFC 8032 §7.1 vectors. The pure-Simple code below
-# uses the field/scalar/point primitives already in this file.
+# could never byte-match RFC 8032 §7.1 vectors. See
+# `doc/08_tracking/bug/ed25519_rfc8032_vector_mismatch_2026-05-01.md`. The
+# pure-Simple code below uses the field/scalar/point primitives already in
+# this file.
+#
+# Baremetal note: `_ed25519_*` C helpers in `baremetal_stubs.c` are now
+# orphaned for the public API. Baremetal Ed25519 has not been re-validated
+# post-rewire.
+#
+# Constant-time note: `ed_scalar_mul` is NOT constant-time today and the
+# sign path passes the secret scalar `a` to it. Tracked in
+# `doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md`.
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
@@ -780,6 +790,9 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     """
     val h = _sha512_u8(private_seed)
     val a = _ed25519_clamp(h)
+    # NOTE(constant-time): `a` is the secret scalar. `ed_scalar_mul` below
+    # is currently variable-time (timing leaks Hamming weight of `a`). See
+    # doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md.
 
     # prefix = h[32..64]
     var prefix: [u8] = []
