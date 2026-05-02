@@ -1,0 +1,408 @@
+# UI Layout Profile Tests
+#
+# Tests for orientation detection, size classes, profile resolution,
+# and adaptive builder functions.
+
+use std.spec.{describe, it, expect}
+use common.ui.profile.{
+    Orientation, SizeClass, LayoutProfile, Breakpoints, ProfileSet, ProfileResolver,
+    detect_orientation, classify, compute_profile, default_profile,
+    default_breakpoints, terminal_breakpoints, breakpoints_for_backend
+}
+use common.ui.viewport.{Viewport, new_viewport}
+use common.ui.builder.{
+    column, row, grid, panel, text_widget, adaptive, with_profile,
+    adaptive_stack, adaptive_sidebar, adaptive_grid,
+    responsive, responsive_if_wide
+}
+use common.ui.session.{UISession, new_session}
+use common.ui.widget.{UITree, UIEvent}
+
+# =========================================================================
+# Orientation Detection
+# =========================================================================
+
+describe "detect_orientation":
+    it "returns Landscape when width > height":
+        expect(detect_orientation(120, 40)).to_equal(Orientation.Landscape)
+
+    it "returns Portrait when height > width":
+        expect(detect_orientation(40, 120)).to_equal(Orientation.Portrait)
+
+    it "returns Square when width == height":
+        expect(detect_orientation(100, 100)).to_equal(Orientation.Square)
+
+    it "returns Landscape for typical terminal 80x24":
+        expect(detect_orientation(80, 24)).to_equal(Orientation.Landscape)
+
+    it "returns Portrait for tall terminal 40x60":
+        expect(detect_orientation(40, 60)).to_equal(Orientation.Portrait)
+
+# =========================================================================
+# Size Class Classification
+# =========================================================================
+
+describe "classify with default breakpoints":
+    it "returns Compact below 600":
+        val bp = default_breakpoints()
+        expect(classify(599, bp)).to_equal(SizeClass.Compact)
+
+    it "returns Regular at 600":
+        val bp = default_breakpoints()
+        expect(classify(600, bp)).to_equal(SizeClass.Regular)
+
+    it "returns Regular below 1200":
+        val bp = default_breakpoints()
+        expect(classify(1199, bp)).to_equal(SizeClass.Regular)
+
+    it "returns Expanded at 1200":
+        val bp = default_breakpoints()
+        expect(classify(1200, bp)).to_equal(SizeClass.Expanded)
+
+describe "classify with terminal breakpoints":
+    it "returns Compact below 80":
+        val bp = terminal_breakpoints()
+        expect(classify(79, bp)).to_equal(SizeClass.Compact)
+
+    it "returns Regular at 80":
+        val bp = terminal_breakpoints()
+        expect(classify(80, bp)).to_equal(SizeClass.Regular)
+
+    it "returns Expanded at 160":
+        val bp = terminal_breakpoints()
+        expect(classify(160, bp)).to_equal(SizeClass.Expanded)
+
+# =========================================================================
+# Breakpoints for Backend
+# =========================================================================
+
+describe "breakpoints_for_backend":
+    it "returns terminal breakpoints for tui":
+        val bp = breakpoints_for_backend("tui")
+        expect(bp.compact_max).to_equal(80)
+
+    it "returns default breakpoints for web":
+        val bp = breakpoints_for_backend("web")
+        expect(bp.compact_max).to_equal(600)
+
+    it "returns default breakpoints for none":
+        val bp = breakpoints_for_backend("none")
+        expect(bp.compact_max).to_equal(600)
+
+# =========================================================================
+# compute_profile
+# =========================================================================
+
+describe "compute_profile":
+    it "computes landscape regular for 80x24 tui":
+        val vp = new_viewport(80, 24, "tui")
+        val p = compute_profile(vp)
+        expect(p.orientation).to_equal(Orientation.Landscape)
+        expect(p.horizontal).to_equal(SizeClass.Regular)
+        expect(p.vertical).to_equal(SizeClass.Compact)
+
+    it "computes portrait compact for 40x60 tui":
+        val vp = new_viewport(40, 60, "tui")
+        val p = compute_profile(vp)
+        expect(p.orientation).to_equal(Orientation.Portrait)
+        expect(p.horizontal).to_equal(SizeClass.Compact)
+
+    it "computes landscape expanded for 1920x1080 web":
+        val vp = new_viewport(1920, 1080, "web")
+        val p = compute_profile(vp)
+        expect(p.orientation).to_equal(Orientation.Landscape)
+        expect(p.horizontal).to_equal(SizeClass.Expanded)
+
+# =========================================================================
+# LayoutProfile Methods
+# =========================================================================
+
+describe "LayoutProfile":
+    it "is_landscape returns true for Landscape":
+        val p = default_profile()
+        expect(p.is_landscape()).to_equal(true)
+
+    it "is_landscape returns true for Square":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Regular,
+            vertical: SizeClass.Regular,
+            orientation: Orientation.Square,
+            width: 100, height: 100
+        )
+        expect(p.is_landscape()).to_equal(true)
+
+    it "is_portrait returns true for Portrait":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Compact,
+            vertical: SizeClass.Regular,
+            orientation: Orientation.Portrait,
+            width: 40, height: 120
+        )
+        expect(p.is_portrait()).to_equal(true)
+
+    it "is_compact returns true for Compact horizontal":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Compact,
+            vertical: SizeClass.Compact,
+            orientation: Orientation.Portrait,
+            width: 40, height: 60
+        )
+        expect(p.is_compact()).to_equal(true)
+
+    it "describe includes orientation and size":
+        val p = default_profile()
+        val desc = p.describe()
+        expect(desc).to_contain("landscape")
+        expect(desc).to_contain("80x24")
+
+# =========================================================================
+# ProfileSet
+# =========================================================================
+
+describe "ProfileSet":
+    it "resolves to default when no profiles set":
+        val default_node = column("default", [])
+        val ps = ProfileSet.new(default_node)
+        val resolved = ps.resolve(Orientation.Landscape)
+        expect(resolved.id).to_equal("default")
+
+    it "resolves landscape profile when set":
+        val default_node = column("default", [])
+        val h_node = row("landscape", [])
+        var ps = ProfileSet.new(default_node)
+        ps = ps.with_landscape(h_node)
+        val resolved = ps.resolve(Orientation.Landscape)
+        expect(resolved.id).to_equal("landscape")
+
+    it "resolves portrait profile when set":
+        val default_node = column("default", [])
+        val v_node = column("portrait", [])
+        var ps = ProfileSet.new(default_node)
+        ps = ps.with_portrait(v_node)
+        val resolved = ps.resolve(Orientation.Portrait)
+        expect(resolved.id).to_equal("portrait")
+
+    it "falls back to default for unset orientation":
+        val default_node = column("default", [])
+        val h_node = row("landscape", [])
+        var ps = ProfileSet.new(default_node)
+        ps = ps.with_landscape(h_node)
+        val resolved = ps.resolve(Orientation.Portrait)
+        expect(resolved.id).to_equal("default")
+
+    it "resolves Square as Landscape":
+        val default_node = column("default", [])
+        val h_node = row("landscape", [])
+        var ps = ProfileSet.new(default_node)
+        ps = ps.with_landscape(h_node)
+        val resolved = ps.resolve(Orientation.Square)
+        expect(resolved.id).to_equal("landscape")
+
+    it "has_profile returns false when not set":
+        val ps = ProfileSet.new(column("d", []))
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(false)
+        expect(ps.has_profile(Orientation.Portrait)).to_equal(false)
+
+    it "has_profile returns true when set":
+        var ps = ProfileSet.new(column("d", []))
+        ps = ps.with_landscape(row("h", []))
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(true)
+
+# =========================================================================
+# ProfileResolver
+# =========================================================================
+
+describe "ProfileResolver":
+    it "starts with landscape orientation for default 80x24":
+        val resolver = ProfileResolver.new()
+        expect(resolver.orientation()).to_equal(Orientation.Landscape)
+
+    it "detects orientation change after update":
+        var resolver = ProfileResolver.new()
+        val old = resolver.orientation()
+        resolver.update(new_viewport(40, 60, "tui"))
+        expect(resolver.orientation_changed(old)).to_equal(true)
+        expect(resolver.orientation()).to_equal(Orientation.Portrait)
+
+    it "no change when orientation stays same":
+        var resolver = ProfileResolver.new()
+        val old = resolver.orientation()
+        resolver.update(new_viewport(120, 40, "tui"))
+        expect(resolver.orientation_changed(old)).to_equal(false)
+
+    it "updates size classes on viewport change":
+        var resolver = ProfileResolver.new()
+        resolver.update(new_viewport(200, 40, "tui"))
+        expect(resolver.horizontal_class()).to_equal(SizeClass.Expanded)
+
+# =========================================================================
+# Adaptive Builders
+# =========================================================================
+
+describe "adaptive":
+    it "creates profile set with both orientations":
+        val ps = adaptive("main", row("h", []), column("v", []))
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(true)
+        expect(ps.has_profile(Orientation.Portrait)).to_equal(true)
+
+describe "with_profile":
+    it "creates profile set with one alternate":
+        val ps = with_profile(row("default", []), Orientation.Portrait, column("alt", []))
+        expect(ps.has_profile(Orientation.Portrait)).to_equal(true)
+        expect(ps.has_profile(Orientation.Landscape)).to_equal(false)
+
+describe "adaptive_stack":
+    it "produces hbox layout in landscape":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
+            orientation: Orientation.Landscape, width: 120, height: 40
+        )
+        val node = adaptive_stack("s", [text_widget("a", "hello")], p)
+        expect(node.layout_name()).to_equal("hbox")
+
+    it "produces vbox layout in portrait":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Compact, vertical: SizeClass.Regular,
+            orientation: Orientation.Portrait, width: 40, height: 120
+        )
+        val node = adaptive_stack("s", [text_widget("a", "hello")], p)
+        expect(node.layout_name()).to_equal("vbox")
+
+describe "adaptive_sidebar":
+    it "hides sidebar in Compact":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Compact, vertical: SizeClass.Compact,
+            orientation: Orientation.Portrait, width: 40, height: 60
+        )
+        val sb = panel("sb", "Nav", [])
+        val ct = panel("ct", "Main", [])
+        val node = adaptive_sidebar("layout", sb, ct, p)
+        val children = node.children()
+        expect(children.len()).to_equal(1)
+
+    it "shows sidebar in Regular":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
+            orientation: Orientation.Landscape, width: 120, height: 40
+        )
+        val sb = panel("sb", "Nav", [])
+        val ct = panel("ct", "Main", [])
+        val node = adaptive_sidebar("layout", sb, ct, p)
+        val children = node.children()
+        expect(children.len()).to_equal(2)
+
+describe "adaptive_grid":
+    it "sets 1 column in Compact":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Compact, vertical: SizeClass.Compact,
+            orientation: Orientation.Portrait, width: 40, height: 60
+        )
+        val node = adaptive_grid("g", [text_widget("a", "1")], p)
+        expect(node.get_prop("columns")).to_equal("1")
+
+    it "sets 2 columns in Regular":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
+            orientation: Orientation.Landscape, width: 120, height: 40
+        )
+        val node = adaptive_grid("g", [text_widget("a", "1")], p)
+        expect(node.get_prop("columns")).to_equal("2")
+
+    it "sets 3 columns in Expanded":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Expanded, vertical: SizeClass.Regular,
+            orientation: Orientation.Landscape, width: 200, height: 60
+        )
+        val node = adaptive_grid("g", [text_widget("a", "1")], p)
+        expect(node.get_prop("columns")).to_equal("3")
+
+describe "responsive":
+    it "picks compact variant":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Compact, vertical: SizeClass.Compact,
+            orientation: Orientation.Portrait, width: 40, height: 60
+        )
+        val c = text_widget("c", "compact")
+        val r = text_widget("r", "regular")
+        val e = text_widget("e", "expanded")
+        val node = responsive("resp", p, c, r, e)
+        expect(node.id).to_equal("c")
+
+    it "picks regular variant":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
+            orientation: Orientation.Landscape, width: 120, height: 40
+        )
+        val c = text_widget("c", "compact")
+        val r = text_widget("r", "regular")
+        val e = text_widget("e", "expanded")
+        val node = responsive("resp", p, c, r, e)
+        expect(node.id).to_equal("r")
+
+describe "responsive_if_wide":
+    it "picks narrow in Compact":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Compact, vertical: SizeClass.Compact,
+            orientation: Orientation.Portrait, width: 40, height: 60
+        )
+        val n = text_widget("narrow", "n")
+        val w = text_widget("wide", "w")
+        val node = responsive_if_wide("resp", p, n, w)
+        expect(node.id).to_equal("narrow")
+
+    it "picks wide in Regular":
+        val p = LayoutProfile(
+            horizontal: SizeClass.Regular, vertical: SizeClass.Compact,
+            orientation: Orientation.Landscape, width: 120, height: 40
+        )
+        val n = text_widget("narrow", "n")
+        val w = text_widget("wide", "w")
+        val node = responsive_if_wide("resp", p, n, w)
+        expect(node.id).to_equal("wide")
+
+# =========================================================================
+# Viewport Orientation Methods
+# =========================================================================
+
+describe "Viewport orientation":
+    it "is_landscape for wide viewport":
+        val vp = new_viewport(120, 40, "tui")
+        expect(vp.is_landscape()).to_equal(true)
+
+    it "is_portrait for tall viewport":
+        val vp = new_viewport(40, 120, "tui")
+        expect(vp.is_portrait()).to_equal(true)
+
+    it "orientation returns correct enum":
+        val vp = new_viewport(80, 24, "tui")
+        expect(vp.orientation()).to_equal(Orientation.Landscape)
+
+    it "size_class returns Regular for 80-col tui":
+        val vp = new_viewport(80, 24, "tui")
+        expect(vp.size_class()).to_equal(SizeClass.Regular)
+
+# =========================================================================
+# UISession Profile Integration
+# =========================================================================
+
+describe "UISession profiles":
+    it "creates session with default profile resolver":
+        val tree = UITree.new(column("root", []))
+        val session = new_session(tree)
+        expect(session.current_orientation()).to_equal(Orientation.Landscape)
+
+    it "register_profile_set stores profiles":
+        val tree = UITree.new(column("root", []))
+        var session = new_session(tree)
+        val ps = adaptive("main", row("h", []), column("v", []))
+        session.register_profile_set("main", ps)
+        expect(session.profile_sets.len()).to_equal(1)
+
+    it "register_profile_set replaces existing entry":
+        val tree = UITree.new(column("root", []))
+        var session = new_session(tree)
+        val ps1 = adaptive("main", row("h1", []), column("v1", []))
+        val ps2 = adaptive("main", row("h2", []), column("v2", []))
+        session.register_profile_set("main", ps1)
+        session.register_profile_set("main", ps2)
+        expect(session.profile_sets.len()).to_equal(1)

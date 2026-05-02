@@ -1,0 +1,85 @@
+"""
+# MCP Protocol Runtime
+
+**Category:** Application
+**Status:** In Progress
+
+## Overview
+
+Tests the wire-level MCP protocol handling for the active simple-mcp server
+wrapper. Verifies JSON-RPC framing, request/response correlation, error codes,
+and protocol negotiation at the transport layer.
+"""
+# # MCP Protocol Runtime Spec
+#
+# Wire-level protocol checks for active simple-mcp server wrapper.
+
+use std.spec
+use app.io.mod.{shell}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn mcp_msg(body: text) -> text:
+    "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
+
+fn init_request(id: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+    mcp_msg(body)
+
+fn initialized_notification() -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}")
+
+fn shutdown_request(id: text) -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"shutdown\",\"params\":{}}")
+
+fn generic_request(id: text, method: text, params_json: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"" + method + "\",\"params\":" + params_json + "}"
+    mcp_msg(body)
+
+fn send_mcp(messages: text) -> text:
+    val mk = shell("mktemp /tmp/mcp_protocol_runtime_input.XXXXXX")
+    val tmp = mk.stdout.trim()
+    rt_file_write_text(tmp, messages)
+    val result = shell("cat " + tmp + " | bin/simple_mcp_server 2>/dev/null; rm -f " + tmp)
+    result.stdout ?? ""
+
+describe "MCP Protocol Runtime":
+
+    it "supports protocol/runtime matrix in one session":
+        val req1 = generic_request("2", "resources/templates/list", "{}")
+        val req2 = generic_request("3", "resources/read", "{\"uri\":\"project:///info\"}")
+        val req3 = generic_request("4", "resources/read", "{\"uri\":\"bugdb:///stats\"}")
+        val req4 = generic_request("5", "prompts/get", "{\"name\":\"analyze-file\",\"arguments\":{\"path\":\"src/app/mcp/main_lazy.spl\"}}")
+        val req5 = generic_request("6", "completion/complete", "{\"ref\":{\"type\":\"ref/prompt\",\"name\":\"analyze-file\"},\"argument\":{\"name\":\"path\",\"value\":\"src\"}}")
+        val req6 = generic_request("7", "logging/setLevel", "{\"level\":\"debug\"}")
+        val req7 = generic_request("8", "roots/list", "{}")
+        val req8 = generic_request("9", "tools/call", "{\"name\":\"no_such_tool\",\"arguments\":{}}")
+        val req9 = generic_request("10", "tools/list", "{}")
+        val req10 = generic_request("11", "tools/call", "{\"name\":\"debug_log_status\",\"arguments\":{}}")
+        val input = init_request("abc-1") + initialized_notification() + req1 + req2 + req3 + req4 + req5 + req6 + req7 + req8 + req9 + req10 + shutdown_request("12")
+        val output = send_mcp(input)
+        expect output.contains("\"id\":\"abc-1\"") == true
+        expect output.contains("\"capabilities\"") == true
+        expect output.contains("resourceTemplates") == true
+        expect output.contains("project:///info") == true
+        expect output.contains("Working Dir") == true
+        expect output.contains("bugdb:///stats") == true
+        expect output.contains("\"health\"") == true
+        expect output.contains("\"description\":\"Analyze file\"") == true
+        expect output.contains("\"messages\"") == true
+        expect output.contains("\"completion\"") == true
+        expect output.contains("\"values\":[") == true
+        expect output.contains("src/") == true
+        expect output.contains("\"level\":\"debug\"") == true
+        expect output.contains("\"roots\":[") == true
+        expect output.contains("\"uri\":\"file://") == true
+        expect output.contains("\"isError\":true") == true
+        expect output.contains("Unknown tool") == true
+        expect output.contains("\"error\":") == false
+        expect output.contains("\"name\":\"simple_read\"") == true
+        expect output.contains("\"name\":\"debug_set_data_breakpoint\"") == true
+        expect output.contains("\"required\":[\"path\"]") == true
+        expect output.contains("\"annotations\"") == true
+        expect output.contains("\"structuredContent\"") == true
+        expect output.contains("\"inferredType\":\"object\"") == true
+        expect output.contains("\"shape\":\"object") == true

@@ -1,0 +1,65 @@
+# Method Dispatch — Field-Access / Index / Tuple Receiver Type Recovery
+#
+# Round-17 widening of the Round-16 fix
+# (`baremetal_method_dispatch_spec.spl`) that handled bare local
+# receivers. This spec locks in the broader recovery path introduced by
+# the T58 follow-up to cover non-Local receivers whose `receiver.ty`
+# resolves to Any / Unknown in MIR: field accesses
+# (`container.widget.init()`), tuple projections (`pair.0.init()`), and
+# index accesses (`arr[i].init()`).
+#
+# Without the widening, `recover_receiver_type` only descended one level
+# (through `HirExprKind::Local`) and the MIR method-call lowering fell
+# through to an unqualified method name. The native-build codegen then
+# picks the shortest-named `.init` symbol module-wide, silently
+# dispatching `container.widget.init()` to a *different* class's `init`.
+#
+# Each test below constructs a scenario where at least two classes
+# expose an ambiguous `init()` method, one is nested behind a struct
+# field / tuple slot / array element, and we assert the side-effect of
+# the *correct* class's body using `.to_be_true()`.
+
+use std.spec
+
+class FieldInitA:
+    last: i64
+
+    static fn new() -> FieldInitA:
+        FieldInitA(last: 0)
+
+    me init():
+        self.last = 701
+
+class FieldInitB:
+    tag: i64
+
+    static fn new() -> FieldInitB:
+        FieldInitB(tag: 0)
+
+    me init():
+        self.tag = 802
+
+class FieldInitContainer:
+    widget: FieldInitA
+    other: FieldInitB
+
+    static fn new() -> FieldInitContainer:
+        FieldInitContainer(widget: FieldInitA.new(), other: FieldInitB.new())
+
+describe "method dispatch — field-access / index / tuple receiver":
+    context "field-access receiver (`container.widget.init()`)":
+        it "dispatches through the struct field's declared type":
+            # `container.widget` has `receiver.ty == FieldInitA` only when
+            # the field-type recovery path walks into the struct's field
+            # table. If that path is missing, the call mis-dispatches to
+            # `FieldInitB.init` and `last` stays at 0 (or `tag` flips).
+            var container: FieldInitContainer = FieldInitContainer.new()
+            container.widget.init()
+            expect(container.widget.last == 701).to_be_true()
+            expect(container.other.tag == 0).to_be_true()
+
+    context "index-access receiver (`arr[i].init()`)":
+        it "dispatches through the array element type":
+            var arr: [FieldInitA; 2] = [FieldInitA.new(), FieldInitA.new()]
+            arr[0].init()
+            expect(arr[0].last == 701).to_be_true()

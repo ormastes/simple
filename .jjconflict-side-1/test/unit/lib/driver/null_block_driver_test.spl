@@ -1,0 +1,62 @@
+use examples.simple_os.src.drivers.null_block.{register_null_block_driver,
+                                                null_block_probe,
+                                                null_block_attach,
+                                                null_block_detach,
+                                                null_block_ioctl}
+use std.driver.types.{DeviceId, DriverClass, IoctlCmd, ProbeResult, DriverHandle}
+use std.driver.error.{DriverError}
+
+fn test():
+    describe "null_block_driver":
+
+        it "probe accepts device 0 and rejects others":
+            val d0: DeviceId = DeviceId(value: 0, dclass: DriverClass.Block)
+            val d1: DeviceId = DeviceId(value: 1, dclass: DriverClass.Block)
+            var got0: ProbeResult = ProbeResult.Defer
+            var got1: ProbeResult = ProbeResult.Defer
+            match null_block_probe(d0):
+                Result.Ok(r) -> got0 = r
+                Result.Err(_) -> got0 = ProbeResult.Reject
+            match null_block_probe(d1):
+                Result.Ok(r) -> got1 = r
+                Result.Err(_) -> got1 = ProbeResult.Reject
+            expect(got0).to_equal(ProbeResult.Accept)
+            expect(got1).to_equal(ProbeResult.Reject)
+
+        it "attach returns handle 1 and detach accepts it":
+            var attach_h: i64 = -1
+            match null_block_attach(DeviceId(value: 0, dclass: DriverClass.Block)):
+                Result.Ok(h) -> attach_h = h.value
+                Result.Err(_) -> attach_h = -2
+            expect(attach_h).to_equal(1)
+            var detach_ok: i32 = 0
+            match null_block_detach(DriverHandle(value: 1)):
+                Result.Ok(_) -> detach_ok = 1
+                Result.Err(_) -> detach_ok = 0
+            expect(detach_ok).to_equal(1)
+
+        it "detach rejects a handle that didn't come from attach":
+            var err_kind: DriverError = DriverError.Internal
+            match null_block_detach(DriverHandle(value: 99)):
+                Result.Ok(_) -> err_kind = DriverError.NotSupported  # sentinel
+                Result.Err(e) -> err_kind = e
+            expect(err_kind).to_equal(DriverError.BadArg)
+
+        it "ioctl echoes the command code":
+            var rc: i64 = 0
+            match null_block_ioctl(DriverHandle(value: 1), IoctlCmd(code: 42, arg: 0)):
+                Result.Ok(v) -> rc = v
+                Result.Err(_) -> rc = -1
+            expect(rc).to_equal(42)
+
+        it "register_null_block_driver returns an index":
+            var idx: i32 = -1
+            match register_null_block_driver():
+                Result.Ok(i) -> idx = i
+                Result.Err(_) -> idx = -2
+            # First registration in a fresh process gets index 0; any
+            # non-negative return means the entry landed.
+            var ok: i32 = 0
+            if idx >= 0:
+                ok = 1
+            expect(ok).to_equal(1)

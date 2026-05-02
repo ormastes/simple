@@ -1,0 +1,209 @@
+# Unreachable Code Lint
+#
+# Detects code that can never be executed because it follows a
+# terminal statement (return, break, continue, pass_todo).
+#
+# UNREACH001: Code after return statement is unreachable                WARNING
+# UNREACH002: Code after break/continue is unreachable                 WARNING
+# UNREACH003: Code after pass_todo is unreachable                      WARNING
+#
+# Does NOT flag:
+# - Code inside different branches of if/match (only sequential flow)
+# - extern fn declarations (no body)
+# - Empty function bodies
+#
+# Works with the arena-based core AST (integer-tagged nodes).
+
+use compiler.core.ast_expr.{
+    EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE,
+    EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
+    expr_tag, expr_left
+}
+use compiler.core.ast_stmt.{
+    STMT_EXPR, STMT_RETURN, STMT_BREAK, STMT_CONTINUE,
+    STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK,
+    stmt_tag, stmt_expr, stmt_body
+}
+use compiler.core.ast.{
+    DECL_FN, DECL_EXTERN_FN,
+    decl_tag, decl_name, decl_body_stmts
+}
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+struct UnreachableCodeWarning:
+    code: text
+    severity: text
+    message: text
+    hint: text
+    fn_name: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} in '{self.fn_name}' — {self.hint}"
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn check_unreachable_code(decl_indices: [i64]) -> [UnreachableCodeWarning]:
+    """Run unreachable-code lint on module declarations.
+
+    For each function body, scans statement sequences. After seeing a
+    terminal statement (return, break, continue, pass_todo), any
+    subsequent statements at the same level are flagged as unreachable.
+    """
+    var warnings: [UnreachableCodeWarning] = []
+
+    for idx in decl_indices:
+        val tag = decl_tag[idx]
+
+        # Only check regular functions
+        if tag != DECL_FN:
+            continue
+
+        val fn_name = decl_name[idx]
+        val body = decl_body_stmts[idx]
+
+        # Skip empty bodies
+        if body.len() == 0:
+            continue
+
+        val fn_warnings = check_stmts_reachability(body, fn_name)
+        for w in fn_warnings:
+            warnings.push(w)
+
+    warnings
+
+# ============================================================================
+# Statement Sequence Reachability
+# ============================================================================
+
+fn check_stmts_reachability(stmts: [i64], fn_name: text) -> [UnreachableCodeWarning]:
+    """Check a sequence of statements for unreachable code.
+
+    Scans left-to-right. Once a terminal statement is found, all
+    subsequent statements are flagged as unreachable.
+    Also recurses into nested blocks/loops.
+    """
+    var warnings: [UnreachableCodeWarning] = []
+    var found_terminal = false
+    var terminal_kind = ""
+
+    for s in stmts:
+        if s < 0:
+            continue
+
+        # If we already saw a terminal, this statement is unreachable
+        if found_terminal:
+            val code = if terminal_kind == "return": "UNREACH001"
+                       elif terminal_kind == "pass_todo": "UNREACH003"
+                       else: "UNREACH002"
+
+            warnings.push(UnreachableCodeWarning(
+                code: code,
+                severity: "WARNING",
+                message: "unreachable code after '{terminal_kind}'",
+                hint: "remove unreachable code or restructure control flow",
+                fn_name: fn_name
+            ))
+            # Only warn once per terminal in a given block
+            break
+
+        # Check if this statement is terminal
+        val kind = classify_terminal(s)
+        if kind != "":
+            found_terminal = true
+            terminal_kind = kind
+
+        # Recurse into nested structures
+        val nested_warnings = check_nested_reachability(s, fn_name)
+        for w in nested_warnings:
+            warnings.push(w)
+
+    warnings
+
+fn check_nested_reachability(s: i64, fn_name: text) -> [UnreachableCodeWarning]:
+    """Recurse into nested blocks, loops, and branches to check reachability."""
+    var warnings: [UnreachableCodeWarning] = []
+    if s < 0:
+        return warnings
+
+    val tag = stmt_tag[s]
+
+    # Recurse into block bodies
+    if tag == STMT_BLOCK:
+        val ws = check_stmts_reachability(stmt_body[s], fn_name)
+        for w in ws:
+            warnings.push(w)
+
+    # Recurse into if-then body
+    elif tag == STMT_IF:
+        val ws = check_stmts_reachability(stmt_body[s], fn_name)
+        for w in ws:
+            warnings.push(w)
+
+    # Recurse into for/while loop bodies
+    elif tag == STMT_FOR or tag == STMT_WHILE:
+        val ws = check_stmts_reachability(stmt_body[s], fn_name)
+        for w in ws:
+            warnings.push(w)
+
+    # Recurse into match arm bodies (stored as stmt_body)
+    elif tag == STMT_MATCH:
+        val arms = stmt_body[s]
+        for arm_idx in arms:
+            if arm_idx >= 0:
+                # Match arms use the arm arena, recurse into arm bodies
+                # arm bodies are stored separately in arm_body pool
+                pass_do_nothing
+
+    warnings
+
+# ============================================================================
+# Terminal Statement Classification
+# ============================================================================
+
+fn classify_terminal(s: i64) -> text:
+    """Classify a statement as a terminal (flow-ending) statement.
+
+    Returns the kind name if terminal, or "" if not.
+    """
+    if s < 0:
+        return ""
+
+    val tag = stmt_tag[s]
+
+    # Explicit return statement
+    if tag == STMT_RETURN:
+        return "return"
+
+    # Break statement
+    if tag == STMT_BREAK:
+        return "break"
+
+    # Continue statement
+    if tag == STMT_CONTINUE:
+        return "continue"
+
+    # Expression-level return/break/continue/pass_todo
+    if tag == STMT_EXPR:
+        val e = stmt_expr[s]
+        if e >= 0:
+            val etag = expr_tag[e]
+
+            if etag == EXPR_RETURN:
+                return "return"
+            if etag == EXPR_BREAK:
+                return "break"
+            if etag == EXPR_CONTINUE:
+                return "continue"
+            if etag == EXPR_PASS_TODO:
+                return "pass_todo"
+
+    ""
+
+# ============================================================================
+# Exports
+# ============================================================================

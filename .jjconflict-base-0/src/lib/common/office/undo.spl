@@ -1,0 +1,88 @@
+# Undo/Redo Stack
+#
+# Generic snapshot-based undo/redo for office apps.
+# Stores SDN text snapshots of before/after state.
+
+# =========================================================================
+# Undo Entry
+# =========================================================================
+
+class UndoEntry:
+    id: text
+    description: text
+    before_snapshot: text
+    after_snapshot: text
+
+# =========================================================================
+# Undo Stack
+# =========================================================================
+
+class UndoStack:
+    entries: [UndoEntry]
+    position: i32
+    max_size: i32
+
+    static fn new(max_size: i32) -> UndoStack:
+        """Create an empty undo stack with the given maximum size."""
+        return UndoStack(entries: [], position: -1, max_size: max_size)
+
+    me push(entry: UndoEntry):
+        """Push an entry, truncating any redo history after current position."""
+        # Truncate entries after current position (discard redo history)
+        var kept: [UndoEntry] = []
+        var idx = 0
+        for e in self.entries:
+            if idx <= self.position:
+                kept = kept.push(e)
+            idx = idx + 1
+        kept = kept.push(entry)
+        # Enforce max_size by dropping oldest entries
+        if kept.len() > self.max_size:
+            var trimmed: [UndoEntry] = []
+            var trim_idx = 0
+            val drop_count = kept.len() - self.max_size
+            for e in kept:
+                if trim_idx >= drop_count:
+                    trimmed = trimmed.push(e)
+                trim_idx = trim_idx + 1
+            self.entries = trimmed
+            self.position = self.entries.len() - 1
+        else:
+            self.entries = kept
+            self.position = self.entries.len() - 1
+
+    me undo() -> text?:
+        """Return the before_snapshot and move position back. Nil if nothing to undo."""
+        if self.position < 0:
+            return nil
+        val entry = self.entries[self.position]
+        self.position = self.position - 1
+        return entry.before_snapshot
+
+    me redo() -> text?:
+        """Return the after_snapshot and move position forward. Nil if nothing to redo."""
+        val next_pos = self.position + 1
+        if next_pos >= self.entries.len():
+            return nil
+        self.position = next_pos
+        val entry = self.entries[self.position]
+        return entry.after_snapshot
+
+    fn can_undo() -> bool:
+        """True if there is an entry to undo."""
+        return self.position >= 0
+
+    fn can_redo() -> bool:
+        """True if there is an entry to redo."""
+        return self.position + 1 < self.entries.len()
+
+    fn current_description() -> text:
+        """Description of the current entry, or empty string."""
+        if self.position < 0:
+            return ""
+        return self.entries[self.position].description
+
+    me clear():
+        """Reset the undo stack."""
+        self.entries = []
+        self.position = -1

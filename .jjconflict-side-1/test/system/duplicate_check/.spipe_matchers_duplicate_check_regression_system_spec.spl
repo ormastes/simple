@@ -1,0 +1,105 @@
+# @cover src/compiler/90.tools/duplicate_check/main.spl 60%
+# @cover src/compiler/90.tools/duplicate_check/semantic.spl 80%
+# @cover src/compiler/90.tools/duplicate_check/formatter.spl 80%
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+fn run_spec(path: text) -> (text, text, i64):
+    rt_process_run("bin/simple", ["test", path])
+
+fn run_bootstrap(args: [text]) -> (text, text, i64):
+    rt_process_run("src/compiler_rust/target/bootstrap/simple", args)
+
+fn make_cli_fixture(root: text):
+    expect rt_dir_create(root, true) == true
+    val file_a = root + "/alpha.spl"
+    val file_b = root + "/beta.spl"
+    val content_a = "## Adds a normalized value for downstream scoring.\nfn add_score(seed: i64) -> i64:\n    seed + 1\n"
+    val content_b = "## Adds a normalized value for downstream scoring.\nfn merge_score(seed: i64) -> i64:\n    seed + 2\n"
+    expect rt_file_write_text(file_a, content_a) == true
+    expect rt_file_write_text(file_b, content_b) == true
+
+describe "duplicate-check system regressions":
+    slow_it "executes the CLI regression unit spec end-to-end":
+        val (stdout, _, code) = run_spec("test/unit/app/duplicate_check/duplicate_check_spec.spl")
+
+        expect code == 0
+        expect (stdout).contains("Passed:")
+        expect (stdout).contains("All tests passed")
+
+    slow_it "executes semantic fallback regressions end-to-end":
+        val (stdout, _, code) = run_spec("test/system/duplicate_check/semantic_fallback_probe_spec.spl")
+
+        expect code == 0
+        expect (stdout).contains("Passed:")
+        expect (stdout).contains("All tests passed")
+
+    slow_it "executes semantic helper regressions end-to-end":
+        val (stdout, _, code) = run_spec("test/unit/app/duplicate_check/semantic_spec.spl")
+
+        expect code == 0
+        expect (stdout).contains("Passed:")
+        expect (stdout).contains("All tests passed")
+
+    slow_it "runs semantic analysis by default for bare duplicate-check invocations":
+        val root = "/tmp/simple_duplicate_check_system_default"
+        make_cli_fixture(root)
+
+        val (stdout, stderr, code) = rt_process_run("bin/simple", [
+            "duplicate-check",
+            root,
+            "--semantic-threshold",
+            "0.70",
+            "--ollama-url",
+            "http://127.0.0.1:9"
+        ])
+
+        expect code == 1
+        expect (stdout).contains("Semantic Doc Similarity Report")
+        expect (stdout).contains("Falling back to text-based similarity")
+        expect (stdout).contains("Similar Docs")
+        expect stderr == ""
+
+    slow_it "warns and stays semantic-only when deprecated lexical flags are used":
+        val root = "/tmp/simple_duplicate_check_system_deprecated"
+        make_cli_fixture(root)
+
+        val (stdout, stderr, code) = rt_process_run("bin/simple", [
+            "duplicate-check",
+            root,
+            "--cosine",
+            "--min-tokens",
+            "30",
+            "--semantic-threshold",
+            "0.70",
+            "--ollama-url",
+            "http://127.0.0.1:9"
+        ])
+
+        expect code == 1
+        expect (stdout).contains("WARNING: lexical duplicate-check options are deprecated")
+        expect (stdout).contains("Requested: --cosine, --min-tokens")
+        expect (stdout).contains("semantic-only analysis")
+        expect (stdout).contains("Semantic Doc Similarity Report")
+        expect stderr == ""
+
+    slow_it "falls back cleanly in bootstrap semantic mode without HTTP extern support":
+        val (stdout, stderr, code) = run_bootstrap([
+            "run",
+            "src/compiler/90.tools/duplicate_check/main.spl",
+            "src/compiler/90.tools/duplicate_check",
+            "--semantic",
+            "--semantic-threshold",
+            "0.7",
+            "--ollama-url",
+            "http://127.0.0.1:9"
+        ])
+
+        expect code == 0
+        expect (stdout).contains("Falling back to text-based similarity")
+        expect (stdout).contains("Semantic Doc Similarity Report")
+        expect stderr == ""

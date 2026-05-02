@@ -1,0 +1,157 @@
+# ACPI Clock Source Discovery — FR-BENCH-CLOCK-002 / FR-SIMPLEOS-ACPI-001
+#
+# Helpers to locate HPET MMIO base and PMTMR port from ACPI tables.
+#
+# Status: IMPLEMENTED — FR-SIMPLEOS-ACPI-001 (ACPI table walk) is complete.
+#   acpi_hpet_present() walks RSDP → RSDT/XSDT → HPET signature table and
+#   returns the HPET BaseAddress GAS physical address (MMIO u64).
+#   acpi_pmtmr_port() walks RSDP → FADT (signature "FACP") → PM_TMR_BLK
+#   field (u32 port I/O address).
+#
+# Usage by timer.spl:
+#   use os.kernel.acpi.clock_sources.{acpi_hpet_present, acpi_pmtmr_port,
+#       acpi_set_rsdp}
+#
+# MMIO access uses os.kernel.boot.mmio.{mmio_read32, mmio_read64} (volatile).
+# Port I/O uses std.baremetal.x86.io.{inb}.
+
+use std.baremetal.x86.io.{inb}
+use os.kernel.boot.mmio.{mmio_read32, mmio_read64}
+use os.kernel.boot.limine_boot.{phys_to_virt}
+use os.kernel.acpi.rsdp.{acpi_find_rsdp}
+use os.kernel.acpi.rsdt.{acpi_find_table}
+use os.kernel.acpi.fadt.{acpi_fadt_pm_tmr_port}
+use os.kernel.acpi.hpet_table.{acpi_hpet_base}
+
+# ============================================================================
+# RSDP global — set once at kernel init from BootOutputPort.rsdp_addr
+# ============================================================================
+
+# Physical address of RSDP (0 = not set / unavailable)
+var g_rsdp_phys: u64 = 0
+
+fn acpi_set_rsdp(phys: u64):
+    """Record the RSDP physical address provided by the bootloader.
+
+    Must be called before acpi_hpet_present() or acpi_pmtmr_port().
+    Typically called in the arch kernel-init path after parsing BootOutputPort.
+    """
+    g_rsdp_phys = phys
+
+fn acpi_rsdp_available() -> bool:
+    """Return true if a valid RSDP address has been registered."""
+    g_rsdp_phys != 0
+
+# ============================================================================
+# ACPI table signatures (4-byte ASCII as u32, little-endian)
+# ============================================================================
+
+# "HPET" = 0x54455048
+val ACPI_SIG_HPET: u32 = 0x54455048
+# "FACP" (FADT) = 0x50434146
+val ACPI_SIG_FACP: u32 = 0x50434146
+# "RSDT" = 0x54445352
+val ACPI_SIG_RSDT: u32 = 0x54445352
+# "XSDT" = 0x54445358
+val ACPI_SIG_XSDT: u32 = 0x54445358
+
+# ============================================================================
+# ACPI HPET discovery
+# ============================================================================
+
+fn _resolve_rsdp() -> u64?:
+    """Return RSDP physical address: use registered value if available,
+    otherwise fall back to BIOS shadow scan."""
+    if g_rsdp_phys != 0:
+        return g_rsdp_phys
+    acpi_find_rsdp()
+
+fn acpi_hpet_present() -> u64?:
+    """Return HPET MMIO base address (physical) if the HPET ACPI table is present.
+
+    Walk: RSDP → RSDT/XSDT → table with signature ACPI_SIG_HPET → GAS.address.
+    Returns the physical MMIO base (typically 0xFED00000 on QEMU).
+
+    Callers must convert to virtual with phys_to_virt() before MMIO access.
+    Returns nil if RSDP is unavailable, HPET table is absent, or GAS is invalid.
+    """
+    val rsdp = _resolve_rsdp()
+    if rsdp == nil:
+        return nil
+    val hpet_phys = acpi_find_table(rsdp as u64, ACPI_SIG_HPET)
+    if hpet_phys == nil:
+        return nil
+    acpi_hpet_base(hpet_phys as u64)
+
+# ============================================================================
+# ACPI PMTMR (PM Timer) port discovery
+# ============================================================================
+
+fn acpi_pmtmr_port() -> u32?:
+    """Return PMTMR I/O port if discoverable via ACPI FADT.
+
+    Walk RSDP → RSDT/XSDT → table with signature ACPI_SIG_FACP (FADT).
+    Extracts PM_TMR_BLK (offset 76) or X_PM_TMR_BLK GAS (offset 208,
+    ACPI 2.0+, SystemIO space only).
+
+    PMTMR is a 24-bit counter at 3.579545 MHz.
+    Returns nil if RSDP unavailable, FADT absent, or PM_TMR_BLK == 0.
+    """
+    val rsdp = _resolve_rsdp()
+    if rsdp == nil:
+        return nil
+    val fadt_phys = acpi_find_table(rsdp as u64, ACPI_SIG_FACP)
+    if fadt_phys == nil:
+        return nil
+    acpi_fadt_pm_tmr_port(fadt_phys as u64)
+
+# ============================================================================
+# PMTMR read helper (port I/O, 32-bit, 24-bit counter)
+# ============================================================================
+
+val PMTMR_MASK: u32 = 0x00FFFFFF   # 24-bit counter mask
+val PMTMR_FREQ: u64 = 3579545      # Hz (exactly 3.579545 MHz)
+
+fn pmtmr_read(port: u32) -> u32:
+    """Read PMTMR counter from I/O port (24-bit masked)."""
+    # The PMTMR is a 32-bit port read; low 24 bits are the timer value.
+    # Some implementations extend to 32 bits; masking is always safe.
+    val raw = inb(port as i32) as u32
+    raw & PMTMR_MASK
+
+fn pmtmr_read32(port: u32) -> u32:
+    """Read all 32 bits of PMTMR — some platforms extend to 32-bit counter."""
+    inb(port as i32) as u32
+
+# ============================================================================
+# HPET read helper (MMIO, 64-bit counter at offset 0xF0)
+# ============================================================================
+
+# HPET register offsets (from MMIO base)
+val HPET_REG_GCAP:    u64 = 0x000   # General Capabilities and ID
+val HPET_REG_GCONF:   u64 = 0x010   # General Configuration
+val HPET_REG_COUNTER: u64 = 0x0F0   # Main Counter Value
+
+fn hpet_read_counter(hpet_virt: u64) -> u64:
+    """Read HPET main 64-bit counter from MMIO base (virtual address).
+
+    The HPET must be enabled (bit 0 of GCONF set) before reading.
+    """
+    mmio_read64(hpet_virt + HPET_REG_COUNTER)
+
+fn hpet_read_capabilities(hpet_virt: u64) -> u64:
+    """Read HPET General Capabilities register.
+
+    Bits 63:32 = COUNTER_CLK_PERIOD (femtoseconds per tick, u32).
+    Bits 12:8  = NUM_TIM_CAP (number of timers minus one).
+    Bit  13    = COUNT_SIZE_CAP (1 = 64-bit counter, 0 = 32-bit).
+    """
+    mmio_read64(hpet_virt + HPET_REG_GCAP)
+
+fn hpet_enable(hpet_virt: u64):
+    """Enable HPET main counter (set bit 0 of General Configuration)."""
+    # Read current config (64-bit register, use mmio_read64)
+    val conf = mmio_read64(hpet_virt + HPET_REG_GCONF)
+    # Set ENABLE_CNF (bit 0) — only modify bit 0 to avoid disturbing legacy replacement
+    use os.kernel.boot.mmio.{mmio_write64}
+    mmio_write64(hpet_virt + HPET_REG_GCONF, conf | 1)

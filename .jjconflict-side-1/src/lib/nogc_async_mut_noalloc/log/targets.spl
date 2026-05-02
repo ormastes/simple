@@ -1,0 +1,110 @@
+# Log Targets - Output Destinations for Bare-Metal Logging
+#
+# Three targets selectable via bitmask:
+#   1 = Device serial (x86 COM1 / ARM UART / RISC-V UART)
+#   2 = Semihost terminal (debugger console)
+#   4 = Host file (semihosting SYS_OPEN/SYS_WRITE)
+#
+# Usage:
+#   log_init(LOG_INFO, TARGET_DEVICE | TARGET_SEMIHOST)
+
+extern fn rt_string_data(value: text) -> i64
+extern fn rt_string_len(value: text) -> i64
+extern fn rt_log_target_device_write_bytes(ptr: i64, len: i64) -> bool
+extern fn rt_log_target_semihost_write_bytes(ptr: i64, len: i64) -> bool
+
+
+# ============================================================================
+# Target Bit Constants
+# ============================================================================
+
+val TARGET_DEVICE: i32    = 1    # On-device serial/UART
+val TARGET_SEMIHOST: i32  = 2    # Semihost terminal (debugger console)
+val TARGET_HOST_FILE: i32 = 4    # Host file via semihosting
+
+# ============================================================================
+# Device Target - Serial Port Output
+# ============================================================================
+
+fn target_device_write(msg: text):
+    """Write message to device serial port.
+
+    Routes through the runtime hook first — on bare-metal SimpleOS this
+    reaches the UART configured via log_set_device (x86 COM1 / ARM PL011 /
+    RISC-V NS16550). On hosted/interpreter builds the hook stub returns
+    false and we fall through to println so test output still shows."""
+    if rt_log_target_device_write_bytes(rt_string_data(msg), rt_string_len(msg)):
+        return
+    println msg
+
+# ============================================================================
+# Semihost Target - Debugger Console Output
+# ============================================================================
+
+fn target_semihost_write(msg: text):
+    """Write message to semihost terminal.
+
+    Uses SYS_WRITE0 semihosting call (null-terminated string).
+    In interpreter mode, falls back to print.
+    """
+    if rt_log_target_semihost_write_bytes(rt_string_data(msg), rt_string_len(msg)):
+        return
+    print msg
+
+fn target_semihost_write_h(handle: i32):
+    """Write interned string to semihost terminal by handle.
+
+    Uses SYS_WRITE_HANDLE (0x100) semihosting extension.
+    In interpreter mode, prints handle ID.
+    """
+    print "[interned:" + handle.to_text() + "]"
+
+fn target_semihost_write_h1(handle: i32, p0: i32):
+    """Write interned string with 1 parameter.
+
+    Uses SYS_WRITE_HANDLE_P1 (0x101).
+    """
+    print "[interned:" + handle.to_text() + " p0=" + p0.to_text() + "]"
+
+fn target_semihost_write_h2(handle: i32, p0: i32, p1: i32):
+    """Write interned string with 2 parameters.
+
+    Uses SYS_WRITE_HANDLE_P2 (0x102).
+    """
+    print "[interned:" + handle.to_text() + " p0=" + p0.to_text() + " p1=" + p1.to_text() + "]"
+
+# ============================================================================
+# Host File Target - Semihosting File I/O
+# ============================================================================
+
+var g_log_file_handle: i32 = -1
+
+fn target_file_open(path: text) -> bool:
+    """Open a log file on the host via semihosting SYS_OPEN.
+
+    Path uses forward slashes. The host debugger resolves
+    to the actual OS path (e.g., /tmp/device.log).
+    Returns true if file opened successfully.
+    """
+    # In interpreter mode, this is a no-op stub
+    # In compiled baremetal mode, uses semi_host_call(SYS_OPEN, ...)
+    g_log_file_handle = 1    # Stub: pretend success
+    true
+
+fn target_file_write(msg: text):
+    """Write message to host file via semihosting SYS_WRITE.
+
+    Requires target_file_open() to have been called first.
+    """
+    if g_log_file_handle == -1:
+        return
+    # In interpreter mode, fall back to print
+    # In compiled baremetal mode, uses semi_host_call(SYS_WRITE, ...)
+    print msg
+
+fn target_file_close():
+    """Close the host log file via semihosting SYS_CLOSE."""
+    if g_log_file_handle == -1:
+        return
+    # In compiled baremetal mode, uses semi_host_call(SYS_CLOSE, ...)
+    g_log_file_handle = -1

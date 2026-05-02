@@ -1,0 +1,290 @@
+#!/bin/bash
+# GHDL runner for the generated RV64 compiled-payload boot-info DTB lane.
+#
+# Usage:
+#   ./ghdl_generated_rv64_boot_info_dtb_runner.shs \
+#       --payload-elf <payload.elf> [--fw-stub=path/to/fw_stub.s] [--timeout=30]
+#   ./ghdl_generated_rv64_boot_info_dtb_runner.shs \
+#       --payload-bin <payload.bin> [--fw-stub=path/to/fw_stub.s] [--timeout=30]
+#   ./ghdl_generated_rv64_boot_info_dtb_runner.shs \
+#       --payload-elf <payload.elf> --expect-marker "Linux version" \
+#       [--expect-marker "Freeing unused kernel memory"] \
+#       [--log-path path/to/runner.log] [--uart-log-path path/to/uart.log] \
+#       [--max-cycles 200000000] [--allow-timeout-success] [--timeout=300]
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
+DEFAULT_FW_STUB="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_fw_jump_stub.s"
+TIMEOUT=30
+FW_STUB="$DEFAULT_FW_STUB"
+PAYLOAD=""
+PAYLOAD_KIND=""
+PAYLOAD_MODE="flat"
+EXPECT_VALUE=""
+LOG_PATH=""
+UART_LOG_PATH=""
+MAX_CYCLES=300000
+ALLOW_TIMEOUT_SUCCESS=0
+EXPECT_MARKERS=""
+
+for arg in "$@"; do
+    if [ -n "$EXPECT_VALUE" ]; then
+        case "$EXPECT_VALUE" in
+            fw-stub) FW_STUB="$arg" ;;
+            payload-elf)
+                PAYLOAD="$arg"
+                PAYLOAD_KIND="elf"
+                ;;
+            payload-bin)
+                PAYLOAD="$arg"
+                PAYLOAD_KIND="bin"
+                ;;
+            log-path) LOG_PATH="$arg" ;;
+            uart-log-path) UART_LOG_PATH="$arg" ;;
+            expect-marker)
+                if [ -n "$EXPECT_MARKERS" ]; then
+                    EXPECT_MARKERS="${EXPECT_MARKERS}
+$arg"
+                else
+                    EXPECT_MARKERS="$arg"
+                fi
+                ;;
+            max-cycles) MAX_CYCLES="$arg" ;;
+        esac
+        EXPECT_VALUE=""
+        continue
+    fi
+    case "$arg" in
+        --timeout=*) TIMEOUT="${arg#--timeout=}" ;;
+        --max-cycles=*) MAX_CYCLES="${arg#--max-cycles=}" ;;
+        --fw-stub) EXPECT_VALUE="fw-stub" ;;
+        --fw-stub=*) FW_STUB="${arg#--fw-stub=}" ;;
+        --payload-elf) EXPECT_VALUE="payload-elf" ;;
+        --payload-elf=*)
+            PAYLOAD="${arg#--payload-elf=}"
+            PAYLOAD_KIND="elf"
+            ;;
+        --payload-bin) EXPECT_VALUE="payload-bin" ;;
+        --payload-bin=*)
+            PAYLOAD="${arg#--payload-bin=}"
+            PAYLOAD_KIND="bin"
+            ;;
+        --log-path) EXPECT_VALUE="log-path" ;;
+        --log-path=*) LOG_PATH="${arg#--log-path=}" ;;
+        --uart-log-path) EXPECT_VALUE="uart-log-path" ;;
+        --uart-log-path=*) UART_LOG_PATH="${arg#--uart-log-path=}" ;;
+        --expect-marker) EXPECT_VALUE="expect-marker" ;;
+        --expect-marker=*)
+            if [ -n "$EXPECT_MARKERS" ]; then
+                EXPECT_MARKERS="${EXPECT_MARKERS}
+${arg#--expect-marker=}"
+            else
+                EXPECT_MARKERS="${arg#--expect-marker=}"
+            fi
+            ;;
+        --allow-timeout-success) ALLOW_TIMEOUT_SUCCESS=1 ;;
+        --max-cycles) EXPECT_VALUE="max-cycles" ;;
+        *)
+            if [ -z "$PAYLOAD" ]; then
+                PAYLOAD="$arg"
+            else
+                echo "Unexpected extra argument: $arg"
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+if [ -n "$EXPECT_VALUE" ]; then
+    echo "Error: Missing value for --$EXPECT_VALUE"
+    exit 1
+fi
+
+if [ -z "$PAYLOAD" ]; then
+    echo "Usage: $0 --payload-elf <payload.elf>|--payload-bin <payload.bin> [--fw-stub=path/to/fw_stub.s] [--timeout=N]"
+    exit 1
+fi
+
+if [ ! -f "$FW_STUB" ] && [ "$PAYLOAD_KIND" != "elf" ]; then
+    echo "Error: FW stub not found: $FW_STUB"
+    exit 1
+fi
+
+if [ ! -f "$PAYLOAD" ]; then
+    echo "Error: Payload not found: $PAYLOAD"
+    exit 1
+fi
+
+if [ -z "$PAYLOAD_KIND" ]; then
+    case "${PAYLOAD##*.}" in
+        elf) PAYLOAD_KIND="elf" ;;
+        bin) PAYLOAD_KIND="bin" ;;
+        *)
+            echo "Error: Could not infer payload type from $PAYLOAD"
+            echo "Use --payload-elf or --payload-bin."
+            exit 1
+            ;;
+    esac
+fi
+
+TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv64_boot_info_dtb_XXXXXX)
+trap "rm -rf $TMP_DIR" EXIT
+
+GEN_DIR="$TMP_DIR/generated"
+FW_BASE="$TMP_DIR/fw_stub"
+FW_ELF="$FW_BASE.elf"
+FW_BIN="$FW_BASE.bin"
+FW_HEX="$TMP_DIR/fw_stub.hex"
+PAYLOAD_BIN="$TMP_DIR/payload.bin"
+PAYLOAD_HEX="$TMP_DIR/payload.hex"
+TEST_PKG="$TMP_DIR/test_program.vhd"
+
+PAYLOAD_SECTION=""
+if [ "$PAYLOAD_KIND" = "elf" ] && riscv64-linux-gnu-readelf -h "$PAYLOAD" | grep -q 'Entry point address:[[:space:]]*0x80000000'; then
+    if riscv64-linux-gnu-readelf -S "$PAYLOAD" | grep -q '[[:space:]]\.payload[[:space:]]'; then
+        PAYLOAD_SECTION=".payload"
+        PAYLOAD_MODE="split-bbl"
+    elif riscv64-linux-gnu-readelf -S "$PAYLOAD" | grep -q '[[:space:]]\.text\.payload[[:space:]]'; then
+        PAYLOAD_SECTION=".text.payload"
+        PAYLOAD_MODE="split-bbl"
+    fi
+fi
+
+if [ -n "$PAYLOAD_SECTION" ]; then
+    PAYLOAD_MODE="split-bbl"
+fi
+
+bin/simple run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
+if [ "$PAYLOAD_MODE" = "split-bbl" ]; then
+    echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] split ELF mode: machine image + $PAYLOAD_SECTION"
+    riscv64-linux-gnu-objcopy -O binary --remove-section=.payload --remove-section=.text.payload "$PAYLOAD" "$FW_BIN"
+    riscv64-linux-gnu-objcopy -O binary -j "$PAYLOAD_SECTION" "$PAYLOAD" "$PAYLOAD_BIN"
+else
+    riscv64-linux-gnu-as -march=rv64i_zicsr -mabi=lp64 -o "$FW_BASE.o" "$FW_STUB"
+    riscv64-linux-gnu-ld -m elf64lriscv -Ttext=0x80000000 --no-relax -o "$FW_ELF" "$FW_BASE.o"
+    riscv64-linux-gnu-objcopy -O binary "$FW_ELF" "$FW_BIN"
+    if [ "$PAYLOAD_KIND" = "elf" ]; then
+        riscv64-linux-gnu-objcopy -O binary "$PAYLOAD" "$PAYLOAD_BIN"
+    else
+        cp "$PAYLOAD" "$PAYLOAD_BIN"
+    fi
+fi
+python3 - "$FW_BIN" "$FW_HEX" "$PAYLOAD_BIN" "$PAYLOAD_HEX" "$TEST_PKG" <<'PY'
+import pathlib
+import sys
+
+fw_bin_path, fw_hex_path, payload_bin_path, payload_hex_path, test_pkg_path = sys.argv[1:]
+
+def write_word_hex(bin_path: str, hex_path: str) -> int:
+    data = pathlib.Path(bin_path).read_bytes()
+    with open(hex_path, "w", encoding="ascii") as f:
+        for offset in range(0, len(data), 8):
+            chunk = data[offset:offset + 8]
+            padded = chunk + (b"\x00" * (8 - len(chunk)))
+            f.write(padded[::-1].hex().upper())
+            f.write("\n")
+    return len(data)
+
+fw_size = write_word_hex(fw_bin_path, fw_hex_path)
+payload_size = write_word_hex(payload_bin_path, payload_hex_path)
+
+pathlib.Path(test_pkg_path).write_text(
+    "library ieee;\n"
+    "use ieee.std_logic_1164.all;\n"
+    "package test_program is\n"
+    f"    constant FW_SIZE_BYTES : integer := {fw_size};\n"
+    f"    constant FW_HEX_PATH : string := \"{fw_hex_path}\";\n"
+    f"    constant PAYLOAD_SIZE_BYTES : integer := {payload_size};\n"
+    f"    constant PAYLOAD_HEX_PATH : string := \"{payload_hex_path}\";\n"
+    "end package test_program;\n",
+    encoding="ascii",
+)
+PY
+
+cd "$TMP_DIR"
+GHDL_FLAGS="--std=08 -frelaxed"
+ghdl -a $GHDL_FLAGS \
+    "$GEN_DIR/rv64/rtl/simple_rv64i_core_pkg.vhd" \
+    "$GEN_DIR/rv64/rtl/simple_rv64gc_core.vhd" \
+    "$TEST_PKG" \
+    "$GEN_DIR/rv64/rtl/tb_generated_rv64_boot_info_dtb.vhd"
+ghdl -e $GHDL_FLAGS tb_generated_rv64_boot_info_dtb
+
+STOP_MS=$((TIMEOUT * 1000))
+RAW_OUTPUT_PATH="$TMP_DIR/ghdl_generated_rv64_boot_info_dtb.log"
+if [ -n "$LOG_PATH" ]; then
+    mkdir -p "$(dirname "$LOG_PATH")"
+    RAW_OUTPUT_PATH="$LOG_PATH"
+fi
+GHDL_RUN_PREFIX=""
+if command -v stdbuf >/dev/null 2>&1; then
+    GHDL_RUN_PREFIX="stdbuf -oL -eL "
+fi
+/bin/sh -c "timeout \"$TIMEOUT\" ${GHDL_RUN_PREFIX}ghdl -r $GHDL_FLAGS tb_generated_rv64_boot_info_dtb -gMAX_CYCLES=\"$MAX_CYCLES\" --stop-time=\"${STOP_MS}ms\"" >"$RAW_OUTPUT_PATH" 2>&1 || EXIT_STATUS=$?
+EXIT_STATUS=${EXIT_STATUS:-0}
+OUTPUT=$(cat "$RAW_OUTPUT_PATH")
+
+echo "$OUTPUT" | grep -E "PRELOAD_(FW|PAYLOAD|PROCESS)_[A-Z_0-9: ]*|RESET_PROCESS_[A-Z_0-9: ]*|HEARTBEAT_(CYCLES|PC_HEX32|PRIV_MODE|IMEM_HEX32|LAST_LOAD_HEX32):|PROGRESS_(CYCLES|PC_HEX32|PRIV_MODE|IMEM_HEX32|LAST_LOAD_HEX32|UART_WORD_HEX32):|DMEM_(READ|WRITE)_EVENT_(ADDR|DATA)_HEX32:|CYCLES:|MAGIC_LOW32:|DONE_LOW32:|HART_ID_LOW32:|DTB_ADDR_LOW32:|DTB_ADDR_HEX32:|DTB_VALID_LOW32:|RAM_BASE_LOW32:|RAM_SIZE_LOW32:|SERIAL_BASE_LOW32:|SERIAL_MMIO_LOW32:|MAP_LEN_LOW32:|REGION[0-2]_(BASE|SIZE|KIND)_(LOW32|HEX32):|RAM_BASE_HEX32:|RAM_SIZE_HEX32:|SERIAL_BASE_HEX32:|DTB_PROBE_SEEN:|DTB_PROBE_ADDR_HEX32:|UART_BYTES_LOW32:|UART_MARKER_SEEN:|PRIV_MODE:|HALT_SEEN:|TRAP_SEEN:|PC_LOW32:|PC_HEX32:|DMEM_WRITE_SEEN:|DMEM_WRITE_ADDR_HEX32:|GENERATED_RV64_BOOT_INFO_DTB:" || true
+
+UART_TEXT=$(printf '%s\n' "$OUTPUT" | python3 -c '
+import re
+import sys
+
+out = []
+for line in sys.stdin:
+    match = re.search(r"UART_CHAR_HEX8:\s*([0-9A-Fa-f]{2})", line)
+    if match:
+        out.append(chr(int(match.group(1), 16)))
+sys.stdout.write("".join(out))
+')
+
+if [ -n "$UART_LOG_PATH" ]; then
+    mkdir -p "$(dirname "$UART_LOG_PATH")"
+    printf '%s' "$UART_TEXT" >"$UART_LOG_PATH"
+fi
+
+if [ -n "$UART_TEXT" ]; then
+    echo "UART_STREAM_BEGIN"
+    printf '%s' "$UART_TEXT"
+    printf '\n'
+    echo "UART_STREAM_END"
+fi
+
+MARKER_CHECK_RC=0
+if [ -n "$EXPECT_MARKERS" ]; then
+    while IFS= read -r marker; do
+        [ -n "$marker" ] || continue
+        if printf '%s' "$UART_TEXT" | grep -F -q "$marker"; then
+            echo "MARKER_OK: $marker"
+        else
+            echo "MARKER_MISSING: $marker"
+            MARKER_CHECK_RC=1
+        fi
+    done <<EOF
+$EXPECT_MARKERS
+EOF
+fi
+
+if [ "$EXIT_STATUS" = "124" ]; then
+    if [ "$ALLOW_TIMEOUT_SUCCESS" = "1" ] && [ "$MARKER_CHECK_RC" -eq 0 ] && [ -n "$EXPECT_MARKERS" ]; then
+        echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] PASS (timeout after markers)"
+        exit 0
+    fi
+    echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] TIMEOUT after ${TIMEOUT}s"
+    exit 124
+fi
+
+if [ "$MARKER_CHECK_RC" -eq 0 ] && [ -n "$EXPECT_MARKERS" ]; then
+    echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] PASS (marker mode)"
+    exit 0
+fi
+
+if echo "$OUTPUT" | grep -q "GENERATED_RV64_BOOT_INFO_DTB: PASS"; then
+    echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] PASS"
+    exit 0
+fi
+
+echo "[GHDL-GEN-RV64-BOOT-INFO-DTB] FAIL"
+exit 1

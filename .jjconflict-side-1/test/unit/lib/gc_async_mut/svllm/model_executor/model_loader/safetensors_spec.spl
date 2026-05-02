@@ -1,0 +1,121 @@
+# svllm safetensors — A2 real parser specs (fail until Phase 5 lands the parser)
+#
+# Fixture strategy: a 162-byte tiny checkpoint built inline via push() calls,
+# well under the interpreter's multi-MiB buffer limit. Two tensors:
+#   - "w" : F32 shape [2,2] bytes 0..16
+#   - "b" : I64 shape [3]   bytes 16..40
+# Header JSON is ASCII; length prefix is u64 little-endian.
+
+use std.gc_async_mut.svllm.model_executor.model_loader.safetensors.{SafetensorsHeader, SafetensorsTensorEntry, SafetensorsError, parse_safetensors_header}
+use std.gc_async_mut.svllm.model_executor.model_loader.weight_utils.{Dtype}
+
+# Helper: push the ASCII bytes of `s` into `buf`.
+fn push_ascii(buf: [u8], s: text) -> [u8]:
+    var i = 0
+    while i < s.len():
+        buf.push(s.byte_at(i) as u8)
+        i = i + 1
+    buf
+
+# Helper: push a u64 as 8 little-endian bytes.
+fn push_u64_le(buf: [u8], v: i64) -> [u8]:
+    var i = 0
+    while i < 8:
+        buf.push(((v >> (i * 8)) and 0xFF) as u8)
+        i = i + 1
+    buf
+
+# Build the tiny 162-byte safetensors fixture.
+fn build_tiny_safetensors() -> [u8]:
+    val header_json = "{\"w\":{\"dtype\":\"F32\",\"shape\":[2,2],\"data_offsets\":[0,16]},\"b\":{\"dtype\":\"I64\",\"shape\":[3],\"data_offsets\":[16,40]}}"
+    var buf: [u8] = []
+    buf = push_u64_le(buf, header_json.len() as i64)
+    buf = push_ascii(buf, header_json)
+    # 16 bytes F32 payload (zeros are fine for parser tests).
+    var i = 0
+    while i < 16:
+        buf.push(0 as u8)
+        i = i + 1
+    # 24 bytes I64 payload.
+    i = 0
+    while i < 24:
+        buf.push(0 as u8)
+        i = i + 1
+    buf
+
+describe "parse_safetensors_header — happy path (A2)":
+    it "returns Ok for the tiny 2-tensor fixture":
+        val buf = build_tiny_safetensors()
+        val r = parse_safetensors_header(buf)
+        expect(r.is_ok()).to_equal(true)
+
+    it "records the 8-byte header length prefix value":
+        val buf = build_tiny_safetensors()
+        val r = parse_safetensors_header(buf)
+        val h = r.unwrap()
+        expect(h.header_byte_len).to_be_greater_than(100)
+
+    it "extracts exactly two tensor entries":
+        val buf = build_tiny_safetensors()
+        val h = parse_safetensors_header(buf).unwrap()
+        expect(h.tensors.len()).to_equal(2)
+
+    it "first tensor is named 'w' with dtype F32":
+        val buf = build_tiny_safetensors()
+        val h = parse_safetensors_header(buf).unwrap()
+        val w = h.tensors[0]
+        expect(w.name).to_equal("w")
+        expect(w.dtype).to_equal(Dtype.F32)
+
+    it "first tensor has shape [2,2] and data_offsets [0,16]":
+        val buf = build_tiny_safetensors()
+        val h = parse_safetensors_header(buf).unwrap()
+        val w = h.tensors[0]
+        expect(w.shape.len()).to_equal(2)
+        expect(w.shape[0]).to_equal(2)
+        expect(w.shape[1]).to_equal(2)
+        expect(w.offset).to_equal(0)
+        expect(w.length).to_equal(16)
+
+    it "second tensor is named 'b' with dtype I64":
+        val buf = build_tiny_safetensors()
+        val h = parse_safetensors_header(buf).unwrap()
+        val b = h.tensors[1]
+        expect(b.name).to_equal("b")
+        expect(b.dtype).to_equal(Dtype.I64)
+
+describe "parse_safetensors_header — error paths":
+    it "rejects buffers shorter than 8 bytes as TruncatedHeader":
+        var buf: [u8] = []
+        buf.push(0 as u8)
+        buf.push(0 as u8)
+        val r = parse_safetensors_header(buf)
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects a length prefix that overruns the buffer":
+        # Prefix claims 999 bytes of JSON but buffer is only 8 bytes long.
+        var buf: [u8] = []
+        buf = push_u64_le(buf, 999)
+        val r = parse_safetensors_header(buf)
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects malformed JSON header as MalformedJson":
+        val bad = "not-a-json-object"
+        var buf: [u8] = []
+        buf = push_u64_le(buf, bad.len() as i64)
+        buf = push_ascii(buf, bad)
+        val r = parse_safetensors_header(buf)
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects unknown dtype strings":
+        val j = "{\"x\":{\"dtype\":\"WEIRD\",\"shape\":[1],\"data_offsets\":[0,4]}}"
+        var buf: [u8] = []
+        buf = push_u64_le(buf, j.len() as i64)
+        buf = push_ascii(buf, j)
+        # Pad 4 bytes payload.
+        var i = 0
+        while i < 4:
+            buf.push(0 as u8)
+            i = i + 1
+        val r = parse_safetensors_header(buf)
+        expect(r.is_err()).to_equal(true)

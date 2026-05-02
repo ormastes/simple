@@ -1,0 +1,172 @@
+"""
+# RV64 Pipeline Control Unit Tests
+
+**Feature IDs:** #RV64-PIPELINE-001
+**Category:** Hardware
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Unit tests for 64-bit pipeline hazard detection and data forwarding.
+"""
+
+import std.spec
+
+use hardware.rv64gc.core.rv64_pipeline_ctrl.*
+use hardware.rv64gc.pkg.rv64_types_pkg.*
+
+describe "Load-Use Hazard Detection":
+    """
+    ## Load-Use Hazards
+
+    LD/LW in EX stage followed by dependent instruction causes stall.
+    """
+
+    it "LD followed by dependent ALU detects hazard":
+        val hazard = detect_load_use_hazard(
+            ex_is_load: true, ex_rd: 10,
+            id_rs1: 10, id_rs2: 0
+        )
+        expect(hazard).to_equal(true)
+
+    it "LD followed by independent ALU has no hazard":
+        val hazard = detect_load_use_hazard(
+            ex_is_load: true, ex_rd: 10,
+            id_rs1: 11, id_rs2: 12
+        )
+        expect(hazard).to_equal(false)
+
+    it "non-load instruction has no load-use hazard":
+        val hazard = detect_load_use_hazard(
+            ex_is_load: false, ex_rd: 10,
+            id_rs1: 10, id_rs2: 0
+        )
+        expect(hazard).to_equal(false)
+
+    it "hazard on rs2 dependency":
+        val hazard = detect_load_use_hazard(
+            ex_is_load: true, ex_rd: 10,
+            id_rs1: 0, id_rs2: 10
+        )
+        expect(hazard).to_equal(true)
+
+    it "no hazard when ex_rd is x0":
+        val hazard = detect_load_use_hazard(
+            ex_is_load: true, ex_rd: 0,
+            id_rs1: 0, id_rs2: 0
+        )
+        expect(hazard).to_equal(false)
+
+    it "LW also triggers hazard":
+        val hazard = detect_load_use_hazard(
+            ex_is_load: true, ex_rd: 5,
+            id_rs1: 5, id_rs2: 0
+        )
+        expect(hazard).to_equal(true)
+
+describe "Data Forwarding":
+    """
+    ## Forwarding from EX/MEM Stages
+    """
+
+    it "forward from EX stage to rs1":
+        val fwd = resolve_forward_rs1(
+            id_rs1: 10,
+            ex_rd: 10, ex_write_en: true,
+            mem_rd: 0, mem_write_en: false
+        )
+        expect(fwd == ForwardSrc.FromEx).to_equal(true)
+
+    it "forward from MEM stage to rs1":
+        val fwd = resolve_forward_rs1(
+            id_rs1: 10,
+            ex_rd: 0, ex_write_en: false,
+            mem_rd: 10, mem_write_en: true
+        )
+        expect(fwd == ForwardSrc.FromMem).to_equal(true)
+
+    it "no forwarding when no match":
+        val fwd = resolve_forward_rs1(
+            id_rs1: 10,
+            ex_rd: 11, ex_write_en: true,
+            mem_rd: 12, mem_write_en: true
+        )
+        expect(fwd == ForwardSrc.RegFile).to_equal(true)
+
+    it "no forwarding when rd is x0":
+        val fwd = resolve_forward_rs1(
+            id_rs1: 0,
+            ex_rd: 0, ex_write_en: true,
+            mem_rd: 0, mem_write_en: true
+        )
+        expect(fwd == ForwardSrc.RegFile).to_equal(true)
+
+    it "EX has priority over MEM":
+        val fwd = resolve_forward_rs1(
+            id_rs1: 10,
+            ex_rd: 10, ex_write_en: true,
+            mem_rd: 10, mem_write_en: true
+        )
+        expect(fwd == ForwardSrc.FromEx).to_equal(true)
+
+describe "Pipeline Control":
+    """
+    ## Stall/Flush Control Signals
+    """
+
+    it "stall on load-use hazard":
+        val ctrl = compute_pipeline_control(
+            load_use_hazard: true, branch_taken: false
+        )
+        expect(ctrl.stall).to_equal(true)
+        expect(ctrl.flush).to_equal(false)
+
+    it "flush on branch taken":
+        val ctrl = compute_pipeline_control(
+            load_use_hazard: false, branch_taken: true
+        )
+        expect(ctrl.stall).to_equal(false)
+        expect(ctrl.flush).to_equal(true)
+
+    it "no stall or flush in normal operation":
+        val ctrl = compute_pipeline_control(
+            load_use_hazard: false, branch_taken: false
+        )
+        expect(ctrl.stall).to_equal(false)
+        expect(ctrl.flush).to_equal(false)
+
+describe "64-bit Forwarding Paths":
+    """
+    ## RV64-Specific: Full 64-bit Data Forwarding
+    """
+
+    it "LD creates 64-bit forwarding path":
+        val fwd = resolve_forward_rs2(
+            id_rs2: 10,
+            ex_rd: 10, ex_write_en: true,
+            mem_rd: 0, mem_write_en: false
+        )
+        expect(fwd == ForwardSrc.FromEx).to_equal(true)
+
+    it "SD with forwarded store data":
+        val fwd = resolve_forward_rs2(
+            id_rs2: 11,
+            ex_rd: 11, ex_write_en: true,
+            mem_rd: 0, mem_write_en: false
+        )
+        expect(fwd == ForwardSrc.FromEx).to_equal(true)
+
+    it "double forwarding: both rs1 and rs2 from different stages":
+        val fwd1 = resolve_forward_rs1(
+            id_rs1: 10,
+            ex_rd: 10, ex_write_en: true,
+            mem_rd: 0, mem_write_en: false
+        )
+        val fwd2 = resolve_forward_rs2(
+            id_rs2: 11,
+            ex_rd: 0, ex_write_en: false,
+            mem_rd: 11, mem_write_en: true
+        )
+        expect(fwd1 == ForwardSrc.FromEx).to_equal(true)
+        expect(fwd2 == ForwardSrc.FromMem).to_equal(true)

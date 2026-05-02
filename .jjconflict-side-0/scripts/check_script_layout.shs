@@ -1,0 +1,119 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/check_script_layout.shs [--repo-root=<dir>] [--ignore-file=<path>]
+
+Checks repo policy for command/script locations:
+  1. Shell entrypoints under scripts/ should use .shs, unless explicitly ignored.
+  2. bin/ must not contain source-style shell files named *.sh, *.shs, or *.bash.
+
+The ignore file is newline-delimited repo-relative paths. Blank lines and '#'
+comments are ignored.
+EOF
+}
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "${script_dir}/.." && pwd)
+ignore_file="${repo_root}/scripts/script_layout_ignore.txt"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo-root=*) repo_root="${1#*=}" ;;
+    --ignore-file=*) ignore_file="${1#*=}" ;;
+    --help|-h) usage; exit 0 ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+cd "${repo_root}"
+
+tmp_ignore="$(mktemp)"
+tmp_files="$(mktemp)"
+trap 'rm -f "${tmp_ignore}" "${tmp_files}"' EXIT
+
+normalize_path() {
+  local path="$1"
+  path="${path#./}"
+  printf '%s\n' "$path"
+}
+
+if [ -f "${ignore_file}" ]; then
+  while IFS= read -r raw || [ -n "${raw}" ]; do
+    case "${raw}" in
+      ''|'#'*) continue ;;
+    esac
+    normalize_path "${raw}" >> "${tmp_ignore}"
+  done < "${ignore_file}"
+fi
+
+is_ignored() {
+  local path
+  path="$(normalize_path "$1")"
+  if [ ! -s "${tmp_ignore}" ]; then
+    return 1
+  fi
+  grep -Fxq "${path}" "${tmp_ignore}"
+}
+
+list_repo_files() {
+  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files
+  else
+    find . \
+      -path './.git' -prune -o \
+      -path './build' -prune -o \
+      -path './node_modules' -prune -o \
+      -path './scripts/__pycache__' -prune -o \
+      -path './bin/__pycache__' -prune -o \
+      -type f -print | sed 's#^\./##'
+  fi
+}
+
+list_repo_files > "${tmp_files}"
+
+fail=0
+
+echo "[check_script_layout] checking scripts/ shell extension policy"
+while IFS= read -r path || [ -n "${path}" ]; do
+  case "${path}" in
+    scripts/*)
+      case "${path}" in
+        *.sh|*.bash)
+          if is_ignored "${path}"; then
+            continue
+          fi
+          echo "ERROR: shell entrypoint under scripts/ must use .shs or be ignored: ${path}" >&2
+          fail=1
+          ;;
+      esac
+      ;;
+  esac
+done < "${tmp_files}"
+
+echo "[check_script_layout] checking bin/ file naming policy"
+while IFS= read -r path || [ -n "${path}" ]; do
+  case "${path}" in
+    bin/*)
+      case "${path}" in
+        *.sh|*.shs|*.bash)
+          echo "ERROR: bin/ must not contain source-style shell files: ${path}" >&2
+          fail=1
+          ;;
+      esac
+      ;;
+  esac
+done < "${tmp_files}"
+
+if [ "${fail}" -ne 0 ]; then
+  echo "[check_script_layout] FAILED" >&2
+  exit 1
+fi
+
+echo "[check_script_layout] OK"

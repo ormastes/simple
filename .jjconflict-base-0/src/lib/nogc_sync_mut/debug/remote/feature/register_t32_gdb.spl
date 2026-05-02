@@ -1,0 +1,234 @@
+# T32 GDB Bridge Feature Registration
+# Registers T32 GDB bridge handlers. Standard GDB ops at rank NATIVE (via T32's GDB server),
+# plus T32-unique operations (trace, coverage, PRACTICE) at rank NATIVE.
+
+use app.debug.remote.feature.features.{FeatureId, FeatureRank}
+use app.debug.remote.feature.registry.{FeatureHandler, FeatureRegistry}
+use app.debug.remote.protocol.t32_gdb_bridge.T32GdbBridgeClient
+use app.debug.coordinator.VarInfo
+
+# Register all T32 GDB bridge features
+fn register_t32_gdb_features(registry: FeatureRegistry, client: T32GdbBridgeClient):
+    # Execution control (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.Halt, FeatureRank.NATIVE(), "t32-gdb",
+        \args: client.halt(),
+        "T32-GDB -exec-interrupt"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.Resume, FeatureRank.NATIVE(), "t32-gdb",
+        \args: client.resume(),
+        "T32-GDB -exec-continue"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.SingleStep, FeatureRank.NATIVE(), "t32-gdb",
+        \args: client.single_step(),
+        "T32-GDB -exec-step"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.StepOver, FeatureRank.NATIVE(), "t32-gdb",
+        \args: client.step_over(),
+        "T32-GDB -exec-next"
+    ))
+
+    # Memory (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadMemory, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_read_memory(client, args),
+        "T32-GDB -data-read-memory-bytes"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.WriteMemory, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_write_memory(client, args),
+        "T32-GDB -data-write-memory-bytes"
+    ))
+
+    # Registers (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadRegister, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_read_register(client, args),
+        "T32-GDB register read"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.WriteRegister, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_write_register(client, args),
+        "T32-GDB register write"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadAllRegisters, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_read_all_registers(client),
+        "T32-GDB all registers"
+    ))
+
+    # Breakpoints (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.SetBreakpoint, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_set_breakpoint(client, args),
+        "T32-GDB -break-insert"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ClearBreakpoint, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_clear_breakpoint(client, args),
+        "T32-GDB -break-delete"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.SetWatchpoint, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_set_watchpoint(client, args),
+        "T32-GDB -break-watch"
+    ))
+
+    # Inspection (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadLocals, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_read_locals(client),
+        "T32-GDB -stack-list-locals"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadArguments, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_read_arguments(client),
+        "T32-GDB -stack-list-arguments"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.EvaluateExpression, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_evaluate(client, args),
+        "T32-GDB -data-evaluate-expression"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadStackTrace, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_read_stack_trace(client),
+        "T32-GDB -stack-list-frames"
+    ))
+
+    # System operations (via T32 PRACTICE)
+    registry.register(FeatureHandler.of(
+        FeatureId.SystemReset, FeatureRank.NATIVE(), "t32-gdb",
+        \args: client.system_reset(),
+        "T32-GDB SYStem.Up"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.FlashProgram, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_flash_program(client, args),
+        "T32-GDB FLASH.ReProgram"
+    ))
+
+    # T32-unique features (via PRACTICE commands)
+    registry.register(FeatureHandler.of(
+        FeatureId.TraceCapture, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_trace_capture(client, args),
+        "T32-GDB Trace.Arm + Trace.List"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.CoverageCollect, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_coverage_collect(client, args),
+        "T32-GDB COVerage.ListFunc"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.PracticeScript, FeatureRank.NATIVE(), "t32-gdb",
+        \args: t32gdb_practice_script(client, args),
+        "T32-GDB PRACTICE script execution"
+    ))
+
+# --- Handler adapters ---
+
+fn t32gdb_read_memory(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("ReadMemory requires [addr, size]")
+    val addr = args[0].parse_int() ?? 0
+    val size = args[1].parse_int() ?? 0
+    val bytes = client.read_memory(addr, size)?
+    Ok(bytes.map(\b: "{b}").join(","))
+
+fn t32gdb_write_memory(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("WriteMemory requires [addr, data...]")
+    val addr = args[0].parse_int() ?? 0
+    var data: [i32] = []
+    for i in 1..args.len():
+        data.push(args[i].parse_int() ?? 0)
+    client.write_memory(addr, data)
+
+fn t32gdb_read_register(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("ReadRegister requires [name]")
+    val value = client.read_register(args[0])?
+    Ok("{value}")
+
+fn t32gdb_write_register(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("WriteRegister requires [name, value]")
+    val value = args[1].parse_int() ?? 0
+    client.write_register(args[0], value)
+
+fn t32gdb_read_all_registers(client: T32GdbBridgeClient) -> Result<text, text>:
+    val regs = client.read_all_registers()?
+    var parts: [text] = []
+    for key in regs.keys():
+        parts.push("{key}={regs[key]}")
+    Ok(parts.join(","))
+
+fn t32gdb_set_breakpoint(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("SetBreakpoint requires [location]")
+    val id = client.set_breakpoint(args[0])?
+    Ok("{id}")
+
+fn t32gdb_clear_breakpoint(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("ClearBreakpoint requires [id]")
+    val id = args[0].parse_int() ?? 0
+    client.delete_breakpoint(id)
+
+fn t32gdb_set_watchpoint(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("SetWatchpoint requires [expr, access?]")
+    val access = if args.len() > 1: args[1] else: "write"
+    val id = client.set_watchpoint(args[0], access)?
+    Ok("{id}")
+
+fn t32gdb_read_locals(client: T32GdbBridgeClient) -> Result<text, text>:
+    val vars = client.read_locals()?
+    Ok(serialize_t32gdb_vars(vars))
+
+fn t32gdb_read_arguments(client: T32GdbBridgeClient) -> Result<text, text>:
+    val vars = client.read_arguments()?
+    Ok(serialize_t32gdb_vars(vars))
+
+fn t32gdb_evaluate(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("EvaluateExpression requires [expr]")
+    client.evaluate(args[0])
+
+fn t32gdb_read_stack_trace(client: T32GdbBridgeClient) -> Result<text, text>:
+    val frames = client.stack_trace()?
+    var parts: [text] = []
+    for f in frames:
+        parts.push("{f.index}:{f.function_name}:{f.file}:{f.line}")
+    Ok(parts.join(";"))
+
+fn t32gdb_flash_program(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("FlashProgram requires [elf_path]")
+    client.flash_program(args[0])
+
+fn t32gdb_trace_capture(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    val duration = if args.len() > 0: args[0].parse_int() ?? 1000 else: 1000
+    client.trace_capture(duration)
+
+fn t32gdb_coverage_collect(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("CoverageCollect requires [module]")
+    client.coverage_collect(args[0])
+
+fn t32gdb_practice_script(client: T32GdbBridgeClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("PracticeScript requires [script_path]")
+    client.practice_script(args[0])
+
+fn serialize_t32gdb_vars(vars: [VarInfo]) -> text:
+    var parts: [text] = []
+    for v in vars:
+        parts.push("{v.name}={v.value}:{v.type_name}")
+    parts.join(";")
+
+# --- Exports ---
+

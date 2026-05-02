@@ -1,0 +1,139 @@
+# @cover src/os/compositor/tolerance_profile.spl 90%
+# @tag: rendering, pixel, tolerance
+#
+# Tolerance Profile Specification
+#
+# Verifies composable tolerance profile system: per-region-type thresholds,
+# preset profiles (strict, text, blur, WM default), and profile merging.
+
+use std.spec.{describe, context, it, expect}
+use os.compositor.tolerance_profile.{
+    ToleranceProfile, RegionTolerance,
+    profile_strict, profile_text_tolerant, profile_glass_blur,
+    profile_wm_default, merge_profiles}
+
+# ============================================================================
+# Test Group 1: Preset Profiles (AC-4)
+# ============================================================================
+
+describe "ToleranceProfile — preset profiles":
+
+    context "strict profile":
+
+        it "AC-4: strict profile has zero default threshold":
+            val p = profile_strict()
+            expect(p.default_threshold).to_equal(0)
+
+        it "AC-4: strict profile has zero yiq threshold":
+            val p = profile_strict()
+            expect(p.default_yiq_threshold).to_equal(0.0)
+
+        it "AC-4: strict profile has name 'strict'":
+            val p = profile_strict()
+            expect(p.name).to_equal("strict")
+
+    context "text-tolerant profile":
+
+        it "AC-4: text tolerant profile has nonzero threshold":
+            val p = profile_text_tolerant()
+            expect(p.default_threshold).to_be_greater_than(0)
+
+        it "AC-4: text tolerant profile has positive yiq threshold":
+            val p = profile_text_tolerant()
+            expect(p.default_yiq_threshold).to_be_greater_than(0.0)
+
+        it "AC-4: text tolerant profile has name 'text_tolerant'":
+            val p = profile_text_tolerant()
+            expect(p.name).to_equal("text_tolerant")
+
+        it "AC-4: text tolerant profile includes text region tolerance":
+            val p = profile_text_tolerant()
+            val has_text_region = p.regions.len() > 0
+            expect(has_text_region).to_equal(true)
+
+    context "glass blur profile":
+
+        it "AC-4: glass blur profile has threshold >= 12":
+            val p = profile_glass_blur()
+            val above_12 = p.default_threshold >= 12
+            expect(above_12).to_equal(true)
+
+        it "AC-4: glass blur profile has name 'glass_blur'":
+            val p = profile_glass_blur()
+            expect(p.name).to_equal("glass_blur")
+
+    context "WM default profile":
+
+        it "AC-4: wm default profile exists and has a name":
+            val p = profile_wm_default()
+            expect(p.name).to_equal("wm_default")
+
+        it "AC-4: wm default profile has multiple region tolerances":
+            val p = profile_wm_default()
+            val has_regions = p.regions.len() > 1
+            expect(has_regions).to_equal(true)
+
+        it "AC-4: wm default profile has nonzero default threshold":
+            val p = profile_wm_default()
+            expect(p.default_threshold).to_be_greater_than(0)
+
+# ============================================================================
+# Test Group 2: Region Tolerances (AC-4)
+# ============================================================================
+
+describe "ToleranceProfile — region tolerances":
+
+    context "RegionTolerance structure":
+
+        it "AC-4: region tolerance has region_type field":
+            val p = profile_wm_default()
+            val first = p.regions[0]
+            val has_type = first.region_type.len() > 0
+            expect(has_type).to_equal(true)
+
+        it "AC-4: region tolerance has non-negative threshold":
+            val p = profile_wm_default()
+            val first = p.regions[0]
+            val non_neg = first.threshold >= 0
+            expect(non_neg).to_equal(true)
+
+        it "AC-4: region tolerance has min_match_pct between 0 and 10000":
+            val p = profile_wm_default()
+            val first = p.regions[0]
+            val in_range = first.min_match_pct >= 0 and first.min_match_pct <= 10000
+            expect(in_range).to_equal(true)
+
+# ============================================================================
+# Test Group 3: Profile Merging (AC-4)
+# ============================================================================
+
+describe "ToleranceProfile — merge_profiles":
+
+    context "merging two profiles":
+
+        it "AC-4: merged profile takes overlay name":
+            val base = profile_strict()
+            val overlay = profile_text_tolerant()
+            val merged = merge_profiles(base, overlay)
+            expect(merged.name).to_equal("text_tolerant")
+
+        it "AC-4: merged profile has overlay default_threshold":
+            val base = profile_strict()
+            val overlay = profile_glass_blur()
+            val merged = merge_profiles(base, overlay)
+            expect(merged.default_threshold).to_equal(overlay.default_threshold)
+
+        it "AC-4: merged profile contains regions from both profiles":
+            val base = profile_text_tolerant()
+            val overlay = profile_glass_blur()
+            val merged = merge_profiles(base, overlay)
+            val combined_len = base.regions.len() + overlay.regions.len()
+            val has_all = merged.regions.len() >= base.regions.len()
+            expect(has_all).to_equal(true)
+
+    context "merging with strict (identity-like)":
+
+        it "AC-4: merging strict with itself yields strict":
+            val base = profile_strict()
+            val merged = merge_profiles(base, base)
+            expect(merged.default_threshold).to_equal(0)

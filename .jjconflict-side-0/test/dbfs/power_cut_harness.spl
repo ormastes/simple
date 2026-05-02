@@ -1,0 +1,95 @@
+# Shared harness module — not a spec file.
+# Used by: dbfs_recovery_spec.spl, dbfs_engine_intent_log_spec.spl,
+#           dbfs_engine_checkpoint_ring_spec.spl
+# Maps to: AC-5 (crash-safe transactional semantics)
+
+"""
+Power-Cut Harness
+
+Provides a virtual block device that can inject failure between any two
+fsync points, then supports remount for recovery verification.
+
+Usage:
+    val harness = PowerCutHarness.new()
+    harness.inject_fault(FaultPoint.AfterWalFlush)
+    harness.write_wal_record(WalRecord(txn_id: 1, record_type: WAL_RECORD_COMMIT, payload: ""))
+    harness.mark_committed(txn_id: 1)
+    val device = harness.device()
+    val result = DbfsRecovery.recover(device).unwrap()
+"""
+
+use std.io_runtime
+use std.db.dbfs_engine.recovery.{SuperblockReplica, FaultDevice, FaultWalEntry}
+use std.db.dbfs_engine.wal.{WalRecord}
+
+# FaultPoint enumerates the fsync boundaries where the harness can inject failure.
+enum FaultPoint:
+    AfterDataWrite
+    AfterWalAppend
+    AfterWalFlush
+    AfterRootPublish
+
+# PowerCutHarness wraps a VirtualBlockDevice and controls fault injection.
+struct PowerCutHarness:
+    fault_point:    FaultPoint?
+    orphan_arenas:  [i64]
+    wal_records:    [WalRecord]
+    committed_txns: [i64]
+    replicas:       [SuperblockReplica]
+    last_clean_gen: i64
+
+impl PowerCutHarness:
+    static fn new() -> PowerCutHarness:
+        PowerCutHarness(
+            fault_point:    None,
+            orphan_arenas:  [],
+            wal_records:    [],
+            committed_txns: [],
+            replicas:       [],
+            last_clean_gen: 0,
+        )
+
+    me fn inject_fault(fp: FaultPoint):
+        self.fault_point = Some(fp)
+
+    me fn write_replica(index: i64, replica: SuperblockReplica):
+        self.replicas.push(replica)
+
+    me fn write_wal_record(rec: WalRecord):
+        self.wal_records.push(rec)
+
+    me fn mark_committed(txn_id: i64):
+        self.committed_txns.push(txn_id)
+
+    me fn mark_orphan_arena(arena_id: i64):
+        self.orphan_arenas.push(arena_id)
+
+    me fn set_last_clean_gen(gen: i64):
+        self.last_clean_gen = gen
+
+    fn txn_is_committed(txn_id: i64) -> bool:
+        for ct in self.committed_txns:
+            if ct == txn_id:
+                return true
+        false
+
+    fn device() -> FaultDevice:
+        # Build FaultWalEntry list — committed if txn_id is in committed_txns
+        var entries: [FaultWalEntry] = []
+        var lsn_ctr: i64 = 0
+        for rec in self.wal_records:
+            val is_committed = self.txn_is_committed(rec.txn_id)
+            entries.push(FaultWalEntry(
+                txn_id:    rec.txn_id,
+                committed: is_committed,
+                lsn:       lsn_ctr,
+            ))
+            lsn_ctr = lsn_ctr + 1
+
+        FaultDevice(
+            replicas:       self.replicas,
+            wal_entries:    entries,
+            orphan_arenas:  self.orphan_arenas,
+            fault_after:    -1,
+            last_clean_gen: self.last_clean_gen,
+        )

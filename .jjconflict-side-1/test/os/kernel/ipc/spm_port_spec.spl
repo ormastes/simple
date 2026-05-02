@@ -1,0 +1,73 @@
+# Spec: src/os/kernel/ipc/spm_port.spl
+use std.test.{describe, it, expect}
+use os.kernel.ipc.spm_port.{spm_port_register, spm_port_send, spm_port_listen, spm_port_is_registered, spm_port_registered_task, spm_port_reset, spm_port_post_response}
+
+describe("spm_port"):
+
+    it("starts unregistered"):
+        spm_port_reset()
+        expect(spm_port_is_registered()).to_equal(false)
+
+    it("register accepts a task id"):
+        spm_port_reset()
+        val ok = spm_port_register(42 as u64)
+        expect(ok).to_equal(true)
+        expect(spm_port_is_registered()).to_equal(true)
+        expect(spm_port_registered_task()).to_equal(42 as u64)
+
+    it("register is idempotent for the same task"):
+        spm_port_reset()
+        spm_port_register(7 as u64)
+        val again = spm_port_register(7 as u64)
+        expect(again).to_equal(true)
+
+    it("register rejects a second distinct task"):
+        spm_port_reset()
+        spm_port_register(7 as u64)
+        val ok = spm_port_register(8 as u64)
+        expect(ok).to_equal(false)
+
+    it("listen on empty inbox returns empty bytes"):
+        spm_port_reset()
+        val r = spm_port_listen()
+        expect(r.len()).to_equal(0)
+
+    it("send enqueues a request"):
+        spm_port_reset()
+        val req: [u8] = [1 as u8, 2 as u8, 3 as u8]
+        spm_port_send(req)
+        val got = spm_port_listen()
+        expect(got.len()).to_equal(3)
+
+    it("send returns the last stashed response"):
+        spm_port_reset()
+        val resp: [u8] = [9 as u8, 9 as u8]
+        spm_port_post_response(resp)
+        val req: [u8] = [1 as u8]
+        val r = spm_port_send(req)
+        expect(r.len()).to_equal(2)
+
+    it("FIFO: first in first out"):
+        spm_port_reset()
+        val a: [u8] = [1 as u8]
+        val b: [u8] = [2 as u8, 2 as u8]
+        spm_port_send(a)
+        spm_port_send(b)
+        val first = spm_port_listen()
+        val second = spm_port_listen()
+        expect(first.len()).to_equal(1)
+        expect(second.len()).to_equal(2)
+
+    it("listen drains the inbox"):
+        spm_port_reset()
+        spm_port_send([1 as u8])
+        spm_port_listen()
+        val again = spm_port_listen()
+        expect(again.len()).to_equal(0)
+
+    it("reset clears state"):
+        spm_port_register(1 as u64)
+        spm_port_send([1 as u8])
+        spm_port_reset()
+        expect(spm_port_is_registered()).to_equal(false)
+        expect(spm_port_listen().len()).to_equal(0)

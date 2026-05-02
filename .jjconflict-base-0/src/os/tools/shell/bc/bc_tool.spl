@@ -1,0 +1,216 @@
+# bc — Basic calculator
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+
+fn tool_bc(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Basic integer arithmetic calculator.
+
+    Usage: bc EXPRESSION
+           bc FILE
+    Supports: +, -, *, /, %, parentheses. Integer only.
+    Multiple expressions separated by semicolons.
+    """
+    var lines: [text] = []
+
+    if args.len() > 0:
+        val first = args[0]
+        # Check if it looks like a file path (contains / or ends with known ext)
+        if first.starts_with("/") or first.starts_with("."):
+            if vfs == nil:
+                write_error(terminal, "bc: no filesystem mounted")
+                return 1
+            val path = resolve_path(cwd, first)
+            val result = vfs.read_text(path)
+            if result.is_err():
+                write_error(terminal, "bc: {path}: {result.unwrap_err()}")
+                return 1
+            lines = split_lines(result.unwrap())
+        else:
+            # Treat as expression — split on semicolons
+            lines = _split_on_semi(first)
+    else:
+        write_error(terminal, "bc: missing expression or file")
+        return 1
+
+    var exit_code = 0
+    for line in lines:
+        val trimmed = _trim(line)
+        if trimmed != "":
+            val tokens = _tokenize(trimmed)
+            if tokens.len() == 0:
+                continue
+            val res = _parse_expr(tokens, 0)
+            val value = res[0]
+            val pos = res[1]
+            val err = res[2]
+            if err != 0:
+                write_error(terminal, "bc: syntax error in: {trimmed}")
+                exit_code = 1
+            else:
+                write_line(terminal, "{value}")
+
+    return exit_code
+
+fn _split_on_semi(s: text) -> [text]:
+    """Split text on semicolons."""
+    var parts: [text] = []
+    var current = ""
+    for ch in s:
+        if ch == ";":
+            parts = parts.push(current)
+            current = ""
+        else:
+            current = "{current}{ch}"
+    parts = parts.push(current)
+    return parts
+
+fn _trim(s: text) -> text:
+    """Trim leading/trailing whitespace."""
+    var start = 0
+    var end = s.len()
+    var i = 0
+    for ch in s:
+        if ch == " " or ch == "\t" or ch == "\r":
+            if i == start:
+                start = start + 1
+        i = i + 1
+    var j = s.len()
+    while j > start:
+        val ch = s.char_at(j - 1)
+        if ch == " " or ch == "\t" or ch == "\r":
+            j = j - 1
+        else:
+            end = j
+            j = 0  # break
+    if j > 0:
+        end = j
+    return s.slice(start, end)
+
+fn _tokenize(expr: text) -> [text]:
+    """Split expression into number and operator tokens."""
+    var tokens: [text] = []
+    var num = ""
+    for ch in expr:
+        if ch >= "0" and ch <= "9":
+            num = "{num}{ch}"
+        else:
+            if num != "":
+                tokens = tokens.push(num)
+                num = ""
+            if ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "%" or ch == "(" or ch == ")":
+                tokens = tokens.push(ch)
+            # skip spaces and unknown chars
+    if num != "":
+        tokens = tokens.push(num)
+    return tokens
+
+# Returns [value, next_pos, error_flag]
+fn _parse_expr(tokens: [text], pos: i32) -> [i32]:
+    """Parse additive expression."""
+    var res = _parse_term(tokens, pos)
+    var value = res[0]
+    var cur = res[1]
+    var err = res[2]
+    if err != 0:
+        return [0, cur, 1]
+
+    while cur < tokens.len():
+        val op = tokens[cur]
+        if op == "+":
+            val rhs = _parse_term(tokens, cur + 1)
+            if rhs[2] != 0:
+                return [0, rhs[1], 1]
+            value = value + rhs[0]
+            cur = rhs[1]
+        elif op == "-":
+            val rhs = _parse_term(tokens, cur + 1)
+            if rhs[2] != 0:
+                return [0, rhs[1], 1]
+            value = value - rhs[0]
+            cur = rhs[1]
+        else:
+            # stop — not our operator
+            cur = tokens.len() + 1  # break
+    if cur > tokens.len():
+        cur = cur - 1
+    return [value, cur, 0]
+
+fn _parse_term(tokens: [text], pos: i32) -> [i32]:
+    """Parse multiplicative expression."""
+    var res = _parse_factor(tokens, pos)
+    var value = res[0]
+    var cur = res[1]
+    var err = res[2]
+    if err != 0:
+        return [0, cur, 1]
+
+    while cur < tokens.len():
+        val op = tokens[cur]
+        if op == "*":
+            val rhs = _parse_factor(tokens, cur + 1)
+            if rhs[2] != 0:
+                return [0, rhs[1], 1]
+            value = value * rhs[0]
+            cur = rhs[1]
+        elif op == "/":
+            val rhs = _parse_factor(tokens, cur + 1)
+            if rhs[2] != 0:
+                return [0, rhs[1], 1]
+            if rhs[0] == 0:
+                return [0, rhs[1], 1]
+            value = value / rhs[0]
+            cur = rhs[1]
+        elif op == "%":
+            val rhs = _parse_factor(tokens, cur + 1)
+            if rhs[2] != 0:
+                return [0, rhs[1], 1]
+            if rhs[0] == 0:
+                return [0, rhs[1], 1]
+            value = value % rhs[0]
+            cur = rhs[1]
+        else:
+            cur = tokens.len() + 1  # break
+    if cur > tokens.len():
+        cur = cur - 1
+    return [value, cur, 0]
+
+fn _parse_factor(tokens: [text], pos: i32) -> [i32]:
+    """Parse a number or parenthesized expression."""
+    if pos >= tokens.len():
+        return [0, pos, 1]
+    val tok = tokens[pos]
+    if tok == "(":
+        val inner = _parse_expr(tokens, pos + 1)
+        val value = inner[0]
+        val next = inner[1]
+        val err = inner[2]
+        if err != 0:
+            return [0, next, 1]
+        if next >= tokens.len() or tokens[next] != ")":
+            return [0, next, 1]
+        return [value, next + 1, 0]
+    # Try to parse as number
+    var num = 0
+    var is_num = true
+    var neg = false
+    var start = 0
+    val first_ch = tok.char_at(0)
+    if first_ch == "-":
+        neg = true
+        start = 1
+    var idx = start
+    while idx < tok.len():
+        val ch = tok.char_at(idx)
+        if ch >= "0" and ch <= "9":
+            num = num * 10 + (ch.to_i32() - "0".to_i32())
+        else:
+            is_num = false
+        idx = idx + 1
+    if not is_num:
+        return [0, pos, 1]
+    if neg:
+        num = -num
+    return [num, pos + 1, 0]

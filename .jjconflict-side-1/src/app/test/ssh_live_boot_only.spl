@@ -1,0 +1,131 @@
+use os.qemu_runner.{get_ssh_live_target, QemuScenario, build_os_with_backend, ensure_scenario_media}
+use os.kernel.arch.arch_context.{Architecture}
+use test.qemu.os.common.qemu_os_harness.{
+    allocate_live_host_port, can_run_target, spawn_guest_with_qmp_scenario,
+    wait_for_serial_marker, read_serial_log, read_qemu_stderr_log}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn _scenario_x64_ssh_on_port(port: i64, disk_path: text) -> QemuScenario:
+    QemuScenario(
+        name: "x64-ssh-{port}",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "2G",
+        qemu_extra: [
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-drive", "file={disk_path},if=none,id=nvm,format=raw",
+            "-device", "nvme,serial=deadbeef,drive=nvm",
+            "-netdev", "user,id=n0,hostfwd=tcp::{port}-:22",
+            "-device", "virtio-net-pci,netdev=n0"
+        ],
+        gui_mode: false,
+        description: "x86_64 full-stack with SSH (host:{port} -> guest:22)"
+    )
+
+fn _prepare_run_disk(run_token: text) -> Result<text, text>:
+    val source = "build/os/simpleos_disk.img"
+    val dest = "build/os/simpleos_disk_{run_token}.img"
+    if not rt_file_exists(source):
+        return Err("missing base disk image: {source}")
+    if rt_file_exists(dest):
+        rt_file_delete(dest)
+    if not rt_file_copy(source, dest):
+        return Err("failed to copy disk image to {dest}")
+    Ok(dest)
+
+fn _print_manual_instructions(port: i64):
+    print ""
+    print "Manual SSH repro command:"
+    print "ssh -vvv \\"
+    print "  -o StrictHostKeyChecking=no \\"
+    print "  -o UserKnownHostsFile=/tmp/simpleos_ssh_live_manual_known_hosts \\"
+    print "  -o ConnectTimeout=5 \\"
+    print "  -o PreferredAuthentications=password \\"
+    print "  -o PubkeyAuthentication=no \\"
+    print "  -o NumberOfPasswordPrompts=1 \\"
+    print "  -p {port} \\"
+    print "  root@127.0.0.1"
+    print ""
+    print "Password: simpleos"
+
+fn main():
+    val backend = "cranelift"
+    val target = get_ssh_live_target()
+    val port_result = allocate_live_host_port(32000)
+    if port_result.is_err():
+        print "[ssh_live_boot_only] failed to allocate host port"
+        return
+    val host_port = port_result.unwrap()
+
+    if not build_os_with_backend(target, backend):
+        print "[ssh_live_boot_only] build failed for backend={backend}"
+        return
+    if not can_run_target(target):
+        print "[ssh_live_boot_only] target unavailable after build"
+        return
+
+    val build_marker = rt_env_get("SIMPLE_SSH_LIVE_BUILD_MARKER") ?? ""
+    val run_token = "manual_{backend}_{rt_getpid()}_{rt_time_now_unix_micros()}"
+    val disk_result = _prepare_run_disk(run_token)
+    if disk_result.is_err():
+        print "[ssh_live_boot_only] {disk_result.unwrap_err()}"
+        return
+    val run_disk = disk_result.unwrap()
+
+    val scenario = _scenario_x64_ssh_on_port(host_port, run_disk)
+    if not ensure_scenario_media(scenario):
+        print "[ssh_live_boot_only] failed to ensure scenario media"
+        return
+
+    val qmp_socket = "/tmp/simpleos_ssh_live_manual_{run_token}.sock"
+    val serial_log = "build/os/ssh_live_manual_{run_token}.log"
+    val info_path = "build/os/ssh_live_manual_{run_token}.info"
+    dir_create_all("build/os")
+
+    match spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log):
+        Ok(handle):
+            val ready = wait_for_serial_marker(handle, "[sshd] SSH daemon listening on port 22", 30000)
+            val boot_serial = read_serial_log(handle)
+            val boot_stderr = read_qemu_stderr_log(handle)
+            if not ready:
+                print "[ssh_live_boot_only] boot failed"
+                print boot_serial
+                if boot_stderr != "":
+                    print boot_stderr
+                rt_file_write_text("build/os/ssh_live_manual_failure_{backend}.log", boot_serial)
+                rt_file_write_text("build/os/ssh_live_manual_failure_{backend}.stderr.log", boot_stderr)
+                return
+
+            val info = "backend={backend}\n" +
+                "build_marker={build_marker}\n" +
+                "pid={handle.pid}\n" +
+                "port={host_port}\n" +
+                "qmp_socket={qmp_socket}\n" +
+                "serial_log={serial_log}\n" +
+                "stderr_log={handle.stderr_log}\n" +
+                "disk_image={run_disk}\n"
+            rt_file_write_text(info_path, info)
+
+            print "[ssh_live_boot_only] guest ready"
+            print "[ssh_live_boot_only] pid={handle.pid}"
+            print "[ssh_live_boot_only] port={host_port}"
+            print "[ssh_live_boot_only] qmp={qmp_socket}"
+            print "[ssh_live_boot_only] serial={serial_log}"
+            print "[ssh_live_boot_only] stderr={handle.stderr_log}"
+            print "[ssh_live_boot_only] disk={run_disk}"
+            print "[ssh_live_boot_only] info={info_path}"
+            _print_manual_instructions(host_port)
+            print ""
+            print "Guest remains running after this command exits."
+            print "Use the qmp socket or pid above for cleanup."
+        Err(err):
+            print "[ssh_live_boot_only] failed to spawn guest: {err}"

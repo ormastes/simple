@@ -1,0 +1,115 @@
+# Installer Staging Directory
+#
+# Creates a common staging directory layout used by all backends.
+# The staging dir mirrors the target filesystem structure.
+
+use std.io_runtime (process_run, file_exists, file_copy, is_dir, dir_create, dir_remove)
+
+use lib.nogc_sync_mut.package.installer.types (InstallerConfig, InstallerPlatform)
+
+
+fn staging_dir(config: InstallerConfig, platform: InstallerPlatform) -> text:
+    """Get staging directory path for a platform."""
+    "{config.output_dir}/staging-{platform.to_string()}"
+
+
+fn create_staging_dir(config: InstallerConfig, platform: InstallerPlatform) -> Result<text, text>:
+    """Create a staging directory with the standard file layout.
+    Returns Ok(staging_path) or Err(message)."""
+
+    val staging = staging_dir(config, platform)
+
+    # Clean previous staging
+    if is_dir(staging):
+        dir_remove(staging, recursive: true)
+
+    # Determine layout based on platform
+    if platform == InstallerPlatform.WindowsExe:
+        create_windows_layout(config, staging)
+    else:
+        create_unix_layout(config, staging)
+
+
+fn create_unix_layout(config: InstallerConfig, staging: text) -> Result<text, text>:
+    """Create FHS-compliant directory layout for Linux/macOS/FreeBSD.
+    Layout:
+      usr/local/bin/simple              (symlink)
+      usr/local/lib/simple/simple       (binary)
+      usr/local/lib/simple/lib/         (stdlib)
+      usr/local/share/doc/simple-lang/  (docs)
+    """
+    dir_create("{staging}/usr/local/bin", recursive: true)
+    dir_create("{staging}/usr/local/lib/simple/lib", recursive: true)
+    dir_create("{staging}/usr/local/share/doc/simple-lang", recursive: true)
+
+    # Copy binary
+    val binary_src = "{config.source_dir}/simple"
+    if not file_exists(binary_src):
+        return Err("Release binary not found at {binary_src}")
+
+    file_copy(binary_src, "{staging}/usr/local/lib/simple/simple")
+    val (_, _, chmod_code) = process_run("chmod", ["755", "{staging}/usr/local/lib/simple/simple"])
+    if chmod_code != 0:
+        return Err("Failed to set binary permissions")
+
+    # Create symlink
+    val (_, _, ln_code) = process_run("ln", ["-sf", "/usr/local/lib/simple/simple",
+                                              "{staging}/usr/local/bin/simple"])
+    if ln_code != 0:
+        return Err("Failed to create symlink")
+
+    # Copy stdlib
+    if is_dir("src/lib"):
+        val (_, _, _) = process_run("cp", ["-r", "src/lib/.", "{staging}/usr/local/lib/simple/lib/"])
+
+    # Copy docs
+    if file_exists("README.md"):
+        file_copy("README.md", "{staging}/usr/local/share/doc/simple-lang/README.md")
+
+    if file_exists("LICENSE"):
+        file_copy("LICENSE", "{staging}/usr/local/share/doc/simple-lang/LICENSE")
+
+    Ok(staging)
+
+
+fn create_windows_layout(config: InstallerConfig, staging: text) -> Result<text, text>:
+    """Create Windows installer layout.
+    Layout:
+      bin/simple.exe      (binary)
+      lib/                (stdlib)
+      doc/                (docs)
+    """
+    dir_create("{staging}/bin", recursive: true)
+    dir_create("{staging}/lib", recursive: true)
+    dir_create("{staging}/doc", recursive: true)
+
+    # Copy binary (look for Windows binary)
+    val binary_src = "{config.source_dir}/windows-x86_64/simple.exe"
+    val binary_fallback = "{config.source_dir}/simple.exe"
+
+    if file_exists(binary_src):
+        file_copy(binary_src, "{staging}/bin/simple.exe")
+    else if file_exists(binary_fallback):
+        file_copy(binary_fallback, "{staging}/bin/simple.exe")
+    else:
+        return Err("Windows binary not found at {binary_src} or {binary_fallback}")
+
+    # Copy stdlib
+    if is_dir("src/lib"):
+        val (_, _, _) = process_run("cp", ["-r", "src/lib/.", "{staging}/lib/"])
+
+    # Copy docs
+    if file_exists("README.md"):
+        file_copy("README.md", "{staging}/doc/README.md")
+
+    if file_exists("LICENSE"):
+        file_copy("LICENSE", "{staging}/doc/LICENSE")
+
+    Ok(staging)
+
+
+fn clean_staging_dir(config: InstallerConfig, platform: InstallerPlatform):
+    """Remove staging directory after package build."""
+    val staging = staging_dir(config, platform)
+    if is_dir(staging):
+        dir_remove(staging, recursive: true)

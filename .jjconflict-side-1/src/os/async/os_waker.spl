@@ -1,0 +1,37 @@
+# OS Waker — Notification-based wakeup for OS futures
+#
+# Wraps a kernel notification ID and bit position. When wake() is called,
+# it signals the notification via syscall 25 (NotificationSignal), causing
+# any thread blocked on syscall 26 (NotificationWait) to resume.
+#
+# This is the OS-level equivalent of std::task::Waker, but uses L4-style
+# notification objects instead of host OS primitives.
+
+use os.userlib.syscall_raw.{syscall}
+
+struct OsWaker:
+    """Waker that signals a kernel notification object.
+
+    Each waker targets a specific notification ID and bit. Multiple wakers
+    can target the same notification with different bits, allowing the
+    executor to distinguish which future triggered the wakeup.
+    """
+    notification_id: u64
+    notification_bit: u64
+
+impl OsWaker:
+    static fn new(notif_id: u64, bit: u64) -> OsWaker:
+        """Create a new waker targeting the given notification and bit."""
+        OsWaker(notification_id: notif_id, notification_bit: bit)
+
+    fn wake():
+        """Signal the notification to wake the executor.
+
+        Calls syscall 25 (NotificationSignal) which atomically ORs the
+        bit into the notification word and wakes any waiting thread.
+        """
+        syscall(25, self.notification_id, self.notification_bit, 0, 0, 0)
+
+    fn clone() -> OsWaker:
+        """Create a copy of this waker."""
+        OsWaker(notification_id: self.notification_id, notification_bit: self.notification_bit)

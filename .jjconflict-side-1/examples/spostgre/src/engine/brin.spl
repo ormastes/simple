@@ -1,0 +1,312 @@
+# spostgre engine — BRIN (Block Range INdex) summaries (M3b).
+#
+# BRIN keeps a compact min/max summary per block range so the query executor
+# can skip entire ranges that cannot match a predicate, without the space and
+# maintenance cost of a B-tree.
+#
+# Design ref: spostgre_design.md §8.
+# Default range: 128 pages per range (1 MiB logical).
+#
+# Language notes:
+#   - No &mut — functions that "update" an index return a new copy.
+#   - No inheritance — plain structs + free functions.
+#   - Generics: <> not [].
+#   - Constructors: BrinValue(kind: 1, raw: 0) not .new().
+
+# ---------------------------------------------------------------------------
+# BrinValue — unified value representation.
+#
+# kind tags:
+#   BRIN_KIND_NULL      = 0  — null / missing value.
+#   BRIN_KIND_INT       = 1  — raw holds i64 integer.
+#   BRIN_KIND_FLOAT_BITS= 2  — raw holds IEEE-754 double bits (comparison
+#                               is ordering-unsafe across nulls; callers
+#                               must ensure same-kind comparisons).
+#   BRIN_KIND_TEXT_HASH = 3  — raw holds a 64-bit hash of the string.
+#                               Range matching degrades to "unknown" for
+#                               text-hash kind (conservative: never prunes).
+# ---------------------------------------------------------------------------
+
+val BRIN_KIND_NULL: i32       = 0
+val BRIN_KIND_INT: i32        = 1
+val BRIN_KIND_FLOAT_BITS: i32 = 2
+val BRIN_KIND_TEXT_HASH: i32  = 3
+
+struct BrinValue:
+    """Unified value for BRIN min/max tracking.
+
+    kind — BRIN_KIND_* constant (see above).
+    raw  — payload: integer, float bits, text hash, or 0 for null.
+    """
+    kind: i32
+    raw: i64
+
+# ---------------------------------------------------------------------------
+# BrinSummary — per block-range summary.
+#
+# is_placeholder: true iff no values have been scanned yet (fresh entry).
+# has_nulls:      true iff at least one null was seen.
+# min / max:      smallest / largest non-null value seen; kind matches the
+#                 column kind; undefined when is_placeholder == true.
+# ---------------------------------------------------------------------------
+
+struct BrinSummary:
+    """Min/max summary for one block range.
+
+    Fields:
+      min            — minimum non-null value seen; kind = BRIN_KIND_NULL if is_placeholder.
+      max            — maximum non-null value seen; kind = BRIN_KIND_NULL if is_placeholder.
+      has_nulls      — true if any null was seen in this range.
+      is_placeholder — true if no values have been processed yet.
+    """
+    min: BrinValue
+    max: BrinValue
+    has_nulls: bool
+    is_placeholder: bool
+
+# ---------------------------------------------------------------------------
+# BrinIndex — top-level index structure.
+#
+# summaries is indexed by block_range_id = blkno / pages_per_range.
+# Entries 0..summaries.len()-1 are valid.  Gaps (sparse ranges) are
+# represented as placeholder summaries.
+# ---------------------------------------------------------------------------
+
+struct BrinIndex:
+    """BRIN index for one column.
+
+    column_id      — column this index covers.
+    pages_per_range — number of heap pages per summary range (default 128).
+    summaries      — summaries[block_range_id] holds the min/max for that range.
+    """
+    column_id: u32
+    pages_per_range: u32
+    summaries: [BrinSummary]
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _brin_placeholder() -> BrinSummary:
+    """Return a fresh placeholder summary (no data yet)."""
+    BrinSummary(
+        min: BrinValue(kind: BRIN_KIND_NULL, raw: 0),
+        max: BrinValue(kind: BRIN_KIND_NULL, raw: 0),
+        has_nulls: false,
+        is_placeholder: true)
+
+fn _brin_value_less(a: BrinValue, b: BrinValue) -> bool:
+    """Return true if a < b for ordering purposes (same-kind assumed)."""
+    a.raw < b.raw
+
+fn _brin_value_greater(a: BrinValue, b: BrinValue) -> bool:
+    """Return true if a > b for ordering purposes (same-kind assumed)."""
+    a.raw > b.raw
+
+fn _brin_update_summary(s: BrinSummary, v: BrinValue) -> BrinSummary:
+    """Fold one value into a summary; returns updated summary."""
+    if v.kind == BRIN_KIND_NULL:
+        BrinSummary(
+            min: s.min,
+            max: s.max,
+            has_nulls: true,
+            is_placeholder: s.is_placeholder)
+    else:
+        if s.is_placeholder:
+            # First non-null value: initialise min and max.
+            BrinSummary(
+                min: v,
+                max: v,
+                has_nulls: s.has_nulls,
+                is_placeholder: false)
+        else:
+            val new_min = if _brin_value_less(v, s.min): v else: s.min
+            val new_max = if _brin_value_greater(v, s.max): v else: s.max
+            BrinSummary(
+                min: new_min,
+                max: new_max,
+                has_nulls: s.has_nulls,
+                is_placeholder: false)
+
+fn _brin_ensure_range(idx: BrinIndex, block_range_id: u32) -> BrinIndex:
+    """Grow idx.summaries so that block_range_id is a valid index."""
+    val target = (block_range_id as i64) + 1
+    val current = idx.summaries.len()
+    if current >= target:
+        idx
+    else:
+        # Append placeholder entries until the target length is reached.
+        var summaries: [BrinSummary] = []
+        var i = 0
+        while i < current:
+            summaries = summaries + [idx.summaries[i]]
+            i = i + 1
+        while (summaries.len() as i64) < target:
+            summaries = summaries + [_brin_placeholder()]
+        BrinIndex(
+            column_id: idx.column_id,
+            pages_per_range: idx.pages_per_range,
+            summaries: summaries)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn brin_new(column_id: u32, pages_per_range: u32) -> BrinIndex:
+    """Create an empty BRIN index for the given column.
+
+    Parameters:
+      column_id      — column identifier this index covers.
+      pages_per_range — heap pages grouped per summary (default 128 = 1 MiB).
+
+    Returns a new, empty BrinIndex.
+    @coverage: spostgre_design.md §8
+    """
+    var empty: [BrinSummary] = []
+    BrinIndex(
+        column_id: column_id,
+        pages_per_range: pages_per_range,
+        summaries: empty)
+
+fn brin_summarize_range(idx: BrinIndex, block_range_id: u32,
+                        values: [BrinValue]) -> BrinIndex:
+    """Scan values and produce (or overwrite) the summary for block_range_id.
+
+    This is a bulk rebuild: the existing summary for the range is discarded
+    and recomputed from values.  Callers use this for initial population or
+    full range refresh.
+
+    Parameters:
+      idx            — current index (not mutated; a new copy is returned).
+      block_range_id — which range to (re)build.
+      values         — all values visible in the range (may include nulls).
+
+    Returns updated BrinIndex.
+    @coverage: spostgre_design.md §8.3
+    """
+    val idx2 = _brin_ensure_range(idx, block_range_id)
+    var s = _brin_placeholder()
+    var i = 0
+    while i < values.len():
+        s = _brin_update_summary(s, values[i])
+        i = i + 1
+    # Rebuild summaries array with the new entry at block_range_id.
+    val rid = block_range_id as i64
+    var summaries: [BrinSummary] = []
+    var j = 0
+    while j < idx2.summaries.len():
+        if (j as i64) == rid:
+            summaries = summaries + [s]
+        else:
+            summaries = summaries + [idx2.summaries[j]]
+        j = j + 1
+    BrinIndex(
+        column_id: idx2.column_id,
+        pages_per_range: idx2.pages_per_range,
+        summaries: summaries)
+
+fn brin_update_tuple(idx: BrinIndex, blkno: u64, value: BrinValue) -> BrinIndex:
+    """Incremental update: fold one tuple's value into the appropriate range summary.
+
+    Computes block_range_id = blkno / pages_per_range, grows the index if
+    needed, and merges value into the existing summary for that range.
+
+    Parameters:
+      idx   — current index.
+      blkno — heap block number where the tuple resides.
+      value — the column value (may be null).
+
+    Returns updated BrinIndex.
+    @coverage: spostgre_design.md §8
+    """
+    val range_id = (blkno / (idx.pages_per_range as u64)) as u32
+    val idx2 = _brin_ensure_range(idx, range_id)
+    val rid = range_id as i64
+    val old_s = idx2.summaries[rid]
+    val new_s = _brin_update_summary(old_s, value)
+    var summaries: [BrinSummary] = []
+    var j = 0
+    while j < idx2.summaries.len():
+        if (j as i64) == rid:
+            summaries = summaries + [new_s]
+        else:
+            summaries = summaries + [idx2.summaries[j]]
+        j = j + 1
+    BrinIndex(
+        column_id: idx2.column_id,
+        pages_per_range: idx2.pages_per_range,
+        summaries: summaries)
+
+fn brin_range_matches(idx: BrinIndex, block_range_id: u32,
+                      pred_min: BrinValue, pred_max: BrinValue) -> bool:
+    """Return true if the range's summary overlaps [pred_min, pred_max].
+
+    Used during range scans to prune block ranges that cannot possibly
+    contain matching tuples.
+
+    Pruning logic (for non-text-hash, non-null summary kinds):
+      - If summary max < pred_min  → no overlap → return false.
+      - If summary min > pred_max  → no overlap → return false.
+      - Otherwise                  → overlap possible → return true.
+
+    Text-hash and placeholder summaries are conservatively treated as
+    matching (never prune).
+
+    Parameters:
+      idx            — BRIN index.
+      block_range_id — range to test.
+      pred_min       — lower bound of the predicate range (inclusive).
+      pred_max       — upper bound of the predicate range (inclusive).
+
+    Returns true if the range might contain matches.
+    @coverage: spostgre_design.md §8
+    """
+    val rid = block_range_id as i64
+    if rid >= idx.summaries.len():
+        # Range beyond index — conservatively matches (full scan needed).
+        true
+    else:
+        val s = idx.summaries[rid]
+        if s.is_placeholder:
+            # No data yet — conservative: might match.
+            true
+        else:
+            if s.min.kind == BRIN_KIND_TEXT_HASH:
+                # Text-hash ordering is unsafe — never prune.
+                true
+            else:
+                # Overlap check: not(max < pred_min or min > pred_max).
+                val below = _brin_value_less(s.max, pred_min)
+                val above = _brin_value_greater(s.min, pred_max)
+                if below:
+                    false
+                else:
+                    if above:
+                        false
+                    else:
+                        true
+
+fn brin_scan_range(idx: BrinIndex, pred_min: BrinValue,
+                   pred_max: BrinValue) -> [u32]:
+    """Return the list of block_range_ids that might contain matches.
+
+    Iterates all summaries and collects those for which brin_range_matches
+    returns true.  The executor visits only those ranges, skipping the rest.
+
+    Parameters:
+      idx      — BRIN index to scan.
+      pred_min — lower bound of predicate range.
+      pred_max — upper bound of predicate range.
+
+    Returns list of block_range_ids (may be empty if all ranges pruned).
+    @coverage: spostgre_design.md §8
+    """
+    var result: [u32] = []
+    var i = 0
+    while i < idx.summaries.len():
+        val rid = i as u32
+        val matches = brin_range_matches(idx, rid, pred_min, pred_max)
+        if matches:
+            result = result + [rid]
+        i = i + 1
+    result

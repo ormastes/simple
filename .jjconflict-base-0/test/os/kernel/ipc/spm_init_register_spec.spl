@@ -1,0 +1,38 @@
+# Spec: kernel boot wires spm_port_register via init_services.
+#
+# Verifies that `init_spm_port()` (called from init_all_services at boot)
+# claims the SPM kernel-port slot with the well-known placeholder TaskId,
+# so syscalls 110-114 have a registered receiver from the first scheduler
+# tick. The real userland SPM task rebinds this slot later.
+#
+# Feature: spm-winfs-llm-suite (Task 1 wiring).
+
+use std.test.{describe, it, expect}
+use os.kernel.ipc.spm_port.{spm_port_is_registered, spm_port_registered_task, spm_port_reset}
+use os.kernel.boot.init_services.{init_spm_port, spm_well_known_task_id}
+
+describe("init_services spm_port wiring"):
+
+    it("registers the SPM port during boot-time init"):
+        spm_port_reset()
+        expect(spm_port_is_registered()).to_equal(false)
+        val ok = init_spm_port()
+        expect(ok).to_equal(true)
+        expect(spm_port_is_registered()).to_equal(true)
+
+    it("registers the well-known placeholder task id"):
+        spm_port_reset()
+        init_spm_port()
+        expect(spm_port_registered_task()).to_equal(spm_well_known_task_id())
+
+    it("well-known placeholder is non-zero (0 is the unregistered sentinel)"):
+        val wk = spm_well_known_task_id()
+        expect(wk != (0 as u64)).to_equal(true)
+
+    it("init_spm_port is idempotent for the same placeholder id"):
+        spm_port_reset()
+        val first = init_spm_port()
+        val second = init_spm_port()
+        expect(first).to_equal(true)
+        expect(second).to_equal(true)
+        expect(spm_port_registered_task()).to_equal(spm_well_known_task_id())

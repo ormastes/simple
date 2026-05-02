@@ -1,0 +1,232 @@
+# Comptime Semantic Checker Specification
+#
+# Tests for the comptime semantic checker that detects non-compile-time-safe
+# operations in comptime/const fn contexts.
+#
+# NOTE: This spec is self-contained (no module imports) because it runs in
+# interpreter mode where complex imports are not available. The checker logic
+# is replicated locally for testing.
+
+# ============================================================================
+# Local replica of checker logic (no imports needed)
+# ============================================================================
+
+val NON_CT_PREFIXES_TEST: [text] = [
+    "rt_",
+    "shell",
+    "print",
+    "file_",
+    "env_",
+    "thread_",
+    "process_",
+]
+
+val NON_CT_NAMES_TEST: [text] = [
+    "input",
+    "sleep",
+    "rand",
+    "random",
+    "now",
+    "time",
+    "date",
+]
+
+fn test_is_non_ct_name(name: text) -> bool:
+    for non_ct in NON_CT_NAMES_TEST:
+        if name == non_ct:
+            return true
+    false
+
+fn test_has_non_ct_prefix(name: text) -> bool:
+    for prefix in NON_CT_PREFIXES_TEST:
+        val plen = prefix.len()
+        if name.len() >= plen:
+            val head = name[0:plen]
+            if head == prefix:
+                return true
+    false
+
+fn test_make_warning(fn_name: text, expr_text: text, reason: text) -> text:
+    "WARN[comptime]: in '" + fn_name + "' — '" + expr_text + "' " + reason
+
+fn test_check_call(name: text) -> bool:
+    if test_has_non_ct_prefix(name):
+        return true
+    if test_is_non_ct_name(name):
+        return true
+    false
+
+fn test_check_calls_in_fn(call_names: [text]) -> i64:
+    var count = 0
+    for callee in call_names:
+        if test_check_call(callee):
+            count = count + 1
+    count
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "Comptime Checker - Non-CT Prefix Detection":
+    it "detects rt_ prefix as non-CT":
+        val result = test_has_non_ct_prefix("rt_file_read")
+        expect(result).to_equal(true)
+
+    it "detects shell prefix as non-CT":
+        val result = test_has_non_ct_prefix("shell")
+        expect(result).to_equal(true)
+
+    it "detects print prefix as non-CT":
+        val result = test_has_non_ct_prefix("println")
+        expect(result).to_equal(true)
+
+    it "detects file_ prefix as non-CT":
+        val result = test_has_non_ct_prefix("file_write")
+        expect(result).to_equal(true)
+
+    it "detects env_ prefix as non-CT":
+        val result = test_has_non_ct_prefix("env_get")
+        expect(result).to_equal(true)
+
+    it "detects thread_ prefix as non-CT":
+        val result = test_has_non_ct_prefix("thread_spawn")
+        expect(result).to_equal(true)
+
+    it "detects process_ prefix as non-CT":
+        val result = test_has_non_ct_prefix("process_run")
+        expect(result).to_equal(true)
+
+    it "does not flag pure math function as non-CT":
+        val result = test_has_non_ct_prefix("sqrt")
+        expect(result).to_equal(false)
+
+    it "does not flag user-defined function as non-CT":
+        val result = test_has_non_ct_prefix("compute_checksum")
+        expect(result).to_equal(false)
+
+describe "Comptime Checker - Non-CT Name Detection":
+    it "detects input as non-CT":
+        val result = test_is_non_ct_name("input")
+        expect(result).to_equal(true)
+
+    it "detects sleep as non-CT":
+        val result = test_is_non_ct_name("sleep")
+        expect(result).to_equal(true)
+
+    it "detects rand as non-CT":
+        val result = test_is_non_ct_name("rand")
+        expect(result).to_equal(true)
+
+    it "detects random as non-CT":
+        val result = test_is_non_ct_name("random")
+        expect(result).to_equal(true)
+
+    it "detects now as non-CT":
+        val result = test_is_non_ct_name("now")
+        expect(result).to_equal(true)
+
+    it "detects time as non-CT":
+        val result = test_is_non_ct_name("time")
+        expect(result).to_equal(true)
+
+    it "detects date as non-CT":
+        val result = test_is_non_ct_name("date")
+        expect(result).to_equal(true)
+
+    it "does not flag add as non-CT":
+        val result = test_is_non_ct_name("add")
+        expect(result).to_equal(false)
+
+    it "does not flag max as non-CT":
+        val result = test_is_non_ct_name("max")
+        expect(result).to_equal(false)
+
+describe "Comptime Checker - Warning Message Format":
+    it "warning contains WARN[comptime] prefix":
+        val msg = test_make_warning("my_fn", "rt_io()", "is a runtime-only call (non-CT prefix)")
+        val has_prefix = msg.contains("WARN[comptime]")
+        expect(has_prefix).to_equal(true)
+
+    it "warning contains function name":
+        val msg = test_make_warning("const_compute", "sleep()", "is a runtime-only function")
+        val has_fn = msg.contains("const_compute")
+        expect(has_fn).to_equal(true)
+
+    it "warning contains expression text":
+        val msg = test_make_warning("my_fn", "file_write()", "is an I/O operation (not allowed at compile time)")
+        val has_expr = msg.contains("file_write()")
+        expect(has_expr).to_equal(true)
+
+    it "warning contains reason":
+        val msg = test_make_warning("my_fn", "sleep()", "is a runtime-only function")
+        val has_reason = msg.contains("is a runtime-only function")
+        expect(has_reason).to_equal(true)
+
+    it "warning uses em-dash separator":
+        val msg = test_make_warning("my_fn", "rand()", "is a runtime-only function")
+        val has_sep = msg.contains("—")
+        expect(has_sep).to_equal(true)
+
+describe "Comptime Checker - Batch Analysis":
+    it "counts zero violations for all-safe calls":
+        val calls: [text] = ["add", "subtract", "clamp", "max_val"]
+        val count = test_check_calls_in_fn(calls)
+        expect(count).to_equal(0)
+
+    it "counts one violation for single non-CT call":
+        val calls: [text] = ["add", "rt_get_time", "clamp"]
+        val count = test_check_calls_in_fn(calls)
+        expect(count).to_equal(1)
+
+    it "counts multiple violations for multiple non-CT calls":
+        val calls: [text] = ["sleep", "rand", "add"]
+        val count = test_check_calls_in_fn(calls)
+        expect(count).to_equal(2)
+
+    it "counts all violations when all calls are non-CT":
+        val calls: [text] = ["rt_read", "env_get", "file_write"]
+        val count = test_check_calls_in_fn(calls)
+        expect(count).to_equal(3)
+
+    it "handles empty call list with zero violations":
+        val calls: [text] = []
+        val count = test_check_calls_in_fn(calls)
+        expect(count).to_equal(0)
+
+describe "Comptime Checker - Safe Expressions":
+    it "pure arithmetic is comptime-safe":
+        val result = test_check_call("add")
+        expect(result).to_equal(false)
+
+    it "constant literal access is comptime-safe":
+        val result = test_check_call("PI")
+        expect(result).to_equal(false)
+
+    it "user-defined pure function is comptime-safe by default":
+        val result = test_check_call("fibonacci")
+        expect(result).to_equal(false)
+
+    it "string concat helper is comptime-safe":
+        val result = test_check_call("concat_strings")
+        expect(result).to_equal(false)
+
+describe "Comptime Checker - Prefix Edge Cases":
+    it "rt_ prefix matches at start only":
+        val is_non_ct = test_has_non_ct_prefix("get_rt_value")
+        expect(is_non_ct).to_equal(false)
+
+    it "file_ prefix matches file_read":
+        val result = test_has_non_ct_prefix("file_read")
+        expect(result).to_equal(true)
+
+    it "shell prefix matches shell_exec":
+        val result = test_has_non_ct_prefix("shell_exec")
+        expect(result).to_equal(true)
+
+    it "short name shorter than prefix is not flagged":
+        val result = test_has_non_ct_prefix("rt")
+        expect(result).to_equal(false)
+
+    it "exact prefix match shell is non-CT":
+        val result = test_has_non_ct_prefix("shell")
+        expect(result).to_equal(true)

@@ -1,0 +1,83 @@
+use std.spec
+use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _repeat_byte(count: i64, byte: u8) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(byte)
+        i = i + 1
+    out
+
+fn _cleanup(path: text):
+    _ = rt_process_run("/bin/sh", ["-c", "rm -rf '" + path + "'"])
+
+describe "CachedRawImageBlockDevice":
+    it "loads a host image and exposes block-device reads":
+        val root = "/tmp/cached_raw_image_block_device_spec_load"
+        _cleanup(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+
+        var image = _repeat_byte(1024, 0u8)
+        image[512] = 0x11u8
+        image[513] = 0x22u8
+        image[514] = 0x33u8
+        expect(rt_file_write_bytes(root + "/disk.img", image)).to_equal(true)
+
+        val device_result = CachedRawImageBlockDevice.load(root + "/disk.img")
+        expect(device_result.is_ok()).to_equal(true)
+        val device = device_result.unwrap()
+        expect(device.image_bytes[512]).to_equal(0x11u8)
+        expect(device.image_bytes[513]).to_equal(0x22u8)
+        expect(device.image_bytes[514]).to_equal(0x33u8)
+
+        var second = _repeat_byte(512, 0u8)
+        expect(device.read_sector(1u64, second).is_ok()).to_equal(true)
+        expect(second[0]).to_equal(0x11u8)
+        expect(second[1]).to_equal(0x22u8)
+        expect(second[2]).to_equal(0x33u8)
+
+        _cleanup(root)
+
+    it "reads writes and flushes sectors for a preloaded in-memory image":
+        val root = "/tmp/cached_raw_image_block_device_spec_write"
+        _cleanup(root)
+        expect(rt_dir_create_all(root)).to_equal(true)
+
+        val path = root + "/disk.img"
+        expect(rt_file_write_bytes(path, _repeat_byte(1024, 0u8))).to_equal(true)
+        val device_result = CachedRawImageBlockDevice.from_bytes(path, _repeat_byte(1024, 0u8), 512u32)
+        expect(device_result.is_ok()).to_equal(true)
+        var device = device_result.unwrap()
+
+        expect(device.write_sector(1u64, [0xAAu8, 0xBBu8, 0xCCu8]).is_ok()).to_equal(true)
+        expect(device.dirty).to_equal(true)
+
+        var second = _repeat_byte(512, 0u8)
+        expect(device.read_sector(1u64, second).is_ok()).to_equal(true)
+        expect(second[0]).to_equal(0xAAu8)
+        expect(second[1]).to_equal(0xBBu8)
+        expect(second[2]).to_equal(0xCCu8)
+        expect(second[3]).to_equal(0u8)
+
+        expect(device.flush().is_ok()).to_equal(true)
+        expect(device.dirty).to_equal(false)
+
+        val reloaded_result = CachedRawImageBlockDevice.load(path)
+        expect(reloaded_result.is_ok()).to_equal(true)
+        val reloaded = reloaded_result.unwrap()
+        var reloaded_sector = _repeat_byte(512, 0u8)
+        expect(reloaded.read_sector(1u64, reloaded_sector).is_ok()).to_equal(true)
+        expect(reloaded_sector[0]).to_equal(0xAAu8)
+        expect(reloaded_sector[1]).to_equal(0xBBu8)
+        expect(reloaded_sector[2]).to_equal(0xCCu8)
+
+        _cleanup(root)
+
+    it "rejects host images whose byte length is not sector aligned":
+        val result = CachedRawImageBlockDevice.from_bytes("", [1u8, 2u8, 3u8], 512u32)
+        expect(result.is_err()).to_equal(true)

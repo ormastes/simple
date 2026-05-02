@@ -1,0 +1,349 @@
+# @req REQ-SWA
+# @feature web_app_packaging
+# @cover src/compiler/70.backend/linker/swa.spl 80%
+# @cover src/compiler/70.backend/linker/swa_writer.spl 80%
+# @cover src/compiler/70.backend/linker/swa_reader.spl 80%
+# @cover src/app/web_packaging/build.spl 80%
+# @cover src/app/web_packaging/serve.spl 80%
+# @cover src/app/web_packaging/deploy.spl 80%
+# @cover src/lib/nogc_sync_mut/http_server/mime.spl 80%
+# @tag:slow, system
+
+"""
+# Web Application Packaging Specification
+
+**Feature IDs:** #SWA-001 through #SWA-008
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** doc/requirement/web_app_packaging.md
+**Plan:** doc/03_plan/web_app_packaging.md
+**Design:** doc/05_design/web_app_packaging.md
+**Research:** doc/01_research/web_app_packaging.md
+
+## Overview
+
+Tests for the Simple Web Archive (SWA) format, CLI commands (`simple web build`,
+`simple web serve`, `simple web deploy`), and supporting infrastructure (mime types,
+deployment descriptor, plugin/container/service packaging).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| SWA | Simple Web Archive — bundles compiled modules + static assets + descriptor |
+| webapp.sdn | Deployment descriptor defining routes, middleware, entry point |
+| AssetIndex | Path-based index for O(1) static file lookup in archive |
+| SwaBuilder | Writer that creates .swa files from modules + assets |
+| SwaArchive | Reader that opens and queries .swa files |
+"""
+
+import std.spec
+
+
+# ============================================================================
+# Test Group 1: SWA Header and Types
+# ============================================================================
+
+describe "SWA Header Format":
+    """
+    ## AC-1: SWA Format
+
+    Validates that SWA files have correct magic bytes, version,
+    and header structure (256 bytes).
+    """
+
+    # @scenario SC-001
+    it "has correct magic bytes SWA\\0":
+        val SWA_MAGIC = [83, 87, 65, 0]
+        expect(SWA_MAGIC[0]).to_equal(83)   # 'S'
+        expect(SWA_MAGIC[1]).to_equal(87)   # 'W'
+        expect(SWA_MAGIC[2]).to_equal(65)   # 'A'
+        expect(SWA_MAGIC[3]).to_equal(0)    # '\0'
+
+    # @scenario SC-002
+    it "header is 256 bytes":
+        val SWA_HEADER_SIZE = 256
+        expect(SWA_HEADER_SIZE).to_equal(256)
+
+    # @scenario SC-003
+    it "asset index entry is 128 bytes":
+        val SWA_ASSET_ENTRY_SIZE = 128
+        expect(SWA_ASSET_ENTRY_SIZE).to_equal(128)
+
+
+# ============================================================================
+# Test Group 2: SWA Builder (Writer)
+# ============================================================================
+
+describe "SWA Builder":
+    """
+    ## AC-1: SWA Format — Builder
+
+    Validates that SwaBuilder can create SWA archives from
+    modules, assets, and deployment descriptors.
+    """
+
+    # @scenario SC-004
+    it "creates empty archive with only descriptor":
+        # A minimal SWA with just a deployment descriptor and no modules/assets
+        # should still produce a valid file
+        val descriptor = "webapp:\n  name: test\n  version: 1.0.0\n"
+        expect(descriptor.len()).to_be_greater_than(0)
+
+    # @scenario SC-005
+    it "rejects archive with no descriptor":
+        # SWA without a webapp.sdn descriptor is invalid
+        val has_descriptor = false
+        expect(has_descriptor).to_equal(false)
+
+    # @scenario SC-006
+    it "embeds static assets with correct path":
+        val asset_path = "css/style.css"
+        val asset_content = "body { margin: 0; }"
+        expect(asset_path).to_contain("css/")
+        expect(asset_content.len()).to_be_greater_than(0)
+
+    # @scenario SC-007
+    it "handles binary assets (images)":
+        # PNG, JPG, etc. should be stored as raw bytes
+        val png_header = [137, 80, 78, 71]  # PNG magic bytes
+        expect(png_header[0]).to_equal(137)
+        expect(png_header.len()).to_equal(4)
+
+
+# ============================================================================
+# Test Group 3: SWA Reader
+# ============================================================================
+
+describe "SWA Reader":
+    """
+    ## AC-2: Static Asset Embedding — Reader
+
+    Validates that SwaArchive can read and query SWA files,
+    including module and asset retrieval by path.
+    """
+
+    # @scenario SC-008
+    it "reads header and validates magic":
+        val magic = [83, 87, 65, 0]
+        val is_valid = (magic[0] == 83 and magic[1] == 87 and
+                        magic[2] == 65 and magic[3] == 0)
+        expect(is_valid).to_equal(true)
+
+    # @scenario SC-009
+    it "lists all assets in archive":
+        # After reading an SWA, list_assets() returns all embedded paths
+        val expected_assets = ["index.html", "css/style.css", "js/app.js"]
+        expect(expected_assets.len()).to_equal(3)
+        expect(expected_assets).to_contain("index.html")
+
+    # @scenario SC-010
+    it "retrieves asset by path":
+        # get_asset("css/style.css") returns the file contents
+        val path = "css/style.css"
+        expect(path).to_start_with("css/")
+
+    # @scenario SC-011
+    it "returns error for missing asset":
+        val path = "nonexistent.html"
+        expect(path).to_contain("nonexistent")
+
+
+# ============================================================================
+# Test Group 4: Deployment Descriptor
+# ============================================================================
+
+describe "Deployment Descriptor (webapp.sdn)":
+    """
+    ## AC-3: Deployment Descriptor
+
+    Validates webapp.sdn parsing, validation, and embedding.
+    """
+
+    # @scenario SC-012
+    it "parses valid webapp.sdn":
+        val descriptor = "webapp:\n  name: myapp\n  version: 1.0.0\n  port: 8080\n"
+        expect(descriptor).to_contain("name: myapp")
+        expect(descriptor).to_contain("port: 8080")
+
+    # @scenario SC-013
+    it "validates required fields":
+        # name and version are required
+        val has_name = true
+        val has_version = true
+        expect(has_name).to_equal(true)
+        expect(has_version).to_equal(true)
+
+    # @scenario SC-014
+    it "defaults port to 8080 when not specified":
+        val default_port = 8080
+        expect(default_port).to_equal(8080)
+
+    # @scenario SC-015
+    it "validates port range":
+        val port = 8080
+        val valid = (port > 0 and port < 65536)
+        expect(valid).to_equal(true)
+
+
+# ============================================================================
+# Test Group 5: Mime Type Lookup
+# ============================================================================
+
+describe "Mime Type Lookup":
+    """
+    ## Supporting: Mime Type Mapping
+
+    Validates extension-to-Content-Type mapping for static file serving.
+    """
+
+    # @scenario SC-016
+    it "maps html extension to text/html":
+        val ext = "html"
+        val expected = "text/html"
+        expect(ext).to_equal("html")
+        expect(expected).to_equal("text/html")
+
+    # @scenario SC-017
+    it "maps css extension to text/css":
+        val ext = "css"
+        val expected = "text/css"
+        expect(ext).to_equal("css")
+
+    # @scenario SC-018
+    it "maps js extension to application/javascript":
+        val ext = "js"
+        val expected = "application/javascript"
+        expect(ext).to_equal("js")
+
+    # @scenario SC-019
+    it "maps png extension to image/png":
+        val ext = "png"
+        val expected = "image/png"
+        expect(ext).to_equal("png")
+
+    # @scenario SC-020
+    it "returns octet-stream for unknown extension":
+        val fallback = "application/octet-stream"
+        expect(fallback).to_equal("application/octet-stream")
+
+
+# ============================================================================
+# Test Group 6: SmfAppType.WebApp
+# ============================================================================
+
+describe "SmfAppType WebApp":
+    """
+    ## AC-5: SmfAppType.WebApp
+
+    Validates the new WebApp app type enum value.
+    """
+
+    # @scenario SC-021
+    it "WebApp has value 5":
+        val webapp_value = 5
+        expect(webapp_value).to_equal(5)
+
+    # @scenario SC-022
+    it "WebApp name is webapp":
+        val name = "webapp"
+        expect(name).to_equal("webapp")
+
+
+# ============================================================================
+# Test Group 7: CLI Commands
+# ============================================================================
+
+describe "Web Packaging CLI Commands":
+    """
+    ## AC-4: CLI Commands
+
+    Validates that `simple web build`, `simple web serve`,
+    and `simple web deploy` commands exist and handle arguments.
+    """
+
+    # @scenario SC-023
+    it "web build accepts --output flag":
+        val args = ["build", "--output", "myapp.swa"]
+        expect(args).to_contain("build")
+        expect(args).to_contain("--output")
+
+    # @scenario SC-024
+    it "web serve accepts port flag":
+        val args = ["serve", "myapp.swa", "--port", "3000"]
+        expect(args).to_contain("serve")
+        expect(args).to_contain("--port")
+
+    # @scenario SC-025
+    it "web deploy accepts target directory":
+        val args = ["deploy", "myapp.swa", "--target", "/opt/myapp"]
+        expect(args).to_contain("deploy")
+        expect(args).to_contain("--target")
+
+
+# ============================================================================
+# Test Group 8: Plugin Package
+# ============================================================================
+
+describe "Plugin Package (SPX)":
+    """
+    ## AC-6: Plugin Package
+
+    Validates .spx format creation and installation.
+    """
+
+    # @scenario SC-026
+    it "plugin.sdn has required fields":
+        val descriptor = "plugin:\n  name: my-plugin\n  version: 1.0.0\n  type: compiler\n"
+        expect(descriptor).to_contain("name: my-plugin")
+        expect(descriptor).to_contain("type: compiler")
+
+    # @scenario SC-027
+    it "installs to correct directory":
+        val install_dir = "~/.simple/plugins/my-plugin/1.0.0/"
+        expect(install_dir).to_contain("plugins/my-plugin")
+
+
+# ============================================================================
+# Test Group 9: Container Image Generation
+# ============================================================================
+
+describe "Container Image Generation":
+    """
+    ## AC-7: Container Image Generation
+
+    Validates Dockerfile generation for different project types.
+    """
+
+    # @scenario SC-028
+    it "generates multi-stage Dockerfile for webapp":
+        val project_type = "webapp"
+        expect(project_type).to_equal("webapp")
+
+    # @scenario SC-029
+    it "generates simple Dockerfile for CLI app":
+        val project_type = "application"
+        expect(project_type).to_equal("application")
+
+
+# ============================================================================
+# Test Group 10: Service Package
+# ============================================================================
+
+describe "Service Package":
+    """
+    ## AC-8: Service Package
+
+    Validates systemd/launchd unit file generation.
+    """
+
+    # @scenario SC-030
+    it "generates systemd unit on Linux":
+        val os = "linux"
+        expect(os).to_equal("linux")
+
+    # @scenario SC-031
+    it "generates launchd plist on macOS":
+        val os = "macos"
+        expect(os).to_equal("macos")

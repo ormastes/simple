@@ -1,0 +1,342 @@
+# Environment management command handlers
+# Migrated from: src/driver/src/cli/commands/env_commands.rs
+# Purpose: Handle 'env' subcommands for virtual environment management
+
+use fs.{create_dir, write_text, read_text, list_dir, remove_dir, exists, join, is_dir}
+use super.config_env.{get_env_home}
+use sdn.{parse as sdn_parse}
+
+# Handle 'env' command - manage virtual environments
+# Returns exit code: 0 = success, 1 = error
+fn handle_env(args: List<text>) -> i32:
+    val subcommand = if args.len() > 1:
+        Some(args[1])
+    else:
+        None
+    
+    match subcommand:
+        Some("create") =>
+            if args.len() < 3:
+                print_err("error: env create requires a name")
+                print_err("Usage: simple env create <name>")
+                return 1
+            env_create(args[2])
+        
+        Some("activate") =>
+            if args.len() < 3:
+                print_err("error: env activate requires a name")
+                print_err("Usage: simple env activate <name>")
+                return 1
+            val shell = if args.len() > 3:
+                Some(args[3])
+            else:
+                None
+            env_activate(args[2], shell)
+        
+        Some("list") =>
+            env_list()
+        
+        Some("remove") =>
+            if args.len() < 3:
+                print_err("error: env remove requires a name")
+                print_err("Usage: simple env remove <name> [--force]")
+                return 1
+            val force = args.any(\a: a == "--force")
+            env_remove(args[2], force)
+        
+        Some("info") =>
+            if args.len() < 3:
+                print_err("error: env info requires a name")
+                print_err("Usage: simple env info <name>")
+                return 1
+            env_info(args[2])
+        
+        Some(cmd) =>
+            print_err("error: unknown env subcommand: {cmd}")
+            print_err("Usage: simple env [create|activate|list|remove|info] <name>")
+            1
+        
+        None =>
+            print_env_help()
+            0
+
+# Print help text for env command
+fn print_env_help():
+    print_err("Simple Environment Management")
+    print_err("")
+    print_err("Usage:")
+    print_err("  simple env create <name>     Create new environment")
+    print_err("  simple env activate <name>   Print activation script")
+    print_err("  simple env list              List all environments")
+    print_err("  simple env remove <name>     Remove environment")
+    print_err("  simple env info <name>       Show environment info")
+    print_err("")
+    print_err("To activate an environment:")
+    print_err("  source $(simple env activate <name>)")
+
+# Get the base directory for virtual environments
+fn get_envs_dir() -> Option<text>:
+    match get_env_home():
+        Some(home):
+            Some(join([home, ".simple", "envs"]))
+        None:
+            None
+
+# Get the directory for a specific environment
+fn get_env_dir(name: text) -> Option<text>:
+    match get_envs_dir():
+        Some(envs_dir):
+            Some(join([envs_dir, name]))
+        None:
+            None
+
+# Create a new virtual environment
+fn env_create(name: text) -> i32:
+    # Validate environment name
+    if name.is_empty():
+        print_err("error: environment name cannot be empty")
+        return 1
+
+    # Get environment directory
+    match get_env_dir(name):
+        Some(env_dir):
+            # Check if environment already exists
+            if exists(env_dir):
+                print_err("error: environment '{name}' already exists")
+                return 1
+
+            # Create environment directory structure
+            match create_dir(env_dir, true):
+                Ok(_):
+                    # Create subdirectories
+                    val bin_dir = join([env_dir, "bin"])
+                    val lib_dir = join([env_dir, "lib"])
+
+                    match create_dir(bin_dir, false):
+                        Ok(_):
+                            match create_dir(lib_dir, false):
+                                Ok(_):
+                                    # Create config file
+                                    val config_path = join([env_dir, "config.sdn"])
+                                    val config_content = "[env]\nname = \"{name}\"\ncreated = \"$(date)\"\n"
+
+                                    match write_text(config_path, config_content):
+                                        Ok(_):
+                                            print "Created environment: {name}"
+                                            print "Location: {env_dir}"
+                                            0
+                                        Err(e):
+                                            print_err("error: failed to create config: {e}")
+                                            1
+                                Err(e):
+                                    print_err("error: failed to create lib directory: {e}")
+                                    1
+                        Err(e):
+                            print_err("error: failed to create bin directory: {e}")
+                            1
+                Err(e):
+                    print_err("error: failed to create environment directory: {e}")
+                    1
+        None:
+            print_err("error: could not determine home directory")
+            1
+
+fn env_activate(name: text, shell: Option<text>) -> i32:
+    # Get environment directory
+    match get_env_dir(name):
+        Some(env_dir):
+            # Check if environment exists
+            if not exists(env_dir):
+                print_err("error: environment '{name}' does not exist")
+                return 1
+
+            # Generate activation script
+            val bin_dir = join([env_dir, "bin"])
+            val shell_type = match shell:
+                Some(sh): sh
+                None: "bash"  # Default to bash
+
+            # Generate shell-specific activation commands
+            if shell_type == "bash" or shell_type == "sh" or shell_type == "zsh":
+                # Bash/Zsh activation
+                print "# Source this output to activate the environment:"
+                print "export SIMPLE_ENV=\"{name}\""
+                print "export SIMPLE_ENV_DIR=\"{env_dir}\""
+                print "export PATH=\"{bin_dir}:$PATH\""
+                print "# Activated Simple environment: {name}"
+                0
+            elif shell_type == "fish":
+                # Fish shell activation
+                print "# Source this output to activate the environment:"
+                print "set -gx SIMPLE_ENV \"{name}\""
+                print "set -gx SIMPLE_ENV_DIR \"{env_dir}\""
+                print "set -gx PATH \"{bin_dir}\" $PATH"
+                print "# Activated Simple environment: {name}"
+                0
+            else:
+                print_err("error: unsupported shell: {shell_type}")
+                print_err("Supported shells: bash, sh, zsh, fish")
+                1
+        None:
+            print_err("error: could not determine home directory")
+            1
+
+fn env_list() -> i32:
+    # Get environments directory
+    match get_envs_dir():
+        Some(envs_dir):
+            # Check if envs directory exists
+            if not exists(envs_dir):
+                print "No environments created yet."
+                print "Create one with: simple env create <name>"
+                return 0
+
+            # List all environment directories
+            match list_dir(envs_dir):
+                Ok(entries):
+                    if entries.is_empty():
+                        print "No environments found."
+                        return 0
+
+                    print "Simple Environments:"
+                    print ""
+
+                    var count = 0
+                    var i = 0
+                    while i < entries.len():
+                        val entry = entries[i]
+                        val entry_path = join([envs_dir, entry])
+
+                        # Check if it's a directory
+                        if is_dir(entry_path):
+                            count = count + 1
+                            print "  {count}. {entry}"
+
+                            # Try to read and parse config
+                            val config_path = join([entry_path, "config.sdn"])
+                            if exists(config_path):
+                                match read_text(config_path):
+                                    Ok(config_text):
+                                        print "     Location: {entry_path}"
+                                        # Parse SDN config and show key info
+                                        match sdn_parse(config_text):
+                                            Ok(doc):
+                                                # Show key configuration fields
+                                                match doc.get("name"):
+                                                    Some(name):
+                                                        print "     Name: {name.as_str().unwrap_or("")}"
+                                                    None:
+                                                        pass
+                                                match doc.get("python_version"):
+                                                    Some(ver):
+                                                        print "     Python: {ver.as_str().unwrap_or("")}"
+                                                    None:
+                                                        pass
+                                                match doc.get("created"):
+                                                    Some(created):
+                                                        print "     Created: {created.as_str().unwrap_or("")}"
+                                                    None:
+                                                        pass
+                                            Err(_):
+                                                # Failed to parse, just show location
+                                                pass
+                                    Err(_):
+                                        pass
+
+                        i = i + 1
+
+                    print ""
+                    print "Total: {count} environment(s)"
+                    0
+                Err(e):
+                    print_err("error: failed to list environments: {e}")
+                    1
+        None:
+            print_err("error: could not determine home directory")
+            1
+
+fn env_remove(name: text, force: bool) -> i32:
+    # Get environment directory
+    match get_env_dir(name):
+        Some(env_dir):
+            # Check if environment exists
+            if not exists(env_dir):
+                print_err("error: environment '{name}' does not exist")
+                return 1
+
+            # Warn if not forced
+            if not force:
+                print_err("warning: this will permanently delete environment '{name}'")
+                print_err("Use --force to confirm removal")
+                return 1
+
+            # Remove the environment directory
+            match remove_dir(env_dir, true):
+                Ok(_):
+                    print "Removed environment: {name}"
+                    0
+                Err(e):
+                    print_err("error: failed to remove environment: {e}")
+                    1
+        None:
+            print_err("error: could not determine home directory")
+            1
+
+fn env_info(name: text) -> i32:
+    # Get environment directory
+    match get_env_dir(name):
+        Some(env_dir):
+            # Check if environment exists
+            if not exists(env_dir):
+                print_err("error: environment '{name}' does not exist")
+                return 1
+
+            # Show environment information
+            print "Environment: {name}"
+            print "Location: {env_dir}"
+            print ""
+
+            # Read and display config
+            val config_path = join([env_dir, "config.sdn"])
+            if exists(config_path):
+                match read_text(config_path):
+                    Ok(config):
+                        print "Configuration:"
+                        print config
+                        print ""
+                    Err(e):
+                        print_err("warning: failed to read config: {e}")
+
+            # Show directory contents
+            val bin_dir = join([env_dir, "bin"])
+            val lib_dir = join([env_dir, "lib"])
+
+            print "Directories:"
+            print "  bin: {bin_dir}"
+            if exists(bin_dir):
+                match list_dir(bin_dir):
+                    Ok(bin_entries):
+                        if not bin_entries.is_empty():
+                            print "    Executables: {bin_entries.len()}"
+                    Err(_):
+                        pass
+
+            print "  lib: {lib_dir}"
+            if exists(lib_dir):
+                match list_dir(lib_dir):
+                    Ok(lib_entries):
+                        if not lib_entries.is_empty():
+                            print "    Libraries: {lib_entries.len()}"
+                    Err(_):
+                        pass
+
+            print ""
+            print "To activate: source $(simple env activate {name})"
+            0
+        None:
+            print_err("error: could not determine home directory")
+            1
+
+# Helper to print to stderr
+fn print_err(msg: text):
+    eprint msg

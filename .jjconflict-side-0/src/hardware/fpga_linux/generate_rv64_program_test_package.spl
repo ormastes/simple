@@ -1,0 +1,79 @@
+use std.io_runtime.{file_exists, file_read_bytes, file_write}
+use std.format_utils.{format_hex}
+use common.string_builder.{StringBuilder}
+
+extern fn sys_get_args() -> [text]
+
+fn usage() -> text:
+    "usage: bin/simple run src/hardware/fpga_linux/generate_rv64_program_test_package.spl -- <program-bin> <program-hex> <test-pkg>"
+
+fn test_program_pkg_text(program_hex_path: text, program_size_bytes: i64) -> text:
+    val sb = StringBuilder(parts: [])
+    sb.push_line("library ieee;")
+    sb.push_line("use ieee.std_logic_1164.all;")
+    sb.push_line("package test_program is")
+    sb.push_line("    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);")
+    sb.push_line("    constant PROGRAM_SIZE_BYTES : integer := {program_size_bytes};")
+    if program_size_bytes > 0:
+        sb.push_line("    constant PROGRAM_BYTES : byte_array_t(0 to {program_size_bytes - 1}) := (")
+    else:
+        sb.push_line("    constant PROGRAM_BYTES : byte_array_t(0 to 0) := (")
+    sb.push_line("        PLACEHOLDER_PROGRAM_BYTES")
+    sb.push_line("    );")
+    sb.push_line("    constant PROGRAM_HEX_PATH : string := \"{program_hex_path}\";")
+    sb.push_line("end package test_program;")
+    sb.to_text()
+
+fn main() -> i32:
+    val args = sys_get_args()
+    var filtered: [text] = []
+    var idx: i64 = 1
+    while idx < args.len():
+        val arg = args[idx]
+        if arg != "--":
+            filtered.push(arg)
+        idx = idx + 1
+
+    if filtered.len() != 3:
+        print usage()
+        return 1
+
+    val program_bin_path = filtered[0]
+    val program_hex_path = filtered[1]
+    val test_pkg_path = filtered[2]
+
+    if not file_exists(program_bin_path):
+        print "error: program binary not found: {program_bin_path}"
+        return 1
+
+    val program_bytes = file_read_bytes(program_bin_path) ?? []
+    val program_hex = StringBuilder(parts: [])
+    val program_array = StringBuilder(parts: [])
+
+    var program_idx: i64 = 0
+    while program_idx < program_bytes.len():
+        val program_value = program_bytes[program_idx]
+        program_hex.push(format_hex(program_value, 2))
+        program_hex.push("\n")
+        program_array.push("        x\"")
+        program_array.push(format_hex(program_value, 2))
+        program_array.push("\"")
+        if program_idx + 1 < program_bytes.len():
+            program_array.push(",")
+        program_array.push("\n")
+        program_idx = program_idx + 1
+
+    var package_text = test_program_pkg_text(program_hex_path, program_bytes.len())
+    if program_bytes.len() > 0:
+        package_text = package_text.replace("        PLACEHOLDER_PROGRAM_BYTES\n", program_array.to_text())
+    else:
+        package_text = package_text.replace("        PLACEHOLDER_PROGRAM_BYTES\n", "        x\"00\"\n")
+
+    if not file_write(program_hex_path, program_hex.to_text()):
+        print "error: failed to write program hex: {program_hex_path}"
+        return 1
+    if not file_write(test_pkg_path, package_text):
+        print "error: failed to write test package: {test_pkg_path}"
+        return 1
+
+    0

@@ -1,0 +1,119 @@
+"""
+# RV64GC SoC — System-on-Chip Composition
+
+Composes all hardware components into a complete RV64GC SoC:
+hart manager, bus, MMU (TLB + PMP), and peripherals.
+"""
+
+use hardware.rv64gc.smp.rv64_hart_manager.Rv64HartManager
+use hardware.rv64gc.mem.rv64_bus.{Rv64Bus, DRAM_BASE}
+use hardware.rv64gc.mmu.rv64_tlb.Rv64Tlb
+use hardware.rv64gc.mmu.rv64_pmp.Rv64Pmp
+use hardware.rv64gc.core.rv64_memory.MemResult
+use hardware.rv64gc.pkg.rv64_types_pkg.{PrivilegeMode, AccessType}
+use hardware.rv64gc.privilege.rv64_interrupt.should_take_interrupt
+use hardware.rv64gc.pkg.rv64_csr_addrs.*
+
+class Rv64Soc:
+    harts: Rv64HartManager
+    bus: Rv64Bus
+    tlb: Rv64Tlb
+    pmp: Rv64Pmp
+    num_harts: i64
+    cycle_count: i64
+
+    static fn create(num_harts: i64, ram_size: i64, reset_vector: i64) -> Rv64Soc:
+        Rv64Soc(
+            harts: Rv64HartManager.create(num_harts, reset_vector),
+            bus: Rv64Bus.create(ram_size, num_harts),
+            tlb: Rv64Tlb.create(),
+            pmp: Rv64Pmp.create(),
+            num_harts: num_harts,
+            cycle_count: 0
+        )
+
+    # ---------------------------------------------------------------------------
+    # Memory access (with address translation)
+    # ---------------------------------------------------------------------------
+
+    fn read_mem(addr: i64, width: i64) -> MemResult:
+        """Read memory (physical address, no translation)."""
+        if width == 1: self.bus.read8(addr)
+        elif width == 2: self.bus.read16(addr)
+        elif width == 4: self.bus.read32(addr)
+        elif width == 8: self.bus.read64(addr)
+        else: self.bus.read8(addr)
+
+    me write_mem(addr: i64, value: i64, width: i64) -> MemResult:
+        """Write memory (physical address, no translation)."""
+        if width == 1: self.bus.write8(addr, value)
+        elif width == 2: self.bus.write16(addr, value)
+        elif width == 4: self.bus.write32(addr, value)
+        elif width == 8: self.bus.write64(addr, value)
+        else: self.bus.write8(addr, value)
+
+    # ---------------------------------------------------------------------------
+    # Interrupt distribution
+    # ---------------------------------------------------------------------------
+
+    me update_interrupts():
+        """Update interrupt pending bits for all harts from CLINT and PLIC."""
+        var h = 0
+        while h < self.num_harts:
+            var hart = self.harts.get_hart_mut(h)
+            val mip = hart.read_csr(CSR_MIP)
+            var new_mip = mip
+
+            # CLINT: MSIP (bit 3) and MTIP (bit 7)
+            if self.bus.clint.get_msip(h):
+                new_mip = new_mip or 0x8
+            else:
+                new_mip = new_mip and 0xFFFFFFFFFFFFFFF7
+
+            if self.bus.clint.get_mtip(h):
+                new_mip = new_mip or 0x80
+            else:
+                new_mip = new_mip and 0xFFFFFFFFFFFFFF7F
+
+            # PLIC: MEIP (bit 11) and SEIP (bit 9)
+            val m_ctx = h * 2      # M-mode context
+            val s_ctx = h * 2 + 1  # S-mode context
+            if self.bus.plic.has_pending(m_ctx):
+                new_mip = new_mip or 0x800
+            else:
+                new_mip = new_mip and 0xFFFFFFFFFFFFF7FF
+
+            if self.bus.plic.has_pending(s_ctx):
+                new_mip = new_mip or 0x200
+            else:
+                new_mip = new_mip and 0xFFFFFFFFFFFFFDFF
+
+            hart.write_csr(CSR_MIP, new_mip)
+
+            # Wake hart from WFI if interrupts pending
+            if new_mip != 0 and hart.is_wfi():
+                hart.exit_wfi()
+
+            h = h + 1
+
+    # ---------------------------------------------------------------------------
+    # Tick
+    # ---------------------------------------------------------------------------
+
+    me tick():
+        """Advance SoC by one cycle."""
+        self.bus.tick()
+        self.cycle_count = self.cycle_count + 1
+        self.update_interrupts()
+        self.harts.tick_all()
+
+    # ---------------------------------------------------------------------------
+    # Binary loading
+    # ---------------------------------------------------------------------------
+
+    me load_binary(addr: i64, bytes: [i64]):
+        """Load binary into DRAM."""
+        self.bus.load_binary(addr, bytes)
+
+    fn get_cycle_count() -> i64:
+        self.cycle_count

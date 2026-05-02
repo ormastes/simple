@@ -1,0 +1,84 @@
+#![allow(unnamed_duplicate_typed_args)]
+# AOP Conflict Detection — Detect conflicting advice rules
+#
+# Detects:
+# - E1504: Same predicate + form + priority (conflicting advice order)
+# - E1506: Circular around advice chains (A wraps B, B wraps A)
+
+use compiler.frontend.core.aop.{WeavingRule, WeavingDiagnostic, DiagnosticLevel, AdviceForm}
+
+fn detect_advice_conflicts(rules: [WeavingRule]) -> [WeavingDiagnostic]:
+    """Detect conflicting or circular advice rules."""
+    var diagnostics: [WeavingDiagnostic] = []
+
+    # Check for same predicate + form + priority conflicts
+    var i = 0
+    while i < rules.len():
+        var j = i + 1
+        while j < rules.len():
+            val same_pred = rules[i].predicate_text == rules[j].predicate_text
+            val same_pri = rules[i].priority == rules[j].priority
+            if same_pred and same_pri:
+                val same_form = advice_form_eq(rules[i].form, rules[j].form)
+                if same_form:
+                    val fn_a = rules[i].advice_function
+                    val fn_b = rules[j].advice_function
+                    if fn_a != fn_b:
+                        diagnostics.push(WeavingDiagnostic(
+                            level: DiagnosticLevel.Error,
+                            message: "E1504: conflicting advice order — '{fn_a}' and '{fn_b}' target same predicate '{rules[i].predicate_text}' with same priority {rules[i].priority}",
+                            predicate: rules[i].predicate_text,
+                            location: ""
+                        ))
+            j = j + 1
+        i = i + 1
+
+    # Check for circular around advice
+    var around_targets: [text] = []
+    var around_advisors: [text] = []
+    for rule in rules:
+        match rule.form:
+            case Around:
+                around_targets.push(rule.predicate_text)
+                around_advisors.push(rule.advice_function)
+            case _:
+                pass_do_nothing
+
+    # Detect if any around advisor is itself a target of another around
+    var ai = 0
+    while ai < around_advisors.len():
+        var aj = 0
+        while aj < around_targets.len():
+            if ai != aj:
+                val advisor_is_target = around_advisors[ai] == around_targets[aj]
+                val target_is_advisor = around_targets[ai] == around_advisors[aj]
+                if advisor_is_target and target_is_advisor:
+                    diagnostics.push(WeavingDiagnostic(
+                        level: DiagnosticLevel.Error,
+                        message: "E1506: circular around advice — '{around_advisors[ai]}' and '{around_advisors[aj]}' wrap each other",
+                        predicate: around_targets[ai],
+                        location: ""
+                    ))
+            aj = aj + 1
+        ai = ai + 1
+
+    diagnostics
+
+fn advice_form_eq(a: AdviceForm, b: AdviceForm) -> bool:
+    match a:
+        case Before:
+            match b:
+                case Before: true
+                case _: false
+        case AfterSuccess:
+            match b:
+                case AfterSuccess: true
+                case _: false
+        case AfterError:
+            match b:
+                case AfterError: true
+                case _: false
+        case Around:
+            match b:
+                case Around: true
+                case _: false

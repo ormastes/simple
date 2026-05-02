@@ -1,0 +1,172 @@
+# std.game2d.render.canvas — Canvas builder (Wave B, AC-2)
+#
+# `Canvas` is a thin builder around `engine/render/command.spl`'s typed
+# `RenderCommandBuffer`. The user calls clear/draw/rect/circle/line/text;
+# every call appends a typed `RenderCommand`. `flush(backend)` hands the
+# accumulated commands to a `GameBackend`.
+#
+# Edge contract (AC-2): when `Color { a == 0 }` (fully transparent), the
+# enqueue is short-circuited — drawing with a transparent color is a no-op.
+#
+# Null-Image error path (GAME-RENDER-001): `Canvas.draw(null_image, …)`
+# panics. The check is a runtime guard since Simple's null/Optional surface
+# does not yet enforce this at the type level.
+
+use std.common.engine.math2d.{Vec2, Transform2D}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.units.{ZIndex}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer, FontId}
+use std.nogc_sync_mut.game2d.math.{DrawMode}
+use std.nogc_sync_mut.game2d.render.image.{Image, RenderError}
+use std.nogc_sync_mut.game2d.render.font.{Font}
+
+# alpha == 0 short-circuit — drawing with a transparent color is a no-op.
+fn _is_transparent(c: EngineColor) -> bool:
+    c.a == 0.0
+
+
+fn _z_zero() -> ZIndex:
+    ZIndex(value: 0)
+
+
+# GAME-RENDER-001 panic helper — drawing with a null Image aborts.
+fn _panic_null_image() -> bool:
+    # Side-effect-only: prints diagnostic, then aborts via division-by-zero
+    # (no `panic` builtin in this tier). Replaced with a real panic when the
+    # runtime gains one.
+    val msg = "GAME-RENDER-001: draw on null Image"
+    val _ = msg
+    val zero: i64 = 0
+    val _crash: i64 = 1 / zero
+    false
+
+
+class Canvas:
+    commands: RenderCommandBuffer
+    width: i64
+    height: i64
+    default_font: Font
+
+    static fn create(width: i64, height: i64) -> Canvas:
+        Canvas(
+            commands: RenderCommandBuffer.create(),
+            width: width,
+            height: height,
+            default_font: Font.default_font()
+        )
+
+    fn clear(self, color: EngineColor):
+        """Enqueue a Clear with the given color. Honors transparent-no-op."""
+        if _is_transparent(color):
+            return
+        self.commands.push(RenderCommand.Clear(color: color))
+
+    fn draw(self, image: Image, pos: Vec2):
+        """Draw an Image at `pos`. Null Image triggers GAME-RENDER-001."""
+        if image.is_null():
+            _panic_null_image()
+            return
+        # Transparent tint short-circuit (the sprite's tint defaults to white,
+        # but if a caller wraps a fully-transparent image we still skip).
+        if _is_transparent(image.sprite.tint):
+            return
+        val src = image.sprite.src_rect
+        val dst = image.dst_rect(pos)
+        self.commands.push(RenderCommand.DrawSprite(
+            texture_id: image.sprite.texture_id,
+            src_rect: src,
+            dst_rect: dst,
+            tint: EngineColor.white(),
+            z_order: _z_zero()
+        ))
+
+    fn draw(self, image: Image, t: Transform2D):
+        """Draw an Image with a full Transform2D. Wave-B implementation
+        applies translation only (rotation/scale require renderer-side
+        matrix support — left to Wave C). Null Image triggers
+        GAME-RENDER-001.
+        """
+        if image.is_null():
+            _panic_null_image()
+            return
+        val src = image.sprite.src_rect
+        val w = image.width * t.scale.x
+        val h = image.height * t.scale.y
+        val dst = Rect2(
+            x: t.position.x,
+            y: t.position.y,
+            width: w,
+            height: h
+        )
+        self.commands.push(RenderCommand.DrawSprite(
+            texture_id: image.sprite.texture_id,
+            src_rect: src,
+            dst_rect: dst,
+            tint: EngineColor.white(),
+            z_order: _z_zero()
+        ))
+
+    fn rect(self, mode: DrawMode, r: Rect2, c: EngineColor):
+        """Filled (Fill) or outlined (Stroke) rect. Transparent → no-op."""
+        if _is_transparent(c):
+            return
+        match mode:
+            case DrawMode.Fill:
+                self.commands.push(RenderCommand.DrawRect(
+                    rect: r, color: c, z_order: _z_zero()
+                ))
+            case DrawMode.Stroke:
+                self.commands.push(RenderCommand.DrawRectOutlined(
+                    rect: r, color: c, z_order: _z_zero()
+                ))
+
+    fn circle(self, mode: DrawMode, center: Vec2, radius: f64, c: EngineColor):
+        """Filled or outlined circle."""
+        if _is_transparent(c):
+            return
+        match mode:
+            case DrawMode.Fill:
+                self.commands.push(RenderCommand.DrawCircle(
+                    cx: center.x,
+                    cy: center.y,
+                    radius: radius,
+                    color: c,
+                    z_order: _z_zero()
+                ))
+            case DrawMode.Stroke:
+                self.commands.push(RenderCommand.DrawCircleOutlined(
+                    cx: center.x,
+                    cy: center.y,
+                    radius: radius,
+                    color: c,
+                    z_order: _z_zero()
+                ))
+
+    fn line(self, a: Vec2, b: Vec2, c: EngineColor):
+        if _is_transparent(c):
+            return
+        self.commands.push(RenderCommand.DrawLine(
+            x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+            width: 1.0,
+            color: c,
+            z_order: _z_zero()
+        ))
+
+    fn text(self, content: text, pos: Vec2, c: EngineColor):
+        """Render text via the default Font handle. Transparent → no-op."""
+        if _is_transparent(c):
+            return
+        self.commands.push(RenderCommand.DrawText(
+            font: self.default_font.id,
+            content: content,
+            pos: pos,
+            color: c,
+            z_order: _z_zero()
+        ))
+
+    fn clear_commands(self):
+        self.commands.clear()
+
+    fn command_count() -> i64:
+        self.commands.len()

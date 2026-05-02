@@ -1,0 +1,252 @@
+# numfmt — Format numbers with SI or IEC suffixes
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+
+fn tool_numfmt(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Format numbers with SI or IEC suffixes.
+
+    Usage: numfmt [--to=si|iec] [--from=si|iec] [--suffix=X] [--field N] [NUMBER... | FILE]
+    --to=si    Convert to SI (K=1000, M, G, T, P)
+    --to=iec   Convert to IEC (Ki=1024, Mi, Gi, Ti)
+    --from=si  Parse SI suffixed number to raw
+    --from=iec Parse IEC suffixed number to raw
+    --suffix=X Append X to output
+    --field N  Apply conversion to field N (1-based, default 1)
+    """
+    var to_mode = ""      # "si", "iec", or ""
+    var from_mode = ""    # "si", "iec", or ""
+    var suffix = ""
+    var field = 1
+    var number_args: [text] = []
+    var file_arg = ""
+
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a.starts_with("--to="):
+            to_mode = a.slice(5, a.len())
+        elif a.starts_with("--from="):
+            from_mode = a.slice(7, a.len())
+        elif a.starts_with("--suffix="):
+            suffix = a.slice(9, a.len())
+        elif a.starts_with("--field="):
+            field = _parse_i32(a.slice(8, a.len()))
+            if field < 1:
+                field = 1
+        elif a == "--field" and i + 1 < args.len():
+            field = _parse_i32(args[i + 1])
+            if field < 1:
+                field = 1
+            i = i + 1
+        elif a.starts_with("-"):
+            write_error(terminal, "numfmt: unknown option: {a}")
+            return 1
+        else:
+            # Check if it's a file
+            if a.starts_with("/") or a.starts_with("."):
+                file_arg = a
+            else:
+                number_args = number_args.push(a)
+        i = i + 1
+
+    var lines: [text] = []
+
+    if file_arg != "":
+        if vfs == nil:
+            write_error(terminal, "numfmt: no filesystem mounted")
+            return 1
+        val path = resolve_path(cwd, file_arg)
+        val result = vfs.read_text(path)
+        if result.is_err():
+            write_error(terminal, "numfmt: {path}: {result.unwrap_err()}")
+            return 1
+        lines = split_lines(result.unwrap())
+    elif number_args.len() > 0:
+        lines = number_args
+    else:
+        write_error(terminal, "numfmt: missing operand")
+        return 1
+
+    var exit_code = 0
+    for line in lines:
+        if line == "":
+            continue
+        val processed = _process_line(line, field, from_mode, to_mode, suffix)
+        if processed == "":
+            write_error(terminal, "numfmt: invalid number: {line}")
+            exit_code = 1
+        else:
+            write_line(terminal, processed)
+
+    return exit_code
+
+fn _process_line(line: text, field: i32, from_mode: text, to_mode: text, suffix: text) -> text:
+    """Process one line: split fields, convert target field, reassemble."""
+    val fields = _split_fields(line)
+    if field > fields.len():
+        return line
+
+    val idx = field - 1
+    val raw = fields[idx]
+
+    # Parse the number
+    var value: i64 = 0
+    if from_mode == "si":
+        value = _parse_si(raw)
+    elif from_mode == "iec":
+        value = _parse_iec(raw)
+    else:
+        value = _parse_plain(raw)
+
+    if value < 0:
+        return ""
+
+    # Format the number
+    var formatted = ""
+    if to_mode == "si":
+        formatted = _format_si(value)
+    elif to_mode == "iec":
+        formatted = _format_iec(value)
+    else:
+        formatted = "{value}"
+
+    val with_suffix = "{formatted}{suffix}"
+
+    # Reconstruct line with replaced field
+    var result = ""
+    var i = 0
+    while i < fields.len():
+        if i > 0:
+            result = "{result} "
+        if i == idx:
+            result = "{result}{with_suffix}"
+        else:
+            result = "{result}{fields[i]}"
+        i = i + 1
+    return result
+
+fn _split_fields(line: text) -> [text]:
+    """Split line on whitespace runs."""
+    var fields: [text] = []
+    var current = ""
+    var in_word = false
+    for ch in line:
+        if ch == " " or ch == "\t":
+            if in_word:
+                fields = fields.push(current)
+                current = ""
+                in_word = false
+        else:
+            current = "{current}{ch}"
+            in_word = true
+    if in_word:
+        fields = fields.push(current)
+    return fields
+
+fn _parse_plain(s: text) -> i64:
+    """Parse plain integer, returns -1 on failure."""
+    var result: i64 = 0
+    var started = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i32() - "0".to_i32()) as i64
+            started = true
+        else:
+            return -1
+    if not started:
+        return -1
+    return result
+
+fn _parse_si(s: text) -> i64:
+    """Parse SI suffixed number (K=1000, M, G, T, P)."""
+    if s.len() == 0:
+        return -1
+    val last = s.char_at(s.len() - 1)
+    var multiplier: i64 = 1
+    var num_part = s
+    if last == "K" or last == "k":
+        multiplier = 1000
+        num_part = s.slice(0, s.len() - 1)
+    elif last == "M":
+        multiplier = 1000000
+        num_part = s.slice(0, s.len() - 1)
+    elif last == "G":
+        multiplier = 1000000000
+        num_part = s.slice(0, s.len() - 1)
+    elif last == "T":
+        multiplier = 1000000000000
+        num_part = s.slice(0, s.len() - 1)
+    elif last == "P":
+        multiplier = 1000000000000000
+        num_part = s.slice(0, s.len() - 1)
+    val base = _parse_plain(num_part)
+    if base < 0:
+        return -1
+    return base * multiplier
+
+fn _parse_iec(s: text) -> i64:
+    """Parse IEC suffixed number (Ki=1024, Mi, Gi, Ti)."""
+    if s.len() == 0:
+        return -1
+    # Check 2-char suffix
+    if s.len() >= 2 and s.char_at(s.len() - 1) == "i":
+        val prefix = s.char_at(s.len() - 2)
+        var multiplier: i64 = 1
+        var matched = true
+        if prefix == "K":
+            multiplier = 1024
+        elif prefix == "M":
+            multiplier = 1048576
+        elif prefix == "G":
+            multiplier = 1073741824
+        elif prefix == "T":
+            multiplier = 1099511627776
+        else:
+            matched = false
+        if matched:
+            val base = _parse_plain(s.slice(0, s.len() - 2))
+            if base < 0:
+                return -1
+            return base * multiplier
+    return _parse_plain(s)
+
+fn _format_si(n: i64) -> text:
+    """Format n with SI suffix."""
+    if n >= 1000000000000000:
+        return "{n / 1000000000000000}P"
+    elif n >= 1000000000000:
+        return "{n / 1000000000000}T"
+    elif n >= 1000000000:
+        return "{n / 1000000000}G"
+    elif n >= 1000000:
+        return "{n / 1000000}M"
+    elif n >= 1000:
+        return "{n / 1000}K"
+    else:
+        return "{n}"
+
+fn _format_iec(n: i64) -> text:
+    """Format n with IEC suffix."""
+    if n >= 1099511627776:
+        return "{n / 1099511627776}Ti"
+    elif n >= 1073741824:
+        return "{n / 1073741824}Gi"
+    elif n >= 1048576:
+        return "{n / 1048576}Mi"
+    elif n >= 1024:
+        return "{n / 1024}Ki"
+    else:
+        return "{n}"
+
+fn _parse_i32(s: text) -> i32:
+    """Parse text to i32, returns 0 on failure."""
+    var result = 0
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i32() - "0".to_i32())
+        else:
+            return 0
+    return result

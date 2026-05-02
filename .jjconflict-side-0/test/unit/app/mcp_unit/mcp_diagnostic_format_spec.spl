@@ -1,0 +1,83 @@
+# Unit tests for MCP structured diagnostic formatting
+#
+# Tests the <new-diagnostics> block format used by simple_read, simple_edit, simple_multi_edit
+
+# @cover src/app/mcp/main_lazy_diag_tools.spl 60%
+
+# NOTE: These test the format helpers directly. The helpers are defined in
+# main_lazy_diag_tools.spl and imported via the MCP server module path.
+
+describe "MCP Diagnostic Format":
+    """Tests for structured diagnostic formatting in MCP tool results"""
+
+    context "strip_ansi":
+        """Removes ANSI escape codes from text"""
+
+        it "passes through plain text":
+            expect(strip_ansi("hello world")).to_equal("hello world")
+
+        it "returns empty for empty input":
+            expect(strip_ansi("")).to_equal("")
+
+    context "parse_diag_text_line":
+        """Parses text diagnostic lines into formatted strings"""
+
+        it "parses error line":
+            val line = "src/test.spl:10:5: error: undeclared variable"
+            val result = parse_diag_text_line(line)
+            expect(result).to_contain("Error")
+            expect(result).to_contain("line 10")
+            expect(result).to_contain("col 5")
+            expect(result).to_contain("undeclared variable")
+            expect(result).to_contain("(simple)")
+
+        it "parses warning line":
+            val line = "src/test.spl:20:1: warning: unused import"
+            val result = parse_diag_text_line(line)
+            expect(result).to_contain("Warning")
+            expect(result).to_contain("line 20")
+            expect(result).to_contain("unused import")
+
+        it "returns empty for non-diagnostic line":
+            val line = "Checking src/test.spl... OK"
+            val result = parse_diag_text_line(line)
+            expect(result).to_equal("")
+
+        it "returns empty for empty line":
+            expect(parse_diag_text_line("")).to_equal("")
+
+        it "returns empty for summary line":
+            val line = "1 error(s) found in 1 file(s)"
+            val result = parse_diag_text_line(line)
+            expect(result).to_equal("")
+
+    context "format_new_diagnostics_block":
+        """Produces <new-diagnostics> block from check output"""
+
+        it "returns empty for no diagnostics":
+            val result = format_new_diagnostics_block("test.spl", "")
+            expect(result).to_equal("")
+
+        it "returns empty for clean output":
+            val result = format_new_diagnostics_block("test.spl", "Checking test.spl... OK\nAll checks passed")
+            expect(result).to_equal("")
+
+        it "wraps single error in block":
+            val output = "src/test.spl:10:5: error: unexpected token\n  expected: expression\n  found:    Colon"
+            val result = format_new_diagnostics_block("src/test.spl", output)
+            expect(result).to_contain("<new-diagnostics>")
+            expect(result).to_contain("</new-diagnostics>")
+            expect(result).to_contain("src/test.spl:")
+            expect(result).to_contain("Error (line 10, col 5)")
+
+        it "wraps multiple diagnostics in block":
+            val output = "test.spl:10:1: error: parse error\ntest.spl:20:1: warning: unused var"
+            val result = format_new_diagnostics_block("test.spl", output)
+            expect(result).to_contain("Error (line 10")
+            expect(result).to_contain("Warning (line 20")
+
+        it "skips non-diagnostic lines":
+            val output = "Checking test.spl...\ntest.spl:5:1: error: bad\n1 error(s)"
+            val result = format_new_diagnostics_block("test.spl", output)
+            expect(result).to_contain("<new-diagnostics>")
+            expect(result).to_contain("Error (line 5")

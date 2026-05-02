@@ -1,0 +1,819 @@
+# Specification for HPACK encoder and decoder (RFC 7541).
+#
+# Covers:
+#   RFC 7541 Appendix C.2  — individual representation examples
+#   RFC 7541 Appendix C.3  — request sequence without Huffman
+#   RFC 7541 Appendix C.4  — request sequence with Huffman
+#   RFC 7541 Appendix C.5  — response sequence without Huffman (max_size=256)
+#   RFC 7541 Appendix C.6  — response sequence with Huffman (max_size=256)
+#   Round-trip cases
+#   Adversarial cases
+
+use std.spipe.*
+use std.common.hpack.encoder.{HpackHeader, HpackEncoderState, HpackDecoderState, hpack_encoder_new, hpack_decoder_new}
+use std.common.hpack.decoder.{hpack_decode}
+
+# ============================================================================
+# Module-level helpers — all byte arrays and header lists must be built here
+# (it-block var mutation is not preserved across loop iterations in interpreter
+# mode; all helper fns run in fn scope where it works correctly).
+# ============================================================================
+
+# Return the dynamic table entry count from an encoder state.
+fn _enc_table_len(s: HpackEncoderState) -> i64:
+    s.table.entries.len()
+
+# Return the dynamic table entry count from a decoder state.
+fn _dec_table_len(s: HpackDecoderState) -> i64:
+    s.table.entries.len()
+
+fn _enc_table_size(s: HpackEncoderState) -> i64:
+    s.table.current_size
+
+fn _dec_table_size(s: HpackDecoderState) -> i64:
+    s.table.current_size
+
+fn _enc_entry_name(s: HpackEncoderState, idx: i64) -> text:
+    s.table.entries[idx].name
+
+fn _enc_entry_value(s: HpackEncoderState, idx: i64) -> text:
+    s.table.entries[idx].value
+
+fn _dec_entry_name(s: HpackDecoderState, idx: i64) -> text:
+    s.table.entries[idx].name
+
+fn _dec_entry_value(s: HpackDecoderState, idx: i64) -> text:
+    s.table.entries[idx].value
+
+# Append two [u8] arrays (used in helper fns below).
+fn _cat(a: [u8], b: [u8]) -> [u8]:
+    var r = a
+    var i: i64 = 0
+    while i < b.len():
+        r = r + [b[i]]
+        i = i + 1
+    r
+
+# Check whether two byte arrays are equal.
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var ok = true
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            ok = false
+        i = i + 1
+    ok
+
+# Check whether two header lists are equal (name+value+sensitive).
+fn _headers_eq(a: [HpackHeader], b: [HpackHeader]) -> bool:
+    if a.len() != b.len():
+        return false
+    var ok = true
+    var i: i64 = 0
+    while i < a.len():
+        val ha = a[i]
+        val hb = b[i]
+        if ha.name != hb.name or ha.value != hb.value or ha.sensitive != hb.sensitive:
+            ok = false
+        i = i + 1
+    ok
+
+# ============================================================================
+# RFC 7541 Appendix C.2 byte vectors
+# ============================================================================
+
+# C.2.1: Literal Header Field with Indexing — "custom-key: custom-header"
+# Bytes: 40 0a 63 75 73 74 6f 6d 2d 6b 65 79 0d 63 75 73 74 6f 6d 2d 68 65 61 64 65 72
+fn _c21_bytes() -> [u8]:
+    [0x40u8,
+     0x0au8, 0x63u8, 0x75u8, 0x73u8, 0x74u8, 0x6fu8, 0x6du8, 0x2du8, 0x6bu8, 0x65u8, 0x79u8,
+     0x0du8, 0x63u8, 0x75u8, 0x73u8, 0x74u8, 0x6fu8, 0x6du8, 0x2du8, 0x68u8, 0x65u8, 0x61u8,
+     0x64u8, 0x65u8, 0x72u8]
+
+fn _c21_headers() -> [HpackHeader]:
+    [HpackHeader(name: "custom-key", value: "custom-header", sensitive: false)]
+
+# C.2.2: Literal Header Field without Indexing — ":path: /sample/path"
+# Bytes: 04 0c 2f 73 61 6d 70 6c 65 2f 70 61 74 68
+fn _c22_bytes() -> [u8]:
+    [0x04u8,
+     0x0cu8, 0x2fu8, 0x73u8, 0x61u8, 0x6du8, 0x70u8, 0x6cu8, 0x65u8, 0x2fu8, 0x70u8, 0x61u8,
+     0x74u8, 0x68u8]
+
+fn _c22_headers() -> [HpackHeader]:
+    [HpackHeader(name: ":path", value: "/sample/path", sensitive: false)]
+
+# C.2.3: Literal Header Field Never Indexed — "password: secret"
+# Bytes: 10 08 70 61 73 73 77 6f 72 64 06 73 65 63 72 65 74
+fn _c23_bytes() -> [u8]:
+    [0x10u8,
+     0x08u8, 0x70u8, 0x61u8, 0x73u8, 0x73u8, 0x77u8, 0x6fu8, 0x72u8, 0x64u8,
+     0x06u8, 0x73u8, 0x65u8, 0x63u8, 0x72u8, 0x65u8, 0x74u8]
+
+fn _c23_headers() -> [HpackHeader]:
+    [HpackHeader(name: "password", value: "secret", sensitive: true)]
+
+# C.2.4: Indexed Header Field — ":method: GET" → 0x82
+fn _c24_bytes() -> [u8]:
+    [0x82u8]
+
+fn _c24_headers() -> [HpackHeader]:
+    [HpackHeader(name: ":method", value: "GET", sensitive: false)]
+
+# ============================================================================
+# RFC 7541 Appendix C.3 — Request Examples without Huffman
+# ============================================================================
+
+# C.3.1: First Request
+# Headers: :method=GET, :scheme=http, :path=/, :authority=www.example.com
+# Bytes: 82 86 84 41 0f 77 77 77 2e 65 78 61 6d 70 6c 65 2e 63 6f 6d
+fn _c31_headers() -> [HpackHeader]:
+    [
+        HpackHeader(name: ":method", value: "GET", sensitive: false),
+        HpackHeader(name: ":scheme", value: "http", sensitive: false),
+        HpackHeader(name: ":path", value: "/", sensitive: false),
+        HpackHeader(name: ":authority", value: "www.example.com", sensitive: false)
+    ]
+
+fn _c31_bytes() -> [u8]:
+    [0x82u8, 0x86u8, 0x84u8,
+     0x41u8, 0x0fu8, 0x77u8, 0x77u8, 0x77u8, 0x2eu8, 0x65u8, 0x78u8, 0x61u8, 0x6du8, 0x70u8,
+     0x6cu8, 0x65u8, 0x2eu8, 0x63u8, 0x6fu8, 0x6du8]
+
+# C.3.2: Second Request
+# Headers: :method=GET, :scheme=http, :path=/, :authority=www.example.com, cache-control=no-cache
+# Bytes: 82 86 84 be 58 08 6e 6f 2d 63 61 63 68 65
+fn _c32_headers() -> [HpackHeader]:
+    [
+        HpackHeader(name: ":method", value: "GET", sensitive: false),
+        HpackHeader(name: ":scheme", value: "http", sensitive: false),
+        HpackHeader(name: ":path", value: "/", sensitive: false),
+        HpackHeader(name: ":authority", value: "www.example.com", sensitive: false),
+        HpackHeader(name: "cache-control", value: "no-cache", sensitive: false)
+    ]
+
+fn _c32_bytes() -> [u8]:
+    [0x82u8, 0x86u8, 0x84u8, 0xbeu8,
+     0x58u8, 0x08u8, 0x6eu8, 0x6fu8, 0x2du8, 0x63u8, 0x61u8, 0x63u8, 0x68u8, 0x65u8]
+
+# C.3.3: Third Request
+# Headers: :method=GET, :scheme=https, :path=/index.html, :authority=www.example.com,
+#          custom-key=custom-value
+# Bytes: 82 87 85 bf 40 0a 63 75 73 74 6f 6d 2d 6b 65 79 0c 63 75 73 74 6f 6d 2d 76 61 6c 75 65
+fn _c33_headers() -> [HpackHeader]:
+    [
+        HpackHeader(name: ":method", value: "GET", sensitive: false),
+        HpackHeader(name: ":scheme", value: "https", sensitive: false),
+        HpackHeader(name: ":path", value: "/index.html", sensitive: false),
+        HpackHeader(name: ":authority", value: "www.example.com", sensitive: false),
+        HpackHeader(name: "custom-key", value: "custom-value", sensitive: false)
+    ]
+
+fn _c33_bytes() -> [u8]:
+    [0x82u8, 0x87u8, 0x85u8, 0xbfu8,
+     0x40u8,
+     0x0au8, 0x63u8, 0x75u8, 0x73u8, 0x74u8, 0x6fu8, 0x6du8, 0x2du8, 0x6bu8, 0x65u8, 0x79u8,
+     0x0cu8, 0x63u8, 0x75u8, 0x73u8, 0x74u8, 0x6fu8, 0x6du8, 0x2du8, 0x76u8, 0x61u8, 0x6cu8,
+     0x75u8, 0x65u8]
+
+# ============================================================================
+# RFC 7541 Appendix C.4 — Request Examples with Huffman
+# ============================================================================
+
+# C.4.1: First Request (Huffman)
+# Bytes: 82 86 84 41 8c f1 e3 c2 e5 f2 3a 6b a0 ab 90 f4 ff
+fn _c41_bytes() -> [u8]:
+    [0x82u8, 0x86u8, 0x84u8,
+     0x41u8, 0x8cu8, 0xf1u8, 0xe3u8, 0xc2u8, 0xe5u8, 0xf2u8, 0x3au8, 0x6bu8, 0xa0u8, 0xabu8,
+     0x90u8, 0xf4u8, 0xffu8]
+
+# C.4.2: Second Request (Huffman)
+# Bytes: 82 86 84 be 58 86 a8 eb 10 64 9c bf
+fn _c42_bytes() -> [u8]:
+    [0x82u8, 0x86u8, 0x84u8, 0xbeu8,
+     0x58u8, 0x86u8, 0xa8u8, 0xebu8, 0x10u8, 0x64u8, 0x9cu8, 0xbfu8]
+
+# C.4.3: Third Request (Huffman)
+# Bytes: 82 87 85 bf 40 88 25 a8 49 e9 5b a9 7d 7f 89 25 a8 49 e9 5b b8 e8 b4 bf
+fn _c43_bytes() -> [u8]:
+    [0x82u8, 0x87u8, 0x85u8, 0xbfu8,
+     0x40u8,
+     0x88u8, 0x25u8, 0xa8u8, 0x49u8, 0xe9u8, 0x5bu8, 0xa9u8, 0x7du8, 0x7fu8,
+     0x89u8, 0x25u8, 0xa8u8, 0x49u8, 0xe9u8, 0x5bu8, 0xb8u8, 0xe8u8, 0xb4u8, 0xbfu8]
+
+# ============================================================================
+# RFC 7541 Appendix C.5 — Response Examples without Huffman (max_size=256)
+# ============================================================================
+
+fn _c51_headers() -> [HpackHeader]:
+    [
+        HpackHeader(name: ":status", value: "302", sensitive: false),
+        HpackHeader(name: "cache-control", value: "private", sensitive: false),
+        HpackHeader(name: "date", value: "Mon, 21 Oct 2013 20:13:21 GMT", sensitive: false),
+        HpackHeader(name: "location", value: "https://www.example.com", sensitive: false)
+    ]
+
+fn _c51_bytes() -> [u8]:
+    [0x48u8, 0x03u8, 0x33u8, 0x30u8, 0x32u8,
+     0x58u8, 0x07u8, 0x70u8, 0x72u8, 0x69u8, 0x76u8, 0x61u8, 0x74u8, 0x65u8,
+     0x61u8, 0x1du8,
+     0x4du8, 0x6fu8, 0x6eu8, 0x2cu8, 0x20u8, 0x32u8, 0x31u8, 0x20u8, 0x4fu8, 0x63u8,
+     0x74u8, 0x20u8, 0x32u8, 0x30u8, 0x31u8, 0x33u8, 0x20u8, 0x32u8, 0x30u8, 0x3au8,
+     0x31u8, 0x33u8, 0x3au8, 0x32u8, 0x31u8, 0x20u8, 0x47u8, 0x4du8, 0x54u8,
+     0x6eu8, 0x17u8,
+     0x68u8, 0x74u8, 0x74u8, 0x70u8, 0x73u8, 0x3au8, 0x2fu8, 0x2fu8, 0x77u8, 0x77u8,
+     0x77u8, 0x2eu8, 0x65u8, 0x78u8, 0x61u8, 0x6du8, 0x70u8, 0x6cu8, 0x65u8, 0x2eu8,
+     0x63u8, 0x6fu8, 0x6du8]
+
+fn _c52_headers() -> [HpackHeader]:
+    [
+        HpackHeader(name: ":status", value: "307", sensitive: false),
+        HpackHeader(name: "cache-control", value: "private", sensitive: false),
+        HpackHeader(name: "date", value: "Mon, 21 Oct 2013 20:13:21 GMT", sensitive: false),
+        HpackHeader(name: "location", value: "https://www.example.com", sensitive: false)
+    ]
+
+fn _c52_bytes() -> [u8]:
+    [0x48u8, 0x03u8, 0x33u8, 0x30u8, 0x37u8,
+     0xc1u8, 0xc0u8, 0xbfu8]
+
+fn _c53_headers() -> [HpackHeader]:
+    [
+        HpackHeader(name: ":status", value: "200", sensitive: false),
+        HpackHeader(name: "cache-control", value: "private", sensitive: false),
+        HpackHeader(name: "date", value: "Mon, 21 Oct 2013 20:13:22 GMT", sensitive: false),
+        HpackHeader(name: "location", value: "https://www.example.com", sensitive: false),
+        HpackHeader(name: "content-encoding", value: "gzip", sensitive: false),
+        HpackHeader(name: "set-cookie", value: "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1", sensitive: false)
+    ]
+
+fn _c53_bytes() -> [u8]:
+    # RFC 7541 Appendix C.5.3 — Third Response without Huffman (max_size=256).
+    # set-cookie value = "foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1" (56 bytes = 0x38)
+    [0x88u8,
+     0xc1u8,
+     0x61u8, 0x1du8,
+     0x4du8, 0x6fu8, 0x6eu8, 0x2cu8, 0x20u8, 0x32u8, 0x31u8, 0x20u8, 0x4fu8, 0x63u8,
+     0x74u8, 0x20u8, 0x32u8, 0x30u8, 0x31u8, 0x33u8, 0x20u8, 0x32u8, 0x30u8, 0x3au8,
+     0x31u8, 0x33u8, 0x3au8, 0x32u8, 0x32u8, 0x20u8, 0x47u8, 0x4du8, 0x54u8,
+     0xc0u8,
+     0x5au8, 0x04u8, 0x67u8, 0x7au8, 0x69u8, 0x70u8,
+     0x77u8, 0x38u8,
+     0x66u8, 0x6fu8, 0x6fu8, 0x3du8, 0x41u8, 0x53u8, 0x44u8, 0x4au8, 0x4bu8, 0x48u8,
+     0x51u8, 0x4bu8, 0x42u8, 0x5au8, 0x58u8, 0x4fu8, 0x51u8, 0x57u8, 0x45u8, 0x4fu8,
+     0x50u8, 0x49u8, 0x55u8, 0x41u8, 0x58u8, 0x51u8, 0x57u8, 0x45u8, 0x4fu8, 0x49u8,
+     0x55u8, 0x3bu8, 0x20u8, 0x6du8, 0x61u8, 0x78u8, 0x2du8, 0x61u8, 0x67u8, 0x65u8,
+     0x3du8, 0x33u8, 0x36u8, 0x30u8, 0x30u8, 0x3bu8, 0x20u8, 0x76u8, 0x65u8, 0x72u8,
+     0x73u8, 0x69u8, 0x6fu8, 0x6eu8, 0x3du8, 0x31u8]
+
+# ============================================================================
+# RFC 7541 Appendix C.6 — Response Examples with Huffman (max_size=256)
+# ============================================================================
+
+fn _c61_bytes() -> [u8]:
+    [0x48u8, 0x82u8, 0x64u8, 0x02u8,
+     0x58u8, 0x85u8, 0xaeu8, 0xc3u8, 0x77u8, 0x1au8, 0x4bu8,
+     0x61u8, 0x96u8, 0xd0u8, 0x7au8, 0xbeu8, 0x94u8, 0x10u8, 0x54u8, 0xd4u8, 0x44u8,
+     0xa8u8, 0x20u8, 0x05u8, 0x95u8, 0x04u8, 0x0bu8, 0x81u8, 0x66u8, 0xe0u8, 0x82u8,
+     0xa6u8, 0x2du8, 0x1bu8, 0xffu8,
+     0x6eu8, 0x91u8, 0x9du8, 0x29u8, 0xadu8, 0x17u8, 0x18u8, 0x63u8, 0xc7u8, 0x8fu8,
+     0x0bu8, 0x97u8, 0xc8u8, 0xe9u8, 0xaeu8, 0x82u8, 0xaeu8, 0x43u8, 0xd3u8]
+
+fn _c62_bytes() -> [u8]:
+    [0x48u8, 0x83u8, 0x64u8, 0x0eu8, 0xffu8, 0xc1u8, 0xc0u8, 0xbfu8]
+
+fn _c63_bytes() -> [u8]:
+    # RFC 7541 Appendix C.6.3 — Third Response with Huffman (max_size=256).
+    [0x88u8, 0xc1u8,
+     0x61u8, 0x96u8, 0xd0u8, 0x7au8, 0xbeu8, 0x94u8, 0x10u8, 0x54u8, 0xd4u8, 0x44u8,
+     0xa8u8, 0x20u8, 0x05u8, 0x95u8, 0x04u8, 0x0bu8, 0x81u8, 0x66u8, 0xe0u8, 0x84u8,
+     0xa6u8, 0x2du8, 0x1bu8, 0xffu8, 0xc0u8,
+     0x5au8, 0x83u8, 0x9bu8, 0xd9u8, 0xabu8,
+     0x77u8, 0xadu8, 0x94u8, 0xe7u8, 0x82u8, 0x1du8, 0xd7u8, 0xf2u8, 0xe6u8, 0xc7u8,
+     0xb3u8, 0x35u8, 0xdfu8, 0xdfu8, 0xcdu8, 0x5bu8, 0x39u8, 0x60u8, 0xd5u8, 0xafu8,
+     0x27u8, 0x08u8, 0x7fu8, 0x36u8, 0x72u8, 0xc1u8, 0xabu8, 0x27u8, 0x0fu8, 0xb5u8,
+     0x29u8, 0x1fu8, 0x95u8, 0x87u8, 0x31u8, 0x60u8, 0x65u8, 0xc0u8, 0x03u8, 0xedu8,
+     0x4eu8, 0xe5u8, 0xb1u8, 0x06u8, 0x3du8, 0x50u8, 0x07u8]
+
+# ============================================================================
+# Round-trip helpers
+# ============================================================================
+
+fn _make_5_headers() -> [HpackHeader]:
+    [
+        HpackHeader(name: ":method", value: "GET", sensitive: false),
+        HpackHeader(name: ":scheme", value: "https", sensitive: false),
+        HpackHeader(name: ":path", value: "/api/data", sensitive: false),
+        HpackHeader(name: ":authority", value: "example.com", sensitive: false),
+        HpackHeader(name: "accept", value: "application/json", sensitive: false)
+    ]
+
+fn _make_sensitive_headers() -> [HpackHeader]:
+    [
+        HpackHeader(name: ":method", value: "POST", sensitive: false),
+        HpackHeader(name: "authorization", value: "Bearer secret-token", sensitive: true)
+    ]
+
+# ============================================================================
+# Appendix C.2 — Individual Representation Examples
+# ============================================================================
+
+describe "RFC 7541 C.2.1 — Literal Header Field with Indexing":
+
+    it "encoder produces expected bytes":
+        val state = hpack_encoder_new(4096, false)
+        val headers = _c21_headers()
+        val result = hpack_encode(headers, state)
+        val encoded = result.0
+        val expected = _c21_bytes()
+        expect _bytes_eq(encoded, expected) == true
+
+    it "encoder inserts into dynamic table":
+        val state = hpack_encoder_new(4096, false)
+        val headers = _c21_headers()
+        val result = hpack_encode(headers, state)
+        val new_state = result.1
+        expect _enc_table_len(new_state) == 1
+        expect _enc_entry_name(new_state, 0) == "custom-key"
+        expect _enc_entry_value(new_state, 0) == "custom-header"
+
+    it "decoder recovers the header":
+        val state = hpack_decoder_new(4096)
+        val bytes = _c21_bytes()
+        val result = hpack_decode(bytes, state)
+        expect result.is_ok() == true
+        val pair = result.unwrap()
+        val headers = pair.0
+        expect headers.len() == 1
+        expect headers[0].name == "custom-key"
+        expect headers[0].value == "custom-header"
+        expect headers[0].sensitive == false
+
+    it "decoder inserts into dynamic table":
+        val state = hpack_decoder_new(4096)
+        val bytes = _c21_bytes()
+        val result = hpack_decode(bytes, state).unwrap()
+        val new_state = result.1
+        expect _dec_table_len(new_state) == 1
+        expect _dec_entry_name(new_state, 0) == "custom-key"
+        expect _dec_entry_value(new_state, 0) == "custom-header"
+
+describe "RFC 7541 C.2.2 — Literal Header Field without Indexing":
+
+    it "decoder recovers the header":
+        val state = hpack_decoder_new(4096)
+        val bytes = _c22_bytes()
+        val result = hpack_decode(bytes, state)
+        expect result.is_ok() == true
+        val headers = result.unwrap().0
+        expect headers.len() == 1
+        expect headers[0].name == ":path"
+        expect headers[0].value == "/sample/path"
+
+    it "decoder does NOT insert into dynamic table":
+        val state = hpack_decoder_new(4096)
+        val bytes = _c22_bytes()
+        val result = hpack_decode(bytes, state).unwrap()
+        val new_state = result.1
+        expect _dec_table_len(new_state) == 0
+
+describe "RFC 7541 C.2.3 — Literal Header Field Never Indexed":
+
+    it "encoder produces expected bytes":
+        val state = hpack_encoder_new(4096, false)
+        val headers = _c23_headers()
+        val result = hpack_encode(headers, state)
+        val encoded = result.0
+        val expected = _c23_bytes()
+        expect _bytes_eq(encoded, expected) == true
+
+    it "decoder sets sensitive=true on the decoded header":
+        val state = hpack_decoder_new(4096)
+        val bytes = _c23_bytes()
+        val result = hpack_decode(bytes, state)
+        expect result.is_ok() == true
+        val headers = result.unwrap().0
+        expect headers.len() == 1
+        expect headers[0].name == "password"
+        expect headers[0].value == "secret"
+        expect headers[0].sensitive == true
+
+    it "decoder does NOT insert sensitive header into dynamic table":
+        val state = hpack_decoder_new(4096)
+        val bytes = _c23_bytes()
+        val result = hpack_decode(bytes, state).unwrap()
+        val new_state = result.1
+        expect _dec_table_len(new_state) == 0
+
+describe "RFC 7541 C.2.4 — Indexed Header Field":
+
+    it "encoder produces single byte 0x82 for :method=GET":
+        val state = hpack_encoder_new(4096, false)
+        val headers = _c24_headers()
+        val result = hpack_encode(headers, state)
+        val encoded = result.0
+        expect encoded.len() == 1
+        expect encoded[0] == 0x82u8
+
+    it "decoder recovers :method=GET from 0x82":
+        val state = hpack_decoder_new(4096)
+        val bytes = _c24_bytes()
+        val result = hpack_decode(bytes, state)
+        expect result.is_ok() == true
+        val headers = result.unwrap().0
+        expect headers.len() == 1
+        expect headers[0].name == ":method"
+        expect headers[0].value == "GET"
+
+# ============================================================================
+# Appendix C.3 — Request Examples without Huffman
+# ============================================================================
+
+describe "RFC 7541 C.3.1 — First request without Huffman":
+
+    it "encoder bytes match RFC":
+        val state = hpack_encoder_new(4096, false)
+        val headers = _c31_headers()
+        val result = hpack_encode(headers, state)
+        val encoded = result.0
+        val expected = _c31_bytes()
+        expect _bytes_eq(encoded, expected) == true
+
+    it "encoder dynamic table has 1 entry: :authority=www.example.com":
+        val state = hpack_encoder_new(4096, false)
+        val headers = _c31_headers()
+        val result = hpack_encode(headers, state)
+        val new_state = result.1
+        expect _enc_table_len(new_state) == 1
+        expect _enc_entry_name(new_state, 0) == ":authority"
+        expect _enc_entry_value(new_state, 0) == "www.example.com"
+
+    it "decoder bytes match RFC":
+        val state = hpack_decoder_new(4096)
+        val bytes = _c31_bytes()
+        val result = hpack_decode(bytes, state)
+        expect result.is_ok() == true
+        val headers = result.unwrap().0
+        expect headers.len() == 4
+        expect headers[0].name == ":method"
+        expect headers[0].value == "GET"
+        expect headers[3].name == ":authority"
+        expect headers[3].value == "www.example.com"
+
+describe "RFC 7541 C.3.2 — Second request without Huffman":
+
+    it "encoder bytes match RFC":
+        val state0 = hpack_encoder_new(4096, false)
+        val h1 = _c31_headers()
+        val r1 = hpack_encode(h1, state0)
+        val state1 = r1.1
+        val h2 = _c32_headers()
+        val r2 = hpack_encode(h2, state1)
+        val encoded = r2.0
+        val expected = _c32_bytes()
+        expect _bytes_eq(encoded, expected) == true
+
+    it "encoder dynamic table has 2 entries after second request":
+        val state0 = hpack_encoder_new(4096, false)
+        val h1 = _c31_headers()
+        val r1 = hpack_encode(h1, state0)
+        val state1 = r1.1
+        val h2 = _c32_headers()
+        val r2 = hpack_encode(h2, state1)
+        val state2 = r2.1
+        expect _enc_table_len(state2) == 2
+        # newest entry at index 0: cache-control=no-cache
+        expect _enc_entry_name(state2, 0) == "cache-control"
+        expect _enc_entry_value(state2, 0) == "no-cache"
+
+    it "decoder recovers second request headers":
+        val state0 = hpack_decoder_new(4096)
+        val r1 = hpack_decode(_c31_bytes(), state0)
+        val state1 = r1.unwrap().1
+        val r2 = hpack_decode(_c32_bytes(), state1)
+        expect r2.is_ok() == true
+        val headers = r2.unwrap().0
+        expect headers.len() == 5
+        expect headers[4].name == "cache-control"
+        expect headers[4].value == "no-cache"
+
+describe "RFC 7541 C.3.3 — Third request without Huffman":
+
+    it "encoder bytes match RFC":
+        val state0 = hpack_encoder_new(4096, false)
+        val r1 = hpack_encode(_c31_headers(), state0)
+        val r2 = hpack_encode(_c32_headers(), r1.1)
+        val r3 = hpack_encode(_c33_headers(), r2.1)
+        val encoded = r3.0
+        val expected = _c33_bytes()
+        expect _bytes_eq(encoded, expected) == true
+
+    it "encoder dynamic table has 3 entries after third request":
+        val state0 = hpack_encoder_new(4096, false)
+        val r1 = hpack_encode(_c31_headers(), state0)
+        val r2 = hpack_encode(_c32_headers(), r1.1)
+        val r3 = hpack_encode(_c33_headers(), r2.1)
+        val state3 = r3.1
+        expect _enc_table_len(state3) == 3
+        expect _enc_entry_name(state3, 0) == "custom-key"
+        expect _enc_entry_value(state3, 0) == "custom-value"
+
+    it "decoder recovers third request headers":
+        val state0 = hpack_decoder_new(4096)
+        val r1 = hpack_decode(_c31_bytes(), state0)
+        val r2 = hpack_decode(_c32_bytes(), r1.unwrap().1)
+        val r3 = hpack_decode(_c33_bytes(), r2.unwrap().1)
+        expect r3.is_ok() == true
+        val headers = r3.unwrap().0
+        expect headers.len() == 5
+        expect headers[4].name == "custom-key"
+        expect headers[4].value == "custom-value"
+
+# ============================================================================
+# Appendix C.4 — Request Examples with Huffman
+# ============================================================================
+
+describe "RFC 7541 C.4 — Request Examples with Huffman":
+
+    it "C.4.1 decoder recovers first request from Huffman bytes":
+        val state = hpack_decoder_new(4096)
+        val result = hpack_decode(_c41_bytes(), state)
+        expect result.is_ok() == true
+        val headers = result.unwrap().0
+        expect headers.len() == 4
+        expect headers[0].name == ":method"
+        expect headers[0].value == "GET"
+        expect headers[3].name == ":authority"
+        expect headers[3].value == "www.example.com"
+
+    it "C.4.1 encoder with huffman=true produces expected bytes":
+        val state = hpack_encoder_new(4096, true)
+        val headers = _c31_headers()
+        val result = hpack_encode(headers, state)
+        val encoded = result.0
+        val expected = _c41_bytes()
+        expect _bytes_eq(encoded, expected) == true
+
+    it "C.4.2 decoder recovers second request from Huffman bytes":
+        val state0 = hpack_decoder_new(4096)
+        val r1 = hpack_decode(_c41_bytes(), state0)
+        val r2 = hpack_decode(_c42_bytes(), r1.unwrap().1)
+        expect r2.is_ok() == true
+        val headers = r2.unwrap().0
+        expect headers.len() == 5
+        expect headers[4].name == "cache-control"
+        expect headers[4].value == "no-cache"
+
+    it "C.4.2 encoder with huffman=true produces expected bytes":
+        val state0 = hpack_encoder_new(4096, true)
+        val r1 = hpack_encode(_c31_headers(), state0)
+        val r2 = hpack_encode(_c32_headers(), r1.1)
+        val expected = _c42_bytes()
+        expect _bytes_eq(r2.0, expected) == true
+
+    it "C.4.3 decoder recovers third request from Huffman bytes":
+        val state0 = hpack_decoder_new(4096)
+        val r1 = hpack_decode(_c41_bytes(), state0)
+        val r2 = hpack_decode(_c42_bytes(), r1.unwrap().1)
+        val r3 = hpack_decode(_c43_bytes(), r2.unwrap().1)
+        expect r3.is_ok() == true
+        val headers = r3.unwrap().0
+        expect headers.len() == 5
+        expect headers[4].name == "custom-key"
+        expect headers[4].value == "custom-value"
+
+    it "C.4.3 encoder with huffman=true produces expected bytes":
+        val state0 = hpack_encoder_new(4096, true)
+        val r1 = hpack_encode(_c31_headers(), state0)
+        val r2 = hpack_encode(_c32_headers(), r1.1)
+        val r3 = hpack_encode(_c33_headers(), r2.1)
+        val expected = _c43_bytes()
+        expect _bytes_eq(r3.0, expected) == true
+
+    it "C.4 Huffman output is shorter than C.3 raw output for first request":
+        val c31_len = _c31_bytes().len()
+        val c41_len = _c41_bytes().len()
+        expect c41_len < c31_len == true
+
+# ============================================================================
+# Appendix C.5 — Response Examples without Huffman (max_size=256)
+# ============================================================================
+
+describe "RFC 7541 C.5.1 — First response (max_size=256) without Huffman":
+
+    it "encoder bytes match RFC":
+        val state = hpack_encoder_new(256, false)
+        val result = hpack_encode(_c51_headers(), state)
+        val expected = _c51_bytes()
+        expect _bytes_eq(result.0, expected) == true
+
+    it "decoder recovers first response":
+        val state = hpack_decoder_new(256)
+        val result = hpack_decode(_c51_bytes(), state)
+        expect result.is_ok() == true
+        val headers = result.unwrap().0
+        expect headers.len() == 4
+        expect headers[0].name == ":status"
+        expect headers[0].value == "302"
+
+describe "RFC 7541 C.5.2 — Second response (eviction) without Huffman":
+
+    it "encoder bytes match RFC":
+        val state0 = hpack_encoder_new(256, false)
+        val r1 = hpack_encode(_c51_headers(), state0)
+        val r2 = hpack_encode(_c52_headers(), r1.1)
+        val expected = _c52_bytes()
+        expect _bytes_eq(r2.0, expected) == true
+
+    it "decoder recovers second response":
+        val state0 = hpack_decoder_new(256)
+        val r1 = hpack_decode(_c51_bytes(), state0)
+        val r2 = hpack_decode(_c52_bytes(), r1.unwrap().1)
+        expect r2.is_ok() == true
+        val headers = r2.unwrap().0
+        expect headers.len() == 4
+        expect headers[0].name == ":status"
+        expect headers[0].value == "307"
+
+describe "RFC 7541 C.5.3 — Third response (eviction + small table) without Huffman":
+
+    it "encoder bytes match RFC":
+        val state0 = hpack_encoder_new(256, false)
+        val r1 = hpack_encode(_c51_headers(), state0)
+        val r2 = hpack_encode(_c52_headers(), r1.1)
+        val r3 = hpack_encode(_c53_headers(), r2.1)
+        val expected = _c53_bytes()
+        expect _bytes_eq(r3.0, expected) == true
+
+    it "decoder recovers third response":
+        val state0 = hpack_decoder_new(256)
+        val r1 = hpack_decode(_c51_bytes(), state0)
+        val r2 = hpack_decode(_c52_bytes(), r1.unwrap().1)
+        val r3 = hpack_decode(_c53_bytes(), r2.unwrap().1)
+        expect r3.is_ok() == true
+        val headers = r3.unwrap().0
+        expect headers.len() == 6
+        expect headers[0].name == ":status"
+        expect headers[0].value == "200"
+
+    it "dynamic table has only 3 entries (eviction due to max_size=256)":
+        val state0 = hpack_decoder_new(256)
+        val r1 = hpack_decode(_c51_bytes(), state0)
+        val r2 = hpack_decode(_c52_bytes(), r1.unwrap().1)
+        val r3 = hpack_decode(_c53_bytes(), r2.unwrap().1)
+        val state3 = r3.unwrap().1
+        expect _dec_table_len(state3) == 3
+
+# ============================================================================
+# Appendix C.6 — Response Examples with Huffman (max_size=256)
+# ============================================================================
+
+describe "RFC 7541 C.6 — Response Examples with Huffman":
+
+    it "C.6.1 decoder recovers first response from Huffman bytes":
+        val state = hpack_decoder_new(256)
+        val result = hpack_decode(_c61_bytes(), state)
+        expect result.is_ok() == true
+        val headers = result.unwrap().0
+        expect headers.len() == 4
+        expect headers[0].name == ":status"
+        expect headers[0].value == "302"
+
+    it "C.6.1 encoder with huffman=true produces expected bytes":
+        val state = hpack_encoder_new(256, true)
+        val result = hpack_encode(_c51_headers(), state)
+        val expected = _c61_bytes()
+        expect _bytes_eq(result.0, expected) == true
+
+    it "C.6.2 decoder recovers second response from Huffman bytes":
+        val state0 = hpack_decoder_new(256)
+        val r1 = hpack_decode(_c61_bytes(), state0)
+        val r2 = hpack_decode(_c62_bytes(), r1.unwrap().1)
+        expect r2.is_ok() == true
+        val headers = r2.unwrap().0
+        expect headers.len() == 4
+        expect headers[0].value == "307"
+
+    it "C.6.2 encoder with huffman=true produces expected bytes":
+        val state0 = hpack_encoder_new(256, true)
+        val r1 = hpack_encode(_c51_headers(), state0)
+        val r2 = hpack_encode(_c52_headers(), r1.1)
+        val expected = _c62_bytes()
+        expect _bytes_eq(r2.0, expected) == true
+
+    it "C.6.3 decoder recovers third response from Huffman bytes":
+        val state0 = hpack_decoder_new(256)
+        val r1 = hpack_decode(_c61_bytes(), state0)
+        val r2 = hpack_decode(_c62_bytes(), r1.unwrap().1)
+        val r3 = hpack_decode(_c63_bytes(), r2.unwrap().1)
+        expect r3.is_ok() == true
+        val headers = r3.unwrap().0
+        expect headers.len() == 6
+        expect headers[0].value == "200"
+
+    it "C.6.3 encoder with huffman=true produces expected bytes":
+        val state0 = hpack_encoder_new(256, true)
+        val r1 = hpack_encode(_c51_headers(), state0)
+        val r2 = hpack_encode(_c52_headers(), r1.1)
+        val r3 = hpack_encode(_c53_headers(), r2.1)
+        val expected = _c63_bytes()
+        expect _bytes_eq(r3.0, expected) == true
+
+# ============================================================================
+# Round-trip cases
+# ============================================================================
+
+describe "HPACK round-trip — 5 typical request headers":
+
+    it "encode → decode produces equal headers":
+        val original = _make_5_headers()
+        val enc_state = hpack_encoder_new(4096, false)
+        val enc_result = hpack_encode(original, enc_state)
+        val encoded_bytes = enc_result.0
+        val dec_state = hpack_decoder_new(4096)
+        val dec_result = hpack_decode(encoded_bytes, dec_state)
+        expect dec_result.is_ok() == true
+        val decoded = dec_result.unwrap().0
+        expect _headers_eq(original, decoded) == true
+
+describe "HPACK round-trip — sensitive header survives":
+
+    it "sensitive flag is preserved through encode → decode":
+        val original = _make_sensitive_headers()
+        val enc_state = hpack_encoder_new(4096, false)
+        val enc_result = hpack_encode(original, enc_state)
+        val dec_state = hpack_decoder_new(4096)
+        val dec_result = hpack_decode(enc_result.0, dec_state)
+        expect dec_result.is_ok() == true
+        val decoded = dec_result.unwrap().0
+        expect decoded.len() == 2
+        expect decoded[1].sensitive == true
+
+    it "sensitive header is NOT in dynamic table after decode":
+        val original = _make_sensitive_headers()
+        val enc_state = hpack_encoder_new(4096, false)
+        val enc_result = hpack_encode(original, enc_state)
+        val dec_state = hpack_decoder_new(4096)
+        val dec_result = hpack_decode(enc_result.0, dec_state)
+        val new_dec_state = dec_result.unwrap().1
+        # :method=POST is indexed (static), auth=sensitive is never indexed
+        # only entries actually inserted should appear
+        var found_auth = false
+        var i: i64 = 0
+        while i < _dec_table_len(new_dec_state):
+            if _dec_entry_name(new_dec_state, i) == "authorization":
+                found_auth = true
+            i = i + 1
+        expect found_auth == false
+
+describe "HPACK round-trip — huffman=false byte size matches raw":
+
+    it "encoded length equals raw literal size for simple headers":
+        val headers = _c21_headers()
+        val enc_state = hpack_encoder_new(4096, false)
+        val result = hpack_encode(headers, enc_state)
+        val encoded = result.0
+        # C.2.1 raw bytes = 26 bytes (from RFC)
+        expect encoded.len() == 26
+
+# ============================================================================
+# Adversarial cases
+# ============================================================================
+
+describe "HPACK decoder — adversarial inputs":
+
+    it "rejects Indexed Header Field with index 0":
+        val state = hpack_decoder_new(4096)
+        # 0x80 = 1xxxxxxx with index 0
+        val bytes: [u8] = [0x80u8]
+        val result = hpack_decode(bytes, state)
+        expect result.is_err() == true
+
+    it "rejects out-of-range static index":
+        val state = hpack_decoder_new(4096)
+        # 0x80 | 62 = 0xbe; but dynamic table is empty so index 62 is out of range
+        val bytes: [u8] = [0xbeu8]
+        val result = hpack_decode(bytes, state)
+        expect result.is_err() == true
+
+    it "rejects truncated input mid-string":
+        val state = hpack_decoder_new(4096)
+        # 0x40 = literal incremental, 0x05 = 5-byte name, but only 2 bytes follow
+        val bytes: [u8] = [0x40u8, 0x05u8, 0x61u8, 0x62u8]
+        val result = hpack_decode(bytes, state)
+        expect result.is_err() == true
+
+    it "honours Dynamic Table Size Update":
+        val state = hpack_decoder_new(4096)
+        # First encode C.3.1 to put :authority=www.example.com in the decoder table
+        val r1 = hpack_decode(_c31_bytes(), state)
+        val state1 = r1.unwrap().1
+        expect _dec_table_len(state1) == 1
+        # §6.3 Dynamic Table Size Update: 001xxxxx with new_size=0 → 0x20
+        val resize_bytes: [u8] = [0x20u8]
+        val r2 = hpack_decode(resize_bytes, state1)
+        expect r2.is_ok() == true
+        val state2 = r2.unwrap().1
+        expect _dec_table_len(state2) == 0

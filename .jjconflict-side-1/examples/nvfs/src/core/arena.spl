@@ -1,0 +1,448 @@
+# NVFS core — arena_* in-memory implementation.
+#
+# N1 milestone (doc/05_design/nvfs_design.md §12):
+#   Implements §4.1 arena primitives backed by in-process byte vectors.
+#   No NVMe I/O. No ZNS/FDP paths. StorageClass tag is passthrough.
+#
+# Error codes returned as i64 (negative = error):
+#   -1  InvalidArena   — unknown arena_id
+#   -2  Sealed         — append on sealed arena
+#   -3  Discarded      — access on discarded arena
+#   -4  OutOfBounds    — clone_range src range out of bounds
+#
+# FR-NVFS-N6a-003: arena_seal_impl now calls nvfs_arena_seal_rotate to rotate
+#   the DEK for encrypted arenas on seal. Non-encrypted arenas are unaffected.
+
+use examples.nvfs.src.core.encryption.{nvfs_arena_seal_rotate}
+use examples.nvfs.src.core.compression.{compress_extent, decompress_extent, class_default_algo}
+use examples.nvfs.src.core.dedup.{dedup_class_enabled, dedup_hash_of, dedup_insert_or_bump, dedup_release, dedup_lookup}
+
+# ---------------------------------------------------------------------------
+# Arena metadata record
+# ---------------------------------------------------------------------------
+
+struct ArenaMeta:
+    """Per-arena metadata stored alongside the byte buffer."""
+    arena_id: i64
+    class_tag: i32      # StorageClass ordinal
+    hint_bytes: i64     # initial size hint
+    sealed: bool
+    discarded: bool
+    total_bytes: i64    # bytes appended so far
+
+# ---------------------------------------------------------------------------
+# In-memory arena store
+#   _arena_ids  : flat list of ArenaId values (same index as _metas / _bufs)
+#   _metas      : parallel list of ArenaMeta
+#   _bufs       : parallel list of byte buffers ([u8])
+# ---------------------------------------------------------------------------
+
+var _arena_ids: [i64] = []
+var _metas: [ArenaMeta] = []
+var _bufs: [[u8]] = []
+# _extent_hashes: parallel list; each entry is a flat list of 32-byte hashes
+# for extents appended via arena_append_deduped, in append order.
+# Only populated when dedup_class_enabled for the arena's class_tag.
+var _extent_hashes: [[[u8]]] = []
+var _next_id: i64 = 1
+
+fn _find_index(arena_id: i64) -> i64:
+    """Return the index of arena_id in _arena_ids, or -1 if not found."""
+    var i = 0
+    while i < _arena_ids.len():
+        if _arena_ids[i] == arena_id:
+            return i
+        i = i + 1
+    -1
+
+# ---------------------------------------------------------------------------
+# Public API (matches existing _impl suffix convention)
+# ---------------------------------------------------------------------------
+
+fn arena_create_impl(class_tag: i32, hint_bytes: i64) -> i64:
+    """Provision a new arena; returns opaque arena_id (> 0).
+
+    class_tag is the StorageClass ordinal; stored for arena_class_impl.
+    """
+    val arena_id = _next_id
+    _next_id = _next_id + 1
+
+    val meta = ArenaMeta(
+        arena_id: arena_id,
+        class_tag: class_tag,
+        hint_bytes: hint_bytes,
+        sealed: false,
+        discarded: false,
+        total_bytes: 0
+    )
+    val buf: [u8] = []
+
+    _arena_ids.push(arena_id)
+    _metas.push(meta)
+    _bufs.push(buf)
+    # Initialize empty extent-hash list for this arena (populated by arena_append_deduped).
+    var empty_hashes: [[u8]] = []
+    _extent_hashes.push(empty_hashes)
+
+    arena_id
+
+fn arena_append_impl(arena_id: i64, data: [u8], durability_tag: i32) -> i64:
+    """Append `data` to arena; returns bytes_written or negative error code.
+
+    Failure modes:
+      -1  InvalidArena  — arena_id unknown
+      -2  Sealed        — arena has been sealed
+      -3  Discarded     — arena has been discarded
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _metas[idx]
+    if meta.discarded:
+        return -3
+    if meta.sealed:
+        return -2
+
+    val n = data.len() as i64
+    _bufs[idx] = _bufs[idx] + data
+
+    val updated = ArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: false,
+        discarded: false,
+        total_bytes: meta.total_bytes + n
+    )
+    _metas[idx] = updated
+    n
+
+fn arena_append_compressed(arena_id: i64, data: [u8], durability_tag: i32) -> i64:
+    """Append data to arena, applying class-aware compression before storage.
+
+    FR-NVFS-N7a-001: compress-on-write path (§V3-2.4 write path steps 2-5).
+    Ordering: plaintext → compress → (encrypt handled by caller) → on-disk.
+
+    Returns bytes_written (of compressed data), or negative error code:
+      -1  InvalidArena
+      -2  Sealed
+      -3  Discarded
+
+    The return value is the count of bytes physically appended (compressed).
+    Callers that need the original logical size must retain data.len() separately.
+    Use arena_read_extent for the decompression-aware read path.
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _metas[idx]
+    if meta.discarded:
+        return -3
+    if meta.sealed:
+        return -2
+
+    # Apply class-aware compression.
+    val result = compress_extent(data, meta.class_tag)
+    val payload = result.data
+    val n = payload.len() as i64
+
+    _bufs[idx] = _bufs[idx] + payload
+
+    val updated = ArenaMeta(
+        arena_id:    meta.arena_id,
+        class_tag:   meta.class_tag,
+        hint_bytes:  meta.hint_bytes,
+        sealed:      false,
+        discarded:   false,
+        total_bytes: meta.total_bytes + n
+    )
+    _metas[idx] = updated
+    n
+
+fn arena_append_deduped(arena_id: i64, data: [u8], durability_tag: i32) -> i64:
+    """Append data with dedup-then-compress ordering (§V3-2.4 N7b write path).
+
+    FR-NVFS-N7b-001: dedup layer above compression.
+    Ordering: plaintext → dedup-hash → (if hit) return 0; (if miss) compress → store.
+
+    When the arena's class has dedup enabled:
+      - Computes a 32-byte hash of plaintext.
+      - Looks up the module DDT.
+      - On hit: bumps the DDT refcount, records hash in _extent_hashes, returns 0
+        (no new bytes written — caller uses the existing physical pointer).
+      - On miss: inserts into DDT, compresses, appends, records hash.
+    When dedup is not enabled for the class, falls back to arena_append_impl.
+
+    Returns bytes_written (compressed) on miss, 0 on dedup hit, or negative error:
+      -1  InvalidArena
+      -2  Sealed
+      -3  Discarded
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _metas[idx]
+    if meta.discarded:
+        return -3
+    if meta.sealed:
+        return -2
+
+    # Gate: if class does not participate in dedup, fall back to plain append.
+    if not dedup_class_enabled(meta.class_tag):
+        return arena_append_impl(arena_id, data, durability_tag)
+
+    # Compute content hash on plaintext (§V3-3.1: hash before compress/encrypt).
+    val h = dedup_hash_of(data)
+
+    # DDT lookup.
+    val hit = dedup_lookup(data)
+    if hit:
+        # Dedup hit: bump refcount, record hash, return 0 (no new physical write).
+        val _ = dedup_insert_or_bump(h, arena_id, meta.total_bytes)
+        var hashes = _extent_hashes[idx]
+        hashes.push(h)
+        _extent_hashes[idx] = hashes
+        return 0
+
+    # Dedup miss: compress then store.
+    val result = compress_extent(data, meta.class_tag)
+    val payload = result.data
+    val n = payload.len() as i64
+
+    _bufs[idx] = _bufs[idx] + payload
+
+    val updated = ArenaMeta(
+        arena_id:    meta.arena_id,
+        class_tag:   meta.class_tag,
+        hint_bytes:  meta.hint_bytes,
+        sealed:      false,
+        discarded:   false,
+        total_bytes: meta.total_bytes + n
+    )
+    _metas[idx] = updated
+
+    # Insert into DDT (first occurrence; refcount=1).
+    val _ = dedup_insert_or_bump(h, arena_id, meta.total_bytes)
+
+    # Record hash for later release on discard.
+    var hashes2 = _extent_hashes[idx]
+    hashes2.push(h)
+    _extent_hashes[idx] = hashes2
+
+    n
+
+fn arena_read_extent(arena_id: i64, off: i64, compressed_len: i64, algo: u8, decompressed_len: i64) -> [u8]:
+    """Read a compressed extent from the arena and decompress it.
+
+    FR-NVFS-N7a-001: decompress-on-read path (§V3-2.4 read path steps 2-4).
+
+    off             — physical byte offset in arena where compressed data starts.
+    compressed_len  — number of compressed bytes to read (from pmap compressed_len field).
+    algo            — CompressAlgo tag (from pmap compress_algo field; 0=None).
+    decompressed_len — expected plaintext size (logical block size).
+
+    When algo=0 (None), reads compressed_len bytes and returns them directly.
+    Returns empty slice on error (invalid arena, out of range, decompression failure).
+    """
+    val raw = arena_readv_impl(arena_id, off, compressed_len)
+    if raw.len() == 0:
+        return []
+    if algo == 0:
+        return raw
+    val result = decompress_extent(raw, raw.len() as u32, decompressed_len as u32, algo)
+    if result.ok:
+        result.data
+    else:
+        []
+
+fn arena_readv_impl(arena_id: i64, off: i64, buf_len: i64) -> [u8]:
+    """Read `buf_len` bytes from `off`; returns the slice or empty on error.
+
+    Caller checks: empty result when arena invalid/discarded, or out-of-range.
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return []
+    val meta = _metas[idx]
+    if meta.discarded:
+        return []
+
+    val src = _bufs[idx]
+    val src_len = src.len() as i64
+    if off < 0 or off >= src_len:
+        return []
+    var end = off + buf_len
+    if end > src_len:
+        end = src_len
+
+    var result: [u8] = []
+    var i = off
+    while i < end:
+        result.push(src[i as i64])
+        i = i + 1
+    result
+
+fn arena_seal_impl(arena_id: i64, generation: i64) -> bool:
+    """Seal the arena at `generation`; idempotent. Returns false if unknown.
+
+    FR-NVFS-N6a-003: if the arena is registered as encrypted, rotates its DEK
+    via nvfs_arena_seal_rotate before marking it sealed. Non-encrypted arenas
+    are unaffected. Rotation failure is non-fatal (returns true regardless).
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return false
+    val meta = _metas[idx]
+    if meta.discarded:
+        return false
+    # Idempotent
+    if meta.sealed:
+        return true
+
+    # Rotate DEK if this arena is encrypted (no-op for non-encrypted arenas).
+    val _ = nvfs_arena_seal_rotate(arena_id)
+
+    val updated = ArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: true,
+        discarded: false,
+        total_bytes: meta.total_bytes
+    )
+    _metas[idx] = updated
+    true
+
+fn arena_discard_impl(arena_id: i64) -> bool:
+    """Drop the arena. Returns false if arena_id unknown.
+
+    FR-NVFS-N7b-001: walks _extent_hashes[idx] and calls dedup_release for
+    each recorded content hash so the DDT refcount is correctly decremented.
+    When a refcount reaches zero the DDT entry is removed (physical block free
+    is the caller's responsibility in a full implementation).
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return false
+    val meta = _metas[idx]
+
+    # Release dedup refcounts for all extents appended via arena_append_deduped.
+    val hashes = _extent_hashes[idx]
+    var hi = 0
+    while hi < hashes.len():
+        val _ = dedup_release(hashes[hi])
+        hi = hi + 1
+    _extent_hashes[idx] = []
+
+    val updated = ArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: meta.sealed,
+        discarded: true,
+        total_bytes: meta.total_bytes
+    )
+    _metas[idx] = updated
+    # Clear buffer memory
+    _bufs[idx] = []
+    true
+
+fn arena_clone_range_impl(src: i64, src_off: i64, dst: i64, dst_off: i64, len: i64) -> i64:
+    """Copy `len` bytes from src arena at src_off into dst arena.
+
+    Returns bytes copied, or negative error code:
+      -1  InvalidArena  — src or dst unknown
+      -4  OutOfBounds   — src_off + len > src.total_bytes
+      -2  Sealed        — dst is sealed
+      -3  Discarded     — src or dst discarded
+    """
+    val src_idx = _find_index(src)
+    val dst_idx = _find_index(dst)
+    if src_idx < 0 or dst_idx < 0:
+        return -1
+
+    val src_meta = _metas[src_idx]
+    val dst_meta = _metas[dst_idx]
+
+    if src_meta.discarded or dst_meta.discarded:
+        return -3
+    if dst_meta.sealed:
+        return -2
+
+    val src_buf = _bufs[src_idx]
+    val src_total = src_buf.len() as i64
+    if src_off < 0 or src_off + len > src_total:
+        return -4
+
+    var dst_buf = _bufs[dst_idx]
+    var i = src_off
+    while i < src_off + len:
+        dst_buf.push(src_buf[i])
+        i = i + 1
+    _bufs[dst_idx] = dst_buf
+
+    val updated_dst = ArenaMeta(
+        arena_id: dst_meta.arena_id,
+        class_tag: dst_meta.class_tag,
+        hint_bytes: dst_meta.hint_bytes,
+        sealed: false,
+        discarded: false,
+        total_bytes: dst_meta.total_bytes + len
+    )
+    _metas[dst_idx] = updated_dst
+    len
+
+fn arena_preferred_granule_impl(arena_id: i64) -> i64:
+    """Return preferred I/O granule for the arena's class (4096 for N1)."""
+    4096
+
+fn arena_class_impl(arena_id: i64) -> i32:
+    """Return the StorageClass ordinal stored at creation time.
+
+    Returns -1 if arena_id is unknown or discarded.
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _metas[idx]
+    if meta.discarded:
+        return -1
+    meta.class_tag
+
+fn arena_total_bytes_impl(arena_id: i64) -> i64:
+    """Return total bytes appended; -1 if invalid."""
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _metas[idx]
+    if meta.discarded:
+        return -1
+    meta.total_bytes
+
+fn arena_is_sealed_impl(arena_id: i64) -> bool:
+    """Return true if arena is sealed."""
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return false
+    _metas[idx].sealed
+
+# TEST-ONLY: direct byte mutation for scrub corruption injection tests.
+# FR-NVFS-N4a-001: Expose a public mutation API for fault-injection beyond test scope.
+fn arena_mutate_for_test(arena_id: i64, offset: i64, byte: u8) -> bool:
+    """TEST-ONLY: Overwrite one byte in the arena buffer at offset.
+
+    Used by scrub_test to simulate storage corruption without going through
+    the write path (which would also update the pmap sidecar checksum).
+    Returns false if arena_id is unknown, discarded, or offset is out of range.
+    """
+    val idx = _find_index(arena_id)
+    if idx < 0:
+        return false
+    val meta = _metas[idx]
+    if meta.discarded:
+        return false
+    val buf_len = _bufs[idx].len() as i64
+    if offset < 0 or offset >= buf_len:
+        return false
+    _bufs[idx][offset] = byte
+    true

@@ -1,0 +1,179 @@
+# # Argument Parsing Specification
+#
+# **Feature IDs:** #3120
+# **Category:** Tooling
+# **Status:** In Progress
+#
+# Command-line argument parsing utilities for global flags, internal flags,
+# and language configuration. Provides structured parsing of CLI arguments
+# with support for flag values and option filtering.
+#
+# *Migrated from: src/driver/src/cli/commands/arg_parsing.rs*
+#
+# NOTE: This spec uses a local parser harness so it can exercise the expected
+# behavior without calling unsupported static methods from the bootstrap runtime.
+
+struct LocalGlobalFlags:
+    gc_log: bool
+    gc_off: bool
+    use_notui: bool
+    macro_trace: bool
+    debug_mode: bool
+    backend: text
+
+fn parse_global_flags(args: [text]) -> LocalGlobalFlags:
+    var backend = "auto"
+    LocalGlobalFlags(
+        gc_log: args.any(\arg: arg == "--gc-log"),
+        gc_off: args.any(\arg: arg == "--gc=off" or arg == "--gc=OFF"),
+        use_notui: args.any(\arg: arg == "--notui"),
+        macro_trace: args.any(\arg: arg == "--macro-trace"),
+        debug_mode: args.any(\arg: arg == "--debug"),
+        backend: backend
+    )
+
+fn parse_fixed_backend(args: [text]) -> LocalGlobalFlags:
+    var backend = "auto"
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
+        elif arg.starts_with("--backend="):
+            backend = arg[10:]
+        elif arg == "--fixed-be":
+            backend = "llvm"
+        elif arg.starts_with("--fixed-be="):
+            val fixed_backend = arg[11:]
+            backend = if fixed_backend == "": "llvm" else: fixed_backend
+        i = i + 1
+
+    LocalGlobalFlags(
+        gc_log: false,
+        gc_off: false,
+        use_notui: false,
+        macro_trace: false,
+        debug_mode: false,
+        backend: backend
+    )
+
+fn parse_lang_flag_value(args: [text]) -> text?:
+    var i = 0
+    while i < args.len():
+        if args[i] == "--lang" and i + 1 < args.len():
+            return args[i + 1]
+        i = i + 1
+
+    nil
+
+fn filter_internal_flags(args: [text]) -> [text]:
+    var filtered: [text] = []
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+
+        val is_single_flag = arg.starts_with("--gc") or arg == "--notui" or arg == "--startup-metrics" or arg == "--macro-trace" or arg == "--debug" or arg == "--sandbox" or arg == "--no-network"
+        if is_single_flag:
+            i = i + 1
+            continue
+
+        val is_value_flag = arg == "--time-limit" or arg == "--memory-limit" or arg == "--fd-limit" or arg == "--thread-limit" or arg == "--network-allow" or arg == "--network-block" or arg == "--read-only" or arg == "--read-write" or arg == "--lang"
+        if is_value_flag:
+            i = i + 2
+            continue
+
+        filtered = filtered + [arg]
+        i = i + 1
+
+    filtered
+
+describe "GlobalFlags parsing":
+    context "parses gc_log and debug_mode flags":
+        it "sets gc_log to true":
+            val flags = parse_global_flags(["--gc-log"])
+            expect(flags.gc_log).to_equal(true)
+            expect(flags.gc_off).to_equal(false)
+
+        it "sets debug_mode to true":
+            val flags = parse_global_flags(["--debug"])
+            expect(flags.debug_mode).to_equal(true)
+            expect(flags.gc_log).to_equal(false)
+
+        it "keeps gc_off false when unrelated flags are present":
+            val flags = parse_global_flags(["--notui"])
+            expect(flags.gc_off).to_equal(false)
+
+    context "parses gc_off flag":
+        it "recognizes lowercase --gc=off":
+            val flags = parse_global_flags(["--gc=off"])
+            expect(flags.gc_off).to_equal(true)
+
+        it "recognizes uppercase --gc=OFF":
+            val flags = parse_global_flags(["--gc=OFF"])
+            expect(flags.gc_off).to_equal(true)
+
+    context "parses other flags":
+        it "sets macro_trace to true":
+            val flags = parse_global_flags(["--macro-trace"])
+            expect(flags.macro_trace).to_equal(true)
+
+        it "sets use_notui to true":
+            val flags = parse_global_flags(["--notui"])
+            expect(flags.use_notui).to_equal(true)
+
+    context "parses fixed backend flags":
+        it "defaults --fixed-be to llvm":
+            val flags = parse_fixed_backend(["--fixed-be"])
+            expect(flags.backend).to_equal("llvm")
+
+        it "keeps an explicit fixed backend":
+            val flags = parse_fixed_backend(["--fixed-be=llvm-lib"])
+            expect(flags.backend).to_equal("llvm-lib")
+
+        it "normalizes an empty fixed backend value to llvm":
+            val flags = parse_fixed_backend(["--fixed-be="])
+            expect(flags.backend).to_equal("llvm")
+
+        it "lets fixed-be override an earlier backend flag":
+            val flags = parse_fixed_backend(["--backend=cranelift", "--fixed-be"])
+            expect(flags.backend).to_equal("llvm")
+
+describe "filter_internal_flags":
+    context "removes single flags":
+        it "keeps only user arguments":
+            val args = ["simple", "run", "--gc-log", "--debug", "test/example.spl"]
+            val filtered = filter_internal_flags(args)
+            expect(filtered.len()).to_equal(3)
+            expect(filtered[0]).to_equal("simple")
+            expect(filtered[1]).to_equal("run")
+            expect(filtered[2]).to_equal("test/example.spl")
+
+    context "removes flags with values":
+        it "removes both flag and value":
+            val args = ["simple", "--time-limit", "120", "--lang", "ko", "test/example.spl"]
+            val filtered = filter_internal_flags(args)
+            expect(filtered.len()).to_equal(2)
+            expect(filtered[0]).to_equal("simple")
+            expect(filtered[1]).to_equal("test/example.spl")
+
+    context "handles mixed flags":
+        it "filters correctly":
+            val args = ["simple", "--sandbox", "--read-only", "fixtures", "run", "--no-network", "test/example.spl", "--gc=off"]
+            val filtered = filter_internal_flags(args)
+            expect(filtered.len()).to_equal(3)
+            expect(filtered[0]).to_equal("simple")
+            expect(filtered[1]).to_equal("run")
+            expect(filtered[2]).to_equal("test/example.spl")
+
+describe "parse_lang_flag":
+    context "sets environment variable":
+        it "extracts the lang value safely":
+            val lang = parse_lang_flag_value(["simple", "--lang", "ko", "run"])
+            expect(lang.?).to_equal(true)
+            expect(lang? == "ko")
+
+        it "returns nil when lang flag is missing":
+            val lang = parse_lang_flag_value(["simple", "run"])
+            expect(lang.?).to_equal(false)

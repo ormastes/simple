@@ -1,0 +1,111 @@
+# Engine Time — Clock and FrameTime tests
+#
+# Tests Clock creation, tick behavior, fixed-step accumulation,
+# and FrameTime struct fields.
+
+use std.spec.{describe, it, expect}
+use std.common.engine.units.{Seconds}
+use std.nogc_sync_mut.engine.core.time.{Clock, FrameTime}
+
+describe "Engine Time":
+    describe "FrameTime":
+        it "stores delta and fixed_delta":
+            val ft = FrameTime(
+                delta: Seconds(value: 0.016),
+                fixed_delta: Seconds(value: 0.016),
+                total_time: Seconds(value: 0.016),
+                frame_count: 1
+            )
+            expect(ft.delta.value).to_equal(0.016)
+            expect(ft.fixed_delta.value).to_equal(0.016)
+
+        it "stores total time and frame count":
+            val ft = FrameTime(
+                delta: Seconds(value: 0.016),
+                fixed_delta: Seconds(value: 0.016),
+                total_time: Seconds(value: 1.5),
+                frame_count: 90
+            )
+            expect(ft.total_time.value).to_equal(1.5)
+            expect(ft.frame_count).to_equal(90)
+
+    describe "Clock":
+        it "creates with fixed timestep":
+            val clock = Clock.create(Seconds(value: 0.016))
+            expect(clock.frame_count).to_equal(0)
+            expect(clock.total_time.value).to_equal(0.0)
+            expect(clock.accumulator).to_equal(0.0)
+
+        it "first tick produces zero delta":
+            var clock = Clock.create(Seconds(value: 0.016))
+            val ft = clock.tick(1000000000)
+            expect(ft.delta.value).to_equal(0.0)
+            expect(ft.frame_count).to_equal(1)
+
+        it "second tick computes delta from elapsed nanoseconds":
+            var clock = Clock.create(Seconds(value: 0.016))
+            clock.tick(1000000000)
+            val ft = clock.tick(1016000000)
+            # 16ms = 0.016 seconds
+            expect(ft.delta.value).to_be_greater_than(0.015)
+            expect(ft.delta.value).to_be_less_than(0.017)
+            expect(ft.frame_count).to_equal(2)
+
+        it "clamps delta to maximum 0.1 seconds":
+            var clock = Clock.create(Seconds(value: 0.016))
+            clock.tick(1000000000)
+            # Jump 500ms ahead (would be 0.5s delta, clamped to 0.1)
+            val ft = clock.tick(1500000000)
+            expect(ft.delta.value).to_equal(0.1)
+
+        it "clamps negative delta to zero":
+            var clock = Clock.create(Seconds(value: 0.016))
+            clock.tick(2000000000)
+            # Go backwards in time
+            val ft = clock.tick(1000000000)
+            expect(ft.delta.value).to_equal(0.0)
+
+        it "accumulates total time across ticks":
+            var clock = Clock.create(Seconds(value: 0.016))
+            clock.tick(1000000000)
+            clock.tick(1016000000)
+            val ft = clock.tick(1032000000)
+            expect(ft.total_time.value).to_be_greater_than(0.03)
+            expect(ft.total_time.value).to_be_less_than(0.034)
+
+        it "consumes fixed steps from accumulator":
+            var clock = Clock.create(Seconds(value: 0.01))
+            clock.tick(1000000000)
+            # Add 50ms (should yield 5 steps at 10ms each)
+            clock.tick(1050000000)
+            val steps = clock.consume_fixed_steps()
+            expect(steps).to_equal(5)
+
+        it "returns zero steps when accumulator is below timestep":
+            var clock = Clock.create(Seconds(value: 0.1))
+            clock.tick(1000000000)
+            # Add only 16ms (below 100ms timestep)
+            clock.tick(1016000000)
+            val steps = clock.consume_fixed_steps()
+            expect(steps).to_equal(0)
+
+        it "retains leftover time in accumulator":
+            var clock = Clock.create(Seconds(value: 0.01))
+            clock.tick(1000000000)
+            # Add 25ms (2 steps of 10ms, 5ms leftover)
+            clock.tick(1025000000)
+            val steps = clock.consume_fixed_steps()
+            expect(steps).to_equal(2)
+            val leftover = clock.get_accumulator()
+            expect(leftover).to_be_greater_than(0.004)
+            expect(leftover).to_be_less_than(0.006)
+
+        it "computes interpolation alpha":
+            var clock = Clock.create(Seconds(value: 0.01))
+            clock.tick(1000000000)
+            clock.tick(1025000000)
+            clock.consume_fixed_steps()
+            val alpha = clock.get_interpolation_alpha()
+            # leftover ~5ms / 10ms timestep = ~0.5
+            expect(alpha).to_be_greater_than(0.4)
+            expect(alpha).to_be_less_than(0.6)

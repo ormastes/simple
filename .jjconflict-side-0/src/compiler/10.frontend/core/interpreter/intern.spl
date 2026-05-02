@@ -1,0 +1,84 @@
+# String Interning Pool for Interpreter
+#
+# Maps strings to unique i64 IDs for fast comparison.
+# All identifier lookups benefit from integer comparison O(1)
+# instead of full string comparison O(n).
+#
+# Usage:
+#   val id = intern(name)            # Get or create intern ID
+#   val s = intern_resolve(id)       # Reverse lookup: ID → string
+#   if id1 == id2: ...               # Fast comparison (i64 ==)
+
+# ===== Storage =====
+# Parallel arrays: intern_strings[id] = original string
+# Hash map: text -> id for dedup
+
+val INTERN_HM_SIZE: i64 = 512
+
+var intern_strings: [text] = []
+var intern_count: i64 = 0
+
+# Hash map for dedup: bucket heads + chains
+var intern_hm_keys: [text] = []
+var intern_hm_vals: [i64] = []
+var intern_hm_buckets: [i64] = []
+var intern_hm_nexts: [i64] = []
+var intern_initialized: bool = false
+
+fn intern_init():
+    if intern_initialized: return
+    intern_strings = []
+    intern_count = 0
+    intern_hm_keys = []
+    intern_hm_vals = []
+    intern_hm_nexts = []
+    intern_hm_buckets = []
+    var i: i64 = 0
+    while i < INTERN_HM_SIZE:
+        intern_hm_buckets.push(-1)
+        i = i + 1
+    intern_initialized = true
+
+fn intern(s: text) -> i64:
+    """Intern a string, returning its unique i64 ID.
+
+    Same string always returns same ID. Different strings get different IDs.
+    First call for a new string is O(n), subsequent calls are O(1) amortized.
+    """
+    if not intern_initialized:
+        intern_init()
+    # Lookup in hash map
+    val h = hm_hash_text(s)
+    val bucket = h % INTERN_HM_SIZE
+    var idx = intern_hm_buckets[bucket]
+    while idx != -1:
+        if intern_hm_keys[idx] == s:
+            return intern_hm_vals[idx]
+        idx = intern_hm_nexts[idx]
+    # Not found — add new entry
+    val id = intern_count
+    intern_strings.push(s)
+    intern_count = intern_count + 1
+    # Add to hash map
+    val entry_idx = intern_hm_keys.len()
+    intern_hm_keys.push(s)
+    intern_hm_vals.push(id)
+    intern_hm_nexts.push(intern_hm_buckets[bucket])
+    intern_hm_buckets[bucket] = entry_idx
+    id
+
+fn intern_resolve(id: i64) -> text:
+    """Resolve intern ID back to original string."""
+    if id < 0: return ""
+    if id >= intern_count: return ""
+    intern_strings[id]
+
+fn intern_reset():
+    """Reset the intern pool. Use between independent interpreter sessions."""
+    intern_initialized = false
+    intern_strings = []
+    intern_count = 0
+    intern_hm_keys = []
+    intern_hm_vals = []
+    intern_hm_buckets = []
+    intern_hm_nexts = []

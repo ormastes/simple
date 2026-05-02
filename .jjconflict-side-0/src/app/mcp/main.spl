@@ -1,0 +1,137 @@
+# MCP Server Entry Point
+#
+# Table-driven tool dispatch with ~100 tools (68 original + ~33 new CLI wrappers).
+# Uses only extern fn calls for I/O — no subprocess dispatch, no hangs.
+#
+# Architecture:
+#   - Zero stdlib imports: all JSON helpers and tool logic inlined
+#   - Table-driven dispatch: tool_table.spl defines all tool metadata
+#   - CLI passthrough: most tools delegate to bin/simple via cli_passthrough.spl
+#   - Fast startup (~200ms), fast tool calls (<1s)
+#
+# Module files:
+#   - tool_registry.spl        — McpToolEntry struct
+#   - tool_table.spl           — All tool definitions (name, schema, annotations, handler_kind)
+#   - cli_passthrough.spl      — Generic CLI passthrough handler for handler_kind="cli"
+#   - main_lazy_json.spl       — JSON helpers, tool result helpers, shell helpers
+#   - main_lazy_protocol.spl   — Protocol I/O, initialize, tools list, schemas, resources, prompts
+#   - main_lazy_diag_tools.spl — In-process diagnostic handlers (read, edit, multi_edit, status, api)
+#   - main_lazy_vcs_tools.spl  — VCS tool handlers (diff, log, squash, new, commit, push, rebase, pull)
+#   - main_lazy_debug_tools.spl — Debug session/breakpoint/variable handlers
+#   - main_lazy_debug_log_tools.spl — Debug log tool handlers
+#   - main_lazy_tasks.spl         — Background task manager
+#   - main_lazy_query_tools.spl   — Query + Analysis tool handlers (deps, context, api_diff, search)
+#   - main_lazy_test_daemon_tools.spl — Test daemon IPC handlers
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_exit(code: i64)
+
+use std.mcp_sdk.core.shell.{find_simple_binary as _sdk_find_simple_binary}
+
+fn _mcp_find_simple_binary() -> text:
+    _sdk_find_simple_binary()
+
+# Load split module implementations from sibling files.
+use .main_lazy_json
+use .main_lazy_protocol
+use .main_lazy_diag_tools
+use .main_lazy_vcs_tools
+use .main_lazy_debug_tools
+use .main_lazy_dialog_tools
+# main_lazy_debug_log_tools removed — debug log tools now CLI passthrough
+# main_lazy_tasks removed — task tools now CLI passthrough
+use .main_lazy_query_tools
+use .main_lazy_play_tools
+use .main_lazy_assistant
+use .main_static_tools
+use .main_dispatch
+# main_lazy_test_daemon_tools removed — test daemon tools now CLI passthrough
+use .tool_registry
+use .tool_table
+use .cli_passthrough
+use .dap_bridge
+use .startup_log
+
+val SERVER_NAME = "simple-mcp-full"
+val SERVER_VERSION = "4.0.0"
+val NL = "\n"
+
+# Protocol auto-detection
+var USE_JSON_LINES = false
+
+# Caches
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
+
+# Debug session state managed by dap_bridge.spl (DapSession class)
+
+# MCP log level (protocol-level, not debug log)
+var MCP_LOG_LEVEL = "info"
+
+# --- Server loop ---
+
+fn start_server():
+    var running = true
+    while running:
+        var line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            var method = extract_field(line, "method")
+            var id = extract_id(line)
+            var response = ""
+            if method == "initialize":
+                response = make_init_response(id)
+            elif method == "initialized" or method == "notifications/initialized":
+                response = ""
+            elif method == "shutdown":
+                response = make_json_result(id, "null")
+            elif method == "tools/list":
+                response = make_json_result(id, _mcp_static_tools_result())
+            elif method == "tools/call":
+                var tool_name = extract_nested(line, "name")
+                response = dispatch_tool(id, tool_name, line)
+            elif method == "resources/list":
+                response = handle_resources_list(id)
+            elif method == "resources/templates/list":
+                response = handle_resource_templates_list(id)
+            elif method == "resources/read":
+                val uri = extract_nested(line, "uri")
+                response = handle_resources_read(id, uri)
+            elif method == "prompts/list":
+                response = handle_prompts_list(id)
+            elif method == "prompts/get":
+                val prompt_name = extract_nested(line, "name")
+                response = handle_prompts_get(id, prompt_name, line)
+            elif method == "completion/complete" or method == "completions/complete":
+                response = handle_completion_req(id, line)
+            elif method == "logging/setLevel":
+                val level = extract_nested(line, "level")
+                if level != "":
+                    MCP_LOG_LEVEL = level
+                response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
+            elif method == "roots/list":
+                val cwd = get_cwd()
+                var root = LB()
+                root = root + jp("uri", js("file://" + cwd))
+                root = root + "," + jp("name", js("workspace"))
+                root = root + RB()
+                response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
+            elif method == "ping":
+                response = make_json_result(id, LB() + RB())
+            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+                response = ""
+            else:
+                if id != "" and id != "null":
+                    response = make_error(id, -32601, "Method not found: " + method)
+            if response != "":
+                write_stdout_message(response)
+
+fn main() -> i64:
+    start_server()
+    rt_exit(0)
+    0

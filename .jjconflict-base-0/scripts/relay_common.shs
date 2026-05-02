@@ -1,0 +1,162 @@
+#!/bin/sh
+# Shared helpers for USB relay control scripts.
+# Source this file; do not execute directly.
+#
+# Detects Arduino-style USB relay boards that appear as /dev/ttyACM* or
+# /dev/ttyUSB* and communicates via simple text serial commands.
+#
+# Environment variables (all optional):
+#   RELAY_DEVICE        Explicit device path (skips auto-detection)
+#   RELAY_USB_VID       USB vendor  ID for detection (default: 1a86, CH340)
+#   RELAY_USB_PID       USB product ID for detection (default: 7523, CH340)
+#   RELAY_BAUD          Serial baud rate             (default: 9600)
+#   RELAY_CMD_ON        Command for relay ON          (default: ON)
+#   RELAY_CMD_OFF       Command for relay OFF         (default: OFF)
+#   RELAY_CMD_STATE     Command to query state        (default: STATE)
+#   RELAY_CMD_TOGGLE    Command to toggle relay       (default: TOGGLE)
+#   RELAY_LOCK_TIMEOUT  Seconds to wait for flock     (default: 5)
+#   RELAY_READ_TIMEOUT  Seconds to wait for response  (default: 2)
+#   RELAY_RESET_DELAY   Seconds between off and on    (default: 2)
+
+RELAY_USB_VID="${RELAY_USB_VID:-1a86}"
+RELAY_USB_PID="${RELAY_USB_PID:-7523}"
+RELAY_BAUD="${RELAY_BAUD:-9600}"
+RELAY_CMD_ON="${RELAY_CMD_ON:-ON}"
+RELAY_CMD_OFF="${RELAY_CMD_OFF:-OFF}"
+RELAY_CMD_STATE="${RELAY_CMD_STATE:-STATE}"
+RELAY_CMD_TOGGLE="${RELAY_CMD_TOGGLE:-TOGGLE}"
+RELAY_LOCK_TIMEOUT="${RELAY_LOCK_TIMEOUT:-5}"
+RELAY_READ_TIMEOUT="${RELAY_READ_TIMEOUT:-2}"
+RELAY_RESET_DELAY="${RELAY_RESET_DELAY:-2}"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+relay_log() {
+    printf '[RELAY] %s\n' "$*" >&2
+}
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+has_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# Device detection
+# ---------------------------------------------------------------------------
+
+# Resolve the USB relay serial device.  Sets RELAY_DEVICE on success.
+# Priority: env override -> VID:PID via lsusb+sysfs -> first /dev/ttyACM* or ttyUSB*
+detect_relay_device() {
+    # 1. Explicit override
+    if [ -n "${RELAY_DEVICE:-}" ]; then
+        if [ -c "$RELAY_DEVICE" ]; then
+            relay_log "Using device from RELAY_DEVICE=$RELAY_DEVICE"
+            return 0
+        fi
+        relay_log "ERROR: RELAY_DEVICE=$RELAY_DEVICE is not a character device"
+        return 1
+    fi
+
+    # 2. VID:PID via lsusb + sysfs
+    if has_cmd lsusb; then
+        DEVICE_LINE="$(lsusb | grep -i "${RELAY_USB_VID}:${RELAY_USB_PID}" | head -n 1 || true)"
+        if [ -n "$DEVICE_LINE" ]; then
+            BUS="$(printf '%s\n' "$DEVICE_LINE" | awk '{print $2}')"
+            DEV="$(printf '%s\n' "$DEVICE_LINE" | awk '{print $4}' | tr -d ':')"
+            relay_log "Found USB device ${RELAY_USB_VID}:${RELAY_USB_PID} on bus $BUS dev $DEV"
+
+            # Walk sysfs to find the tty device node
+            for SYSDIR in /sys/bus/usb/devices/*; do
+                [ -d "$SYSDIR" ] || continue
+                SYSBUS="$(cat "$SYSDIR/busnum" 2>/dev/null || true)"
+                SYSDEV="$(cat "$SYSDIR/devnum" 2>/dev/null || true)"
+                # busnum is decimal, BUS from lsusb is zero-padded
+                if [ "$(printf '%d' "0$BUS" 2>/dev/null || echo "$BUS")" = "${SYSBUS:-}" ] && \
+                   [ "$(printf '%d' "0$DEV" 2>/dev/null || echo "$DEV")" = "${SYSDEV:-}" ]; then
+                    # Look for tty subdirectory (may be nested under interface)
+                    TTY_NODE="$(find "$SYSDIR" -maxdepth 4 -name 'ttyACM*' -o -name 'ttyUSB*' 2>/dev/null | head -n 1 || true)"
+                    if [ -n "$TTY_NODE" ]; then
+                        TTY_NAME="$(basename "$TTY_NODE")"
+                        RELAY_DEVICE="/dev/$TTY_NAME"
+                        if [ -c "$RELAY_DEVICE" ]; then
+                            relay_log "Detected $RELAY_DEVICE via VID:PID"
+                            return 0
+                        fi
+                    fi
+                fi
+            done
+        fi
+    fi
+
+    # 3. Fallback: first available ttyACM or ttyUSB
+    for PATTERN in /dev/ttyACM* /dev/ttyUSB*; do
+        for CANDIDATE in $PATTERN; do
+            [ -c "$CANDIDATE" ] || continue
+            RELAY_DEVICE="$CANDIDATE"
+            relay_log "Fallback: using first serial device $RELAY_DEVICE"
+            return 0
+        done
+    done
+
+    relay_log "ERROR: No USB relay device found."
+    relay_log "  - Plug in the relay and check: ls /dev/ttyACM* /dev/ttyUSB*"
+    relay_log "  - Or set RELAY_DEVICE=/dev/ttyXXXN explicitly"
+    relay_log "  - Ensure your user is in the 'dialout' group: sudo usermod -aG dialout \$USER"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Serial I/O
+# ---------------------------------------------------------------------------
+
+# Configure the serial port.  Call after detect_relay_device().
+serial_setup() {
+    # Prevent Arduino DTR reset on open; set baud, 8N1, raw mode
+    stty -F "$RELAY_DEVICE" "$RELAY_BAUD" cs8 -cstopb -parenb raw -echo -hupcl 2>/dev/null || \
+    stty -f "$RELAY_DEVICE" "$RELAY_BAUD" cs8 -cstopb -parenb raw -echo -hupcl 2>/dev/null || \
+        relay_log "WARN: stty configuration failed (non-fatal)"
+}
+
+# Send a command and capture the first line of response.
+# Usage: RESPONSE=$(serial_send "ON")
+# Uses flock for concurrency safety.
+serial_send() {
+    _CMD="$1"
+
+    serial_setup
+
+    if has_cmd flock; then
+        _RESPONSE="$(
+            flock -w "$RELAY_LOCK_TIMEOUT" 9 || { relay_log "ERROR: could not acquire lock on $RELAY_DEVICE"; exit 1; }
+            printf '%s\n' "$_CMD" > "$RELAY_DEVICE"
+            timeout "$RELAY_READ_TIMEOUT" head -n 1 < "$RELAY_DEVICE" 2>/dev/null || true
+        ) 9<"$RELAY_DEVICE""
+    else
+        # No flock available (e.g. macOS) — proceed without locking
+        printf '%s\n' "$_CMD" > "$RELAY_DEVICE"
+        _RESPONSE="$(timeout "$RELAY_READ_TIMEOUT" head -n 1 < "$RELAY_DEVICE" 2>/dev/null || true)"
+    fi
+
+    printf '%s' "$_RESPONSE"
+}
+
+# Send a command without reading a response (fire-and-forget).
+serial_send_noreply() {
+    _CMD="$1"
+
+    serial_setup
+
+    if has_cmd flock; then
+        (
+            flock -w "$RELAY_LOCK_TIMEOUT" 9 || { relay_log "ERROR: could not acquire lock on $RELAY_DEVICE"; exit 1; }
+            printf '%s\n' "$_CMD" > "$RELAY_DEVICE"
+        ) 9<"$RELAY_DEVICE"
+    else
+        printf '%s\n' "$_CMD" > "$RELAY_DEVICE"
+    fi
+}

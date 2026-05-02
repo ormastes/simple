@@ -1,0 +1,144 @@
+"""
+# ECS Stdlib Specification
+**Feature IDs:** #MDSOC-PLUS-ECS-STDLIB
+**Category:** Library / Architecture
+**Status:** In Progress
+
+Verifies the ECS primitives (`Entity`, `EntityAllocator`, `ComponentStore<T>`,
+`WorldBase`, `Scheduler`, `ChangeTracker`) introduced for MDSOC+ userland
+services. These types are the shared building blocks for per-service Worlds.
+"""
+use std.spec.*
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.change_detection.{ChangeTracker}
+use std.ecs.system.{Scheduler}
+use std.ecs.world.{WorldBase}
+
+struct Position:
+    x: i32
+    y: i32
+
+describe "ECS Entity allocator":
+    """Generational indices, free-list reuse, staleness detection."""
+
+    it "allocates distinct entities":
+        var alloc = EntityAllocator.new()
+        val a = alloc.alloc()
+        val b = alloc.alloc()
+        expect a.id.to_equal(0)
+        expect b.id.to_equal(1)
+        expect alloc.len().to_equal(2)
+
+    it "reports null entity as not live":
+        var alloc = EntityAllocator.new()
+        val n = Entity.null()
+        expect n.is_null().to_equal(true)
+        expect alloc.is_live(n).to_equal(false)
+
+    it "bumps generation on reuse so stale handles do not alias":
+        var alloc = EntityAllocator.new()
+        val a = alloc.alloc()
+        val freed = alloc.free(a)
+        val b = alloc.alloc()
+        expect freed.to_equal(true)
+        expect b.id.to_equal(a.id)
+        expect alloc.is_live(a).to_equal(false)
+        expect alloc.is_live(b).to_equal(true)
+
+    it "rejects double-free of stale handles":
+        var alloc = EntityAllocator.new()
+        val a = alloc.alloc()
+        val first = alloc.free(a)
+        val second = alloc.free(a)
+        expect first.to_equal(true)
+        expect second.to_equal(false)
+
+describe "ECS ComponentStore":
+    """Sparse-set insert / remove / contains with tick stamping."""
+
+    it "inserts and reads back a component":
+        var alloc = EntityAllocator.new()
+        var store: ComponentStore<Position> = ComponentStore.new()
+        val e = alloc.alloc()
+        val inserted = store.insert(e, Position(x: 3, y: 4), 1)
+        expect inserted.to_equal(true)
+        expect store.contains(e).to_equal(true)
+        expect store.len().to_equal(1)
+
+    it "remove uses swap-with-last to keep dense packed":
+        var alloc = EntityAllocator.new()
+        var store: ComponentStore<Position> = ComponentStore.new()
+        val a = alloc.alloc()
+        val b = alloc.alloc()
+        val c = alloc.alloc()
+        store.insert(a, Position(x: 1, y: 1), 1)
+        store.insert(b, Position(x: 2, y: 2), 1)
+        store.insert(c, Position(x: 3, y: 3), 1)
+        val removed = store.remove(b)
+        expect removed.to_equal(true)
+        expect store.len().to_equal(2)
+        expect store.contains(a).to_equal(true)
+        expect store.contains(b).to_equal(false)
+        expect store.contains(c).to_equal(true)
+
+    it "records last-modified tick on insert and touch":
+        var alloc = EntityAllocator.new()
+        var store: ComponentStore<Position> = ComponentStore.new()
+        val e = alloc.alloc()
+        store.insert(e, Position(x: 0, y: 0), 5)
+        val slot = store.get_slot(e)
+        val tick_before = store.tick_at(slot)
+        val touched = store.touch(e, 9)
+        val tick_after = store.tick_at(slot)
+        expect tick_before.to_equal(5)
+        expect touched.to_equal(true)
+        expect tick_after.to_equal(9)
+
+describe "ECS ChangeTracker":
+    """Per-system bookmark that drives Added / Changed / Removed."""
+
+    it "marks a slot as changed when its tick exceeds the bookmark":
+        var t = ChangeTracker.new()
+        t.bookmark(5)
+        val changed = t.is_changed_since(7)
+        val unchanged = t.is_changed_since(5)
+        expect changed.to_equal(true)
+        expect unchanged.to_equal(false)
+
+    it "drains removed events and leaves queue empty":
+        var t = ChangeTracker.new()
+        t.push_removed(Entity(id: 1, generation: 1), 2)
+        t.push_removed(Entity(id: 2, generation: 1), 3)
+        val drained = t.drain_removed()
+        val empty_again = t.drain_removed()
+        expect drained.len().to_equal(2)
+        expect empty_again.len().to_equal(0)
+
+describe "ECS Scheduler":
+    """Insertion-order systems, enable/disable flag, monotonic tick."""
+
+    it "advances tick on each step":
+        var s = Scheduler.new()
+        val before = s.now()
+        s.step(0)
+        s.step(0)
+        val after = s.now()
+        expect before.to_equal(0)
+        expect after.to_equal(2)
+
+describe "ECS WorldBase":
+    """Shared base used by service Worlds (PM, VFS, WM)."""
+
+    it "composes an EntityAllocator + Scheduler + tick counter":
+        var base = WorldBase.new()
+        val e = base.spawn()
+        val live_before = base.is_live(e)
+        base.advance()
+        val tick_after = base.now()
+        val freed = base.despawn(e)
+        val live_after = base.is_live(e)
+        expect live_before.to_equal(true)
+        expect tick_after.to_equal(1)
+        expect freed.to_equal(true)
+        expect live_after.to_equal(false)

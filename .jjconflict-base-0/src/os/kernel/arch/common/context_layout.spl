@@ -1,0 +1,72 @@
+# Context Layout — shared register-save-area helpers + frame templates.
+#
+# Per-arch context.spl modules implement save/restore via inline asm; the
+# layout decisions (stack-frame template, alignment, callee-saved set,
+# initial-frame builder for a new task) are common idioms. This module
+# captures the templates so per-arch context.spl files just plug in
+# arch-specific register names.
+#
+# Wave 2 — added 2026-04-25 for AC-3 helper extraction.
+
+# Stack alignment requirements at function entry:
+#   x86_64 / arm64 / rv64: 16 bytes
+#   x86_32 / arm32 / rv32: 8 bytes (rv32 baseline; some toolchains require 16)
+@repr("C")
+struct StackAlignReq:
+    """Per-arch stack alignment at function entry."""
+    bytes: u32
+
+fn stack_align_x86_64()  -> StackAlignReq: StackAlignReq(bytes: 16)
+fn stack_align_x86_32()  -> StackAlignReq: StackAlignReq(bytes: 8)
+fn stack_align_arm64()   -> StackAlignReq: StackAlignReq(bytes: 16)
+fn stack_align_arm32()   -> StackAlignReq: StackAlignReq(bytes: 8)
+fn stack_align_riscv64() -> StackAlignReq: StackAlignReq(bytes: 16)
+fn stack_align_riscv32() -> StackAlignReq: StackAlignReq(bytes: 16)
+
+# Round a stack pointer DOWN to the alignment boundary.
+fn align_stack_down(sp: u64, align: StackAlignReq) -> u64:
+    val mask: u64 = (align.bytes as u64) - 1
+    sp & ~mask
+
+# Round a stack pointer UP to the alignment boundary.
+fn align_stack_up(sp: u64, align: StackAlignReq) -> u64:
+    val mask: u64 = (align.bytes as u64) - 1
+    (sp + mask) & ~mask
+
+# Frame template — describes the fixed layout the kernel uses for a new
+# task's initial stack: a return-address slot + saved-frame-pointer slot
+# + a small redzone. Per-arch context.spl extends with actual register
+# saves on top of this template.
+@repr("C")
+struct FrameTemplate:
+    """Initial-frame layout for a freshly-created task stack."""
+    return_addr_offset: u32
+    saved_fp_offset:    u32
+    redzone_bytes:      u32
+    total_bytes:        u32
+
+fn frame_template_default() -> FrameTemplate:
+    """Conservative template that fits all 6 archs' requirements."""
+    FrameTemplate(
+        return_addr_offset: 0,
+        saved_fp_offset: 8,
+        redzone_bytes: 128,
+        total_bytes: 256,
+    )
+
+# Build an initial sp for a task with `entry`/`stack_top`.
+# `align` is the per-arch alignment; `tmpl` is the frame template.
+# Returns the stack pointer to load when the task first runs.
+fn build_initial_sp(stack_top: u64, align: StackAlignReq, tmpl: FrameTemplate) -> u64:
+    val redzoned: u64 = stack_top - (tmpl.redzone_bytes as u64)
+    val framed:   u64 = redzoned - (tmpl.total_bytes as u64)
+    align_stack_down(framed, align)
+
+# Per-arch callee-saved register count — used by harness/heap budget
+# calculation when sizing TaskControlBlock storage.
+fn callee_saved_count_x86_64()  -> u32: 7        # rbx, rbp, r12-r15, rip
+fn callee_saved_count_x86_32()  -> u32: 5        # ebx, esi, edi, ebp, eip
+fn callee_saved_count_arm64()   -> u32: 12       # x19-x30 (excl sp)
+fn callee_saved_count_arm32()   -> u32: 8        # r4-r11
+fn callee_saved_count_riscv64() -> u32: 13       # ra, sp, s0-s11 (s2-s11 = 10)
+fn callee_saved_count_riscv32() -> u32: 13

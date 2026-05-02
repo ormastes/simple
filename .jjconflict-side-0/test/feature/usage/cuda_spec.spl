@@ -1,0 +1,56 @@
+"""
+# CUDA Backend
+
+Real CUDA backend checks through the Simple `std.nogc_async_mut.cuda` surface.
+These tests run against the compiled runtime rather than stub helpers.
+"""
+
+use std.spec
+use std.nogc_async_mut.cuda
+
+fn invalid_ptx() -> text:
+    "this is not valid PTX"
+
+describe "CUDA runtime surface":
+    it "reports an internally consistent availability state":
+        val available = cuda.cuda_available()
+        val count = cuda.cuda_device_count()
+
+        if available:
+            expect(count).to_be_greater_than(0)
+        else:
+            expect(count).to_equal(0)
+
+    it "returns a stable init result":
+        val init_rc = cuda.cuda_init()
+        val available = cuda.cuda_available()
+        val count = cuda.cuda_device_count()
+
+        if available:
+            expect(init_rc).to_equal(cuda.CUDA_SUCCESS)
+            expect(count).to_be_greater_than(0)
+        else:
+            expect(count).to_equal(0)
+            expect(init_rc == cuda.CUDA_SUCCESS or init_rc == cuda.CUDA_ERROR_NOT_INITIALIZED or init_rc == cuda.CUDA_ERROR_NO_DEVICE).to_equal(true)
+
+    it "reports device metadata when CUDA is available":
+        if cuda.cuda_available():
+            val device = cuda.cuda_device_get(0)
+            val name = cuda.cuda_device_name(device)
+            val cc = cuda.cuda_device_compute_capability(device)
+            expect(device).to_be_greater_than(-1)
+            expect(name.len()).to_be_greater_than(0)
+            expect(cc).to_be_greater_than(0)
+        else:
+            expect(cuda.cuda_device_count()).to_equal(0)
+
+    it "maps known error codes to text":
+        val msg = cuda.cuda_get_error_string(cuda.CUDA_ERROR_NOT_INITIALIZED)
+        expect(msg).to_contain("NOT_INITIALIZED")
+
+    it "rejects invalid PTX when CUDA is available":
+        val module = cuda.cuda_module_load_data(invalid_ptx())
+        if cuda.cuda_available():
+            expect(module).to_be_less_than(0)
+        else:
+            expect(module).to_equal(cuda.CUDA_ERROR_NOT_INITIALIZED)

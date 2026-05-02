@@ -1,0 +1,838 @@
+# Solitaire -- Klondike Card Game
+#
+# Standard Klondike solitaire with 52-card deck, 7 tableau piles,
+# 4 foundation piles, stock and waste. Keyboard-driven interface
+# with card display as [Rank Suit] text widgets.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Card
+# =========================================================================
+
+struct Card:
+    """A playing card with rank (1-13), suit (0-3), and face-up state."""
+    rank: i32
+    suit: i32
+    face_up: bool
+
+# =========================================================================
+# Suit / Rank Helpers
+# =========================================================================
+
+fn _suit_char(suit: i32) -> text:
+    """Return single-char suit label: H, D, C, S."""
+    match suit:
+        0 => "H"
+        1 => "D"
+        2 => "C"
+        3 => "S"
+        _ => "?"
+
+fn _rank_char(rank: i32) -> text:
+    """Return rank label: A, 2-10, J, Q, K."""
+    match rank:
+        1  => "A"
+        2  => "2"
+        3  => "3"
+        4  => "4"
+        5  => "5"
+        6  => "6"
+        7  => "7"
+        8  => "8"
+        9  => "9"
+        10 => "10"
+        11 => "J"
+        12 => "Q"
+        13 => "K"
+        _  => "?"
+
+fn _card_text(card: Card) -> text:
+    """Format a card for display. Face-down cards show [###]."""
+    if not card.face_up:
+        return "[###]"
+    val r = _rank_char(card.rank)
+    val s = _suit_char(card.suit)
+    return "[{r} {s}]"
+
+fn _suit_is_red(suit: i32) -> bool:
+    """Hearts (0) and Diamonds (1) are red."""
+    suit == 0 or suit == 1
+
+fn _can_stack_tableau(top: Card, bottom: Card) -> bool:
+    """Check if top card can be placed on bottom card in tableau.
+
+    Requires alternating color and descending rank (bottom.rank == top.rank + 1).
+    """
+    val top_red = _suit_is_red(top.suit)
+    val bottom_red = _suit_is_red(bottom.suit)
+    if top_red == bottom_red:
+        return false
+    return bottom.rank == top.rank + 1
+
+fn _can_stack_foundation(card: Card, pile: [Card]) -> bool:
+    """Check if card can go on a foundation pile.
+
+    Empty pile accepts Aces only. Otherwise same suit, ascending rank.
+    """
+    if pile.len() == 0:
+        return card.rank == 1
+    val top = pile[pile.len() - 1]
+    return card.suit == top.suit and card.rank == top.rank + 1
+
+# =========================================================================
+# Solitaire App
+# =========================================================================
+
+class SolitaireApp:
+    """Klondike solitaire card game.
+
+    7 tableau piles, 4 foundation piles, stock and waste.
+    Keyboard-driven: 1-7 for tableau, s for stock, w for waste,
+    f1-f4 for foundations, Enter to pick up / place cards.
+    """
+    tableau_0: [Card]
+    tableau_1: [Card]
+    tableau_2: [Card]
+    tableau_3: [Card]
+    tableau_4: [Card]
+    tableau_5: [Card]
+    tableau_6: [Card]
+    found_0: [Card]
+    found_1: [Card]
+    found_2: [Card]
+    found_3: [Card]
+    stock: [Card]
+    waste: [Card]
+    selected_pile: i32
+    selected_count: i32
+    holding: [Card]
+    moves: i32
+    game_won: bool
+    seed: i32
+    status_message: text
+
+impl SolitaireApp:
+
+    static fn new() -> SolitaireApp:
+        """Create a new solitaire game, dealt and ready to play."""
+        var app = SolitaireApp(
+            tableau_0: [], tableau_1: [], tableau_2: [],
+            tableau_3: [], tableau_4: [], tableau_5: [],
+            tableau_6: [],
+            found_0: [], found_1: [], found_2: [], found_3: [],
+            stock: [], waste: [],
+            selected_pile: 0,
+            selected_count: 1,
+            holding: [],
+            moves: 0,
+            game_won: false,
+            seed: 42,
+            status_message: "Welcome to Solitaire! Keys: 1-7 tableau, s stock, w waste, f/g/h/j foundations, Enter pick/place"
+        )
+        app.deal()
+        return app
+
+    # -- Deck and Deal -------------------------------------------------------
+
+    me deal():
+        """Shuffle a 52-card deck and deal into tableau and stock."""
+        # Build ordered deck
+        var deck = []
+        var s = 0
+        while s < 4:
+            var r = 1
+            while r <= 13:
+                deck = deck.push(Card(rank: r, suit: s, face_up: false))
+                r = r + 1
+            s = s + 1
+
+        # Deterministic shuffle using seed (Fisher-Yates variant)
+        deck = self._shuffle(deck)
+
+        # Clear all piles
+        self.tableau_0 = []
+        self.tableau_1 = []
+        self.tableau_2 = []
+        self.tableau_3 = []
+        self.tableau_4 = []
+        self.tableau_5 = []
+        self.tableau_6 = []
+        self.found_0 = []
+        self.found_1 = []
+        self.found_2 = []
+        self.found_3 = []
+        self.waste = []
+        self.holding = []
+
+        # Deal to tableau: pile i gets i+1 cards, top card face up
+        var idx = 0
+        var pile_num = 0
+        while pile_num < 7:
+            var cards_to_deal = pile_num + 1
+            var dealt = 0
+            while dealt < cards_to_deal:
+                var card = deck[idx]
+                if dealt == cards_to_deal - 1:
+                    card = Card(rank: card.rank, suit: card.suit, face_up: true)
+                self._push_to_tableau(pile_num, card)
+                idx = idx + 1
+                dealt = dealt + 1
+            pile_num = pile_num + 1
+
+        # Remaining cards go to stock
+        self.stock = []
+        while idx < 52:
+            self.stock = self.stock.push(deck[idx])
+            idx = idx + 1
+
+        self.selected_pile = 0
+        self.selected_count = 1
+        self.moves = 0
+        self.game_won = false
+        self.status_message = "New game dealt. Good luck!"
+
+    me _shuffle(deck: [Card]) -> [Card]:
+        """Deterministic Fisher-Yates shuffle using internal seed."""
+        var cards = deck
+        var i = cards.len() - 1
+        while i > 0:
+            self.seed = (self.seed * 1103515245 + 12345) % 2147483647
+            var j = self.seed % (i + 1)
+            if j < 0:
+                j = j * -1
+            # Swap cards[i] and cards[j]
+            val temp = cards[i]
+            cards[i] = cards[j]
+            cards[j] = temp
+            i = i - 1
+        return cards
+
+    # -- Tableau Access Helpers -----------------------------------------------
+
+    me _get_tableau(pile: i32) -> [Card]:
+        """Get a tableau pile by index (0-6)."""
+        match pile:
+            0 => self.tableau_0
+            1 => self.tableau_1
+            2 => self.tableau_2
+            3 => self.tableau_3
+            4 => self.tableau_4
+            5 => self.tableau_5
+            6 => self.tableau_6
+            _ => []
+
+    me _set_tableau(pile: i32, cards: [Card]):
+        """Set a tableau pile by index (0-6)."""
+        match pile:
+            0: self.tableau_0 = cards
+            1: self.tableau_1 = cards
+            2: self.tableau_2 = cards
+            3: self.tableau_3 = cards
+            4: self.tableau_4 = cards
+            5: self.tableau_5 = cards
+            6: self.tableau_6 = cards
+            _: pass_dn
+
+    me _push_to_tableau(pile: i32, card: Card):
+        """Push a card onto a tableau pile."""
+        match pile:
+            0: self.tableau_0 = self.tableau_0.push(card)
+            1: self.tableau_1 = self.tableau_1.push(card)
+            2: self.tableau_2 = self.tableau_2.push(card)
+            3: self.tableau_3 = self.tableau_3.push(card)
+            4: self.tableau_4 = self.tableau_4.push(card)
+            5: self.tableau_5 = self.tableau_5.push(card)
+            6: self.tableau_6 = self.tableau_6.push(card)
+            _: pass_dn
+
+    me _get_foundation(pile: i32) -> [Card]:
+        """Get a foundation pile by index (0-3)."""
+        match pile:
+            0 => self.found_0
+            1 => self.found_1
+            2 => self.found_2
+            3 => self.found_3
+            _ => []
+
+    me _set_foundation(pile: i32, cards: [Card]):
+        """Set a foundation pile by index (0-3)."""
+        match pile:
+            0: self.found_0 = cards
+            1: self.found_1 = cards
+            2: self.found_2 = cards
+            3: self.found_3 = cards
+            _: pass_dn
+
+    # -- Stock and Waste ------------------------------------------------------
+
+    me draw_from_stock():
+        """Draw one card from stock to waste, face up. Recycle waste if stock empty."""
+        if self.stock.len() == 0:
+            if self.waste.len() == 0:
+                self.status_message = "No cards to draw"
+                return
+            # Recycle waste back to stock (reversed, face down)
+            var new_stock = []
+            var i = self.waste.len() - 1
+            while i >= 0:
+                val c = self.waste[i]
+                new_stock = new_stock.push(Card(rank: c.rank, suit: c.suit, face_up: false))
+                i = i - 1
+            self.stock = new_stock
+            self.waste = []
+            self.status_message = "Stock recycled from waste"
+            return
+
+        # Draw top card from stock
+        val top_idx = self.stock.len() - 1
+        val card = self.stock[top_idx]
+        val face_card = Card(rank: card.rank, suit: card.suit, face_up: true)
+
+        # Remove from stock
+        var new_stock = []
+        var i = 0
+        while i < top_idx:
+            new_stock = new_stock.push(self.stock[i])
+            i = i + 1
+        self.stock = new_stock
+        self.waste = self.waste.push(face_card)
+        self.moves = self.moves + 1
+        self.status_message = "Drew {_card_text(face_card)}"
+
+    # -- Pick Up and Place ---------------------------------------------------
+
+    me pick_up_from_tableau(pile: i32, count: i32):
+        """Pick up count face-up cards from the bottom of a tableau pile."""
+        if self.holding.len() > 0:
+            self.status_message = "Already holding cards - place them first"
+            return
+        val cards = self._get_tableau(pile)
+        if cards.len() == 0:
+            self.status_message = "Tableau pile {pile + 1} is empty"
+            return
+
+        # Count face-up cards from the bottom
+        var face_up_count = 0
+        var i = cards.len() - 1
+        while i >= 0:
+            if cards[i].face_up:
+                face_up_count = face_up_count + 1
+            else:
+                i = 0  # break
+            i = i - 1
+
+        val actual_count = if count > face_up_count: face_up_count else: count
+        if actual_count == 0:
+            self.status_message = "No face-up cards to pick up"
+            return
+
+        # Grab the cards
+        val start = cards.len() - actual_count
+        var grabbed = []
+        var idx = start
+        while idx < cards.len():
+            grabbed = grabbed.push(cards[idx])
+            idx = idx + 1
+
+        # Remove from pile
+        var remaining = []
+        idx = 0
+        while idx < start:
+            remaining = remaining.push(cards[idx])
+            idx = idx + 1
+
+        self._set_tableau(pile, remaining)
+        self.holding = grabbed
+
+        val card_names = self._holding_text()
+        self.status_message = "Picked up {actual_count} card(s): {card_names}"
+
+    me pick_up_from_waste():
+        """Pick up the top card from waste."""
+        if self.holding.len() > 0:
+            self.status_message = "Already holding cards - place them first"
+            return
+        if self.waste.len() == 0:
+            self.status_message = "Waste is empty"
+            return
+
+        val top_idx = self.waste.len() - 1
+        val card = self.waste[top_idx]
+
+        # Remove from waste
+        var new_waste = []
+        var i = 0
+        while i < top_idx:
+            new_waste = new_waste.push(self.waste[i])
+            i = i + 1
+        self.waste = new_waste
+        self.holding = [card]
+        self.status_message = "Picked up {_card_text(card)} from waste"
+
+    me place_on_tableau(pile: i32):
+        """Try to place held cards on a tableau pile."""
+        if self.holding.len() == 0:
+            self.status_message = "Not holding any cards"
+            return
+        val target = self._get_tableau(pile)
+        val first_card = self.holding[0]
+
+        if target.len() == 0:
+            # Empty pile: only Kings allowed
+            if first_card.rank != 13:
+                self.status_message = "Only Kings can go on empty tableau piles"
+                return
+        else:
+            val top = target[target.len() - 1]
+            if not _can_stack_tableau(first_card, top):
+                self.status_message = "Cannot place {_card_text(first_card)} on {_card_text(top)}"
+                return
+
+        # Place all held cards
+        var new_pile = target
+        for card in self.holding:
+            new_pile = new_pile.push(card)
+        self._set_tableau(pile, new_pile)
+
+        self.moves = self.moves + 1
+        val count = self.holding.len()
+        self.holding = []
+        self._flip_top_cards()
+        self.status_message = "Placed {count} card(s) on pile {pile + 1}"
+        self._check_win()
+
+    me place_on_foundation(pile: i32):
+        """Try to place the held card on a foundation pile."""
+        if self.holding.len() == 0:
+            self.status_message = "Not holding any cards"
+            return
+        if self.holding.len() > 1:
+            self.status_message = "Can only place one card at a time on foundations"
+            return
+        val card = self.holding[0]
+        val target = self._get_foundation(pile)
+
+        if not _can_stack_foundation(card, target):
+            if target.len() == 0:
+                self.status_message = "Foundation {pile + 1} needs an Ace first"
+            else:
+                val top = target[target.len() - 1]
+                self.status_message = "Cannot place {_card_text(card)} on {_card_text(top)}"
+            return
+
+        var new_pile = target
+        new_pile = new_pile.push(card)
+        self._set_foundation(pile, new_pile)
+
+        self.moves = self.moves + 1
+        self.holding = []
+        self._flip_top_cards()
+        self.status_message = "Placed {_card_text(card)} on foundation {pile + 1}"
+        self._check_win()
+
+    me auto_foundation():
+        """Try to automatically move cards to foundations from waste and tableau tops."""
+        var moved = false
+        # Try waste top
+        if self.waste.len() > 0:
+            val card = self.waste[self.waste.len() - 1]
+            var f = 0
+            while f < 4:
+                val found = self._get_foundation(f)
+                if _can_stack_foundation(card, found):
+                    # Remove from waste
+                    var new_waste = []
+                    var i = 0
+                    while i < self.waste.len() - 1:
+                        new_waste = new_waste.push(self.waste[i])
+                        i = i + 1
+                    self.waste = new_waste
+                    var new_found = found
+                    new_found = new_found.push(card)
+                    self._set_foundation(f, new_found)
+                    self.moves = self.moves + 1
+                    moved = true
+                    self.status_message = "Auto: {_card_text(card)} to foundation {f + 1}"
+                    f = 4  # break
+                f = f + 1
+
+        # Try each tableau pile top card
+        var p = 0
+        while p < 7:
+            val pile = self._get_tableau(p)
+            if pile.len() > 0:
+                val card = pile[pile.len() - 1]
+                if card.face_up:
+                    var f = 0
+                    while f < 4:
+                        val found = self._get_foundation(f)
+                        if _can_stack_foundation(card, found):
+                            # Remove from tableau
+                            var new_pile = []
+                            var i = 0
+                            while i < pile.len() - 1:
+                                new_pile = new_pile.push(pile[i])
+                                i = i + 1
+                            self._set_tableau(p, new_pile)
+                            var new_found = found
+                            new_found = new_found.push(card)
+                            self._set_foundation(f, new_found)
+                            self.moves = self.moves + 1
+                            moved = true
+                            self._flip_top_cards()
+                            self.status_message = "Auto: {_card_text(card)} to foundation {f + 1}"
+                            f = 4  # break
+                        f = f + 1
+            p = p + 1
+
+        if not moved:
+            self.status_message = "No cards can be auto-moved to foundations"
+        self._check_win()
+
+    me cancel_holding():
+        """Put held cards back. For simplicity, place them on waste."""
+        if self.holding.len() == 0:
+            self.status_message = "Nothing to cancel"
+            return
+        for card in self.holding:
+            self.waste = self.waste.push(card)
+        self.holding = []
+        self.status_message = "Returned held cards to waste"
+
+    # -- Internal Helpers -----------------------------------------------------
+
+    me _flip_top_cards():
+        """Flip top face-down card in each tableau pile."""
+        var p = 0
+        while p < 7:
+            val pile = self._get_tableau(p)
+            if pile.len() > 0:
+                val top = pile[pile.len() - 1]
+                if not top.face_up:
+                    var new_pile = []
+                    var i = 0
+                    while i < pile.len() - 1:
+                        new_pile = new_pile.push(pile[i])
+                        i = i + 1
+                    new_pile = new_pile.push(Card(rank: top.rank, suit: top.suit, face_up: true))
+                    self._set_tableau(p, new_pile)
+            p = p + 1
+
+    me _check_win():
+        """Check if all 4 foundations have 13 cards."""
+        if (self.found_0.len() == 13 and self.found_1.len() == 13 and
+            self.found_2.len() == 13 and self.found_3.len() == 13):
+            self.game_won = true
+            self.status_message = "Congratulations! You won in {self.moves} moves!"
+
+    me _holding_text() -> text:
+        """Format held cards as text."""
+        var result = ""
+        var i = 0
+        while i < self.holding.len():
+            if i > 0:
+                result = "{result} "
+            result = "{result}{_card_text(self.holding[i])}"
+            i = i + 1
+        return result
+
+    me _foundation_top_text(pile: i32) -> text:
+        """Format the top card of a foundation pile, or empty marker."""
+        val cards = self._get_foundation(pile)
+        if cards.len() == 0:
+            return "[   ]"
+        return _card_text(cards[cards.len() - 1])
+
+    me _waste_top_text() -> text:
+        """Format the top card of the waste pile, or empty marker."""
+        if self.waste.len() == 0:
+            return "[   ]"
+        return _card_text(self.waste[self.waste.len() - 1])
+
+    me _stock_text() -> text:
+        """Format stock indicator showing count."""
+        if self.stock.len() == 0:
+            return "[   ]"
+        return "[{self.stock.len()}]"
+
+    me _pile_display_text(pile: i32) -> text:
+        """Format a tableau pile as a vertical text column."""
+        val cards = self._get_tableau(pile)
+        if cards.len() == 0:
+            return "(empty)"
+        var result = ""
+        var i = 0
+        while i < cards.len():
+            if i > 0:
+                result = "{result}\n"
+            result = "{result}{_card_text(cards[i])}"
+            i = i + 1
+        return result
+
+    # -- Input Handling -------------------------------------------------------
+
+    me handle_key(key: text):
+        """Map keyboard input to solitaire actions.
+
+        Keys:
+          1-7 : Select tableau pile (and pick up / place)
+          s   : Draw from stock
+          w   : Pick up from waste
+          f   : Place on foundation 1 (or pick count +1)
+          g   : Place on foundation 2
+          h   : Place on foundation 3
+          j   : Place on foundation 4
+          a   : Auto-move to foundation
+          n   : New game
+          Escape : Cancel held cards
+          Enter  : Pick up from selected pile
+          +/- : Increase/decrease selected count
+        """
+        if self.game_won:
+            match key:
+                "n" => self.deal()
+                _ => self.status_message = "Game over! Press 'n' for new game"
+            return
+
+        match key:
+            "1":
+                if self.holding.len() > 0:
+                    self.place_on_tableau(0)
+                else:
+                    self.selected_pile = 0
+                    self.status_message = "Selected pile 1"
+            "2":
+                if self.holding.len() > 0:
+                    self.place_on_tableau(1)
+                else:
+                    self.selected_pile = 1
+                    self.status_message = "Selected pile 2"
+            "3":
+                if self.holding.len() > 0:
+                    self.place_on_tableau(2)
+                else:
+                    self.selected_pile = 2
+                    self.status_message = "Selected pile 3"
+            "4":
+                if self.holding.len() > 0:
+                    self.place_on_tableau(3)
+                else:
+                    self.selected_pile = 3
+                    self.status_message = "Selected pile 4"
+            "5":
+                if self.holding.len() > 0:
+                    self.place_on_tableau(4)
+                else:
+                    self.selected_pile = 4
+                    self.status_message = "Selected pile 5"
+            "6":
+                if self.holding.len() > 0:
+                    self.place_on_tableau(5)
+                else:
+                    self.selected_pile = 5
+                    self.status_message = "Selected pile 6"
+            "7":
+                if self.holding.len() > 0:
+                    self.place_on_tableau(6)
+                else:
+                    self.selected_pile = 6
+                    self.status_message = "Selected pile 7"
+            "s" => self.draw_from_stock()
+            "w" => self.pick_up_from_waste()
+            "f" => self.place_on_foundation(0)
+            "g" => self.place_on_foundation(1)
+            "h" => self.place_on_foundation(2)
+            "j" => self.place_on_foundation(3)
+            "a" => self.auto_foundation()
+            "n" => self.deal()
+            "Escape" => self.cancel_holding()
+            "Enter":
+                if self.holding.len() == 0:
+                    self.pick_up_from_tableau(self.selected_pile, self.selected_count)
+                else:
+                    self.place_on_tableau(self.selected_pile)
+            "+":
+                self.selected_count = self.selected_count + 1
+                val pile = self._get_tableau(self.selected_pile)
+                if self.selected_count > pile.len():
+                    self.selected_count = pile.len()
+                if self.selected_count < 1:
+                    self.selected_count = 1
+                self.status_message = "Select count: {self.selected_count}"
+            "-":
+                self.selected_count = self.selected_count - 1
+                if self.selected_count < 1:
+                    self.selected_count = 1
+                self.status_message = "Select count: {self.selected_count}"
+            _ => pass_dn
+
+    me handle_action(action: text):
+        """Dispatch button action strings to game methods."""
+        match action:
+            "new_game" => self.deal()
+            "draw" => self.draw_from_stock()
+            "auto" => self.auto_foundation()
+            "cancel" => self.cancel_holding()
+            "pick_waste" => self.pick_up_from_waste()
+            "pick_up" => self.pick_up_from_tableau(self.selected_pile, self.selected_count)
+            "count_up":
+                self.selected_count = self.selected_count + 1
+                val pile = self._get_tableau(self.selected_pile)
+                if self.selected_count > pile.len():
+                    self.selected_count = pile.len()
+                if self.selected_count < 1:
+                    self.selected_count = 1
+                self.status_message = "Select count: {self.selected_count}"
+            "count_down":
+                self.selected_count = self.selected_count - 1
+                if self.selected_count < 1:
+                    self.selected_count = 1
+                self.status_message = "Select count: {self.selected_count}"
+            _:
+                if action.starts_with("select_"):
+                    val num_str = action.slice(7, action.len())
+                    val num = num_str.parse_i32()
+                    if num >= 1 and num <= 7:
+                        if self.holding.len() > 0:
+                            self.place_on_tableau(num - 1)
+                        else:
+                            self.selected_pile = num - 1
+                            self.selected_count = 1
+                            self.status_message = "Selected pile {num}"
+                    elif num >= 8 and num <= 11:
+                        self.place_on_foundation(num - 8)
+
+    # -- UI Construction ------------------------------------------------------
+
+    me build_ui() -> UISession:
+        """Build the solitaire UI.
+
+        Layout:
+          Menu bar
+          Foundations row: F1 F2 F3 F4  |  Stock  Waste
+          Holding indicator (if cards held)
+          Tableau columns 1-7 (vertical card stacks)
+          Control row: buttons for common actions
+          Status bar
+        """
+        # Foundation and stock/waste header row
+        val found_row = row("sol_found_row", [
+            with_flex(panel("f1_panel", "F1 H", [
+                label("f1_top", self._foundation_top_text(0)),
+                label("f1_count", "{self.found_0.len()}/13")
+            ]), 1),
+            with_flex(panel("f2_panel", "F2 D", [
+                label("f2_top", self._foundation_top_text(1)),
+                label("f2_count", "{self.found_1.len()}/13")
+            ]), 1),
+            with_flex(panel("f3_panel", "F3 C", [
+                label("f3_top", self._foundation_top_text(2)),
+                label("f3_count", "{self.found_2.len()}/13")
+            ]), 1),
+            with_flex(panel("f4_panel", "F4 S", [
+                label("f4_top", self._foundation_top_text(3)),
+                label("f4_count", "{self.found_3.len()}/13")
+            ]), 1),
+            label("sol_spacer", "  "),
+            panel("stock_panel", "Stock", [
+                label("stock_top", self._stock_text()),
+                label("stock_count", "{self.stock.len()} left")
+            ]),
+            panel("waste_panel", "Waste", [
+                label("waste_top", self._waste_top_text()),
+                label("waste_count", "{self.waste.len()} cards")
+            ])
+        ])
+
+        # Holding indicator
+        val holding_text = if self.holding.len() > 0:
+            "Holding: {self._holding_text()}"
+        else:
+            ""
+        val holding_row = row("sol_holding", [
+            label("holding_label", holding_text)
+        ])
+
+        # Build tableau columns
+        var tableau_widgets = []
+        var p = 0
+        while p < 7:
+            val pile = self._get_tableau(p)
+            val pile_idx = p + 1
+            val is_selected = p == self.selected_pile
+            val marker = if is_selected: ">" else: " "
+
+            # Build card list for this pile
+            var card_widgets = []
+            if pile.len() == 0:
+                card_widgets = card_widgets.push(
+                    label("tab_{p}_empty", "(empty)")
+                )
+            else:
+                var c = 0
+                while c < pile.len():
+                    card_widgets = card_widgets.push(
+                        label("tab_{p}_c_{c}", _card_text(pile[c]))
+                    )
+                    c = c + 1
+
+            val header_text = "{marker}Pile {pile_idx}"
+            val pile_panel = with_flex(panel("tab_{p}_panel", header_text, [
+                column("tab_{p}_cards", card_widgets)
+            ]), 1)
+            tableau_widgets = tableau_widgets.push(pile_panel)
+            p = p + 1
+
+        val tableau_row = row("sol_tableau_row", tableau_widgets)
+
+        # Control buttons row
+        val control_row = row("sol_controls", [
+            button("btn_draw", "Draw (s)", "draw"),
+            button("btn_waste", "Waste (w)", "pick_waste"),
+            button("btn_pick", "Pick (Enter)", "pick_up"),
+            button("btn_auto", "Auto (a)", "auto"),
+            button("btn_cancel", "Cancel (Esc)", "cancel"),
+            button("btn_up", "Count+", "count_up"),
+            button("btn_down", "Count-", "count_down"),
+            button("btn_new", "New (n)", "new_game")
+        ])
+
+        # Foundation target buttons
+        val found_btn_row = row("sol_found_btns", [
+            with_flex(button("btn_f1", "-> F1 (f)", "select_8"), 1),
+            with_flex(button("btn_f2", "-> F2 (g)", "select_9"), 1),
+            with_flex(button("btn_f3", "-> F3 (h)", "select_10"), 1),
+            with_flex(button("btn_f4", "-> F4 (j)", "select_11"), 1)
+        ])
+
+        # Win banner
+        val win_text = if self.game_won: "*** YOU WIN! ***" else: ""
+
+        val root = column("sol_root", [
+            menubar("sol_menu", [
+                "Game", "Help"
+            ]),
+            found_row,
+            holding_row,
+            label("sol_win", win_text),
+            with_flex(tableau_row, 1),
+            found_btn_row,
+            control_row,
+            statusbar("sol_status",
+                "Moves: {self.moves} | Pile: {self.selected_pile + 1} | Count: {self.selected_count}",
+                "Solitaire (Klondike)"
+            ),
+            text_widget("sol_msg", self.status_message)
+        ])
+
+        val tree = build_tree_with_title(root, "Solitaire", "dark")
+        UISession.new(tree)

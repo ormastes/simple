@@ -1,0 +1,109 @@
+# SYS-GUI-00X — Simple Browser single-window launcher lifecycle spec
+#
+# Covers the filesystem-backed `simple_browser` WM ownership contract used by
+# the x64 desktop/QEMU acceptance lane.
+
+use std.spec
+use os.desktop.shell.{DesktopShell}
+use os.compositor.compositor.{Compositor}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.input_backend.{InputBackend}
+use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
+use os.drivers.input.ps2_mouse.{MouseEvent}
+use os.services.launcher.launcher.{
+    launcher_init, launcher_record_process,
+    launcher_get_process_app_id_for_pid, launcher_get_process_window_count,
+    launcher_get_app_launch_state, launcher_get_app_window_count,
+    launcher_get_app_path, launcher_get_app_identity
+}
+use os.services.wm.wm_service.{WmAction}
+use os.apps.simple_browser.simple_browser.{
+    simple_browser_ready_marker, simple_browser_window_marker,
+    simple_browser_render_marker, simple_browser_start_page
+}
+
+class SilentInputBackend:
+    _unused: bool
+
+impl InputBackend for SilentInputBackend:
+    me poll_key() -> KeyEvent?:
+        nil
+
+    me poll_mouse() -> MouseEvent?:
+        nil
+
+    fn alt_held() -> bool:
+        false
+
+    fn shift_held() -> bool:
+        false
+
+    fn ctrl_held() -> bool:
+        false
+
+    fn key_to_char(key: Key) -> text?:
+        nil
+
+impl SilentInputBackend:
+    static fn new() -> SilentInputBackend:
+        SilentInputBackend(_unused: false)
+
+describe "Simple Browser launcher lifecycle":
+    it "exposes the built-in simple_browser manifest identity":
+        launcher_init()
+        expect(launcher_get_app_path(5)).to_equal("/sys/apps/simple_browser")
+        expect(launcher_get_app_identity(5)).to_equal("/sys/apps/simple_browser")
+
+    it "joins launcher pid, shell WM ownership, and compositor on one browser window":
+        launcher_init()
+        val pid: u64 = 9105
+        expect(launcher_record_process(pid, 5, "running", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        shell.apply_wm_action(_create_window_action("Simple Browser", pid, 501))
+
+        expect(shell.compositor.window_count()).to_equal(1)
+        val ids = shell.compositor.windows_for_process(pid)
+        expect(ids.len()).to_equal(1)
+        val wid = ids[0]
+        expect(shell.compositor.window_process_id(wid)).to_equal(pid)
+        expect(shell.compositor.window_app_id(wid)).to_equal("/sys/apps/simple_browser")
+        expect(shell.wm.window_owner_process_id(wid)).to_equal(pid)
+        expect(shell.wm.window_owner_app_id(wid)).to_equal("/sys/apps/simple_browser")
+        expect(launcher_get_process_app_id_for_pid(pid)).to_equal("/sys/apps/simple_browser")
+        expect(launcher_get_process_window_count(0)).to_equal(1)
+        expect(launcher_get_app_launch_state(5)).to_equal("running")
+        expect(launcher_get_app_window_count(5)).to_equal(1)
+
+    it "emits deterministic startup and render markers for about:network":
+        val pid: u64 = 9106
+        val wid: u64 = 77
+        expect(simple_browser_ready_marker(pid)).to_contain("app_id=/sys/apps/simple_browser")
+        expect(simple_browser_ready_marker(pid)).to_contain("page={simple_browser_start_page()}")
+        expect(simple_browser_window_marker(pid, wid)).to_contain("wid=77")
+        expect(simple_browser_render_marker(pid, wid)).to_contain("page={simple_browser_start_page()}")
+        expect(simple_browser_render_marker(pid, wid)).to_contain("renderer=simple_web")
+
+fn _make_test_shell() -> DesktopShell:
+    val backend = BrowserCompositorBackend.new(1024, 768)
+    val input = SilentInputBackend.new()
+    val compositor = Compositor.with_backends(backend, input, 1024, 768)
+    var shell = DesktopShell.new(compositor)
+    shell.set_task_reaper_enabled(false)
+    shell
+
+fn _create_window_action(title: text, process_id: u64, owner_port: u64) -> WmAction:
+    WmAction(
+        kind: "create_window",
+        window_id: 0,
+        title: title,
+        x: 32,
+        y: 48,
+        width: 640,
+        height: 480,
+        content: "",
+        process_id: process_id,
+        app_id: "",
+        owner_port: owner_port,
+        src_port: owner_port
+    )

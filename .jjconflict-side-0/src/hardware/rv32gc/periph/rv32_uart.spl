@@ -1,0 +1,72 @@
+"""
+# RV32 UART — 16550-compatible model
+"""
+
+val UART_FIFO_SIZE: i64 = 16
+val UART_RBR: i64 = 0
+val UART_THR: i64 = 0
+val UART_IER: i64 = 1
+val UART_LCR: i64 = 3
+val UART_LSR: i64 = 5
+val LSR_DATA_READY: i64 = 0x01
+val LSR_THR_EMPTY: i64 = 0x20
+val LSR_TEMT: i64 = 0x40
+
+class Rv32Uart:
+    rx_fifo: [i64]
+    tx_fifo: [i64]
+    rx_count: i64
+    tx_count: i64
+    ier: i64
+    lcr: i64
+
+    static fn create() -> Rv32Uart:
+        var rx: [i64] = []
+        var tx: [i64] = []
+        var idx = 0
+        while idx < UART_FIFO_SIZE:
+            rx.push(0)
+            tx.push(0)
+            idx = idx + 1
+        Rv32Uart(rx_fifo: rx, tx_fifo: tx, rx_count: 0, tx_count: 0, ier: 0, lcr: 0)
+
+    fn read_reg(offset: i64) -> i64:
+        if offset == UART_RBR and self.rx_count > 0:
+            return self.rx_fifo[0]
+        if offset == UART_IER:
+            return self.ier
+        if offset == UART_LCR:
+            return self.lcr
+        if offset == UART_LSR:
+            var lsr = LSR_THR_EMPTY or LSR_TEMT
+            if self.rx_count > 0:
+                lsr = lsr or LSR_DATA_READY
+            return lsr
+        0
+
+    me write_reg(offset: i64, value: i64):
+        val byte = value and 0xFF
+        if offset == UART_THR:
+            if self.tx_count < UART_FIFO_SIZE:
+                self.tx_fifo[self.tx_count] = byte
+                self.tx_count = self.tx_count + 1
+        elif offset == UART_IER:
+            self.ier = byte
+        elif offset == UART_LCR:
+            self.lcr = byte
+
+    me push_rx(byte: i64):
+        if self.rx_count < UART_FIFO_SIZE:
+            self.rx_fifo[self.rx_count] = byte and 0xFF
+            self.rx_count = self.rx_count + 1
+
+    me consume_tx() -> i64:
+        if self.tx_count <= 0:
+            return 0
+        val byte = self.tx_fifo[0]
+        var idx = 0
+        while idx < self.tx_count - 1:
+            self.tx_fifo[idx] = self.tx_fifo[idx + 1]
+            idx = idx + 1
+        self.tx_count = self.tx_count - 1
+        byte

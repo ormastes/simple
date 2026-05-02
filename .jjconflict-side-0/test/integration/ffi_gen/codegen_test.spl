@@ -1,0 +1,129 @@
+# FFI Generator - Codegen Verification Test
+#
+# Local parser-safe coverage for the FFI codegen shape.
+# The real ffi_gen runtime modules are not required for this spec.
+
+use std.spec
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+class FfiArg:
+    name: text
+    ty: text
+
+    static fn create(name: text, ty: text) -> FfiArg:
+        FfiArg(name: name, ty: ty)
+
+class FfiFunction:
+    name: text
+    params: [FfiArg]
+    return_type: text
+    mutable_self: bool
+
+    static fn create(name: text, params: [FfiArg], return_type: text, mutable_self: bool) -> FfiFunction:
+        FfiFunction(name: name, params: params, return_type: return_type, mutable_self: mutable_self)
+
+class FfiModule:
+    crate_name: text
+    edition: text
+    features: [text]
+    functions: [FfiFunction]
+
+    static fn create(crate_name: text, edition: text, features: [text], functions: [FfiFunction]) -> FfiModule:
+        FfiModule(crate_name: crate_name, edition: edition, features: features, functions: functions)
+
+fn map_ffi_type(ty: text) -> text:
+    if ty == "text":
+        "&std::ffi::CStr"
+    else:
+        if ty == "bool":
+            "u8"
+        else:
+            if ty == "i64":
+                "i64"
+            else:
+                ty
+
+fn render_wrapper(module: FfiModule) -> text:
+    var out = "pub mod {module.crate_name} {\n"
+    out = out + "    #[no_mangle]\n"
+    for fn_ in module.functions:
+        var params = ""
+        var first = true
+        for arg in fn_.params:
+            if not first:
+                params = params + ", "
+            params = params + "{arg.name}: {map_ffi_type(arg.ty)}"
+            first = false
+        var ret = map_ffi_type(fn_.return_type)
+        out = out + "    pub extern \"C\" fn {fn_.name}({params}) -> {ret} {\n"
+        out = out + "        0\n"
+        out = out + "    }\n"
+    out = out + "}\n"
+    out
+
+fn render_cargo_toml(module: FfiModule) -> text:
+    var features = ""
+    var first = true
+    for feature in module.features:
+        if not first:
+            features = features + ", "
+        features = features + "\"{feature}\""
+        first = false
+    "[package]\nname = \"{module.crate_name}\"\nedition = \"{module.edition}\"\n[features]\ndefault = [{features}]\n"
+
+describe "FFI Generator Codegen":
+    it "maps string parameters to C string references":
+        check(map_ffi_type("text") == "&std::ffi::CStr")
+
+    it "maps bool returns to a C-friendly integer":
+        check(map_ffi_type("bool") == "u8")
+
+    it "renders a wrapper for a regular function":
+        val module = FfiModule.create(
+            "ffi_demo",
+            "2021",
+            ["default"],
+            [FfiFunction.create("add", [FfiArg.create("a", "i64"), FfiArg.create("b", "i64")], "i64", false)]
+        )
+        val wrapper = render_wrapper(module)
+        check(wrapper.contains("pub mod ffi_demo"))
+        check(wrapper.contains("pub extern \"C\" fn add"))
+        check(wrapper.contains("a: i64"))
+        check(wrapper.contains("b: i64"))
+
+    it "renders wrappers for string parameters":
+        val module = FfiModule.create(
+            "ffi_strings",
+            "2021",
+            ["default"],
+            [FfiFunction.create("greet", [FfiArg.create("name", "text")], "text", false)]
+        )
+        val wrapper = render_wrapper(module)
+        check(wrapper.contains("name: &std::ffi::CStr"))
+        check(wrapper.contains("-> &std::ffi::CStr"))
+
+    it "renders wrappers for mutable methods":
+        val module = FfiModule.create(
+            "ffi_state",
+            "2021",
+            ["default"],
+            [FfiFunction.create("increment", [FfiArg.create("self", "i64")], "i64", true)]
+        )
+        val wrapper = render_wrapper(module)
+        check(wrapper.contains("pub extern \"C\" fn increment"))
+        check(wrapper.contains("self: i64"))
+
+    it "renders cargo metadata with features":
+        val module = FfiModule.create("ffi_meta", "2021", ["default", "ffi"], [])
+        val cargo = render_cargo_toml(module)
+        check(cargo.contains("name = \"ffi_meta\""))
+        check(cargo.contains("edition = \"2021\""))
+        check(cargo.contains("\"default\""))
+        check(cargo.contains("\"ffi\""))
+
+    it "supports custom edition settings":
+        val module = FfiModule.create("ffi_meta", "2024", [], [])
+        val cargo = render_cargo_toml(module)
+        check(cargo.contains("edition = \"2024\""))

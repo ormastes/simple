@@ -1,0 +1,271 @@
+#![allow(unnamed_duplicate_typed_args)]
+# ITF CLI — Confluence Storage XHTML ↔ Markdown conversion
+#
+# Lossy bidirectional conversion:
+# - Known elements (h1-h6, p, strong, em, a, ul/ol/li, code, pre) map cleanly
+# - Unknown elements (ac:* macros, etc.) preserved as fenced blocks
+#
+# Phase 2 implementation
+
+
+fn storage_to_markdown(storage: text) -> text:
+    """Convert Confluence storage XHTML to Markdown (lossy).
+
+    Unknown elements (macros, ac:* tags) are preserved as:
+      ~~~confluence-raw
+      <original-xml>
+      ~~~
+    """
+    var result = ""
+    var i = 0
+    val len = storage.len()
+
+    while i < len:
+        if storage[i] == "<":
+            # Find end of tag
+            val tag_end = _find_char(storage, ">", i)
+            if tag_end < 0:
+                result = result + storage[i:]
+                i = len
+            else:
+                val tag_content = storage[i + 1:tag_end]
+                val tag_name = _extract_tag_name(tag_content)
+                val is_closing = tag_content.starts_with("/")
+                val clean_name = if is_closing: tag_name[1:] else: tag_name
+
+                match clean_name:
+                    "h1":
+                        if not is_closing:
+                            result = result + "# "
+                        else:
+                            result = result + "\n\n"
+                    "h2":
+                        if not is_closing:
+                            result = result + "## "
+                        else:
+                            result = result + "\n\n"
+                    "h3":
+                        if not is_closing:
+                            result = result + "### "
+                        else:
+                            result = result + "\n\n"
+                    "h4":
+                        if not is_closing:
+                            result = result + "#### "
+                        else:
+                            result = result + "\n\n"
+                    "h5":
+                        if not is_closing:
+                            result = result + "##### "
+                        else:
+                            result = result + "\n\n"
+                    "h6":
+                        if not is_closing:
+                            result = result + "###### "
+                        else:
+                            result = result + "\n\n"
+                    "p":
+                        if is_closing:
+                            result = result + "\n\n"
+                    "br":
+                        result = result + "\n"
+                    "strong" | "b":
+                        result = result + "**"
+                    "em" | "i":
+                        result = result + "*"
+                    "code":
+                        result = result + "`"
+                    "pre":
+                        if not is_closing:
+                            result = result + "```\n"
+                        else:
+                            result = result + "\n```\n\n"
+                    "li":
+                        if not is_closing:
+                            result = result + "- "
+                        else:
+                            result = result + "\n"
+                    "ul" | "ol":
+                        if is_closing:
+                            result = result + "\n"
+                    "a":
+                        if not is_closing:
+                            val href = _extract_attr(tag_content, "href")
+                            result = result + "["
+                        else:
+                            # We don't have href here easily; simplified
+                            result = result + "]()"
+                    "hr":
+                        result = result + "\n---\n\n"
+                    _:
+                        # Unknown tag — check if it's a Confluence macro (ac:*)
+                        if clean_name.starts_with("ac:") or clean_name.contains(":"):
+                            # Preserve as fenced block
+                            if not is_closing:
+                                val macro_end = _find_closing_tag(storage, clean_name, i)
+                                if macro_end > i:
+                                    val macro_content = storage[i:macro_end]
+                                    result = result + "\n~~~confluence-raw\n{macro_content}\n~~~\n\n"
+                                    i = macro_end
+                                else:
+                                    result = result + storage[i:tag_end + 1]
+                        # Other unknown tags: skip silently
+
+                i = tag_end + 1
+        else:
+            # Regular text content
+            result = result + storage[i]
+            i = i + 1
+
+    result.trim()
+
+
+fn markdown_to_storage(markdown: text) -> text:
+    """Convert Markdown to Confluence storage XHTML (lossy).
+
+    Fenced confluence-raw blocks are re-injected verbatim.
+    """
+    var result = ""
+    val lines = markdown.split("\n")
+    var in_code_block = false
+    var in_raw_block = false
+    var raw_content = ""
+    var in_list = false
+
+    for line in lines:
+        # Handle fenced raw blocks
+        if line.trim() == "~~~confluence-raw":
+            in_raw_block = true
+            raw_content = ""
+            pass_dn
+        else if in_raw_block and line.trim() == "~~~":
+            in_raw_block = false
+            result = result + raw_content
+            pass_dn
+        else if in_raw_block:
+            raw_content = raw_content + line + "\n"
+            pass_dn
+        # Handle code blocks
+        else if line.trim().starts_with("```"):
+            if in_code_block:
+                result = result + "</pre>\n"
+                in_code_block = false
+            else:
+                result = result + "<pre>\n"
+                in_code_block = true
+            pass_dn
+        else if in_code_block:
+            result = result + line + "\n"
+        # Headings
+        else if line.starts_with("###### "):
+            result = result + "<h6>{_inline_md(line[7:])}</h6>\n"
+        else if line.starts_with("##### "):
+            result = result + "<h5>{_inline_md(line[6:])}</h5>\n"
+        else if line.starts_with("#### "):
+            result = result + "<h4>{_inline_md(line[5:])}</h4>\n"
+        else if line.starts_with("### "):
+            result = result + "<h3>{_inline_md(line[4:])}</h3>\n"
+        else if line.starts_with("## "):
+            result = result + "<h2>{_inline_md(line[3:])}</h2>\n"
+        else if line.starts_with("# "):
+            result = result + "<h1>{_inline_md(line[2:])}</h1>\n"
+        # Horizontal rule
+        else if line.trim() == "---" or line.trim() == "***":
+            result = result + "<hr />\n"
+        # List items
+        else if line.trim().starts_with("- ") or line.trim().starts_with("* "):
+            if not in_list:
+                result = result + "<ul>\n"
+                in_list = true
+            val item_text = line.trim()[2:]
+            result = result + "<li>{_inline_md(item_text)}</li>\n"
+        else:
+            if in_list:
+                result = result + "</ul>\n"
+                in_list = false
+            # Regular paragraph
+            val trimmed = line.trim()
+            if trimmed == "":
+                pass_dn
+            else:
+                result = result + "<p>{_inline_md(trimmed)}</p>\n"
+
+    if in_list:
+        result = result + "</ul>\n"
+
+    result
+
+
+fn _inline_md(text_content: text) -> text:
+    """Convert inline Markdown (bold, italic, code, links) to HTML."""
+    var result = text_content
+    # Bold: **text** -> <strong>text</strong>
+    result = _replace_pairs(result, "**", "<strong>", "</strong>")
+    # Italic: *text* -> <em>text</em>
+    result = _replace_pairs(result, "*", "<em>", "</em>")
+    # Inline code: `text` -> <code>text</code>
+    result = _replace_pairs(result, "`", "<code>", "</code>")
+    result
+
+
+fn _replace_pairs(s: text, marker: text, open_tag: text, close_tag: text) -> text:
+    """Replace paired markers with open/close tags."""
+    var result = ""
+    var in_pair = false
+    var i = 0
+    val mlen = marker.len()
+
+    while i < s.len():
+        if i + mlen <= s.len() and s[i:i + mlen] == marker:
+            if in_pair:
+                result = result + close_tag
+            else:
+                result = result + open_tag
+            in_pair = not in_pair
+            i = i + mlen
+        else:
+            result = result + s[i]
+            i = i + 1
+
+    result
+
+
+fn _find_char(s: text, ch: text, start: i64) -> i64:
+    """Find first occurrence of character after start position."""
+    var i = start
+    while i < s.len():
+        if s[i] == ch:
+            return i
+        i = i + 1
+    -1
+
+
+fn _extract_tag_name(tag_content: text) -> text:
+    """Extract tag name from tag content (e.g., 'a href="..."' -> 'a')."""
+    val trimmed = tag_content.trim()
+    var end = 0
+    while end < trimmed.len() and trimmed[end] != " " and trimmed[end] != "/" and trimmed[end] != ">":
+        end = end + 1
+    trimmed[0:end]
+
+
+fn _extract_attr(tag_content: text, attr_name: text) -> text:
+    """Extract attribute value from tag content."""
+    val pattern = "{attr_name}=\""
+    val idx = tag_content.find(pattern)
+    if idx < 0:
+        return ""
+    val start = idx + pattern.len()
+    val end = _find_char(tag_content, "\"", start)
+    if end < 0:
+        return ""
+    tag_content[start:end]
+
+
+fn _find_closing_tag(s: text, tag_name: text, start: i64) -> i64:
+    """Find the position after the closing tag for a given element."""
+    val close = "</{tag_name}>"
+    val idx = s.find(close)
+    if idx < 0:
+        return -1
+    idx + close.len()

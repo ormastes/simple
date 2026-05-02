@@ -1,0 +1,166 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+"""
+# Accept-Encoding Emit
+
+Tests that outgoing fetch requests automatically get a default
+Accept-Encoding header when the caller did not supply one.
+"""
+# Accept-Encoding Default Injection Tests
+#
+# Category: Browser Platform Networking
+# Status: Active
+#
+# Validates that ensure_default_accept_encoding() injects
+# "Accept-Encoding: zstd, lz4, gzip" when absent, and leaves
+# caller-supplied values untouched (case-insensitive detection).
+#
+# Run with: bin/simple test examples/browser/test/net/accept_encoding_emit_spec.spl
+
+use std.spec
+use std.js.types.pair.{Pair}
+use examples.browser.entity.net.request_types.{FetchRequest, HttpMethod, RequestMode, RequestCredentials}
+use examples.browser.entity.net.url_types.{Url}
+use examples.browser.feature.net.fetch.{ensure_default_accept_encoding}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_get_url() -> Url:
+    Url.parse("http://example.com/path")
+
+fn make_request_no_ae() -> FetchRequest:
+    var hdrs: [Pair<text, text>] = []
+    FetchRequest(
+        url: make_get_url(),
+        method: HttpMethod.Get,
+        headers: hdrs,
+        body: "",
+        mode: RequestMode.Cors,
+        credentials: RequestCredentials.SameOrigin
+    )
+
+fn make_request_with_ae(value: text) -> FetchRequest:
+    var hdrs: [Pair<text, text>] = []
+    hdrs.push(Pair("Accept-Encoding", value))
+    FetchRequest(
+        url: make_get_url(),
+        method: HttpMethod.Get,
+        headers: hdrs,
+        body: "",
+        mode: RequestMode.Cors,
+        credentials: RequestCredentials.SameOrigin
+    )
+
+fn make_request_with_lowercase_ae(value: text) -> FetchRequest:
+    var hdrs: [Pair<text, text>] = []
+    hdrs.push(Pair("accept-encoding", value))
+    FetchRequest(
+        url: make_get_url(),
+        method: HttpMethod.Get,
+        headers: hdrs,
+        body: "",
+        mode: RequestMode.Cors,
+        credentials: RequestCredentials.SameOrigin
+    )
+
+fn make_request_with_extra_headers() -> FetchRequest:
+    var hdrs: [Pair<text, text>] = []
+    hdrs.push(Pair("X-Custom", "value1"))
+    hdrs.push(Pair("Authorization", "Bearer token"))
+    FetchRequest(
+        url: make_get_url(),
+        method: HttpMethod.Get,
+        headers: hdrs,
+        body: "",
+        mode: RequestMode.Cors,
+        credentials: RequestCredentials.SameOrigin
+    )
+
+fn find_accept_encoding(headers: [Pair<text, text>]) -> text:
+    for h in headers:
+        if h.first.to_lowercase() == "accept-encoding":
+            return h.second
+    ""
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "ensure_default_accept_encoding":
+    """
+    ## Ensure Default Accept-Encoding Tests
+
+    Validates that the default Accept-Encoding header injection works correctly.
+    """
+
+    context "no Accept-Encoding present":
+        it "injects Accept-Encoding: zstd, lz4, gzip":
+            val req = make_request_no_ae()
+            val result = ensure_default_accept_encoding(req)
+            val ae = find_accept_encoding(result.headers)
+            expect ae == "zstd, lz4, gzip"
+
+        it "increases header count by one":
+            val req = make_request_no_ae()
+            val before = req.headers.len()
+            val result = ensure_default_accept_encoding(req)
+            expect result.headers.len() == before + 1
+
+    context "caller-supplied Accept-Encoding":
+        it "does not override caller value (canonical case)":
+            val req = make_request_with_ae("gzip")
+            val result = ensure_default_accept_encoding(req)
+            val ae = find_accept_encoding(result.headers)
+            expect ae == "gzip"
+
+        it "does not add a second Accept-Encoding header":
+            val req = make_request_with_ae("gzip")
+            val result = ensure_default_accept_encoding(req)
+            var count = 0
+            for h in result.headers:
+                if h.first.to_lowercase() == "accept-encoding":
+                    count = count + 1
+            expect count == 1
+
+    context "case-insensitive detection":
+        it "does not add header when lowercase accept-encoding: br is present":
+            val req = make_request_with_lowercase_ae("br")
+            val result = ensure_default_accept_encoding(req)
+            val ae = find_accept_encoding(result.headers)
+            expect ae == "br"
+
+        it "does not duplicate when lowercase accept-encoding is present":
+            val req = make_request_with_lowercase_ae("br")
+            val result = ensure_default_accept_encoding(req)
+            var count = 0
+            for h in result.headers:
+                if h.first.to_lowercase() == "accept-encoding":
+                    count = count + 1
+            expect count == 1
+
+    context "existing headers are preserved":
+        it "preserves all other headers when injecting default":
+            val req = make_request_with_extra_headers()
+            val result = ensure_default_accept_encoding(req)
+            # 2 original + 1 injected
+            expect result.headers.len() == 3
+
+        it "first header is still X-Custom":
+            val req = make_request_with_extra_headers()
+            val result = ensure_default_accept_encoding(req)
+            expect result.headers[0].first == "X-Custom"
+
+        it "second header is still Authorization":
+            val req = make_request_with_extra_headers()
+            val result = ensure_default_accept_encoding(req)
+            expect result.headers[1].first == "Authorization"
+
+        it "injected Accept-Encoding is last":
+            val req = make_request_with_extra_headers()
+            val result = ensure_default_accept_encoding(req)
+            val last = result.headers[2]
+            expect last.first == "Accept-Encoding"
+            expect last.second == "zstd, lz4, gzip"

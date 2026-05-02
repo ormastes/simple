@@ -1,0 +1,720 @@
+/// LLVM backend core - struct definition, constructors, and basic accessors
+use crate::codegen::backend_trait::NativeBackend;
+use crate::error::CompileError;
+use crate::hir::TypeId;
+use crate::mir::{MirFunction, MirModule};
+use crate::optimizations::NativeOptimizationLevel;
+use simple_common::target::{Target, TargetArch, TargetCpu, TargetOS};
+
+#[cfg(feature = "llvm")]
+use inkwell::builder::Builder;
+#[cfg(feature = "llvm")]
+use inkwell::context::Context;
+#[cfg(feature = "llvm")]
+use inkwell::module::Module;
+#[cfg(feature = "llvm")]
+use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine};
+#[cfg(feature = "llvm")]
+use inkwell::types::BasicTypeEnum;
+#[cfg(feature = "llvm")]
+use inkwell::values::{BasicMetadataValueEnum, FunctionValue};
+#[cfg(feature = "llvm")]
+use inkwell::OptimizationLevel;
+#[cfg(feature = "llvm")]
+use std::cell::RefCell;
+
+/// LLVM-based code generator
+pub struct LlvmBackend {
+    pub(super) target: Target,
+    pub(super) opt_level: NativeOptimizationLevel,
+    pub(super) cpu: TargetCpu,
+    /// Enable coverage instrumentation
+    pub(super) coverage_enabled: bool,
+    #[cfg(feature = "llvm")]
+    pub(super) context: &'static Context,
+    #[cfg(feature = "llvm")]
+    pub(super) module: RefCell<Option<Module<'static>>>,
+    #[cfg(feature = "llvm")]
+    pub(super) builder: RefCell<Option<Builder<'static>>>,
+    /// Counter for coverage basic blocks
+    #[cfg(feature = "llvm")]
+    pub(super) coverage_counter: RefCell<u32>,
+    /// Import map: raw function name → mangled name for cross-module resolution
+    pub(super) import_map: std::sync::Arc<std::collections::HashMap<String, String>>,
+    /// Per-module use map from `use` statements
+    pub(super) use_map: std::collections::HashMap<String, String>,
+}
+
+// Manual Debug implementation since Context/Module/Builder don't implement Debug
+impl std::fmt::Debug for LlvmBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlvmBackend")
+            .field("target", &self.target)
+            .field("coverage_enabled", &self.coverage_enabled)
+            .field("has_module", &cfg!(feature = "llvm"))
+            .finish()
+    }
+}
+
+impl LlvmBackend {
+    /// Create a new LLVM backend for the given target
+    pub fn new(target: Target) -> Result<Self, CompileError> {
+        Self::new_with_opt_level(target, NativeOptimizationLevel::Standard)
+    }
+
+    /// Create a new LLVM backend for the given target and optimization profile.
+    pub fn new_with_opt_level(target: Target, opt_level: NativeOptimizationLevel) -> Result<Self, CompileError> {
+        Self::new_with_opt_level_and_cpu(target, opt_level, TargetCpu::builtin_default_for_arch(target.arch))
+    }
+
+    pub fn new_with_opt_level_and_cpu(
+        target: Target,
+        opt_level: NativeOptimizationLevel,
+        cpu: TargetCpu,
+    ) -> Result<Self, CompileError> {
+        #[cfg(not(feature = "llvm"))]
+        {
+            let _ = (target, opt_level, cpu); // Suppress unused warning when feature disabled
+            Err(crate::error::factory::llvm_feature_required())
+        }
+
+        #[cfg(feature = "llvm")]
+        {
+            let context = Box::leak(Box::new(Context::create()));
+            Ok(Self {
+                target,
+                opt_level,
+                cpu,
+                coverage_enabled: false,
+                context,
+                module: RefCell::new(None),
+                builder: RefCell::new(None),
+                coverage_counter: RefCell::new(0),
+                import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+                use_map: std::collections::HashMap::new(),
+            })
+        }
+    }
+
+    /// Set the import map for cross-module function resolution
+    pub fn set_import_map(&mut self, map: std::sync::Arc<std::collections::HashMap<String, String>>) {
+        self.import_map = map;
+    }
+
+    /// Set the per-module use map from `use` statements
+    pub fn set_use_map(&mut self, map: std::collections::HashMap<String, String>) {
+        self.use_map = map;
+    }
+
+    /// Enable coverage instrumentation
+    pub fn with_coverage(mut self, enabled: bool) -> Self {
+        self.coverage_enabled = enabled;
+        self
+    }
+
+    /// Check if coverage is enabled
+    pub fn coverage_enabled(&self) -> bool {
+        self.coverage_enabled
+    }
+
+    /// Get the target for this backend
+    pub fn target(&self) -> &Target {
+        &self.target
+    }
+
+    pub fn cpu(&self) -> &TargetCpu {
+        &self.cpu
+    }
+
+    #[cfg(feature = "llvm")]
+    fn declare_globals(&self, module_ir: &MirModule) {
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return;
+        };
+        let rv_type = self.runtime_int_type();
+
+        for (name, _ty, is_mutable) in &module_ir.globals {
+            // Extern/runtime functions are modeled as globals in MIR so GlobalLoad
+            // can treat them as values, but they must not become LLVM data globals.
+            // A same-named data global makes later call lowering add suffixed
+            // function decls like `rt_mmio_write_u64.1`, which then fail to link.
+            if module_ir.extern_fn_names.contains(name) {
+                continue;
+            }
+            if m.get_global(name).is_some() {
+                continue;
+            }
+            if m.get_function(name).is_some() {
+                continue;
+            }
+
+            let global = m.add_global(rv_type, None, name);
+            global.set_constant(!*is_mutable);
+
+            if module_ir.local_globals.contains(name) {
+                let init = module_ir
+                    .global_init_values
+                    .get(name)
+                    .map(|v| rv_type.const_int(*v as u64, true))
+                    .unwrap_or_else(|| rv_type.const_zero());
+                global.set_initializer(&init);
+                global.set_linkage(inkwell::module::Linkage::External);
+            } else {
+                global.set_linkage(inkwell::module::Linkage::External);
+            }
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn declare_dot_aliases_for_methods(&self) {
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return;
+        };
+        let mut originals: Vec<FunctionValue<'static>> = Vec::new();
+        let mut func_opt = m.get_first_function();
+        while let Some(f) = func_opt {
+            originals.push(f);
+            func_opt = f.get_next_function();
+        }
+        drop(m);
+
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return;
+        };
+        for f in originals {
+            let Ok(name) = f.get_name().to_str() else {
+                continue;
+            };
+            if !name.contains('.') || name.contains("_dot_") {
+                continue;
+            }
+            let alias_name = name.replace('.', "_dot_");
+            if m.get_function(&alias_name).is_none() {
+                let alias = m.add_function(&alias_name, f.get_type(), None);
+                // Cross-module callers can still reference the sanitized `_dot_`
+                // spelling, so this alias must remain externally visible.
+                alias.set_linkage(inkwell::module::Linkage::External);
+            }
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn define_dot_alias_bodies(&self) -> Result<(), CompileError> {
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return Ok(());
+        };
+        let mut aliases: Vec<FunctionValue<'static>> = Vec::new();
+        let mut func_opt = m.get_first_function();
+        while let Some(f) = func_opt {
+            if f.count_basic_blocks() == 0 {
+                if let Ok(name) = f.get_name().to_str() {
+                    if name.contains("_dot_") {
+                        aliases.push(f);
+                    }
+                }
+            }
+            func_opt = f.get_next_function();
+        }
+        drop(m);
+
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else {
+            return Ok(());
+        };
+        for alias in aliases {
+            let alias_name = alias
+                .get_name()
+                .to_str()
+                .map_err(|_| CompileError::semantic("invalid alias function name"))?;
+            let target_name = alias_name.replace("_dot_", ".");
+            let Some(target) = m.get_function(&target_name) else {
+                continue;
+            };
+            let builder = self.context.create_builder();
+            let entry = self.context.append_basic_block(alias, "entry");
+            builder.position_at_end(entry);
+            let args: Vec<BasicMetadataValueEnum<'static>> = alias.get_param_iter().map(Into::into).collect();
+            let call = builder
+                .build_call(target, &args, "dot_alias")
+                .map_err(|e| crate::error::factory::llvm_build_failed("dot alias call", &e))?;
+            if alias.get_type().get_return_type().is_some() {
+                let ret = call
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| CompileError::semantic(format!("alias `{alias_name}` missing return value")))?;
+                builder
+                    .build_return(Some(&ret))
+                    .map_err(|e| crate::error::factory::llvm_build_failed("dot alias return", &e))?;
+            } else {
+                builder
+                    .build_return(None)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("dot alias return", &e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the LLVM target triple string for this target
+    pub fn get_target_triple(&self) -> String {
+        use simple_common::target::WasmRuntime;
+
+        let arch_str = match self.target.arch {
+            TargetArch::X86_64 => "x86_64",
+            TargetArch::Aarch64 => "aarch64",
+            TargetArch::X86 => "i686",
+            TargetArch::Arm => "armv7",
+            TargetArch::Riscv64 => "riscv64",
+            TargetArch::Riscv32 => "riscv32",
+            TargetArch::Wasm32 => "wasm32",
+            TargetArch::Wasm64 => "wasm64",
+        };
+
+        // WASM targets use runtime-specific triples
+        if matches!(self.target.arch, TargetArch::Wasm32 | TargetArch::Wasm64) {
+            let runtime_str = match self.target.wasm_runtime {
+                Some(WasmRuntime::Wasi) => "wasi",
+                Some(WasmRuntime::Emscripten) => "unknown-emscripten",
+                Some(WasmRuntime::Browser) | Some(WasmRuntime::Standalone) | None => "unknown-unknown",
+            };
+            return format!("{}-{}", arch_str, runtime_str);
+        }
+
+        let os_str = match self.target.os {
+            TargetOS::Linux => "unknown-linux-gnu",
+            TargetOS::MacOS => "apple-darwin",
+            TargetOS::Windows => "pc-windows-msvc",
+            TargetOS::FreeBSD => "unknown-freebsd",
+            TargetOS::SimpleOS => "unknown-none-elf",
+            TargetOS::Any | TargetOS::None => "unknown-unknown",
+        };
+
+        format!("{}-{}", arch_str, os_str)
+    }
+
+    /// Get pointer width (32 or 64 bits)
+    pub fn pointer_width(&self) -> u32 {
+        use simple_common::target::TargetArch;
+        match self.target.arch {
+            TargetArch::X86 | TargetArch::Arm | TargetArch::Riscv32 | TargetArch::Wasm32 => 32,
+            TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::Riscv64 | TargetArch::Wasm64 => 64,
+        }
+    }
+
+    /// Get the LLVM integer type used for RuntimeValue on this target.
+    ///
+    /// On 64-bit targets, RuntimeValue is i64 (tagged 64-bit value).
+    /// On 32-bit targets, RuntimeValue is i32 (tagged 32-bit value).
+    /// The C runtime defines `typedef int32_t RuntimeValue` on RV32 and
+    /// `typedef int64_t RuntimeValue` on 64-bit, so this must match.
+    #[cfg(feature = "llvm")]
+    pub fn runtime_int_type(&self) -> inkwell::types::IntType<'static> {
+        if self.pointer_width() == 32 {
+            self.context.i32_type()
+        } else {
+            self.context.i64_type()
+        }
+    }
+
+    /// Create an LLVM module (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn create_module(&self, name: &str) -> Result<(), CompileError> {
+        use simple_common::target::{TargetArch, WasmRuntime};
+
+        // Create module with the context
+        let module = self.context.create_module(name);
+
+        // Set target triple
+        let triple = self.get_target_triple();
+        module.set_triple(&inkwell::targets::TargetTriple::create(&triple));
+
+        // Declare WASI imports for wasm32-wasi / wasm64-wasi targets
+        if matches!(self.target.arch, TargetArch::Wasm32 | TargetArch::Wasm64) {
+            if matches!(self.target.wasm_runtime, Some(WasmRuntime::Wasi)) {
+                #[cfg(feature = "wasm-wasi")]
+                crate::codegen::llvm::wasm_imports::declare_wasi_imports(&module)?;
+            }
+        }
+
+        *self.module.borrow_mut() = Some(module);
+
+        // Create builder
+        let builder = self.context.create_builder();
+        *self.builder.borrow_mut() = Some(builder);
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn create_module(&self, _name: &str) -> Result<(), CompileError> {
+        Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+
+    /// Create LLVM function signature (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn create_function_signature(
+        &self,
+        name: &str,
+        param_types: &[TypeId],
+        return_type: &TypeId,
+    ) -> Result<FunctionValue<'static>, CompileError> {
+        let module = self.module.borrow();
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
+
+        // Map parameter types
+        let param_llvm: Result<Vec<_>, _> = param_types
+            .iter()
+            .map(|ty| self.llvm_type(ty).map(|t| t.into()))
+            .collect();
+        let param_llvm = param_llvm?;
+
+        // Map return type
+        let ret_llvm = self.llvm_type(return_type)?;
+
+        // Create function type
+        let fn_type = match ret_llvm {
+            BasicTypeEnum::IntType(t) => t.fn_type(&param_llvm, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&param_llvm, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&param_llvm, false),
+            _ => return Err(crate::error::factory::unsupported_return_type()),
+        };
+
+        // Check for existing declaration to avoid creating duplicates with suffixed names.
+        // When a function was already pre-declared (e.g., by runtime function loop), reuse it.
+        if let Some(existing) = module.get_function(name) {
+            return Ok(existing);
+        }
+        Ok(module.add_function(name, fn_type, None))
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn create_function_signature(
+        &self,
+        _name: &str,
+        _param_types: &[TypeId],
+        _return_type: &TypeId,
+    ) -> Result<(), CompileError> {
+        Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+
+    /// Declare a function with appropriate linkage.
+    /// Functions with bodies get WeakAny linkage (like Cranelift's Preemptible) to avoid
+    /// duplicate symbol errors in multi-file builds with --no-mangle.
+    /// Functions without bodies (extern declarations) get External linkage.
+    #[cfg(feature = "llvm")]
+    pub fn declare_function_with_linkage(
+        &self,
+        name: &str,
+        param_types: &[TypeId],
+        return_type: &TypeId,
+        has_body: bool,
+    ) -> Result<(), CompileError> {
+        let func = self.create_function_signature(name, param_types, return_type)?;
+        if has_body {
+            // Module-qualified names (containing "__") use External linkage so they
+            // override weak stubs.  Bare names use WeakAny to avoid duplicate-symbol
+            // errors when the same bare name appears in multiple modules.
+            // The linker uses --allow-multiple-definition to handle the rare case of
+            // genuinely duplicated mangled names across modules.
+            if name.contains("__") || name == "spl_main" {
+                func.set_linkage(inkwell::module::Linkage::External);
+            } else {
+                func.set_linkage(inkwell::module::Linkage::WeakAny);
+            }
+        } else {
+            func.set_linkage(inkwell::module::Linkage::External);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn declare_function_with_linkage(
+        &self,
+        _name: &str,
+        _param_types: &[TypeId],
+        _return_type: &TypeId,
+        _has_body: bool,
+    ) -> Result<(), CompileError> {
+        Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+
+    /// Get LLVM IR as string (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn get_ir(&self) -> Result<String, CompileError> {
+        let module = self.module.borrow();
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        Ok(module.print_to_string().to_string())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn get_ir(&self) -> Result<String, CompileError> {
+        Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+
+    /// Verify the module (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn verify(&self) -> Result<(), CompileError> {
+        let module = self.module.borrow();
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
+
+        module
+            .verify()
+            .map_err(|e| crate::error::factory::llvm_verification_failed(&e))?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn verify(&self) -> Result<(), CompileError> {
+        Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+
+    /// Take ownership of the LLVM module (for JIT execution engine creation).
+    #[cfg(feature = "llvm")]
+    pub fn take_module(&self) -> Option<Module<'static>> {
+        self.module.borrow_mut().take()
+    }
+
+    /// Emit object code from the module (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        use simple_common::target::{TargetArch, TargetOS};
+
+        // Initialize LLVM targets
+        LlvmTarget::initialize_all(&InitializationConfig::default());
+
+        let module = self.module.borrow();
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
+
+        // Get target triple
+        let triple = self.get_target_triple();
+        let target_triple = inkwell::targets::TargetTriple::create(&triple);
+
+        // Get target from triple
+        let target = LlvmTarget::from_triple(&target_triple)
+            .map_err(|e| crate::error::factory::llvm_target_failed(&triple, &e))?;
+
+        // Select relocation and code model based on target.
+        // - WASM: static (no PIC needed, no GOT in wasm).
+        // - Freestanding / baremetal ELF (SimpleOS, None): MUST be static.
+        //   PIC on freestanding riscv32 emits R_RISCV_GOT_HI20 / %pcrel_hi pairs that
+        //   resolve incorrectly when there is no .got section in the final link — the
+        //   auipc+jalr pair for function-pointer/indirect array calls collapses to a
+        //   self-call. Static reloc + medany code model matches the `-mcmodel=medany
+        //   -fno-pie` that the freestanding stub compile and linker already pass.
+        // - Hosted OSes: keep PIC.
+        let is_freestanding = matches!(self.target.os, TargetOS::SimpleOS | TargetOS::None);
+        let reloc_mode = if triple.contains("wasm") || is_freestanding {
+            RelocMode::Static
+        } else {
+            RelocMode::PIC
+        };
+
+        // RISC-V freestanding needs the "medany" (Medium) code model so that PC-relative
+        // symbol addressing can reach any address; the small/default model assumes the
+        // link range is [−2GiB, +2GiB] around address 0, which breaks at 0x8000_0000.
+        let is_riscv = matches!(self.target.arch, TargetArch::Riscv32 | TargetArch::Riscv64);
+        let code_model = if is_freestanding && is_riscv {
+            CodeModel::Medium
+        } else {
+            CodeModel::Default
+        };
+
+        // Match the freestanding linker ISA contract for the generated soft-core
+        // lanes. RV64/RV32 compiled payloads are allowed to use compressed
+        // instructions, so codegen must keep C enabled.
+        let features = match self.target.arch {
+            TargetArch::Riscv32 => "+m,+a,+c",
+            TargetArch::Riscv64 => "+m,+a,+c",
+            _ => "",
+        };
+
+        let cpu_name = self
+            .cpu
+            .llvm_cpu_name(self.target.arch)
+            .unwrap_or(match self.target.arch {
+                TargetArch::X86_64 => "x86-64-v3",
+                TargetArch::Aarch64 => "generic",
+                TargetArch::X86 => "i686",
+                TargetArch::Arm => "generic",
+                TargetArch::Riscv64 => "generic-rv64",
+                TargetArch::Riscv32 => "generic-rv32",
+                TargetArch::Wasm32 | TargetArch::Wasm64 => "generic",
+            });
+
+        let target_machine = target
+            .create_target_machine(
+                &target_triple,
+                cpu_name,
+                features,
+                match self.opt_level {
+                    NativeOptimizationLevel::None => OptimizationLevel::None,
+                    NativeOptimizationLevel::Basic => OptimizationLevel::Less,
+                    NativeOptimizationLevel::Standard => OptimizationLevel::Default,
+                    NativeOptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
+                },
+                reloc_mode,
+                code_model,
+            )
+            .ok_or_else(crate::error::factory::llvm_target_machine_failed)?;
+
+        // Emit object file to memory buffer
+        let buffer = target_machine
+            .write_to_memory_buffer(module, FileType::Object)
+            .map_err(|e| crate::error::factory::llvm_emit_failed("object file", &e))?;
+
+        Ok(buffer.as_slice().to_vec())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+}
+
+impl NativeBackend for LlvmBackend {
+    fn target(&self) -> &Target {
+        &self.target
+    }
+
+    fn compile(&mut self, module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        let module_name = module.name.as_deref().unwrap_or("module");
+        self.create_module(module_name)?;
+
+        // Pre-declare runtime functions with correct signatures.
+        // This prevents compile_call from creating wrong declarations when
+        // MIR calls a runtime function with a different number of arguments
+        // (e.g., rt_array_new called with 0 args in MIR vs 1 arg actual).
+        //
+        // Skip functions that the LLVM backend declares manually with ptr types
+        // (Cranelift uses i64 for everything, but LLVM distinguishes ptr from i64).
+        #[cfg(feature = "llvm")]
+        {
+            let m = self.module.borrow();
+            if let Some(m) = m.as_ref() {
+                let rv_type = self.runtime_int_type();
+
+                for spec in crate::codegen::runtime_ffi::RUNTIME_FUNCS {
+                    // Skip if already declared
+                    if m.get_function(spec.name).is_some() {
+                        continue;
+                    }
+
+                    // Only pre-declare functions with ALL i64 params and i64 return.
+                    // (The Cranelift spec uses I64 universally; on 32-bit targets we
+                    // map these to the RuntimeValue width via rv_type.)
+                    // Functions with i8/i32/f64 params would cause type mismatches
+                    // when compile_call passes rv_type args. Those functions will be
+                    // declared on-demand by compile_call with matching arg types,
+                    // and the indirect call path handles arity mismatches.
+                    let all_i64_params = spec.params.iter().all(|ty| *ty == cranelift_codegen::ir::types::I64);
+                    let i64_return = spec.returns.len() == 1 && spec.returns[0] == cranelift_codegen::ir::types::I64;
+                    let void_return = spec.returns.is_empty();
+
+                    // Only pre-declare functions with ALL i64 params and i64 return.
+                    // Skip void-return functions — they may clash with user-defined
+                    // functions that return values (e.g. debug_stubs.spl redefines
+                    // rt_fault_* to return bool). The arity-mismatch path in
+                    // compile_call handles void functions fine.
+                    if !all_i64_params || !i64_return {
+                        continue;
+                    }
+
+                    let params: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                        spec.params.iter().map(|_| rv_type.into()).collect();
+
+                    let fn_type = rv_type.fn_type(&params, false);
+                    let f = m.add_function(spec.name, fn_type, None);
+                    f.set_linkage(inkwell::module::Linkage::External);
+                }
+            }
+        }
+
+        #[cfg(feature = "llvm")]
+        self.declare_globals(module);
+
+        // First pass: forward-declare all function signatures
+        // This is necessary so that functions can call each other regardless of compilation order
+        for func in &module.functions {
+            let param_types: Vec<_> = func.params.iter().map(|p| p.ty).collect();
+            // Resolve through import_map/use_map to get the mangled name
+            // (e.g., "exit" -> "app__io__cli_ops__exit") to avoid symbol collisions
+            let resolved_name = self
+                .use_map
+                .get(&func.name)
+                .or_else(|| self.import_map.get(&func.name))
+                .map(|s| s.as_str())
+                .unwrap_or(&func.name);
+            self.declare_function_with_linkage(
+                resolved_name,
+                &param_types,
+                &func.return_type,
+                !func.blocks.is_empty(),
+            )?;
+        }
+        #[cfg(feature = "llvm")]
+        self.declare_dot_aliases_for_methods();
+
+        // Second pass: compile all function bodies
+        for func in &module.functions {
+            self.compile_function(func)?;
+        }
+        #[cfg(feature = "llvm")]
+        self.define_dot_alias_bodies()?;
+
+        // Fix linkage after compilation:
+        // 1. Declarations (no body) must have External linkage, not WeakAny.
+        // 2. spl_main (entry point) must have Global linkage to beat the weak stub.
+        #[cfg(feature = "llvm")]
+        {
+            let m = self.module.borrow();
+            if let Some(m) = m.as_ref() {
+                let mut func_opt = m.get_first_function();
+                while let Some(f) = func_opt {
+                    if f.count_basic_blocks() == 0 {
+                        // No body — must be External
+                        f.set_linkage(inkwell::module::Linkage::External);
+                    } else if f.get_name().to_str() == Ok("spl_main") {
+                        // Entry point must be a strong (Global) symbol so the linker
+                        // prefers it over the weak spl_main in the C main stub.
+                        f.set_linkage(inkwell::module::Linkage::External);
+                    }
+                    func_opt = f.get_next_function();
+                }
+            }
+        }
+
+        self.verify()?;
+        self.emit_object(module)
+    }
+
+    fn name(&self) -> &'static str {
+        "llvm"
+    }
+
+    fn supports_target(target: &Target) -> bool {
+        // LLVM supports all targets including WASM
+        use simple_common::target::TargetArch;
+        matches!(
+            target.arch,
+            TargetArch::X86_64
+                | TargetArch::Aarch64
+                | TargetArch::X86
+                | TargetArch::Arm
+                | TargetArch::Riscv64
+                | TargetArch::Riscv32
+                | TargetArch::Wasm32
+                | TargetArch::Wasm64
+        )
+    }
+}

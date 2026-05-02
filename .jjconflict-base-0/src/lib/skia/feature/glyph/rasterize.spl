@@ -1,0 +1,243 @@
+# Glyph outline rasterizer: analytic-AA scanline rasterizer
+
+use std.skia.feature.glyph.outline.{GlyphOutline}
+use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment}
+use std.skia.entity.geometry.{SkPoint}
+
+class GlyphBitmap:
+    width: i64
+    height: i64
+    left: i64
+    top: i64
+    pixels: [u8]
+
+# Active-edge structure for scanline rasterization
+class Edge:
+    y_top: f64
+    y_bot: f64
+    x_at_top: f64
+    dx_dy: f64
+    direction: i32
+
+fn edge_make(ax: f64, ay: f64, bx: f64, by: f64) -> Edge:
+    # Canonicalize so y_top < y_bot; flip direction if swapped
+    if ay < by:
+        val dy = by - ay
+        val dx_dy = if dy == 0.0: 0.0 else: (bx - ax) / dy
+        Edge(y_top: ay, y_bot: by, x_at_top: ax, dx_dy: dx_dy, direction: 1)
+    else:
+        val dy = ay - by
+        val dx_dy = if dy == 0.0: 0.0 else: (ax - bx) / dy
+        Edge(y_top: by, y_bot: ay, x_at_top: bx, dx_dy: dx_dy, direction: -1)
+
+fn quad_subdivide(edges: [Edge], ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64, depth: i32) -> [Edge]:
+    # Midpoint subdivision for quadratic Bezier -> line edges
+    if depth <= 0:
+        val e = edge_make(ax, ay, bx, by)
+        val skip = e.y_top == e.y_bot
+        if skip:
+            edges
+        else:
+            [...edges, e]
+    else:
+        val mx = (ax + 2.0 * cx + bx) / 4.0
+        val my = (ay + 2.0 * cy + by) / 4.0
+        val lx = (ax + cx) / 2.0
+        val ly = (ay + cy) / 2.0
+        val rx = (cx + bx) / 2.0
+        val ry = (cy + by) / 2.0
+        val next_depth = depth - 1
+        val left_edges = quad_subdivide(edges, ax, ay, lx, ly, mx, my, next_depth)
+        quad_subdivide(left_edges, mx, my, rx, ry, bx, by, next_depth)
+
+fn cubic_subdivide(edges: [Edge], ax: f64, ay: f64, c1x: f64, c1y: f64, c2x: f64, c2y: f64, bx: f64, by: f64, depth: i32) -> [Edge]:
+    # Midpoint subdivision for cubic Bezier -> line edges
+    if depth <= 0:
+        val e = edge_make(ax, ay, bx, by)
+        val skip = e.y_top == e.y_bot
+        if skip:
+            edges
+        else:
+            [...edges, e]
+    else:
+        val m1x = (ax + c1x) / 2.0
+        val m1y = (ay + c1y) / 2.0
+        val m2x = (c1x + c2x) / 2.0
+        val m2y = (c1y + c2y) / 2.0
+        val m3x = (c2x + bx) / 2.0
+        val m3y = (c2y + by) / 2.0
+        val n1x = (m1x + m2x) / 2.0
+        val n1y = (m1y + m2y) / 2.0
+        val n2x = (m2x + m3x) / 2.0
+        val n2y = (m2y + m3y) / 2.0
+        val midx = (n1x + n2x) / 2.0
+        val midy = (n1y + n2y) / 2.0
+        val next_depth = depth - 1
+        val left_edges = cubic_subdivide(edges, ax, ay, m1x, m1y, n1x, n1y, midx, midy, next_depth)
+        cubic_subdivide(left_edges, midx, midy, n2x, n2y, m3x, m3y, bx, by, next_depth)
+
+fn flatten_path(path: SkPath, scale: f64, ox: f64, oy: f64) -> [Edge]:
+    # Walk path segments; track pen position; emit Edges for each linear span.
+    # ox, oy are origin offsets (subtract to shift path to bitmap coords).
+    var edges: [Edge] = []
+    var pen_x: f64 = 0.0
+    var pen_y: f64 = 0.0
+    var move_x: f64 = 0.0
+    var move_y: f64 = 0.0
+    var idx: i64 = 0
+    val seg_count = path.segments.len()
+    while idx < seg_count:
+        val seg = path.segments[idx]
+        val verb = seg.verb
+        if verb == SkPathVerb.Move:
+            val pt = seg.pts[0]
+            pen_x = pt.x * scale - ox
+            pen_y = pt.y * scale - oy
+            move_x = pen_x
+            move_y = pen_y
+        else:
+            if verb == SkPathVerb.Line:
+                val pt = seg.pts[0]
+                val tx = pt.x * scale - ox
+                val ty = pt.y * scale - oy
+                val e = edge_make(pen_x, pen_y, tx, ty)
+                val skip = e.y_top == e.y_bot
+                if skip:
+                    pass_do_nothing
+                else:
+                    edges = [...edges, e]
+                pen_x = tx
+                pen_y = ty
+            else:
+                if verb == SkPathVerb.Quad:
+                    val cp = seg.pts[0]
+                    val ep = seg.pts[1]
+                    val cx = cp.x * scale - ox
+                    val cy = cp.y * scale - oy
+                    val ex = ep.x * scale - ox
+                    val ey = ep.y * scale - oy
+                    edges = quad_subdivide(edges, pen_x, pen_y, cx, cy, ex, ey, 4)
+                    pen_x = ex
+                    pen_y = ey
+                else:
+                    if verb == SkPathVerb.Cubic:
+                        val c1 = seg.pts[0]
+                        val c2 = seg.pts[1]
+                        val ep = seg.pts[2]
+                        val c1x = c1.x * scale - ox
+                        val c1y = c1.y * scale - oy
+                        val c2x = c2.x * scale - ox
+                        val c2y = c2.y * scale - oy
+                        val ex = ep.x * scale - ox
+                        val ey = ep.y * scale - oy
+                        edges = cubic_subdivide(edges, pen_x, pen_y, c1x, c1y, c2x, c2y, ex, ey, 4)
+                        pen_x = ex
+                        pen_y = ey
+                    else:
+                        if verb == SkPathVerb.Conic:
+                            # TODO(glyph-raster-conic): conic flatten with weight; approximate as quad w=1
+                            val cp = seg.pts[0]
+                            val ep = seg.pts[1]
+                            val cx = cp.x * scale - ox
+                            val cy = cp.y * scale - oy
+                            val ex = ep.x * scale - ox
+                            val ey = ep.y * scale - oy
+                            edges = quad_subdivide(edges, pen_x, pen_y, cx, cy, ex, ey, 4)
+                            pen_x = ex
+                            pen_y = ey
+                        else:
+                            if verb == SkPathVerb.Close:
+                                val e = edge_make(pen_x, pen_y, move_x, move_y)
+                                val skip = e.y_top == e.y_bot
+                                if skip:
+                                    pass_do_nothing
+                                else:
+                                    edges = [...edges, e]
+                                pen_x = move_x
+                                pen_y = move_y
+                            else:
+                                pass_do_nothing
+        idx = idx + 1
+    edges
+
+fn winding_at(edges: [Edge], sample_y: f64, test_x: f64) -> i32:
+    # Count winding crossings: for each edge that straddles sample_y,
+    # check if crossing x <= test_x, accumulate direction.
+    var winding: i32 = 0
+    var ei: i64 = 0
+    val ec = edges.len()
+    while ei < ec:
+        val e = edges[ei]
+        val in_span = (e.y_top <= sample_y) and (sample_y < e.y_bot)
+        if in_span:
+            val dy = sample_y - e.y_top
+            val cross_x = e.x_at_top + e.dx_dy * dy
+            if cross_x <= test_x:
+                winding = winding + e.direction
+        ei = ei + 1
+    winding
+
+fn compute_coverage(edges: [Edge], pixel_x: f64, pixel_y: f64) -> f64:
+    # 4 subsample rows per pixel (at y + 1/8, 3/8, 5/8, 7/8)
+    var hits: f64 = 0.0
+    val center_x = pixel_x + 0.5
+    val s0y = pixel_y + 0.125
+    val s1y = pixel_y + 0.375
+    val s2y = pixel_y + 0.625
+    val s3y = pixel_y + 0.875
+    val w0 = winding_at(edges, s0y, center_x)
+    val w1 = winding_at(edges, s1y, center_x)
+    val w2 = winding_at(edges, s2y, center_x)
+    val w3 = winding_at(edges, s3y, center_x)
+    if w0 != 0:
+        hits = hits + 1.0
+    if w1 != 0:
+        hits = hits + 1.0
+    if w2 != 0:
+        hits = hits + 1.0
+    if w3 != 0:
+        hits = hits + 1.0
+    hits / 4.0
+
+fn rasterize_outline(outline: GlyphOutline, size_px: f64) -> GlyphBitmap:
+    # 1. Compute scale from em-size hint via bounds extent; fall back to 1.0.
+    val bounds = outline.metrics.bounds
+    val em_w = bounds.right - bounds.left
+    val em_h = bounds.bottom - bounds.top
+    val em_size = if em_h > em_w: em_h else: em_w
+    val scale = if em_size > 0.0: size_px / em_size else: 1.0
+
+    # 2. Compute scaled bitmap dimensions
+    val raw_w = em_w * scale
+    val raw_h = em_h * scale
+    val w = if raw_w < 1.0: 1 as i64 else: raw_w as i64
+    val h = if raw_h < 1.0: 1 as i64 else: raw_h as i64
+
+    # Origin: top-left corner of scaled bounds in bitmap coords
+    val ox = bounds.left * scale
+    val oy = bounds.top * scale
+
+    # 3. Flatten path into edges (shifted to bitmap-local coords)
+    val edges = flatten_path(outline.path, scale, ox, oy)
+
+    # 4. For each pixel rasterize coverage
+    val total = w * h
+    var pixels: [u8] = []
+    var py: i64 = 0
+    while py < h:
+        var px: i64 = 0
+        while px < w:
+            val coverage = compute_coverage(edges, px as f64, py as f64)
+            val alpha = (coverage * 255.0) as u8
+            pixels = [...pixels, alpha]
+            px = px + 1
+        py = py + 1
+
+    # 5. Return bitmap
+    GlyphBitmap(
+        width: w,
+        height: h,
+        left: ox as i64,
+        top: oy as i64,
+        pixels: pixels
+    )

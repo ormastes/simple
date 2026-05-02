@@ -1,0 +1,72 @@
+# Style Pipeline Debug — test whether CSS styles survive cross-module field access
+#
+# Build: bin/simple native-build --source src/lib --source src/os --entry test/integration/rendering/pixel_verify_style.spl -o build/pixel_verify_style --entry-closure --runtime-bundle all
+# Run:   ./build/pixel_verify_style
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style, be_dom_get_bg_color}
+use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, be_default_style}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{browser_renderer_html_string_to_dom}
+use std.gc_async_mut.gpu.browser_engine.layout.{layout_tree, BeLayoutBox}
+use std.gc_async_mut.gpu.browser_engine.paint.{generate_paint_list}
+
+fn main():
+    print "=== Style Pipeline Debug ==="
+
+    # Test 1: Direct DOM node style
+    print "\n--- Test 1: Direct node.set_style ---"
+    var node = BeDomNode.element("div")
+    print "  Before: bg_color = {node.style.background_color}"
+    node.set_style("background-color", "#FF0000")
+    print "  After set_style: bg_color = {node.style.background_color}"
+
+    # Test 2: Same-module accessor
+    print "\n--- Test 2: be_dom_get_bg_color ---"
+    val bg = be_dom_get_bg_color(node)
+    print "  bg_color via accessor = {bg}"
+
+    # Test 3: Cross-module field access
+    print "\n--- Test 3: Cross-module style access ---"
+    val style = node.style
+    print "  style.background_color = {style.background_color}"
+    print "  style.display = {style.display}"
+
+    # Test 4: HTML parsing with inline style
+    print "\n--- Test 4: HTML with div inline style ---"
+    val html1 = "<div style=\"background-color:#00FF00\">hello</div>"
+    val dom1 = browser_renderer_html_string_to_dom(html1)
+    print "  root tag = {dom1.tag}"
+    print "  root children = {dom1.children.len()}"
+    if dom1.children.len() > 0:
+        val child = dom1.children[0]
+        print "  child[0] tag = {child.tag}"
+        print "  child[0] bg_color direct = {child.style.background_color}"
+        val child_bg = be_dom_get_bg_color(child)
+        print "  child[0] bg_color via accessor = {child_bg}"
+
+    # Test 5: Layout + paint commands
+    print "\n--- Test 5: Paint commands ---"
+    val layout = layout_tree(dom1, 100, 100)
+    print "  layout box: x={layout.x} y={layout.y} w={layout.width} h={layout.height}"
+    print "  layout content: cx={layout.content_x} cy={layout.content_y} cw={layout.content_width} ch={layout.content_height}"
+    print "  layout children = {layout.children.len()}"
+    val commands = generate_paint_list(layout)
+    print "  paint commands = {commands.len()}"
+    var ci = 0
+    while ci < commands.len():
+        val cmd = commands[ci]
+        print "    cmd[{ci}] kind={cmd.kind} x={cmd.x} y={cmd.y} w={cmd.width} h={cmd.height} color={cmd.color}"
+        ci = ci + 1
+
+    # Test 6: Layout child boxes
+    if layout.children.len() > 0:
+        print "\n--- Test 6: Child layout boxes ---"
+        var li = 0
+        while li < layout.children.len():
+            val cbox = layout.children[li]
+            print "  child[{li}] tag={cbox.node.tag} x={cbox.x} y={cbox.y} w={cbox.width} h={cbox.height}"
+            print "    content: cx={cbox.content_x} cy={cbox.content_y} cw={cbox.content_width} ch={cbox.content_height}"
+            val cs = cbox.node.style
+            print "    bg_color = {cs.background_color}"
+            li = li + 1
+
+    print "\n=== Done ==="

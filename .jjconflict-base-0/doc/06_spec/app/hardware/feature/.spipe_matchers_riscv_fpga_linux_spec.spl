@@ -1,0 +1,75 @@
+"""
+# RISC-V FPGA Linux System Specification
+
+Executable requirement trace for the dual-arch orchestration layer.
+"""
+
+use std.spec.*
+
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, create_riscv_fpga_linux_manifest_for_board, generate_default_riscv_fpga_rtl_bundle, generate_riscv_fpga_rtl_bundle_for_board, read_generated_riscv_fpga_rtl_file}
+
+describe "REQ-RFL-001..003: board and lane contracts":
+    it "keeps board validation separate from hardware boot validation":
+        val profile = XilinxBoardProfile.generic()
+        expect profile.validate_for_prepare().len() == 0
+        expect (profile.validate_for_hardware_boot()).contains("xilinx part must be selected before hardware boot")
+
+    it "publishes MLK-S02-100T as a named board profile with concrete part, clock, and programmer":
+        val mlk = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+        expect mlk.part == "xc7a100t-2ffg484i"
+        expect mlk.clock_hz == 25000000
+        expect mlk.programmer == "openFPGALoader"
+
+    it "defines both RV32 and RV64 as generated Linux lanes":
+        val rv32 = RiscvFpgaLane.rv32_default()
+        val rv64 = RiscvFpgaLane.rv64_default()
+        expect rv32.readiness_status() == RiscvReadinessStatus.Contract
+        expect rv32.proof_lane().to_text() == "generated_rv32_linux"
+        expect rv32.xlen.linux_policy() == "repo-native-rv32-linux"
+        expect rv64.proof_lane().to_text() == "generated_rv64_linux"
+
+describe "REQ-RFL-004..006: deterministic dual-arch orchestration":
+    it "creates a deterministic default dual-arch manifest":
+        val manifest = create_default_riscv_fpga_linux_manifest()
+        expect manifest.lanes.len() == 2
+        expect (manifest.readiness_summary()).contains("rv32:contract:qemu_virt_rv32")
+        expect (manifest.readiness_summary()).contains("rv64:contract:qemu_virt_rv64")
+
+    it "creates board-specific manifests and per-arch boot products for MLK-S02-100T":
+        val manifest = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t").ok().unwrap()
+        expect manifest.board.name == "mlk_s02_100t"
+        expect (manifest.vivado_tcl_plan()).contains("examples/09_embedded/fpga_riscv/constraints/mlk_s02_100t.xdc")
+        val products = manifest.board_linux_boot_products_manifest_text("/tmp/simple_riscv_fpga_system_spec_mlk")
+        expect (products).contains("product_id = \"mlk_s02_100t_rv32_linux\"")
+        expect (products).contains("product_id = \"mlk_s02_100t_rv64_linux\"")
+        expect (products).contains("boot_script = \"scripts/mlk_s02_100t_generated_linux_boot.shs\"")
+        expect (products).contains("validation_kind = \"linux-uart-markers\"")
+
+    it "emits generated bundle metadata and a boot products manifest":
+        val result = generate_default_riscv_fpga_rtl_bundle("/tmp/simple_riscv_fpga_system_spec")
+        expect result.is_ok() == true
+        val bundle = result.ok().unwrap()
+        val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+        val products_text = read_generated_riscv_fpga_rtl_file(bundle.board_linux_boot_products_manifest_path)
+        val bundle_readme_text = read_generated_riscv_fpga_rtl_file(bundle.bundle_readme_path)
+        expect (manifest_text).contains("proof_lane = \"generated_rv32_linux\"")
+        expect (manifest_text).contains("proof_lane = \"generated_rv64_linux\"")
+        expect (manifest_text).contains("authoritative_rtl_provenance = \"simple-compiler-generated\"")
+        expect (manifest_text).contains("authoritative_file = \"/tmp/simple_riscv_fpga_system_spec/rv32/rtl/simple_rv32gc_core.spl\"")
+        expect (manifest_text).contains("authoritative_file = \"/tmp/simple_riscv_fpga_system_spec/rv64/rtl/simple_rv64gc_core.vhd\"")
+        expect (manifest_text).contains("pure_simple_authoritative_rtl = \"true\"")
+        expect (products_text).contains("product_id = \"xilinx_generic_rv32_linux\"")
+        expect (products_text).contains("product_id = \"xilinx_generic_rv64_linux\"")
+        expect (products_text).contains("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
+        expect (bundle_readme_text).contains("per-arch boot products manifest: `board_linux_boot_products.sdn`")
+        expect (bundle_readme_text).contains("The machine-readable authoritative subset is listed explicitly by `authoritative_file` entries in the manifest and `provenance.authoritativeFiles` in the debug sidecar.")
+
+    it "emits MLK-specific bundle metadata for board-level hardware wrappers":
+        val result = generate_riscv_fpga_rtl_bundle_for_board("/tmp/simple_riscv_fpga_system_spec_mlk", "mlk_s02_100t")
+        expect result.is_ok() == true
+        val bundle = result.ok().unwrap()
+        val manifest_text = read_generated_riscv_fpga_rtl_file(bundle.manifest_path)
+        val products_text = read_generated_riscv_fpga_rtl_file(bundle.board_linux_boot_products_manifest_path)
+        expect (manifest_text).contains("board = \"mlk_s02_100t\"")
+        expect (products_text).contains("product_id = \"mlk_s02_100t_rv32_linux\"")
+        expect (products_text).contains("product_id = \"mlk_s02_100t_rv64_linux\"")

@@ -1,0 +1,128 @@
+# IR_TC Memory Operation Descriptors
+#
+# Every memory access carries explicit width, endianness, alignment,
+# and address space. Critical for:
+# - AVR Harvard architecture (program vs data memory)
+# - 8086 segment:offset addressing
+# - Cross-endian emulation
+
+# ============================================================================
+# Endianness
+# ============================================================================
+
+enum Endian:
+    """Byte order for memory accesses."""
+    Little      # Little-endian (x86, AVR, RISC-V)
+    Big         # Big-endian (some ARM, network byte order)
+    Host        # Host endianness (compilation path — resolved at build time)
+    Guest       # Guest endianness (emulation path — resolved at codegen time)
+
+impl Endian:
+    fn to_text() -> text:
+        match self:
+            Little: "le"
+            Big: "be"
+            Host: "host"
+            Guest: "guest"
+
+# ============================================================================
+# Memory Operation
+# ============================================================================
+
+struct MemOp:
+    """Descriptor for every memory load/store in IR_TC.
+
+    Unlike LLVM (target-global endianness) or TCG (implicit guest endian),
+    IR_TC makes endianness explicit per-access.
+    """
+    width: i64          # Access width in bytes: 1, 2, 4, 8
+    signed: bool        # Sign-extend on load?
+    endian: Endian      # Byte order for this access
+    align: i64          # Required alignment in bytes (0 = natural)
+    addr_space: i64     # Address space (0=default, 1=program, 2=IO, 3=data)
+
+impl MemOp:
+    static fn new(width: i64, signed: bool, endian: Endian) -> MemOp:
+        MemOp(
+            width: width,
+            signed: signed,
+            endian: endian,
+            align: 0,
+            addr_space: 0
+        )
+
+    static fn byte(endian: Endian) -> MemOp:
+        """8-bit access (no endianness concern)."""
+        MemOp(width: 1, signed: false, endian: endian, align: 1, addr_space: 0)
+
+    static fn word16(endian: Endian) -> MemOp:
+        """16-bit access."""
+        MemOp(width: 2, signed: false, endian: endian, align: 2, addr_space: 0)
+
+    static fn word32(endian: Endian) -> MemOp:
+        """32-bit access."""
+        MemOp(width: 4, signed: false, endian: endian, align: 4, addr_space: 0)
+
+    static fn word64(endian: Endian) -> MemOp:
+        """64-bit access."""
+        MemOp(width: 8, signed: false, endian: endian, align: 8, addr_space: 0)
+
+    fn with_signed(signed: bool) -> MemOp:
+        MemOp(..self, signed: signed)
+
+    fn with_align(align: i64) -> MemOp:
+        MemOp(..self, align: align)
+
+    fn with_addr_space(addr_space: i64) -> MemOp:
+        MemOp(..self, addr_space: addr_space)
+
+    fn bit_width() -> i64:
+        self.width * 8
+
+    fn to_text() -> text:
+        var s = "mem.{self.endian.to_text()}.{self.bit_width()}"
+        if self.signed:
+            s = s + ".s"
+        if self.addr_space != 0:
+            s = s + ".as{self.addr_space}"
+        if self.align != 0:
+            s = s + ".a{self.align}"
+        s
+
+# ============================================================================
+# Barrier Kind
+# ============================================================================
+
+enum BarrierKind:
+    """Memory barrier types for Barrier instruction."""
+    Full            # Full memory fence (sequentially consistent)
+    LoadLoad        # Loads before barrier complete before loads after
+    StoreStore      # Stores before barrier complete before stores after
+    LoadStore       # Loads before barrier complete before stores after
+    StoreLoad       # Stores before barrier complete before loads after
+
+impl BarrierKind:
+    fn to_text() -> text:
+        match self:
+            Full: "full"
+            LoadLoad: "ll"
+            StoreStore: "ss"
+            LoadStore: "ls"
+            StoreLoad: "sl"
+
+# ============================================================================
+# Guest Register Identifier
+# ============================================================================
+
+struct GuestRegId:
+    """Identifies a guest CPU register."""
+    arch: GuestArch
+    index: i64          # Register index within the architecture
+    name: text          # Human-readable name ("r0", "AX", "SREG")
+
+impl GuestRegId:
+    static fn new(arch: GuestArch, index: i64, name: text) -> GuestRegId:
+        GuestRegId(arch: arch, index: index, name: name)
+
+    fn to_text() -> text:
+        "{self.arch.to_text()}.{self.name}"

@@ -1,0 +1,915 @@
+#![allow(unnamed_duplicate_typed_args)]
+# TLS 1.3 Certificate Verification — DER parse + Ed25519 + RSA-PSS + ECDSA-P256 signature verify
+#
+# Implements:
+#   - DER TLV helpers (tag, length, TLV, skip)
+#   - extract_ed25519_pubkey_from_cert: navigate X.509 DER to extract Ed25519 public key
+#   - extract_rsa_pubkey_spki_from_cert: navigate X.509 DER to extract RSA/ECDSA SPKI TLV bytes
+#   - verify_certificate_verify_msg: RFC 8446 §4.4.3 CertificateVerify verify (Ed25519 shim)
+#   - verify_certificate_verify_msg_scheme: dispatch on SignatureScheme (Ed25519 + RSA-PSS + ECDSA-P256)
+#   - verify_cert_signature_ed25519: verify a certificate's self/issuer signature
+#
+# Signature schemes (RFC 8446 §4.2.3):
+#   ed25519:                    0x0807
+#   rsa_pss_rsae_sha256:        0x0804
+#   rsa_pss_rsae_sha384:        0x0805
+#   rsa_pss_rsae_sha512:        0x0806
+#   ecdsa_secp256r1_sha256:     0x0403
+#   ecdsa_secp384r1_sha384:     0x0503  (P-384 primitive not in tree — unsupported)
+#   ecdsa_secp521r1_sha512:     0x0603  (P-521 primitive not in tree — unsupported)
+#
+# Reference: RFC 8446 §4.4.3 (CertificateVerify)
+# Reference: RFC 5280 (X.509 DER encoding)
+# Reference: RFC 8410 (Ed25519 in X.509, OID 1.3.101.112)
+# Reference: RFC 8017 (RSA-PSS)
+# Reference: RFC 5480 (ECDSA in X.509, OID 1.2.840.10045.4.3.2)
+
+use os.crypto.ed25519.{ed25519_verify}
+use os.crypto.ecdsa_p256.{ecdsa_p256_verify_fixed}
+use std.nogc_sync_mut.io.signature_ffi.{rsa_pss_sha256_verify, rsa_pss_sha384_verify, rsa_pss_sha512_verify}
+
+# Exact baremetal x86_64 freestanding builds already expose rt_ed25519_verify in
+# the boot/runtime stubs. Keep the normal verifier as primary and use raw
+# fallbacks only in TLS CertificateVerify so hosted and other lanes keep the
+# existing behavior unless the wrapper path rejects a signature this lane can
+# verify directly.
+extern fn rt_ed25519_verify(message: [u8], pubkey: [u8], signature: [u8]) -> i64
+
+# ============================================================================
+# Result Type
+# ============================================================================
+
+enum CertVerifyResult:
+    Ok
+    Err(msg: text)
+
+enum CertChainResult:
+    Ok
+    Err(msg: text)
+
+# ============================================================================
+# DER Helper Classes
+# ============================================================================
+
+class DerLength:
+    length: u64
+    header_size: u64
+
+class DerTlv:
+    tag: u8
+    value_offset: u64
+    value_length: u64
+    total_length: u64
+
+class ParsedCert:
+    tbs_bytes: [u8]
+    issuer_tlv: [u8]
+    subject_tlv: [u8]
+    spki_tlv: [u8]
+    signature: [u8]
+    sig_scheme: u16
+    is_ca: bool
+
+# ============================================================================
+# Private DER Helpers
+# ============================================================================
+
+fn _der_read_tag(data: [u8], offset: u64) -> u8:
+    """Read the DER tag byte at the given offset."""
+    data[offset]
+
+fn _verify_certverify_ed25519(pubkey: [u8], message: [u8], signature: [u8]) -> (bool, text):
+    """Verify TLS CertificateVerify Ed25519 signatures with a baremetal fallback.
+
+    Hosted and non-baremetal callers stay on the existing os.crypto.ed25519
+    path. The raw runtime fallback is only consulted if that primary verifier
+    rejects, which is the freestanding x86_64 failure mode this shim targets.
+    """
+    if ed25519_verify(pubkey, message, signature):
+        return (true, "primary")
+    val raw_rc = rt_ed25519_verify(message, pubkey, signature)
+    if raw_rc == 1:
+        return (true, "raw")
+    val tls_rc = rt_tls13_ed25519_verify(message, pubkey, signature)
+    if tls_rc == 0:
+        return (true, "tls-helper")
+    (false, "primary=false raw_rc={raw_rc} tls_rc={tls_rc}")
+
+fn _der_read_length(data: [u8], offset_after_tag: u64) -> DerLength:
+    """Read a DER length field starting at offset_after_tag.
+
+    Short form: byte < 0x80 — the byte itself is the length, header_size = 1.
+    Long form 0x81: next 1 byte is the length, header_size = 2.
+    Long form 0x82: next 2 bytes are the length (big-endian), header_size = 3.
+    """
+    val first = data[offset_after_tag]
+    if first < 0x80:
+        DerLength(length: first.to_u64(), header_size: 1)
+    elif first == 0x81:
+        val len_val = data[offset_after_tag + 1].to_u64()
+        DerLength(length: len_val, header_size: 2)
+    else:
+        # 0x82: two length bytes (big-endian)
+        val hi = data[offset_after_tag + 1].to_u64()
+        val lo = data[offset_after_tag + 2].to_u64()
+        val len_val = (hi << 8) | lo
+        DerLength(length: len_val, header_size: 3)
+
+fn _der_read_tlv(data: [u8], offset: u64) -> DerTlv:
+    """Read a DER TLV at offset.
+
+    Returns DerTlv with:
+      tag           = the tag byte
+      value_offset  = offset of first byte of value
+      value_length  = number of bytes in value
+      total_length  = tag + length-header + value bytes
+    """
+    val tag = _der_read_tag(data, offset)
+    val dl = _der_read_length(data, offset + 1)
+    val value_offset = offset + 1 + dl.header_size
+    val total_length = 1 + dl.header_size + dl.length
+    DerTlv(
+        tag: tag,
+        value_offset: value_offset,
+        value_length: dl.length,
+        total_length: total_length
+    )
+
+fn _der_skip(data: [u8], offset: u64) -> u64:
+    """Skip one TLV at offset, returning the offset immediately after it."""
+    val tlv = _der_read_tlv(data, offset)
+    offset + tlv.total_length
+
+fn _copy_slice(data: [u8], offset: u64, length: u64) -> [u8]:
+    """Copy a contiguous byte slice into a new array."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        out.push(data[offset + i])
+        i = i + 1
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    """Compare two byte arrays for exact equality."""
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# Ed25519 OID check: 1.3.101.112 = 06 03 2B 65 70
+# ============================================================================
+
+fn _is_ed25519_oid(data: [u8], offset: u64) -> bool:
+    """Check that 5 bytes at offset match the Ed25519 OID tag+value: 06 03 2B 65 70."""
+    if data[offset] != 0x06:
+        return false
+    if data[offset + 1] != 0x03:
+        return false
+    if data[offset + 2] != 0x2B:
+        return false
+    if data[offset + 3] != 0x65:
+        return false
+    if data[offset + 4] != 0x70:
+        return false
+    true
+
+fn _is_rsa_pss_oid(data: [u8], offset: u64) -> bool:
+    """Check for the RSASSA-PSS OID tag+value: 06 09 2A 86 48 86 F7 0D 01 01 0A."""
+    if data[offset] != 0x06:
+        return false
+    if data[offset + 1] != 0x09:
+        return false
+    if data[offset + 2] != 0x2A:
+        return false
+    if data[offset + 3] != 0x86:
+        return false
+    if data[offset + 4] != 0x48:
+        return false
+    if data[offset + 5] != 0x86:
+        return false
+    if data[offset + 6] != 0xF7:
+        return false
+    if data[offset + 7] != 0x0D:
+        return false
+    if data[offset + 8] != 0x01:
+        return false
+    if data[offset + 9] != 0x01:
+        return false
+    if data[offset + 10] != 0x0A:
+        return false
+    true
+
+fn _is_ecdsa_p256_oid(data: [u8], offset: u64) -> bool:
+    """Check for the ecdsa-with-SHA256 OID tag+value: 06 08 2A 86 48 CE 3D 04 03 02.
+
+    OID 1.2.840.10045.4.3.2 (RFC 5480 / ANSI X9.62).
+    """
+    if data[offset] != 0x06:
+        return false
+    if data[offset + 1] != 0x08:
+        return false
+    if data[offset + 2] != 0x2A:
+        return false
+    if data[offset + 3] != 0x86:
+        return false
+    if data[offset + 4] != 0x48:
+        return false
+    if data[offset + 5] != 0xCE:
+        return false
+    if data[offset + 6] != 0x3D:
+        return false
+    if data[offset + 7] != 0x04:
+        return false
+    if data[offset + 8] != 0x03:
+        return false
+    if data[offset + 9] != 0x02:
+        return false
+    true
+
+fn _ecdsa_p256_der_sig_to_fixed64(der_sig: [u8]) -> [u8]:
+    """Decode a DER-encoded ECDSA-Sig-Value SEQUENCE { r INTEGER, s INTEGER } to 64-byte r||s.
+
+    The DER blob is: 30 <len> 02 <rlen> <r bytes> 02 <slen> <s bytes>.
+    Each INTEGER may have a leading 0x00 padding byte (high-bit safety per DER).
+    Each component is stripped of the padding byte then left-padded to 32 bytes.
+    Returns empty [] on any malformed input.
+    """
+    if der_sig.len() < 8:
+        return []
+    # Outer SEQUENCE tag 0x30
+    if der_sig[0u64] != 0x30:
+        return []
+    val seq_tlv = _der_read_tlv(der_sig, 0)
+    if seq_tlv.tag != 0x30:
+        return []
+    # First INTEGER: r
+    val r_tlv = _der_read_tlv(der_sig, seq_tlv.value_offset)
+    if r_tlv.tag != 0x02:
+        return []
+    # Second INTEGER: s
+    val s_offset = seq_tlv.value_offset + r_tlv.total_length
+    val s_tlv = _der_read_tlv(der_sig, s_offset)
+    if s_tlv.tag != 0x02:
+        return []
+
+    # Extract r: strip optional leading 0x00 sign byte, left-pad to 32
+    var r_start = r_tlv.value_offset
+    var r_len = r_tlv.value_length
+    if r_len > 1 and der_sig[r_start] == 0x00:
+        r_start = r_start + 1
+        r_len = r_len - 1
+    if r_len > 32:
+        return []
+
+    # Extract s: strip optional leading 0x00 sign byte, left-pad to 32
+    var s_start = s_tlv.value_offset
+    var s_len = s_tlv.value_length
+    if s_len > 1 and der_sig[s_start] == 0x00:
+        s_start = s_start + 1
+        s_len = s_len - 1
+    if s_len > 32:
+        return []
+
+    var result: [u8] = []
+    # Left-pad r to 32 bytes
+    var pad: u64 = 32 - r_len
+    var p: u64 = 0
+    while p < pad:
+        result.push(0u8)
+        p = p + 1
+    var i: u64 = 0
+    while i < r_len:
+        result.push(der_sig[r_start + i])
+        i = i + 1
+    # Left-pad s to 32 bytes
+    pad = 32 - s_len
+    p = 0
+    while p < pad:
+        result.push(0u8)
+        p = p + 1
+    i = 0
+    while i < s_len:
+        result.push(der_sig[s_start + i])
+        i = i + 1
+    result
+
+fn _ecdsa_p256_der_sig_encode_fixed64(r32: [u8], s32: [u8]) -> [u8]:
+    """Encode a 64-byte r||s pair (32 bytes each) into DER SEQUENCE { INTEGER r, INTEGER s }.
+
+    Used in tests to produce a DER-encoded signature from a fixed64 form.
+    Prepends 0x00 if the high bit of r or s is set (DER positive integer).
+    """
+    # Build r DER INTEGER value (strip leading zeros, add 0x00 if high bit set)
+    var r_mag: [u8] = []
+    var i: u64 = 0
+    while i < 32 and r32[i] == 0:
+        i = i + 1
+    while i < 32:
+        r_mag.push(r32[i])
+        i = i + 1
+    if r_mag.len() == 0:
+        r_mag.push(0u8)
+    elif (r_mag[0u64] & 0x80) != 0:
+        var padded_r: [u8] = [0x00u8]
+        var j: u64 = 0
+        while j < r_mag.len():
+            padded_r.push(r_mag[j])
+            j = j + 1
+        r_mag = padded_r
+
+    # Build s DER INTEGER value
+    var s_mag: [u8] = []
+    i = 0
+    while i < 32 and s32[i] == 0:
+        i = i + 1
+    while i < 32:
+        s_mag.push(s32[i])
+        i = i + 1
+    if s_mag.len() == 0:
+        s_mag.push(0u8)
+    elif (s_mag[0u64] & 0x80) != 0:
+        var padded_s: [u8] = [0x00u8]
+        var j: u64 = 0
+        while j < s_mag.len():
+            padded_s.push(s_mag[j])
+            j = j + 1
+        s_mag = padded_s
+
+    # Build r INTEGER TLV: 02 <len> <mag>
+    var r_tlv_bytes: [u8] = [0x02u8]
+    r_tlv_bytes.push(r_mag.len().to_u8())
+    var j: u64 = 0
+    while j < r_mag.len():
+        r_tlv_bytes.push(r_mag[j])
+        j = j + 1
+
+    # Build s INTEGER TLV: 02 <len> <mag>
+    var s_tlv_bytes: [u8] = [0x02u8]
+    s_tlv_bytes.push(s_mag.len().to_u8())
+    j = 0
+    while j < s_mag.len():
+        s_tlv_bytes.push(s_mag[j])
+        j = j + 1
+
+    # Wrap in SEQUENCE: 30 <len> <r_tlv><s_tlv>
+    val seq_content_len = r_tlv_bytes.len() + s_tlv_bytes.len()
+    var result: [u8] = [0x30u8]
+    result.push(seq_content_len.to_u8())
+    j = 0
+    while j < r_tlv_bytes.len():
+        result.push(r_tlv_bytes[j])
+        j = j + 1
+    j = 0
+    while j < s_tlv_bytes.len():
+        result.push(s_tlv_bytes[j])
+        j = j + 1
+    result
+
+fn _oid_present_in_range(data: [u8], start: u64, end: u64, oid: [u8]) -> bool:
+    """Return true when the exact tag+value OID bytes occur anywhere in [start, end)."""
+    if oid.len() == 0:
+        return false
+    if end < start:
+        return false
+    var i: u64 = start
+    while i + oid.len() <= end:
+        var matched: bool = true
+        var j: u64 = 0
+        while j < oid.len():
+            if data[i + j] != oid[j]:
+                matched = false
+            j = j + 1
+        if matched:
+            return true
+        i = i + 1
+    false
+
+fn _sig_scheme_from_algorithm_tlv(data: [u8], alg_tlv: DerTlv) -> u16:
+    """Map a certificate signatureAlgorithm TLV to a TLS SignatureScheme."""
+    val start = alg_tlv.value_offset
+    val end = alg_tlv.value_offset + alg_tlv.value_length
+    if _is_ed25519_oid(data, start):
+        return 0x0807
+    if _is_ecdsa_p256_oid(data, start):
+        return 0x0403
+    if _is_rsa_pss_oid(data, start):
+        val sha256_oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]
+        val sha384_oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02]
+        val sha512_oid = [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03]
+        if _oid_present_in_range(data, start, end, sha256_oid):
+            return 0x0804
+        if _oid_present_in_range(data, start, end, sha384_oid):
+            return 0x0805
+        if _oid_present_in_range(data, start, end, sha512_oid):
+            return 0x0806
+    0
+
+fn _extract_is_ca(cert_der: [u8], tbs_value_offset: u64, tbs_value_length: u64) -> bool:
+    """Extract BasicConstraints.cA from TBSCertificate extensions. Missing => false."""
+    val end = tbs_value_offset + tbs_value_length
+    val bc_oid = [0x06u8, 0x03, 0x55, 0x1D, 0x13]
+    var pos: u64 = tbs_value_offset
+
+    while pos + bc_oid.len() <= end:
+        if _bytes_eq(_copy_slice(cert_der, pos, bc_oid.len()), bc_oid):
+            var field_pos = pos + bc_oid.len()
+            if field_pos < end and cert_der[field_pos] == 0x01:
+                field_pos = _der_skip(cert_der, field_pos)
+            if field_pos >= end:
+                return false
+            val extn_value = _der_read_tlv(cert_der, field_pos)
+            if extn_value.tag != 0x04 or extn_value.value_length == 0:
+                return false
+            val inner = _der_read_tlv(cert_der, extn_value.value_offset)
+            if inner.tag != 0x30:
+                return false
+            if inner.value_length == 0:
+                return false
+            val inner_pos = inner.value_offset
+            if cert_der[inner_pos] != 0x01:
+                return false
+            val bool_tlv = _der_read_tlv(cert_der, inner_pos)
+            if bool_tlv.value_length == 0:
+                return false
+            return cert_der[bool_tlv.value_offset] != 0x00
+        pos = pos + 1
+    false
+
+fn _parse_cert_for_chain(cert_der: [u8]) -> ParsedCert:
+    """Parse the certificate fields needed for issuer-chain verification."""
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    val tbs_bytes = _copy_slice(cert_der, cert_body_start, tbs_tlv.total_length)
+
+    var pos = tbs_tlv.value_offset
+    if cert_der[pos] == 0xA0:
+        pos = _der_skip(cert_der, pos)
+    pos = _der_skip(cert_der, pos)
+    pos = _der_skip(cert_der, pos)
+
+    val issuer_tlv = _der_read_tlv(cert_der, pos)
+    val issuer_bytes = _copy_slice(cert_der, pos, issuer_tlv.total_length)
+    pos = pos + issuer_tlv.total_length
+
+    pos = _der_skip(cert_der, pos)
+
+    val subject_tlv = _der_read_tlv(cert_der, pos)
+    val subject_bytes = _copy_slice(cert_der, pos, subject_tlv.total_length)
+    pos = pos + subject_tlv.total_length
+
+    val spki_tlv = _der_read_tlv(cert_der, pos)
+    val spki_bytes = _copy_slice(cert_der, pos, spki_tlv.total_length)
+
+    val sig_alg_offset = cert_body_start + tbs_tlv.total_length
+    val sig_alg_tlv = _der_read_tlv(cert_der, sig_alg_offset)
+    val sig_scheme = _sig_scheme_from_algorithm_tlv(cert_der, sig_alg_tlv)
+
+    val sig_tlv = _der_read_tlv(cert_der, sig_alg_offset + sig_alg_tlv.total_length)
+    val signature = _copy_slice(cert_der, sig_tlv.value_offset + 1, sig_tlv.value_length - 1)
+
+    ParsedCert(
+        tbs_bytes: tbs_bytes,
+        issuer_tlv: issuer_bytes,
+        subject_tlv: subject_bytes,
+        spki_tlv: spki_bytes,
+        signature: signature,
+        sig_scheme: sig_scheme,
+        is_ca: _extract_is_ca(cert_der, tbs_tlv.value_offset, tbs_tlv.value_length)
+    )
+
+fn _verify_cert_signature_with_issuer(parsed: ParsedCert, issuer_cert_der: [u8]) -> CertVerifyResult:
+    """Verify one certificate's signature against its issuer certificate."""
+    if parsed.sig_scheme == 0x0807:
+        val issuer_pubkey = extract_ed25519_pubkey_from_cert(issuer_cert_der)
+        if issuer_pubkey.len() != 32:
+            return CertVerifyResult.Err(msg: "issuer Ed25519 public key extraction failed")
+        val ok = ed25519_verify(issuer_pubkey, parsed.tbs_bytes, parsed.signature)
+        if ok:
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (ed25519)")
+    elif parsed.sig_scheme == 0x0804:
+        val issuer_spki = extract_rsa_pubkey_spki_from_cert(issuer_cert_der)
+        if rsa_pss_sha256_verify(issuer_spki, parsed.tbs_bytes, parsed.signature):
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (rsa_pss_sha256)")
+    elif parsed.sig_scheme == 0x0805:
+        val issuer_spki = extract_rsa_pubkey_spki_from_cert(issuer_cert_der)
+        if rsa_pss_sha384_verify(issuer_spki, parsed.tbs_bytes, parsed.signature):
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (rsa_pss_sha384)")
+    elif parsed.sig_scheme == 0x0806:
+        val issuer_spki = extract_rsa_pubkey_spki_from_cert(issuer_cert_der)
+        if rsa_pss_sha512_verify(issuer_spki, parsed.tbs_bytes, parsed.signature):
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (rsa_pss_sha512)")
+    elif parsed.sig_scheme == 0x0403:
+        # ecdsa_secp256r1_sha256: cert chain ECDSA-P256 signature verify
+        # Cert chain signatures are DER-encoded SEQUENCE { INTEGER r, INTEGER s }
+        val issuer_spki = extract_rsa_pubkey_spki_from_cert(issuer_cert_der)
+        val fixed64 = _ecdsa_p256_der_sig_to_fixed64(parsed.signature)
+        if fixed64.len() != 64:
+            return CertVerifyResult.Err(msg: "certificate signature invalid (ecdsa_p256: DER decode failed)")
+        if ecdsa_p256_verify_fixed(issuer_spki, parsed.tbs_bytes, fixed64):
+            return CertVerifyResult.Ok
+        return CertVerifyResult.Err(msg: "certificate signature invalid (ecdsa_p256_sha256)")
+    CertVerifyResult.Err(msg: "unsupported certificate signature algorithm")
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn extract_ed25519_pubkey_from_cert(cert_der: [u8]) -> [u8]:
+    """Extract the 32-byte Ed25519 public key from a DER-encoded X.509 certificate.
+
+    Navigation:
+      Certificate  SEQUENCE
+        TBSCertificate  SEQUENCE
+          [0] CONTEXT optional (version)  — skip if present (tag 0xA0)
+          INTEGER  (serialNumber)          — skip
+          SEQUENCE (signatureAlgorithm)    — skip
+          SEQUENCE (issuer)                — skip
+          SEQUENCE (validity)              — skip
+          SEQUENCE (subject)               — skip
+          SEQUENCE (subjectPublicKeyInfo)  — parse
+            SEQUENCE (algorithm)
+              OID 1.3.101.112              — verify Ed25519
+            BIT STRING (subjectPublicKey)  — extract 32 bytes (skip unused-bits byte)
+    """
+    # Outer Certificate SEQUENCE
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val tbs_start = cert_tlv.value_offset
+
+    # TBSCertificate SEQUENCE
+    val tbs_tlv = _der_read_tlv(cert_der, tbs_start)
+    var pos = tbs_tlv.value_offset
+
+    # Optional version [0] CONTEXT (tag 0xA0)
+    if cert_der[pos] == 0xA0:
+        pos = _der_skip(cert_der, pos)
+
+    # serialNumber INTEGER (tag 0x02)
+    pos = _der_skip(cert_der, pos)
+
+    # signatureAlgorithm SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # issuer SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # validity SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # subject SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # subjectPublicKeyInfo SEQUENCE (tag 0x30)
+    val spki_tlv = _der_read_tlv(cert_der, pos)
+    var spki_pos = spki_tlv.value_offset
+
+    # algorithm SEQUENCE (tag 0x30)
+    val alg_tlv = _der_read_tlv(cert_der, spki_pos)
+    # Verify Ed25519 OID at start of algorithm SEQUENCE value
+    _is_ed25519_oid(cert_der, alg_tlv.value_offset)
+
+    # Advance past algorithm SEQUENCE
+    spki_pos = spki_pos + alg_tlv.total_length
+
+    # subjectPublicKey BIT STRING (tag 0x03)
+    val bs_tlv = _der_read_tlv(cert_der, spki_pos)
+    # BIT STRING: first byte is unused_bits count (must be 0 for Ed25519)
+    val key_start = bs_tlv.value_offset + 1
+
+    # Extract 32 bytes
+    var pubkey: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        pubkey.push(cert_der[key_start + i])
+        i = i + 1
+    pubkey
+
+fn extract_rsa_pubkey_spki_from_cert(cert_der: [u8]) -> [u8]:
+    """Extract the SubjectPublicKeyInfo SEQUENCE TLV from a DER-encoded X.509 certificate.
+
+    Returns the full SPKI TLV bytes (outer SEQUENCE including AlgorithmIdentifier and BIT STRING)
+    suitable for passing directly to rsa_pss_sha*_verify functions.
+
+    Navigation:
+      Certificate  SEQUENCE
+        TBSCertificate  SEQUENCE
+          [0] CONTEXT optional (version)  — skip if present (tag 0xA0)
+          INTEGER  (serialNumber)          — skip
+          SEQUENCE (signatureAlgorithm)    — skip
+          SEQUENCE (issuer)                — skip
+          SEQUENCE (validity)              — skip
+          SEQUENCE (subject)               — skip
+          SEQUENCE (subjectPublicKeyInfo)  — return TLV bytes wholesale
+
+    On parse failure, returns empty [u8].
+    """
+    # Outer Certificate SEQUENCE
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val tbs_start = cert_tlv.value_offset
+
+    # TBSCertificate SEQUENCE
+    val tbs_tlv = _der_read_tlv(cert_der, tbs_start)
+    var pos = tbs_tlv.value_offset
+
+    # Optional version [0] CONTEXT (tag 0xA0)
+    if cert_der[pos] == 0xA0:
+        pos = _der_skip(cert_der, pos)
+
+    # serialNumber INTEGER (tag 0x02)
+    pos = _der_skip(cert_der, pos)
+
+    # signatureAlgorithm SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # issuer SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # validity SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # subject SEQUENCE (tag 0x30)
+    pos = _der_skip(cert_der, pos)
+
+    # subjectPublicKeyInfo SEQUENCE (tag 0x30) — return the whole TLV
+    val spki_tlv = _der_read_tlv(cert_der, pos)
+    var spki_bytes: [u8] = []
+    var i: u64 = 0
+    while i < spki_tlv.total_length:
+        spki_bytes.push(cert_der[pos + i])
+        i = i + 1
+    spki_bytes
+
+fn verify_certificate_verify_msg(server_pubkey: [u8], transcript_hash: [u8], sig: [u8]) -> CertVerifyResult:
+    """Verify a TLS 1.3 CertificateVerify message assuming Ed25519 (sig_scheme 0x0807).
+
+    Shim for backward compatibility. New callers should use
+    verify_certificate_verify_msg_scheme and pass the actual SignatureScheme.
+
+    Args:
+        server_pubkey:   32-byte Ed25519 public key from the server's certificate.
+        transcript_hash: transcript hash at CertificateVerify.
+        sig:             64-byte Ed25519 signature from the CertificateVerify message.
+
+    Returns CertVerifyResult.Ok on success, CertVerifyResult.Err on failure.
+    """
+    verify_certificate_verify_msg_scheme(server_pubkey, 0x0807, transcript_hash, sig)
+
+fn verify_certificate_verify_msg_scheme(pubkey: [u8], sig_scheme: u16, transcript_hash: [u8], sig: [u8]) -> CertVerifyResult:
+    """Verify a TLS 1.3 CertificateVerify message dispatching on SignatureScheme.
+
+    The signed content is:
+      64 x 0x20 || "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash
+
+    Supported sig_scheme values (RFC 8446 §4.2.3):
+      0x0807  ed25519                   — pubkey is 32-byte raw Ed25519 key
+      0x0804  rsa_pss_rsae_sha256       — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0805  rsa_pss_rsae_sha384       — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0806  rsa_pss_rsae_sha512       — pubkey is DER SubjectPublicKeyInfo bytes
+      0x0403  ecdsa_secp256r1_sha256    — pubkey is DER SubjectPublicKeyInfo bytes; sig is DER SEQUENCE{r,s}
+      0x0503  ecdsa_secp384r1_sha384    — unsupported (P-384 primitive not in tree)
+      0x0603  ecdsa_secp521r1_sha512    — unsupported (P-521 primitive not in tree)
+
+    Args:
+        pubkey:          Public key bytes (format depends on sig_scheme — see above).
+        sig_scheme:      2-byte SignatureScheme from the CertificateVerify wire message.
+        transcript_hash: transcript hash at CertificateVerify.
+        sig:             Signature bytes from the CertificateVerify message.
+
+    Returns CertVerifyResult.Ok on success, CertVerifyResult.Err on failure.
+    """
+    # Build the content buffer per RFC 8446 §4.4.3
+    var content: [u8] = []
+
+    # 64 spaces (0x20)
+    var i: u64 = 0
+    while i < 64:
+        content.push(0x20)
+        i = i + 1
+
+    # Context string "TLS 1.3, server CertificateVerify" as bytes
+    content.push(0x54)  # T
+    content.push(0x4C)  # L
+    content.push(0x53)  # S
+    content.push(0x20)  # (space)
+    content.push(0x31)  # 1
+    content.push(0x2E)  # .
+    content.push(0x33)  # 3
+    content.push(0x2C)  # ,
+    content.push(0x20)  # (space)
+    content.push(0x73)  # s
+    content.push(0x65)  # e
+    content.push(0x72)  # r
+    content.push(0x76)  # v
+    content.push(0x65)  # e
+    content.push(0x72)  # r
+    content.push(0x20)  # (space)
+    content.push(0x43)  # C
+    content.push(0x65)  # e
+    content.push(0x72)  # r
+    content.push(0x74)  # t
+    content.push(0x69)  # i
+    content.push(0x66)  # f
+    content.push(0x69)  # i
+    content.push(0x63)  # c
+    content.push(0x61)  # a
+    content.push(0x74)  # t
+    content.push(0x65)  # e
+    content.push(0x56)  # V
+    content.push(0x65)  # e
+    content.push(0x72)  # r
+    content.push(0x69)  # i
+    content.push(0x66)  # f
+    content.push(0x79)  # y
+
+    # Separator 0x00
+    content.push(0x00)
+
+    # Append transcript_hash
+    i = 0
+    while i < transcript_hash.len():
+        content.push(transcript_hash[i])
+        i = i + 1
+
+    # Dispatch on SignatureScheme
+    if sig_scheme == 0x0807:
+        # ed25519
+        val (ok, verify_path) = _verify_certverify_ed25519(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ed25519: {verify_path})")
+    elif sig_scheme == 0x0804:
+        # rsa_pss_rsae_sha256
+        val ok = rsa_pss_sha256_verify(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha256)")
+    elif sig_scheme == 0x0805:
+        # rsa_pss_rsae_sha384
+        val ok = rsa_pss_sha384_verify(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha384)")
+    elif sig_scheme == 0x0806:
+        # rsa_pss_rsae_sha512
+        val ok = rsa_pss_sha512_verify(pubkey, content, sig)
+        if ok:
+            CertVerifyResult.Ok
+        else:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (rsa_pss_sha512)")
+    elif sig_scheme == 0x0403:
+        # ecdsa_secp256r1_sha256 — pubkey is DER SubjectPublicKeyInfo bytes (SPKI)
+        # sig is DER-encoded SEQUENCE { INTEGER r, INTEGER s } per RFC 8446 §4.2.3
+        val fixed64 = _ecdsa_p256_der_sig_to_fixed64(sig)
+        if fixed64.len() != 64:
+            CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_p256: DER decode failed)")
+        else:
+            val ok = ecdsa_p256_verify_fixed(pubkey, content, fixed64)
+            if ok:
+                CertVerifyResult.Ok
+            else:
+                CertVerifyResult.Err(msg: "CertificateVerify signature invalid (ecdsa_secp256r1_sha256)")
+    elif sig_scheme == 0x0503:
+        # ecdsa_secp384r1_sha384 — P-384 primitive not in tree
+        CertVerifyResult.Err(msg: "ecdsa_secp384r1_sha384 unsupported (P-384 primitive not in tree)")
+    elif sig_scheme == 0x0603:
+        # ecdsa_secp521r1_sha512 — P-521 primitive not in tree
+        CertVerifyResult.Err(msg: "ecdsa_secp521r1_sha512 unsupported (P-521 primitive not in tree)")
+    else:
+        CertVerifyResult.Err(msg: "unsupported signature scheme")
+
+fn verify_cert_signature_ed25519(cert_der: [u8], issuer_pubkey: [u8]) -> CertVerifyResult:
+    """Verify the Ed25519 signature on a DER-encoded X.509 certificate.
+
+    Extracts TBSCertificate bytes (the signed data), skips signatureAlgorithm,
+    reads the signature BIT STRING, then calls ed25519_verify.
+
+    Args:
+        cert_der:      DER-encoded X.509 certificate.
+        issuer_pubkey: 32-byte Ed25519 public key of the issuer (or self for self-signed).
+
+    Returns CertVerifyResult.Ok on success, CertVerifyResult.Err on failure.
+    """
+    # Outer Certificate SEQUENCE
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+
+    # TBSCertificate SEQUENCE — this is what was signed
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    val tbs_start = cert_body_start
+    val tbs_total = tbs_tlv.total_length
+
+    # Collect TBSCertificate bytes
+    var tbs_bytes: [u8] = []
+    var i: u64 = 0
+    while i < tbs_total:
+        tbs_bytes.push(cert_der[tbs_start + i])
+        i = i + 1
+
+    # Advance past TBSCertificate
+    var pos = cert_body_start + tbs_total
+
+    # signatureAlgorithm SEQUENCE — skip
+    pos = _der_skip(cert_der, pos)
+
+    # signature BIT STRING (tag 0x03)
+    val sig_tlv = _der_read_tlv(cert_der, pos)
+    # Skip the unused_bits byte (first byte of BIT STRING value)
+    val sig_start = sig_tlv.value_offset + 1
+    val sig_len = sig_tlv.value_length - 1
+
+    var signature: [u8] = []
+    i = 0
+    while i < sig_len:
+        signature.push(cert_der[sig_start + i])
+        i = i + 1
+
+    # Verify
+    val ok = ed25519_verify(issuer_pubkey, tbs_bytes, signature)
+    if ok:
+        CertVerifyResult.Ok
+    else:
+        CertVerifyResult.Err(msg: "certificate signature invalid")
+
+fn extract_tbs_certificate_bytes(cert_der: [u8]) -> [u8]:
+    """Extract the DER-encoded TBSCertificate bytes (including SEQUENCE TLV)."""
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    _copy_slice(cert_der, cert_body_start, tbs_tlv.total_length)
+
+fn extract_certificate_signature_bytes(cert_der: [u8]) -> [u8]:
+    """Extract the raw signature bytes from the outer certificate BIT STRING."""
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    val sig_alg_offset = cert_body_start + tbs_tlv.total_length
+    val sig_alg_tlv = _der_read_tlv(cert_der, sig_alg_offset)
+    val sig_tlv = _der_read_tlv(cert_der, sig_alg_offset + sig_alg_tlv.total_length)
+    _copy_slice(cert_der, sig_tlv.value_offset + 1, sig_tlv.value_length - 1)
+
+fn extract_certificate_signature_scheme(cert_der: [u8]) -> u16:
+    """Extract the TLS SignatureScheme-equivalent for the outer certificate signature."""
+    val cert_tlv = _der_read_tlv(cert_der, 0)
+    val cert_body_start = cert_tlv.value_offset
+    val tbs_tlv = _der_read_tlv(cert_der, cert_body_start)
+    val sig_alg_offset = cert_body_start + tbs_tlv.total_length
+    val sig_alg_tlv = _der_read_tlv(cert_der, sig_alg_offset)
+    _sig_scheme_from_algorithm_tlv(cert_der, sig_alg_tlv)
+
+fn verify_cert_chain(chain: [[u8]], root_store: [[u8]]) -> CertChainResult:
+    """Verify a leaf-first certificate chain against a trust-anchor store.
+
+    `chain` must be ordered leaf -> intermediates. The final issuer may be
+    absent from `chain` if it is present in `root_store`.
+    """
+    if chain.len() == 0:
+        return CertChainResult.Err(msg: "certificate chain is empty")
+
+    var i: u64 = 0
+    while i < chain.len():
+        val current_cert = chain[i]
+        val current = _parse_cert_for_chain(current_cert)
+
+        if i + 1 < chain.len():
+            val issuer_cert = chain[i + 1]
+            val issuer = _parse_cert_for_chain(issuer_cert)
+            if not _bytes_eq(current.issuer_tlv, issuer.subject_tlv):
+                return CertChainResult.Err(msg: "issuer/subject mismatch inside chain")
+            if not issuer.is_ca:
+                return CertChainResult.Err(msg: "intermediate certificate is not a CA")
+            val verify_result = _verify_cert_signature_with_issuer(current, issuer_cert)
+            if val CertVerifyResult.Err(msg) = verify_result:
+                return CertChainResult.Err(msg: msg)
+        else:
+            var matched_root: bool = false
+            var root_idx: u64 = 0
+            while root_idx < root_store.len():
+                val root_cert = root_store[root_idx]
+                val root = _parse_cert_for_chain(root_cert)
+                if _bytes_eq(current.issuer_tlv, root.subject_tlv):
+                    if not root.is_ca:
+                        return CertChainResult.Err(msg: "matched trust anchor is not a CA")
+                    val verify_result = _verify_cert_signature_with_issuer(current, root_cert)
+                    if val CertVerifyResult.Ok = verify_result:
+                        matched_root = true
+                    root_idx = root_store.len()
+                else:
+                    root_idx = root_idx + 1
+            if not matched_root:
+                return CertChainResult.Err(msg: "no trust anchor matched the chain issuer")
+        i = i + 1
+
+    CertChainResult.Ok

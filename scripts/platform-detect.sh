@@ -1,1 +1,0 @@
-platform-detect.shs

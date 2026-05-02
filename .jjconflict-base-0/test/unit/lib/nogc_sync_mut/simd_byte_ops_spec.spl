@@ -1,0 +1,158 @@
+# Tests for Phase 2 (seed) SIMD byte intrinsics.
+#
+# Feature: doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md
+# Scope: 1 op (add) for u8x16. AES round / PCLMUL / shuffle deferred.
+#
+# The load-bearing property under test is per-lane wrapping with NO carry
+# propagation across lane boundaries — this is the byte-add semantic AES /
+# AES-GCM byte-shuffle workloads rely on.
+
+use std.simd.{Vec16u8, simd_add_u8x16}
+
+describe "std.simd byte ops (u8x16)":
+    describe "Vec16u8 carriers":
+        it "splat fills all 16 lanes with the same value":
+            val v = Vec16u8.splat(7)
+            expect v.u0 == 7
+            expect v.u1 == 7
+            expect v.u7 == 7
+            expect v.u8_ == 7
+            expect v.u15 == 7
+
+        it "zero is all zeros":
+            val z = Vec16u8.zero()
+            expect z.u0 == 0
+            expect z.u8_ == 0
+            expect z.u15 == 0
+
+        it "from_array round-trips through to_array":
+            val arr = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            val v = Vec16u8.from_array(arr)
+            val back = v.to_array()
+            expect back[0] == 0
+            expect back[8] == 8
+            expect back[15] == 15
+
+    describe "simd_add_u8x16":
+        it "zeros plus zeros is zeros":
+            val z = Vec16u8.zero()
+            val r = simd_add_u8x16(z, z)
+            expect r.u0 == 0
+            expect r.u7 == 0
+            expect r.u8_ == 0
+            expect r.u15 == 0
+
+        it "lane-wise add of two byte vectors":
+            val a = Vec16u8(
+                u0: 1, u1: 2, u2: 3, u3: 4,
+                u4: 5, u5: 6, u6: 7, u7: 8,
+                u8_: 9, u9: 10, u10: 11, u11: 12,
+                u12: 13, u13: 14, u14: 15, u15: 16,
+            )
+            val b = Vec16u8(
+                u0: 10, u1: 20, u2: 30, u3: 40,
+                u4: 50, u5: 60, u6: 70, u7: 80,
+                u8_: 90, u9: 100, u10: 110, u11: 120,
+                u12: 130, u13: 140, u14: 150, u15: 160,
+            )
+            val r = simd_add_u8x16(a, b)
+            expect r.u0 == 11
+            expect r.u3 == 44
+            expect r.u7 == 88
+            expect r.u8_ == 99
+            expect r.u11 == 132
+            expect r.u15 == 176
+
+        it "all-ones plus all-ones wraps to 0xFE per lane":
+            # Each lane: 0xFF + 0xFF = 0x1FE -> wrap to 0xFE.
+            # All 16 lanes wrap independently — no carry propagation.
+            val a = Vec16u8.splat(255)
+            val b = Vec16u8.splat(255)
+            val r = simd_add_u8x16(a, b)
+            expect r.u0 == 254
+            expect r.u1 == 254
+            expect r.u7 == 254
+            expect r.u8_ == 254
+            expect r.u15 == 254
+
+        it "single-lane carry does NOT propagate to next lane":
+            # Core property: u8 lane addition wraps mod 256 per lane.
+            # Lane 0: 0xFF + 0x01 = 0x100 -> 0x00 (wrap), and lane 1
+            # MUST remain 0x00 (no carry-in from lane 0). Same for lane 2
+            # (0xFE + 0x02 = 0x100 -> 0x00, no carry to lane 3) and
+            # lane 4 (0x80 + 0x80 = 0x100 -> 0x00, no carry to lane 5).
+            val a = Vec16u8(
+                u0: 255, u1: 0, u2: 254, u3: 255,
+                u4: 128, u5: 0, u6: 0, u7: 0,
+                u8_: 0, u9: 0, u10: 0, u11: 0,
+                u12: 0, u13: 0, u14: 0, u15: 0,
+            )
+            val b = Vec16u8(
+                u0: 1, u1: 0, u2: 2, u3: 2,
+                u4: 128, u5: 0, u6: 0, u7: 0,
+                u8_: 0, u9: 0, u10: 0, u11: 0,
+                u12: 0, u13: 0, u14: 0, u15: 0,
+            )
+            val r = simd_add_u8x16(a, b)
+            # Lane 0 wraps to 0x00 (0xFF + 0x01 = 0x100, low byte = 0x00).
+            expect r.u0 == 0
+            # Lane 1: NO carry-in absorbed from lane 0. Stays 0.
+            expect r.u1 == 0
+            # Lane 2: 0xFE + 0x02 = 0x100, wrap to 0x00.
+            expect r.u2 == 0
+            # Lane 3: 0xFF + 0x02 = 0x101, wrap to 0x01 (lane-internal,
+            # NOT lane 2's carry).
+            expect r.u3 == 1
+            # Lane 4: 0x80 + 0x80 = 0x100, wrap to 0x00.
+            expect r.u4 == 0
+            # Lane 5: NO carry-in from lane 4.
+            expect r.u5 == 0
+
+        it "byte-exact parity vs scalar lane-wise add":
+            # Random-ish bytes, verify each output lane == (a[i] + b[i]) & 0xFF
+            # computed scalar-wise, ensuring SIMD path matches the spec.
+            val a = Vec16u8(
+                u0: 13, u1: 87, u2: 200, u3: 1,
+                u4: 99, u5: 250, u6: 17, u7: 64,
+                u8_: 211, u9: 5, u10: 42, u11: 199,
+                u12: 33, u13: 173, u14: 100, u15: 251,
+            )
+            val b = Vec16u8(
+                u0: 100, u1: 200, u2: 100, u3: 250,
+                u4: 1, u5: 10, u6: 240, u7: 200,
+                u8_: 50, u9: 251, u10: 213, u11: 60,
+                u12: 220, u13: 90, u14: 156, u15: 5,
+            )
+            val r = simd_add_u8x16(a, b)
+            # Lane 0: 13+100 = 113.
+            expect r.u0 == 113
+            # Lane 1: 87+200 = 287 -> 287-256 = 31.
+            expect r.u1 == 31
+            # Lane 2: 200+100 = 300 -> 44.
+            expect r.u2 == 44
+            # Lane 3: 1+250 = 251.
+            expect r.u3 == 251
+            # Lane 4: 99+1 = 100.
+            expect r.u4 == 100
+            # Lane 5: 250+10 = 260 -> 4.
+            expect r.u5 == 4
+            # Lane 6: 17+240 = 257 -> 1.
+            expect r.u6 == 1
+            # Lane 7: 64+200 = 264 -> 8.
+            expect r.u7 == 8
+            # Lane 8: 211+50 = 261 -> 5.
+            expect r.u8_ == 5
+            # Lane 9: 5+251 = 256 -> 0.
+            expect r.u9 == 0
+            # Lane 10: 42+213 = 255.
+            expect r.u10 == 255
+            # Lane 11: 199+60 = 259 -> 3.
+            expect r.u11 == 3
+            # Lane 12: 33+220 = 253.
+            expect r.u12 == 253
+            # Lane 13: 173+90 = 263 -> 7.
+            expect r.u13 == 7
+            # Lane 14: 100+156 = 256 -> 0.
+            expect r.u14 == 0
+            # Lane 15: 251+5 = 256 -> 0.
+            expect r.u15 == 0

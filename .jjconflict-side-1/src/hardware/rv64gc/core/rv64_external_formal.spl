@@ -1,0 +1,165 @@
+"""
+# RV64GC External Formal Wrapper
+
+Provides a first real formal target for the in-repo RV64GC hardware model.
+Unlike the RV32 VHDL lane, this path wraps the actual RV64 hart/CSR/trap state
+already implemented in Simple and proves retire/trap/return transitions through
+the shared RISC-V architectural contract.
+"""
+
+use hardware.riscv_common.core.riscv_formal.{RiscvFormalContract, RiscvRetireEvent, verify_riscv_event}
+use hardware.rv64gc.smp.rv64_hart.Rv64Hart
+use hardware.rv64gc.pkg.rv64_types_pkg.{PrivilegeMode, priv_to_i64, TRAP_ECALL_U}
+use hardware.rv64gc.pkg.rv64_csr_addrs.{CSR_STVEC, CSR_MTVEC}
+use hardware.rv64gc.privilege.rv64_trap.{handle_trap_entry, compute_trap_vector}
+use std.nogc_sync_mut.debug.remote.exec.result_channel.{ResultPacket}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+class Rv64ExternalFormalBundle:
+    root_dir: text
+    manifest_path: text
+    harness_path: text
+    top_module: text
+
+class Rv64FormalModel:
+    hart: Rv64Hart
+
+    static fn create(reset_vector: i64) -> Rv64FormalModel:
+        Rv64FormalModel(hart: Rv64Hart.create(0, reset_vector))
+
+    me verify_retire_step(instr_bits: i64, instr_size: i64, rd_index: i64, rd_value: i64, mem_write_width_bits: i64) -> Result<text, text>:
+        val pc_before = self.hart.get_pc()
+        val priv_before = priv_to_i64(self.hart.get_priv())
+        if rd_index >= 0:
+            self.hart.write_reg(rd_index, rd_value)
+        self.hart.advance_pc(instr_size)
+        self.hart.retire()
+        val event = RiscvRetireEvent(
+            kind: 0,
+            pc_before: pc_before,
+            pc_after: self.hart.get_pc(),
+            instr_bits: instr_bits,
+            instr_size: instr_size,
+            rd_index: rd_index,
+            rd_value: if rd_index >= 0: self.hart.read_reg(rd_index) else: 0,
+            x0_value: self.hart.read_reg(0),
+            privilege_before: priv_before,
+            privilege_after: priv_to_i64(self.hart.get_priv()),
+            trap_cause: 0,
+            mem_write_width_bits: mem_write_width_bits
+        )
+        verify_riscv_event(RiscvFormalContract.rv64_model_formal(), event)
+
+    me verify_trap_and_return(cause: i64, tval: i64) -> Result<text, text>:
+        val pc_before = self.hart.get_pc()
+        val priv_before_mode = self.hart.get_priv()
+        val priv_before = priv_to_i64(priv_before_mode)
+        val target_mode = handle_trap_entry(
+            cause,
+            tval,
+            pc_before,
+            self.hart.read_csr(0x302),
+            self.hart.read_csr(0x303),
+            priv_before_mode
+        )
+        self.hart.csrs.trap_enter(cause, tval, pc_before, target_mode, priv_before_mode)
+        self.hart.set_priv(target_mode)
+        val tvec = if target_mode == PrivilegeMode.Machine:
+            self.hart.read_csr(CSR_MTVEC)
+        else:
+            self.hart.read_csr(CSR_STVEC)
+        val trap_pc = compute_trap_vector(tvec, cause)
+        self.hart.set_pc(trap_pc)
+        val trap_event = RiscvRetireEvent.trap(
+            pc_before,
+            trap_pc,
+            0x00000073,
+            priv_before,
+            priv_to_i64(target_mode),
+            cause
+        )
+        verify_riscv_event(RiscvFormalContract.rv64_model_formal(), trap_event)?
+
+        val return_before = self.hart.get_pc()
+        val return_mode = self.hart.get_priv()
+        val resume_priv = self.hart.csrs.trap_return_priv(return_mode)
+        val resume_pc = self.hart.csrs.trap_return(return_mode)
+        self.hart.set_priv(resume_priv)
+        self.hart.set_pc(resume_pc)
+        val return_event = RiscvRetireEvent.return_transfer(
+            return_before,
+            resume_pc,
+            priv_to_i64(return_mode),
+            priv_to_i64(resume_priv)
+        )
+        verify_riscv_event(RiscvFormalContract.rv64_model_formal(), return_event)
+
+fn rv64_external_formal_default_dir() -> text:
+    "/tmp/simple_rv64_external_formal"
+
+fn _bundle_manifest_text(root_dir: text) -> text:
+    "[external_formal]\n" +
+        "arch = \"riscv64\"\n" +
+        "top = \"rv64gc_formal_wrapper\"\n" +
+        "model_dir = \"src/hardware/rv64gc\"\n" +
+        "core = \"src/hardware/rv64gc/smp/rv64_hart.spl\"\n" +
+        "bundle_dir = \"{root_dir}\"\n" +
+        "proof_style = \"hardware_model\"\n" +
+        "runner = \"rv64gc-formal-wrapper\"\n"
+
+fn _rv64_harness_text() -> text:
+    "rv64gc_formal_wrapper {\n" +
+        "  observes = [pc, priv_mode, x0, minstret, trap_csrs]\n" +
+        "  proves = [retire_step, trap_entry, trap_return, x0_zero]\n" +
+        "  source = \"src/hardware/rv64gc/smp/rv64_hart.spl\"\n" +
+        "}\n"
+
+fn generate_rv64_external_formal_bundle(root_dir: text) -> Result<Rv64ExternalFormalBundle, text>:
+    if not rt_dir_create(root_dir, true):
+        return Err("failed to create rv64 bundle dir: {root_dir}")
+    val harness_path = "{root_dir}/rv64gc_formal_wrapper.sdn"
+    val manifest_path = "{root_dir}/bundle_manifest.sdn"
+    if not rt_file_write_text(harness_path, _rv64_harness_text()):
+        return Err("failed to write rv64 harness: {harness_path}")
+    if not rt_file_write_text(manifest_path, _bundle_manifest_text(root_dir)):
+        return Err("failed to write rv64 manifest: {manifest_path}")
+    Ok(Rv64ExternalFormalBundle(
+        root_dir: root_dir,
+        manifest_path: manifest_path,
+        harness_path: harness_path,
+        top_module: "rv64gc_formal_wrapper"
+    ))
+
+fn read_generated_rv64_bundle_file(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn run_rv64_external_formal(bundle: Rv64ExternalFormalBundle) -> Result<text, text>:
+    if not rt_file_exists(bundle.manifest_path):
+        return Err("rv64 formal bundle missing manifest")
+    val model = Rv64FormalModel.create(0x80000000)
+    model.hart.write_csr(CSR_MTVEC, 0x80000100)
+    model.hart.write_csr(CSR_STVEC, 0x80000200)
+    model.verify_retire_step(0x00000013, 4, 5, 0x1234, 0)?
+    model.verify_retire_step(0x0001, 2, 0, 0xFFFFFFFFFFFFFFFF, 16)?
+    model.hart.set_priv(PrivilegeMode.User)
+    model.hart.write_csr(0x302, (1 << TRAP_ECALL_U))
+    model.verify_trap_and_return(TRAP_ECALL_U, 0)
+
+fn run_rv64_external_formal_packet(bundle: Rv64ExternalFormalBundle) -> ResultPacket:
+    match run_rv64_external_formal(bundle):
+        Ok(output):
+            ResultPacket.from_exit_code("riscv64_external_formal", 0, output, 0)
+        Err(reason):
+            ResultPacket.failure("riscv64_external_formal", reason)
+
+export Rv64ExternalFormalBundle
+export Rv64FormalModel
+export rv64_external_formal_default_dir
+export generate_rv64_external_formal_bundle
+export read_generated_rv64_bundle_file
+export run_rv64_external_formal
+export run_rv64_external_formal_packet

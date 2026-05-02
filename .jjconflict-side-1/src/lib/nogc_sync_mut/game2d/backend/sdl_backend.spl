@@ -1,0 +1,104 @@
+# std.game2d.backend.sdl_backend — SDL2 windowed backend (Wave B, AC-1)
+#
+# Composition only — NOT inheritance. The class holds an SDL window handle
+# and forwards the trait surface to `nogc_sync_mut/io/window_ffi.spl`.
+#
+# Wave-B scope: parses-clean and provides a stable surface. Real rendering
+# routes through the existing `engine/render/pipeline.spl::SoftwareRenderer`
+# producing an `[i64]` framebuffer that the SDL backend `present`s. If the
+# SDL FFI is unavailable in the host, the trait body errors at runtime;
+# AC-5 testing uses `HeadlessBackend` instead.
+
+use std.common.engine.color.{EngineColor}
+use std.nogc_sync_mut.engine.render.command.{RenderCommandBuffer}
+use std.nogc_sync_mut.game2d.backend.trait.{GameBackend, WindowConfig, Window, Event}
+use std.nogc_sync_mut.game2d.render.canvas.{Canvas}
+use std.nogc_sync_mut.game2d.render.image.{Image, RenderError}
+use std.nogc_sync_mut.game2d.audio.{Sound, AudioError}
+use std.nogc_sync_mut.game2d.input.snapshot.{InputSnapshot}
+
+
+# Opaque wrapper around an SDL window handle. `raw == 0` denotes an
+# unavailable backend (parses-clean, errors at runtime).
+class SdlWindow:
+    raw: i64
+    width: i64
+    height: i64
+    closed: bool
+
+    static fn null() -> SdlWindow:
+        SdlWindow(raw: 0, width: 0, height: 0, closed: true)
+
+
+class SdlBackend:
+    window: SdlWindow
+    width: i64
+    height: i64
+    fb: [i64]
+    last_input: InputSnapshot
+
+    static fn create() -> SdlBackend:
+        SdlBackend(
+            window: SdlWindow.null(),
+            width: 0,
+            height: 0,
+            fb: [],
+            last_input: InputSnapshot.empty()
+        )
+
+    me _ensure_fb(self, w: i64, h: i64):
+        val n = w * h
+        if self.fb.len() == n:
+            return
+        var fb: [i64] = []
+        var i: i64 = 0
+        while i < n:
+            fb.push(0)
+            i = i + 1
+        self.fb = fb
+        self.width = w
+        self.height = h
+
+
+# GameBackend impl — composition (NOT inheritance).
+impl SdlBackend: GameBackend
+    fn create_window(self, cfg: WindowConfig) -> Window:
+        # Wave-B stub — wire to `rt_sdl2_create_window` in Wave C.
+        # If/when SDL FFI is available, replace `null()` with a real call.
+        self._ensure_fb(cfg.width, cfg.height)
+        self.window = SdlWindow(
+            raw: 0,
+            width: cfg.width,
+            height: cfg.height,
+            closed: false
+        )
+        Window(raw: 0, width: cfg.width, height: cfg.height)
+
+    fn poll_events(self, out: [Event]) -> i64:
+        # Stub — Wave C will marshal SDL events into the `out` list.
+        val _ = out
+        0
+
+    fn begin_frame(self) -> Canvas:
+        Canvas.create(self.width, self.height)
+
+    fn end_frame(self):
+        # Wave C: rt_sdl2_present_rgba(self.window.raw, self.fb, w, h)
+        pass_do_nothing
+
+    fn execute_commands(self, cmds: RenderCommandBuffer):
+        # Wave C: route through SoftwareRenderer.render_frame.
+        val _ = cmds
+        pass_do_nothing
+
+    fn load_image(self, path: text) -> Result<Image, RenderError>:
+        Image.new(path)
+
+    fn load_sound(self, path: text) -> Result<Sound, AudioError>:
+        Sound.new(path)
+
+    fn shutdown(self):
+        self.window = SdlWindow.null()
+
+    fn current_input(self) -> InputSnapshot:
+        self.last_input

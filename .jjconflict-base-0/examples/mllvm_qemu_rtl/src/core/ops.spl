@@ -1,0 +1,205 @@
+# IR_TC Instruction Set
+#
+# ~50 opcodes covering both compilation and emulation paths.
+# Follows the MirInstKind enum pattern from Simple's compiler.
+#
+# Naming convention:
+# - Arithmetic/bitwise: LLVM IR names (add, sub, shl, etc.)
+# - Memory: LLVM-style (Load/Store) + TCG-style (GuestLoad/GuestStore)
+# - Control flow: LLVM-style (Br, BrCond, Ret) + TCG-style (ExitTB, GotoTB)
+# - Guest state: TCG-style (ReadGuestReg, WriteGuestReg)
+
+use core.types.{IrTcValue, IrTcTypeKind, IrTcCond, CallConv, GuestArch}
+use core.mem_op.{MemOp, BarrierKind, GuestRegId}
+use core.block.{BlockId}
+
+# ============================================================================
+# IR_TC Instruction
+# ============================================================================
+
+struct IrTcInst:
+    """A single IR_TC instruction with optional source location."""
+    kind: IrTcOp
+    source_line: i64?       # Source line number (debug info)
+    source_file: i64?       # Index into module string table
+
+impl IrTcInst:
+    static fn new(kind: IrTcOp) -> IrTcInst:
+        IrTcInst(kind: kind, source_line: nil, source_file: nil)
+
+    fn with_debug(line: i64, file: i64) -> IrTcInst:
+        IrTcInst(..self, source_line: Some(line), source_file: Some(file))
+
+# ============================================================================
+# Instruction Kinds — the full IR_TC opcode set
+# ============================================================================
+
+enum IrTcOp:
+    """IR_TC instruction set — superset of LLVM IR ops + TCG ops."""
+
+    # ==== Arithmetic (6 ops) ====
+    # All width-polymorphic: operand types determine width
+    Add(dest: IrTcValue, a: IrTcValue, b: IrTcValue)
+    Sub(dest: IrTcValue, a: IrTcValue, b: IrTcValue)
+    Mul(dest: IrTcValue, a: IrTcValue, b: IrTcValue)
+    Div(dest: IrTcValue, a: IrTcValue, b: IrTcValue, signed: bool)
+    Rem(dest: IrTcValue, a: IrTcValue, b: IrTcValue, signed: bool)
+    Neg(dest: IrTcValue, a: IrTcValue)
+
+    # ==== Bitwise (9 ops) ====
+    And(dest: IrTcValue, a: IrTcValue, b: IrTcValue)
+    Or(dest: IrTcValue, a: IrTcValue, b: IrTcValue)
+    Xor(dest: IrTcValue, a: IrTcValue, b: IrTcValue)
+    Not(dest: IrTcValue, a: IrTcValue)
+    Shl(dest: IrTcValue, a: IrTcValue, b: IrTcValue)       # Shift left
+    Shr(dest: IrTcValue, a: IrTcValue, b: IrTcValue)       # Logical shift right
+    Sar(dest: IrTcValue, a: IrTcValue, b: IrTcValue)       # Arithmetic shift right
+    RotL(dest: IrTcValue, a: IrTcValue, b: IrTcValue)      # Rotate left (TCG)
+    RotR(dest: IrTcValue, a: IrTcValue, b: IrTcValue)      # Rotate right (TCG)
+
+    # ==== Comparison (1 op) ====
+    Cmp(dest: IrTcValue, cond: IrTcCond, a: IrTcValue, b: IrTcValue)
+
+    # ==== Width Conversion (3 ops) ====
+    Ext(dest: IrTcValue, src: IrTcValue, signed: bool)      # Extend to wider type
+    Trunc(dest: IrTcValue, src: IrTcValue)                   # Truncate to narrower type
+    Bitcast(dest: IrTcValue, src: IrTcValue)                 # Reinterpret bits
+
+    # ==== Memory — Compilation Path (3 ops) ====
+    Load(dest: IrTcValue, addr: IrTcValue, mem: MemOp)
+    Store(value: IrTcValue, addr: IrTcValue, mem: MemOp)
+    Alloca(dest: IrTcValue, type_: IrTcTypeKind, count: IrTcValue?)
+
+    # ==== Memory — Emulation Path (2 ops) ====
+    # Go through guest MMU/TLB; mmu_idx selects TLB set
+    GuestLoad(dest: IrTcValue, addr: IrTcValue, mem: MemOp, mmu_idx: i64)
+    GuestStore(value: IrTcValue, addr: IrTcValue, mem: MemOp, mmu_idx: i64)
+
+    # ==== Control Flow (4 ops) ====
+    Br(target: BlockId)
+    BrCond(cond: IrTcValue, true_: BlockId, false_: BlockId)
+    Switch(value: IrTcValue, cases: [SwitchCase], default: BlockId)
+    Ret(value: IrTcValue?)
+
+    # ==== Function Calls (2 ops) ====
+    Call(dest: IrTcValue?, func: IrTcValue, args: [IrTcValue], cc: CallConv)
+    CallHelper(dest: IrTcValue?, helper_id: i64, args: [IrTcValue])
+
+    # ==== Guest State — Emulation Only (2 ops) ====
+    ReadGuestReg(dest: IrTcValue, guest_reg: GuestRegId)
+    WriteGuestReg(guest_reg: GuestRegId, value: IrTcValue)
+
+    # ==== Translation Block Control — Emulation Only (3 ops) ====
+    ExitTB(exit_code: i64)
+    GotoTB(tb_index: i64)
+    LookupGotoTB(target_pc: IrTcValue)
+
+    # ==== Aggregates (3 ops) ====
+    GetElementPtr(dest: IrTcValue, base: IrTcValue, indices: [IrTcValue])
+    ExtractValue(dest: IrTcValue, agg: IrTcValue, index: i64)
+    InsertValue(dest: IrTcValue, agg: IrTcValue, value: IrTcValue, index: i64)
+
+    # ==== SSA (1 op) ====
+    Phi(dest: IrTcValue, incoming: [PhiEntry])
+
+    # ==== Special (4 ops) ====
+    SyncGuestPC(value: IrTcValue)           # Update guest PC (emulation)
+    Barrier(kind: BarrierKind)              # Memory fence
+    Nop                                      # No operation
+    Unreachable                              # Undefined behavior marker
+
+# ============================================================================
+# Supporting Types
+# ============================================================================
+
+struct SwitchCase:
+    """A case in a Switch instruction."""
+    value: i64
+    target: BlockId
+
+impl SwitchCase:
+    static fn new(value: i64, target: BlockId) -> SwitchCase:
+        SwitchCase(value: value, target: target)
+
+struct PhiEntry:
+    """An incoming edge for a Phi node."""
+    block: BlockId
+    value: IrTcValue
+
+impl PhiEntry:
+    static fn new(block: BlockId, value: IrTcValue) -> PhiEntry:
+        PhiEntry(block: block, value: value)
+
+# ============================================================================
+# IrTcOp helpers
+# ============================================================================
+
+impl IrTcOp:
+    fn is_emulation_only() -> bool:
+        """Returns true if this op is only valid in emulation mode."""
+        match self:
+            GuestLoad(_, _, _, _): true
+            GuestStore(_, _, _, _): true
+            ReadGuestReg(_, _): true
+            WriteGuestReg(_, _): true
+            ExitTB(_): true
+            GotoTB(_): true
+            LookupGotoTB(_): true
+            SyncGuestPC(_): true
+            CallHelper(_, _, _): true
+            _: false
+
+    fn is_terminator() -> bool:
+        """Returns true if this op ends a basic block."""
+        match self:
+            Br(_): true
+            BrCond(_, _, _): true
+            Switch(_, _, _): true
+            Ret(_): true
+            ExitTB(_): true
+            GotoTB(_): true
+            LookupGotoTB(_): true
+            Unreachable: true
+            _: false
+
+    fn is_memory_access() -> bool:
+        match self:
+            Load(_, _, _): true
+            Store(_, _, _): true
+            GuestLoad(_, _, _, _): true
+            GuestStore(_, _, _, _): true
+            _: false
+
+    fn dest_value() -> IrTcValue?:
+        """Returns the destination value if this op produces one."""
+        match self:
+            Add(d, _, _): Some(d)
+            Sub(d, _, _): Some(d)
+            Mul(d, _, _): Some(d)
+            Div(d, _, _, _): Some(d)
+            Rem(d, _, _, _): Some(d)
+            Neg(d, _): Some(d)
+            And(d, _, _): Some(d)
+            Or(d, _, _): Some(d)
+            Xor(d, _, _): Some(d)
+            Not(d, _): Some(d)
+            Shl(d, _, _): Some(d)
+            Shr(d, _, _): Some(d)
+            Sar(d, _, _): Some(d)
+            RotL(d, _, _): Some(d)
+            RotR(d, _, _): Some(d)
+            Cmp(d, _, _, _): Some(d)
+            Ext(d, _, _): Some(d)
+            Trunc(d, _): Some(d)
+            Bitcast(d, _): Some(d)
+            Load(d, _, _): Some(d)
+            Alloca(d, _, _): Some(d)
+            GuestLoad(d, _, _, _): Some(d)
+            GetElementPtr(d, _, _): Some(d)
+            ExtractValue(d, _, _): Some(d)
+            InsertValue(d, _, _, _): Some(d)
+            Phi(d, _): Some(d)
+            ReadGuestReg(d, _): Some(d)
+            Call(d, _, _, _): d
+            CallHelper(d, _, _): d
+            _: nil

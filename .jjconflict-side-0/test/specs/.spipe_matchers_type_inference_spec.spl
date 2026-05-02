@@ -1,0 +1,228 @@
+"""
+# Type Inference Specification - Test Specification
+
+**Status:** Partial Implementation (Hindley-Milner scaffold working)
+**Feature IDs:** #13
+**Source:** type_inference.md
+**Type:** Extracted Examples (Category B)
+**Last Updated:** 2026-02-08
+**Migrated From:** doc/06_spec/type_inference.md
+
+## Overview
+
+Simple uses a Hindley-Milner-style type inference system that automatically deduces types
+for expressions, variables, and functions without requiring explicit type annotations.
+
+This test file covers basic type inference rules that work in the current runtime.
+
+## Syntax
+
+Type annotations are optional when the type can be inferred:
+
+    val x = 42          # inferred: i64
+    val y = 3.14        # inferred: f64
+    val s = "hello"     # inferred: text
+    val b = true        # inferred: bool
+
+Function return types are inferred from the body:
+
+    fn double(x: i64) -> _:   # _ = inferred i64
+        x * 2
+
+Generic instantiation inferred from arguments:
+
+    fn identity<T>(x: T) -> T: x
+
+    val a = identity(5)     # T inferred as i64
+    val b = identity("hi")  # T inferred as text
+
+Bidirectional inference from expected type:
+
+    val nums: [i64] = [1, 2, 3]  # list element type inferred
+
+## Examples
+
+    val x = 42
+    val y = x + 8    # => 50  (i64 propagated through arithmetic)
+
+    val flag = x > 10    # => true  (bool from comparison)
+
+    fn square(n: i64) -> i64: n * n
+    square(7)   # => 49  (no annotation needed at call site)
+
+    val words = ["a", "b", "c"]
+    words.len()  # => 3  (list type inferred as [text])
+
+## Key Concepts
+
+**Hindley-Milner (HM)** — Simple's inference algorithm is based on HM with
+extensions. Every expression has a principal type that is uniquely inferred
+without programmer annotations (except at module boundaries for public APIs).
+
+**Unification** — the inference engine collects equality constraints between
+type variables and solves them. A conflict (e.g., using an `i64` where
+`text` is expected) is caught at unification, not at run time.
+
+**Generalization** — at let-bindings, free type variables are generalised
+into universally quantified type schemes, enabling reuse with different
+concrete types.
+
+**Bidirectional inference** — expected types (from context) flow inward;
+synthesised types (from expressions) flow outward. This reduces annotation
+burden on lambda arguments and collection literals.
+
+**Annotation escapes** — public API boundaries require explicit type
+annotations so that library consumers get stable, documented types instead
+of inferred internals that could change across versions.
+
+**Rank-1 polymorphism** — Simple infers rank-1 (prenex) types by default.
+Higher-rank types require explicit annotations and are rare in practice.
+
+## Common Patterns
+
+Let-bound generics (inferred at each use site):
+
+    val id = |x| x         # type: <T> (T) -> T
+    id(5)                   # => 5  (T = i64)
+    id("hi")                # => "hi" (T = text)
+
+Inference through `match`:
+
+    val result = match flag:
+        true  => 1
+        false => 0
+    # result: i64 (both branches unify)
+
+Collection literal with inferred element type:
+
+    val nums = [1, 2, 3]    # [i64]
+    val tags = ["a", "b"]   # [text]
+
+Closure return type inferred from body:
+
+    val square = |x: i64| x * x   # (i64) -> i64 — no annotation needed
+"""
+
+use std.spec
+use std.spec.{check, check_msg, expect}
+
+describe "Type Inference Spec":
+    it "inference rules - literals":
+        # Integer, float, string, boolean literals infer their types
+        val x = 42
+        val y = 3.14
+        val s = "hello"
+        val b = true
+        check(true)
+
+    it "inference rules - arithmetic":
+        # Operators infer types from operands
+        val a = 1 + 2
+        val b = 3.0 * 1.5
+        expect a == 3
+
+    it "inference rules - comparison":
+        # Comparison operators return bool
+        val cmp = 1 < 2
+        expect cmp == true
+
+    it "inference rules - logical":
+        # Logical operators return bool
+        val logic = true and false
+        expect logic == false
+
+    it "inference rules - bitwise":
+        # Bitwise operators work on integers
+        val bits = 5 << 2
+        expect bits == 20
+
+    it "inference rules - arrays":
+        # Arrays infer element type from literals
+        val arr = [1, 2, 3]
+        expect arr[0] == 1
+
+    it "inference rules - tuples":
+        # Tuples can have mixed types
+        val t = (1, "hi", true)
+        check(true)
+
+    it "inference rules - dictionaries":
+        # Dictionaries infer key/value types
+        val dict = {"a": 1, "b": 2}
+        check(true)
+
+    it "inference rules - functions with explicit types":
+        # Functions can have explicit return types
+        fn add(a: i64, b: i64) -> i64:
+            a + b
+        val result = add(3, 4)
+        expect result == 7
+
+    it "inference rules - lambda types":
+        # Lambda expressions infer from context
+        val double = \x: x * 2
+        val result = double(5)
+        expect result == 10
+
+    it "inference rules - higher-order functions":
+        # Functions can take functions as arguments
+        fn apply(f: fn(i64) -> i64, x: i64) -> i64:
+            f(x)
+
+        val square = \n: n * n
+        val result = apply(square, 5)
+        expect result == 25
+
+    it "inference rules - if expressions":
+        # If-else expressions infer unified type
+        val x = 1
+        val v = if x > 0:
+            1
+        else:
+            2
+        expect v == 1
+
+    it "inference rules - loops":
+        # Loops with type-stable variables
+        # Note: Closure variable capture has known limitations
+        var i = 0
+        while i < 3:
+            i = i + 1
+        check(true)  # Loop completes without error
+
+    it "examples - basic iteration":
+        # For loop with array inference
+        val numbers = [1, 2, 3, 4, 5]
+        var sum = 0
+        for n in numbers:
+            sum = sum + n
+        expect sum == 15
+
+    it "examples - map function":
+        # Higher-order function with generics
+        fn map_simple(arr: [i64], f: fn(i64) -> i64) -> [i64]:
+            var result = []
+            for x in arr:
+                result = result + [f(x)]
+            result
+
+        val numbers = [1, 2, 3]
+        val doubled = map_simple(numbers, \x: x * 2)
+        expect doubled[0] == 2
+        expect doubled[1] == 4
+        expect doubled[2] == 6
+
+    it "examples - option type with match":
+        # Option type with pattern matching
+        fn find_first(arr: [i64], target: i64) -> i64:
+            for x in arr:
+                if x == target:
+                    return x
+            return -1
+
+        val numbers = [10, 20, 30]
+        val found = find_first(numbers, 20)
+        val not_found = find_first(numbers, 99)
+
+        expect found == 20
+        expect not_found == -1

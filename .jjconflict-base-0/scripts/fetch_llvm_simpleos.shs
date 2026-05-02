@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# fetch_llvm_simpleos.shs — clone or verify the pinned ormastes/llvm-project
+# checkout used by the SimpleOS toolchain build.
+#
+# Single source of truth: scripts/llvm_simpleos_pin.txt
+#
+# Behaviour:
+#   - If LLVM_SRC does not exist: clone the simpleos branch and reset to pin.
+#   - If LLVM_SRC exists and HEAD == pin: print OK and exit 0.
+#   - If LLVM_SRC exists and HEAD != pin: print drift warning and exit 1
+#     (the user resolves manually; we do NOT auto-reset a working tree).
+#
+# Env vars (all optional):
+#   LLVM_SRC          default: $HOME/llvm-project
+#   LLVM_REMOTE       default: https://github.com/ormastes/llvm-project.git
+#   LLVM_BRANCH       default: simpleos
+#   LLVM_PIN_FILE     default: <repo>/scripts/llvm_simpleos_pin.txt
+#   LLVM_FETCH_FORCE  if set, fetch + reset --hard to pin even if drifted
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+LLVM_SRC="${LLVM_SRC:-$HOME/llvm-project}"
+LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/ormastes/llvm-project.git}"
+LLVM_BRANCH="${LLVM_BRANCH:-simpleos}"
+LLVM_PIN_FILE="${LLVM_PIN_FILE:-$REPO_ROOT/scripts/llvm_simpleos_pin.txt}"
+LLVM_FETCH_FORCE="${LLVM_FETCH_FORCE:-0}"
+
+die() { echo "error: $*" >&2; exit "${2:-1}"; }
+warn() { echo "warning: $*" >&2; }
+
+[ -f "$LLVM_PIN_FILE" ] || die "pin file missing: $LLVM_PIN_FILE" 2
+
+PIN_SHA="$(tr -d '[:space:]' < "$LLVM_PIN_FILE")"
+[ -n "$PIN_SHA" ] || die "pin file is empty: $LLVM_PIN_FILE" 2
+
+if [ ! -d "$LLVM_SRC/.git" ]; then
+    echo "==> Cloning $LLVM_REMOTE branch=$LLVM_BRANCH -> $LLVM_SRC"
+    mkdir -p "$(dirname "$LLVM_SRC")"
+    git clone --branch "$LLVM_BRANCH" "$LLVM_REMOTE" "$LLVM_SRC"
+    git -C "$LLVM_SRC" reset --hard "$PIN_SHA"
+    echo "==> Pinned to $PIN_SHA"
+    exit 0
+fi
+
+CUR_SHA="$(git -C "$LLVM_SRC" rev-parse HEAD)"
+
+if [ "$CUR_SHA" = "$PIN_SHA" ]; then
+    echo "==> $LLVM_SRC at pin $PIN_SHA — OK"
+    exit 0
+fi
+
+if [ "$LLVM_FETCH_FORCE" = "1" ]; then
+    echo "==> Force-resetting $LLVM_SRC: $CUR_SHA -> $PIN_SHA"
+    git -C "$LLVM_SRC" fetch origin "$LLVM_BRANCH"
+    git -C "$LLVM_SRC" reset --hard "$PIN_SHA"
+    exit 0
+fi
+
+cat >&2 <<EOF
+warning: LLVM source drift detected
+  pin:      $PIN_SHA
+  current:  $CUR_SHA
+  location: $LLVM_SRC
+
+The working tree is on a different commit than the pin. We will NOT auto-reset
+because there may be local changes. Resolve manually:
+
+  # to discard local state and snap to pin:
+  LLVM_FETCH_FORCE=1 $0
+
+  # or to bump the pin to current HEAD:
+  git -C "$LLVM_SRC" rev-parse HEAD > "$LLVM_PIN_FILE"
+EOF
+exit 1

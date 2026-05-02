@@ -1,0 +1,146 @@
+"""Object Provider integration specification tests."""
+
+use compiler.backend.linker.lib_smf_writer.{LibSmfBuilder}
+use compiler.backend.linker.object_provider.{ObjectProvider, ObjectProviderConfig}
+use compiler.backend.linker.smf_header.{SmfHeader, SMF_HEADER_SIZE}
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute, compile_options_hash_to_bytes}
+use compiler.driver.smf_writer.{build_smf_with_code_for_target, Target}
+use app.io.{shell}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn delete_if_exists(path: text):
+    if rt_file_exists(path):
+        rt_file_delete(path)
+
+fn mark_smf_as_pic_for_backend(smf_data: [u8], backend: text) -> [u8]:
+    val header_offset = smf_data.len() - SMF_HEADER_SIZE
+    val header_result = SmfHeader.from_bytes(smf_data[header_offset:smf_data.len()])
+    if header_result.is_err():
+        fail("failed to parse generated SMF header: {header_result.unwrap_err()}")
+
+    var header = header_result.unwrap()
+    header.set_pic(true)
+    val options_hash = compile_options_hash_compute(backend, 2, true, true, false)
+    header.set_compile_options_bytes(compile_options_hash_to_bytes(options_hash))
+    smf_data[0:header_offset] + header.to_bytes()
+
+describe "Object Provider":
+    it "loads library modules and exposes module bytes, object bytes, and code units":
+        val temp_dir = "/tmp/unit_object_provider_spec"
+        val lib_path = "{temp_dir}/provider_fixture.lsm"
+        _ = shell("mkdir -p '{temp_dir}'")
+        delete_if_exists(lib_path)
+
+        var builder = LibSmfBuilder.new()
+        expect(builder.add_module_data_with_object("pkg/core", [1, 2, 3, 4], [127, 69, 76, 70, 1]).is_ok()).to_equal(true)
+        expect(builder.add_module_data("pkg/fallback", [9, 8, 7]).is_ok()).to_equal(true)
+        expect(builder.write(lib_path).is_ok()).to_equal(true)
+
+        val provider = ObjectProvider.new(ObjectProviderConfig(
+            search_paths: [temp_dir],
+            libraries: [],
+            enable_cache: true,
+            verbose: false,
+            prefer_backend: ""
+        ))
+
+        expect(provider.add_library(lib_path).is_ok()).to_equal(true)
+        expect(provider.has_module("pkg/core")).to_equal(true)
+        expect(provider.has_module("pkg/fallback")).to_equal(true)
+        expect(provider.list_modules().contains("pkg/core")).to_equal(true)
+        expect(provider.list_modules().contains("pkg/fallback")).to_equal(true)
+
+        expect(provider.get_module_bytes("pkg/core").unwrap()).to_equal([1, 2, 3, 4])
+        expect(provider.get_object("pkg/core").unwrap()).to_equal([127, 69, 76, 70, 1])
+
+        val code_units = provider.get_exported_code("pkg/fallback").unwrap()
+        expect(code_units.len()).to_equal(1)
+        expect(code_units[0].name).to_equal("pkg/fallback")
+        expect(code_units[0].bytes).to_equal([9, 8, 7])
+        expect(code_units[0].size).to_equal(3)
+
+        delete_if_exists(lib_path)
+        _ = shell("rmdir '{temp_dir}' 2>/dev/null || true")
+
+    it "returns errors for missing modules":
+        val provider = ObjectProvider.new(ObjectProviderConfig(
+            search_paths: [],
+            libraries: [],
+            enable_cache: true,
+            verbose: false,
+            prefer_backend: ""
+        ))
+
+        expect(provider.get_module_bytes("missing/mod").is_err()).to_equal(true)
+        expect(provider.get_object("missing/mod").is_err()).to_equal(true)
+        expect(provider.get_exported_code("missing/mod").is_err()).to_equal(true)
+
+    it "rejects prefer_backend when the module cannot prove a matching backend":
+        val temp_dir = "/tmp/unit_object_provider_backend_spec"
+        val lib_path = "{temp_dir}/provider_backend_fixture.lsm"
+        _ = shell("mkdir -p '{temp_dir}'")
+        delete_if_exists(lib_path)
+
+        var builder = LibSmfBuilder.new()
+        expect(builder.add_module_data_with_object("pkg/core", [1, 2, 3, 4], [127, 69, 76, 70, 1]).is_ok()).to_equal(true)
+        expect(builder.add_module_data("pkg/fallback", [9, 8, 7]).is_ok()).to_equal(true)
+        expect(builder.write(lib_path).is_ok()).to_equal(true)
+
+        val provider = ObjectProvider.new(ObjectProviderConfig(
+            search_paths: [temp_dir],
+            libraries: [],
+            enable_cache: true,
+            verbose: false,
+            prefer_backend: "llvm"
+        ))
+
+        expect(provider.add_library(lib_path).is_ok()).to_equal(true)
+        val object_result = provider.get_object("pkg/core")
+        expect(object_result.is_err()).to_equal(true)
+        expect(object_result.unwrap_err()).to_contain("prefer_backend=llvm")
+        expect(object_result.unwrap_err()).to_contain("missing compile options hash")
+
+        val code_result = provider.get_exported_code("pkg/fallback")
+        expect(code_result.is_err()).to_equal(true)
+        expect(code_result.unwrap_err()).to_contain("prefer_backend=llvm")
+
+        delete_if_exists(lib_path)
+        _ = shell("rmdir '{temp_dir}' 2>/dev/null || true")
+
+    it "accepts prefer_backend when the module proves a matching PIC llvm build":
+        val temp_dir = "/tmp/unit_object_provider_backend_ok_spec"
+        val lib_path = "{temp_dir}/provider_backend_ok_fixture.lsm"
+        _ = shell("mkdir -p '{temp_dir}'")
+        delete_if_exists(lib_path)
+
+        val smf_data = mark_smf_as_pic_for_backend(
+            build_smf_with_code_for_target([0xC3], Target.x86_64_unknown_linux_gnu()),
+            "llvm-lib"
+        )
+
+        var builder = LibSmfBuilder.new()
+        expect(builder.add_module_data_with_object("pkg/llvm", smf_data, [127, 69, 76, 70, 1]).is_ok()).to_equal(true)
+        expect(builder.write(lib_path).is_ok()).to_equal(true)
+
+        val provider = ObjectProvider.new(ObjectProviderConfig(
+            search_paths: [temp_dir],
+            libraries: [],
+            enable_cache: true,
+            verbose: false,
+            prefer_backend: "llvm"
+        ))
+
+        expect(provider.add_library(lib_path).is_ok()).to_equal(true)
+        val object_result = provider.get_object("pkg/llvm")
+        expect(object_result.is_ok()).to_equal(true)
+        expect(object_result.unwrap()).to_equal([127, 69, 76, 70, 1])
+
+        val code_result = provider.get_exported_code("pkg/llvm")
+        expect(code_result.is_ok()).to_equal(true)
+        expect(code_result.unwrap().len()).to_equal(1)
+        expect(code_result.unwrap()[0].name).to_equal("pkg/llvm")
+
+        delete_if_exists(lib_path)
+        _ = shell("rmdir '{temp_dir}' 2>/dev/null || true")

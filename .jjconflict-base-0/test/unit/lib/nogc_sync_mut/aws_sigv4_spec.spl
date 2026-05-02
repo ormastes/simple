@@ -1,0 +1,167 @@
+# AWS SigV4 helper specs.
+#
+# Feature: AWS Signature V4 — known-answer + presigned URL roundtrip.
+# Category: Lib | nogc_sync_mut | aws_sigv4
+# Status: Implementation
+#
+# Test vector source: AWS published example
+#   https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
+# Reproduced via Python on 2026-04-26: signature `aeeed9bb…d404` matches.
+
+use std.common.crypto.types.{rotr32}
+use std.nogc_sync_mut.aws_sigv4.{
+    SIGV4_ALGORITHM, SIGV4_UNSIGNED_PAYLOAD, SIGV4_EMPTY_SHA256,
+    SigV4QueryParam, SigV4Header,
+    sigv4_sha256_hex, sigv4_uri_encode, sigv4_canonical_uri,
+    sigv4_canonical_query, sigv4_credential_scope,
+    sigv4_compute_signature, sigv4_presign_get_url,
+    sigv4_authorization_header, parse_s3_error
+}
+
+
+# ---------------------------------------------------------------------------
+# AWS published presigned-GET test vector (research note §2.5):
+#
+#   secret      = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+#   access_key  = AKIAIOSFODNN7EXAMPLE
+#   datetime    = 20130524T000000Z   (date 20130524)
+#   region      = us-east-1
+#   service     = s3
+#   bucket+key  = examplebucket/test.txt   (virtual-host style — host carries bucket)
+#   expires     = 86400
+#
+# Canonical request (literal — empty line between canonical_headers and signed_headers):
+#
+#   GET\n
+#   /test.txt\n
+#   X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host\n
+#   host:examplebucket.s3.amazonaws.com\n
+#   \n
+#   host\n
+#   UNSIGNED-PAYLOAD
+#
+# Expected canonical-request SHA256: 3bfa292879f6447bbcda7001decf97f4a54dc650c8942174ae0a9121cf58ad04
+# Expected final signature:          aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404
+# ---------------------------------------------------------------------------
+
+val VECTOR_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+val VECTOR_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"
+val VECTOR_DATE = "20130524"
+val VECTOR_DATETIME = "20130524T000000Z"
+val VECTOR_REGION = "us-east-1"
+val VECTOR_SERVICE = "s3"
+val VECTOR_HOST = "examplebucket.s3.amazonaws.com"
+val VECTOR_EXPECTED_CR_HASH = "3bfa292879f6447bbcda7001decf97f4a54dc650c8942174ae0a9121cf58ad04"
+val VECTOR_EXPECTED_SIG = "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+
+
+fn _build_literal_canonical_request() -> text:
+    # Literal canonical request from the AWS test vector. Note the trailing
+    # blank line in CanonicalHeaders is encoded as the lone `\n` between
+    # `host:...\n` and `host\n`.
+    val q = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host"
+    "GET\n/test.txt\n{q}\nhost:{VECTOR_HOST}\n\nhost\nUNSIGNED-PAYLOAD"
+
+
+describe "AWS SigV4 helper":
+
+    context "primitives":
+
+        it "computes lowercase hex SHA256 of empty string":
+            expect(sigv4_sha256_hex("")).to_equal(SIGV4_EMPTY_SHA256)
+
+        it "URI-encodes per RFC 3986 with uppercase hex":
+            # `/` preserved when encode_slash=false; `/` percent-encoded when true;
+            # space → %20; unreserved chars unchanged.
+            expect(sigv4_uri_encode("a/b c", false)).to_equal("a/b%20c")
+            expect(sigv4_uri_encode("a/b", true)).to_equal("a%2Fb")
+            expect(sigv4_uri_encode("a-b_c.d~e", false)).to_equal("a-b_c.d~e")
+
+        it "builds canonical_uri from a path":
+            expect(sigv4_canonical_uri("/test.txt")).to_equal("/test.txt")
+            expect(sigv4_canonical_uri("")).to_equal("/")
+
+        it "sorts canonical_query by name then value and encodes both sides":
+            var params: [SigV4QueryParam] = []
+            params = params + [SigV4QueryParam(name: "X-Amz-SignedHeaders", value: "host")]
+            params = params + [SigV4QueryParam(name: "X-Amz-Algorithm", value: SIGV4_ALGORITHM)]
+            params = params + [SigV4QueryParam(name: "X-Amz-Date", value: VECTOR_DATETIME)]
+            val out = sigv4_canonical_query(params)
+            # Sorted: X-Amz-Algorithm, X-Amz-Date, X-Amz-SignedHeaders.
+            val expected = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20130524T000000Z&X-Amz-SignedHeaders=host"
+            expect(out).to_equal(expected)
+
+        it "builds credential scope":
+            expect(sigv4_credential_scope("20130524", "us-east-1", "s3")).to_equal("20130524/us-east-1/s3/aws4_request")
+
+    context "Test A — known-answer for literal canonical request":
+
+        it "reproduces canonical-request hash from the AWS vector":
+            val cr = _build_literal_canonical_request()
+            expect(sigv4_sha256_hex(cr)).to_equal(VECTOR_EXPECTED_CR_HASH)
+
+        it "reproduces signature aeeed9bb…d404 from the AWS vector":
+            val cr = _build_literal_canonical_request()
+            val sig = sigv4_compute_signature(
+                VECTOR_SECRET, VECTOR_DATE, VECTOR_REGION, VECTOR_SERVICE,
+                VECTOR_DATETIME, cr
+            )
+            expect(sig).to_equal(VECTOR_EXPECTED_SIG)
+
+    context "Test B — full presigned URL pipeline":
+
+        it "presign_get_url embeds the same signature":
+            # Force path-style with bucket="" so URL path is /test.txt and
+            # host header carries the bucket — matches the AWS vector exactly.
+            val url = sigv4_presign_get_url(
+                "https://{VECTOR_HOST}", VECTOR_HOST, "", "test.txt",
+                VECTOR_ACCESS_KEY, VECTOR_SECRET, VECTOR_REGION, VECTOR_SERVICE,
+                VECTOR_DATETIME, 86400
+            )
+            expect(url.contains("X-Amz-Signature={VECTOR_EXPECTED_SIG}")).to_equal(true)
+            expect(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256")).to_equal(true)
+            expect(url.contains("X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request")).to_equal(true)
+            expect(url.contains("X-Amz-Date=20130524T000000Z")).to_equal(true)
+            expect(url.contains("X-Amz-Expires=86400")).to_equal(true)
+            expect(url.contains("X-Amz-SignedHeaders=host")).to_equal(true)
+            expect(url.starts_with("https://{VECTOR_HOST}/test.txt?")).to_equal(true)
+
+        it "produces path-style URL for path-style buckets":
+            val url = sigv4_presign_get_url(
+                "https://minio.corp:9000", "minio.corp:9000",
+                "firmware-images", "zynq/v2.3.0/fw.bin",
+                VECTOR_ACCESS_KEY, VECTOR_SECRET, VECTOR_REGION, VECTOR_SERVICE,
+                VECTOR_DATETIME, 3600
+            )
+            expect(url.starts_with("https://minio.corp:9000/firmware-images/zynq/v2.3.0/fw.bin?")).to_equal(true)
+            expect(url.contains("X-Amz-Signature=")).to_equal(true)
+
+    context "header-auth Authorization line":
+
+        it "produces an Authorization header for an empty-body GET":
+            var headers: [SigV4Header] = []
+            headers = headers + [SigV4Header(name: "host", value: "minio.corp:9000")]
+            headers = headers + [SigV4Header(name: "x-amz-content-sha256", value: SIGV4_EMPTY_SHA256)]
+            headers = headers + [SigV4Header(name: "x-amz-date", value: VECTOR_DATETIME)]
+            val auth = sigv4_authorization_header(
+                "GET", "/firmware-images/zynq/v2.3.0/fw.bin", "",
+                headers, SIGV4_EMPTY_SHA256,
+                VECTOR_ACCESS_KEY, VECTOR_SECRET, VECTOR_REGION, VECTOR_SERVICE,
+                VECTOR_DATETIME
+            )
+            expect(auth.starts_with("AWS4-HMAC-SHA256 Credential={VECTOR_ACCESS_KEY}/20130524/us-east-1/s3/aws4_request")).to_equal(true)
+            expect(auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date")).to_equal(true)
+            expect(auth.contains("Signature=")).to_equal(true)
+
+    context "S3 error XML parsing":
+
+        it "extracts <Code> and <Message> from S3 error body":
+            val body = "<?xml version=\"1.0\"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Resource>/x/y</Resource></Error>"
+            val info = parse_s3_error(body)
+            expect(info.code).to_equal("NoSuchKey")
+            expect(info.message).to_equal("The specified key does not exist.")
+
+        it "returns empty fields for unrelated XML":
+            val info = parse_s3_error("<Other>foo</Other>")
+            expect(info.code).to_equal("")
+            expect(info.message).to_equal("")

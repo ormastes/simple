@@ -1,0 +1,71 @@
+# tree — Recursively display directory contents in tree format
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.kernel.types.fs_types.{FsNodeKind}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
+
+fn _tree_walk(vfs: VfsManager, path: text, prefix: text, depth: i32, show_all: bool, counts: [u32], terminal: Terminal):
+    """Recursively emit tree lines for entries under `path`. Depth-bounded to 32."""
+    if depth > 32:
+        return
+    val result = vfs.readdir(path)
+    if result.is_err():
+        return
+    val entries = result.unwrap()
+    val total = entries.len()
+    var idx: u64 = 0
+    for entry in entries:
+        val is_hidden = entry.name.starts_with(".")
+        if is_hidden and not show_all:
+            idx = idx + 1
+            continue
+        val is_last = idx == total - 1
+        val branch = match is_last:
+            true => "└── "
+            false => "├── "
+        write_line(terminal, "{prefix}{branch}{entry.name}")
+        if entry.node.kind == FsNodeKind.Directory:
+            counts[0] = counts[0] + 1
+            var child_prefix = "{prefix}│   "
+            if is_last:
+                child_prefix = "{prefix}    "
+            var child_path = "{path}/{entry.name}"
+            if path == "/":
+                child_path = "/{entry.name}"
+            _tree_walk(vfs, child_path, child_prefix, depth + 1, show_all, counts, terminal)
+        else:
+            counts[1] = counts[1] + 1
+        idx = idx + 1
+
+fn tool_tree(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Display directory tree.
+
+    Usage: tree [-a] [PATH]
+    Flags:
+      -a        include hidden entries (names starting with ".")
+      --help    print usage and exit 0
+    """
+    var path = cwd
+    var show_all = false
+    for arg in args:
+        if arg == "--help" or arg == "-h":
+            write_line(terminal, "usage: tree [-a] [PATH]")
+            return 0
+        elif arg == "-a":
+            show_all = true
+        elif arg.starts_with("-"):
+            write_error(terminal, "tree: unknown option '{arg}'")
+            return 1
+        else:
+            path = resolve_path(cwd, arg)
+    if vfs == nil:
+        write_error(terminal, "tree: no filesystem mounted")
+        return 1
+    write_line(terminal, path)
+    var counts: [u32] = [0, 0]
+    _tree_walk(vfs, path, "", 0, show_all, counts, terminal)
+    write_line(terminal, "")
+    write_line(terminal, "{counts[0]} directories, {counts[1]} files")
+    0

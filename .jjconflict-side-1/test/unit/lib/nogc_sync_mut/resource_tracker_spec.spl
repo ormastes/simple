@@ -1,0 +1,317 @@
+# Resource Tracker Tests
+
+use std.spec.{describe, it, expect}
+use std.resource_tracker.{ResourceUsageRecord, calculate_resource_stats, detect_violations}
+use std.resource_tracker.{resource_db_init, resource_db_record, resource_db_load_all}
+use std.resource_tracker.{resource_db_query_worst_cpu, resource_db_query_worst_memory}
+use std.process_monitor.{ProcessMetrics}
+use app.io.mod.{file_exists, file_delete}
+
+describe "ResourceUsageRecord struct":
+    it "creates record with all fields":
+        val record = ResourceUsageRecord(
+            test_file: "test.spl",
+            timestamp_ms: 1000,
+            duration_ms: 500,
+            max_cpu_percent: 45.5,
+            max_memory_mb: 128,
+            avg_cpu_percent: 30.2,
+            avg_memory_mb: 100,
+            max_open_fds: 50,
+            max_threads: 4,
+            sample_count: 10,
+            violations: "cpu,memory"
+        )
+
+        expect(record.test_file).to_equal("test.spl")
+        expect(record.max_cpu_percent).to_equal(45.5)
+        expect(record.violations).to_equal("cpu,memory")
+
+describe "calculate_resource_stats":
+    it "calculates max and avg from samples":
+        val samples = [
+            ProcessMetrics(
+                pid: 1,
+                cpu_percent: 10.0,
+                memory_mb: 100,
+                open_fds: 10,
+                thread_count: 2,
+                timestamp_ms: 1000
+            ),
+            ProcessMetrics(
+                pid: 1,
+                cpu_percent: 50.0,
+                memory_mb: 200,
+                open_fds: 20,
+                thread_count: 4,
+                timestamp_ms: 2000
+            ),
+            ProcessMetrics(
+                pid: 1,
+                cpu_percent: 30.0,
+                memory_mb: 150,
+                open_fds: 15,
+                thread_count: 3,
+                timestamp_ms: 3000
+            )
+        ]
+
+        val record = calculate_resource_stats(samples)
+
+        expect(record.max_cpu_percent).to_equal(50.0)
+        expect(record.max_memory_mb).to_equal(200)
+        expect(record.max_open_fds).to_equal(20)
+        expect(record.max_threads).to_equal(4)
+        expect(record.sample_count).to_equal(3)
+        expect(record.duration_ms).to_equal(2000)
+
+    it "returns zero record for empty samples":
+        val samples: [ProcessMetrics] = []
+        val record = calculate_resource_stats(samples)
+
+        expect(record.max_cpu_percent).to_equal(0.0)
+        expect(record.max_memory_mb).to_equal(0)
+        expect(record.sample_count).to_equal(0)
+
+describe "detect_violations":
+    it "detects CPU violation":
+        val record = ResourceUsageRecord(
+            test_file: "",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 250.0,
+            max_memory_mb: 100,
+            avg_cpu_percent: 200.0,
+            avg_memory_mb: 90,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 1,
+            violations: ""
+        )
+
+        val violations = detect_violations(record, 200.0, 512, 1024)
+        expect(violations).to_contain("cpu")
+
+    it "detects memory violation":
+        val record = ResourceUsageRecord(
+            test_file: "",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 50.0,
+            max_memory_mb: 1024,
+            avg_cpu_percent: 40.0,
+            avg_memory_mb: 900,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 1,
+            violations: ""
+        )
+
+        val violations = detect_violations(record, 200.0, 512, 1024)
+        expect(violations).to_contain("memory")
+
+    it "detects multiple violations":
+        val record = ResourceUsageRecord(
+            test_file: "",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 250.0,
+            max_memory_mb: 1024,
+            avg_cpu_percent: 200.0,
+            avg_memory_mb: 900,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 1,
+            violations: ""
+        )
+
+        val violations = detect_violations(record, 200.0, 512, 1024)
+        expect(violations).to_contain("cpu")
+        expect(violations).to_contain("memory")
+
+    it "reports no violations when within limits":
+        val record = ResourceUsageRecord(
+            test_file: "",
+            timestamp_ms: 0,
+            duration_ms: 0,
+            max_cpu_percent: 50.0,
+            max_memory_mb: 256,
+            avg_cpu_percent: 40.0,
+            avg_memory_mb: 200,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 1,
+            violations: ""
+        )
+
+        val violations = detect_violations(record, 200.0, 512, 1024)
+        expect(violations).to_equal("")
+
+describe "resource_db operations":
+    it "initializes database file":
+        # Clean up any existing test database
+        val db_path = "doc/test/resource_usage.sdn"
+        if file_exists(db_path):
+            file_delete(db_path)
+
+        resource_db_init()
+        expect(file_exists(db_path)).to_equal(true)
+
+    it "records resource usage to database":
+        val db_path = "doc/test/resource_usage.sdn"
+        if file_exists(db_path):
+            file_delete(db_path)
+
+        resource_db_init()
+
+        val record = ResourceUsageRecord(
+            test_file: "test_example.spl",
+            timestamp_ms: 1000,
+            duration_ms: 500,
+            max_cpu_percent: 45.5,
+            max_memory_mb: 128,
+            avg_cpu_percent: 30.2,
+            avg_memory_mb: 100,
+            max_open_fds: 50,
+            max_threads: 4,
+            sample_count: 10,
+            violations: "cpu"
+        )
+
+        resource_db_record("test_example.spl", record, "cpu")
+
+        # Verify file was written
+        expect(file_exists(db_path)).to_equal(true)
+
+    it "loads records from database":
+        val db_path = "doc/test/resource_usage.sdn"
+        if file_exists(db_path):
+            file_delete(db_path)
+
+        resource_db_init()
+
+        # Record two test entries
+        val record1 = ResourceUsageRecord(
+            test_file: "test1.spl",
+            timestamp_ms: 1000,
+            duration_ms: 500,
+            max_cpu_percent: 100.0,
+            max_memory_mb: 256,
+            avg_cpu_percent: 80.0,
+            avg_memory_mb: 200,
+            max_open_fds: 50,
+            max_threads: 4,
+            sample_count: 10,
+            violations: ""
+        )
+
+        val record2 = ResourceUsageRecord(
+            test_file: "test2.spl",
+            timestamp_ms: 2000,
+            duration_ms: 1000,
+            max_cpu_percent: 200.0,
+            max_memory_mb: 512,
+            avg_cpu_percent: 150.0,
+            avg_memory_mb: 400,
+            max_open_fds: 100,
+            max_threads: 8,
+            sample_count: 20,
+            violations: "cpu"
+        )
+
+        resource_db_record("test1.spl", record1, "")
+        resource_db_record("test2.spl", record2, "cpu")
+
+        # Load all records
+        val loaded = resource_db_load_all()
+        expect(loaded.len()).to_equal(2)
+
+    it "queries worst CPU consumers":
+        val db_path = "doc/test/resource_usage.sdn"
+        if file_exists(db_path):
+            file_delete(db_path)
+
+        resource_db_init()
+
+        # Record tests with different CPU usage
+        val record1 = ResourceUsageRecord(
+            test_file: "low_cpu.spl",
+            timestamp_ms: 1000,
+            duration_ms: 500,
+            max_cpu_percent: 50.0,
+            max_memory_mb: 100,
+            avg_cpu_percent: 40.0,
+            avg_memory_mb: 90,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 5,
+            violations: ""
+        )
+
+        val record2 = ResourceUsageRecord(
+            test_file: "high_cpu.spl",
+            timestamp_ms: 2000,
+            duration_ms: 1000,
+            max_cpu_percent: 300.0,
+            max_memory_mb: 200,
+            avg_cpu_percent: 250.0,
+            avg_memory_mb: 180,
+            max_open_fds: 20,
+            max_threads: 4,
+            sample_count: 10,
+            violations: "cpu"
+        )
+
+        resource_db_record("low_cpu.spl", record1, "")
+        resource_db_record("high_cpu.spl", record2, "cpu")
+
+        # Query worst CPU consumers
+        val worst = resource_db_query_worst_cpu(1)
+        expect(worst.len()).to_equal(1)
+        expect(worst[0].test_file).to_equal("high_cpu.spl")
+        expect(worst[0].max_cpu_percent).to_equal(300.0)
+
+    it "queries worst memory consumers":
+        val db_path = "doc/test/resource_usage.sdn"
+        if file_exists(db_path):
+            file_delete(db_path)
+
+        resource_db_init()
+
+        # Record tests with different memory usage
+        val record1 = ResourceUsageRecord(
+            test_file: "low_mem.spl",
+            timestamp_ms: 1000,
+            duration_ms: 500,
+            max_cpu_percent: 50.0,
+            max_memory_mb: 128,
+            avg_cpu_percent: 40.0,
+            avg_memory_mb: 100,
+            max_open_fds: 10,
+            max_threads: 2,
+            sample_count: 5,
+            violations: ""
+        )
+
+        val record2 = ResourceUsageRecord(
+            test_file: "high_mem.spl",
+            timestamp_ms: 2000,
+            duration_ms: 1000,
+            max_cpu_percent: 100.0,
+            max_memory_mb: 2048,
+            avg_cpu_percent: 80.0,
+            avg_memory_mb: 1800,
+            max_open_fds: 20,
+            max_threads: 4,
+            sample_count: 10,
+            violations: "memory"
+        )
+
+        resource_db_record("low_mem.spl", record1, "")
+        resource_db_record("high_mem.spl", record2, "memory")
+
+        # Query worst memory consumers
+        val worst = resource_db_query_worst_memory(1)
+        expect(worst.len()).to_equal(1)
+        expect(worst[0].test_file).to_equal("high_mem.spl")
+        expect(worst[0].max_memory_mb).to_equal(2048)

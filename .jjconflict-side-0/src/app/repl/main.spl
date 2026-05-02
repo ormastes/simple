@@ -1,0 +1,282 @@
+# Simple Language REPL
+# Interactive Read-Eval-Print Loop using temp-file accumulation + subprocess
+# Usage: bin/simple (no args) or bin/simple repl
+# No compiler imports — uses subprocess for fast startup
+
+extern fn input() -> text
+extern fn stdout_write(s: text)
+extern fn stdout_flush()
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(name: text) -> text
+extern fn rt_platform_name() -> text
+
+# Module-level state (avoids closure mutation bug)
+# Use text instead of arrays to avoid .len()/.push() path call issues
+var REPL_ACCUMULATED: text = ""
+var REPL_RUNNING: bool = true
+var REPL_LINE_NUM: i64 = 1
+var REPL_CONTINUATION: text = ""
+var REPL_IN_MULTILINE: bool = false
+var REPL_EXPR_COUNT: i64 = 0
+var REPL_TEMP_PATH: text = ""
+var REPL_HISTORY_TEXT: text = ""
+
+fn repl_init_temp_path():
+    val pid = rt_getpid()
+    REPL_TEMP_PATH = "/tmp/simple_repl_{pid}.spl"
+
+fn repl_find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+
+    val is_win = rt_platform_name() == "windows"
+    val ext = if is_win: ".exe" else: ""
+
+    if rt_file_exists("src/compiler_rust/target/release/simple{ext}"):
+        return "src/compiler_rust/target/release/simple{ext}"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple{ext}"):
+        return "src/compiler_rust/target/bootstrap/simple{ext}"
+    if rt_file_exists("bin/simple{ext}"):
+        return "bin/simple{ext}"
+    if not is_win:
+        if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+            return "bin/release/aarch64-apple-darwin-macho/simple"
+        if rt_file_exists("bin/release/macos-arm64/simple"):
+            return "bin/release/macos-arm64/simple"
+        if rt_file_exists("bin/release/darwin-aarch64/simple"):
+            return "bin/release/darwin-aarch64/simple"
+        if rt_file_exists("bin/release/macos-x86_64/simple"):
+            return "bin/release/macos-x86_64/simple"
+        if rt_file_exists("bin/release/linux-x86_64/simple"):
+            return "bin/release/linux-x86_64/simple"
+    else:
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+    "bin/simple{ext}"
+
+fn repl_read_line(prompt: text) -> text:
+    stdout_write(prompt)
+    stdout_flush()
+    input() ?? ""
+
+fn repl_print_banner():
+    print "Simple Language REPL v0.2.0"
+    print "Type ':help' for commands, ':quit' to exit"
+    print ""
+
+fn repl_handle_command(line: text) -> bool:
+    if line == ":help" or line == ":h":
+        print "Commands:"
+        print "  :help, :h          Show this help"
+        print "  :quit, :q, :exit   Exit REPL"
+        print "  :clear             Clear accumulated state"
+        print "  :history           Show command history"
+        print "  :load <file>       Load and execute a file"
+        print "  :show              Show accumulated definitions"
+        print ""
+        print "Tips:"
+        print "  - Lines ending with ':' start a multi-line block"
+        print "  - Empty line in multi-line mode submits the block"
+        print "  - Expressions are auto-printed"
+        return true
+    if line == ":quit" or line == ":q" or line == ":exit":
+        REPL_RUNNING = false
+        print "Goodbye!"
+        return true
+    if line == ":clear":
+        REPL_ACCUMULATED = ""
+        REPL_EXPR_COUNT = 0
+        print "State cleared."
+        return true
+    if line == ":history":
+        if REPL_HISTORY_TEXT == "":
+            print "(empty)"
+        else:
+            print REPL_HISTORY_TEXT
+        return true
+    if line == ":show":
+        if REPL_ACCUMULATED == "":
+            print "(no definitions)"
+        else:
+            print REPL_ACCUMULATED
+        return true
+    if line.starts_with(":load "):
+        val file_path = line.substring(6).trim()
+        if file_path == "":
+            print "Usage: :load <file>"
+            return true
+        if not rt_file_exists(file_path):
+            print "Error: file not found: {file_path}"
+            return true
+        val content = rt_file_read_text(file_path) ?? ""
+        if content != "":
+            REPL_ACCUMULATED = REPL_ACCUMULATED + content + "\n"
+            print "Loaded: {file_path}"
+        return true
+    false
+
+fn repl_is_declaration(line: text) -> bool:
+    val t = line.trim()
+    if t.starts_with("val "):
+        return true
+    if t.starts_with("var "):
+        return true
+    if t.starts_with("fn "):
+        return true
+    if t.starts_with("class "):
+        return true
+    if t.starts_with("struct "):
+        return true
+    if t.starts_with("enum "):
+        return true
+    if t.starts_with("trait "):
+        return true
+    if t.starts_with("use "):
+        return true
+    if t.starts_with("extern "):
+        return true
+    if t.starts_with("type "):
+        return true
+    if t.starts_with("alias "):
+        return true
+    false
+
+fn repl_is_statement(line: text) -> bool:
+    val t = line.trim()
+    if t.starts_with("if "):
+        return true
+    if t.starts_with("while "):
+        return true
+    if t.starts_with("for "):
+        return true
+    if t.starts_with("match "):
+        return true
+    if t.starts_with("print "):
+        return true
+    if t.starts_with("print("):
+        return true
+    # Assignment: contains = but not ==
+    if (t.contains(" = ") and not t.contains("==") and not t.starts_with("val ") and not t.starts_with("var ")):
+        return true
+    false
+
+fn repl_detect_multiline(line: text) -> bool:
+    val t = line.trim()
+    t.ends_with(":")
+
+fn repl_evaluate(code: text):
+    val trimmed = code.trim()
+    if trimmed == "":
+        return
+
+    REPL_LINE_NUM = REPL_LINE_NUM + 1
+    REPL_HISTORY_TEXT = REPL_HISTORY_TEXT + "  " + str(REPL_LINE_NUM) + ": " + trimmed + "\n"
+
+    if repl_is_declaration(trimmed) or repl_is_statement(trimmed):
+        repl_eval_code(trimmed)
+    else:
+        repl_eval_expression(trimmed)
+
+fn repl_eval_code(code: text):
+    # Try adding to accumulated state and running
+    val prev = REPL_ACCUMULATED
+    REPL_ACCUMULATED = REPL_ACCUMULATED + code + "\n"
+    rt_file_write_text(REPL_TEMP_PATH, REPL_ACCUMULATED)
+    val simple_bin = repl_find_simple_binary()
+    val (out, err, exit_code) = rt_process_run("bash", ["-c", "{simple_bin} run " + REPL_TEMP_PATH + " </dev/null 2>&1"])
+    if exit_code != 0:
+        REPL_ACCUMULATED = prev
+        if err.trim() != "":
+            print "Error: {err.trim()}"
+        elif out.trim() != "":
+            print "Error: {out.trim()}"
+        else:
+            print "Error: could not evaluate"
+    else:
+        if out.trim() != "":
+            print out.trim()
+
+fn repl_eval_expression(code: text):
+    REPL_EXPR_COUNT = REPL_EXPR_COUNT + 1
+    val wrapper_name = "__repl_expr_{REPL_EXPR_COUNT}"
+    val wrapper = "fn {wrapper_name}():\n    val __r = ({code})\n    print __r\n{wrapper_name}()\n"
+    val full = REPL_ACCUMULATED + wrapper
+    rt_file_write_text(REPL_TEMP_PATH, full)
+    val simple_bin = repl_find_simple_binary()
+    val (out, err, exit_code) = rt_process_run("bash", ["-c", "{simple_bin} run " + REPL_TEMP_PATH + " </dev/null 2>&1"])
+    if exit_code == 0 and out.trim() != "":
+        print out.trim()
+    elif exit_code != 0:
+        # Try as statement instead
+        repl_eval_code(code)
+
+fn run_repl() -> i64:
+    repl_init_temp_path()
+    repl_print_banner()
+
+    while REPL_RUNNING:
+        val prompt = if REPL_IN_MULTILINE then "... " else ">>> "
+
+        val line_raw = repl_read_line(prompt)
+
+        # Multi-line mode handling
+        if REPL_IN_MULTILINE:
+            if line_raw.trim() == "":
+                # Empty line terminates multi-line block
+                REPL_IN_MULTILINE = false
+                val block = REPL_CONTINUATION
+                REPL_CONTINUATION = ""
+                repl_evaluate(block)
+            else:
+                REPL_CONTINUATION = REPL_CONTINUATION + "    " + line_raw.trim() + "\n"
+            continue
+
+        val line = line_raw.trim()
+
+        # EOF handling — empty from input() means EOF
+        if line == "" and line_raw == "":
+            REPL_RUNNING = false
+            print ""
+            continue
+
+        # Skip empty lines
+        if line == "":
+            continue
+
+        # Handle commands
+        if line.starts_with(":"):
+            val handled = repl_handle_command(line)
+            if handled:
+                continue
+
+        # Handle exit/quit without colon prefix
+        if line == "exit" or line == "quit" or line == "exit()" or line == "quit()":
+            REPL_RUNNING = false
+            print "Goodbye!"
+            continue
+
+        # Check for multi-line
+        if repl_detect_multiline(line):
+            REPL_IN_MULTILINE = true
+            REPL_CONTINUATION = line + "\n"
+            continue
+
+        # Single-line evaluation
+        repl_evaluate(line)
+
+    # Clean up temp file
+    if rt_file_exists(REPL_TEMP_PATH):
+        rt_file_delete(REPL_TEMP_PATH)
+
+    0
+
+fn main():
+    val exit_code = run_repl()

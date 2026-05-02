@@ -1,0 +1,349 @@
+"""
+# Session Store
+
+Database-backed session store and signed cookie session support.
+Sessions map a session_id to key-value data with expiry.
+
+## DB-backed sessions
+
+```simple
+var db = Database.memory()?
+var store = SessionStore(db: db)
+store.init()?
+
+val sid = store.create("user_42")?
+store.set(sid, "role", "admin")
+val data = store.get(sid)?
+store.destroy(sid)
+```
+
+## Signed cookie sessions
+
+```simple
+val data = {"user_id": "42", "role": "admin"}
+val cookie = SignedCookieSession.encode(data, "my-secret-key")
+val decoded = SignedCookieSession.decode(cookie, "my-secret-key")
+```
+"""
+
+use std.database.sql.connection.{Database}
+use std.database.sql.types.{DbValue, DbError}
+use std.crypto.hmac.{hmac_sha256}
+
+# ============================================================================
+# Session Store (DB-backed)
+# ============================================================================
+
+class SessionStore:
+    """Database-backed session store.
+
+    Sessions are stored in a `sessions` table with columns:
+    session_id (text PK), user_id (text), data (text), created_at (i64), expires_at (i64).
+
+    Session data is stored as pipe-delimited key=value pairs.
+    """
+    db: Database
+
+impl SessionStore:
+    me init() -> Result<(), text>:
+        """Initialize the sessions table. Safe to call repeatedly."""
+        val sql = "CREATE TABLE IF NOT EXISTS sessions (" +
+            "session_id TEXT PRIMARY KEY, " +
+            "user_id TEXT NOT NULL, " +
+            "data TEXT DEFAULT '', " +
+            "created_at INTEGER NOT NULL, " +
+            "expires_at INTEGER NOT NULL" +
+            ")"
+        val result = self.db.exec(sql, [])
+        match result:
+            Ok(_): Ok(())
+            Err(e): Err("Failed to create sessions table")
+
+    me create(user_id: text) -> Result<text, text>:
+        """Create a new session for a user.
+
+        Generates a random hex session ID and inserts a row.
+
+        Args:
+            user_id: User identifier to associate with session
+
+        Returns:
+            Ok(session_id) on success
+        """
+        val sid = generate_session_id()
+        val now = current_timestamp()
+        val expires = now + 86400  # 24 hours default
+        val sql = "INSERT INTO sessions (session_id, user_id, data, created_at, expires_at) VALUES (?, ?, ?, ?, ?)"
+        val params: [DbValue] = [
+            DbValue.Text(value: sid),
+            DbValue.Text(value: user_id),
+            DbValue.Text(value: ""),
+            DbValue.Integer(value: now),
+            DbValue.Integer(value: expires)
+        ]
+        val result = self.db.exec(sql, params)
+        match result:
+            Ok(_): Ok(sid)
+            Err(e): Err("Failed to create session")
+
+    me get(session_id: text) -> Result<Dict<text, text>, text>:
+        """Retrieve session data by session ID.
+
+        Returns empty dict if session not found or expired.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            Ok(data_dict) with session key-value pairs
+        """
+        val now = current_timestamp()
+        val sql = "SELECT data, user_id FROM sessions WHERE session_id = ? AND expires_at > ? LIMIT 1"
+        val params: [DbValue] = [
+            DbValue.Text(value: session_id),
+            DbValue.Integer(value: now)
+        ]
+        val result = self.db.query(sql, params)
+        match result:
+            Ok(rows):
+                if rows.len() == 0:
+                    return Ok({})
+                val row = rows[0]
+                val data_str = row.get_text("data") ?? ""
+                val user_id = row.get_text("user_id") ?? ""
+                var data = deserialize_session_data(data_str)
+                data["_user_id"] = user_id
+                Ok(data)
+            Err(e):
+                Err("Failed to get session")
+
+    me set(session_id: text, key: text, value: text) -> Result<(), text>:
+        """Set a key-value pair in a session.
+
+        Args:
+            session_id: Session identifier
+            key: Data key
+            value: Data value
+        """
+        val get_result = self.get(session_id)
+        match get_result:
+            Ok(data):
+                var updated = data
+                updated.remove("_user_id")
+                updated[key] = value
+                val serialized = serialize_session_data(updated)
+                val sql = "UPDATE sessions SET data = ? WHERE session_id = ?"
+                val params: [DbValue] = [
+                    DbValue.Text(value: serialized),
+                    DbValue.Text(value: session_id)
+                ]
+                val result = self.db.exec(sql, params)
+                match result:
+                    Ok(_): Ok(())
+                    Err(e): Err("Failed to update session")
+            Err(e):
+                Err(e)
+
+    me destroy(session_id: text) -> Result<(), text>:
+        """Delete a session.
+
+        Args:
+            session_id: Session identifier to destroy
+        """
+        val sql = "DELETE FROM sessions WHERE session_id = ?"
+        val params: [DbValue] = [DbValue.Text(value: session_id)]
+        val result = self.db.exec(sql, params)
+        match result:
+            Ok(_): Ok(())
+            Err(e): Err("Failed to destroy session")
+
+    me gc() -> Result<i64, text>:
+        """Garbage collect expired sessions.
+
+        Returns:
+            Ok(count) of deleted sessions
+        """
+        val now = current_timestamp()
+        val sql = "DELETE FROM sessions WHERE expires_at <= ?"
+        val params: [DbValue] = [DbValue.Integer(value: now)]
+        val result = self.db.exec(sql, params)
+        match result:
+            Ok(count): Ok(count)
+            Err(e): Err("Failed to gc sessions")
+
+    me touch(session_id: text, ttl: i64) -> Result<(), text>:
+        """Extend a session's expiry.
+
+        Args:
+            session_id: Session to extend
+            ttl: New time-to-live in seconds from now
+        """
+        val now = current_timestamp()
+        val expires = now + ttl
+        val sql = "UPDATE sessions SET expires_at = ? WHERE session_id = ?"
+        val params: [DbValue] = [
+            DbValue.Integer(value: expires),
+            DbValue.Text(value: session_id)
+        ]
+        val result = self.db.exec(sql, params)
+        match result:
+            Ok(_): Ok(())
+            Err(e): Err("Failed to touch session")
+
+# ============================================================================
+# Signed Cookie Session
+# ============================================================================
+
+class SignedCookieSession:
+    """Stateless session stored entirely in a signed cookie.
+
+    Data is serialized as pipe-delimited key=value pairs,
+    then signed with HMAC-SHA256. Format: `data.signature`.
+    """
+
+impl SignedCookieSession:
+    static fn encode(data: Dict<text, text>, secret: text) -> text:
+        """Encode session data into a signed cookie value.
+
+        Args:
+            data: Session data as key-value pairs
+            secret: Secret key for HMAC signing
+
+        Returns:
+            Signed cookie string in format `encoded_data.signature`
+        """
+        val serialized = serialize_session_data(data)
+        val signature = compute_signature(serialized, secret)
+        "{serialized}.{signature}"
+
+    static fn decode(cookie_value: text, secret: text) -> Dict<text, text>?:
+        """Decode and verify a signed cookie value.
+
+        Args:
+            cookie_value: Signed cookie string
+            secret: Secret key for HMAC verification
+
+        Returns:
+            Session data if signature is valid, nil otherwise
+        """
+        val dot_pos = cookie_value.last_index_of(".")
+        if dot_pos <= 0:
+            return nil
+
+        val data_part = cookie_value[0:dot_pos]
+        val sig_part = cookie_value[dot_pos + 1:]
+
+        val expected_sig = compute_signature(data_part, secret)
+        if sig_part != expected_sig:
+            return nil
+
+        Some(deserialize_session_data(data_part))
+
+# ============================================================================
+# Session Data Serialization
+# ============================================================================
+
+fn serialize_session_data(data: Dict<text, text>) -> text:
+    """Serialize session data to pipe-delimited key=value format.
+
+    Values are percent-encoded to prevent delimiter collisions.
+    """
+    var parts: [text] = []
+    for key in data.keys():
+        val value = data.get(key) ?? ""
+        val encoded_key = simple_encode(key)
+        val encoded_value = simple_encode(value)
+        parts.push("{encoded_key}={encoded_value}")
+    parts.join("|")
+
+fn deserialize_session_data(s: text) -> Dict<text, text>:
+    """Deserialize pipe-delimited key=value string to dict."""
+    var result: Dict<text, text> = {}
+    if s.len() == 0:
+        return result
+
+    val pairs = s.split("|")
+    for pair in pairs:
+        val eq_pos = pair.index_of("=")
+        if eq_pos > 0:
+            val key = simple_decode(pair[0:eq_pos])
+            val value = simple_decode(pair[eq_pos + 1:])
+            result[key] = value
+    result
+
+fn simple_encode(s: text) -> text:
+    """Simple percent-encoding for pipe and equals characters."""
+    var result = s
+    result = result.replace("%", "%25")
+    result = result.replace("|", "%7C")
+    result = result.replace("=", "%3D")
+    result = result.replace(".", "%2E")
+    result
+
+fn simple_decode(s: text) -> text:
+    """Decode simple percent-encoding."""
+    var result = s
+    result = result.replace("%2E", ".")
+    result = result.replace("%3D", "=")
+    result = result.replace("%7C", "|")
+    result = result.replace("%25", "%")
+    result
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn generate_session_id() -> text:
+    """Generate a random-looking session ID.
+
+    Uses timestamp + counter for uniqueness. In production,
+    this would use a CSPRNG.
+    """
+    val ts = current_timestamp()
+    var parts: [text] = []
+    var n = ts
+    var i = 0
+    while i < 16:
+        val digit = (n * 2654435761) % 16
+        n = n + digit + i + 7
+        if digit < 10:
+            parts.push("{digit}")
+        else:
+            match digit:
+                10: parts.push("a")
+                11: parts.push("b")
+                12: parts.push("c")
+                13: parts.push("d")
+                14: parts.push("e")
+                _: parts.push("f")
+        i = i + 1
+    parts.join("")
+
+fn compute_signature(data: text, secret: text) -> text:
+    """Compute HMAC-SHA256 signature as hex string."""
+    val hash_bytes = hmac_sha256(secret, data)
+    bytes_to_hex(hash_bytes)
+
+fn bytes_to_hex(bytes: [i64]) -> text:
+    """Convert byte array to hex string."""
+    var parts: [text] = []
+    for b in bytes:
+        val hi = (b / 16) % 16
+        val lo = b % 16
+        parts.push(hex_digit(hi))
+        parts.push(hex_digit(lo))
+    parts.join("")
+
+fn hex_digit(n: i64) -> text:
+    """Convert 0-15 to hex character."""
+    if n < 10:
+        return "{n}"
+    match n:
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        _: "f"
+
+extern fn current_timestamp() -> i64

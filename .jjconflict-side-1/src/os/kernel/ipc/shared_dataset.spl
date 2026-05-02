@@ -1,0 +1,216 @@
+# Kernel immutable shared dataset manager.
+#
+# Handles encode generation in the high bits and table slot in the low bits.
+# Slot 0, generation 0 is therefore handle 0 and is valid; closed handles are
+# invalidated by incrementing the slot generation before the slot can be reused.
+
+use os.posix.errno.{EBADF, EINVAL, ENOMEM}
+
+val SHARED_DATASET_MAX_OBJECTS: u64 = 64
+val SHARED_DATASET_MAX_BYTES: u64 = 4096
+val SHARED_DATASET_STORAGE_BYTES: u64 = 262144
+val SHARED_DATASET_HANDLE_SLOT_BITS: u64 = 16
+val SHARED_DATASET_HANDLE_SLOT_MASK: u64 = 0xFFFF
+val SHARED_DATASET_INVALID_HANDLE: u64 = 0xFFFFFFFFFFFFFFFF
+
+struct SharedDatasetRead:
+    status: i64
+    len: u64
+    data: [u8]
+
+var shared_dataset_active: [bool; 64]
+var shared_dataset_sealed: [bool; 64]
+var shared_dataset_size_table: [u64; 64]
+var shared_dataset_flags_table: [u32; 64]
+var shared_dataset_generation_table: [u64; 64]
+var shared_dataset_bytes: [u8; 262144]
+
+fn shared_dataset_init():
+    """Reset the fixed dataset table."""
+    var i: u64 = 0
+    while i < SHARED_DATASET_MAX_OBJECTS:
+        shared_dataset_active[i] = false
+        shared_dataset_sealed[i] = false
+        shared_dataset_size_table[i] = 0
+        shared_dataset_flags_table[i] = 0
+        shared_dataset_generation_table[i] = 0
+        i = i + 1
+    i = 0
+    while i < SHARED_DATASET_STORAGE_BYTES:
+        shared_dataset_bytes[i] = 0
+        i = i + 1
+
+fn _shared_dataset_make_handle(slot: u64) -> u64:
+    (shared_dataset_generation_table[slot] << SHARED_DATASET_HANDLE_SLOT_BITS) | slot
+
+fn _shared_dataset_slot(handle: u64) -> u64:
+    handle & SHARED_DATASET_HANDLE_SLOT_MASK
+
+fn _shared_dataset_generation(handle: u64) -> u64:
+    handle >> SHARED_DATASET_HANDLE_SLOT_BITS
+
+fn _shared_dataset_base(slot: u64) -> u64:
+    slot * SHARED_DATASET_MAX_BYTES
+
+fn _shared_dataset_valid(handle: u64) -> bool:
+    if handle == SHARED_DATASET_INVALID_HANDLE:
+        return false
+    val slot = _shared_dataset_slot(handle)
+    if slot >= SHARED_DATASET_MAX_OBJECTS:
+        return false
+    if not shared_dataset_active[slot]:
+        return false
+    shared_dataset_generation_table[slot] == _shared_dataset_generation(handle)
+
+fn shared_dataset_create(size: u64, flags: u32) -> i64:
+    """Create an unsealed immutable dataset builder.
+
+    Returns a handle >= 0, or -errno. Handle 0 is a valid result.
+    """
+    if size == 0 or size > SHARED_DATASET_MAX_BYTES:
+        return 0 - EINVAL as i64
+
+    var slot: u64 = 0
+    while slot < SHARED_DATASET_MAX_OBJECTS:
+        if not shared_dataset_active[slot]:
+            shared_dataset_active[slot] = true
+            shared_dataset_sealed[slot] = false
+            shared_dataset_size_table[slot] = size
+            shared_dataset_flags_table[slot] = flags
+
+            val base = _shared_dataset_base(slot)
+            var i: u64 = 0
+            while i < SHARED_DATASET_MAX_BYTES:
+                shared_dataset_bytes[base + i] = 0
+                i = i + 1
+
+            return _shared_dataset_make_handle(slot) as i64
+        slot = slot + 1
+
+    0 - ENOMEM as i64
+
+fn shared_dataset_write(handle: u64, offset: u64, bytes: [u8]) -> i64:
+    """Write bytes into an unsealed dataset."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+
+    val slot = _shared_dataset_slot(handle)
+    if shared_dataset_sealed[slot]:
+        return 0 - EINVAL as i64
+    if offset > shared_dataset_size_table[slot]:
+        return 0 - EINVAL as i64
+    if offset + bytes.len() > shared_dataset_size_table[slot]:
+        return 0 - EINVAL as i64
+
+    val base = _shared_dataset_base(slot)
+    var i: u64 = 0
+    while i < bytes.len():
+        shared_dataset_bytes[base + offset + i] = bytes[i]
+        i = i + 1
+    bytes.len() as i64
+
+fn shared_dataset_write_byte(handle: u64, offset: u64, value: u8) -> i64:
+    """Write one byte into an unsealed dataset."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+
+    val slot = _shared_dataset_slot(handle)
+    if shared_dataset_sealed[slot]:
+        return 0 - EINVAL as i64
+    if offset >= shared_dataset_size_table[slot]:
+        return 0 - EINVAL as i64
+
+    shared_dataset_bytes[_shared_dataset_base(slot) + offset] = value
+    1
+
+fn shared_dataset_seal(handle: u64) -> i64:
+    """Seal a dataset and make it read-only."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+
+    val slot = _shared_dataset_slot(handle)
+    shared_dataset_sealed[slot] = true
+    0
+
+fn shared_dataset_close(handle: u64) -> i64:
+    """Close a dataset handle and free its table slot."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+
+    val slot = _shared_dataset_slot(handle)
+    val base = _shared_dataset_base(slot)
+    var i: u64 = 0
+    while i < SHARED_DATASET_MAX_BYTES:
+        shared_dataset_bytes[base + i] = 0
+        i = i + 1
+
+    shared_dataset_active[slot] = false
+    shared_dataset_sealed[slot] = false
+    shared_dataset_size_table[slot] = 0
+    shared_dataset_flags_table[slot] = 0
+    shared_dataset_generation_table[slot] = shared_dataset_generation_table[slot] + 1
+    0
+
+fn shared_dataset_read(handle: u64, offset: u64, len: u64) -> SharedDatasetRead:
+    """Read bytes from a sealed dataset."""
+    if not _shared_dataset_valid(handle):
+        return SharedDatasetRead(status: 0 - EBADF as i64, len: 0, data: [])
+
+    val slot = _shared_dataset_slot(handle)
+    if not shared_dataset_sealed[slot]:
+        return SharedDatasetRead(status: 0 - EINVAL as i64, len: 0, data: [])
+    if offset > shared_dataset_size_table[slot]:
+        return SharedDatasetRead(status: 0 - EINVAL as i64, len: 0, data: [])
+    if offset + len > shared_dataset_size_table[slot]:
+        return SharedDatasetRead(status: 0 - EINVAL as i64, len: 0, data: [])
+
+    val base = _shared_dataset_base(slot)
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < len:
+        out.push(shared_dataset_bytes[base + offset + i])
+        i = i + 1
+    SharedDatasetRead(status: len as i64, len: len, data: out)
+
+fn shared_dataset_read_byte(handle: u64, offset: u64) -> i64:
+    """Read one byte from a sealed dataset."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+
+    val slot = _shared_dataset_slot(handle)
+    if not shared_dataset_sealed[slot]:
+        return 0 - EINVAL as i64
+    if offset >= shared_dataset_size_table[slot]:
+        return 0 - EINVAL as i64
+
+    shared_dataset_bytes[_shared_dataset_base(slot) + offset] as i64
+
+fn shared_dataset_size(handle: u64) -> i64:
+    """Return the dataset size or -errno."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+    shared_dataset_size_table[_shared_dataset_slot(handle)] as i64
+
+fn shared_dataset_flags(handle: u64) -> i64:
+    """Return creation flags or -errno."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+    shared_dataset_flags_table[_shared_dataset_slot(handle)] as i64
+
+fn shared_dataset_is_sealed(handle: u64) -> bool:
+    """Return true when the handle names a sealed active dataset."""
+    if not _shared_dataset_valid(handle):
+        return false
+    shared_dataset_sealed[_shared_dataset_slot(handle)]
+
+fn shared_dataset_handle_slot(handle: u64) -> i64:
+    """Return the table slot for an active handle or -errno."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+    _shared_dataset_slot(handle) as i64
+
+fn shared_dataset_handle_generation(handle: u64) -> i64:
+    """Return the generation for an active handle or -errno."""
+    if not _shared_dataset_valid(handle):
+        return 0 - EBADF as i64
+    _shared_dataset_generation(handle) as i64

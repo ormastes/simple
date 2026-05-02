@@ -1,0 +1,482 @@
+"""
+# Static File Handler
+
+Serves static files from a configured root directory. Uses sendfile
+zero-copy when available via IoDriver.submit_sendfile().
+
+## Features
+
+- MIME type detection from file extension
+- Directory index (index.html)
+- Path traversal protection
+- sendfile zero-copy for large files
+- Last-Modified / If-Modified-Since support
+- Pre-compression LRU cache via `StaticCompressionCache`
+
+## Usage
+
+```simple
+val handler = StaticFileHandler.new("/var/www/html", "index.html")
+val response = handler.handle(request, location)
+```
+"""
+
+use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig}
+use std.http_server.response.{
+    build_file_response, build_not_found, build_error, build_html
+}
+use std.http_server.error.{HttpServerError}
+use std.http_server.compression.{compress_response_body, supported_encodings}
+use std.nogc_sync_mut.http.accept_encoding.{negotiate_encoding}
+
+# File system FFI
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_is_dir(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_read_text(path: text) -> text
+
+# text -> [u8] bridge for the compression dispatcher.
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Static Compression Cache
+# ============================================================================
+
+# Default limits for StaticCompressionCache.
+val STATIC_CACHE_DEFAULT_CAPACITY: i64 = 128
+val STATIC_CACHE_DEFAULT_MAX_BYTES: i64 = 16777216  # 16 MiB
+
+class CacheEntry:
+    """One cached compressed payload keyed by (path, encoding)."""
+    path: text
+    encoding: text
+    compressed: [u8]
+    size: i64
+
+class StaticCompressionCache:
+    """LRU cache of pre-compressed static file payloads.
+
+    Keyed by `(path, encoding)`. Capacity is bounded both by entry count
+    (`capacity`) and by total compressed bytes (`max_bytes`). Eviction is
+    LRU by access order: the least-recently-used entry is at index 0;
+    the most-recently-used entry is at the end of the list.
+
+    The cache is dumb storage — it stores ALREADY-compressed bytes.
+    Compression is never performed here; callers compress and then `put`.
+
+    ## Usage
+
+    ```simple
+    val cache = StaticCompressionCache(
+        capacity: 128,
+        max_bytes: 16777216,
+        entries: [],
+        current_size: 0
+    )
+    val hit = cache.get("/index.html", "gzip")
+    if hit != nil:
+        # serve cached bytes
+    else:
+        # compress, then cache.put("/index.html", "gzip", compressed_bytes)
+    ```
+    """
+    capacity: i64
+    max_bytes: i64
+    entries: [CacheEntry]
+    current_size: i64
+
+    static fn new(capacity: i64, max_bytes: i64) -> StaticCompressionCache:
+        """Create an empty cache with the given bounds."""
+        StaticCompressionCache(
+            capacity: capacity,
+            max_bytes: max_bytes,
+            entries: [],
+            current_size: 0
+        )
+
+    me get(path: text, encoding: text) -> Option<[u8]>:
+        """Look up a cached compressed payload.
+
+        On a hit, promotes the entry to most-recently-used (end of list).
+        Returns nil on a miss.
+        """
+        var idx: i64 = 0
+        var found_idx: i64 = -1
+        while idx < self.entries.len():
+            val e = self.entries[idx]
+            if e.path == path and e.encoding == encoding:
+                found_idx = idx
+            idx = idx + 1
+        if found_idx == -1:
+            return nil
+        # Promote to MRU: remove from position, append to end.
+        val hit = self.entries[found_idx]
+        var new_entries: [CacheEntry] = []
+        var i: i64 = 0
+        while i < self.entries.len():
+            if i != found_idx:
+                new_entries = new_entries + [self.entries[i]]
+            i = i + 1
+        new_entries = new_entries + [hit]
+        self.entries = new_entries
+        Some(hit.compressed)
+
+    me put(path: text, encoding: text, compressed: [u8]):
+        """Store a compressed payload.
+
+        If `compressed.len() > max_bytes`, the entry is too large to ever
+        fit and is silently rejected. Otherwise, evicts LRU entries until
+        there is room, then appends.
+        """
+        val sz = compressed.len()
+        # Reject entries that can never fit.
+        if sz > self.max_bytes:
+            return
+        # Evict until both count and byte bounds have room.
+        while (self.entries.len() >= self.capacity) or (self.current_size + sz > self.max_bytes):
+            if self.entries.len() == 0:
+                return
+            self.evict_oldest()
+        val entry = CacheEntry(path: path, encoding: encoding, compressed: compressed, size: sz)
+        self.entries = self.entries + [entry]
+        self.current_size = self.current_size + sz
+
+    me evict_oldest():
+        """Remove the least-recently-used entry (index 0)."""
+        if self.entries.len() == 0:
+            return
+        val oldest = self.entries[0]
+        self.current_size = self.current_size - oldest.size
+        var new_entries: [CacheEntry] = []
+        var i: i64 = 1
+        while i < self.entries.len():
+            new_entries = new_entries + [self.entries[i]]
+            i = i + 1
+        self.entries = new_entries
+
+    me clear():
+        """Remove all entries from the cache."""
+        self.entries = []
+        self.current_size = 0
+
+# ============================================================================
+# MIME Type Detection
+# ============================================================================
+
+fn mime_from_extension(path: text) -> text:
+    """Detect MIME type from file extension.
+
+    Args:
+        path: File path or name
+
+    Returns:
+        MIME type string
+    """
+    val lower = path.lower()
+
+    if lower.ends_with(".html") or lower.ends_with(".htm"):
+        return "text/html; charset=utf-8"
+    if lower.ends_with(".css"):
+        return "text/css; charset=utf-8"
+    if lower.ends_with(".js") or lower.ends_with(".mjs"):
+        return "application/javascript; charset=utf-8"
+    if lower.ends_with(".json"):
+        return "application/json; charset=utf-8"
+    if lower.ends_with(".xml"):
+        return "application/xml; charset=utf-8"
+    if lower.ends_with(".txt"):
+        return "text/plain; charset=utf-8"
+    if lower.ends_with(".csv"):
+        return "text/csv; charset=utf-8"
+
+    # Images
+    if lower.ends_with(".png"):
+        return "image/png"
+    if lower.ends_with(".jpg") or lower.ends_with(".jpeg"):
+        return "image/jpeg"
+    if lower.ends_with(".gif"):
+        return "image/gif"
+    if lower.ends_with(".svg"):
+        return "image/svg+xml"
+    if lower.ends_with(".ico"):
+        return "image/x-icon"
+    if lower.ends_with(".webp"):
+        return "image/webp"
+    if lower.ends_with(".avif"):
+        return "image/avif"
+
+    # Fonts
+    if lower.ends_with(".woff"):
+        return "font/woff"
+    if lower.ends_with(".woff2"):
+        return "font/woff2"
+    if lower.ends_with(".ttf"):
+        return "font/ttf"
+
+    # Archives & binary
+    if lower.ends_with(".pdf"):
+        return "application/pdf"
+    if lower.ends_with(".zip"):
+        return "application/zip"
+    if lower.ends_with(".gz") or lower.ends_with(".tgz"):
+        return "application/gzip"
+    if lower.ends_with(".wasm"):
+        return "application/wasm"
+
+    # Media
+    if lower.ends_with(".mp4"):
+        return "video/mp4"
+    if lower.ends_with(".webm"):
+        return "video/webm"
+    if lower.ends_with(".mp3"):
+        return "audio/mpeg"
+    if lower.ends_with(".ogg"):
+        return "audio/ogg"
+
+    "application/octet-stream"
+
+# ============================================================================
+# Static File Handler
+# ============================================================================
+
+class StaticFileHandler:
+    """Serves static files from a root directory.
+
+    Resolves request paths against the root, validates for
+    directory traversal attacks, and returns file responses
+    with appropriate MIME types.
+
+    For small (<= 64 KiB) compressible files, the handler consults a
+    `StaticCompressionCache` to avoid re-compressing on every request.
+    Compression is skipped for the sendfile branch (> 64 KiB) because
+    the kernel does that I/O zero-copy and we never see the bytes.
+    """
+    root: text
+    index_file: text
+    cache: StaticCompressionCache
+
+    static fn new(root: text, index_file: text) -> StaticFileHandler:
+        """Create a static file handler with a default-sized compression cache.
+
+        Args:
+            root: Base directory for file serving
+            index_file: Default file for directory requests (e.g., "index.html")
+        """
+        StaticFileHandler(
+            root: root,
+            index_file: index_file,
+            cache: StaticCompressionCache.new(
+                STATIC_CACHE_DEFAULT_CAPACITY,
+                STATIC_CACHE_DEFAULT_MAX_BYTES
+            )
+        )
+
+    static fn with_cache(root: text, index_file: text, cache: StaticCompressionCache) -> StaticFileHandler:
+        """Create a static file handler with a caller-supplied cache.
+
+        Used by tests to inject a cache and assert hit/miss behavior, and
+        by deployments that want to share one cache across many handlers
+        or tune capacity / max_bytes.
+        """
+        StaticFileHandler(root: root, index_file: index_file, cache: cache)
+
+    fn handle(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
+        """Serve a static file for the given request.
+
+        Args:
+            request: HTTP request (uses path, headers)
+            location: Matched location config (uses root, pattern)
+
+        Returns:
+            File response or 404/403 error
+        """
+        # Strip the location prefix from the request path
+        val relative = strip_prefix(request.path, location.pattern)
+
+        # Resolve to filesystem path
+        val root_dir = if location.root.len() > 0:
+            location.root
+        else:
+            self.root
+
+        val file_path = resolve_path(root_dir, relative)
+
+        # Path traversal check
+        if not is_safe_path(file_path, root_dir):
+            return build_error(403, "Forbidden")
+
+        # Check if directory → serve index file
+        var actual_path = file_path
+        if rt_file_is_dir(file_path):
+            actual_path = file_path + "/" + self.index_file
+
+        # Check file exists
+        if not rt_file_exists(actual_path):
+            return build_not_found()
+
+        # Get file size and MIME type
+        val size = rt_file_size(actual_path)
+        val mime = mime_from_extension(actual_path)
+
+        # For small files, read into memory and try compression cache.
+        # For large files, use sendfile (body_file) — cannot be cached.
+        if size <= 65536:
+            val content = rt_file_read_text(actual_path)
+            val accept = _get_header_ci(request.headers, "accept-encoding")
+            serve_compressed_or_plain(content, mime, actual_path, accept, self.cache)
+        else:
+            build_file_response(actual_path, mime, size)
+
+# ============================================================================
+# Path Utilities
+# ============================================================================
+
+fn strip_prefix(path: text, prefix: text) -> text:
+    """Strip location prefix from request path.
+
+    Example: strip_prefix("/static/css/main.css", "/static/") = "css/main.css"
+    """
+    if path.starts_with(prefix):
+        val rest = path.slice(prefix.len(), path.len())
+        if rest.starts_with("/"):
+            return rest.slice(1, rest.len())
+        return rest
+    path
+
+fn resolve_path(root: text, relative: text) -> text:
+    """Join root directory with relative path."""
+    if root.ends_with("/"):
+        root + relative
+    else:
+        root + "/" + relative
+
+fn is_safe_path(resolved: text, root: text) -> bool:
+    """Check that resolved path doesn't escape root directory.
+
+    Prevents directory traversal attacks via ../
+
+    Args:
+        resolved: Resolved absolute file path
+        root: Root directory that must contain the file
+
+    Returns:
+        true if path is safe
+    """
+    # Reject any path containing ..
+    if resolved.contains(".."):
+        return false
+
+    # Ensure resolved starts with root
+    resolved.starts_with(root)
+
+fn build_html_or_typed(content: text, mime: text) -> HttpResponseData:
+    """Build a plain (uncompressed) response with the correct content type."""
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("Content-Type", mime),
+            ("Server", "SimpleServer")
+        ],
+        body: content,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn build_compressed_response(compressed: [u8], mime: text, encoding: text) -> HttpResponseData:
+    """Build a 200 response carrying already-compressed bytes.
+
+    Sets `Content-Encoding` to the codec name and `Vary: Accept-Encoding`
+    so downstream caches don't serve the compressed body to clients that
+    didn't advertise that codec.
+    """
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("Content-Type", mime),
+            ("Content-Encoding", encoding),
+            ("Vary", "Accept-Encoding"),
+            ("Server", "SimpleServer")
+        ],
+        body: "",
+        body_bytes: compressed,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _get_header_ci(headers: [(text, text)], name_lower: text) -> text:
+    """Case-insensitive header lookup. Returns the value, or "" if absent.
+
+    `name_lower` MUST already be lowercase — we lowercase the header name
+    on each comparison.
+    """
+    for h in headers:
+        if h.0.lower() == name_lower:
+            return h.1
+    ""
+
+fn is_mime_compressible(mime: text) -> bool:
+    """True if the given MIME type is worth running through a compressor.
+
+    Matches `mime_from_extension`'s suffixed forms (e.g.
+    `"text/html; charset=utf-8"`). Image/audio/video/font/archive types
+    return false because they're already compressed.
+    """
+    val lower = mime.lower()
+    if lower.starts_with("text/"):
+        return true
+    if lower.starts_with("application/javascript"):
+        return true
+    if lower.starts_with("application/json"):
+        return true
+    if lower.starts_with("application/xml"):
+        return true
+    if lower.starts_with("application/wasm"):
+        return true
+    if lower.starts_with("image/svg+xml"):
+        return true
+    false
+
+fn serve_compressed_or_plain(
+    content: text,
+    mime: text,
+    actual_path: text,
+    accept_header: text,
+    cache: StaticCompressionCache
+) -> HttpResponseData:
+    """Pick a Content-Encoding and serve cached/freshly-compressed bytes.
+
+    Falls back to a plain `build_html_or_typed` response when:
+      - the client did not advertise a supported encoding,
+      - the MIME type is not compression-eligible,
+      - or the chosen codec returned `Err` (codec not yet wired).
+
+    On a cache miss for an eligible response, compresses once and stores
+    the bytes for subsequent hits.
+    """
+    if accept_header.len() == 0:
+        return build_html_or_typed(content, mime)
+    if not is_mime_compressible(mime):
+        return build_html_or_typed(content, mime)
+    val chosen = negotiate_encoding(accept_header, supported_encodings())
+    if chosen.len() == 0:
+        return build_html_or_typed(content, mime)
+    # Cache hit?
+    val hit = cache.get(actual_path, chosen)
+    if hit != nil:
+        val cached = hit ?? []
+        return build_compressed_response(cached, mime, chosen)
+    # Miss: compress, cache on success, fall back to plain on Err.
+    val raw = rt_text_to_bytes(content)
+    val res = compress_response_body(raw, chosen)
+    if res.is_err():
+        return build_html_or_typed(content, mime)
+    val compressed = res.unwrap()
+    cache.put(actual_path, chosen, compressed)
+    build_compressed_response(compressed, mime, chosen)

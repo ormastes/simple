@@ -1,0 +1,98 @@
+# Daemon SDK Client — Generic client API for daemon IPC
+#
+# Provides submit-and-poll pattern for sending requests to a daemon
+# and waiting for responses via file-based IPC.
+
+
+use std.daemon_sdk.types.{
+    DaemonConfig, DaemonRequest, DaemonResponse,
+    daemon_request_new, daemon_response_new
+}
+use std.daemon_sdk.lock.{is_daemon_running}
+use std.daemon_sdk.protocol.{
+    write_daemon_request, read_daemon_response, daemon_request_path_for
+}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_mkdir_p(path: text) -> bool
+
+# ============================================================================
+# Ensure Running
+# ============================================================================
+
+fn daemon_ensure_running(config: DaemonConfig, start_fn: fn() -> bool) -> bool:
+    if is_daemon_running(config.lock_path):
+        return true
+    val started = start_fn()
+    if not started:
+        return false
+
+    # Wait briefly for daemon to acquire lock (avoids double-start on slow platforms)
+    val deadline = rt_time_now_unix_micros() + 5_000_000  # 5s
+    while rt_time_now_unix_micros() < deadline:
+        if is_daemon_running(config.lock_path):
+            return true
+        rt_sleep_ms(100)
+
+    false
+
+# ============================================================================
+# Submit Request
+# ============================================================================
+
+fn daemon_submit(req: DaemonRequest, config: DaemonConfig) -> text:
+    if not is_daemon_running(config.lock_path):
+        return ""
+
+    val req_path = write_daemon_request(req, config.request_dir)
+    if req_path == "":
+        return ""
+    req.id
+
+# ============================================================================
+# Poll for Response
+# ============================================================================
+
+fn daemon_poll_result(request_id: text, config: DaemonConfig, timeout_ms: i64) -> DaemonResponse:
+    val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
+
+    var attempts = 0
+    while rt_time_now_unix_micros() < deadline and attempts < 600:
+        val resp = read_daemon_response(request_id, config.response_dir)
+        if resp.request_id != "":
+            return resp
+        rt_sleep_ms(100)
+        attempts = attempts + 1
+
+    # Timeout — return empty response
+    DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
+
+# ============================================================================
+# Submit and Wait
+# ============================================================================
+
+fn daemon_submit_and_wait(req: DaemonRequest, config: DaemonConfig, timeout_ms: i64) -> DaemonResponse:
+    val request_id = daemon_submit(req, config)
+    if request_id == "":
+        return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
+    daemon_poll_result(request_id, config, timeout_ms)
+
+# ============================================================================
+# Stop Daemon
+# ============================================================================
+
+fn daemon_stop(config: DaemonConfig) -> bool:
+    if not is_daemon_running(config.lock_path):
+        return true
+
+    # Send a stop request (kind = -1 is the stop signal)
+    var req = daemon_request_new(-1)
+    val request_id = daemon_submit(req, config)
+    if request_id == "":
+        return false
+
+    # Wait briefly for daemon to shut down
+    val resp = daemon_poll_result(request_id, config, 5000)
+    resp.request_id != ""

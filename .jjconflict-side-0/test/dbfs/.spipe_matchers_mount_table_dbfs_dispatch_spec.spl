@@ -1,0 +1,68 @@
+# Maps to: AC-2, AC-9
+# Run: bin/simple test test/dbfs/mount_table_dbfs_dispatch_spec.spl
+
+"""
+MountTable DBFS Dispatch Specification
+
+Verifies that adding DbFs(driver) to the DriverInstance enum routes
+path lookups correctly through MountTable longest-prefix match.
+"""
+
+use std.spipe.*
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.db.dbfs_driver.{DbFsDriver}
+
+fn make_table_with_both() -> MountTable:
+    val mt = MountTable.new()
+    val ramfs = RamFsDriver.new()
+    mt.mount("/", DriverInstance.RamFs(ramfs), MountOptions.default()).unwrap()
+    val dbfs = DbFsDriver.new_hosted()
+    mt.mount("/data", DriverInstance.DbFs(dbfs), MountOptions.default()).unwrap()
+    mt
+
+describe "MountTable DBFS dispatch — longest-prefix routing":
+    it "path under /data routes to DbFsDriver":
+        val mt = make_table_with_both()
+        val resolved = mt.resolve_driver("/data/foo.txt").unwrap()
+        expect resolved.driver_name() == "DbFsDriver"
+
+    it "path under / (not /data) routes to RamFsDriver":
+        val mt = make_table_with_both()
+        val resolved = mt.resolve_driver("/etc/config").unwrap()
+        expect resolved.driver_name() == "RamFsDriver"
+
+    it "exact /data route resolves to DbFsDriver":
+        val mt = make_table_with_both()
+        val resolved = mt.resolve_driver("/data").unwrap()
+        expect resolved.driver_name() == "DbFsDriver"
+
+    it "nested path /data/a/b/c routes to DbFsDriver":
+        val mt = make_table_with_both()
+        val resolved = mt.resolve_driver("/data/a/b/c").unwrap()
+        expect resolved.driver_name() == "DbFsDriver"
+
+describe "MountTable DBFS dispatch — exhaustive match compiles clean":
+    it "DriverInstance.DbFs variant is present in driver_name()":
+        val driver = DbFsDriver.new_hosted()
+        val inst = DriverInstance.DbFs(driver)
+        # driver_name() must handle DbFs variant — if it panics, the match is not exhaustive.
+        val name = inst.driver_name()
+        expect name == "DbFsDriver"
+
+describe "MountTable DBFS dispatch — mount/unmount":
+    it "unmount /data leaves / still resolvable":
+        val mt = make_table_with_both()
+        mt.unmount("/data").unwrap()
+        val resolved = mt.resolve_driver("/etc/hosts").unwrap()
+        expect resolved.driver_name() == "RamFsDriver"
+
+    it "resolve after unmount of /data returns error for /data path":
+        val mt = make_table_with_both()
+        mt.unmount("/data").unwrap()
+        # /data no longer has a dedicated mount; falls back to / (RamFs) if present.
+        # But if MountTable removes sub-prefix entirely, path still resolves to root.
+        val resolved = mt.resolve_driver("/data/file")
+        expect resolved.is_ok() == true

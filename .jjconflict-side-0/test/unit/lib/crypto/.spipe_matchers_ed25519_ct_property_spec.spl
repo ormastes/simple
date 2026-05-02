@@ -1,0 +1,147 @@
+# =============================================================================
+# Ed25519 Constant-Time Property Spec
+# =============================================================================
+#
+# Companion spec to `ed25519_rfc8032_spec.spl`, focused on the constant-time
+# discipline on the secret-scalar code path. Filed against the fix for
+# `doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md`.
+#
+# Three checks:
+#
+# 1. Determinism — same seed/msg, same signature. Confirms the rewritten
+#    always-add-and-select loop in `ed_scalar_mul` has no nondeterminism.
+#
+# 2. Cross-Hamming-weight correctness — sign+verify under a low-Hamming-
+#    weight clamped scalar (seed = 0x00 * 32) AND under a high-Hamming-weight
+#    clamped scalar (seed = 0xFF * 32). Both must succeed: the always-add path
+#    must not depend on bit values to produce a valid signature.
+#
+# 3. Structural CT inspection — read the live source of
+#    `src/os/crypto/ed25519.spl`, locate the body of `fn ed_scalar_mul`, and
+#    assert the body contains NO `if` branch on the scalar bit. The previous
+#    leaky form was `if ((byte_val.to_u64() >> bit) & 1) == 1:`. None of those
+#    fingerprints may survive. Positive sanity: the body MUST mention
+#    `ed_point_cselect`.
+#
+# A wall-time timing test would be unreliable in interpreter mode (per the
+# bug doc itself); the structural property test is the hard guarantee.
+#
+# Per `feedback_no_coverups.md`: no skip(), no relaxed assertions.
+# =============================================================================
+
+use std.spipe.*
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_verify}
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _seed_filled(byte_val: u8) -> [u8]:
+    """A 32-byte seed where every byte equals `byte_val`."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push(byte_val)
+        i = i + 1
+    out
+
+fn _msg_one() -> [u8]:
+    var m: [u8] = []
+    m.push(0x01.to_u8())
+    m
+
+fn _msg_deadbeef() -> [u8]:
+    var m: [u8] = []
+    m.push(0xDE.to_u8())
+    m.push(0xAD.to_u8())
+    m.push(0xBE.to_u8())
+    m.push(0xEF.to_u8())
+    m
+
+# -----------------------------------------------------------------------------
+# Specs
+# -----------------------------------------------------------------------------
+
+describe("Ed25519 constant-time discipline on secret-scalar path"):
+
+    it("derives the same public key when called twice on the same seed (determinism)"):
+        val seed = _seed_filled(0x42.to_u8())
+        val kp_a = ed25519_keypair_from_seed(seed)
+        val kp_b = ed25519_keypair_from_seed(seed)
+        val pubkey_a = kp_a.1
+        val pubkey_b = kp_b.1
+        expect _bytes_equal(a: pubkey_a, b: pubkey_b) == true
+        expect pubkey_a.len() == 32
+
+    it("produces identical signatures for identical inputs"):
+        val seed = _seed_filled(0xA5.to_u8())
+        val kp = ed25519_keypair_from_seed(seed)
+        val pubkey = kp.1
+        val msg = _msg_deadbeef()
+        val sig1 = ed25519_sign(seed, pubkey, msg)
+        val sig2 = ed25519_sign(seed, pubkey, msg)
+        expect sig1.len() == 64
+        expect _bytes_equal(a: sig1, b: sig2) == true
+
+    it("signs+verifies under a low-Hamming-weight seed (seed = 0x00 * 32)"):
+        val seed = _seed_filled(0x00.to_u8())
+        val kp = ed25519_keypair_from_seed(seed)
+        val pubkey = kp.1
+        val msg = _msg_one()
+        val sig = ed25519_sign(seed, pubkey, msg)
+        expect sig.len() == 64
+        expect ed25519_verify(pubkey, msg, sig) == true
+
+    it("signs+verifies under a high-Hamming-weight seed (seed = 0xFF * 32)"):
+        val seed = _seed_filled(0xFF.to_u8())
+        val kp = ed25519_keypair_from_seed(seed)
+        val pubkey = kp.1
+        val msg = _msg_one()
+        val sig = ed25519_sign(seed, pubkey, msg)
+        expect sig.len() == 64
+        expect ed25519_verify(pubkey, msg, sig) == true
+
+    it("structural CT: ed_scalar_mul body contains no `if` branch on a scalar bit"):
+        val src = rt_file_read_text("src/os/crypto/ed25519.spl")
+
+        # Locate the function header.
+        val hdr = "fn ed_scalar_mul(scalar: [u8], p: EdPoint) -> EdPoint:"
+        val start_opt = src.find(hdr)
+        val start: i64 = start_opt ?? (-1).to_i64()
+        expect start >= 0 == true
+
+        # The body ends at the next top-level `\nfn ` after the header.
+        val after_hdr: u64 = (start.to_u64()) + hdr.len()
+        val rest = src.substring(after_hdr, src.len())
+        val next_fn_opt = rest.find("\nfn ")
+        var body_end: u64 = src.len()
+        val nfo: i64 = next_fn_opt ?? (-1).to_i64()
+        if nfo >= 0:
+            body_end = after_hdr + nfo.to_u64()
+
+        val body = src.substring(after_hdr, body_end)
+
+        # OLD branchful form fingerprints. None of these may survive.
+        val has_byte_val_branch = (body.find("if ((byte_val") ?? (-1).to_i64()) >= 0
+        val has_scalar_branch = (body.find("if scalar[") ?? (-1).to_i64()) >= 0
+        val has_shr_eq_one = (body.find(") & 1) == 1") ?? (-1).to_i64()) >= 0
+
+        expect has_byte_val_branch == false
+        expect has_scalar_branch == false
+        expect has_shr_eq_one == false
+
+        # Positive sanity: the new body MUST call the constant-time helper.
+        val cselect_idx: i64 = body.find("ed_point_cselect") ?? (-1).to_i64()
+        expect cselect_idx >= 0 == true

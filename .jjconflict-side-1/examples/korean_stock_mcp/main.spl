@@ -1,0 +1,86 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Korean Stock MCP Server
+#
+# MCP server for Korean stock market data (KRX, DART, news).
+# Uses direct HTTP calls — no Python dependencies.
+#
+# Architecture:
+#   - Zero stdlib imports: all JSON helpers and tool logic inlined
+#   - Direct extern fn calls: rt_http_get, rt_http_post, rt_http_request
+#   - Stdio JSON-RPC loop (Content-Length + JSON Lines auto-detect)
+#
+# Split into modules:
+#   - json_helpers.spl   — JSON building, escaping, extraction
+#   - protocol.spl       — Protocol I/O, initialize, tools list
+#   - tools.spl          — Tool dispatch and implementations
+#   - sources/            — KRX, DART, news data sources
+#   - utils/              — Cache, formatting, config
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_http_get(url: text) -> (i64, text, text)
+extern fn rt_http_post(url: text, body: text, content_type: text) -> (i64, text, text)
+extern fn rt_http_request(method: text, url: text, headers: [text], body: text) -> (i64, text, text)
+extern fn rt_http_url_encode(input: text) -> text
+
+# Load modules
+use examples.korean_stock_mcp.json_helpers
+use examples.korean_stock_mcp.protocol
+use examples.korean_stock_mcp.tools
+use examples.korean_stock_mcp.sources.krx_source
+use examples.korean_stock_mcp.sources.dart_source
+use examples.korean_stock_mcp.sources.news_source
+use examples.korean_stock_mcp.utils.cache
+use examples.korean_stock_mcp.utils.formatting
+use examples.korean_stock_mcp.utils.config
+
+val SERVER_NAME = "korean-stock-mcp"
+val SERVER_VERSION = "1.0.0"
+val NL = "\n"
+
+# Protocol auto-detection
+var USE_JSON_LINES = false
+
+# Caches
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
+
+# --- Server loop ---
+
+fn start_server():
+    var running = true
+    while running:
+        var line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            var method = extract_field(line, "method")
+            var id = extract_id(line)
+            var response = ""
+            if method == "initialize":
+                response = make_init_response(id)
+            elif method == "initialized" or method == "notifications/initialized":
+                response = ""
+            elif method == "shutdown":
+                response = make_json_result(id, "null")
+            elif method == "tools/list":
+                response = make_tools_list(id)
+            elif method == "tools/call":
+                var tool_name = extract_nested(line, "name")
+                response = dispatch_tool(id, tool_name, line)
+            elif method == "ping":
+                response = make_json_result(id, LB() + RB())
+            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+                response = ""
+            else:
+                if id != "" and id != "null":
+                    response = make_error(id, -32601, "Method not found: " + method)
+            if response != "":
+                write_stdout_message(response)
+
+fn main() -> i64:
+    start_server()
+    0

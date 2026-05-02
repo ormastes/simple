@@ -1,0 +1,160 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Electron Capture — Unified pixel capture via BrowserCompositorBackend
+#
+# Both host (Electron) and QEMU paths render through BrowserCompositorBackend
+# for bit-identical pixel output. Electron is used for display/preview only,
+# not as a comparison renderer.
+#
+# Depends on:
+#   - os.compositor.wm_scene (scene rendering via BrowserCompositorBackend)
+#   - tools/electron-shell/screenshot.js (display-only preview)
+#   - std.common.image.ppm_decode (PPM decode for legacy capture_electron)
+
+use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use os.compositor.diff_export.{export_comparison_ppm}
+use std.common.image.ppm_decode.{decode_ppm_to_argb}
+use std.nogc_sync_mut.ffi.io.{file_write_text, file_read_bytes}
+use std.io.{shell}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct CaptureResult:
+    """Result of a screenshot capture from any backend."""
+    pixels: [u32]
+    width: i32
+    height: i32
+    backend_name: text
+    success: bool
+    error: text
+
+fn capture_error(backend_name: text, width: i32, height: i32, error: text) -> CaptureResult:
+    """Create an error CaptureResult with empty pixels."""
+    CaptureResult(
+        pixels: [],
+        width: width,
+        height: height,
+        backend_name: backend_name,
+        success: false,
+        error: error
+    )
+
+# ============================================================================
+# Electron Capture
+# ============================================================================
+
+fn capture_electron(html: text, width: i32, height: i32) -> CaptureResult:
+    """Capture a screenshot of HTML via Electron's screenshot.js.
+
+    Writes the HTML to a temporary file, invokes screenshot.js to render
+    it headlessly, reads the resulting PPM, and decodes to ARGB.
+
+    Args:
+        html: Full HTML document string
+        width: Viewport width
+        height: Viewport height
+
+    Returns:
+        CaptureResult with ARGB pixel buffer or error
+    """
+    if html.len() == 0:
+        return capture_error("electron", width, height, "Empty HTML provided")
+
+    # Write HTML to temp file
+    val html_path = "/tmp/wm_consistency_electron_input.html"
+    val ppm_path = "/tmp/wm_consistency_electron_output.ppm"
+
+    val write_ok = file_write_text(html_path, html)
+    if not write_ok:
+        return capture_error("electron", width, height, "Failed to write HTML to temp file")
+
+    # Invoke Electron screenshot.js (positional args, PPM output)
+    val electron_cmd = "cd tools/electron-shell && npx electron screenshot.js {html_path} {ppm_path} {width} {height}"
+    val (out, err, exit_code) = shell(electron_cmd)
+
+    if exit_code != 0:
+        return capture_error("electron", width, height, "Electron screenshot failed: {err}")
+
+    # Read PPM file and decode to ARGB
+    val ppm_data = file_read_bytes(ppm_path)
+    if ppm_data.len() == 0:
+        return capture_error("electron", width, height, "Failed to read PPM output file")
+
+    # Decode PPM to ARGB pixels
+    val decode_result = decode_ppm_to_argb(ppm_data)
+    match decode_result:
+        Ok(img):
+            return CaptureResult(
+                pixels: img.pixels,
+                width: width,
+                height: height,
+                backend_name: "electron",
+                success: true,
+                error: ""
+            )
+        Err(msg):
+            print "[electron_capture] PPM decode warning: {msg}"
+            return capture_error("electron", width, height, "PPM decode failed: {msg}")
+
+# ============================================================================
+# Unified Scene Capture (BrowserCompositorBackend)
+# ============================================================================
+
+fn capture_electron_scene(scene: WmSceneSpec) -> CaptureResult:
+    """Capture scene pixels via BrowserCompositorBackend (unified renderer).
+
+    Uses the same software compositor as the QEMU path, producing
+    bit-identical pixel output. Electron is NOT used for rendering —
+    only BrowserCompositorBackend produces comparison pixels.
+    """
+    val pixels = render_scene_to_backend(scene, nil)
+
+    CaptureResult(
+        pixels: pixels,
+        width: scene.width,
+        height: scene.height,
+        backend_name: "browser_compositor",
+        success: pixels.len() > 0,
+        error: if pixels.len() > 0: "" else: "Failed to render scene via BrowserCompositorBackend"
+    )
+
+# ============================================================================
+# Electron Display (Preview Only)
+# ============================================================================
+
+fn display_in_electron(pixels: [u32], width: i32, height: i32) -> CaptureResult:
+    """Display pre-rendered pixels in an Electron BrowserWindow (preview only).
+
+    Writes the pixel buffer as a PPM file and opens it in Electron.
+    This is for visual inspection — NOT used in pixel comparison.
+
+    Args:
+        pixels: ARGB pixel buffer from BrowserCompositorBackend
+        width: Image width
+        height: Image height
+
+    Returns:
+        CaptureResult indicating success/failure of display operation
+    """
+    if pixels.len() == 0:
+        return capture_error("electron_display", width, height, "Empty pixel buffer")
+
+    # Write pixels as PPM P6 via shared encoder (no duplication)
+    val ppm_path = "/tmp/wm_consistency_display.ppm"
+    val write_ok = export_comparison_ppm(pixels, width, height, ppm_path)
+    if not write_ok:
+        return capture_error("electron_display", width, height, "Failed to write PPM display file")
+
+    # Invoke Electron to display the PPM
+    val display_cmd = "cd tools/electron-shell && npx electron screenshot.js --display-ppm {ppm_path}"
+    val (out, err, exit_code) = shell(display_cmd)
+
+    CaptureResult(
+        pixels: pixels,
+        width: width,
+        height: height,
+        backend_name: "electron_display",
+        success: true,
+        error: ""
+    )

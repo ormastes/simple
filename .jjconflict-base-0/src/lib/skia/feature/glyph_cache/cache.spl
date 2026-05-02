@@ -1,0 +1,114 @@
+# Glyph cache — bitmap cache keyed by (font hash, glyph_id, size).
+#
+# Mirrors Skia's SkGlyphCache / SkStrikeCache. Avoids re-rasterizing the
+# same glyph repeatedly across many draw calls. Simple LRU eviction when
+# capacity is exceeded.
+
+use std.skia.feature.glyph.rasterize.{GlyphBitmap}
+use std.skia.entity.font.{SkFont}
+
+# ============================================================================
+# GlyphCacheKey — identifies a rasterized glyph
+# ============================================================================
+
+class GlyphCacheKey:
+    font_hash: i64
+    glyph_id: i64
+    size_fixed: i64   # size * 256 for 1/256 precision
+
+fn glyph_cache_key_equal(a: GlyphCacheKey, b: GlyphCacheKey) -> bool:
+    a.font_hash == b.font_hash and a.glyph_id == b.glyph_id and a.size_fixed == b.size_fixed
+
+# ============================================================================
+# GlyphCacheEntry — single cached rasterized glyph with LRU timestamp
+# ============================================================================
+
+class GlyphCacheEntry:
+    key: GlyphCacheKey
+    bitmap: GlyphBitmap
+    last_used: i64
+
+# ============================================================================
+# GlyphCache — bounded LRU cache of rasterized glyph bitmaps
+# ============================================================================
+
+class GlyphCache:
+    entries: [GlyphCacheEntry]
+    capacity: i64
+    tick: i64
+
+fn glyph_cache_new(capacity: i64) -> GlyphCache:
+    GlyphCache(entries: [], capacity: capacity, tick: 0)
+
+impl GlyphCache:
+    me lookup(key: GlyphCacheKey) -> Option<GlyphBitmap>:
+        # Linear search by key equality. On hit, bump last_used with the
+        # monotonic tick counter and return the bitmap wrapped in Some.
+        var idx: i64 = 0
+        val count = self.entries.len()
+        while idx < count:
+            val entry = self.entries[idx]
+            if glyph_cache_key_equal(entry.key, key):
+                self.tick = self.tick + 1
+                val updated = GlyphCacheEntry(
+                    key: entry.key,
+                    bitmap: entry.bitmap,
+                    last_used: self.tick
+                )
+                self.entries[idx] = updated
+                return Some(updated.bitmap)
+            idx = idx + 1
+        None
+
+    me insert(key: GlyphCacheKey, bitmap: GlyphBitmap):
+        # Evict LRU entry if at capacity, then append the new record with a
+        # freshly-bumped tick timestamp.
+        val count = self.entries.len()
+        if count >= self.capacity:
+            var victim_idx: i64 = 0
+            var victim_tick: i64 = self.entries[0].last_used
+            var scan: i64 = 1
+            while scan < count:
+                val e = self.entries[scan]
+                if e.last_used < victim_tick:
+                    victim_tick = e.last_used
+                    victim_idx = scan
+                scan = scan + 1
+            # Remove victim by rebuilding entries without it.
+            var rebuilt: [GlyphCacheEntry] = []
+            var ri: i64 = 0
+            while ri < count:
+                if ri != victim_idx:
+                    rebuilt = [...rebuilt, self.entries[ri]]
+                ri = ri + 1
+            self.entries = rebuilt
+        self.tick = self.tick + 1
+        val fresh = GlyphCacheEntry(key: key, bitmap: bitmap, last_used: self.tick)
+        self.entries = [...self.entries, fresh]
+
+    me size() -> i64:
+        self.entries.len()
+
+    me clear():
+        self.entries = []
+        self.tick = 0
+
+# ============================================================================
+# Static helper: font hashing
+# ============================================================================
+
+fn _hash_text(s: text) -> i64:
+    # djb2-like rolling hash over code units.
+    var h: i64 = 5381
+    var i: i64 = 0
+    val n = s.length()
+    while i < n:
+        val ch = s.code_unit_at(i)
+        h = (h * 33 + ch as i64) and 0x7FFFFFFFFFFFFFFF
+        i = i + 1
+    h
+
+fn hash_font(font: SkFont) -> i64:
+    # Combine typeface family-name hash with integer-coerced size.
+    val name_hash = _hash_text(font.typeface.family_name)
+    (name_hash * 31 + font.size as i64) and 0x7FFFFFFFFFFFFFFF

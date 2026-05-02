@@ -1,0 +1,78 @@
+use os.port.host_fat32_tree_populator.{populate_host_tree_into_fat32_image}
+use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
+use os.services.fat32.fat32.{Fat32Driver}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _repeat_byte(count: i64, byte: u8) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(byte)
+        i = i + 1
+    out
+
+fn _write_u32(buf: [u8], offset: i64, value: u32):
+    buf[offset] = (value & 0x000000FF).to_u8()
+    buf[offset + 1] = ((value >> 8) & 0x000000FF).to_u8()
+    buf[offset + 2] = ((value >> 16) & 0x000000FF).to_u8()
+    buf[offset + 3] = ((value >> 24) & 0x000000FF).to_u8()
+
+fn _shell_stdout(command: text) -> text:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    if code != 0:
+        return "shell err code=" + code.to_text() + " stderr=" + stderr
+    stdout
+
+fn _make_formatted_fat32_image() -> [u8]:
+    var image = _repeat_byte(50 * 512, 0u8)
+    image[11] = 0x00u8
+    image[12] = 0x02u8
+    image[13] = 0x01u8
+    image[14] = 0x20u8
+    image[15] = 0x00u8
+    image[16] = 0x02u8
+    _write_u32(image, 32, 50u32)
+    _write_u32(image, 36, 1u32)
+    _write_u32(image, 44, 2u32)
+    image[510] = 0x55u8
+    image[511] = 0xAAu8
+    _write_u32(image, 32 * 512, 0x0FFFFFF8u32)
+    _write_u32(image, 32 * 512 + 4, 0x0FFFFFFFu32)
+    _write_u32(image, 32 * 512 + 8, 0x0FFFFFFFu32)
+    _write_u32(image, 33 * 512, 0x0FFFFFF8u32)
+    _write_u32(image, 33 * 512 + 4, 0x0FFFFFFFu32)
+    _write_u32(image, 33 * 512 + 8, 0x0FFFFFFFu32)
+    image
+
+fn main():
+    val root = "/tmp/host_fat32_tree_populator_debug"
+    _ = rt_process_run("/bin/sh", ["-c", "rm -rf '" + root + "'"])
+    _ = rt_dir_create_all(root + "/src/APPS/TOOLS")
+    _ = rt_file_write_bytes(root + "/disk.img", _make_formatted_fat32_image())
+    _ = rt_file_write_bytes(root + "/src/KERNEL.BIN", [107u8, 101u8, 114u8, 110u8, 101u8, 108u8, 45u8, 105u8, 109u8, 97u8, 103u8, 101u8])
+    _ = rt_file_write_bytes(root + "/src/APPS/HELLO.SMF", [104u8, 101u8, 108u8, 108u8, 111u8, 45u8, 97u8, 112u8, 112u8])
+    _ = rt_file_write_bytes(root + "/src/APPS/TOOLS/EMPTY.DAT", [])
+
+    match CachedRawImageBlockDevice.load(root + "/disk.img"):
+        case Err(e):
+            print("load err " + e)
+        case Ok(device):
+            var sector = _repeat_byte(512, 0u8)
+            print(device.read_sector(0u64, sector))
+            print(sector.slice(0, 16))
+            var driver = Fat32Driver.new(device)
+            print(driver.mount("", ""))
+            print(driver.mkdir("/APPS"))
+            print(driver.resolve_path("/APPS"))
+            print(driver.resolve_path("/"))
+            print(_shell_stdout("od -An -tx1 -j $((34*512)) -N 64 '" + root + "/disk.img'"))
+
+    val result = populate_host_tree_into_fat32_image(root + "/disk.img", root + "/src")
+    print(result)
+    print(_shell_stdout("od -An -tx1 -j $((34*512)) -N 160 '" + root + "/disk.img'"))
+    print(_shell_stdout("od -An -tx1 -j $((38*512)) -N 32 '" + root + "/disk.img'"))
+    print(_shell_stdout("od -An -tx1 -j $((39*512)) -N 32 '" + root + "/disk.img'"))
+    print(_shell_stdout("od -An -tx1 -j $((40*512)) -N 32 '" + root + "/disk.img'"))

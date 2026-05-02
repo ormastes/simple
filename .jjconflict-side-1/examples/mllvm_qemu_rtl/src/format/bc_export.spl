@@ -1,0 +1,572 @@
+# IR_TC → LLVM Bitcode Export
+#
+# Converts an IrTcModule to a BcModule — a logical representation of LLVM IR.
+# Standard IR_TC ops map to LLVM IR instructions.
+# Emulation-only ops map to @llvm.irtc.* intrinsic calls with metadata.
+
+use core.types.{IrTcTypeKind, IrTcValue, IrTcCond, CallConv, GuestArch}
+use core.ops.{IrTcOp, IrTcInst, SwitchCase, PhiEntry}
+use core.mem_op.{MemOp, Endian, BarrierKind, GuestRegId}
+use core.block.{BlockId, IrTcBlock, IrTcFunction, IrTcParam, IrTcModule, IrTcModuleMode, IrTcGlobal}
+use frontend.llvm_types.{LlvmType, irtc_type_to_llvm}
+
+# ============================================================================
+# BC Module — Logical LLVM IR Representation
+# ============================================================================
+
+struct BcModule:
+    """Logical representation of an LLVM IR module."""
+    name: text
+    target_triple: text
+    data_layout: text
+    functions: [BcFunction]
+    globals: [BcGlobal]
+    intrinsic_decls: [BcIntrinsicDecl]
+    metadata: [BcMetadata]
+
+impl BcModule:
+    static fn new(name: text) -> BcModule:
+        BcModule(
+            name: name,
+            target_triple: "",
+            data_layout: "",
+            functions: [],
+            globals: [],
+            intrinsic_decls: [],
+            metadata: []
+        )
+
+struct BcFunction:
+    """A function in the BC module."""
+    name: text
+    return_type: LlvmType
+    params: [BcParam]
+    blocks: [BcBasicBlock]
+    is_declaration: bool
+    calling_conv: text
+
+impl BcFunction:
+    static fn new(name: text, return_type: LlvmType) -> BcFunction:
+        BcFunction(
+            name: name,
+            return_type: return_type,
+            params: [],
+            blocks: [],
+            is_declaration: false,
+            calling_conv: ""
+        )
+
+struct BcParam:
+    """A function parameter in BC."""
+    name: text
+    type_: LlvmType
+
+struct BcBasicBlock:
+    """A basic block in BC."""
+    label: text
+    instructions: [BcInst]
+
+struct BcInst:
+    """A single instruction in BC — textual IR representation."""
+    opcode: text
+    operands: text
+    result: text?
+    metadata: text?
+
+impl BcInst:
+    static fn new(opcode: text, operands: text) -> BcInst:
+        BcInst(opcode: opcode, operands: operands, result: nil, metadata: nil)
+
+    fn with_result(result: text) -> BcInst:
+        BcInst(..self, result: Some(result))
+
+    fn with_metadata(md: text) -> BcInst:
+        BcInst(..self, metadata: Some(md))
+
+    fn to_text() -> text:
+        var s = ""
+        if val r = self.result:
+            s = "{r} = "
+        s = s + "{self.opcode} {self.operands}"
+        if val md = self.metadata:
+            s = s + ", !irtc {md}"
+        s
+
+struct BcGlobal:
+    """A global variable in BC."""
+    name: text
+    type_: LlvmType
+    is_const: bool
+    initializer: text?
+    addr_space: i64
+
+struct BcIntrinsicDecl:
+    """An intrinsic function declaration."""
+    name: text
+    return_type: LlvmType
+    param_types: [LlvmType]
+
+struct BcMetadata:
+    """Module-level metadata entry."""
+    id: i64
+    key: text
+    value: text
+
+# ============================================================================
+# Export Entry Point
+# ============================================================================
+
+fn export_to_bc(module: IrTcModule) -> BcModule:
+    """Convert an IrTcModule to a logical LLVM BC representation."""
+    var bc = BcModule.new(module.name)
+    bc.target_triple = _target_triple(module)
+    bc.data_layout = _data_layout(module)
+
+    # Track which intrinsics we need
+    var needed_intrinsics: [text] = []
+
+    # Export globals
+    for g in module.globals:
+        bc.globals.push(_export_global(g))
+
+    # Export functions
+    for func in module.functions:
+        var bc_func = _export_function(func, needed_intrinsics)
+        bc.functions.push(bc_func)
+
+    # Add intrinsic declarations
+    for name in needed_intrinsics:
+        bc.intrinsic_decls.push(_make_intrinsic_decl(name))
+
+    # Add module metadata
+    if val arch = module.target_arch:
+        bc.metadata.push(BcMetadata(
+            id: 0,
+            key: "irtc.guest_arch",
+            value: arch.to_text()
+        ))
+    bc.metadata.push(BcMetadata(
+        id: 1,
+        key: "irtc.mode",
+        value: module.mode.to_text()
+    ))
+
+    bc
+
+# ============================================================================
+# Target Configuration
+# ============================================================================
+
+fn _target_triple(module: IrTcModule) -> text:
+    """Derive LLVM target triple from module."""
+    if val arch = module.target_arch:
+        match arch:
+            Avr: "avr-unknown-unknown"
+            I8086: "i8086-unknown-unknown"
+            Arm: "arm-unknown-unknown-eabi"
+            Riscv32: "riscv32-unknown-unknown"
+            X86: "i686-unknown-unknown"
+            AArch64: "aarch64-unknown-unknown"
+            Riscv64: "riscv64-unknown-unknown"
+            X86_64: "x86_64-unknown-unknown"
+    else:
+        "unknown-unknown-unknown"
+
+fn _data_layout(module: IrTcModule) -> text:
+    """Derive LLVM data layout from module."""
+    if val arch = module.target_arch:
+        match arch:
+            Avr: "e-P1-p:16:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8-a:0:8"
+            I8086: "e-m:e-p:16:16-i32:16:32-n16"
+            Arm: "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
+            Riscv32: "e-m:e-p:32:32-i64:64-n32-S128"
+            X86: "e-m:e-p:32:32-p270:32:32-p271:32:32-p272:64:64-i128:128-f64:32:64-f80:32-n8:16:32-S128"
+            AArch64: "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128"
+            Riscv64: "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+            X86_64: "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+    else:
+        ""
+
+# ============================================================================
+# Global Export
+# ============================================================================
+
+fn _export_global(g: IrTcGlobal) -> BcGlobal:
+    """Export a single global."""
+    var init_str: text? = nil
+    if val init = g.initializer:
+        var parts: [text] = []
+        for b in init:
+            parts.push("{b}")
+        init_str = Some("c\"{parts.join("")}\"")
+    else:
+        init_str = Some("zeroinitializer")
+
+    BcGlobal(
+        name: g.name,
+        type_: irtc_type_to_llvm(g.type_),
+        is_const: g.is_const,
+        initializer: init_str,
+        addr_space: g.addr_space
+    )
+
+# ============================================================================
+# Function Export
+# ============================================================================
+
+fn _export_function(func: IrTcFunction, needed_intrinsics: [text]) -> BcFunction:
+    """Export a function with all its blocks and instructions."""
+    var bc_func = BcFunction.new(func.name, irtc_type_to_llvm(func.return_type))
+    bc_func.is_declaration = func.is_declaration
+
+    # Parameters
+    for param in func.params:
+        bc_func.params.push(BcParam(
+            name: param.name,
+            type_: irtc_type_to_llvm(param.type_)
+        ))
+
+    # Blocks
+    for block in func.blocks:
+        var bc_block = BcBasicBlock(
+            label: block.display_label(),
+            instructions: []
+        )
+        for inst in block.instructions:
+            var bc_inst = _export_instruction(inst, needed_intrinsics)
+            bc_block.instructions.push(bc_inst)
+        bc_func.blocks.push(bc_block)
+
+    bc_func
+
+# ============================================================================
+# Instruction Export
+# ============================================================================
+
+fn _export_instruction(inst: IrTcInst, needed_intrinsics: [text]) -> BcInst:
+    """Export a single instruction to BC representation."""
+    val bc_inst = _export_op(inst.kind, needed_intrinsics)
+    # Attach debug metadata if present
+    if val line = inst.source_line:
+        if val file = inst.source_file:
+            return bc_inst.with_metadata("!DILocation(line: {line}, file: {file})")
+    bc_inst
+
+fn _export_op(op: IrTcOp, needed_intrinsics: [text]) -> BcInst:
+    """Export an IrTcOp to a BcInst."""
+    match op:
+        # ==== Standard ops map to LLVM IR directly ====
+        Add(dest, a, b):
+            BcInst.new("add", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Sub(dest, a, b):
+            BcInst.new("sub", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Mul(dest, a, b):
+            BcInst.new("mul", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Div(dest, a, b, signed):
+            var opname = "udiv"
+            if signed:
+                opname = "sdiv"
+            BcInst.new(opname, _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Rem(dest, a, b, signed):
+            var opname = "urem"
+            if signed:
+                opname = "srem"
+            BcInst.new(opname, _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Neg(dest, a):
+            # LLVM has no neg; use sub 0, a
+            BcInst.new("sub", _type_text(a.type_) + " 0, " + _val_ref(a))
+                .with_result(_val_ref(dest))
+
+        And(dest, a, b):
+            BcInst.new("and", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Or(dest, a, b):
+            BcInst.new("or", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Xor(dest, a, b):
+            BcInst.new("xor", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Not(dest, a):
+            # LLVM has no not; use xor a, -1
+            BcInst.new("xor", _type_text(a.type_) + " " + _val_ref(a) + ", -1")
+                .with_result(_val_ref(dest))
+
+        Shl(dest, a, b):
+            BcInst.new("shl", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Shr(dest, a, b):
+            BcInst.new("lshr", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Sar(dest, a, b):
+            BcInst.new("ashr", _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        RotL(dest, a, b):
+            # Map to @llvm.fshl intrinsic: fshl(a, a, b)
+            _ensure_intrinsic(needed_intrinsics, "@llvm.fshl." + _type_text(a.type_))
+            BcInst.new("call", _type_text(dest.type_) + " @llvm.fshl." + _type_text(a.type_) + "(" + _type_text(a.type_) + " " + _val_ref(a) + ", " + _type_text(a.type_) + " " + _val_ref(a) + ", " + _type_text(b.type_) + " " + _val_ref(b) + ")")
+                .with_result(_val_ref(dest))
+
+        RotR(dest, a, b):
+            # Map to @llvm.fshr intrinsic: fshr(a, a, b)
+            _ensure_intrinsic(needed_intrinsics, "@llvm.fshr." + _type_text(a.type_))
+            BcInst.new("call", _type_text(dest.type_) + " @llvm.fshr." + _type_text(a.type_) + "(" + _type_text(a.type_) + " " + _val_ref(a) + ", " + _type_text(a.type_) + " " + _val_ref(a) + ", " + _type_text(b.type_) + " " + _val_ref(b) + ")")
+                .with_result(_val_ref(dest))
+
+        Cmp(dest, cond, a, b):
+            BcInst.new("icmp", _cond_text(cond) + " " + _type_text(a.type_) + " " + _val_ref(a) + ", " + _val_ref(b))
+                .with_result(_val_ref(dest))
+
+        Ext(dest, src, signed):
+            var opname = "zext"
+            if signed:
+                opname = "sext"
+            BcInst.new(opname, _type_text(src.type_) + " " + _val_ref(src) + " to " + _type_text(dest.type_))
+                .with_result(_val_ref(dest))
+
+        Trunc(dest, src):
+            BcInst.new("trunc", _type_text(src.type_) + " " + _val_ref(src) + " to " + _type_text(dest.type_))
+                .with_result(_val_ref(dest))
+
+        Bitcast(dest, src):
+            BcInst.new("bitcast", _type_text(src.type_) + " " + _val_ref(src) + " to " + _type_text(dest.type_))
+                .with_result(_val_ref(dest))
+
+        Load(dest, addr, mem):
+            BcInst.new("load", _type_text(dest.type_) + ", ptr " + _val_ref(addr) + _mem_attrs(mem))
+                .with_result(_val_ref(dest))
+
+        Store(value, addr, mem):
+            BcInst.new("store", _type_text(value.type_) + " " + _val_ref(value) + ", ptr " + _val_ref(addr) + _mem_attrs(mem))
+
+        Alloca(dest, type_, count):
+            var operands = _type_text(type_)
+            if val c = count:
+                operands = operands + ", " + _type_text(c.type_) + " " + _val_ref(c)
+            BcInst.new("alloca", operands)
+                .with_result(_val_ref(dest))
+
+        Br(target):
+            BcInst.new("br", "label %" + target.to_text())
+
+        BrCond(cond, true_, false_):
+            BcInst.new("br", "i1 " + _val_ref(cond) + ", label %" + true_.to_text() + ", label %" + false_.to_text())
+
+        Switch(value, cases, default):
+            var operands = _type_text(value.type_) + " " + _val_ref(value) + ", label %" + default.to_text() + " ["
+            for case_ in cases:
+                operands = operands + " " + _type_text(value.type_) + " {case_.value}, label %" + case_.target.to_text()
+            operands = operands + " ]"
+            BcInst.new("switch", operands)
+
+        Ret(value):
+            if val v = value:
+                BcInst.new("ret", _type_text(v.type_) + " " + _val_ref(v))
+            else:
+                BcInst.new("ret", "void")
+
+        Call(dest, func, args, cc):
+            var operands = _type_text(func.type_) + " " + _val_ref(func) + "("
+            for i in 0..args.len():
+                if i > 0:
+                    operands = operands + ", "
+                operands = operands + _type_text(args[i].type_) + " " + _val_ref(args[i])
+            operands = operands + ")"
+            var bc_inst = BcInst.new("call", operands)
+            if val d = dest:
+                bc_inst = bc_inst.with_result(_val_ref(d))
+            bc_inst
+
+        CallHelper(dest, helper_id, args):
+            # Map to @llvm.irtc.call.helper intrinsic
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.call.helper")
+            var operands = "i64 @llvm.irtc.call.helper(i32 {helper_id}"
+            for arg in args:
+                operands = operands + ", " + _type_text(arg.type_) + " " + _val_ref(arg)
+            operands = operands + ")"
+            var bc_inst = BcInst.new("call", operands)
+            if val d = dest:
+                bc_inst = bc_inst.with_result(_val_ref(d))
+            bc_inst
+
+        # ==== Emulation-only ops → @llvm.irtc.* intrinsics ====
+        GuestLoad(dest, addr, mem, mmu_idx):
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.guest.load")
+            BcInst.new("call", _type_text(dest.type_) + " @llvm.irtc.guest.load(" + _type_text(addr.type_) + " " + _val_ref(addr) + ", i32 {mem.width}, i32 {mmu_idx})")
+                .with_result(_val_ref(dest))
+                .with_metadata("!{\"guest_load\", width: {mem.width}, endian: \"{mem.endian.to_text()}\"}")
+
+        GuestStore(value, addr, mem, mmu_idx):
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.guest.store")
+            BcInst.new("call", "void @llvm.irtc.guest.store(" + _type_text(value.type_) + " " + _val_ref(value) + ", " + _type_text(addr.type_) + " " + _val_ref(addr) + ", i32 {mem.width}, i32 {mmu_idx})")
+                .with_metadata("!{\"guest_store\", width: {mem.width}, endian: \"{mem.endian.to_text()}\"}")
+
+        ReadGuestReg(dest, guest_reg):
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.read.guest.reg")
+            BcInst.new("call", _type_text(dest.type_) + " @llvm.irtc.read.guest.reg(i32 {guest_reg.index})")
+                .with_result(_val_ref(dest))
+                .with_metadata("!{\"guest_reg\", arch: \"{guest_reg.arch.to_text()}\", name: \"{guest_reg.name}\"}")
+
+        WriteGuestReg(guest_reg, value):
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.write.guest.reg")
+            BcInst.new("call", "void @llvm.irtc.write.guest.reg(i32 {guest_reg.index}, " + _type_text(value.type_) + " " + _val_ref(value) + ")")
+                .with_metadata("!{\"guest_reg\", arch: \"{guest_reg.arch.to_text()}\", name: \"{guest_reg.name}\"}")
+
+        ExitTB(exit_code):
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.exit.tb")
+            BcInst.new("call", "void @llvm.irtc.exit.tb(i64 {exit_code})")
+
+        GotoTB(tb_index):
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.goto.tb")
+            BcInst.new("call", "void @llvm.irtc.goto.tb(i64 {tb_index})")
+
+        LookupGotoTB(target_pc):
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.lookup.goto.tb")
+            BcInst.new("call", "void @llvm.irtc.lookup.goto.tb(" + _type_text(target_pc.type_) + " " + _val_ref(target_pc) + ")")
+
+        SyncGuestPC(value):
+            _ensure_intrinsic(needed_intrinsics, "@llvm.irtc.sync.guest.pc")
+            BcInst.new("call", "void @llvm.irtc.sync.guest.pc(" + _type_text(value.type_) + " " + _val_ref(value) + ")")
+
+        GetElementPtr(dest, base, indices):
+            var operands = _type_text(dest.type_) + ", ptr " + _val_ref(base)
+            for idx in indices:
+                operands = operands + ", " + _type_text(idx.type_) + " " + _val_ref(idx)
+            BcInst.new("getelementptr", operands)
+                .with_result(_val_ref(dest))
+
+        ExtractValue(dest, agg, index):
+            BcInst.new("extractvalue", _type_text(agg.type_) + " " + _val_ref(agg) + ", {index}")
+                .with_result(_val_ref(dest))
+
+        InsertValue(dest, agg, value, index):
+            BcInst.new("insertvalue", _type_text(agg.type_) + " " + _val_ref(agg) + ", " + _type_text(value.type_) + " " + _val_ref(value) + ", {index}")
+                .with_result(_val_ref(dest))
+
+        Phi(dest, incoming):
+            var operands = _type_text(dest.type_) + " "
+            for i in 0..incoming.len():
+                if i > 0:
+                    operands = operands + ", "
+                operands = operands + "[ " + _val_ref(incoming[i].value) + ", %" + incoming[i].block.to_text() + " ]"
+            BcInst.new("phi", operands)
+                .with_result(_val_ref(dest))
+
+        Barrier(kind):
+            BcInst.new("fence", _barrier_text(kind))
+
+        Nop:
+            # No-op: emit as a comment
+            BcInst.new("; nop", "")
+
+        Unreachable:
+            BcInst.new("unreachable", "")
+
+# ============================================================================
+# Intrinsic Declaration Generator
+# ============================================================================
+
+fn _ensure_intrinsic(needed: [text], name: text):
+    """Add intrinsic name to the list if not already present."""
+    for existing in needed:
+        if existing == name:
+            return
+    needed.push(name)
+
+fn _make_intrinsic_decl(name: text) -> BcIntrinsicDecl:
+    """Create an intrinsic declaration from its name."""
+    # Map known intrinsic names to signatures
+    if name == "@llvm.irtc.guest.load":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.IntType(bits: 64), param_types: [LlvmType.IntType(bits: 64), LlvmType.IntType(bits: 32), LlvmType.IntType(bits: 32)])
+    if name == "@llvm.irtc.guest.store":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.VoidType, param_types: [LlvmType.IntType(bits: 64), LlvmType.IntType(bits: 64), LlvmType.IntType(bits: 32), LlvmType.IntType(bits: 32)])
+    if name == "@llvm.irtc.read.guest.reg":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.IntType(bits: 64), param_types: [LlvmType.IntType(bits: 32)])
+    if name == "@llvm.irtc.write.guest.reg":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.VoidType, param_types: [LlvmType.IntType(bits: 32), LlvmType.IntType(bits: 64)])
+    if name == "@llvm.irtc.exit.tb":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.VoidType, param_types: [LlvmType.IntType(bits: 64)])
+    if name == "@llvm.irtc.goto.tb":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.VoidType, param_types: [LlvmType.IntType(bits: 64)])
+    if name == "@llvm.irtc.lookup.goto.tb":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.VoidType, param_types: [LlvmType.IntType(bits: 64)])
+    if name == "@llvm.irtc.sync.guest.pc":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.VoidType, param_types: [LlvmType.IntType(bits: 64)])
+    if name == "@llvm.irtc.call.helper":
+        return BcIntrinsicDecl(name: name, return_type: LlvmType.IntType(bits: 64), param_types: [LlvmType.IntType(bits: 32)])
+    # Funnel shift intrinsics (type-parameterized)
+    BcIntrinsicDecl(name: name, return_type: LlvmType.IntType(bits: 64), param_types: [LlvmType.IntType(bits: 64), LlvmType.IntType(bits: 64), LlvmType.IntType(bits: 64)])
+
+# ============================================================================
+# Text Helpers
+# ============================================================================
+
+fn _val_ref(value: IrTcValue) -> text:
+    """Format a value as LLVM IR reference."""
+    "%{value.id}"
+
+fn _type_text(type_: IrTcTypeKind) -> text:
+    """Format an IrTcTypeKind as LLVM IR type text."""
+    match type_:
+        I1: "i1"
+        I8: "i8"
+        I16: "i16"
+        I32: "i32"
+        I64: "i64"
+        F32: "float"
+        F64: "double"
+        Ptr(_): "ptr"
+        Vec(elem, count): "<{count} x {_type_text(elem)}>"
+        Struct(fields):
+            var parts: [text] = []
+            for f in fields:
+                parts.push(_type_text(f))
+            "\\{ " + parts.join(", ") + " \\}"
+        Array(elem, count): "[{count} x {_type_text(elem)}]"
+        Void: "void"
+        Flag: "i8"
+
+fn _cond_text(cond: IrTcCond) -> text:
+    """Format a condition as LLVM IR icmp predicate."""
+    match cond:
+        Eq: "eq"
+        Ne: "ne"
+        Lt: "slt"
+        Le: "sle"
+        Gt: "sgt"
+        Ge: "sge"
+        Ltu: "ult"
+        Leu: "ule"
+        Gtu: "ugt"
+        Geu: "uge"
+
+fn _barrier_text(kind: BarrierKind) -> text:
+    """Format a barrier kind as LLVM IR fence ordering."""
+    match kind:
+        Full: "seq_cst"
+        LoadLoad: "acquire"
+        StoreStore: "release"
+        LoadStore: "acq_rel"
+        StoreLoad: "seq_cst"
+
+fn _mem_attrs(mem: MemOp) -> text:
+    """Format MemOp as LLVM IR memory attributes."""
+    var attrs = ""
+    if mem.align > 0:
+        attrs = attrs + ", align {mem.align}"
+    attrs

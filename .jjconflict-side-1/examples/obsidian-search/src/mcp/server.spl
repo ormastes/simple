@@ -1,0 +1,146 @@
+# MCP Server — stdio protocol handler
+#
+# Content-Length framed stdio protocol with JSON Lines auto-detection.
+
+use src.util.json_helpers.{js, jp, jo1, jo2, jo3, jo4, make_json_result, make_error, safe_substr, extract_field, extract_field_raw, extract_id, extract_nested, extract_arg, tool_text_result, LB, RB}
+use src.util.protocol_headers.{parse_content_length_header}
+use src.mcp.tools.{make_tools_list}
+use src.mcp.handlers.{handle_tool_call}
+use src.core.indexer.{IndexDb, open_index_db, open_index_memory, close_index_db, create_schema}
+use src.core.vault_scanner.{resolve_vault_path}
+
+extern fn rt_text_byte_len(s: text) -> i64
+extern fn stdin_read_char() -> text
+extern fn rt_stdout_flush()
+
+# --- Constants ---
+
+val SERVER_NAME = "obsidian-search"
+val SERVER_VERSION = "0.2.0"
+val NL = "\n"
+
+# --- Protocol state ---
+
+var USE_JSON_LINES = false
+
+# --- Protocol I/O ---
+
+fn read_stdin_line() -> text:
+    var result = ""
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            if result == "":
+                return ""
+            return result
+        result = result + ch
+        if ch == "\n":
+            return result
+
+fn read_stdin_chars(count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        result = result + ch
+        i = i + 1
+    result
+
+fn read_stdin_message() -> text:
+    var content_length = 0
+    var saw_header = false
+    while true:
+        var line = read_stdin_line()
+        if line == "":
+            if content_length > 0:
+                break
+            if saw_header:
+                return ""
+            return ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        if line.ends_with("\r"):
+            line = safe_substr(line, 0, line.len() - 1)
+        if line.starts_with(LB()):
+            USE_JSON_LINES = true
+            return line
+        saw_header = true
+        if line.starts_with("Content-Length:"):
+            content_length = parse_content_length_header(line)
+            if content_length < 0:
+                return ""
+        elif line.starts_with("Content-Type:"):
+            continue
+    if content_length <= 0:
+        return ""
+    read_stdin_chars(content_length)
+
+fn write_stdout_message(body: text):
+    if USE_JSON_LINES:
+        print_raw(body + NL)
+    else:
+        val byte_count = rt_text_byte_len(body)
+        var header = "Content-Length: " + str(byte_count) + "\r" + NL + "\r" + NL
+        print_raw(header)
+        print_raw(body)
+    rt_stdout_flush()
+
+# --- Initialize response ---
+
+fn make_init_response(id: text) -> text:
+    val tools_cap = jo1(jp("listChanged", "false"))
+    val caps = jo1(jp("tools", tools_cap))
+    val server_info = jo2(
+        jp("name", js(SERVER_NAME)),
+        jp("version", js(SERVER_VERSION))
+    )
+    val result = jo4(
+        jp("protocolVersion", js("2025-06-18")),
+        jp("capabilities", caps),
+        jp("instructions", js("Obsidian vault MCP server (33 tools): search, graph, write, metadata, analytics, periodic notes, templates. Set OBSIDIAN_VAULT_PATH to your vault directory.")),
+        jp("serverInfo", server_info)
+    )
+    make_json_result(id, result)
+
+# --- Server loop ---
+
+fn start_server():
+    val vault_path = resolve_vault_path()
+
+    var db = open_index_memory()
+    create_schema(db)
+
+    var running = true
+    while running:
+        var line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            var method = extract_field(line, "method")
+            var id = extract_id(line)
+            var response = ""
+            if method == "initialize":
+                response = make_init_response(id)
+            elif method == "initialized" or method == "notifications/initialized":
+                response = ""
+            elif method == "notifications/cancelled" or method == "notifications/roots/list_changed":
+                response = ""
+            elif method == "shutdown":
+                response = make_json_result(id, "null")
+            elif method == "ping":
+                response = make_json_result(id, LB() + RB())
+            elif method == "tools/list":
+                response = make_tools_list(id)
+            elif method == "tools/call":
+                response = handle_tool_call(id, line, db, vault_path)
+            else:
+                if id != "" and id != "null":
+                    response = make_error(id, -32601, "Method not found: " + method)
+            if response != "":
+                write_stdout_message(response)
+
+    close_index_db(db)

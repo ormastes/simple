@@ -1,0 +1,611 @@
+# @cover src/timing/hybrid_sim.spl 80%
+# @cover src/timing/pipeline.spl 80%
+# @cover src/timing/hazards.spl 80%
+# @cover src/timing/classifier.spl 80%
+# @cover src/timing/types.spl 80%
+# @cover src/timing/mode_switcher.spl 80%
+# @cover src/trace/retirement.spl 80%
+# @cover src/trace/vcd_dumper.spl 80%
+"""
+RV32 Hybrid Simulator Specification
+
+Exercises the complete hybrid simulation pipeline: timing overlay,
+pipeline hazard detection, mode switching, VCD trace, retirement
+trace, and tandem checking.
+
+**Feature IDs:** #RV32-HYBRID-SIM, F7
+**Category:** Runtime
+**Status:** Implemented
+**Requirements:** doc/02_requirements/feature/rv32_hybrid_sim.md
+
+## Overview
+
+The RV32 Hybrid Simulator adds timing awareness to the existing
+fast RV32I emulator. It operates in three modes:
+
+1. Fast — existing IR_TC path, no timing info
+2. TimingApproximate — fast execution + parallel pipeline overlay
+3. RtlCycleAccurate — native RTL signal-level simulation
+
+Program loading is intentionally raw-image oriented. The simulator accepts
+bytes as an in-memory image at the reset vector; it does not parse ELF files.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| TimingAnnotation | Parallel metadata per retired instruction |
+| PipelineModel | 5-stage scoreboard for hazard/stall tracking |
+| HazardReport | Aggregated RAW/WAW/WAR/control hazard summary |
+| RetirementTrace | Per-instruction retirement log for tandem check |
+| WaveformDumper | VCD output for GTKWave-compatible waveforms |
+| SimModeSwitcher | State snapshot and mode transition manager |
+"""
+
+use std.spec.{describe, it, expect}
+use timing.types.{
+    SimMode, PipelineStage, CycleCount, LatencyTable,
+    InstructionCategory, TimingAnnotation, StateSnapshot
+}
+use timing.pipeline.{PipelineModel}
+use timing.hazards.{HazardDetector, HazardReport, DataHazard, ControlHazard, HazardKind}
+use timing.classifier.{classify_rv32_instruction, InstructionClassification}
+use timing.mode_switcher.{SimModeSwitcher}
+use timing.hybrid_sim.{HybridSimulator}
+use trace.retirement.{RetirementTrace, TandemChecker}
+use trace.vcd_dumper.{WaveformDumper}
+use test.helpers.riscv_encode.{
+    encode_addi, encode_add, encode_sub, encode_lui,
+    encode_sw, encode_lw, encode_beq, encode_bne,
+    encode_jal, encode_jalr, encode_nop, encode_ebreak
+}
+
+# ============================================================================
+# Helper: create HybridSimulator with program loaded
+# ============================================================================
+
+fn create_hybrid(mode: SimMode, program: [i64]) -> HybridSimulator:
+    var sim = HybridSimulator.new(mode)
+    sim.load_raw_image(program)
+    sim.reset()
+    sim.load_raw_image(program)
+    sim
+
+describe "Program loading semantics":
+    """Verify the simulator treats program input as a raw image."""
+
+    it "loads raw images through the explicit API":
+        var program = encode_addi(10, 0, 42) + encode_ebreak()
+        var sim = HybridSimulator.new(SimMode.Fast)
+        sim.load_raw_image(program)
+        sim.reset()
+        sim.load_raw_image(program)
+        sim.run_until_halt()
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+
+    it "keeps the legacy load_elf_bytes alias working":
+        var program = encode_addi(10, 0, 7) + encode_ebreak()
+        var sim = HybridSimulator.new(SimMode.Fast)
+        sim.load_elf_bytes(program)
+        sim.reset()
+        sim.load_elf_bytes(program)
+        sim.run_until_halt()
+        expect(sim.get_reg("a0")).to_equal(Some(7))
+
+# ============================================================================
+# Timing Types (REQ-SIM-001)
+# ============================================================================
+
+describe "Timing types — REQ-SIM-001":
+    """Verify entity types: SimMode, PipelineStage, CycleCount, LatencyTable, TimingAnnotation."""
+
+    it "SimMode has three variants":
+        expect(SimMode.Fast.to_text()).to_equal("fast")
+        expect(SimMode.TimingApproximate.to_text()).to_equal("timing-approximate")
+        expect(SimMode.RtlCycleAccurate.to_text()).to_equal("rtl-cycle-accurate")
+
+    it "PipelineStage has five stages":
+        expect(PipelineStage.Fetch.index()).to_equal(0)
+        expect(PipelineStage.Decode.index()).to_equal(1)
+        expect(PipelineStage.Execute.index()).to_equal(2)
+        expect(PipelineStage.Memory.index()).to_equal(3)
+        expect(PipelineStage.Writeback.index()).to_equal(4)
+
+    it "CycleCount tracks breakdown":
+        val a = CycleCount(total: 10, execution: 5, stall_data: 3, stall_control: 2, stall_memory: 0)
+        val b = CycleCount(total: 5, execution: 3, stall_data: 1, stall_control: 0, stall_memory: 1)
+        val c = a.add(b)
+        expect(c.total).to_equal(15)
+        expect(c.execution).to_equal(8)
+        expect(c.stall_data).to_equal(4)
+        expect(c.stall_control).to_equal(2)
+        expect(c.stall_memory).to_equal(1)
+
+    it "LatencyTable provides default RV32I values":
+        val table = LatencyTable.default_rv32i()
+        expect(table.lookup(InstructionCategory.AluReg)).to_equal(1)
+        expect(table.lookup(InstructionCategory.Load)).to_equal(2)
+        expect(table.lookup(InstructionCategory.Store)).to_equal(1)
+        expect(table.lookup(InstructionCategory.Branch)).to_equal(1)
+        expect(table.branch_mispredict_penalty).to_equal(2)
+
+    it "TimingAnnotation attaches to instruction via parallel map (AC-001)":
+        val ann = TimingAnnotation.new(0x80000000, 0x00A00513, InstructionCategory.AluImm, 1)
+        val annotated = ann.with_regs(10, 0, -1)
+        expect(annotated.pc).to_equal(0x80000000)
+        expect(annotated.rd).to_equal(10)
+        expect(annotated.rs1).to_equal(0)
+        expect(annotated.rs2).to_equal(-1)
+        expect(annotated.base_latency).to_equal(1)
+
+# ============================================================================
+# Pipeline Model (REQ-SIM-002)
+# ============================================================================
+
+describe "Pipeline model — REQ-SIM-002":
+    """Verify 5-stage pipeline overlay with scoreboard-based hazard detection."""
+
+    it "counts cycles for simple ALU sequence":
+        var pipeline = PipelineModel.new()
+        # ADDI x10, x0, 42 — no dependency, 1 cycle
+        pipeline.retire_instruction(0x80000000, 0, InstructionCategory.AluImm, 10, 0, -1, false)
+        # ADDI x11, x0, 10 — no dependency, 1 cycle
+        pipeline.retire_instruction(0x80000004, 0, InstructionCategory.AluImm, 11, 0, -1, false)
+        expect(pipeline.cycle_count()).to_equal(2)
+        expect(pipeline.retired_count).to_equal(2)
+
+    it "detects RAW hazard on load-use":
+        var pipeline = PipelineModel.new()
+        # LW x10, 0(x11) — load, latency=2
+        pipeline.retire_instruction(0x80000000, 0, InstructionCategory.Load, 10, 11, -1, false)
+        # ADD x12, x10, x13 — uses x10, must stall
+        val ann = pipeline.retire_instruction(0x80000004, 0, InstructionCategory.AluReg, 12, 10, 13, false)
+        expect(ann.stall_cycles).to_be_greater_than(0)
+
+    it "reports hazards correctly (AC-006)":
+        var pipeline = PipelineModel.new()
+        # LW x10, 0(x0) — load
+        pipeline.retire_instruction(0x80000000, 0, InstructionCategory.Load, 10, 0, -1, false)
+        # ADD x11, x10, x0 — RAW on x10
+        pipeline.retire_instruction(0x80000004, 0, InstructionCategory.AluReg, 11, 10, 0, false)
+        val report = pipeline.hazard_report()
+        expect(report.data_hazards.len()).to_be_greater_than(0)
+        expect(report.raw_count).to_be_greater_than(0)
+
+    it "adds branch misprediction penalty for taken branches":
+        var pipeline = PipelineModel.new()
+        # BEQ x10, x11, 8 — branch taken (static not-taken predictor mispredicts)
+        val ann = pipeline.retire_instruction(0x80000000, 0, InstructionCategory.Branch, -1, 10, 11, true)
+        expect(pipeline.branch_mispredict_count).to_equal(1)
+        val report = pipeline.hazard_report()
+        expect(report.control_hazards.len()).to_equal(1)
+
+    it "no penalty for not-taken branch (correct prediction)":
+        var pipeline = PipelineModel.new()
+        val ann = pipeline.retire_instruction(0x80000000, 0, InstructionCategory.Branch, -1, 10, 11, false)
+        expect(pipeline.branch_mispredict_count).to_equal(0)
+
+    it "computes IPC for straight-line code":
+        var pipeline = PipelineModel.new()
+        # 5 ALU instructions, no hazards => IPC should be ~1.0
+        var i: i64 = 0
+        while i < 5:
+            pipeline.retire_instruction(0x80000000 + i * 4, 0, InstructionCategory.AluImm, i + 1, 0, -1, false)
+            i = i + 1
+        val ipc = pipeline.ipc()
+        expect(ipc).to_equal(100)  # IPC * 100 = 1.0 * 100 = 100
+
+# ============================================================================
+# Instruction Classifier
+# ============================================================================
+
+describe "Instruction classifier":
+    """Verify correct classification of RV32I instruction words."""
+
+    it "classifies ADDI as AluImm":
+        val program = encode_addi(10, 0, 42)
+        val word = program[0] | (program[1] << 8) | (program[2] << 16) | (program[3] << 24)
+        val cls = classify_rv32_instruction(word)
+        expect(cls.category.to_text()).to_equal("alu_imm")
+        expect(cls.rd).to_equal(10)
+        expect(cls.rs1).to_equal(0)
+
+    it "classifies ADD as AluReg":
+        val program = encode_add(10, 11, 12)
+        val word = program[0] | (program[1] << 8) | (program[2] << 16) | (program[3] << 24)
+        val cls = classify_rv32_instruction(word)
+        expect(cls.category.to_text()).to_equal("alu_reg")
+        expect(cls.rd).to_equal(10)
+        expect(cls.rs1).to_equal(11)
+        expect(cls.rs2).to_equal(12)
+
+    it "classifies LW as Load":
+        val program = encode_lw(10, 11, 0)
+        val word = program[0] | (program[1] << 8) | (program[2] << 16) | (program[3] << 24)
+        val cls = classify_rv32_instruction(word)
+        expect(cls.category.to_text()).to_equal("load")
+        expect(cls.is_load).to_equal(true)
+
+    it "classifies SW as Store":
+        val program = encode_sw(11, 10, 0)
+        val word = program[0] | (program[1] << 8) | (program[2] << 16) | (program[3] << 24)
+        val cls = classify_rv32_instruction(word)
+        expect(cls.category.to_text()).to_equal("store")
+        expect(cls.is_store).to_equal(true)
+
+    it "classifies BEQ as Branch":
+        val program = encode_beq(10, 11, 8)
+        val word = program[0] | (program[1] << 8) | (program[2] << 16) | (program[3] << 24)
+        val cls = classify_rv32_instruction(word)
+        expect(cls.category.to_text()).to_equal("branch")
+        expect(cls.is_branch).to_equal(true)
+
+    it "classifies JAL as Jump":
+        val program = encode_jal(1, 8)
+        val word = program[0] | (program[1] << 8) | (program[2] << 16) | (program[3] << 24)
+        val cls = classify_rv32_instruction(word)
+        expect(cls.category.to_text()).to_equal("jump")
+
+    it "classifies LUI as UpperImm":
+        val program = encode_lui(10, 0x12345000)
+        val word = program[0] | (program[1] << 8) | (program[2] << 16) | (program[3] << 24)
+        val cls = classify_rv32_instruction(word)
+        expect(cls.category.to_text()).to_equal("upper_imm")
+
+# ============================================================================
+# Mode Switching (REQ-SIM-005)
+# ============================================================================
+
+describe "Mode switching — REQ-SIM-005":
+    """Verify mode transitions with state snapshots."""
+
+    it "switches from Fast to TimingApproximate":
+        var switcher = SimModeSwitcher.new(SimMode.Fast)
+        val snap = StateSnapshot.new([], 0x80000000, [], 0, 0, false, SimMode.Fast)
+        val result = switcher.prepare_switch(SimMode.TimingApproximate, snap)
+        expect(result.success).to_equal(true)
+        expect(switcher.mode().to_text()).to_equal("timing-approximate")
+
+    it "rejects switch to same mode":
+        var switcher = SimModeSwitcher.new(SimMode.Fast)
+        val snap = StateSnapshot.new([], 0x80000000, [], 0, 0, false, SimMode.Fast)
+        val result = switcher.prepare_switch(SimMode.Fast, snap)
+        expect(result.success).to_equal(false)
+
+    it "records snapshot history":
+        var switcher = SimModeSwitcher.new(SimMode.Fast)
+        val snap1 = StateSnapshot.new([], 0x80000000, [], 0, 0, false, SimMode.Fast)
+        switcher.prepare_switch(SimMode.TimingApproximate, snap1)
+        val snap2 = StateSnapshot.new([], 0x80000004, [], 10, 5, false, SimMode.TimingApproximate)
+        switcher.prepare_switch(SimMode.RtlCycleAccurate, snap2)
+        expect(switcher.snapshot_count()).to_equal(2)
+
+    it "preserves state across mode switch (AC-004)":
+        var program = encode_addi(10, 0, 42) + encode_nop() + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.step()
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+        sim.switch_mode(SimMode.TimingApproximate)
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+        expect(sim.mode().to_text()).to_equal("timing-approximate")
+
+# ============================================================================
+# HybridSimulator — Fast Mode
+# ============================================================================
+
+describe "HybridSimulator — Fast mode":
+    """Verify basic emulation in Fast mode."""
+
+    it "executes ADDI in fast mode":
+        var program = encode_addi(10, 0, 42) + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.step()
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+
+    it "halts on EBREAK":
+        var program = encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.step()
+        expect(sim.halted).to_equal(true)
+
+    it "runs until halt":
+        var program = encode_addi(10, 0, 1) + encode_addi(10, 0, 2) + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.run_until_halt()
+        expect(sim.get_reg("a0")).to_equal(Some(2))
+
+    it "runs until PC target":
+        var program = encode_nop() + encode_nop() + encode_nop() + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.run_until_pc(0x80000008)
+        expect(sim.get_reg("pc")).to_equal(Some(0x80000008))
+
+# ============================================================================
+# HybridSimulator — TimingApproximate Mode
+# ============================================================================
+
+describe "HybridSimulator — TimingApproximate mode":
+    """Verify timing overlay produces cycle counts and hazard reports."""
+
+    it "produces cycle count for straight-line code":
+        var program = encode_addi(10, 0, 42) + encode_addi(11, 0, 10) + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.run_until_halt()
+        expect(sim.cycle_count()).to_be_greater_than(0)
+        expect(sim.retired_count()).to_equal(2)
+
+    it "computes IPC for simple ALU sequence":
+        var program = encode_addi(10, 0, 1)
+        program = program + encode_addi(11, 0, 2)
+        program = program + encode_addi(12, 0, 3)
+        program = program + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.run_until_halt()
+        val ipc = sim.ipc()
+        # Straight-line ALU: IPC should be 100 (= 1.00)
+        expect(ipc).to_equal(100)
+
+    it "detects data hazard on load-use pattern":
+        # ADDI x11, x0, 0x40 — set up address
+        # SW x11, x10, 0 — store
+        # LW x10, x11, 0 — load x10
+        # ADD x12, x10, x0 — RAW hazard on x10
+        var program = encode_addi(11, 0, 0x40)
+        program = program + encode_sw(11, 10, 0)
+        program = program + encode_lw(10, 11, 0)
+        program = program + encode_add(12, 10, 0)
+        program = program + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.enable_hazard_report()
+        sim.run_until_halt()
+        val report = sim.hazard_report()
+        expect(report.data_hazards.len()).to_be_greater_than(0)
+        expect(report.raw_count).to_be_greater_than(0)
+
+    it "detects branch misprediction for taken branch":
+        # ADDI x10, x0, 5
+        # ADDI x11, x0, 5
+        # BEQ x10, x11, 8 — taken
+        # ADDI x12, x0, 1 — skipped
+        # ADDI x12, x0, 2 — target
+        var program = encode_addi(10, 0, 5)
+        program = program + encode_addi(11, 0, 5)
+        program = program + encode_beq(10, 11, 8)
+        program = program + encode_addi(12, 0, 1)
+        program = program + encode_addi(12, 0, 2)
+        program = program + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.enable_hazard_report()
+        sim.run_until_halt()
+        expect(sim.branch_misses()).to_equal(1)
+        val report = sim.hazard_report()
+        expect(report.control_hazards.len()).to_equal(1)
+
+    it "reports pipeline stats":
+        var program = encode_addi(10, 0, 42) + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.run_until_halt()
+        val stats = sim.pipeline_stats()
+        expect(stats).to_contain("Pipeline:")
+        expect(stats).to_contain("retired=1")
+
+    it "produces non-zero cycle count for ADD chain with dependency":
+        # x10 = 42, x11 = x10 + 1, x12 = x11 + 1
+        var program = encode_addi(10, 0, 42)
+        program = program + encode_addi(11, 10, 1)
+        program = program + encode_addi(12, 11, 1)
+        program = program + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.run_until_halt()
+        expect(sim.cycle_count()).to_be_greater_than(0)
+        expect(sim.get_reg("a2")).to_equal(Some(44))
+
+# ============================================================================
+# Retirement Trace (REQ-SIM-011)
+# ============================================================================
+
+describe "Retirement trace — REQ-SIM-011":
+    """Verify instruction retirement trace and tandem checking."""
+
+    it "records retirement events":
+        var program = encode_addi(10, 0, 42) + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.step()
+        val trace = sim.retirement_trace_ref()
+        expect(trace.len()).to_equal(1)
+
+    it "tandem checker finds no divergence for identical traces":
+        var trace_a = RetirementTrace.new()
+        trace_a.record(0x80000000, 0x02A00513, 10, 42, SimMode.Fast)
+        trace_a.record(0x80000004, 0x00100073, -1, 0, SimMode.Fast)
+        var trace_b = RetirementTrace.new()
+        trace_b.record(0x80000000, 0x02A00513, 10, 42, SimMode.TimingApproximate)
+        trace_b.record(0x80000004, 0x00100073, -1, 0, SimMode.TimingApproximate)
+        val checker = TandemChecker.new()
+        val divergence = checker.compare(trace_a, trace_b)
+        expect(divergence.? == nil).to_equal(true)
+
+    it "tandem checker detects PC divergence (AC-011)":
+        var trace_a = RetirementTrace.new()
+        trace_a.record(0x80000000, 0x02A00513, 10, 42, SimMode.Fast)
+        var trace_b = RetirementTrace.new()
+        trace_b.record(0x80000004, 0x02A00513, 10, 42, SimMode.TimingApproximate)
+        val checker = TandemChecker.new()
+        val divergence = checker.compare(trace_a, trace_b)
+        expect(divergence.? == nil).to_equal(false)
+
+    it "tandem checker detects value divergence":
+        var trace_a = RetirementTrace.new()
+        trace_a.record(0x80000000, 0x02A00513, 10, 42, SimMode.Fast)
+        var trace_b = RetirementTrace.new()
+        trace_b.record(0x80000000, 0x02A00513, 10, 99, SimMode.TimingApproximate)
+        val checker = TandemChecker.new()
+        val divergence = checker.compare(trace_a, trace_b)
+        expect(divergence.? == nil).to_equal(false)
+
+# ============================================================================
+# VCD Waveform (REQ-SIM-007)
+# ============================================================================
+
+describe "VCD waveform — REQ-SIM-007":
+    """Verify VCD output is well-formed."""
+
+    it "generates valid VCD header":
+        var dumper = WaveformDumper.new("test_module")
+        dumper.add_signal("clk", 1, true)
+        dumper.add_signal("pc", 32, true)
+        val vcd = dumper.finish()
+        expect(vcd).to_contain("$date")
+        expect(vcd).to_contain("$timescale")
+        expect(vcd).to_contain("$scope module test_module $end")
+        expect(vcd).to_contain("$var reg 1")
+        expect(vcd).to_contain("$var reg 32")
+        expect(vcd).to_contain("$enddefinitions $end")
+        expect(vcd).to_contain("$dumpvars")
+
+    it "records signal value changes":
+        var dumper = WaveformDumper.new("test_module")
+        dumper.add_signal("pc", 32, true)
+        dumper.set_time(0)
+        dumper.emit_change("pc", 0x80000000, 32)
+        dumper.set_time(10)
+        dumper.emit_change("pc", 0x80000004, 32)
+        val vcd = dumper.finish()
+        expect(vcd).to_contain("#0")
+        expect(vcd).to_contain("#10")
+        expect(vcd).to_contain("b")
+
+    it "generates VCD from timing mode simulation (AC-005)":
+        var program = encode_addi(10, 0, 42) + encode_nop() + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.enable_trace("trace.vcd")
+        sim.run_until_halt()
+        val vcd = sim.dump_waveform()
+        expect(vcd).to_contain("$scope module rv32_hybrid $end")
+        expect(vcd).to_contain("$enddefinitions $end")
+
+    it "tracks correct signal count":
+        var dumper = WaveformDumper.new("m")
+        dumper.add_signal("a", 1, true)
+        dumper.add_signal("b", 8, false)
+        dumper.add_signal("c", 32, true)
+        expect(dumper.signal_count()).to_equal(3)
+
+# ============================================================================
+# State Snapshot/Restore (REQ-SIM-006)
+# ============================================================================
+
+describe "State snapshot/restore — REQ-SIM-006":
+    """Verify full state capture and restoration across mode transitions."""
+
+    it "captures and restores register state":
+        var program = encode_addi(10, 0, 42) + encode_addi(11, 0, 7) + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.run_until_halt()
+        val snap = sim.snapshot()
+        sim.reset()
+        expect(sim.get_reg("a0")).to_equal(Some(0))
+        sim.restore_snapshot(snap)
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+        expect(sim.get_reg("a1")).to_equal(Some(7))
+
+    it "preserves state through fast -> timing switch":
+        var program = encode_addi(10, 0, 99) + encode_nop() + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.step()
+        val a0_before = sim.get_reg("a0")
+        sim.switch_mode(SimMode.TimingApproximate)
+        expect(sim.get_reg("a0")).to_equal(a0_before)
+
+# ============================================================================
+# Hazard Report (REQ-SIM-009)
+# ============================================================================
+
+describe "Hazard report — REQ-SIM-009":
+    """Verify aggregated hazard reporting."""
+
+    it "aggregates multiple RAW hazards":
+        var detector = HazardDetector.new()
+        detector.record_data_hazard(DataHazard(pc: 0x100, kind: HazardKind.RAW, src_reg: 10, stall_cycles: 1))
+        detector.record_data_hazard(DataHazard(pc: 0x108, kind: HazardKind.RAW, src_reg: 11, stall_cycles: 2))
+        val report = detector.report()
+        expect(report.raw_count).to_equal(2)
+        expect(report.total_data_stalls).to_equal(3)
+
+    it "aggregates control hazards":
+        var detector = HazardDetector.new()
+        detector.record_control_hazard(ControlHazard(pc: 0x200, penalty_cycles: 2, was_taken: true, predicted_taken: false))
+        val report = detector.report()
+        expect(report.control_hazards.len()).to_equal(1)
+        expect(report.total_control_stalls).to_equal(2)
+
+    it "report is printable":
+        var detector = HazardDetector.new()
+        detector.record_data_hazard(DataHazard(pc: 0x100, kind: HazardKind.RAW, src_reg: 10, stall_cycles: 1))
+        val report = detector.report()
+        val text = report.to_text()
+        expect(text).to_contain("Hazard Report")
+        expect(text).to_contain("RAW=1")
+
+# ============================================================================
+# End-to-End: Hybrid Simulator Integration
+# ============================================================================
+
+describe "HybridSimulator end-to-end":
+    """Full integration tests matching requirement examples."""
+
+    it "Example 1: fast mode with timing overlay":
+        # Boot in timing mode, get approximate cycle count
+        var program = encode_addi(10, 0, 1)
+        program = program + encode_addi(11, 0, 2)
+        program = program + encode_add(12, 10, 11)
+        program = program + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.run_until_halt()
+        expect(sim.cycle_count()).to_be_greater_than(0)
+        expect(sim.ipc()).to_be_greater_than(0)
+        expect(sim.get_reg("a2")).to_equal(Some(3))
+
+    it "Example 2: mode switching fast -> timing":
+        var program = encode_addi(10, 0, 42) + encode_nop() + encode_nop() + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.step()
+        sim.switch_mode(SimMode.TimingApproximate)
+        sim.run_until_halt()
+        expect(sim.get_reg("a0")).to_equal(Some(42))
+        expect(sim.cycle_count()).to_be_greater_than(0)
+
+    it "Example 3: pipeline hazard detection":
+        # LW then use creates data hazard
+        var program = encode_addi(11, 0, 0x40)
+        program = program + encode_sw(11, 10, 0)
+        program = program + encode_lw(10, 11, 0)
+        program = program + encode_add(12, 10, 0)
+        program = program + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.enable_hazard_report()
+        sim.run_until_halt()
+        val report = sim.hazard_report()
+        expect(report.data_hazards.len()).to_be_greater_than(0)
+
+    it "mode switch preserves all 32 GPRs":
+        var program = encode_addi(10, 0, 10)
+        program = program + encode_addi(11, 0, 20)
+        program = program + encode_addi(12, 0, 30)
+        program = program + encode_nop()
+        program = program + encode_ebreak()
+        var sim = create_hybrid(SimMode.Fast, program)
+        sim.run_cycles(3)
+        sim.switch_mode(SimMode.TimingApproximate)
+        expect(sim.get_reg("a0")).to_equal(Some(10))
+        expect(sim.get_reg("a1")).to_equal(Some(20))
+        expect(sim.get_reg("a2")).to_equal(Some(30))
+
+    it "reports stats_text for timing mode":
+        var program = encode_addi(10, 0, 42) + encode_ebreak()
+        var sim = create_hybrid(SimMode.TimingApproximate, program)
+        sim.run_until_halt()
+        val stats = sim.stats_text()
+        expect(stats).to_contain("HybridSimulator")
+        expect(stats).to_contain("timing-approximate")
+        expect(stats).to_contain("retired=1")

@@ -1,0 +1,220 @@
+# LLM Diagnostics — Collector
+#
+# Central event buffer and session correlation engine.
+# Module-level state accumulates events from hooks and transcript parsing.
+
+use std.nogc_async_mut.llm_diagnostics.types.{
+    DiagConfig, DiagEvent, ToolCall, AgentNode, McpServerStats,
+    SessionDiag, TokenUsage,
+    new_diag_config, new_session_diag, new_token_usage,
+    new_agent_node, new_mcp_server_stats,
+    token_usage_add,
+    EVENT_TOOL_PRE, EVENT_TOOL_POST, EVENT_TOOL_FAILURE,
+    EVENT_SUBAGENT_START, EVENT_SUBAGENT_STOP,
+    EVENT_SESSION_START
+}
+use std.nogc_async_mut.llm_diagnostics.hook_handler.{
+    parse_tool_call_from_pre, parse_tool_call_from_post,
+    parse_tool_call_from_failure,
+    parse_subagent_start, parse_subagent_stop,
+    is_mcp_tool
+}
+use std.nogc_async_mut.llm_diagnostics.token_estimator.{truncate_content}
+
+extern fn rt_time_millis() -> i64
+
+# --- Module State ---
+
+var DIAG_INITIALIZED = false
+var DIAG_CONFIG = new_diag_config()
+var DIAG_SESSION = new_session_diag("")
+var DIAG_EVENTS: [DiagEvent] = []
+var DIAG_PENDING_TOOLS: [text] = []       # tool_use_ids of in-flight calls
+var DIAG_PENDING_CALLS: [ToolCall] = []   # matching ToolCall objects
+var DIAG_MCP_SERVERS: [text] = []         # server names
+var DIAG_MCP_STATS: [McpServerStats] = [] # per-server stats
+var DIAG_AGENT_IDS: [text] = []           # known agent ids
+var DIAG_AGENTS: [AgentNode] = []         # agent nodes
+
+# --- Initialization ---
+
+fn diag_init(config: DiagConfig):
+    """Initialize diagnostics collector with config."""
+    DIAG_CONFIG = config
+    DIAG_SESSION = new_session_diag("")
+    DIAG_EVENTS = []
+    DIAG_PENDING_TOOLS = []
+    DIAG_PENDING_CALLS = []
+    DIAG_MCP_SERVERS = []
+    DIAG_MCP_STATS = []
+    DIAG_AGENT_IDS = []
+    DIAG_AGENTS = []
+    DIAG_INITIALIZED = true
+
+fn diag_reset():
+    """Clear all session state."""
+    diag_init(DIAG_CONFIG)
+
+fn diag_is_initialized() -> bool:
+    DIAG_INITIALIZED
+
+# --- Event Routing ---
+
+fn diag_push_event(event: DiagEvent):
+    """Buffer event and route to appropriate handler."""
+    if not DIAG_INITIALIZED:
+        return
+
+    # Truncate data if content capture is off
+    var stored = event
+    if not DIAG_CONFIG.capture_content:
+        stored.data = ""
+
+    DIAG_EVENTS.push(stored)
+    DIAG_SESSION.events.push(stored)
+
+    # Route by type
+    match event.event_type:
+        EVENT_SESSION_START:
+            handle_session_start(event)
+        EVENT_TOOL_PRE:
+            handle_tool_pre(event)
+        EVENT_TOOL_POST:
+            handle_tool_post(event)
+        EVENT_TOOL_FAILURE:
+            handle_tool_failure(event)
+        EVENT_SUBAGENT_START:
+            handle_subagent_start(event)
+        EVENT_SUBAGENT_STOP:
+            handle_subagent_stop(event)
+        _:
+            pass_do_nothing
+
+fn handle_session_start(event: DiagEvent):
+    DIAG_SESSION.session_id = event.session_id
+    DIAG_SESSION.start_time = event.timestamp
+
+fn handle_tool_pre(event: DiagEvent):
+    val tc = parse_tool_call_from_pre(event.data)
+    DIAG_PENDING_TOOLS.push(tc.tool_use_id)
+    DIAG_PENDING_CALLS.push(tc)
+
+fn handle_tool_post(event: DiagEvent):
+    val tc = parse_tool_call_from_post(event.data)
+    # Try to match with pending call for latency
+    var i = 0
+    while i < DIAG_PENDING_TOOLS.len():
+        if DIAG_PENDING_TOOLS[i] == tc.tool_use_id:
+            var merged = tc
+            merged.start_time = DIAG_PENDING_CALLS[i].start_time
+            record_completed_tool(merged)
+            # Remove from pending
+            DIAG_PENDING_TOOLS.remove(i)
+            DIAG_PENDING_CALLS.remove(i)
+            return
+        i = i + 1
+    # No matching pre — record anyway
+    record_completed_tool(tc)
+
+fn handle_tool_failure(event: DiagEvent):
+    val tc = parse_tool_call_from_failure(event.data)
+    var i = 0
+    while i < DIAG_PENDING_TOOLS.len():
+        if DIAG_PENDING_TOOLS[i] == tc.tool_use_id:
+            var merged = tc
+            merged.start_time = DIAG_PENDING_CALLS[i].start_time
+            record_completed_tool(merged)
+            DIAG_PENDING_TOOLS.remove(i)
+            DIAG_PENDING_CALLS.remove(i)
+            return
+        i = i + 1
+    record_completed_tool(tc)
+
+fn handle_subagent_start(event: DiagEvent):
+    val parsed = parse_subagent_start(event.data)
+    val agent_id = parsed.0
+    val agent_type = parsed.1
+    var node = new_agent_node(agent_id, agent_type)
+    node.start_time = event.timestamp
+    DIAG_AGENT_IDS.push(agent_id)
+    DIAG_AGENTS.push(node)
+
+fn handle_subagent_stop(event: DiagEvent):
+    val parsed = parse_subagent_stop(event.data)
+    val agent_id = parsed.0
+    val transcript_path = parsed.1
+    var i = 0
+    while i < DIAG_AGENT_IDS.len():
+        if DIAG_AGENT_IDS[i] == agent_id:
+            DIAG_AGENTS[i].end_time = event.timestamp
+            DIAG_AGENTS[i].transcript_path = transcript_path
+            return
+        i = i + 1
+
+# --- MCP Stats Tracking ---
+
+fn record_completed_tool(tc: ToolCall):
+    """Record a completed tool call, updating MCP stats if applicable."""
+    if tc.is_mcp and tc.server_name.len() > 0:
+        update_mcp_stats(tc)
+
+fn update_mcp_stats(tc: ToolCall):
+    var i = 0
+    while i < DIAG_MCP_SERVERS.len():
+        if DIAG_MCP_SERVERS[i] == tc.server_name:
+            DIAG_MCP_STATS[i].call_count = DIAG_MCP_STATS[i].call_count + 1
+            DIAG_MCP_STATS[i].total_request_bytes = DIAG_MCP_STATS[i].total_request_bytes + tc.request_payload.len()
+            DIAG_MCP_STATS[i].total_response_bytes = DIAG_MCP_STATS[i].total_response_bytes + tc.response_payload.len()
+            DIAG_MCP_STATS[i].total_latency_ms = DIAG_MCP_STATS[i].total_latency_ms + tool_call_latency(tc)
+            DIAG_MCP_STATS[i].estimated_request_tokens = DIAG_MCP_STATS[i].estimated_request_tokens + tc.estimated_request_tokens
+            DIAG_MCP_STATS[i].estimated_response_tokens = DIAG_MCP_STATS[i].estimated_response_tokens + tc.estimated_response_tokens
+            DIAG_MCP_STATS[i].calls.push(tc)
+            return
+        i = i + 1
+    # New server
+    var stats = new_mcp_server_stats(tc.server_name)
+    stats.call_count = 1
+    stats.total_request_bytes = tc.request_payload.len()
+    stats.total_response_bytes = tc.response_payload.len()
+    stats.total_latency_ms = tool_call_latency(tc)
+    stats.estimated_request_tokens = tc.estimated_request_tokens
+    stats.estimated_response_tokens = tc.estimated_response_tokens
+    stats.calls.push(tc)
+    DIAG_MCP_SERVERS.push(tc.server_name)
+    DIAG_MCP_STATS.push(stats)
+
+fn tool_call_latency(tc: ToolCall) -> i64:
+    if tc.end_time > tc.start_time:
+        tc.end_time - tc.start_time
+    else:
+        0
+
+# --- Query API ---
+
+fn diag_get_session() -> SessionDiag:
+    """Get current session diagnostics snapshot."""
+    var session = DIAG_SESSION
+    session.mcp_stats = DIAG_MCP_STATS
+    session.agent_tree = DIAG_AGENTS
+    session
+
+fn diag_get_events() -> [DiagEvent]:
+    """Get all buffered events."""
+    DIAG_EVENTS
+
+fn diag_get_mcp_stats() -> [McpServerStats]:
+    """Get per-MCP-server statistics."""
+    DIAG_MCP_STATS
+
+fn diag_get_agents() -> [AgentNode]:
+    """Get all tracked agent nodes."""
+    DIAG_AGENTS
+
+fn diag_get_event_count() -> i64:
+    DIAG_EVENTS.len()
+
+fn diag_get_mcp_server_count() -> i64:
+    DIAG_MCP_SERVERS.len()
+
+fn diag_get_agent_count() -> i64:
+    DIAG_AGENT_IDS.len()

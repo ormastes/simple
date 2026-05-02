@@ -1,0 +1,150 @@
+# PersistentVec Builder (Transient)
+#
+# @tag:api
+#
+# Mutable batch construction for PersistentVec.
+# Use push/push_all to add elements, then .build() to freeze
+# into an immutable collection.
+#
+# Builder methods use `me` (mutable self) for in-place mutation
+# during the construction phase. After .build() is called, the
+# builder is frozen and further mutations are silently ignored.
+#
+# The builder avoids circular dependency with PersistentVec by
+# returning a raw array from .build(). The caller passes this
+# array to PersistentVec.from_array() to obtain the final
+# immutable structure.
+#
+# Usage:
+#   use std.persistent_vec.transient.{PersistentVecBuilder, PersistentVecBuilder.new}
+#
+#   var b = PersistentVecBuilder.new()
+#   b.push(1)
+#   b.push(2)
+#   b.push(3)
+#   val items = b.build()
+#   # Pass items to PersistentVec.from_array(items) to get immutable vec
+
+# ============================================================================
+# PersistentVecBuilder
+# ============================================================================
+
+class PersistentVecBuilder:
+    _items: []       # Accumulated elements
+    _frozen: bool    # True after build() has been called
+
+    # ------------------------------------------------------------------
+    # Mutation (me methods — mutable self)
+    # ------------------------------------------------------------------
+
+    # Add a single element to the end of the builder.
+    # Returns self for chaining. No-op if frozen.
+    me push(value):
+        if self._frozen:
+            return self
+        self._items.push(value)
+        self
+
+    # Add all elements from an array to the builder.
+    # Returns self for chaining. No-op if frozen.
+    me push_all(values):
+        if self._frozen:
+            return self
+        var i = 0
+        while i < values.len():
+            self._items.push(values[i])
+            i = i + 1
+        self
+
+    # Set the element at `index` to `value`.
+    # No-op if frozen or index is out of bounds.
+    me set_at(index, value):
+        if self._frozen:
+            return self
+        if index < 0:
+            return self
+        if index >= self._items.len():
+            return self
+        self._items[index] = value
+        self
+
+    # Remove the last element. No-op if frozen or empty.
+    me pop():
+        if self._frozen:
+            return nil
+        if self._items.len() == 0:
+            return nil
+        self._items.pop()
+
+    # Remove all elements. No-op if frozen.
+    me clear():
+        if self._frozen:
+            return self
+        self._items = []
+        self
+
+    # ------------------------------------------------------------------
+    # Read Operations (fn methods — immutable self)
+    # ------------------------------------------------------------------
+
+    # Return the number of accumulated elements.
+    fn len() -> i64:
+        self._items.len()
+
+    # Return true if no elements have been added.
+    fn is_empty() -> bool:
+        self._items.len() == 0
+
+    # Return true if build() has been called.
+    fn is_frozen() -> bool:
+        self._frozen
+
+    # Get element at index, or nil if out of bounds.
+    fn get(index):
+        if index < 0:
+            return nil
+        if index >= self._items.len():
+            return nil
+        self._items[index]
+
+    # ------------------------------------------------------------------
+    # Freeze / Build
+    # ------------------------------------------------------------------
+
+    # Freeze the builder and return the collected items as an array.
+    # The caller should pass this to PersistentVec.from_array()
+    # to get an immutable PersistentVec.
+    # After this call, all mutation methods become no-ops.
+    me build():
+        self._frozen = true
+        self._items
+
+    # Return a copy of current items without freezing the builder.
+    # Useful for intermediate snapshots during construction.
+    fn to_array():
+        var result = []
+        var i = 0
+        while i < self._items.len():
+            result.push(self._items[i])
+            i = i + 1
+        result
+
+    static fn new() -> PersistentVecBuilder:
+        PersistentVecBuilder(_items: [], _frozen: false)
+
+    static fn from(items) -> PersistentVecBuilder:
+        var copied = []
+        var i = 0
+        while i < items.len():
+            copied.push(items[i])
+            i = i + 1
+        PersistentVecBuilder(_items: copied, _frozen: false)
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+# ============================================================================
+# Exports
+# ============================================================================
+

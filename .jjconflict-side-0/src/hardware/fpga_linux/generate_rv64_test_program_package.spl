@@ -1,0 +1,127 @@
+use std.io_runtime.{file_exists, file_read_bytes, file_write}
+use std.format_utils.{format_hex}
+use common.string_builder.{StringBuilder}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
+
+fn usage() -> text:
+    "usage: bin/simple run src/hardware/fpga_linux/generate_rv64_test_program_package.spl -- <fw-bin> <fw-hex> <payload-bin> <payload-hex> <test-pkg>"
+
+fn byte_literal(byte: u8) -> text:
+    "x\"{format_hex(byte, 2)}\""
+
+fn byte_array_lines(values: [u8], indent: text) -> text:
+    if values.len() == 0:
+        return indent + "(others => x\"00\")"
+
+    val sb = StringBuilder(parts: [])
+    var idx: i64 = 0
+    while idx < values.len():
+        if idx > 0:
+            sb.push(",\n")
+        sb.push(indent)
+        var line_count: i64 = 0
+        while idx < values.len() and line_count < 8:
+            if line_count > 0:
+                sb.push(", ")
+            sb.push(byte_literal(values[idx]))
+            idx = idx + 1
+            line_count = line_count + 1
+    sb.to_text()
+
+fn test_program_pkg_text(fw_hex_path: text, fw_bytes: [u8], payload_hex_path: text, payload_bytes: [u8]) -> text:
+    val sb = StringBuilder(parts: [])
+    sb.push_line("library ieee;")
+    sb.push_line("use ieee.std_logic_1164.all;")
+    sb.push_line("package test_program is")
+    sb.push_line("    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);")
+    sb.push_line("    constant FW_SIZE_BYTES : integer := {fw_bytes.len()};")
+    sb.push_line("    constant FW_BYTES : byte_array_t(0 to FW_SIZE_BYTES - 1) := (")
+    sb.push_line(byte_array_lines(fw_bytes, "        "))
+    sb.push_line("    );")
+    sb.push_line("    constant FW_HEX_PATH : string := \"{fw_hex_path}\";")
+    sb.push_line("    constant PAYLOAD_SIZE_BYTES : integer := {payload_bytes.len()};")
+    sb.push_line("    constant PAYLOAD_BYTES : byte_array_t(0 to PAYLOAD_SIZE_BYTES - 1) := (")
+    sb.push_line(byte_array_lines(payload_bytes, "        "))
+    sb.push_line("    );")
+    sb.push_line("    constant PAYLOAD_HEX_PATH : string := \"{payload_hex_path}\";")
+    sb.push_line("end package test_program;")
+    sb.to_text()
+
+fn append_word_hex_line(sb: StringBuilder, bytes: [u8], base_idx: i64):
+    var word_byte_idx: i64 = 7
+    while word_byte_idx >= 0:
+        val byte_idx = base_idx + word_byte_idx
+        if byte_idx < bytes.len():
+            sb.push(format_hex(bytes[byte_idx], 2))
+        else:
+            sb.push("00")
+        word_byte_idx = word_byte_idx - 1
+    sb.push("\n")
+
+fn write_word_hex_file(path: text, bytes: [u8]) -> bool:
+    if not rt_file_write_text(path, ""):
+        return false
+
+    val sb = StringBuilder(parts: [])
+    var base_idx: i64 = 0
+    var words_in_chunk: i64 = 0
+    while base_idx < bytes.len():
+        append_word_hex_line(sb, bytes, base_idx)
+        words_in_chunk = words_in_chunk + 1
+        if words_in_chunk >= 4096:
+            if not rt_file_append_text(path, sb.to_text()):
+                return false
+            sb.parts = []
+            words_in_chunk = 0
+        base_idx = base_idx + 8
+
+    if sb.parts.len() > 0:
+        if not rt_file_append_text(path, sb.to_text()):
+            return false
+    true
+
+fn main() -> i32:
+    val args = sys_get_args()
+    var filtered: [text] = []
+    var idx: i64 = 1
+    while idx < args.len():
+        val arg = args[idx]
+        if arg != "--":
+            filtered.push(arg)
+        idx = idx + 1
+
+    if filtered.len() != 5:
+        print usage()
+        return 1
+
+    val fw_bin_path = filtered[0]
+    val fw_hex_path = filtered[1]
+    val payload_bin_path = filtered[2]
+    val payload_hex_path = filtered[3]
+    val test_pkg_path = filtered[4]
+
+    if not file_exists(fw_bin_path):
+        print "error: firmware binary not found: {fw_bin_path}"
+        return 1
+    if not file_exists(payload_bin_path):
+        print "error: payload binary not found: {payload_bin_path}"
+        return 1
+
+    val fw_bytes = file_read_bytes(fw_bin_path) ?? []
+    val payload_bytes = file_read_bytes(payload_bin_path) ?? []
+    val package_text = test_program_pkg_text(fw_hex_path, fw_bytes, payload_hex_path, payload_bytes)
+
+    if not write_word_hex_file(fw_hex_path, fw_bytes):
+        print "error: failed to write firmware hex: {fw_hex_path}"
+        return 1
+    if not write_word_hex_file(payload_hex_path, payload_bytes):
+        print "error: failed to write payload hex: {payload_hex_path}"
+        return 1
+    if not file_write(test_pkg_path, package_text):
+        print "error: failed to write test package: {test_pkg_path}"
+        return 1
+
+    0

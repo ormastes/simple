@@ -1,0 +1,388 @@
+# Variable-length BigNat — pure-Simple `[i64]` base 2^30 little-endian.
+#
+# Public API for non-secret big integers: RSA modulus parsing, key gen
+# primality candidates, GCD, mod inverse over a known modulus. All ops
+# branch on length, so this layer is **NOT constant-time**. Secret-
+# dependent paths must use the `Fixed { n, limbs }` layer in `fixed.spl`.
+#
+# Invariant: a normalized BigNat has either `len == 1` or `top limb != 0`.
+# The canonical zero is `[0]` (length 1). Inputs to public-API functions
+# should be normalized; outputs always are.
+
+use std.math.bignum.limb.{
+    LIMB_BITS, LIMB_BASE, LIMB_MASK,
+    add_limbs, sub_limbs, mul_add_limb
+}
+
+
+# ----------------------------------------------------------------------
+# Constructors and predicates
+# ----------------------------------------------------------------------
+fn bn_zero() -> [i64]:
+    [0]
+
+fn bn_one() -> [i64]:
+    [1]
+
+fn bn_from_i64(n: i64) -> [i64]:
+    # Build a normalized BigNat from a nonnegative i64.
+    if n == 0:
+        return [0]
+    var result: [i64] = []
+    var value = n
+    while value > 0:
+        result.push(value & LIMB_MASK)
+        value = value >> LIMB_BITS
+    result
+
+fn is_zero(a: [i64]) -> bool:
+    if a.len() == 0:
+        return true
+    if a.len() == 1:
+        return a[0] == 0
+    false
+
+fn is_one(a: [i64]) -> bool:
+    if a.len() != 1:
+        return false
+    a[0] == 1
+
+fn normalize(a: [i64]) -> [i64]:
+    # Drop trailing zero limbs while keeping at least one limb.
+    var len = a.len()
+    while len > 1:
+        if a[len - 1] != 0:
+            break
+        len = len - 1
+    if len == a.len():
+        return a
+    var result: [i64] = []
+    var i = 0
+    while i < len:
+        result.push(a[i])
+        i = i + 1
+    result
+
+
+# ----------------------------------------------------------------------
+# Comparison
+# ----------------------------------------------------------------------
+fn cmp(a: [i64], b: [i64]) -> i64:
+    # Returns -1 / 0 / 1. Branches on length, so leaks bit-length —
+    # public-values only.
+    val len_a = a.len()
+    val len_b = b.len()
+    if len_a < len_b:
+        return -1
+    if len_a > len_b:
+        return 1
+    var i = len_a - 1
+    while i >= 0:
+        val la = a[i]
+        val lb = b[i]
+        if la < lb:
+            return -1
+        if la > lb:
+            return 1
+        i = i - 1
+    0
+
+
+# ----------------------------------------------------------------------
+# Bit-level access
+# ----------------------------------------------------------------------
+fn bit_length(a: [i64]) -> i64:
+    # Number of bits in the binary representation of `a`. Returns 0 for
+    # canonical zero. Branches on top limb -- public-values only.
+    if is_zero(a):
+        return 0
+    val top = a.len() - 1
+    var bits = top * LIMB_BITS
+    var v = a[top]
+    while v > 0:
+        bits = bits + 1
+        v = v >> 1
+    bits
+
+fn get_bit(a: [i64], idx: i64) -> i64:
+    # Zero-indexed bit at position `idx`, or 0 if out-of-range. Branches
+    # on idx (length leak) — only safe on public values.
+    if idx < 0:
+        return 0
+    val limb_idx = idx / LIMB_BITS
+    val bit_idx = idx - limb_idx * LIMB_BITS
+    if limb_idx >= a.len():
+        return 0
+    (a[limb_idx] >> bit_idx) & 1
+
+fn shift_left_one(a: [i64]) -> [i64]:
+    # Multiply by 2: shift every limb left, propagating the high bit
+    # into the next limb.
+    if is_zero(a):
+        return bn_zero()
+    val len = a.len()
+    var result: [i64] = []
+    var i = 0
+    while i < len:
+        result.push(0)
+        i = i + 1
+    var carry = 0
+    i = 0
+    while i < len:
+        val v = (a[i] << 1) | carry
+        result[i] = v & LIMB_MASK
+        carry = (v >> LIMB_BITS) & 1
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    normalize(result)
+
+
+# ----------------------------------------------------------------------
+# Add / sub
+# ----------------------------------------------------------------------
+fn add(a: [i64], b: [i64]) -> [i64]:
+    # Schoolbook add with carry chain.
+    val len_a = a.len()
+    val len_b = b.len()
+    var max_len = len_a
+    if len_b > max_len:
+        max_len = len_b
+    var result: [i64] = []
+    var carry = 0
+    var i = 0
+    while i < max_len:
+        var la = 0
+        var lb = 0
+        if i < len_a:
+            la = a[i]
+        if i < len_b:
+            lb = b[i]
+        val pair = add_limbs(la, lb, carry)
+        result.push(pair[0])
+        carry = pair[1]
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    normalize(result)
+
+fn sub(a: [i64], b: [i64]) -> [i64]:
+    # `a - b`, returning zero if `b >= a` (matches `rsa_fallback._bi_sub`
+    # behaviour today; keeps callers from having to catch underflow).
+    if cmp(a, b) <= 0:
+        return bn_zero()
+    val len_a = a.len()
+    val len_b = b.len()
+    var result: [i64] = []
+    var borrow = 0
+    var i = 0
+    while i < len_a:
+        var la = a[i]
+        var lb = 0
+        if i < len_b:
+            lb = b[i]
+        val pair = sub_limbs(la, lb, borrow)
+        result.push(pair[0])
+        borrow = pair[1]
+        i = i + 1
+    normalize(result)
+
+
+# ----------------------------------------------------------------------
+# Multiply
+# ----------------------------------------------------------------------
+fn mul(a: [i64], b: [i64]) -> [i64]:
+    # Schoolbook product. Pre-allocates `len_a + len_b` slots up front
+    # (H-5 avoidance: no `.push` in the inner loop).
+    if is_zero(a):
+        return bn_zero()
+    if is_zero(b):
+        return bn_zero()
+    val len_a = a.len()
+    val len_b = b.len()
+    val out_len = len_a + len_b
+    var result: [i64] = []
+    var k = 0
+    while k < out_len:
+        result.push(0)
+        k = k + 1
+    var i = 0
+    while i < len_a:
+        var carry = 0
+        var j = 0
+        while j < len_b:
+            val pair = mul_add_limb(a[i], b[j], result[i + j], carry)
+            result[i + j] = pair[0]
+            carry = pair[1]
+            j = j + 1
+        if carry > 0:
+            result[i + len_b] = result[i + len_b] + carry
+        i = i + 1
+    normalize(result)
+
+fn mul_i64(a: [i64], n: i64) -> [i64]:
+    # Multiply BigNat by a small (<= LIMB_MASK) i64. n must be in
+    # [0, LIMB_MASK] so the per-limb product fits.
+    if n == 0:
+        return bn_zero()
+    if is_zero(a):
+        return bn_zero()
+    val len_a = a.len()
+    var result: [i64] = []
+    var k = 0
+    while k < len_a:
+        result.push(0)
+        k = k + 1
+    var carry = 0
+    var i = 0
+    while i < len_a:
+        val pair = mul_add_limb(a[i], n, 0, carry)
+        result[i] = pair[0]
+        carry = pair[1]
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    normalize(result)
+
+
+# ----------------------------------------------------------------------
+# Division (bit-by-bit, public-values only)
+# ----------------------------------------------------------------------
+fn div_mod(a: [i64], b: [i64]) -> [[i64]]:
+    # Bit-by-bit long division. Returns [quotient, remainder].
+    # Public-values only (variable-time on bit_length(a)).
+    if is_zero(b):
+        return [bn_zero(), bn_zero()]
+    if cmp(a, b) < 0:
+        return [bn_zero(), a]
+    val total_bits = bit_length(a)
+    var quotient = bn_zero()
+    var remainder = bn_zero()
+    var i = total_bits - 1
+    while i >= 0:
+        # Shift remainder left by one and bring down bit i of a.
+        remainder = shift_left_one(remainder)
+        val bit = get_bit(a, i)
+        if bit == 1:
+            remainder = add(remainder, bn_one())
+        # If remainder >= b, subtract and set quotient bit i.
+        if cmp(remainder, b) >= 0:
+            remainder = sub(remainder, b)
+            # Set bit i of quotient: quotient += 2^i.
+            quotient = add(quotient, _pow2(i))
+        i = i - 1
+    [normalize(quotient), normalize(remainder)]
+
+fn modulo(a: [i64], m: [i64]) -> [i64]:
+    val pair = div_mod(a, m)
+    pair[1]
+
+fn _pow2(n: i64) -> [i64]:
+    # Build BigNat representing 2^n. Internal helper for div_mod.
+    if n < 0:
+        return bn_zero()
+    val limb = n / LIMB_BITS
+    val bit = n - limb * LIMB_BITS
+    var result: [i64] = []
+    var i = 0
+    while i < limb:
+        result.push(0)
+        i = i + 1
+    result.push(1 << bit)
+    result
+
+
+# ----------------------------------------------------------------------
+# Byte encoding
+# ----------------------------------------------------------------------
+fn from_bytes_be(bytes: [u8]) -> [i64]:
+    # Big-endian bytes -> normalized BigNat. Empty input maps to zero.
+    val n = bytes.len()
+    if n == 0:
+        return bn_zero()
+    var acc = bn_zero()
+    var i = 0
+    while i < n:
+        acc = mul_i64(acc, 256)
+        val byte_val = bytes[i].to_i64()
+        acc = add(acc, bn_from_i64(byte_val))
+        i = i + 1
+    normalize(acc)
+
+fn from_bytes_le(bytes: [u8]) -> [i64]:
+    val n = bytes.len()
+    if n == 0:
+        return bn_zero()
+    var acc = bn_zero()
+    var i = n - 1
+    while i >= 0:
+        acc = mul_i64(acc, 256)
+        val byte_val = bytes[i].to_i64()
+        acc = add(acc, bn_from_i64(byte_val))
+        i = i - 1
+    normalize(acc)
+
+fn to_bytes_be(a: [i64], length: i64) -> [u8]:
+    # Big-endian, left-padded with zeros to `length`. If `a` does not
+    # fit in `length` bytes, the high bytes are silently dropped.
+    var result: [u8] = []
+    var i = 0
+    while i < length:
+        result.push(0u8)
+        i = i + 1
+    var work = a
+    var pos = length - 1
+    while pos >= 0:
+        if is_zero(work):
+            break
+        val pair = _div_mod_i64(work, 256)
+        work = pair[0]
+        val rem_bn = pair[1]
+        var byte_val = 0
+        if rem_bn.len() > 0:
+            byte_val = rem_bn[0]
+        result[pos] = byte_val.to_u8()
+        pos = pos - 1
+    result
+
+fn to_bytes_le(a: [i64], length: i64) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < length:
+        result.push(0u8)
+        i = i + 1
+    var work = a
+    var pos = 0
+    while pos < length:
+        if is_zero(work):
+            break
+        val pair = _div_mod_i64(work, 256)
+        work = pair[0]
+        val rem_bn = pair[1]
+        var byte_val = 0
+        if rem_bn.len() > 0:
+            byte_val = rem_bn[0]
+        result[pos] = byte_val.to_u8()
+        pos = pos + 1
+    result
+
+fn _div_mod_i64(a: [i64], n: i64) -> [[i64]]:
+    # Internal helper: divide BigNat by small i64 n (assumed > 0).
+    # Returns [quotient_bignat, remainder_as_singleton_bignat].
+    if n <= 0:
+        return [bn_zero(), bn_zero()]
+    if is_zero(a):
+        return [bn_zero(), bn_zero()]
+    var quotient: [i64] = []
+    var i = 0
+    while i < a.len():
+        quotient.push(0)
+        i = i + 1
+    var remainder = 0
+    i = a.len() - 1
+    while i >= 0:
+        val dividend = remainder * LIMB_BASE + a[i]
+        quotient[i] = dividend / n
+        remainder = dividend - quotient[i] * n
+        i = i - 1
+    [normalize(quotient), [remainder]]

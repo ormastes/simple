@@ -1,0 +1,121 @@
+# Remote Test CLI Subcommand
+#
+# Executes test suites on remote PCs via terminal connections:
+#   simple remote-test <terminal_name> <test_path>
+#
+# Connects to the named terminal, uploads if needed, executes
+# `bin/simple test <test_path>` on the remote host, streams results
+# back, and disconnects.
+#
+# Depends on:
+#   - std.terminal.types (TerminalConfig, TerminalConnection, TerminalExecResult)
+#   - std.terminal.connection (terminal_connect, terminal_execute, terminal_close)
+#   - std.terminal.credential.config_parser (parse_terminal_config, find_terminal_by_name)
+
+use std.terminal.types.{TerminalConfig, TerminalConnection, TerminalExecResult, term_kind_name}
+use std.terminal.connection.{terminal_connect, terminal_execute, terminal_close}
+use std.terminal.credential.config_parser.{parse_terminal_config, find_terminal_by_name}
+
+extern fn rt_cli_get_args() -> [text]
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val DEFAULT_CONFIG_PATH: text = "config/t32/t32_terminal.sdn"
+val REMOTE_SIMPLE_BIN: text = "bin/simple"
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn main() -> i64:
+    """Remote test CLI entry point.
+
+    Usage: simple remote-test <terminal_name> <test_path>
+
+    Connects to the named terminal, runs `bin/simple test <test_path>`
+    on the remote host, prints the results, and disconnects.
+
+    Returns:
+        0 on success, remote exit code on test failure, 1 on connection error
+    """
+    val args = rt_cli_get_args()
+
+    if args.len() < 3:
+        print_usage()
+        return 1
+
+    val terminal_name = args[1]
+    val test_path = args[2]
+
+    # Load terminal configuration
+    val configs = parse_terminal_config(DEFAULT_CONFIG_PATH)
+    val found = find_terminal_by_name(configs, terminal_name)
+
+    if not found.?:
+        print "error: terminal '{terminal_name}' not found in {DEFAULT_CONFIG_PATH}"
+        return 1
+
+    val config = found
+
+    # Connect to remote terminal
+    print "Connecting to '{terminal_name}' ({term_kind_name(config.kind)})..."
+    val conn = terminal_connect(config)
+
+    if not conn.connected:
+        print "error: failed to connect to '{terminal_name}'"
+        return 1
+
+    # Build the remote test command
+    val remote_cmd = "{REMOTE_SIMPLE_BIN} test {test_path}"
+    print "Running remote test: {remote_cmd}"
+    print "---"
+
+    # Execute test on remote host
+    val result = terminal_execute(conn, remote_cmd)
+
+    # Print output
+    if result.stdout.len() > 0:
+        print result.stdout
+
+    if result.stderr.len() > 0:
+        print "STDERR:"
+        print result.stderr
+
+    # Print summary
+    print "---"
+    print "Remote test completed (exit={result.exit_code}, duration={result.duration_ms}ms)"
+
+    # Disconnect
+    terminal_close(conn)
+
+    if result.exit_code != 0:
+        print "FAIL: remote test returned non-zero exit code"
+        return result.exit_code
+
+    print "PASS: all remote tests passed"
+    0
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn print_usage():
+    """Print remote-test usage information."""
+    print "Usage: simple remote-test <terminal_name> <test_path>"
+    print ""
+    print "Execute a test suite on a remote PC via terminal connection."
+    print ""
+    print "Arguments:"
+    print "  terminal_name   Name of the terminal in {DEFAULT_CONFIG_PATH}"
+    print "  test_path       Path to the test file on the remote host"
+    print ""
+    print "Example:"
+    print "  simple remote-test test_host_ssh test/lib/math_spec.spl"
+    print ""
+    print "The command connects via SSH/telnet/T32 SWD, runs:"
+    print "  {REMOTE_SIMPLE_BIN} test <test_path>"
+    print "on the remote host, and reports the results."
+    print ""
+    print "Config: {DEFAULT_CONFIG_PATH}"

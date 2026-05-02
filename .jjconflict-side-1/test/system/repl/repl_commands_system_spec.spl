@@ -1,0 +1,67 @@
+# @cover src/app/repl/main.spl 80%
+# REPL Commands System Tests
+# Tests: exit/quit terminate, clear works, history works
+
+# tag: slow, system
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_exists(path: text) -> bool
+
+fn find_simple_binary() -> text:
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn run_repl(input_text: text) -> text:
+    val tmp = "/tmp/repl_test_{rt_getpid()}_{rt_time_now_unix_micros()}.txt"
+    rt_file_write_text(tmp, input_text)
+    val (stdout, stderr, code) = rt_process_run("bash", ["-c", "cat {tmp} | " + find_simple_binary() + " run src/app/repl/main.spl 2>/dev/null"])
+    rt_file_delete(tmp)
+    stdout
+
+describe "REPL Commands":
+    slow_it "should handle :quit":
+        val output = run_repl(":quit\n")
+        expect(output).to_contain("Goodbye")
+
+    slow_it "should handle :q shorthand":
+        val output = run_repl(":q\n")
+        expect(output).to_contain("Goodbye")
+
+    slow_it "should handle :clear":
+        val output = run_repl(":clear\n:quit\n")
+        expect(output).to_contain("State cleared")
+
+    slow_it "should handle :history":
+        val output = run_repl("val x = 1\n:history\n:quit\n")
+        expect(output).to_contain("val x = 1")
+
+    slow_it "should handle :show":
+        val output = run_repl("val x = 1\n:show\n:quit\n")
+        expect(output).to_contain("val x = 1")
+
+    slow_it "should handle exit() function call":
+        val output = run_repl("exit()\n")
+        expect(output).to_contain("Goodbye")
+
+    slow_it "should terminate on EOF":
+        val (stdout, stderr, code) = rt_process_run("bash", ["-c", "echo '' | " + find_simple_binary() + " run src/app/repl/main.spl 2>/dev/null"])
+        expect(code).to_equal(0)

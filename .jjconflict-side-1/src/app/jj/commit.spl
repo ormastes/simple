@@ -1,0 +1,140 @@
+#![allow(unnamed_duplicate_typed_args)]
+# JJ Commit - Commit and describe operations
+#
+# Wraps `jj commit` and `jj describe` for creating and editing commits.
+# Usage: use app.jj.commit.{jj_commit, jj_describe, run_commit}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+struct CommitResult:
+    success: bool
+    message: text
+    change_id: text
+    raw_output: text
+    exit_code: i64
+
+    fn display() -> text:
+        if self.success:
+            "Committed: {self.change_id}\n{self.message}"
+        else:
+            "Commit failed (exit {self.exit_code}):\n{self.raw_output}"
+
+fn jj_commit(message: text) -> CommitResult:
+    """Create a new commit with the given message"""
+    val (stdout, stderr, code) = rt_process_run("jj", ["--no-pager", "--color", "never", "commit", "-m", message])
+
+    val combined = if stdout != "": stdout else: stderr
+    var change_id = ""
+
+    # Try to extract change ID from output
+    val lines = combined.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # jj typically outputs something like "Working copy now at: <change_id> ..."
+        if trimmed.starts_with("Working copy now at:"):
+            val parts = trimmed.split(" ")
+            if parts.len() >= 5:
+                change_id = parts[4]
+
+    CommitResult(
+        success: code == 0,
+        message: message,
+        change_id: change_id,
+        raw_output: combined,
+        exit_code: code
+    )
+
+fn jj_describe(message: text) -> CommitResult:
+    """Update the description of the current working copy change"""
+    val (stdout, stderr, code) = rt_process_run("jj", ["--no-pager", "--color", "never", "describe", "-m", message])
+
+    val combined = if stdout != "": stdout else: stderr
+
+    CommitResult(
+        success: code == 0,
+        message: message,
+        change_id: "",
+        raw_output: combined,
+        exit_code: code
+    )
+
+fn jj_describe_revision(revision: text, message: text) -> CommitResult:
+    """Update the description of a specific revision"""
+    val (stdout, stderr, code) = rt_process_run("jj", ["--no-pager", "--color", "never", "describe", "-r", revision, "-m", message])
+
+    val combined = if stdout != "": stdout else: stderr
+
+    CommitResult(
+        success: code == 0,
+        message: message,
+        change_id: "",
+        raw_output: combined,
+        exit_code: code
+    )
+
+fn run_commit(args: [text]) -> i64:
+    """CLI entry point for jj commit operations
+
+    Usage:
+      simple jj commit "message"         - Create new commit
+      simple jj describe "message"       - Update current description
+      simple jj describe -r REV "msg"    - Update revision description
+    """
+    if args.len() == 0:
+        print "Usage:"
+        print "  simple jj commit \"message\"         Create new commit"
+        print "  simple jj describe \"message\"       Update current description"
+        print "  simple jj describe -r REV \"msg\"    Update revision description"
+        return 1
+
+    val subcmd = args[0]
+
+    if subcmd == "commit":
+        if args.len() < 2:
+            print "Error: commit requires a message"
+            print "Usage: simple jj commit \"your commit message\""
+            return 1
+        # Join remaining args as message
+        var msg_parts: [text] = []
+        var i = 1
+        while i < args.len():
+            msg_parts.push(args[i])
+            i = i + 1
+        val message = msg_parts.join(" ")
+        val result = jj_commit(message)
+        print result.raw_output
+        return result.exit_code
+
+    elif subcmd == "describe":
+        if args.len() < 2:
+            print "Error: describe requires a message"
+            return 1
+        # Check for -r flag
+        if args.len() >= 4 and args[1] == "-r":
+            val rev = args[2]
+            var msg_parts: [text] = []
+            var i = 3
+            while i < args.len():
+                msg_parts.push(args[i])
+                i = i + 1
+            val message = msg_parts.join(" ")
+            val result = jj_describe_revision(rev, message)
+            print result.raw_output
+            return result.exit_code
+        else:
+            var msg_parts: [text] = []
+            var i = 1
+            while i < args.len():
+                msg_parts.push(args[i])
+                i = i + 1
+            val message = msg_parts.join(" ")
+            val result = jj_describe(message)
+            print result.raw_output
+            return result.exit_code
+
+    else:
+        # Treat the whole args as a commit message
+        val message = args.join(" ")
+        val result = jj_commit(message)
+        print result.raw_output
+        return result.exit_code

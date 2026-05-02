@@ -1,0 +1,258 @@
+// reason: auto-generated spipe entry wrapper; examples and assertions live in the wrapped spec body
+use std.common.compress.{
+use std.common.compress.lz4.{lz4_compress_block, lz4_decompress_block, lz4_compress_frame, lz4_compress_frame_for_tier, lz4_decompress_frame, lz4_decompress_frame_for_tier}
+use std.common.compress.utilities.{CompressionSimdTier, xxhash32_bytes}
+
+fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
+    match err:
+        CompressionError.InvalidHeader(message):
+            expect kind == "InvalidHeader"
+            expect (message).contains(message_part)
+        CompressionError.UnsupportedFeature(message):
+            expect kind == "UnsupportedFeature"
+            expect (message).contains(message_part)
+        CompressionError.TruncatedInput(message):
+            expect kind == "TruncatedInput"
+            expect (message).contains(message_part)
+        CompressionError.ChecksumMismatch(message):
+            expect kind == "ChecksumMismatch"
+            expect (message).contains(message_part)
+        CompressionError.CorruptStream(message):
+            expect kind == "CorruptStream"
+            expect (message).contains(message_part)
+        CompressionError.SizeLimitExceeded(limit):
+            expect kind == "SizeLimitExceeded"
+            expect limit >= 0 == true
+
+fn _repetitive_bytes(total: i64) -> [u8]:
+    val seed = [
+        0x61u8, 0x62u8, 0x63u8, 0x64u8,
+        0x61u8, 0x62u8, 0x63u8, 0x64u8,
+        0x78u8, 0x79u8, 0x7Au8, 0x21u8
+    ]
+    var out: [u8] = []
+    var i = 0
+    while i < total:
+        out.push(seed[i % seed.len()])
+        i = i + 1
+    out
+
+fn _frame_options(checksum: bool, content_size: i64?, level: i64) -> CompressionOptions:
+    val base = default_compression_options(CompressionCodec.lz4)
+    CompressionOptions(
+        codec: base.codec,
+        level: CompressionLevel(value: level),
+        checksum: checksum,
+        block_mode: "frame",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: content_size
+    )
+
+fn _frame_header_checksum_offset(frame: [u8]) -> i64:
+    var offset = 6
+    val flg = frame[4]
+    if (flg & 0x08u8) != 0u8:
+        offset = offset + 8
+    if (flg & 0x01u8) != 0u8:
+        offset = offset + 4
+    offset
+
+fn _set_header_checksum(frame: [u8]) -> [u8]:
+    var result = frame
+    val hc_offset = _frame_header_checksum_offset(frame)
+    var desc: [u8] = [frame[4], frame[5]]
+    var pos = 6
+    if (frame[4] & 0x08u8) != 0u8:
+        var i = 0
+        while i < 8:
+            desc.push(frame[pos + i])
+            i = i + 1
+        pos = pos + 8
+    if (frame[4] & 0x01u8) != 0u8:
+        var i = 0
+        while i < 4:
+            desc.push(frame[pos + i])
+            i = i + 1
+        pos = pos + 4
+    result[hc_offset] = ((xxhash32_bytes(desc, 0u32) >> 8u32) & 0xFFu32).to_u8()
+    result
+
+fn _frame_first_block_payload_offset(frame: [u8]) -> i64:
+    _frame_header_checksum_offset(frame) + 1 + 4
+
+fn _frame_content_checksum_offset(frame: [u8]) -> i64:
+    var pos = _frame_header_checksum_offset(frame) + 1
+    val has_block_checksum = (frame[4] & 0x10u8) != 0u8
+    while true:
+        val size_word = frame[pos].to_u32() |
+            (frame[pos + 1].to_u32() << 8) |
+            (frame[pos + 2].to_u32() << 16) |
+            (frame[pos + 3].to_u32() << 24)
+        pos = pos + 4
+        if size_word == 0u32:
+            break
+        val block_len = (size_word & 0x7FFFFFFFu32).to_i64()
+        pos = pos + block_len
+        if has_block_checksum:
+            pos = pos + 4
+    pos
+
+fn _frame_first_block_size_word(frame: [u8]) -> u32:
+    val pos = _frame_header_checksum_offset(frame) + 1
+    frame[pos].to_u32() |
+        (frame[pos + 1].to_u32() << 8) |
+        (frame[pos + 2].to_u32() << 16) |
+        (frame[pos + 3].to_u32() << 24)
+
+fn _count_frame_blocks(frame: [u8]) -> i64:
+    var pos = _frame_header_checksum_offset(frame) + 1
+    val has_block_checksum = (frame[4] & 0x10u8) != 0u8
+    var count = 0
+    while true:
+        val size_word = frame[pos].to_u32() |
+            (frame[pos + 1].to_u32() << 8) |
+            (frame[pos + 2].to_u32() << 16) |
+            (frame[pos + 3].to_u32() << 24)
+        pos = pos + 4
+        if size_word == 0u32:
+            break
+        count = count + 1
+        pos = pos + (size_word & 0x7FFFFFFFu32).to_i64()
+        if has_block_checksum:
+            pos = pos + 4
+    count
+
+fn main():
+        CompressionCodec,
+        CompressionError,
+        CompressionLevel,
+        CompressionOptions,
+        default_compression_options,
+        compress_bytes,
+        decompress_bytes
+    }
+
+    describe "lz4 pure-Simple block and frame":
+        it "round-trips overlap-heavy raw blocks":
+            val input = _repetitive_bytes(8192)
+            val encoded = lz4_compress_block(input)
+            val decoded = lz4_decompress_block(encoded)
+            expect decoded.is_err() == false
+            expect decoded.unwrap() == input
+
+        it "round-trips repetitive data through the baseline raw-block encoder":
+            val input = _repetitive_bytes(8192)
+            val encoded = lz4_compress_block(input)
+            val decoded = lz4_decompress_block(encoded)
+            expect decoded.is_err() == false
+            expect decoded.unwrap() == input
+
+        it "emits framed bytes with declared content size":
+            val input = _repetitive_bytes(4096)
+            val options = _frame_options(false, input.len(), 1)
+            val encoded = lz4_compress_frame(input, options)
+            expect encoded[4] & 0x20u8 != 0u8 == true
+            expect encoded[4] & 0x08u8 != 0u8 == true
+            expect encoded[5] == 0x40u8
+            val decoded = lz4_decompress_frame(encoded)
+            expect decoded.is_err() == false
+            expect decoded.unwrap() == input
+            val public_decoded = decompress_bytes(encoded, nil)
+            expect public_decoded.is_err() == false
+            expect public_decoded.unwrap() == input
+
+        it "keeps public block mode round-tripping through explicit lz4 hint":
+            val base = default_compression_options(CompressionCodec.lz4)
+            val options = CompressionOptions(
+                codec: base.codec,
+                level: base.level,
+                checksum: false,
+                block_mode: "block",
+                dictionary_bytes: nil,
+                dictionary_id: nil,
+                content_size: nil
+            )
+            val input = _repetitive_bytes(4096)
+            val encoded = compress_bytes(input, options)
+            val decoded = decompress_bytes(encoded, Some(CompressionCodec.lz4))
+            expect decoded.is_err() == false
+            expect decoded.unwrap() == input
+
+        it "keeps framed output and decode parity across scalar avx2 and neon tiers":
+            val input = _repetitive_bytes(4096)
+            val options = _frame_options(false, input.len(), 1)
+            val scalar = lz4_compress_frame_for_tier(input, options, CompressionSimdTier.scalar)
+            val avx2 = lz4_compress_frame_for_tier(input, options, CompressionSimdTier.avx2)
+            val neon = lz4_compress_frame_for_tier(input, options, CompressionSimdTier.neon)
+            expect avx2 == scalar
+            expect neon == scalar
+            expect lz4_compress_frame(input, options) == scalar
+            expect lz4_decompress_frame_for_tier(scalar, CompressionSimdTier.scalar).unwrap() == input
+            expect lz4_decompress_frame_for_tier(scalar, CompressionSimdTier.avx2).unwrap() == input
+            expect lz4_decompress_frame_for_tier(scalar, CompressionSimdTier.neon).unwrap() == input
+
+        it "stores compressed frame blocks for repetitive data on the baseline path":
+            val input = _repetitive_bytes(8192)
+            val encoded = lz4_compress_frame(input, _frame_options(false, input.len(), 1))
+            val size_word = _frame_first_block_size_word(encoded)
+            expect (size_word & 0x80000000u32) == 0u32 == true
+            expect (size_word & 0x7FFFFFFFu32).to_i64() < input.len() == true
+            val decoded = lz4_decompress_frame(encoded)
+            expect decoded.is_err() == false
+            expect decoded.unwrap() == input
+
+        it "fails closed on a corrupt frame header checksum":
+            val input = _repetitive_bytes(2048)
+            val encoded = lz4_compress_frame(input, _frame_options(false, input.len(), 1))
+            var corrupt = encoded
+            val hc_offset = _frame_header_checksum_offset(corrupt)
+            corrupt[hc_offset] = corrupt[hc_offset] ^ 0x01u8
+            val decoded = lz4_decompress_frame(corrupt)
+            expect decoded.is_err() == true
+            _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "header checksum")
+
+        it "fails closed on a corrupt block checksum":
+            val input = _repetitive_bytes(4096)
+            val encoded = lz4_compress_frame(input, _frame_options(true, input.len(), 1))
+            var corrupt = encoded
+            val payload_offset = _frame_first_block_payload_offset(corrupt)
+            corrupt[payload_offset] = corrupt[payload_offset] ^ 0x01u8
+            val decoded = lz4_decompress_frame(corrupt)
+            expect decoded.is_err() == true
+            _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "block checksum")
+
+        it "fails closed on a corrupt content checksum":
+            val input = _repetitive_bytes(4096)
+            val encoded = lz4_compress_frame(input, _frame_options(true, input.len(), 1))
+            var corrupt = encoded
+            val checksum_offset = _frame_content_checksum_offset(corrupt)
+            corrupt[checksum_offset] = corrupt[checksum_offset] ^ 0x01u8
+            val decoded = lz4_decompress_frame(corrupt)
+            expect decoded.is_err() == true
+            _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "content checksum")
+
+        it "validates declared content size against decoded bytes":
+            val input = _repetitive_bytes(2048)
+            val encoded = lz4_compress_frame(input, _frame_options(false, input.len(), 1))
+            var corrupt = encoded
+            corrupt[6] = corrupt[6] + 1u8
+            corrupt = _set_header_checksum(corrupt)
+            val decoded = lz4_decompress_frame(corrupt)
+            expect decoded.is_err() == true
+            _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "content size mismatch")
+
+        it "rejects dependent-block frames explicitly":
+            val input = _repetitive_bytes(2048)
+            val encoded = lz4_compress_frame(input, _frame_options(false, nil, 4))
+            var corrupt = encoded
+            corrupt[4] = corrupt[4] & 0xDFu8
+            corrupt = _set_header_checksum(corrupt)
+            val decoded = lz4_decompress_frame(corrupt)
+            expect decoded.is_err() == true
+            _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "dependent blocks")
+
+        it "rejects impossible raw block back-references":
+            val decoded = lz4_decompress_block([0x00u8, 0x00u8, 0x00u8])
+            expect decoded.is_err() == true
+            _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "invalid match offset")

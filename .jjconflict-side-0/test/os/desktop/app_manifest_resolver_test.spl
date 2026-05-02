@@ -1,0 +1,89 @@
+## Spec for resolve_backend() in src/os/desktop/app_manifest.spl
+##
+## Verifies:
+##   * Auto resolves to SimpleWeb on SimpleOS and on hosts without Electron,
+##     and to Electron on hosts where Electron is available.
+##   * Electron is rejected with ManifestError.ElectronNotAvailable on
+##     SimpleOS and on hosts without Electron.
+##   * SimpleWeb resolves unchanged on every host.
+##
+## Run:
+##   bin/simple test test/os/desktop/app_manifest_resolver_test.spl
+
+use std.spec
+use os.desktop.app_manifest.{
+    UiBackendKind,
+    ManifestError,
+    HostCaps,
+    resolve_backend,
+    host_caps_simpleos,
+    host_caps_host
+}
+
+fn _is_ok_simple_web(r: Result<UiBackendKind, ManifestError>) -> bool:
+    match r:
+        Ok(kind):
+            match kind:
+                UiBackendKind.SimpleWeb: true
+                _: false
+        Err(_): false
+
+fn _is_ok_electron(r: Result<UiBackendKind, ManifestError>) -> bool:
+    match r:
+        Ok(kind):
+            match kind:
+                UiBackendKind.Electron: true
+                _: false
+        Err(_): false
+
+fn _is_err_electron_not_available(r: Result<UiBackendKind, ManifestError>) -> bool:
+    match r:
+        Ok(_): false
+        Err(e):
+            match e:
+                ManifestError.ElectronNotAvailable: true
+
+describe "app_manifest.resolve_backend / Auto":
+    """Auto picks SimpleWeb unless Electron is available on a non-SimpleOS host."""
+
+    it "resolves to SimpleWeb on SimpleOS":
+        val r = resolve_backend(UiBackendKind.Auto, host_caps_simpleos())
+        expect(_is_ok_simple_web(r)).to_equal(true)
+
+    it "resolves to SimpleWeb on a host without Electron":
+        val r = resolve_backend(UiBackendKind.Auto, host_caps_host(false))
+        expect(_is_ok_simple_web(r)).to_equal(true)
+
+    it "resolves to Electron on a host with Electron available":
+        val r = resolve_backend(UiBackendKind.Auto, host_caps_host(true))
+        expect(_is_ok_electron(r)).to_equal(true)
+
+describe "app_manifest.resolve_backend / Electron":
+    """Explicit Electron only succeeds where Electron is actually available."""
+
+    it "rejects Electron on SimpleOS":
+        val r = resolve_backend(UiBackendKind.Electron, host_caps_simpleos())
+        expect(_is_err_electron_not_available(r)).to_equal(true)
+
+    it "rejects Electron on a host without Electron":
+        val r = resolve_backend(UiBackendKind.Electron, host_caps_host(false))
+        expect(_is_err_electron_not_available(r)).to_equal(true)
+
+    it "accepts Electron on a host where Electron is available":
+        val r = resolve_backend(UiBackendKind.Electron, host_caps_host(true))
+        expect(_is_ok_electron(r)).to_equal(true)
+
+describe "app_manifest.resolve_backend / SimpleWeb":
+    """Explicit SimpleWeb is a no-op everywhere."""
+
+    it "resolves SimpleWeb unchanged on SimpleOS":
+        val r = resolve_backend(UiBackendKind.SimpleWeb, host_caps_simpleos())
+        expect(_is_ok_simple_web(r)).to_equal(true)
+
+    it "resolves SimpleWeb unchanged on a host without Electron":
+        val r = resolve_backend(UiBackendKind.SimpleWeb, host_caps_host(false))
+        expect(_is_ok_simple_web(r)).to_equal(true)
+
+    it "resolves SimpleWeb unchanged on a host with Electron":
+        val r = resolve_backend(UiBackendKind.SimpleWeb, host_caps_host(true))
+        expect(_is_ok_simple_web(r)).to_equal(true)

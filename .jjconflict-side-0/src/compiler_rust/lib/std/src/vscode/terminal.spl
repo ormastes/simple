@@ -1,0 +1,304 @@
+# VSCode Terminal API
+# Create and interact with integrated terminals
+
+# External FFI declarations
+extern fn vscode_terminal_create(name: text, shell_path: text, cwd: text): i64
+extern fn vscode_terminal_send_text(terminal_id: i64, text: text, add_new_line: bool): void
+extern fn vscode_terminal_show(terminal_id: i64, preserve_focus: bool): void
+extern fn vscode_terminal_hide(terminal_id: i64): void
+extern fn vscode_terminal_dispose(terminal_id: i64): void
+extern fn vscode_terminal_get_process_id(terminal_id: i64): i64
+extern fn vscode_terminal_get_exit_status(terminal_id: i64): i32
+
+# Terminal options
+pub class TerminalOptions:
+    pub name: text
+    pub shell_path: text
+    pub shell_args: List<text>
+    pub cwd: text
+    pub env: Dict<text, text>
+    pub icon_path: text
+    pub color: text
+    pub is_transient: bool
+
+    pub fn new(): TerminalOptions =
+        """Create terminal options.
+
+        Example:
+            opts = TerminalOptions.new()
+            opts.name = "Simple Build"
+            opts.cwd = "/workspace"
+            opts.env = {"SIMPLE_ENV": "production"}
+        """
+        TerminalOptions {
+            name: "Terminal",
+            shell_path: "",
+            shell_args: [],
+            cwd: "",
+            env: {},
+            icon_path: "",
+            color: "",
+            is_transient: false
+        }
+
+# Terminal
+pub class Terminal:
+    pub id: i64
+    pub name: text
+    pub process_id: Option<i64>
+    pub exit_status: Option<i32>
+
+    pub fn new(name: text): Terminal =
+        """Create terminal.
+
+        Args:
+            name: Terminal name
+
+        Example:
+            term = Terminal.new("My Terminal")
+            term.show()
+            term.send_text("echo Hello World")
+        """
+        val id = vscode_terminal_create(name, "", "")
+
+        Terminal {
+            id: id,
+            name: name,
+            process_id: none,
+            exit_status: none
+        }
+
+    pub fn send_text(self, text: text):
+        """Send text to terminal (with newline).
+
+        Args:
+            text: Text to send
+
+        Example:
+            term.send_text("simple build main.spl")
+        """
+        vscode_terminal_send_text(self.id, text, true)
+
+    pub fn send_text_no_newline(self, text: text):
+        """Send text to terminal without newline.
+
+        Args:
+            text: Text to send
+        """
+        vscode_terminal_send_text(self.id, text, false)
+
+    pub fn show(self):
+        """Show terminal in UI."""
+        vscode_terminal_show(self.id, false)
+
+    pub fn show_preserve_focus(self):
+        """Show terminal without stealing focus."""
+        vscode_terminal_show(self.id, true)
+
+    pub fn hide(self):
+        """Hide terminal."""
+        vscode_terminal_hide(self.id)
+
+    pub fn dispose(self):
+        """Dispose terminal."""
+        vscode_terminal_dispose(self.id)
+
+    pub fn get_process_id(self): Option<i64> =
+        """Get terminal process ID.
+
+        Returns:
+            Process ID if available, none otherwise
+        """
+        val pid = vscode_terminal_get_process_id(self.id)
+        if pid == -1:
+            return none
+
+        some(pid)
+
+    pub fn get_exit_status(self): Option<i32> =
+        """Get terminal exit status.
+
+        Returns:
+            Exit code if terminal exited, none if still running
+        """
+        val status = vscode_terminal_get_exit_status(self.id)
+        if status == -1:
+            return none
+
+        some(status)
+
+# Create terminal with options
+pub fn create_terminal(options: TerminalOptions): Terminal =
+    """Create terminal with custom options.
+
+    Args:
+        options: Terminal configuration
+
+    Returns:
+        Terminal instance
+
+    Example:
+        opts = TerminalOptions.new()
+        opts.name = "Build Output"
+        opts.cwd = "/workspace"
+        opts.env = {"NODE_ENV": "development"}
+
+        term = terminal.create_terminal(opts)
+        term.show()
+        term.send_text("npm run build")
+    """
+    val id = vscode_terminal_create(options.name, options.shell_path, options.cwd)
+
+    Terminal {
+        id: id,
+        name: options.name,
+        process_id: none,
+        exit_status: none
+    }
+
+# Create simple terminal
+pub fn create_simple_terminal(name: text): Terminal =
+    """Create terminal with default options.
+
+    Args:
+        name: Terminal name
+
+    Returns:
+        Terminal instance
+
+    Example:
+        term = terminal.create_simple_terminal("Simple Shell")
+        term.show()
+    """
+    Terminal.new(name)
+
+# Active terminal tracking
+val active_terminals: Dict<text, Terminal> = {}
+
+# Get or create terminal
+pub fn get_or_create_terminal(name: text): Terminal =
+    """Get existing terminal or create new one.
+
+    Args:
+        name: Terminal name
+
+    Returns:
+        Terminal instance (existing or new)
+
+    Example:
+        # Always uses same terminal
+        term = terminal.get_or_create_terminal("Build")
+        term.send_text("simple build")
+    """
+    match active_terminals.get(name):
+        some(term):
+            return term
+        none:
+            val term = Terminal.new(name)
+            active_terminals[name] = term
+            return term
+
+# Run command in terminal
+pub fn run_command(command: text, terminal_name: text):
+    """Run command in named terminal.
+
+    Args:
+        command: Command to execute
+        terminal_name: Terminal name (reused if exists)
+
+    Example:
+        terminal.run_command("simple build main.spl", "Build")
+        terminal.run_command("simple test", "Test")
+    """
+    val term = get_or_create_terminal(terminal_name)
+    term.show()
+    term.send_text(command)
+
+# Helper: Create build terminal
+pub fn create_build_terminal(): Terminal =
+    """Create terminal for build output.
+
+    Returns:
+        Terminal configured for builds
+
+    Example:
+        build = terminal.create_build_terminal()
+        build.send_text("simple build")
+    """
+    val opts = TerminalOptions.new()
+    opts.name = "Simple Build"
+    opts.icon_path = "$(tools)"
+    opts.color = "terminal.ansiBlue"
+
+    create_terminal(opts)
+
+# Helper: Create test terminal
+pub fn create_test_terminal(): Terminal =
+    """Create terminal for test output.
+
+    Returns:
+        Terminal configured for tests
+
+    Example:
+        test = terminal.create_test_terminal()
+        test.send_text("simple test")
+    """
+    val opts = TerminalOptions.new()
+    opts.name = "Simple Tests"
+    opts.icon_path = "$(beaker)"
+    opts.color = "terminal.ansiGreen"
+
+    create_terminal(opts)
+
+# Callback storage for execute_and_wait
+var _exit_callbacks: Dict<i64, fn(i32): void> = {}
+var _next_exit_callback_id: i64 = 0
+
+extern fn vscode_terminal_on_exit(terminal_id: i64, callback_id: i64): void
+
+# Helper: Execute and wait
+pub fn execute_and_wait(command: text, callback: fn(exit_code: i32): void):
+    """Execute command and call callback when done.
+
+    Args:
+        command: Command to execute
+        callback: Called with exit code
+
+    Example:
+        terminal.execute_and_wait("simple build", fn(code):
+            if code == 0:
+                print "Build succeeded"
+            else:
+                print "Build failed"
+        )
+    """
+    val term = Terminal.new("Execution")
+    term.send_text(command)
+
+    # Register callback for terminal exit
+    val callback_id = _next_exit_callback_id
+    _next_exit_callback_id = _next_exit_callback_id + 1
+    _exit_callbacks[callback_id] = callback
+
+    # Register with VSCode to call back when terminal exits
+    vscode_terminal_on_exit(term.id, callback_id)
+
+# Called by VSCode when terminal exits
+pub fn _on_terminal_exit(callback_id: i64, exit_code: i32):
+    """Internal callback handler for terminal exit.
+
+    Args:
+        callback_id: Registered callback ID
+        exit_code: Terminal exit code
+    """
+    match _exit_callbacks.get(callback_id):
+        some(callback):
+            callback(exit_code)
+            # Remove callback after use
+            var new_callbacks: Dict<i64, fn(i32): void> = {}
+            for (id, cb) in _exit_callbacks.items():
+                if id != callback_id:
+                    new_callbacks[id] = cb
+            _exit_callbacks = new_callbacks
+        none:
+            pass

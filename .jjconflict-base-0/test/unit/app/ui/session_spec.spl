@@ -1,0 +1,275 @@
+# UISession Specification
+#
+# Tests the unified session model: creation, dispatch, tree update with
+# diff/changelog, viewport management, surface lifecycle with handle
+# validation, and recent_changes output.
+
+use std.spec.{describe, it, expect}
+use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent, UIMode}
+use common.ui.builder.{column, panel, text_widget}
+use common.ui.widget_store.{WidgetStore}
+use common.ui.viewport.{Viewport}
+use common.ui.session.{UISession, new_session}
+use common.ui.surface.{SurfaceHandle}
+
+
+# ============================================================================
+# Session Creation
+# ============================================================================
+
+describe "UISession creation":
+    it "creates session with initial state":
+        val root = column("sess_root1", [
+            text_widget("sess_t1", "Hello")
+        ])
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        expect session.current_mode() to_equal "NORMAL"
+        expect session.current_tree().root_id to_equal "sess_root1"
+
+    it "creates session with main surface":
+        val root = text_widget("sess_main_root", "Main")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        expect session.has_surface("main") to_equal true
+        expect session.surface_count() to_equal 1
+
+    it "creates session with pre-populated store":
+        val root = text_widget("sess_store_root", "Store")
+        val tree = UITree.new(root)
+        val store = WidgetStore.new()
+        val session = UISession.new_with_store(tree, store)
+        expect session.current_tree().root_id to_equal "sess_store_root"
+
+
+# ============================================================================
+# Dispatch Events
+# ============================================================================
+
+describe "UISession dispatch":
+    it "transitions to command mode":
+        val root = text_widget("sess_disp_root", "Cmd")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        session.dispatch(UIEvent.CommandMode)
+        expect session.current_mode() to_equal "COMMAND"
+
+    it "transitions back to normal mode":
+        val root = text_widget("sess_norm_root", "Norm")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        session.dispatch(UIEvent.CommandMode)
+        session.dispatch(UIEvent.NormalMode)
+        expect session.current_mode() to_equal "NORMAL"
+
+
+# ============================================================================
+# Tree Update with Diff / Changelog
+# ============================================================================
+
+describe "UISession update_tree":
+    it "updates tree and populates changelog":
+        val root1 = column("sess_upd_root", [
+            text_widget("sess_upd_t1", "Old")
+        ])
+        val tree1 = UITree.new(root1)
+        var session = new_session(tree1)
+        # Build a new tree with an additional widget (InsertChild => Mount)
+        val root2 = column("sess_upd_root", [
+            text_widget("sess_upd_t1", "Old"),
+            text_widget("sess_upd_t2", "New")
+        ])
+        val tree2 = UITree.new(root2)
+        session.update_tree(tree2)
+        expect session.current_tree().root_id to_equal "sess_upd_root"
+        # Changelog should have at least one entry (mount of new widget)
+        val changes = session.recent_changes(10)
+        expect changes.len() to_be_greater_than 0
+
+    it "updates main surface when tree changes":
+        val root = text_widget("sess_surf_upd_r", "V1")
+        val tree1 = UITree.new(root)
+        var session = new_session(tree1)
+        val root2 = text_widget("sess_surf_upd_r", "V2")
+        val tree2 = UITree.new(root2)
+        session.update_tree(tree2)
+        val main_tree = session.get_surface("main")
+        expect main_tree != nil to_equal true
+
+
+# ============================================================================
+# Viewport Management
+# ============================================================================
+
+describe "UISession viewport":
+    it "has default viewport":
+        val root = text_widget("sess_vp_root", "VP")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        expect session.viewport_width() to_equal 80
+        expect session.viewport_height() to_equal 24
+        expect session.active_backend() to_equal "none"
+
+    it "sets viewport from active backend":
+        val root = text_widget("sess_vp_set_root", "VP")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        # With no active backend ("none"), any backend can set viewport
+        session.set_viewport(120, 40, "tui")
+        expect session.viewport_width() to_equal 120
+        expect session.viewport_height() to_equal 40
+        expect session.active_backend() to_equal "tui"
+
+    it "enforces active backend on viewport update":
+        val root = text_widget("sess_vp_enf_root", "VP")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        session.set_viewport(120, 40, "tui")
+        # Different backend cannot update
+        session.set_viewport(1920, 1080, "tauri")
+        expect session.viewport_width() to_equal 120
+        expect session.viewport_height() to_equal 40
+
+    it "changes active backend":
+        val root = text_widget("sess_vp_chg_root", "VP")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        session.set_active_backend("tauri")
+        expect session.active_backend() to_equal "tauri"
+        # Now tauri can update viewport
+        session.set_viewport(1920, 1080, "tauri")
+        expect session.viewport_width() to_equal 1920
+
+
+# ============================================================================
+# Surface Lifecycle
+# ============================================================================
+
+describe "UISession surface lifecycle":
+    it "opens a new surface":
+        val root = text_widget("sess_sl_root", "Main")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        val popup_root = text_widget("sess_sl_popup_r", "Popup")
+        val popup_tree = UITree.new(popup_root)
+        val handle = session.open_surface("popup", popup_tree)
+        expect handle.id to_equal "popup"
+        expect session.surface_count() to_equal 2
+        expect session.has_surface("popup") to_equal true
+
+    it "closes a surface":
+        val root = text_widget("sess_sl_close_r", "Main")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        val dialog_root = text_widget("sess_sl_dialog_r", "Dialog")
+        val dialog_tree = UITree.new(dialog_root)
+        val handle = session.open_surface("dialog", dialog_tree)
+        val result = session.close_surface(handle)
+        expect result to_equal true
+        expect session.has_surface("dialog") to_equal false
+
+    it "prevents close with stale handle":
+        val root = text_widget("sess_sl_stale_r", "Main")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        val tmp_root = text_widget("sess_sl_tmp_r", "Temp")
+        val tmp_tree = UITree.new(tmp_root)
+        val handle = session.open_surface("temp", tmp_tree)
+        session.close_surface(handle)
+        # Second close with same handle should fail
+        val result = session.close_surface(handle)
+        expect result to_equal false
+
+    it "validates surface handle":
+        val root = text_widget("sess_sl_val_r", "Main")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        val win_root = text_widget("sess_sl_win_r", "Win")
+        val win_tree = UITree.new(win_root)
+        val handle = session.open_surface("win", win_tree)
+        expect session.validate_surface_handle(handle) to_equal true
+        session.close_surface(handle)
+        expect session.validate_surface_handle(handle) to_equal false
+
+
+# ============================================================================
+# Active Surface
+# ============================================================================
+
+describe "UISession active surface":
+    it "defaults active to main":
+        val root = text_widget("sess_as_root", "Main")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        expect session.active_surface() to_equal "main"
+
+    it "switches active surface":
+        val root = text_widget("sess_as_sw_root", "Main")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        val side_root = text_widget("sess_as_side_r", "Side")
+        val side_tree = UITree.new(side_root)
+        session.open_surface("sidebar", side_tree)
+        session.set_active_surface("sidebar")
+        expect session.active_surface() to_equal "sidebar"
+
+
+# ============================================================================
+# Surface Tree Update
+# ============================================================================
+
+describe "UISession update_surface_tree":
+    it "updates surface tree via valid handle":
+        val root = text_widget("sess_ust_root", "Main")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        val panel_root = text_widget("sess_ust_panel_r", "V1")
+        val panel_tree = UITree.new(panel_root)
+        val handle = session.open_surface("panel", panel_tree)
+        val panel_root2 = text_widget("sess_ust_panel_r", "V2")
+        val panel_tree2 = UITree.new(panel_root2)
+        session.update_surface_tree(handle, panel_tree2)
+        val updated = session.get_surface("panel")
+        expect updated != nil to_equal true
+
+    it "ignores update with stale handle":
+        val root = text_widget("sess_ust_stale_r", "Main")
+        val tree = UITree.new(root)
+        var session = new_session(tree)
+        val tmp_root = text_widget("sess_ust_tmp_r", "Temp")
+        val tmp_tree = UITree.new(tmp_root)
+        val handle = session.open_surface("tmp", tmp_tree)
+        session.close_surface(handle)
+        # Stale handle — update should be no-op
+        val new_root = text_widget("sess_ust_tmp_r", "V2")
+        val new_tree = UITree.new(new_root)
+        session.update_surface_tree(handle, new_tree)
+        expect session.has_surface("tmp") to_equal false
+
+
+# ============================================================================
+# Recent Changes
+# ============================================================================
+
+describe "UISession recent_changes":
+    it "returns empty list initially":
+        val root = text_widget("sess_rc_root", "RC")
+        val tree = UITree.new(root)
+        val session = new_session(tree)
+        val changes = session.recent_changes(5)
+        expect changes.len() to_equal 0
+
+    it "returns formatted changelog after tree update":
+        val root1 = column("sess_rc_upd_root", [
+            text_widget("sess_rc_t1", "Old")
+        ])
+        val tree1 = UITree.new(root1)
+        var session = new_session(tree1)
+        val root2 = column("sess_rc_upd_root", [
+            text_widget("sess_rc_t1", "Old"),
+            text_widget("sess_rc_t2", "New")
+        ])
+        val tree2 = UITree.new(root2)
+        session.update_tree(tree2)
+        val changes = session.recent_changes(10)
+        expect changes.len() to_be_greater_than 0

@@ -1,0 +1,237 @@
+"""
+# T32 MCP Server -- JSON & Protocol Tests
+
+**Feature IDs:** #T32-MCP-001
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Tests for the T32 MCP server JSON helpers: encoding, object builders,
+field extraction, and JSON-RPC / MCP protocol response builders.
+All functions under test are pure (no I/O, no side effects).
+
+## Source
+
+`examples/10_tooling/trace32_tools/t32_mcp/json_helpers.spl`
+"""
+
+use app.mcp_t32.json_helpers.{t32_Q, t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_escape_json, t32_js, t32_jp, t32_jo1, t32_jo2, t32_jo3, t32_jo4, t32_extract_field, t32_extract_field_raw, t32_extract_id, t32_extract_nested, t32_make_json_result, t32_make_error, t32_make_tool_result, t32_make_tool_error}
+use app.mcp_t32.protocol.{t32_make_tool_schema}
+
+# ============================================================================
+# JSON Encoding
+# ============================================================================
+
+describe "T32 MCP JSON Encoding":
+
+    context "character helpers":
+        it "returns double-quote char":
+            expect(t32_Q()).to_equal("\"")
+
+        it "returns left brace":
+            expect(t32_LB()).to_equal("{")
+
+        it "returns right brace":
+            expect(t32_RB()).to_equal("}")
+
+    context "escape_json":
+        it "escapes double quotes":
+            val result = t32_escape_json("he\"llo")
+            expect(result).to_contain("\\\"")
+
+        it "escapes backslashes":
+            val result = t32_escape_json("a\\b")
+            expect(result).to_contain("\\\\")
+
+        it "escapes newlines":
+            val result = t32_escape_json("a\nb")
+            expect(result).to_contain("\\n")
+
+        it "escapes tabs":
+            val result = t32_escape_json("a\tb")
+            expect(result).to_contain("\\t")
+
+        it "leaves plain text unchanged":
+            val result = t32_escape_json("hello world")
+            expect(result).to_equal("hello world")
+
+    context "t32_js wraps string with quotes":
+        it "wraps simple string":
+            val result = t32_js("hello")
+            expect(result).to_equal("\"hello\"")
+
+        it "wraps and escapes":
+            val result = t32_js("a\"b")
+            expect(result).to_contain("\\\"")
+
+    context "t32_jp builds key-value pair":
+        it "builds quoted key with value":
+            val result = t32_jp("name", "\"Alice\"")
+            expect(result).to_equal("\"name\":\"Alice\"")
+
+# ============================================================================
+# JSON Object Builders
+# ============================================================================
+
+describe "T32 MCP JSON Object Builders":
+
+    context "t32_jo1 builds 1-pair object":
+        it "wraps single pair in braces":
+            val pair = t32_jp("k", t32_js("v"))
+            val result = t32_jo1(pair)
+            expect(result).to_equal("{\"k\":\"v\"}")
+
+    context "t32_jo2 builds 2-pair object":
+        it "joins two pairs with comma":
+            val p1 = t32_jp("a", t32_js("1"))
+            val p2 = t32_jp("b", t32_js("2"))
+            val result = t32_jo2(p1, p2)
+            expect(result).to_equal("{\"a\":\"1\",\"b\":\"2\"}")
+
+    context "t32_jo3 builds 3-pair object":
+        it "joins three pairs":
+            val p1 = t32_jp("x", "1")
+            val p2 = t32_jp("y", "2")
+            val p3 = t32_jp("z", "3")
+            val result = t32_jo3(p1, p2, p3)
+            expect(result).to_contain("\"x\":1")
+            expect(result).to_contain("\"y\":2")
+            expect(result).to_contain("\"z\":3")
+
+    context "t32_jo4 builds 4-pair object":
+        it "joins four pairs":
+            val p1 = t32_jp("a", "1")
+            val p2 = t32_jp("b", "2")
+            val p3 = t32_jp("c", "3")
+            val p4 = t32_jp("d", "4")
+            val result = t32_jo4(p1, p2, p3, p4)
+            expect(result).to_contain("\"a\":1")
+            expect(result).to_contain("\"d\":4")
+
+# ============================================================================
+# JSON Field Extraction
+# ============================================================================
+
+describe "T32 MCP JSON Extraction":
+
+    context "t32_extract_field":
+        it "extracts string value":
+            val json = "{\"host\":\"localhost\",\"port\":20000}"
+            val result = t32_extract_field(json, "host")
+            expect(result).to_equal("localhost")
+
+        it "extracts numeric value":
+            val json = "{\"host\":\"localhost\",\"port\":20000}"
+            val result = t32_extract_field(json, "port")
+            expect(result).to_equal("20000")
+
+        it "returns empty for missing key":
+            val json = "{\"host\":\"localhost\"}"
+            val result = t32_extract_field(json, "xxx")
+            expect(result).to_equal("")
+
+    context "t32_extract_field_raw":
+        it "extracts raw quoted value with quotes":
+            val json = "{\"name\":\"test\"}"
+            val result = t32_extract_field_raw(json, "name")
+            expect(result).to_start_with("\"")
+
+        it "extracts raw numeric value":
+            val json = "{\"count\":42}"
+            val result = t32_extract_field_raw(json, "count")
+            expect(result).to_equal("42")
+
+        it "returns null for missing key":
+            val json = "{\"a\":1}"
+            val result = t32_extract_field_raw(json, "missing")
+            expect(result).to_equal("null")
+
+    context "t32_extract_id":
+        it "extracts numeric id":
+            val json = "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"test\"}"
+            val result = t32_extract_id(json)
+            expect(result).to_equal("42")
+
+        it "extracts string id":
+            val json = "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"method\":\"test\"}"
+            val result = t32_extract_id(json)
+            expect(result).to_start_with("\"")
+
+    context "t32_extract_nested":
+        it "extracts from params object":
+            val json = "{\"method\":\"test\",\"params\":{\"name\":\"hello\",\"x\":1}}"
+            val result = t32_extract_nested(json, "name")
+            expect(result).to_equal("hello")
+
+        it "returns empty when params missing":
+            val json = "{\"method\":\"test\"}"
+            val result = t32_extract_nested(json, "name")
+            expect(result).to_equal("")
+
+# ============================================================================
+# Protocol Response Builders
+# ============================================================================
+
+describe "T32 MCP Protocol Responses":
+
+    context "JSON-RPC result builders":
+        it "builds success response":
+            val result = t32_make_json_result("1", "{\"ok\":true}")
+            expect(result).to_contain("\"jsonrpc\":\"2.0\"")
+            expect(result).to_contain("\"id\":1")
+            expect(result).to_contain("\"result\":")
+
+        it "builds error response":
+            val result = t32_make_error("1", -32601, "Method not found")
+            expect(result).to_contain("\"jsonrpc\":\"2.0\"")
+            expect(result).to_contain("\"error\":")
+            expect(result).to_contain("\"code\":-32601")
+            expect(result).to_contain("Method not found")
+
+    context "MCP tool result builders":
+        it "builds tool result with content array":
+            val result = t32_make_tool_result("1", "hello world")
+            expect(result).to_contain("\"type\":\"text\"")
+            expect(result).to_contain("\"content\":")
+            expect(result).to_contain("hello world")
+
+        it "builds tool error with isError flag":
+            val result = t32_make_tool_error("1", 500, "Something broke")
+            expect(result).to_contain("\"isError\":true")
+            expect(result).to_contain("Something broke")
+
+# ============================================================================
+# Protocol — New Tool Schemas (v1.1.0)
+# ============================================================================
+
+describe "T32 MCP Protocol — New Tools":
+
+    context "t32_setup_headless schema":
+        it "includes area_name and semihost parameters":
+            val schema = t32_make_tool_schema("t32_setup_headless", "Headless setup")
+            expect(schema).to_contain("area_name")
+            expect(schema).to_contain("semihost")
+            expect(schema).to_contain("error_handler")
+            expect(schema).to_contain("t32_setup_headless")
+
+    context "t32_area_read schema":
+        it "includes area_name and clear parameters":
+            val schema = t32_make_tool_schema("t32_area_read", "Read AREA")
+            expect(schema).to_contain("area_name")
+            expect(schema).to_contain("clear")
+            expect(schema).to_contain("t32_area_read")
+
+    context "t32_cmm_commands schema":
+        it "includes group and search parameters":
+            val schema = t32_make_tool_schema("t32_cmm_commands", "CMM commands")
+            expect(schema).to_contain("group")
+            expect(schema).to_contain("search")
+            expect(schema).to_contain("t32_cmm_commands")
+
+    context "t32_cmm_run schema updated":
+        it "includes capture_area parameter":
+            val schema = t32_make_tool_schema("t32_cmm_run", "Run CMM")
+            expect(schema).to_contain("capture_area")
+            expect(schema).to_contain("script")

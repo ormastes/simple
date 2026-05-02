@@ -1,0 +1,91 @@
+# Shared WM Scene
+#
+# Pure window-manager state used by host UI and SimpleOS adapters.  This file
+# intentionally contains no DOM, framebuffer, IPC, or driver code.
+
+use common.ui.window.{WindowManager}
+use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_LEGACY}
+
+struct SharedWmWindow:
+    surface_id: text
+    window_id: text
+    title: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    z_order: i32
+    minimized: bool
+    maximized: bool
+    focused: bool
+    surface_kind: text
+
+struct SharedWmScene:
+    width: i32
+    height: i32
+    windows: [SharedWmWindow]
+
+fn shared_wm_window(surface_id: text, window_id: text, title: text,
+                   x: i32, y: i32, width: i32, height: i32,
+                   z_order: i32, minimized: bool, maximized: bool,
+                   focused: bool, surface_kind: text) -> SharedWmWindow:
+    SharedWmWindow(
+        surface_id: surface_id,
+        window_id: window_id,
+        title: title,
+        x: x,
+        y: y,
+        width: width,
+        height: height,
+        z_order: z_order,
+        minimized: minimized,
+        maximized: maximized,
+        focused: focused,
+        surface_kind: surface_kind
+    )
+
+fn shared_wm_scene_empty(width: i32, height: i32) -> SharedWmScene:
+    SharedWmScene(width: width, height: height, windows: [])
+
+fn shared_wm_scene_add_window(scene: SharedWmScene, window: SharedWmWindow) -> SharedWmScene:
+    SharedWmScene(width: scene.width, height: scene.height, windows: scene.windows + [window])
+
+fn shared_wm_visible_windows(scene: SharedWmScene) -> [SharedWmWindow]:
+    var visible: [SharedWmWindow] = []
+    for window in scene.windows:
+        if not window.minimized:
+            visible = visible + [window]
+    visible
+
+fn shared_wm_focused_window_id(scene: SharedWmScene) -> text:
+    for window in scene.windows:
+        if window.focused:
+            return window.window_id
+    ""
+
+fn shared_wm_scene_from_window_manager(manager: WindowManager, registry: UiWindowSurfaceRegistry,
+                                       width: i32, height: i32) -> SharedWmScene:
+    """Project WindowManager + UiWindowSurfaceRegistry into a backend-neutral scene."""
+    var scene = shared_wm_scene_empty(width, height)
+    for info in manager.windows:
+        var window_id = info.id
+        var surface_kind = UI_SURFACE_KIND_LEGACY
+        val binding = registry.for_surface(info.id)
+        if binding != nil:
+            window_id = binding.window_id
+            surface_kind = binding.surface_kind
+        scene = shared_wm_scene_add_window(scene, shared_wm_window(
+            info.id,
+            window_id,
+            info.title,
+            info.geometry.x,
+            info.geometry.y,
+            info.geometry.width,
+            info.geometry.height,
+            info.geometry.z_order,
+            info.geometry.minimized,
+            info.geometry.maximized,
+            manager.focused_window == info.id,
+            surface_kind
+        ))
+    scene

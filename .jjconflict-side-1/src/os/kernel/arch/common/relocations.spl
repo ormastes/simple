@@ -1,0 +1,113 @@
+# Relocations — ELF reloc helpers for kernel-load fixups, common across archs.
+#
+# When the kernel image is loaded at a non-link-time virtual address (e.g.
+# Limine/SBI/U-Boot relocates), per-arch entry stubs walk a small reloc
+# table and patch absolute addresses. This module provides a
+# machine-readable per-arch reloc-type → fixup verb mapping shared by all
+# six archs.
+#
+# Wave 2 — added 2026-04-25 for AC-3 helper extraction.
+
+# ELF reloc type constants (subset — kernel-relevant only).
+val R_X86_64_NONE:     u32 = 0
+val R_X86_64_64:       u32 = 1
+val R_X86_64_RELATIVE: u32 = 8
+
+val R_386_NONE:        u32 = 0
+val R_386_32:          u32 = 1
+val R_386_RELATIVE:    u32 = 8
+
+val R_AARCH64_NONE:        u32 = 0
+val R_AARCH64_ABS64:       u32 = 257
+val R_AARCH64_RELATIVE:    u32 = 1027
+
+val R_ARM_NONE:        u32 = 0
+val R_ARM_ABS32:       u32 = 2
+val R_ARM_RELATIVE:    u32 = 23
+
+val R_RISCV_NONE:      u32 = 0
+val R_RISCV_64:        u32 = 2
+val R_RISCV_32:        u32 = 1
+val R_RISCV_RELATIVE:  u32 = 3
+
+# Generic verb the per-arch loader executes.
+enum RelocVerb:
+    """Decoded reloc action — abstract verb the per-arch loader applies."""
+    None_                          # no-op
+    Absolute64    # *target = symbol_value + addend  (64-bit)
+    Absolute32    # *target = (u32)(symbol_value + addend)
+    Relative64    # *target = base + addend          (64-bit, RELATIVE)
+    Relative32    # *target = (u32)(base + addend)
+
+# Decode an x86_64 reloc type.
+fn decode_x86_64(t: u32) -> RelocVerb:
+    if t == R_X86_64_64:        return RelocVerb.Absolute64
+    if t == R_X86_64_RELATIVE:  return RelocVerb.Relative64
+    RelocVerb.None_
+
+# Decode an i386 reloc type.
+fn decode_x86_32(t: u32) -> RelocVerb:
+    if t == R_386_32:           return RelocVerb.Absolute32
+    if t == R_386_RELATIVE:     return RelocVerb.Relative32
+    RelocVerb.None_
+
+# Decode an aarch64 reloc type.
+fn decode_arm64(t: u32) -> RelocVerb:
+    if t == R_AARCH64_ABS64:    return RelocVerb.Absolute64
+    if t == R_AARCH64_RELATIVE: return RelocVerb.Relative64
+    RelocVerb.None_
+
+# Decode an arm32 reloc type.
+fn decode_arm32(t: u32) -> RelocVerb:
+    if t == R_ARM_ABS32:        return RelocVerb.Absolute32
+    if t == R_ARM_RELATIVE:     return RelocVerb.Relative32
+    RelocVerb.None_
+
+# Decode a riscv reloc type (works for both rv64 and rv32 on the verbs).
+fn decode_riscv(t: u32, is_64: bool) -> RelocVerb:
+    if t == R_RISCV_RELATIVE:
+        if is_64: return RelocVerb.Relative64
+        return RelocVerb.Relative32
+    if t == R_RISCV_64 and is_64:
+        return RelocVerb.Absolute64
+    if t == R_RISCV_32:
+        return RelocVerb.Absolute32
+    RelocVerb.None_
+
+# An ELF Rela entry — 24 bytes on 64-bit, 12 bytes on 32-bit. We always
+# use the 64-bit form internally; per-arch loaders truncate on read.
+@repr("C")
+struct Rela64:
+    """64-bit ELF Rela entry."""
+    r_offset: u64
+    r_info:   u64
+    r_addend: i64
+
+fn rela_sym(info: u64) -> u32:  (info >> 32) as u32
+fn rela_type(info: u64) -> u32: (info & 0xFFFFFFFF) as u32
+
+@repr("C")
+struct Rela32:
+    """32-bit ELF Rela entry."""
+    r_offset: u32
+    r_info:   u32
+    r_addend: i32
+
+fn rela32_sym(info: u32) -> u32:  info >> 8
+fn rela32_type(info: u32) -> u32: info & 0xFF
+
+# Apply a decoded verb at `target_addr`, given a base load offset and an
+# addend. Returns the value that should be stored at `target_addr` (the
+# per-arch shim does the actual store via raw memory write).
+fn apply_verb(v: RelocVerb, base: u64, addend: i64) -> u64:
+    match v:
+        RelocVerb.None_:
+            0
+        RelocVerb.Absolute64:
+            (base as i64 + addend) as u64
+        RelocVerb.Absolute32:
+            ((base as i64 + addend) as u64) & 0xFFFFFFFF
+        RelocVerb.Relative64:
+            (base as i64 + addend) as u64
+        RelocVerb.Relative32:
+            ((base as i64 + addend) as u64) & 0xFFFFFFFF

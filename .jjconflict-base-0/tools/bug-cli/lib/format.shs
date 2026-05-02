@@ -1,0 +1,70 @@
+#!/bin/bash
+# bug-cli output formatting
+# Depends on: config.shs (sourced by main entry point)
+
+bug_format_table() {
+  local bugs_json="$1"
+
+  # Header
+  printf "%-12s %-8s %-10s %-10s %-15s %s\n" "ID" "SOURCE" "SEVERITY" "STATUS" "ASSIGNEE" "TITLE"
+  printf "%-12s %-8s %-10s %-10s %-15s %s\n" "----" "------" "--------" "------" "--------" "-----"
+
+  echo "$bugs_json" | jq -r '.[] |
+    [.id, .source, .severity, .status, .assignee[0:14], .title[0:60]] |
+    @tsv' | while IFS=$'\t' read -r id source sev status assignee title; do
+    printf "%-12s %-8s %-10s %-10s %-15s %s\n" "$id" "$source" "$sev" "$status" "$assignee" "$title"
+  done
+}
+
+bug_format_detail() {
+  local bug_json="$1"
+
+  echo "$bug_json" | jq -r '
+    "Bug:       \(.id)",
+    "Source:    \(.source)",
+    "Title:     \(.title)",
+    "Status:    \(.status)",
+    "Severity:  \(.severity // "unknown")",
+    "Component: \(.component // "unknown")",
+    "Assignee:  \(.assignee // "unassigned")",
+    "Created:   \(.created)",
+    "URL:       \(.url)",
+    "",
+    "Description:",
+    "  \(.body // "No description")",
+    ""'
+
+  # Print comments if present
+  local comment_count
+  comment_count=$(echo "$bug_json" | jq '.comments | length // 0')
+  if [ "$comment_count" -gt 0 ]; then
+    echo "Comments (${comment_count}):"
+    echo "$bug_json" | jq -r '.comments[] |
+      "  --- \(.author) (\(.created)) ---",
+      "  \(.body[0:200])",
+      ""'
+  fi
+}
+
+bug_format_json() {
+  local json="$1"
+  echo "$json" | jq '.'
+}
+
+bug_format_fix_context() {
+  local bug_json="$1"
+
+  echo "=== Bug Fix Context ==="
+  echo ""
+  bug_format_detail "$bug_json"
+
+  echo "=== File References ==="
+  # Extract file paths from bug description
+  local body
+  body=$(echo "$bug_json" | jq -r '.body // ""')
+  echo "$body" | grep -oE '[a-zA-Z0-9_/]+\.(spl|shs|rs|ts|js|py|go|c|h)' | sort -u | while read -r filepath; do
+    echo "  - ${filepath}"
+  done
+  echo ""
+  echo "=== End Context ==="
+}

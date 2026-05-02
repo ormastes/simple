@@ -1,0 +1,319 @@
+# Red-Black Tree Utility Operations
+#
+# Utility functions including clear, clone, visualization, bulk operations, and set operations.
+
+from .types import RED, BLACK
+from .types import create_rbtree, tree_root, set_tree_root, tree_nil, tree_size
+from .types import create_node, nil_node, node_value, node_left, node_right, node_color
+from .types import set_node_left, set_node_right, set_node_parent, set_node_color
+from .types import is_nil_node
+from .traverse import rb_to_list
+from .search import rb_search
+from .insert import rb_insert_many
+from .delete import rb_delete_many
+
+# ============================================================================
+# TREE UTILITIES
+# ============================================================================
+
+# Clear all nodes from tree
+fn rb_clear(tree):
+    val nil_sentinel = tree_nil(tree)
+    (nil_sentinel, 0, nil_sentinel)
+
+# Clone a tree (deep copy)
+fn clone_tree(tree):
+    val root = tree_root(tree)
+    val nil_sentinel = tree_nil(tree)
+    val size = tree_size(tree)
+    val new_root = clone_node(root, nil_sentinel)
+    (new_root, size, nil_sentinel)
+
+# Clone a node and its subtree
+fn clone_node(node, nil_sentinel):
+    if is_nil_node(node, nil_sentinel):
+        nil_sentinel
+    else:
+        val value = node_value(node)
+        val color = node_color(node)
+        val left = node_left(node)
+        val right = node_right(node)
+
+        val new_left = clone_node(left, nil_sentinel)
+        val new_right = clone_node(right, nil_sentinel)
+
+        var new_node = create_node(value, color, new_left, new_right, nil_sentinel)
+
+        # Set parent references
+        if is_nil_node(new_left, nil_sentinel) == false:
+            val updated_left = set_node_parent(new_left, new_node)
+            new_node = set_node_left(new_node, updated_left)
+        else:
+            ()
+
+        if is_nil_node(new_right, nil_sentinel) == false:
+            val updated_right = set_node_parent(new_right, new_node)
+            new_node = set_node_right(new_node, updated_right)
+        else:
+            ()
+
+        new_node
+
+# ============================================================================
+# TREE VISUALIZATION
+# ============================================================================
+
+# Print tree in ASCII format
+fn print_tree(tree):
+    val root = tree_root(tree)
+    val nil_sentinel = tree_nil(tree)
+
+    if is_nil_node(root, nil_sentinel):
+        print "Empty tree"
+    else:
+        print_tree_helper(root, "", true, nil_sentinel)
+
+    ()
+
+# Print tree helper
+fn print_tree_helper(node, prefix, is_tail, nil_sentinel):
+    if is_nil_node(node, nil_sentinel):
+        ()
+    else:
+        val value = node_value(node)
+        val color = node_color(node)
+        val color_str = if color == RED:
+            "R"
+        else:
+            "B"
+
+        val connector = if is_tail:
+            "└── "
+        else:
+            "├── "
+
+        print "{prefix}{connector}{value}({color_str})"
+
+        val left = node_left(node)
+        val right = node_right(node)
+        val has_left = is_nil_node(left, nil_sentinel) == false
+        val has_right = is_nil_node(right, nil_sentinel) == false
+
+        val new_prefix = if is_tail:
+            prefix + "    "
+        else:
+            prefix + "│   "
+
+        if has_left:
+            print_tree_helper(left, new_prefix, has_right == false, nil_sentinel)
+        else:
+            ()
+
+        if has_right:
+            print_tree_helper(right, new_prefix, true, nil_sentinel)
+        else:
+            ()
+
+# Generate Graphviz DOT format
+fn tree_to_dot(tree):
+    val root = tree_root(tree)
+    val nil_sentinel = tree_nil(tree)
+
+    var dot = "digraph RBTree {\n"
+    dot = dot + "  node [style=filled];\n"
+
+    if is_nil_node(root, nil_sentinel):
+        dot = dot + "  empty [label=\"Empty\"];\n"
+    else:
+        dot = tree_to_dot_helper(root, nil_sentinel, dot, 0).0
+
+    dot + "}\n"
+
+# DOT format helper
+# Returns (dot_string, next_id)
+fn tree_to_dot_helper(node, nil_sentinel, dot, node_id):
+    if is_nil_node(node, nil_sentinel):
+        (dot, node_id)
+    else:
+        val value = node_value(node)
+        val color = node_color(node)
+        val color_str = if color == RED:
+            "red"
+        else:
+            "black"
+        val text_color = if color == RED:
+            "white"
+        else:
+            "white"
+
+        var new_dot = dot + "  n{node_id} [label=\"{value}\", fillcolor={color_str}, fontcolor={text_color}];\n"
+
+        val left = node_left(node)
+        val right = node_right(node)
+
+        # Process left child
+        val left_id = node_id + 1
+        val left_result = tree_to_dot_helper(left, nil_sentinel, new_dot, left_id)
+        new_dot = left_result.0
+        var next_id = left_result.1
+
+        if is_nil_node(left, nil_sentinel) == false:
+            new_dot = new_dot + "  n{node_id} -> n{left_id};\n"
+        else:
+            ()
+
+        # Process right child
+        val right_id = next_id
+        val right_result = tree_to_dot_helper(right, nil_sentinel, new_dot, right_id)
+        new_dot = right_result.0
+        next_id = right_result.1
+
+        if is_nil_node(right, nil_sentinel) == false:
+            new_dot = new_dot + "  n{node_id} -> n{right_id};\n"
+        else:
+            ()
+
+        (new_dot, next_id)
+
+# ============================================================================
+# BULK OPERATIONS
+# ============================================================================
+
+# Build tree from sorted array (efficient O(n) construction)
+fn build_from_sorted_array(arr):
+    val len = arr.len
+    if len == 0:
+        create_rbtree()
+    else:
+        val nil_sentinel = nil_node()
+        val root = build_balanced_helper(arr, 0, len - 1, nil_sentinel, 0)
+        var tree = (root, len, nil_sentinel)
+
+        # Color nodes to maintain Red-Black properties
+        val colored_root = color_tree_helper(root, nil_sentinel, true)
+        set_tree_root(tree, colored_root)
+
+# Build balanced tree from sorted array
+fn build_balanced_helper(arr, start, end, nil_sentinel, depth):
+    if start > end:
+        nil_sentinel
+    else:
+        val mid = start + (end - start) / 2
+        val value = arr[mid]
+
+        val left = build_balanced_helper(arr, start, mid - 1, nil_sentinel, depth + 1)
+        val right = build_balanced_helper(arr, mid + 1, end, nil_sentinel, depth + 1)
+
+        # Create node (color assigned later)
+        val node = create_node(value, BLACK, left, right, nil_sentinel)
+
+        # Set parent references
+        var new_node = node
+        if is_nil_node(left, nil_sentinel) == false:
+            val updated_left = set_node_parent(left, new_node)
+            new_node = set_node_left(new_node, updated_left)
+        else:
+            ()
+
+        if is_nil_node(right, nil_sentinel) == false:
+            val updated_right = set_node_parent(right, new_node)
+            new_node = set_node_right(new_node, updated_right)
+        else:
+            ()
+
+        new_node
+
+# Color tree to maintain Red-Black properties
+fn color_tree_helper(node, nil_sentinel, is_root):
+    if is_nil_node(node, nil_sentinel):
+        nil_sentinel
+    else:
+        # Root and every other level should be black
+        val color = if is_root:
+            BLACK
+        else:
+            RED  # Simplified coloring
+
+        var colored = set_node_color(node, color)
+
+        val left = node_left(colored)
+        val right = node_right(colored)
+
+        val new_left = color_tree_helper(left, nil_sentinel, false)
+        val new_right = color_tree_helper(right, nil_sentinel, false)
+
+        colored = set_node_left(colored, new_left)
+        set_node_right(colored, new_right)
+
+# ============================================================================
+# COMPARISON AND SET OPERATIONS
+# ============================================================================
+
+# Check if two trees contain the same values
+fn trees_equal(tree1, tree2):
+    val list1 = rb_to_list(tree1)
+    val list2 = rb_to_list(tree2)
+    list1 == list2
+
+# Check if tree1 is subset of tree2
+fn is_subset(tree1, tree2):
+    val values = rb_to_list(tree1)
+    all_contained(values, tree2)
+
+# Check if all values are in tree
+fn all_contained(values, tree):
+    if values == []:
+        true
+    else:
+        val first = values.0
+        val rest = values[1:]
+        val found = rb_search(tree, first)
+        if found:
+            all_contained(rest, tree)
+        else:
+            false
+
+# Union of two trees
+fn rb_union(tree1, tree2):
+    val values2 = rb_to_list(tree2)
+    rb_insert_many(tree1, values2)
+
+# Intersection of two trees
+fn rb_intersection(tree1, tree2):
+    val values1 = rb_to_list(tree1)
+    val common = filter_contained(values1, tree2)
+    rb_insert_many(create_rbtree(), common)
+
+# Filter values that are in tree
+fn filter_contained(values, tree):
+    if values == []:
+        []
+    else:
+        val first = values.0
+        val rest = values[1:]
+        val rest_filtered = filter_contained(rest, tree)
+        val found = rb_search(tree, first)
+        if found:
+            [first] + rest_filtered
+        else:
+            rest_filtered
+
+# Difference (values in tree1 but not in tree2)
+fn rb_difference(tree1, tree2):
+    val values1 = rb_to_list(tree1)
+    val diff = filter_not_contained(values1, tree2)
+    rb_insert_many(create_rbtree(), diff)
+
+# Filter values not in tree
+fn filter_not_contained(values, tree):
+    if values == []:
+        []
+    else:
+        val first = values.0
+        val rest = values[1:]
+        val rest_filtered = filter_not_contained(rest, tree)
+        val found = rb_search(tree, first)
+        if found:
+            rest_filtered
+        else:
+            [first] + rest_filtered

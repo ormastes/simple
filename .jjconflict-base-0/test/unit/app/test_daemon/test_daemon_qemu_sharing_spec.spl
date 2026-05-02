@@ -1,0 +1,262 @@
+# Test Daemon QEMU Session Sharing Specification
+#
+# Tests QEMU session sharing patterns using the real QemuBroker:
+# session pooling, acquire/release cycles, multi-arch sessions,
+# binary hash matching, eviction under pressure, and warm session reuse.
+#
+# **Feature IDs:** #TDMN-031 to #TDMN-050
+# **Category:** Infrastructure
+
+use std.spec.{describe, it, expect, before_each}
+use app.test_daemon.qemu_broker.{
+    QemuBroker, QemuSessionEntry, qemu_broker_new,
+    QEMU_IDLE, QEMU_IN_USE, QEMU_STALE
+}
+
+# ============================================================================
+# Module-level mutable broker — reset before each test group
+# ============================================================================
+
+var broker = qemu_broker_new(6)
+
+fn reset_broker():
+    broker = qemu_broker_new(6)
+
+fn reset_broker_with_max(n: i64):
+    broker = qemu_broker_new(n)
+
+# ============================================================================
+# Helper functions (avoid closure mutation in it blocks)
+# ============================================================================
+
+fn acquire_and_release(arch: text, binary: text) -> text:
+    val entry = broker.acquire(arch, binary)
+    broker.release(entry.session_key)
+    entry.session_key
+
+fn acquire_n_and_release(arch: text, binary: text, n: i64) -> text:
+    var key = ""
+    var i: i64 = 0
+    while i < n:
+        val entry = broker.acquire(arch, binary)
+        key = entry.session_key
+        broker.release(key)
+        i = i + 1
+    key
+
+fn find_session_status(key: text) -> i64:
+    var i = 0
+    while i < broker.sessions.len():
+        if broker.sessions[i].session_key == key:
+            return broker.sessions[i].status
+        i = i + 1
+    -1
+
+fn find_session_test_count(key: text) -> i64:
+    var i = 0
+    while i < broker.sessions.len():
+        if broker.sessions[i].session_key == key:
+            return broker.sessions[i].test_count
+        i = i + 1
+    0
+
+fn find_session_exists(key: text) -> bool:
+    var i = 0
+    while i < broker.sessions.len():
+        if broker.sessions[i].session_key == key:
+            return true
+        i = i + 1
+    false
+
+fn total_session_count() -> i64:
+    broker.sessions.len()
+
+fn acquire_multi_arch() -> [text]:
+    var keys: [text] = []
+    val e1 = broker.acquire("arm64", "/bin/arm64_test")
+    keys = keys + [e1.session_key]
+    val e2 = broker.acquire("riscv64", "/bin/riscv64_test")
+    keys = keys + [e2.session_key]
+    val e3 = broker.acquire("x86_64", "/bin/x86_64_test")
+    keys = keys + [e3.session_key]
+    val e4 = broker.acquire("arm32", "/bin/arm32_test")
+    keys = keys + [e4.session_key]
+    keys
+
+fn sequential_reuse_cycle(arch: text, binary: text, n: i64) -> i64:
+    # Acquire then release n times — session should be reused
+    var i: i64 = 0
+    while i < n:
+        val entry = broker.acquire(arch, binary)
+        broker.release(entry.session_key)
+        i = i + 1
+    val entry = broker.acquire(arch, binary)
+    val tc = entry.test_count
+    broker.release(entry.session_key)
+    tc
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "QEMU Session Sharing":
+    describe "read-only sharing via pooling":
+        it "acquires session and marks it in-use":
+            reset_broker()
+            val entry = broker.acquire("arm64", "/bin/test")
+            expect(total_session_count()).to_equal(1)
+            expect(entry.status).to_equal(QEMU_IN_USE)
+            expect(entry.arch).to_equal("arm64")
+
+        it "reuses idle session with same key":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test")
+            val key = e1.session_key
+            broker.release(key)
+            expect(find_session_status(key)).to_equal(QEMU_IDLE)
+            val e2 = broker.acquire("arm64", "/bin/test")
+            expect(total_session_count()).to_equal(1)
+            expect(e2.session_key).to_equal(key)
+            expect(e2.test_count).to_equal(2)
+
+        it "session becomes idle after release":
+            reset_broker()
+            val entry = broker.acquire("arm64", "/bin/test")
+            val key = entry.session_key
+            expect(find_session_status(key)).to_equal(QEMU_IN_USE)
+            broker.release(key)
+            expect(find_session_status(key)).to_equal(QEMU_IDLE)
+
+        it "tracks test count across reuse cycles":
+            reset_broker()
+            val key = acquire_n_and_release("arm64", "/bin/test", 4)
+            # After 4 acquire+release cycles, acquiring once more gives test_count=5
+            val entry = broker.acquire("arm64", "/bin/test")
+            expect(entry.test_count).to_equal(5)
+
+    describe "exclusive session patterns":
+        it "in-use session is not reused for new acquire":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test")
+            # Session is IN_USE, so next acquire with same key creates new one
+            val e2 = broker.acquire("arm64", "/bin/test")
+            expect(total_session_count()).to_equal(2)
+
+        it "active count tracks in-use sessions":
+            reset_broker()
+            broker.acquire("arm64", "/bin/test_a")
+            broker.acquire("arm64", "/bin/test_b")
+            expect(broker.active_count()).to_equal(2)
+            expect(broker.idle_count()).to_equal(0)
+
+        it "release reduces active and increases idle":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test")
+            expect(broker.active_count()).to_equal(1)
+            broker.release(e1.session_key)
+            expect(broker.active_count()).to_equal(0)
+            expect(broker.idle_count()).to_equal(1)
+
+    describe "multi-architecture":
+        it "creates separate sessions per architecture":
+            reset_broker()
+            val keys = acquire_multi_arch()
+            expect(total_session_count()).to_equal(4)
+            # All keys should be different
+            expect(keys[0] != keys[1]).to_equal(true)
+            expect(keys[1] != keys[2]).to_equal(true)
+            expect(keys[2] != keys[3]).to_equal(true)
+
+        it "same arch different binary creates separate sessions":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test_a")
+            val e2 = broker.acquire("arm64", "/bin/test_b")
+            expect(total_session_count()).to_equal(2)
+            expect(e1.session_key != e2.session_key).to_equal(true)
+
+        it "same arch same binary reuses idle session":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/test")
+            broker.release(e1.session_key)
+            val e2 = broker.acquire("arm64", "/bin/test")
+            expect(total_session_count()).to_equal(1)
+            expect(e2.session_key).to_equal(e1.session_key)
+
+    describe "eviction with sharing":
+        it "evicts oldest idle under pressure":
+            reset_broker_with_max(2)
+            val e1 = broker.acquire("a", "/bin/a1")
+            val k1 = e1.session_key
+            broker.release(k1)
+            val e2 = broker.acquire("b", "/bin/b2")
+            val k2 = e2.session_key
+            broker.release(k2)
+            # At max (2), acquiring new should evict oldest idle (k1)
+            val e3 = broker.acquire("c", "/bin/c3")
+            expect(total_session_count()).to_equal(2)
+            expect(find_session_exists(k1)).to_equal(false)
+
+        it "does not evict in-use sessions":
+            reset_broker_with_max(2)
+            # Two in-use sessions, can't evict either
+            val e1 = broker.acquire("a", "/bin/a1")
+            val e2 = broker.acquire("b", "/bin/b2")
+            # Exceeds max but nothing to evict
+            val e3 = broker.acquire("c", "/bin/c3")
+            expect(total_session_count()).to_equal(3)
+
+    describe "session reuse":
+        it "reuses session across sequential tests":
+            reset_broker()
+            val tc = sequential_reuse_cycle("arm64", "/bin/test", 5)
+            expect(total_session_count()).to_equal(1)
+            # 5 cycles + 1 final acquire = 6
+            expect(tc).to_equal(6)
+
+        it "session key is deterministic for same inputs":
+            reset_broker()
+            val e1 = broker.acquire("arm64", "/bin/same")
+            val k1 = e1.session_key
+            broker.release(k1)
+            broker.shutdown_all()
+            val e2 = broker.acquire("arm64", "/bin/same")
+            expect(e2.session_key).to_equal(k1)
+
+    describe "cleanup with shared sessions":
+        it "keeps in-use sessions during cleanup":
+            reset_broker()
+            val entry = broker.acquire("arm64", "/bin/test")
+            # cleanup_idle uses rt_time_now_unix_micros internally;
+            # with timeout_ms=0, only idle sessions older than 0ms are cleaned
+            broker.cleanup_idle(0)
+            expect(total_session_count()).to_equal(1)
+            expect(find_session_status(entry.session_key)).to_equal(QEMU_IN_USE)
+
+        it "shutdown removes all sessions":
+            reset_broker()
+            broker.acquire("arm64", "/bin/a")
+            broker.acquire("riscv64", "/bin/b")
+            broker.acquire("x86_64", "/bin/c")
+            expect(total_session_count()).to_equal(3)
+            broker.shutdown_all()
+            expect(total_session_count()).to_equal(0)
+
+    describe "pool lifecycle":
+        it "full cycle: acquire, use, release, reuse, shutdown":
+            reset_broker()
+            # Acquire
+            val e1 = broker.acquire("arm64", "/bin/test")
+            val key = e1.session_key
+            expect(broker.active_count()).to_equal(1)
+            # Release
+            broker.release(key)
+            expect(broker.idle_count()).to_equal(1)
+            # Reuse
+            val e2 = broker.acquire("arm64", "/bin/test")
+            expect(e2.session_key).to_equal(key)
+            expect(e2.test_count).to_equal(2)
+            # Release again
+            broker.release(key)
+            # Shutdown
+            broker.shutdown_all()
+            expect(total_session_count()).to_equal(0)

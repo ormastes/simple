@@ -1,0 +1,103 @@
+"""
+# Orchestrator
+
+Tests for orchestrator functionality.
+"""
+#![allow(unnamed_duplicate_typed_args)]
+# Agent Orchestrator — Unit Tests
+#
+# @parent test/system/agent_orchestrator_spec.spl
+# @req agent_orchestrator
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_list(path: text) -> [text]
+
+# ============================================================================
+# Functions under test (inlined for interpreter mode)
+# ============================================================================
+
+fn _provider_binary(provider: text) -> text:
+    if provider == "codex_cli":
+        return "codex"
+    elif provider == "gemini_cli":
+        return "gemini"
+    ""
+
+fn _build_args(provider: text, system_prompt: text, prompt: text) -> [text]:
+    val combined = system_prompt + "\n\n" + prompt
+    var args: [text] = []
+    if provider == "codex_cli":
+        args = args + ["exec", combined]
+    elif provider == "gemini_cli":
+        args = args + ["-p", combined, "--yolo"]
+    args
+
+fn _result_path(agent_id: text) -> text:
+    "data/agents/" + agent_id + ".txt"
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Agent Orchestrator":
+    """
+    ## Agent Orchestrator Tests
+
+    Validates Agent Orchestrator functionality.
+    """
+
+
+    describe "provider resolution":
+        it "resolves codex_cli to codex binary":
+            expect(_provider_binary("codex_cli")).to_equal("codex")
+
+        it "resolves gemini_cli to gemini binary":
+            expect(_provider_binary("gemini_cli")).to_equal("gemini")
+
+        it "returns empty for unknown provider":
+            expect(_provider_binary("unknown")).to_equal("")
+
+    describe "argument building":
+        it "builds codex args with exec subcommand":
+            val args = _build_args("codex_cli", "sys", "prompt")
+            expect(args.len()).to_equal(2)
+            expect(args[0]).to_equal("exec")
+            expect(args[1]).to_contain("sys")
+            expect(args[1]).to_contain("prompt")
+
+        it "builds gemini args with -p and yolo flags":
+            val args = _build_args("gemini_cli", "sys", "prompt")
+            expect(args[0]).to_equal("-p")
+            expect(args[1]).to_contain("sys")
+            expect(args[1]).to_contain("prompt")
+            expect(args[2]).to_equal("--yolo")
+
+        it "combines system prompt and prompt content":
+            val args = _build_args("codex_cli", "system", "user prompt")
+            expect(args[1]).to_contain("system")
+            expect(args[1]).to_contain("user prompt")
+
+        it "returns empty args for unknown provider":
+            val args = _build_args("unknown", "sys", "prompt")
+            expect(args.len()).to_equal(0)
+
+    describe "result path":
+        it "constructs path from agent ID":
+            val path = _result_path("codex_cli_verify_123")
+            expect(path).to_equal("data/agents/codex_cli_verify_123.txt")
+
+    describe "result storage round-trip":
+        it "saves and loads a result":
+            val test_dir = "data/agents"
+            rt_dir_create_all(test_dir)
+            val test_id = "test_roundtrip_001"
+            val test_content = "provider: codex_cli\nrole: verify\nexit_code: 0\n---\nPASS"
+            rt_file_write_text(_result_path(test_id), test_content)
+            val loaded = (rt_file_read_text(_result_path(test_id))) ?? ""
+            expect(loaded).to_contain("provider: codex_cli")
+            expect(loaded).to_contain("PASS")

@@ -1,0 +1,332 @@
+# ECDSA P-256 Signing, Verification, and SSH mpint Conversion
+#
+# Thin wrappers over the rt_ecdsa_p256_* FFI externs declared in
+# src/lib/nogc_sync_mut/io/signature_ffi.spl, plus pure-Simple helpers
+# for converting between the 64-byte fixed r||s form and the SSH wire
+# format (mpint r + mpint s per RFC 4251 §5).
+#
+# Key format:
+#   - Signing:      PKCS#8 v1 DER-encoded ECDSA P-256 private key
+#   - Verification: SubjectPublicKeyInfo (SPKI) DER-encoded P-256 public key
+#
+# Signature formats:
+#   - fixed64: 64-byte concatenation r||s (32 bytes each, big-endian).
+#   - SSH wire: mpint r followed by mpint s (RFC 4251 §5, RFC 5656).
+#
+# Non-deterministic: ECDSA P-256 uses a random nonce each call.
+# Hosted-only: requires the runtime crypto backend.
+#
+# Reference: RFC 5656 (ECDSA in SSH)
+# Reference: RFC 4251 §5 (SSH mpint encoding)
+# Reference: RFC 6979 (NOT used — standard random nonce)
+
+use std.nogc_sync_mut.io.signature_ffi.{rt_ecdsa_p256_sign, rt_ecdsa_p256_verify}
+
+# ============================================================================
+# Sign / Verify (fixed-width 64-byte r||s)
+# ============================================================================
+
+fn ecdsa_p256_sign_fixed(pkcs8: [u8], message: [u8]) -> [u8]:
+    """Sign `message` with ECDSA P-256 SHA-256; returns 64-byte r||s.
+
+    Args:
+        pkcs8:   PKCS#8 v1 DER-encoded ECDSA P-256 private key.
+        message: Arbitrary byte sequence to sign.
+
+    Returns:
+        64-byte fixed-width r||s (32-byte big-endian r, 32-byte big-endian s).
+        Returns an empty array on any error (malformed key, runtime failure).
+
+    Non-deterministic: a fresh random nonce is used each call.
+    For SSH wire format convert the result with fixed64_to_ssh_mpint_pair().
+    Hosted-only.
+    """
+    rt_ecdsa_p256_sign(pkcs8, message)
+
+fn ecdsa_p256_verify_fixed(spki_der: [u8], message: [u8], signature_fixed64: [u8]) -> bool:
+    """Verify a 64-byte r||s ECDSA P-256 SHA-256 signature.
+
+    Args:
+        spki_der:         DER-encoded ECDSA P-256 public key (SPKI).
+        message:          Message bytes that were signed.
+        signature_fixed64: 64-byte r||s form (NOT the SSH mpint pair).
+                           Convert SSH wire format first with ssh_mpint_pair_to_fixed64().
+
+    Returns: true if the signature is valid, false otherwise.
+    """
+    val result = rt_ecdsa_p256_verify(spki_der, message, signature_fixed64)
+    result == 1
+
+# ============================================================================
+# SSH mpint helpers (pure Simple, no FFI)
+# ============================================================================
+
+fn _encode_mpint(component: [u8]) -> [u8]:
+    """Encode a 32-byte big-endian integer as an SSH mpint (RFC 4251 §5).
+
+    Strips leading zero bytes but keeps at least one byte (for the value 0).
+    Prepends a 0x00 byte if the high bit of the first magnitude byte is set
+    (to keep the encoding positive).
+    Prefixes the result with a 4-byte big-endian length.
+    """
+    # Find first non-zero byte index
+    var first_nonzero: i64 = 32
+    var i: i64 = 0
+    while i < 32:
+        if component[i] != 0:
+            if first_nonzero == 32:
+                first_nonzero = i
+        i = i + 1
+
+    # If all zeros, encode as zero-length mpint (value 0)
+    # RFC 4251 §5: zero is represented as empty magnitude.
+    var mag: [u8] = []
+    if first_nonzero == 32:
+        # value is zero — magnitude is empty, length prefix is 0
+        mag = []
+    else:
+        # Copy magnitude bytes starting from first_nonzero
+        var j: i64 = first_nonzero
+        while j < 32:
+            mag.push(component[j])
+            j = j + 1
+        # If high bit is set, prepend 0x00 to keep it positive
+        if (mag[0] & 0x80) != 0:
+            var padded: [u8] = []
+            padded.push(0)
+            var k: i64 = 0
+            while k < mag.len():
+                padded.push(mag[k])
+                k = k + 1
+            mag = padded
+
+    # Build result: 4-byte big-endian length + magnitude
+    var result: [u8] = []
+    val mlen: i64 = mag.len()
+    result.push(((mlen >> 24) & 0xFF).to_u8())
+    result.push(((mlen >> 16) & 0xFF).to_u8())
+    result.push(((mlen >> 8) & 0xFF).to_u8())
+    result.push((mlen & 0xFF).to_u8())
+    var m: i64 = 0
+    while m < mlen:
+        result.push(mag[m])
+        m = m + 1
+    result
+
+fn fixed64_to_ssh_mpint_pair(sig: [u8]) -> [u8]:
+    """Convert a 64-byte r||s ECDSA signature to SSH mpint pair wire format.
+
+    Each of r and s is a 32-byte big-endian integer. The SSH wire format
+    (RFC 4251 §5, RFC 5656) encodes each as an mpint:
+      - 4-byte big-endian length prefix
+      - magnitude bytes (minimum length; leading 0x00 if high bit would be set)
+
+    The pair is concatenated: [mpint r][mpint s].
+
+    Args:
+        sig: 64-byte r||s fixed-width signature. Returns empty [] if len != 64.
+
+    Returns: SSH wire encoding of r and s, or empty [] on bad input.
+
+    Pure Simple — no FFI. Inverse of ssh_mpint_pair_to_fixed64().
+    """
+    if sig.len() != 64:
+        return []
+
+    # Extract r (bytes 0..31) and s (bytes 32..63)
+    var r_bytes: [u8] = []
+    var s_bytes: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        r_bytes.push(sig[i])
+        i = i + 1
+    while i < 64:
+        s_bytes.push(sig[i])
+        i = i + 1
+
+    val r_enc = _encode_mpint(r_bytes)
+    val s_enc = _encode_mpint(s_bytes)
+
+    var result: [u8] = []
+    var j: i64 = 0
+    while j < r_enc.len():
+        result.push(r_enc[j])
+        j = j + 1
+    var k: i64 = 0
+    while k < s_enc.len():
+        result.push(s_enc[k])
+        k = k + 1
+    result
+
+fn _read_mpint_component(blob: [u8], offset: i64) -> [u8]:
+    """Read one mpint from `blob` starting at `offset`.
+
+    Returns the raw magnitude bytes (possibly with leading 0x00 stripped),
+    or an empty sentinel indicating parse failure. Sentinel for failure:
+    returns a [u8] of length 33 filled with 0xFF (impossible for valid P-256).
+
+    On success, the caller strips the leading 0x00 padding byte if present,
+    then left-pads to 32 bytes.
+
+    This is an internal helper — do not call from outside this module.
+    """
+    # Need at least 4 bytes for the length prefix
+    if blob.len() - offset < 4:
+        # Return failure sentinel: 33 bytes of 0xFF
+        var fail: [u8] = []
+        var fi: i64 = 0
+        while fi < 33:
+            fail.push(0xFF)
+            fi = fi + 1
+        return fail
+
+    val b0: i64 = blob[offset].to_i64()
+    val b1: i64 = blob[offset + 1].to_i64()
+    val b2: i64 = blob[offset + 2].to_i64()
+    val b3: i64 = blob[offset + 3].to_i64()
+    val mlen: i64 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+    # Sanity: mpint for a P-256 component is at most 33 bytes (32 + optional 0x00)
+    if mlen < 0 or mlen > 33:
+        var fail: [u8] = []
+        var fi: i64 = 0
+        while fi < 33:
+            fail.push(0xFF)
+            fi = fi + 1
+        return fail
+
+    if blob.len() - (offset + 4) < mlen:
+        var fail: [u8] = []
+        var fi: i64 = 0
+        while fi < 33:
+            fail.push(0xFF)
+            fi = fi + 1
+        return fail
+
+    var mag: [u8] = []
+    var i: i64 = offset + 4
+    val end: i64 = offset + 4 + mlen
+    while i < end:
+        mag.push(blob[i])
+        i = i + 1
+    mag
+
+fn _is_failure_sentinel(b: [u8]) -> bool:
+    """Return true if b is the 33-byte 0xFF failure sentinel from _read_mpint_component."""
+    if b.len() != 33:
+        return false
+    var i: i64 = 0
+    while i < 33:
+        if b[i] != 0xFF:
+            return false
+        i = i + 1
+    true
+
+fn _mpint_bytes_consumed(blob: [u8], offset: i64) -> i64:
+    """Return the total byte count consumed by one mpint at `offset` in `blob`.
+
+    Returns -1 on failure (same conditions as _read_mpint_component).
+    """
+    if blob.len() - offset < 4:
+        return -1
+    val b0: i64 = blob[offset].to_i64()
+    val b1: i64 = blob[offset + 1].to_i64()
+    val b2: i64 = blob[offset + 2].to_i64()
+    val b3: i64 = blob[offset + 3].to_i64()
+    val mlen: i64 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    if mlen < 0 or mlen > 33:
+        return -1
+    if blob.len() - (offset + 4) < mlen:
+        return -1
+    4 + mlen
+
+fn _normalize_component(mag: [u8]) -> [u8]:
+    """Strip optional leading 0x00 and left-pad to exactly 32 bytes.
+
+    RFC 4251 §5: mpint may have a leading 0x00 to keep the sign bit clear.
+    For P-256, the true value is at most 32 bytes. Returns [] on bad input
+    (magnitude > 33 bytes, or > 32 bytes after stripping the padding byte).
+    """
+    var stripped: [u8] = []
+    if mag.len() == 33:
+        # Leading byte must be 0x00 (sign-extension pad)
+        if mag[0] != 0:
+            return []
+        var i: i64 = 1
+        while i < 33:
+            stripped.push(mag[i])
+            i = i + 1
+    elif mag.len() <= 32:
+        var i: i64 = 0
+        while i < mag.len():
+            stripped.push(mag[i])
+            i = i + 1
+    else:
+        return []
+
+    # Left-pad stripped to 32 bytes
+    var result: [u8] = []
+    val pad_count: i64 = 32 - stripped.len()
+    var p: i64 = 0
+    while p < pad_count:
+        result.push(0)
+        p = p + 1
+    var q: i64 = 0
+    while q < stripped.len():
+        result.push(stripped[q])
+        q = q + 1
+    result
+
+fn ssh_mpint_pair_to_fixed64(blob: [u8]) -> [u8]:
+    """Convert SSH mpint pair (r then s) wire encoding to 64-byte r||s.
+
+    Parses two consecutive mpints from `blob` per RFC 4251 §5, strips any
+    leading 0x00 padding byte, and left-pads each to 32 bytes.
+
+    Args:
+        blob: SSH wire bytes containing [mpint r][mpint s].
+
+    Returns:
+        64-byte r||s fixed-width form, or empty [] on any malformed input
+        (wrong length prefix, component too large, extra trailing bytes, etc.).
+
+    Pure Simple — no FFI. Inverse of fixed64_to_ssh_mpint_pair().
+    """
+    # Parse r
+    val r_size = _mpint_bytes_consumed(blob, 0)
+    if r_size < 0:
+        return []
+    val r_mag = _read_mpint_component(blob, 0)
+    if _is_failure_sentinel(r_mag):
+        return []
+
+    # Parse s starting right after r
+    val s_offset: i64 = r_size
+    val s_size = _mpint_bytes_consumed(blob, s_offset)
+    if s_size < 0:
+        return []
+    val s_mag = _read_mpint_component(blob, s_offset)
+    if _is_failure_sentinel(s_mag):
+        return []
+
+    # Ensure we consumed the entire blob (no trailing garbage)
+    if s_offset + s_size != blob.len():
+        return []
+
+    val r32 = _normalize_component(r_mag)
+    if r32.len() != 32:
+        return []
+    val s32 = _normalize_component(s_mag)
+    if s32.len() != 32:
+        return []
+
+    var result: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        result.push(r32[i])
+        i = i + 1
+    var j: i64 = 0
+    while j < 32:
+        result.push(s32[j])
+        j = j + 1
+    result

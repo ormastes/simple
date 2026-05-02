@@ -1,0 +1,163 @@
+# @cover src/os/compositor/electron_capture.spl 80%
+# @cover src/os/compositor/qemu_capture.spl 80%
+# @cover src/os/compositor/wm_consistency_runner.spl 80%
+# @cover src/os/compositor/wm_scene.spl 80%
+# @tag: rendering, pixel, bit-identical, unified-renderer, consistency
+#
+# WM Unified Renderer Specification
+#
+# Validates that the unified rendering pipeline produces bit-identical output
+# through both host (Electron) and QEMU capture paths, using
+# BrowserCompositorBackend as the single source of truth.
+
+use std.spec.{describe, context, it, expect}
+use os.compositor.electron_capture.{capture_electron_scene, CaptureResult, display_in_electron}
+use os.compositor.qemu_capture.{capture_qemu_inprocess}
+use os.compositor.wm_scene.{standard_wm_scene, render_scene_to_backend, scene_to_html}
+use os.compositor.screenshot_compare.{compare_exact}
+use os.compositor.wm_consistency_runner.{run_consistency_check}
+use os.compositor.tolerance_profile.{profile_strict}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val W: i32 = 800
+val H: i32 = 600
+
+# ============================================================================
+# Test Group 1: Bit-Identical Rendering (AC-2, AC-7)
+# ============================================================================
+
+describe "WmUnifiedRenderer -- bit-identical rendering":
+
+    context "host and QEMU paths":
+
+        it "AC-2,AC-7: host and qemu paths produce identical pixel buffers":
+            # Arrange
+            val scene = standard_wm_scene(W, H)
+
+            # Act — capture through both paths
+            val electron_result = capture_electron_scene(scene)
+            val qemu_result = capture_qemu_inprocess(scene)
+
+            # Assert — compare pixel buffers with exact match (threshold=0)
+            val cmp = compare_exact(
+                electron_result.pixels, qemu_result.pixels, W, H)
+            expect(cmp.different_pixels).to_equal(0)
+
+        it "AC-2: repeated renders are deterministic":
+            # Arrange
+            val scene = standard_wm_scene(W, H)
+
+            # Act — render the same scene twice through the same path
+            val first = capture_qemu_inprocess(scene)
+            val second = capture_qemu_inprocess(scene)
+
+            # Assert — identical pixel buffers
+            val cmp = compare_exact(first.pixels, second.pixels, W, H)
+            expect(cmp.different_pixels).to_equal(0)
+
+        it "AC-7: different scenes produce different pixels":
+            # Arrange — two scenes with different dimensions
+            val scene_a = standard_wm_scene(W, H)
+            val scene_b = standard_wm_scene(400, 300)
+
+            # Act
+            val result_a = render_scene_to_backend(scene_a, nil)
+            val result_b = render_scene_to_backend(scene_b, nil)
+
+            # Assert — pixel buffers differ (sanity check)
+            val same_len = result_a.len() == result_b.len()
+            expect(same_len).to_equal(false)
+
+# ============================================================================
+# Test Group 2: Unified Capture Path (AC-1)
+# ============================================================================
+
+describe "WmUnifiedRenderer -- unified capture path":
+
+    context "both captures use BrowserCompositorBackend":
+
+        it "AC-1: capture_electron_scene uses BrowserCompositorBackend":
+            # Arrange
+            val scene = standard_wm_scene(W, H)
+
+            # Act
+            val result = capture_electron_scene(scene)
+
+            # Assert — backend_name should be "browser_compositor", not "electron_chromium"
+            expect(result.backend_name).to_equal("browser_compositor")
+
+        it "AC-1: capture_qemu_inprocess uses BrowserCompositorBackend":
+            # Arrange
+            val scene = standard_wm_scene(W, H)
+
+            # Act
+            val result = capture_qemu_inprocess(scene)
+
+            # Assert — backend_name identifies in-process browser compositor
+            expect(result.backend_name).to_equal("browser_compositor")
+
+# ============================================================================
+# Test Group 3: Consistency Runner Bit-Exact Mode (AC-5)
+# ============================================================================
+
+describe "WmUnifiedRenderer -- consistency runner bit-exact mode":
+
+    context "default bit-exact comparison":
+
+        it "AC-5: run_consistency_check defaults to bit-exact comparison":
+            # Arrange
+            val scene = standard_wm_scene(W, H)
+            val profile = profile_strict()
+
+            # Act
+            val report = run_consistency_check(scene, profile)
+
+            # Assert — 100% match and passed
+            expect(report.overall.match_percentage).to_equal(10000)
+            expect(report.passed).to_equal(true)
+
+        it "AC-5: bit-exact mode reports 0 differing pixels":
+            # Arrange
+            val scene = standard_wm_scene(W, H)
+            val profile = profile_strict()
+
+            # Act
+            val report = run_consistency_check(scene, profile)
+
+            # Assert — zero pixel differences
+            expect(report.overall.different_pixels).to_equal(0)
+
+# ============================================================================
+# Test Group 4: Preview Display Path (AC-3, AC-4)
+# ============================================================================
+
+describe "WmUnifiedRenderer -- preview display path":
+
+    context "Electron display-only mode":
+
+        it "AC-3: display_in_electron produces PPM file from pixels":
+            # Arrange — render scene to get pixel buffer
+            val scene = standard_wm_scene(W, H)
+            val pixels = render_scene_to_backend(scene, nil)
+
+            # Act — display sends pre-rendered pixels to Electron
+            val result = display_in_electron(pixels, W, H)
+
+            # Assert — result indicates success and PPM file was created
+            expect(result.success).to_equal(true)
+
+        it "AC-4: scene_to_html still works for preview":
+            # Arrange
+            val scene = standard_wm_scene(W, H)
+
+            # Act
+            val html = scene_to_html(scene)
+
+            # Assert — HTML output is non-empty and contains expected markup
+            val has_content = html.len() > 0
+            expect(has_content).to_equal(true)
+            val has_div = html.contains("<div") or html.contains("<DIV")
+            expect(has_div).to_equal(true)

@@ -1,0 +1,105 @@
+# Process management wrappers around raw syscalls.
+
+use os.userlib.syscall_raw
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+use os.kernel.types.syscall_types(SignalKind)
+use os.kernel.types.syscall_types.{new_task_info_buf}
+
+class ProcessEntry:
+    pid: u64
+    parent_pid: u64
+    state: u8
+    priority: u8
+    name: text
+    memory_pages: u64
+    cpu_ticks: u64
+
+extern fn unsafe_addr_of(ref: any) -> u64
+extern fn rt_string_data(s: text) -> i64
+
+fn getpid() -> u64:
+    val result = syscall(4, 0, 0, 0, 0, 0)
+    result as u64
+
+fn getppid() -> u64:
+    val result = syscall(9, 0, 0, 0, 0, 0)
+    result as u64
+
+fn spawn(entry: u64, priority: u8) -> Result<u64, text>:
+    val result = syscall(2, entry, priority as u64, 0, 0, 0)
+    if result < 0:
+        return Err("spawn failed with code {result}")
+    Ok(result as u64)
+
+fn spawn_binary(path: text, priority: u8) -> Result<u64, text>:
+    val result = syscall(13, rt_string_data(path) as u64, path.len() as u64, priority as u64, 0, 0)
+    if result < 0:
+        return Err("spawn_binary failed with code {result}")
+    Ok(result as u64)
+
+fn wait_(child_pid: u64) -> Result<i32, text>:
+    val result = syscall(3, child_pid, 0, 0, 0, 0)
+    if result < 0:
+        return Err("wait failed with code {result}")
+    Ok(result as i32)
+
+fn exit_(code: i32):
+    syscall(0, code as u64, 0, 0, 0, 0)
+    pass_do_nothing
+
+fn yield_():
+    syscall(1, 0, 0, 0, 0, 0)
+    pass_do_nothing
+
+fn get_task_info(pid: u64) -> Result<ProcessEntry, text>:
+    var buf = new_task_info_buf()
+    var name_buf: [u8] = [0; 128]
+    val result = syscall(6, pid, &buf as u64, &name_buf as u64, 128u64, 0)
+    if result < 0:
+        return Err("get_task_info failed with code {result}")
+    val raw_name_len = buf.name_len as u64
+    val copied_name_len = if raw_name_len < 128u64: raw_name_len else: 128u64
+    Ok(ProcessEntry(
+        pid: buf.pid,
+        parent_pid: buf.parent_pid,
+        state: buf.state,
+        priority: buf.priority,
+        name: bytes_to_string(name_buf.slice(0, copied_name_len)),
+        memory_pages: buf.memory_pages,
+        cpu_ticks: buf.cpu_ticks
+    ))
+
+fn list_tasks() -> Result<[ProcessEntry], text>:
+    var pid_buf: [u64] = []
+    var slot: u64 = 0
+    while slot < 256:
+        pid_buf.push(0)
+        slot = slot + 1
+    val count_result = syscall(5, pid_buf.ptr() as u64, pid_buf.len() as u64, 0, 0, 0)
+    if count_result < 0:
+        return Err("list_tasks failed with code {count_result}")
+    val count = count_result as u64
+    var tasks: [ProcessEntry] = []
+    var i: u64 = 0
+    val limit = if count < pid_buf.len() as u64: count else: pid_buf.len() as u64
+    while i < limit:
+        val info = get_task_info(pid_buf[i])
+        if val Ok(entry) = info:
+            tasks.push(entry)
+        i = i + 1
+    Ok(tasks)
+
+fn signal(pid: u64, sig: SignalKind) -> Result<bool, text>:
+    val result = syscall(7, pid, sig as u64, 0, 0, 0)
+    if result < 0:
+        return Err("signal failed with code {result}")
+    Ok(true)
+
+fn kill(pid: u64) -> Result<bool, text>:
+    signal(pid, SignalKind.Term)
+
+fn set_priority(pid: u64, priority: u8) -> Result<bool, text>:
+    val result = syscall(8, pid, priority as u64, 0, 0, 0)
+    if result < 0:
+        return Err("set_priority failed with code {result}")
+    Ok(true)

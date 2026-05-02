@@ -1,0 +1,76 @@
+# Tests for cc::Tile — single raster tile in the compositor tile cache.
+
+use std.spipe.*
+use std.lib.cc.entity.tile.{
+    Tile, TileId, TilePriority, TileDrawState,
+    tile_id_new, tile_new
+}
+use std.skia.entity.geometry.{SkRect, sk_rect}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+
+fn _make_tile() -> Tile:
+    val id = tile_id_new(7, 2, 3, 1.0)
+    val rect = sk_rect(0.0, 0.0, 256.0, 256.0)
+    tile_new(id, rect)
+
+describe "Tile":
+    it "tile_new: default priority is Eventually, draw_state is Unrasterized":
+        val t = _make_tile()
+        expect t.priority == TilePriority.Eventually == true
+        expect t.draw_state == TileDrawState.Unrasterized == true
+        expect t.has_raster_task == false
+        expect t.required_for_activation == false
+        expect t.id.layer_id == 7
+        expect t.content_rect.right > 0.0
+
+    it "set_priority: updates priority field":
+        var t = _make_tile()
+        t.set_priority(TilePriority.Now)
+        expect t.priority == TilePriority.Now == true
+        t.set_priority(TilePriority.Soon)
+        expect t.priority == TilePriority.Soon == true
+
+    it "begin_raster: sets InProgress and has_raster_task=true":
+        var t = _make_tile()
+        t.begin_raster()
+        expect t.draw_state == TileDrawState.InProgress == true
+        expect t.has_raster_task == true
+
+    it "complete_raster: sets Ready state with provided bitmap":
+        var t = _make_tile()
+        t.begin_raster()
+        val bmp = Bitmap.zeros(64, 64)
+        t.complete_raster(bmp)
+        expect t.draw_state == TileDrawState.Ready == true
+        expect t.has_raster_task == false
+        expect t.bitmap.width == 64
+        expect t.bitmap.height == 64
+
+    it "fail_raster: sets Failed state":
+        var t = _make_tile()
+        t.begin_raster()
+        t.fail_raster()
+        expect t.draw_state == TileDrawState.Failed == true
+        expect t.has_raster_task == false
+
+    it "is_ready: true only when draw_state is Ready":
+        var t = _make_tile()
+        expect t.is_ready == false
+        t.begin_raster()
+        expect t.is_ready == false
+        val bmp = Bitmap.zeros(32, 32)
+        t.complete_raster(bmp)
+        expect t.is_ready == true
+        # Failed is not Ready
+        var t2 = _make_tile()
+        t2.begin_raster()
+        t2.fail_raster()
+        expect t2.is_ready == false
+
+    it "mark_required_for_activation: updates flag":
+        var t = _make_tile()
+        expect t.required_for_activation == false
+        t.mark_required_for_activation(true)
+        expect t.required_for_activation == true
+        t.mark_required_for_activation(false)
+        expect t.required_for_activation == false

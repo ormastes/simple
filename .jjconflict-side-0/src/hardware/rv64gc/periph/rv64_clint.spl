@@ -1,0 +1,92 @@
+"""
+# RV64 CLINT — Core Local Interruptor
+
+Provides per-hart machine-mode software interrupts (MSIP) and
+timer interrupts (MTIMECMP/MTIME).
+
+CLINT MMIO layout (QEMU virt):
+  0x0000 - 0x3FFF : MSIP registers (4 bytes per hart)
+  0x4000 - 0xBFF7 : MTIMECMP registers (8 bytes per hart)
+  0xBFF8 - 0xBFFF : MTIME register (shared)
+"""
+
+val CLINT_MSIP_BASE: i64 = 0x0000
+val CLINT_MTIMECMP_BASE: i64 = 0x4000
+val CLINT_MTIME_OFFSET: i64 = 0xBFF8
+val MAX_HARTS: i64 = 8
+
+class Rv64Clint:
+    msip: [i64]       # Software interrupt pending per hart
+    mtimecmp: [i64]   # Timer compare per hart
+    mtime: i64        # Global timer
+    num_harts: i64
+
+    static fn create(num_harts: i64) -> Rv64Clint:
+        var msip_arr: [i64] = []
+        var mtimecmp_arr: [i64] = []
+        var i = 0
+        while i < num_harts:
+            msip_arr = msip_arr + [0]
+            mtimecmp_arr = mtimecmp_arr + [0xFFFFFFFFFFFFFFFF]  # Start with max (no timer)
+            i = i + 1
+        Rv64Clint(
+            msip: msip_arr,
+            mtimecmp: mtimecmp_arr,
+            mtime: 0,
+            num_harts: num_harts
+        )
+
+    fn read(offset: i64) -> i64:
+        """Read a CLINT register by offset from CLINT base."""
+        if offset >= CLINT_MSIP_BASE and offset < CLINT_MTIMECMP_BASE:
+            # MSIP register
+            val hartid = (offset - CLINT_MSIP_BASE) / 4
+            if hartid < self.num_harts:
+                self.msip[hartid] and 0x1
+            else:
+                0
+        elif offset >= CLINT_MTIMECMP_BASE and offset < CLINT_MTIME_OFFSET:
+            # MTIMECMP register
+            val hartid = (offset - CLINT_MTIMECMP_BASE) / 8
+            if hartid < self.num_harts:
+                self.mtimecmp[hartid]
+            else:
+                0
+        elif offset == CLINT_MTIME_OFFSET:
+            self.mtime
+        else:
+            0
+
+    me write(offset: i64, value: i64):
+        """Write a CLINT register by offset from CLINT base."""
+        if offset >= CLINT_MSIP_BASE and offset < CLINT_MTIMECMP_BASE:
+            val hartid = (offset - CLINT_MSIP_BASE) / 4
+            if hartid < self.num_harts:
+                self.msip[hartid] = value and 0x1
+        elif offset >= CLINT_MTIMECMP_BASE and offset < CLINT_MTIME_OFFSET:
+            val hartid = (offset - CLINT_MTIMECMP_BASE) / 8
+            if hartid < self.num_harts:
+                self.mtimecmp[hartid] = value
+        elif offset == CLINT_MTIME_OFFSET:
+            self.mtime = value
+
+    me tick():
+        """Advance the global timer by one tick."""
+        self.mtime = self.mtime + 1
+
+    fn get_msip(hartid: i64) -> bool:
+        """Check if MSIP is pending for a hart."""
+        if hartid < self.num_harts:
+            (self.msip[hartid] and 1) != 0
+        else:
+            false
+
+    fn get_mtip(hartid: i64) -> bool:
+        """Check if timer interrupt is pending for a hart (mtime >= mtimecmp)."""
+        if hartid < self.num_harts:
+            self.mtime >= self.mtimecmp[hartid]
+        else:
+            false
+
+    fn get_mtime() -> i64:
+        self.mtime

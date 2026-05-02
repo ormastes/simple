@@ -1,0 +1,562 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Flattened Device Tree (FDT/DTB) Parser
+#
+# Parses the Device Tree Blob passed by OpenSBI in register a1.
+# Extracts device addresses for UART, PLIC, CLINT, and RAM from the
+# standard QEMU virt device tree nodes.
+#
+# FDT binary format (big-endian on RISC-V):
+#   Header (40 bytes): magic, totalsize, offsets, version
+#   Memory reservation block
+#   Structure block: nested BEGIN_NODE/END_NODE with PROP tokens
+#   Strings block: null-terminated property name strings
+#
+# Reference: Devicetree Specification v0.4, Chapter 5 (Flattened Devicetree)
+
+use os.kernel.boot.mmio.{mmio_read8}
+
+# ============================================================================
+# FDT Constants
+# ============================================================================
+
+val FDT_MAGIC: u32 = 0xD00DFEED
+
+# Structure block tokens
+val FDT_BEGIN_NODE: u32 = 0x00000001
+val FDT_END_NODE: u32   = 0x00000002
+val FDT_PROP: u32        = 0x00000003
+val FDT_NOP: u32         = 0x00000004
+val FDT_END: u32         = 0x00000009
+
+# Header field offsets (bytes from DTB base)
+val HDR_MAGIC: u64          = 0
+val HDR_TOTALSIZE: u64      = 4
+val HDR_OFF_DT_STRUCT: u64  = 8
+val HDR_OFF_DT_STRINGS: u64 = 12
+val HDR_OFF_MEM_RSVMAP: u64 = 16
+val HDR_VERSION: u64        = 20
+val HDR_LAST_COMP_VER: u64  = 24
+val HDR_BOOT_CPUID: u64     = 28
+val HDR_SIZE_DT_STRINGS: u64 = 32
+val HDR_SIZE_DT_STRUCT: u64  = 36
+
+# Minimum supported FDT version
+val FDT_MIN_VERSION: u32 = 17
+
+# ============================================================================
+# DtbDeviceInfo — parsed device tree result
+# ============================================================================
+
+struct DtbDeviceInfo:
+    """Parsed device information from a Flattened Device Tree.
+
+    Contains base addresses and sizes for key peripherals discovered
+    from the DTB passed by OpenSBI. If parsing fails, valid is false
+    and all fields are zero.
+    """
+    uart_base: u64
+    uart_size: u64
+    plic_base: u64
+    plic_size: u64
+    clint_base: u64
+    clint_size: u64
+    ram_base: u64
+    ram_size: u64
+    hart_count: u32
+    valid: bool
+
+fn dtb_device_info_empty() -> DtbDeviceInfo:
+    """Return a zeroed DtbDeviceInfo with valid=false."""
+    DtbDeviceInfo(
+        uart_base: 0, uart_size: 0,
+        plic_base: 0, plic_size: 0,
+        clint_base: 0, clint_size: 0,
+        ram_base: 0, ram_size: 0,
+        hart_count: 0, valid: false
+    )
+
+# ============================================================================
+# FDT Header
+# ============================================================================
+
+struct FdtHeader:
+    """Parsed FDT header fields."""
+    magic: u32
+    totalsize: u32
+    off_dt_struct: u32
+    off_dt_strings: u32
+    off_mem_rsvmap: u32
+    version: u32
+    last_comp_ver: u32
+    boot_cpuid: u32
+    size_dt_strings: u32
+    size_dt_struct: u32
+
+# ============================================================================
+# Big-Endian Byte Swap Helpers
+# ============================================================================
+#
+# FDT is always big-endian. RISC-V is little-endian.
+# We read individual bytes via MMIO and reconstruct in host order.
+
+fn _read_be_u32(addr: u64) -> u32:
+    """Read a big-endian u32 from memory, returning host-endian value."""
+    val b0 = mmio_read8(addr) as u32
+    val b1 = mmio_read8(addr + 1) as u32
+    val b2 = mmio_read8(addr + 2) as u32
+    val b3 = mmio_read8(addr + 3) as u32
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+fn _read_be_u64(addr: u64) -> u64:
+    """Read a big-endian u64 from memory, returning host-endian value.
+
+    Used for #address-cells=2 / #size-cells=2 reg properties where
+    values are stored as two consecutive big-endian u32 words.
+    """
+    val hi = _read_be_u32(addr) as u64
+    val lo = _read_be_u32(addr + 4) as u64
+    (hi << 32) | lo
+
+# ============================================================================
+# FDT Header Parsing
+# ============================================================================
+
+fn _parse_fdt_header(dtb_addr: u64) -> FdtHeader?:
+    """Parse the 40-byte FDT header from memory.
+
+    Returns nil if magic number is wrong or version is too old.
+    """
+    val magic = _read_be_u32(dtb_addr + HDR_MAGIC)
+    if magic != FDT_MAGIC:
+        return nil
+
+    val version = _read_be_u32(dtb_addr + HDR_VERSION)
+    if version < FDT_MIN_VERSION:
+        return nil
+
+    FdtHeader(
+        magic: magic,
+        totalsize: _read_be_u32(dtb_addr + HDR_TOTALSIZE),
+        off_dt_struct: _read_be_u32(dtb_addr + HDR_OFF_DT_STRUCT),
+        off_dt_strings: _read_be_u32(dtb_addr + HDR_OFF_DT_STRINGS),
+        off_mem_rsvmap: _read_be_u32(dtb_addr + HDR_OFF_MEM_RSVMAP),
+        version: version,
+        last_comp_ver: _read_be_u32(dtb_addr + HDR_LAST_COMP_VER),
+        boot_cpuid: _read_be_u32(dtb_addr + HDR_BOOT_CPUID),
+        size_dt_strings: _read_be_u32(dtb_addr + HDR_SIZE_DT_STRINGS),
+        size_dt_struct: _read_be_u32(dtb_addr + HDR_SIZE_DT_STRUCT)
+    )
+
+# ============================================================================
+# String Comparison Helpers (byte-by-byte, no text type)
+# ============================================================================
+
+fn _mem_str_len(addr: u64) -> u64:
+    """Calculate length of a null-terminated string in memory."""
+    var len: u64 = 0
+    while mmio_read8(addr + len) != 0:
+        len = len + 1
+    len
+
+fn _mem_str_eq(addr: u64, expected: text) -> bool:
+    """Compare a null-terminated string in memory against a text literal.
+
+    The expected string is a Simple text literal. We compare byte-by-byte.
+    """
+    val expected_len = expected.len() as u64
+    var i: u64 = 0
+    while i < expected_len:
+        val mem_byte = mmio_read8(addr + i)
+        val exp_byte = expected.byte_at(i as i64) as u8
+        if mem_byte != exp_byte:
+            return false
+        i = i + 1
+    # The memory string must also be null-terminated at expected_len
+    mmio_read8(addr + expected_len) == 0
+
+fn _mem_str_starts_with(addr: u64, prefix: text) -> bool:
+    """Check if a null-terminated string in memory starts with prefix."""
+    val prefix_len = prefix.len() as u64
+    var i: u64 = 0
+    while i < prefix_len:
+        val mem_byte = mmio_read8(addr + i)
+        val pfx_byte = prefix.byte_at(i as i64) as u8
+        if mem_byte != pfx_byte:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# Node Name Classification
+# ============================================================================
+#
+# QEMU virt DT node names follow the convention "device@hexaddr":
+#   serial@10000000      → UART
+#   plic@c000000         → PLIC (riscv,plic / sifive,plic-1.0.0)
+#   clint@2000000        → CLINT (riscv,clint0 / sifive,clint0)
+#   memory@80000000      → RAM
+#   cpu@0, cpu@1, ...    → CPU harts
+
+enum _NodeKind:
+    """Classification of a device tree node for property extraction."""
+    Root
+    Soc
+    Uart
+    Plic
+    Clint
+    Memory
+    Cpus
+    Cpu
+    Other
+
+fn _classify_node(name_addr: u64) -> _NodeKind:
+    """Classify a DT node by its name prefix."""
+    # Empty name means root node
+    if mmio_read8(name_addr) == 0:
+        return _NodeKind.Root
+
+    if _mem_str_starts_with(name_addr, "soc"):
+        return _NodeKind.Soc
+    if _mem_str_starts_with(name_addr, "serial@"):
+        return _NodeKind.Uart
+    if _mem_str_starts_with(name_addr, "uart@"):
+        return _NodeKind.Uart
+    if _mem_str_starts_with(name_addr, "plic@"):
+        return _NodeKind.Plic
+    if _mem_str_starts_with(name_addr, "interrupt-controller@"):
+        return _NodeKind.Plic
+    if _mem_str_starts_with(name_addr, "clint@"):
+        return _NodeKind.Clint
+    if _mem_str_starts_with(name_addr, "timer@"):
+        return _NodeKind.Clint
+    if _mem_str_starts_with(name_addr, "memory@"):
+        return _NodeKind.Memory
+    if _mem_str_eq(name_addr, "memory"):
+        return _NodeKind.Memory
+    if _mem_str_eq(name_addr, "cpus"):
+        return _NodeKind.Cpus
+    if _mem_str_starts_with(name_addr, "cpu@"):
+        return _NodeKind.Cpu
+
+    _NodeKind.Other
+
+# ============================================================================
+# FDT Structure Block Walker
+# ============================================================================
+#
+# Walk state: we track current offset into the structure block, the node
+# nesting depth, and which "interesting" node we're inside.
+#
+# The walker uses an iterative approach: it reads tokens sequentially
+# and maintains a simple state machine via the _WalkState struct.
+
+struct _WalkState:
+    """Mutable state for the FDT structure block walker."""
+    dtb_addr: u64
+    struct_base: u64
+    strings_base: u64
+    struct_size: u32
+    offset: u64           # Current byte offset within structure block
+    depth: u32            # Nesting depth (0 = root)
+    node_kind: _NodeKind  # Kind of the node we're currently inside
+    parent_kind: _NodeKind # Kind of parent node (for /soc/... nesting)
+    addr_cells: u32       # Current #address-cells (default 2)
+    size_cells: u32       # Current #size-cells (default 2)
+    result: DtbDeviceInfo # Accumulated result
+
+fn _walk_state_new(dtb_addr: u64, hdr: FdtHeader) -> _WalkState:
+    """Create initial walker state from parsed header."""
+    _WalkState(
+        dtb_addr: dtb_addr,
+        struct_base: dtb_addr + (hdr.off_dt_struct as u64),
+        strings_base: dtb_addr + (hdr.off_dt_strings as u64),
+        struct_size: hdr.size_dt_struct,
+        offset: 0,
+        depth: 0,
+        node_kind: _NodeKind.Other,
+        parent_kind: _NodeKind.Other,
+        addr_cells: 2,
+        size_cells: 2,
+        result: dtb_device_info_empty()
+    )
+
+fn _align4(offset: u64) -> u64:
+    """Align offset up to 4-byte boundary."""
+    (offset + 3) & ~3
+
+fn _read_token(state: _WalkState) -> u32:
+    """Read the next u32 token from the structure block."""
+    _read_be_u32(state.struct_base + state.offset)
+
+fn _get_prop_name(state: _WalkState, nameoff: u32) -> u64:
+    """Return the address of a property name in the strings block."""
+    state.strings_base + (nameoff as u64)
+
+# ============================================================================
+# Property Extraction
+# ============================================================================
+
+fn _extract_reg_pair(data_addr: u64, addr_cells: u32, size_cells: u32) -> (u64, u64):
+    """Extract (base, size) from a reg property data blob.
+
+    The reg property encodes address and size as sequences of u32 cells.
+    #address-cells and #size-cells determine how many u32 words make up
+    each part.
+    """
+    var base: u64 = 0
+    var size: u64 = 0
+
+    if addr_cells == 2:
+        base = _read_be_u64(data_addr)
+    else:
+        base = _read_be_u32(data_addr) as u64
+
+    val size_off = (addr_cells as u64) * 4
+    if size_cells == 2:
+        size = _read_be_u64(data_addr + size_off)
+    else if size_cells == 1:
+        size = _read_be_u32(data_addr + size_off) as u64
+    # size_cells == 0 means no size in reg (unusual, leave 0)
+
+    (base, size)
+
+fn _handle_prop(state: _WalkState, prop_len: u32, nameoff: u32, data_addr: u64) -> _WalkState:
+    """Process a single FDT_PROP, updating walk state if relevant.
+
+    We look for:
+    - #address-cells / #size-cells to track cell sizes
+    - reg property on UART, PLIC, CLINT, memory, CPU nodes
+    """
+    var s = state
+    val name_addr = _get_prop_name(s, nameoff)
+
+    # Track #address-cells
+    if _mem_str_eq(name_addr, "#address-cells"):
+        if prop_len >= 4:
+            s.addr_cells = _read_be_u32(data_addr)
+        return s
+
+    # Track #size-cells
+    if _mem_str_eq(name_addr, "#size-cells"):
+        if prop_len >= 4:
+            s.size_cells = _read_be_u32(data_addr)
+        return s
+
+    # Only process "reg" property for device nodes
+    if not _mem_str_eq(name_addr, "reg"):
+        return s
+
+    # Minimum reg data: at least one cell of address
+    if prop_len < 4:
+        return s
+
+    var result = s.result
+
+    match s.node_kind:
+        case _NodeKind.Uart:
+            val pair = _extract_reg_pair(data_addr, s.addr_cells, s.size_cells)
+            if result.uart_base == 0:
+                result.uart_base = pair.0
+                result.uart_size = pair.1
+        case _NodeKind.Plic:
+            val pair = _extract_reg_pair(data_addr, s.addr_cells, s.size_cells)
+            if result.plic_base == 0:
+                result.plic_base = pair.0
+                result.plic_size = pair.1
+        case _NodeKind.Clint:
+            val pair = _extract_reg_pair(data_addr, s.addr_cells, s.size_cells)
+            if result.clint_base == 0:
+                result.clint_base = pair.0
+                result.clint_size = pair.1
+        case _NodeKind.Memory:
+            val pair = _extract_reg_pair(data_addr, s.addr_cells, s.size_cells)
+            if result.ram_base == 0:
+                result.ram_base = pair.0
+                result.ram_size = pair.1
+        case _:
+            pass_dn
+
+    s.result = result
+    s
+
+# ============================================================================
+# FDT Structure Block Walk Loop
+# ============================================================================
+
+fn _walk_structure(state: _WalkState) -> DtbDeviceInfo:
+    """Walk the entire FDT structure block, extracting device info.
+
+    Iterates through tokens (BEGIN_NODE, END_NODE, PROP, NOP, END)
+    maintaining node depth and classification state.
+    """
+    var s = state
+    val max_offset = s.struct_size as u64
+
+    # Safety: track depth stack for node_kind restoration.
+    # We only need to track interesting-node transitions at depth <= 3
+    # (root=0, soc=1, device=2). Use fixed-size arrays as a depth stack.
+    val MAX_DEPTH: u64 = 16
+    var kind_stack: [u32; 16] = [0; 16]  # _NodeKind encoded as u32
+    var addr_cells_stack: [u32; 16] = [2; 16]
+    var size_cells_stack: [u32; 16] = [2; 16]
+
+    while s.offset < max_offset:
+        val token = _read_token(s)
+        s.offset = s.offset + 4
+
+        if token == FDT_BEGIN_NODE:
+            # Node name follows token, null-terminated, padded to 4-byte alignment
+            val name_addr = s.struct_base + s.offset
+            val name_len = _mem_str_len(name_addr)
+            # Advance past name + null byte, then align
+            s.offset = _align4(s.offset + name_len + 1)
+
+            # Save parent state on stack before entering child
+            if (s.depth as u64) < MAX_DEPTH:
+                kind_stack[s.depth as u64] = _node_kind_to_u32(s.node_kind)
+                addr_cells_stack[s.depth as u64] = s.addr_cells
+                size_cells_stack[s.depth as u64] = s.size_cells
+
+            val child_kind = _classify_node(name_addr)
+
+            # Track parent→child nesting for /soc/device@ patterns
+            s.parent_kind = s.node_kind
+            s.node_kind = child_kind
+
+            # Count CPU harts
+            if child_kind == _NodeKind.Cpu:
+                s.result.hart_count = s.result.hart_count + 1
+
+            # Reset cell sizes for new node scope (inherit from parent)
+            # Actual values will be overwritten if node has #address-cells/#size-cells props
+
+            s.depth = s.depth + 1
+
+        else if token == FDT_END_NODE:
+            if s.depth > 0:
+                s.depth = s.depth - 1
+
+            # Restore parent state from stack
+            if (s.depth as u64) < MAX_DEPTH:
+                s.node_kind = _u32_to_node_kind(kind_stack[s.depth as u64])
+                s.addr_cells = addr_cells_stack[s.depth as u64]
+                s.size_cells = size_cells_stack[s.depth as u64]
+                # Restore grandparent as parent_kind
+                if s.depth > 0:
+                    s.parent_kind = _u32_to_node_kind(kind_stack[(s.depth - 1) as u64])
+                else:
+                    s.parent_kind = _NodeKind.Other
+
+        else if token == FDT_PROP:
+            # Property: len (u32), nameoff (u32), then len bytes of data
+            val prop_len = _read_be_u32(s.struct_base + s.offset)
+            val nameoff = _read_be_u32(s.struct_base + s.offset + 4)
+            s.offset = s.offset + 8
+            val data_addr = s.struct_base + s.offset
+
+            s = _handle_prop(s, prop_len, nameoff, data_addr)
+
+            # Advance past property data, aligned to 4 bytes
+            s.offset = _align4(s.offset + (prop_len as u64))
+
+        else if token == FDT_NOP:
+            # Skip NOP tokens
+            pass_dn
+
+        else if token == FDT_END:
+            # End of structure block
+            break
+
+        else:
+            # Unknown token — bail out to avoid infinite loop
+            break
+
+    s.result
+
+# ============================================================================
+# NodeKind ↔ u32 Encoding (for stack arrays)
+# ============================================================================
+
+fn _node_kind_to_u32(kind: _NodeKind) -> u32:
+    """Encode a _NodeKind as u32 for storage in fixed-size arrays."""
+    match kind:
+        case _NodeKind.Root: 0
+        case _NodeKind.Soc: 1
+        case _NodeKind.Uart: 2
+        case _NodeKind.Plic: 3
+        case _NodeKind.Clint: 4
+        case _NodeKind.Memory: 5
+        case _NodeKind.Cpus: 6
+        case _NodeKind.Cpu: 7
+        case _NodeKind.Other: 8
+
+fn _u32_to_node_kind(v: u32) -> _NodeKind:
+    """Decode a u32 back into a _NodeKind."""
+    if v == 0: return _NodeKind.Root
+    if v == 1: return _NodeKind.Soc
+    if v == 2: return _NodeKind.Uart
+    if v == 3: return _NodeKind.Plic
+    if v == 4: return _NodeKind.Clint
+    if v == 5: return _NodeKind.Memory
+    if v == 6: return _NodeKind.Cpus
+    if v == 7: return _NodeKind.Cpu
+    _NodeKind.Other
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn parse_dtb(dtb_addr: u64) -> DtbDeviceInfo:
+    """Parse a Flattened Device Tree at the given physical address.
+
+    Returns a DtbDeviceInfo with discovered device addresses.
+    If the DTB is invalid (bad magic, unsupported version, or zero address),
+    returns a zeroed result with valid=false.
+
+    Args:
+        dtb_addr: Physical address of the DTB blob (from OpenSBI a1 register)
+    """
+    # Null DTB address means no device tree available
+    if dtb_addr == 0:
+        return dtb_device_info_empty()
+
+    # Parse and validate header
+    val hdr = _parse_fdt_header(dtb_addr)
+    if hdr == nil:
+        return dtb_device_info_empty()
+
+    val header = hdr.unwrap()
+
+    # Sanity check: structure block must have nonzero size
+    if header.size_dt_struct == 0:
+        return dtb_device_info_empty()
+
+    # Walk structure block
+    val initial_state = _walk_state_new(dtb_addr, header)
+    var result = _walk_structure(initial_state)
+
+    # Mark as valid if we found at least RAM info (bare minimum)
+    result.valid = result.ram_base != 0
+
+    result
+
+fn dtb_has_device(info: DtbDeviceInfo, kind: text) -> bool:
+    """Check if a specific device was found in the DTB.
+
+    Args:
+        info: Parsed device tree info
+        kind: Device kind — "uart", "plic", "clint", "ram"
+    """
+    if not info.valid:
+        return false
+
+    if kind == "uart":
+        return info.uart_base != 0
+    if kind == "plic":
+        return info.plic_base != 0
+    if kind == "clint":
+        return info.clint_base != 0
+    if kind == "ram":
+        return info.ram_base != 0
+
+    false

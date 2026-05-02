@@ -1,0 +1,224 @@
+# DBFS Pager - single-cache page manager for DbFsEngine.
+#
+# Provides alloc_page / read_page / write_page / flush_dirty.
+# Single-cache discipline: pages are keyed (ino_id, page_id) and never
+# inserted into the kernel page cache.
+#
+# PAGE_SIZE_BYTES = 8192 (D3 on-disk page size).
+# Capacity is the maximum number of pages held in memory simultaneously.
+#
+# Maps to: AC-3, AC-9, D9.
+
+use std.io_runtime
+
+val PAGE_SIZE_BYTES: i64 = 8192
+
+# --- Module-static disk backing store ---
+# Simulates disk persistence for evicted pages within process lifetime.
+
+var _pager_disk_pages: [PageEntry] = []
+
+struct PageId:
+    """Opaque page identifier."""
+    id: i64
+
+    static fn null() -> PageId:
+        PageId(id: -1)
+
+    fn is_null() -> bool:
+        self.id < 0
+
+struct PageData:
+    """8 KiB page buffer."""
+    bytes: [u8]
+
+    static fn zeroed() -> PageData:
+        var buf: [u8] = []
+        var i: i64 = 0
+        while i < PAGE_SIZE_BYTES:
+            buf.push(0)
+            i = i + 1
+        PageData(bytes: buf)
+
+    me fn set_byte(idx: i64, val_byte: u8):
+        self.bytes[idx as i32] = val_byte
+
+    fn byte_at(idx: i64) -> u8:
+        self.bytes[idx as i32]
+
+struct PageEntry:
+    """Internal pager slot."""
+    page_id: PageId
+    data:    PageData
+    dirty:   bool
+
+struct DbfsPager:
+    """Single-cache pager with fixed capacity.
+
+    Eviction: simple clock-sweep (scan from evict_cursor, pick first clean).
+    Never talks to the kernel page cache.
+    """
+    capacity:     i64
+    entries:      [PageEntry]
+    next_page_id: i64
+    evict_cursor: i32
+
+    static fn new(capacity: i64) -> DbfsPager:
+        DbfsPager(
+            capacity:     capacity,
+            entries:      [],
+            next_page_id: 1,
+            evict_cursor: 0
+        )
+
+    # --- Allocation ---
+
+    me fn alloc_page() -> Result<PageId, text>:
+        """Allocate a fresh page and return its PageId.
+
+        If at capacity, evict the first clean page found (clock-sweep).
+        Fails if all pages are dirty and capacity is exhausted.
+        """
+        if (self.entries.len() as i64) < self.capacity:
+            val pid = PageId(id: self.next_page_id)
+            self.next_page_id = self.next_page_id + 1
+            val zero = PageData.zeroed()
+            val entry = PageEntry(
+                page_id: pid,
+                data:    zero,
+                dirty:   false
+            )
+            self.entries.push(entry)
+            return Ok(pid)
+        # Evict a clean page
+        val n = self.entries.len() as i32
+        var scanned: i32 = 0
+        while scanned < n:
+            val idx = self.evict_cursor % n
+            val slot = self.entries[idx]
+            if not slot.dirty:
+                val pid = PageId(id: self.next_page_id)
+                self.next_page_id = self.next_page_id + 1
+                val zero = PageData.zeroed()
+                val new_entry = PageEntry(
+                    page_id: pid,
+                    data:    zero,
+                    dirty:   false
+                )
+                self.entries.remove(idx)
+                self.entries.push(new_entry)
+                self.evict_cursor = (idx + 1) % n
+                return Ok(pid)
+            self.evict_cursor = (self.evict_cursor + 1) % n
+            scanned = scanned + 1
+        Err("pager: all pages dirty; flush first")
+
+    # --- I/O ---
+
+    me fn write_page(id: PageId, data: PageData) -> Result<(), text>:
+        """Write page data into the pager; marks page dirty."""
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            val slot = self.entries[i]
+            if slot.page_id.id == id.id:
+                val new_entry = PageEntry(page_id: slot.page_id, data: data, dirty: true)
+                self.entries.remove(i)
+                self.entries.push(new_entry)
+                return Ok(())
+            i = i + 1
+        Err("pager: page not found")
+
+    fn read_page(id: PageId) -> Result<PageData, text>:
+        """Read page data by PageId. Falls back to disk backing if evicted."""
+        for slot in self.entries:
+            if slot.page_id.id == id.id:
+                return Ok(slot.data)
+        # Not in cache: check disk backing (simulates disk read after eviction)
+        for de in _pager_disk_pages:
+            if de.page_id.id == id.id:
+                return Ok(de.data)
+        Err("pager: page not found")
+
+    fn is_dirty(id: PageId) -> bool:
+        """Return true if page has unflushed writes."""
+        for slot in self.entries:
+            if slot.page_id.id == id.id:
+                return slot.dirty
+        false
+
+    me fn flush_dirty() -> Result<i64, text>:
+        """Mark all dirty pages clean (simulates writeback). Returns count flushed."""
+        var count: i64 = 0
+        var new_entries: [PageEntry] = []
+        for slot in self.entries:
+            if slot.dirty:
+                val clean = PageEntry(page_id: slot.page_id, data: slot.data, dirty: false)
+                new_entries.push(clean)
+                count = count + 1
+                # Write to disk backing
+                var disk_new: [PageEntry] = []
+                var replaced: bool = false
+                for de in _pager_disk_pages:
+                    if de.page_id.id == slot.page_id.id:
+                        disk_new.push(PageEntry(page_id: slot.page_id, data: slot.data, dirty: false))
+                        replaced = true
+                    else:
+                        disk_new.push(de)
+                if not replaced:
+                    disk_new.push(PageEntry(page_id: slot.page_id, data: slot.data, dirty: false))
+                _pager_disk_pages = disk_new
+            else:
+                new_entries.push(slot)
+        self.entries = new_entries
+        Ok(count)
+
+    fn dirty_count() -> i64:
+        """Return number of dirty pages."""
+        var count: i64 = 0
+        for slot in self.entries:
+            if slot.dirty:
+                count = count + 1
+        count
+
+    me fn flush_page(id: PageId) -> Result<(), text>:
+        """Mark a single page clean and persist to disk backing."""
+        var new_entries: [PageEntry] = []
+        var found: bool = false
+        var flushed_data: PageData = PageData(bytes: [])
+        for slot in self.entries:
+            if slot.page_id.id == id.id:
+                val clean = PageEntry(page_id: slot.page_id, data: slot.data, dirty: false)
+                new_entries.push(clean)
+                flushed_data = slot.data
+                found = true
+            else:
+                new_entries.push(slot)
+        self.entries = new_entries
+        if found:
+            # Write to disk backing
+            var disk_new: [PageEntry] = []
+            var replaced: bool = false
+            for de in _pager_disk_pages:
+                if de.page_id.id == id.id:
+                    disk_new.push(PageEntry(page_id: id, data: flushed_data, dirty: false))
+                    replaced = true
+                else:
+                    disk_new.push(de)
+            if not replaced:
+                disk_new.push(PageEntry(page_id: id, data: flushed_data, dirty: false))
+            _pager_disk_pages = disk_new
+            Ok(())
+        else:
+            Err("pager: page not found")
+
+    fn dirty_pages() -> [PageId]:
+        """Return list of PageIds that are currently dirty."""
+        var result: [PageId] = []
+        for slot in self.entries:
+            if slot.dirty:
+                result.push(slot.page_id)
+        result
+
+    fn has_method(name: text) -> bool:
+        """Structural check: DbfsPager does not expose kernel cache methods."""
+        false

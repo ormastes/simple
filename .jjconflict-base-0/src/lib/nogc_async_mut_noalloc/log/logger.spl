@@ -1,0 +1,452 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# Logger - Core Logging API for Bare-Metal Systems
+#
+# Provides log level filtering and dispatch to configured targets.
+# All log functions check the global level before formatting/dispatching.
+#
+# Usage:
+#   log_init(LOG_INFO, TARGET_DEVICE | TARGET_SEMIHOST)
+#   log_info("System booted")
+#   log_warn("Low memory")
+#   log_error("Fault detected")
+
+
+# ============================================================================
+# Log Levels (i32 constants, ordered by severity)
+# ============================================================================
+
+val LOG_TRACE: i32 = 0
+val LOG_DEBUG: i32 = 1
+val LOG_INFO: i32  = 2
+val LOG_WARN: i32  = 3
+val LOG_ERROR: i32 = 4
+val LOG_FATAL: i32 = 5
+val LOG_OFF: i32   = 6
+
+# ============================================================================
+# Global Logger State
+# ============================================================================
+
+var g_log_level: i32 = LOG_INFO      # Minimum level to output
+var g_log_targets: i32 = 0           # Bitmask of active targets
+
+extern fn rt_string_data(value: text) -> i64
+extern fn rt_string_len(value: text) -> i64
+extern fn rt_string_new(data: i64, len: i64) -> text
+extern fn rt_simpleos_log_init(level: i64, targets: i64) -> bool
+extern fn rt_simpleos_log_emit(level: i64, msg_ptr: i64, msg_len: i64) -> bool
+extern fn rt_simpleos_log_set_device(kind: i64, base: i64) -> bool
+extern fn rt_log_target_device_write_bytes(ptr: i64, len: i64) -> bool
+use generated.simpleos_log_config.{simpleos_log_compile_enabled}
+
+# ============================================================================
+# Initialization
+# ============================================================================
+
+fn log_init(level: i32, targets: i32):
+    """Initialize the logger with minimum level and target bitmask.
+
+    Level: one of LOG_TRACE..LOG_OFF
+    Targets: bitwise OR of TARGET_DEVICE, TARGET_SEMIHOST, TARGET_HOST_FILE
+    """
+    g_log_level = level
+    g_log_targets = targets
+    rt_simpleos_log_init(level.to_i64(), targets.to_i64())
+
+fn log_init_serial(level: i32):
+    """Convenience: send all output at or above `level` to the on-device serial
+    port (COM1 / PL011 / NS16550, per log_set_device). Equivalent to
+    log_init(level, TARGET_DEVICE).
+
+    Call log_set_device(kind, base) before or after this if the runtime needs
+    a non-default UART address."""
+    log_init(level, 1)
+
+fn log_parse_level(name: text) -> i32:
+    """Parse a level token (case-sensitive, lowercase). Unknown → LOG_INFO."""
+    if name == "trace": return LOG_TRACE
+    if name == "debug": return LOG_DEBUG
+    if name == "info":  return LOG_INFO
+    if name == "warn":  return LOG_WARN
+    if name == "error": return LOG_ERROR
+    if name == "fatal": return LOG_FATAL
+    if name == "off":   return LOG_OFF
+    LOG_INFO
+
+fn log_parse_targets(csv: text) -> i32:
+    """Parse a comma-separated target list (e.g. 'serial,semihost') into a
+    bitmask. Unknown tokens are ignored. Empty string → 0."""
+    var mask: i32 = 0
+    var token: text = ""
+    val n = csv.len()
+    var i = 0
+    while i <= n:
+        val c: text = if i < n: csv.char_at(i) else: ","
+        if c == "," or c == " ":
+            if token == "serial" or token == "device":
+                mask = mask | 1
+            if token == "semihost":
+                mask = mask | 2
+            if token == "file":
+                mask = mask | 4
+            token = ""
+        else:
+            token = token + c
+        i = i + 1
+    mask
+
+fn log_init_from_config(cfg: text):
+    """Initialize the logger from a config string of the form
+    'level=<lvl> targets=<csv>'. Tokens are whitespace-separated; values
+    use '='. Missing fields default to INFO / TARGET_DEVICE.
+
+    Examples:
+      log_init_from_config("level=debug targets=serial")
+      log_init_from_config("level=info targets=serial,semihost")
+      log_init_from_config("")                  # INFO + serial
+    """
+    var level: i32 = LOG_INFO
+    var targets: i32 = 1
+    var key: text = ""
+    var val_buf: text = ""
+    var in_value: bool = false
+    val n = cfg.len()
+    var i = 0
+    while i <= n:
+        val c: text = if i < n: cfg.char_at(i) else: " "
+        if c == " " or c == "\t" or c == "\n":
+            if key != "":
+                if key == "level":
+                    level = log_parse_level(val_buf)
+                if key == "targets" or key == "target":
+                    targets = log_parse_targets(val_buf)
+            key = ""
+            val_buf = ""
+            in_value = false
+        elif c == "=" and not in_value:
+            in_value = true
+        else:
+            if in_value:
+                val_buf = val_buf + c
+            else:
+                key = key + c
+        i = i + 1
+    log_init(level, targets)
+
+fn log_set_level(level: i32):
+    """Change minimum log level at runtime."""
+    g_log_level = level
+    rt_simpleos_log_init(g_log_level.to_i64(), g_log_targets.to_i64())
+
+fn log_set_targets(targets: i32):
+    """Change active log targets at runtime."""
+    g_log_targets = targets
+    rt_simpleos_log_init(g_log_level.to_i64(), g_log_targets.to_i64())
+
+# ============================================================================
+# Level Name Helper
+# ============================================================================
+
+fn log_level_name(level: i32) -> text:
+    """Return human-readable name for a log level."""
+    if level == LOG_TRACE: return "TRACE"
+    if level == LOG_DEBUG: return "DEBUG"
+    if level == LOG_INFO:  return "INFO"
+    if level == LOG_WARN:  return "WARN"
+    if level == LOG_ERROR: return "ERROR"
+    if level == LOG_FATAL: return "FATAL"
+    "UNKNOWN"
+
+fn _log_compile_allows(level: i32) -> bool:
+    if simpleos_log_compile_enabled():
+        return true
+    level >= LOG_FATAL
+
+fn _log_policy_allows(min_level: i32, level: i32) -> bool:
+    if not _log_compile_allows(level):
+        return false
+    if level == LOG_OFF:
+        return false
+    if level == LOG_FATAL:
+        return true
+    if level < LOG_TRACE or level > LOG_FATAL:
+        return false
+    level >= min_level
+
+fn _log_runtime_enabled(level: i32) -> bool:
+    _log_policy_allows(g_log_level, level)
+
+fn _log_emit_or_dispatch(level: i32, formatted: text) -> i64:
+    if rt_simpleos_log_emit(level.to_i64(), rt_string_data(formatted), rt_string_len(formatted)):
+        return 1
+    log_dispatch(level, formatted)
+    1
+
+fn _looks_like_facility_token(token: text) -> bool:
+    if token == "":
+        return false
+    val first = token.char_at(0)
+    val first_ok = (first >= "a" and first <= "z") or (first >= "0" and first <= "9")
+    if not first_ok:
+        return false
+    var has_alnum = false
+    var i = 0
+    while i < token.len():
+        val ch = token.char_at(i)
+        val lower = ch >= "a" and ch <= "z"
+        val digit = ch >= "0" and ch <= "9"
+        val punct = ch == "_" or ch == "-" or ch == "."
+        if lower or digit:
+            has_alnum = true
+        if not lower and not digit and not punct:
+            return false
+        i = i + 1
+    has_alnum
+
+fn _normalize_prefixed_message(msg: text) -> text:
+    if not msg.starts_with("["):
+        return msg
+    val n = msg.len()
+    var idx = 0
+    var collected: [text] = []
+    while idx < n and msg.char_at(idx) == "[":
+        val rest = msg.slice(idx, n)
+        val close_rel = rest.find("]")
+        if close_rel < 0:
+            return msg
+        val close_idx = idx + close_rel
+        if close_idx <= idx + 1:
+            return msg
+        val token = msg.slice(idx + 1, close_idx)
+        if not _looks_like_facility_token(token):
+            return msg
+        collected.push(token)
+        idx = close_idx + 1
+        while idx < n and msg.char_at(idx) == " ":
+            idx = idx + 1
+    if collected.len() <= 1:
+        return msg
+    val body = if idx < n: msg.slice(idx, n) else: ""
+    if body == "":
+        return "[" + collected.join(".") + "]"
+    "[" + collected.join(".") + "] " + body
+
+# ============================================================================
+# Text-Based Log Functions
+# ============================================================================
+
+fn log_at(level: i32, msg: text):
+    """Log a message at the given level. Checks level filter first."""
+    if not _log_runtime_enabled(level):
+        return
+    val normalized = _normalize_prefixed_message(msg)
+    val prefix = log_level_name(level)
+    val formatted = "[{prefix}] {normalized}"
+    _log_emit_or_dispatch(level, formatted)
+
+fn log_trace(msg: text):
+    """Log at TRACE level."""
+    log_at(LOG_TRACE, msg)
+
+fn log_debug(msg: text):
+    """Log at DEBUG level."""
+    log_at(LOG_DEBUG, msg)
+
+fn log_info(msg: text):
+    """Log at INFO level."""
+    log_at(LOG_INFO, msg)
+
+fn log_warn(msg: text):
+    """Log at WARN level."""
+    log_at(LOG_WARN, msg)
+
+fn log_error(msg: text):
+    """Log at ERROR level."""
+    log_at(LOG_ERROR, msg)
+
+fn log_fatal(msg: text):
+    """Log at FATAL level."""
+    log_at(LOG_FATAL, msg)
+
+# ============================================================================
+# Raw emission — bypass level filter and [LEVEL] prefix. For markers and
+# pre-formatted wire-byte output whose exact bytes must reach the device.
+# ============================================================================
+
+fn log_raw(msg: text):
+    """Emit bytes to the device target with NO level prefix and no filter.
+    For markers and other invariant pre-formatted output."""
+    if (g_log_targets & 1) != 0:
+        if rt_log_target_device_write_bytes(rt_string_data(msg), rt_string_len(msg)):
+            return
+    target_device_write(msg)
+
+fn log_raw_println(msg: text):
+    """log_raw + newline. Use this for marker lines (e.g. '[BOOT] entry')."""
+    log_raw(msg)
+    log_raw("\n")
+
+# ============================================================================
+# Device config — inject {kind, base} picked at boot from the active
+# MachineProfile. See src/os/kernel/log/log_setup.spl for the profile shim.
+# ============================================================================
+
+val LOG_DEV_KIND_COM1: i32    = 1
+val LOG_DEV_KIND_PL011: i32   = 2
+val LOG_DEV_KIND_NS16550: i32 = 3
+
+fn log_set_device(kind: i32, base: u64):
+    """Tell the runtime which serial device to drive. Safe to call multiple
+    times; takes effect on the next log_* call."""
+    rt_simpleos_log_set_device(kind.to_i64(), base.to_i64())
+
+# Unique wrapper names for environments that also expose userlib.log symbols.
+@export("C", name: "noalloc_log_init")
+fn noalloc_log_init(level: i32, targets: i32):
+    g_log_level = level
+    g_log_targets = targets
+    rt_simpleos_log_init(level.to_i64(), targets.to_i64())
+
+@export("C", name: "noalloc_log_debug")
+fn noalloc_log_debug(msg: text):
+    if not _log_runtime_enabled(LOG_DEBUG):
+        return
+    val formatted = "[DEBUG] {_normalize_prefixed_message(msg)}"
+    _log_emit_or_dispatch(LOG_DEBUG, formatted)
+
+@export("C", name: "noalloc_log_error")
+fn noalloc_log_error(msg: text):
+    if not _log_runtime_enabled(LOG_ERROR):
+        return
+    val formatted = "[ERROR] {_normalize_prefixed_message(msg)}"
+    _log_emit_or_dispatch(LOG_ERROR, formatted)
+
+@export("C", name: "simple_log_c_init")
+fn simple_log_c_init(level: i64, targets: i64) -> i64:
+    g_log_level = level.to_i32()
+    g_log_targets = targets.to_i32()
+    rt_simpleos_log_init(level, targets)
+    1
+
+@export("C", name: "simple_log_c_is_ready")
+fn simple_log_c_is_ready() -> i64:
+    1
+
+@export("C", name: "simple_log_c_enabled")
+fn simple_log_c_enabled(level: i64) -> i64:
+    if not _log_runtime_enabled(level.to_i32()):
+        return 0
+    1
+
+@export("C", name: "simple_log_c_write")
+fn simple_log_c_write(level: i64, msg_ptr: i64, msg_len: i64) -> i64:
+    if not _log_runtime_enabled(level.to_i32()):
+        return 0
+    val msg = rt_string_new(msg_ptr, msg_len)
+    _log_emit_or_dispatch(level.to_i32(), msg)
+    1
+
+# ============================================================================
+# Handle-Based Log Functions (Compressed — String Interning)
+# ============================================================================
+
+fn log_at_h(level: i32, handle: i32):
+    """Log interned string at the given level."""
+    if not _log_runtime_enabled(level):
+        return
+    log_dispatch_h(level, handle)
+
+fn log_trace_h(handle: i32):
+    """Log interned string at TRACE level."""
+    log_at_h(LOG_TRACE, handle)
+
+fn log_debug_h(handle: i32):
+    """Log interned string at DEBUG level."""
+    log_at_h(LOG_DEBUG, handle)
+
+fn log_info_h(handle: i32):
+    """Log interned string at INFO level."""
+    log_at_h(LOG_INFO, handle)
+
+fn log_warn_h(handle: i32):
+    """Log interned string at WARN level."""
+    log_at_h(LOG_WARN, handle)
+
+fn log_error_h(handle: i32):
+    """Log interned string at ERROR level."""
+    log_at_h(LOG_ERROR, handle)
+
+fn log_fatal_h(handle: i32):
+    """Log interned string at FATAL level."""
+    log_at_h(LOG_FATAL, handle)
+
+# ============================================================================
+# Parameterized Handle Log Functions (1-2 params)
+# ============================================================================
+
+fn log_info_h1(handle: i32, p0: i32):
+    """Log interned string at INFO level with 1 parameter."""
+    if not _log_runtime_enabled(LOG_INFO):
+        return
+    log_dispatch_h1(LOG_INFO, handle, p0)
+
+fn log_warn_h1(handle: i32, p0: i32):
+    """Log interned string at WARN level with 1 parameter."""
+    if not _log_runtime_enabled(LOG_WARN):
+        return
+    log_dispatch_h1(LOG_WARN, handle, p0)
+
+fn log_error_h1(handle: i32, p0: i32):
+    """Log interned string at ERROR level with 1 parameter."""
+    if not _log_runtime_enabled(LOG_ERROR):
+        return
+    log_dispatch_h1(LOG_ERROR, handle, p0)
+
+fn log_info_h2(handle: i32, p0: i32, p1: i32):
+    """Log interned string at INFO level with 2 parameters."""
+    if not _log_runtime_enabled(LOG_INFO):
+        return
+    log_dispatch_h2(LOG_INFO, handle, p0, p1)
+
+fn log_warn_h2(handle: i32, p0: i32, p1: i32):
+    """Log interned string at WARN level with 2 parameters."""
+    if not _log_runtime_enabled(LOG_WARN):
+        return
+    log_dispatch_h2(LOG_WARN, handle, p0, p1)
+
+fn log_error_h2(handle: i32, p0: i32, p1: i32):
+    """Log interned string at ERROR level with 2 parameters."""
+    if not _log_runtime_enabled(LOG_ERROR):
+        return
+    log_dispatch_h2(LOG_ERROR, handle, p0, p1)
+
+# ============================================================================
+# Dispatch (delegates to targets.spl)
+# ============================================================================
+
+fn log_dispatch(level: i32, msg: text):
+    """Dispatch formatted message to all active targets."""
+    # Inline dispatch — targets.spl provides the target_*_write functions
+    # Import pattern: both files are in the same module, auto-resolved
+    if (g_log_targets & 1) != 0:
+        target_device_write(msg)
+    if (g_log_targets & 2) != 0:
+        target_semihost_write(msg)
+    if (g_log_targets & 4) != 0:
+        target_file_write(msg)
+
+fn log_dispatch_h(level: i32, handle: i32):
+    """Dispatch interned handle to all active targets."""
+    if (g_log_targets & 2) != 0:
+        target_semihost_write_h(handle)
+
+fn log_dispatch_h1(level: i32, handle: i32, p0: i32):
+    """Dispatch interned handle with 1 param to semihost target."""
+    if (g_log_targets & 2) != 0:
+        target_semihost_write_h1(handle, p0)
+
+fn log_dispatch_h2(level: i32, handle: i32, p0: i32, p1: i32):
+    """Dispatch interned handle with 2 params to semihost target."""
+    if (g_log_targets & 2) != 0:
+        target_semihost_write_h2(handle, p0, p1)

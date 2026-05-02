@@ -1,0 +1,340 @@
+"""
+# Package Service
+
+Package CRUD operations, search, and download tracking.
+"""
+
+use std.database.sql.connection.{Database}
+use std.database.sql.types.{DbValue, DbError}
+use std.web_framework.pagination.{Paginator, PagedResult}
+use portal.models.package_model.{Package, PackageCodec, PackageVersion, PackageVersionCodec}
+
+# ============================================================================
+# Package Queries
+# ============================================================================
+
+fn search_packages(db: Database, query: text, page: i64) -> Result<PagedResult<Package>, text>:
+    """Search packages by name or description with pagination.
+
+    Args:
+        db: Database connection
+        query: Search term (empty string returns all)
+        page: Page number (1-based)
+
+    Returns:
+        Ok(PagedResult) with matching packages
+    """
+    val per_page = 20
+
+    # Count total matches
+    var count_sql = "SELECT COUNT(*) FROM packages"
+    var count_params: [DbValue] = []
+    if query.len() > 0:
+        count_sql = "SELECT COUNT(*) FROM packages WHERE name LIKE ? OR description LIKE ?"
+        val pattern = "%" + query + "%"
+        count_params = [
+            DbValue.Text(value: pattern),
+            DbValue.Text(value: pattern)
+        ]
+
+    val count_result = db.query(count_sql, count_params)
+    var total = 0
+    match count_result:
+        Ok(rows):
+            if rows.len() > 0:
+                total = rows[0].get_int("COUNT(*)") ?? 0
+        Err(e):
+            return Err("Database error counting packages")
+
+    val paginator = Paginator.new(page, per_page, total)
+    val offset = paginator.offset()
+
+    # Fetch page of results
+    var select_sql = "SELECT * FROM packages ORDER BY downloads DESC, name ASC LIMIT ? OFFSET ?"
+    var select_params: [DbValue] = [
+        DbValue.Integer(value: per_page),
+        DbValue.Integer(value: offset)
+    ]
+    if query.len() > 0:
+        select_sql = "SELECT * FROM packages WHERE name LIKE ? OR description LIKE ? ORDER BY downloads DESC, name ASC LIMIT ? OFFSET ?"
+        val pattern = "%" + query + "%"
+        select_params = [
+            DbValue.Text(value: pattern),
+            DbValue.Text(value: pattern),
+            DbValue.Integer(value: per_page),
+            DbValue.Integer(value: offset)
+        ]
+
+    val select_result = db.query(select_sql, select_params)
+    match select_result:
+        Ok(rows):
+            val codec = PackageCodec()
+            var packages: [Package] = []
+            for row in rows:
+                val pkg_result = codec.decode(row)
+                match pkg_result:
+                    Ok(pkg): packages.push(pkg)
+                    Err(e): pass_do_nothing
+            Ok(PagedResult(items: packages, paginator: paginator))
+        Err(e):
+            Err("Database error searching packages")
+
+fn get_package(db: Database, name: text) -> Result<Package?, text>:
+    """Find a package by name.
+
+    Args:
+        db: Database connection
+        name: Package name
+
+    Returns:
+        Ok(Some(package)) if found, Ok(nil) otherwise
+    """
+    val sql = "SELECT * FROM packages WHERE name = ? LIMIT 1"
+    val params: [DbValue] = [DbValue.Text(value: name)]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            if rows.len() == 0:
+                return Ok(nil)
+            val codec = PackageCodec()
+            val pkg_result = codec.decode(rows[0])
+            match pkg_result:
+                Ok(pkg): Ok(Some(pkg))
+                Err(e): Err("Failed to decode package")
+        Err(e):
+            Err("Database error fetching package")
+
+fn get_package_versions(db: Database, package_id: i64) -> Result<[PackageVersion], text>:
+    """Get all versions of a package, ordered newest first.
+
+    Args:
+        db: Database connection
+        package_id: Package ID
+
+    Returns:
+        Ok(versions) ordered by creation date descending
+    """
+    val sql = "SELECT * FROM package_versions WHERE package_id = ? ORDER BY created_at DESC"
+    val params: [DbValue] = [DbValue.Integer(value: package_id)]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            val codec = PackageVersionCodec()
+            var versions: [PackageVersion] = []
+            for row in rows:
+                val v_result = codec.decode(row)
+                match v_result:
+                    Ok(v): versions.push(v)
+                    Err(e): pass_do_nothing
+            Ok(versions)
+        Err(e):
+            Err("Database error fetching versions")
+
+fn get_popular_packages(db: Database, limit: i64) -> Result<[Package], text>:
+    """Get the most downloaded packages.
+
+    Args:
+        db: Database connection
+        limit: Maximum number of packages to return
+
+    Returns:
+        Ok(packages) ordered by download count descending
+    """
+    val sql = "SELECT * FROM packages ORDER BY downloads DESC LIMIT ?"
+    val params: [DbValue] = [DbValue.Integer(value: limit)]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            val codec = PackageCodec()
+            var packages: [Package] = []
+            for row in rows:
+                val pkg_result = codec.decode(row)
+                match pkg_result:
+                    Ok(pkg): packages.push(pkg)
+                    Err(e): pass_do_nothing
+            Ok(packages)
+        Err(e):
+            Err("Database error fetching popular packages")
+
+fn get_recent_packages(db: Database, limit: i64) -> Result<[Package], text>:
+    """Get the most recently published packages.
+
+    Args:
+        db: Database connection
+        limit: Maximum number of packages to return
+
+    Returns:
+        Ok(packages) ordered by creation date descending
+    """
+    val sql = "SELECT * FROM packages ORDER BY created_at DESC LIMIT ?"
+    val params: [DbValue] = [DbValue.Integer(value: limit)]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            val codec = PackageCodec()
+            var packages: [Package] = []
+            for row in rows:
+                val pkg_result = codec.decode(row)
+                match pkg_result:
+                    Ok(pkg): packages.push(pkg)
+                    Err(e): pass_do_nothing
+            Ok(packages)
+        Err(e):
+            Err("Database error fetching recent packages")
+
+fn get_user_packages(db: Database, user_id: i64) -> Result<[Package], text>:
+    """Get all packages owned by a user.
+
+    Args:
+        db: Database connection
+        user_id: Owner user ID
+
+    Returns:
+        Ok(packages) owned by the user
+    """
+    val sql = "SELECT * FROM packages WHERE owner_id = ? ORDER BY name ASC"
+    val params: [DbValue] = [DbValue.Integer(value: user_id)]
+    val result = db.query(sql, params)
+
+    match result:
+        Ok(rows):
+            val codec = PackageCodec()
+            var packages: [Package] = []
+            for row in rows:
+                val pkg_result = codec.decode(row)
+                match pkg_result:
+                    Ok(pkg): packages.push(pkg)
+                    Err(e): pass_do_nothing
+            Ok(packages)
+        Err(e):
+            Err("Database error fetching user packages")
+
+fn publish_package(db: Database, name: text, description: text, version: text, owner_id: i64, readme: text) -> Result<i64, text>:
+    """Publish a new package or new version of an existing package.
+
+    If the package does not exist, creates it. Then adds the version.
+
+    Args:
+        db: Database connection
+        name: Package name
+        description: Package description
+        version: Version string (e.g., "1.0.0")
+        owner_id: User ID of the publisher
+        readme: README content for the version
+
+    Returns:
+        Ok(package_id) on success
+    """
+    # Check if package exists
+    val existing = get_package(db, name)?
+    var package_id: i64 = 0
+
+    if existing != nil:
+        val pkg = existing ?? return Err("Internal error")
+        # Verify ownership
+        if pkg.owner_id != owner_id:
+            return Err("You do not own this package")
+        package_id = pkg.id
+
+        # Update package metadata
+        val update_sql = "UPDATE packages SET description = ?, latest_version = ?, updated_at = datetime('now') WHERE id = ?"
+        val update_params: [DbValue] = [
+            DbValue.Text(value: description),
+            DbValue.Text(value: version),
+            DbValue.Integer(value: package_id)
+        ]
+        val update_result = db.exec(update_sql, update_params)
+        match update_result:
+            Ok(_): pass_do_nothing
+            Err(e): return Err("Failed to update package")
+    else:
+        # Create new package
+        val insert_sql = "INSERT INTO packages (name, description, latest_version, owner_id, downloads) VALUES (?, ?, ?, ?, 0)"
+        val insert_params: [DbValue] = [
+            DbValue.Text(value: name),
+            DbValue.Text(value: description),
+            DbValue.Text(value: version),
+            DbValue.Integer(value: owner_id)
+        ]
+        val insert_result = db.exec(insert_sql, insert_params)
+        match insert_result:
+            Ok(_):
+                package_id = db.last_insert_rowid()
+            Err(e):
+                return Err("Failed to create package")
+
+    # Insert version record
+    val version_sql = "INSERT INTO package_versions (package_id, version, readme) VALUES (?, ?, ?)"
+    val version_params: [DbValue] = [
+        DbValue.Integer(value: package_id),
+        DbValue.Text(value: version),
+        DbValue.Text(value: readme)
+    ]
+    val version_result = db.exec(version_sql, version_params)
+    match version_result:
+        Ok(_): Ok(package_id)
+        Err(e): Err("Failed to create package version (version may already exist)")
+
+fn increment_downloads(db: Database, package_id: i64, version: text):
+    """Record a download for a package version.
+
+    Increments the daily download counter and the total package downloads.
+
+    Args:
+        db: Database connection
+        package_id: Package ID
+        version: Version string that was downloaded
+    """
+    val today = current_date_text()
+
+    # Upsert daily download stat
+    val upsert_sql = "INSERT INTO download_stats (package_id, version, date, count) " +
+        "VALUES (?, ?, ?, 1) " +
+        "ON CONFLICT(package_id, version, date) DO UPDATE SET count = count + 1"
+    val upsert_params: [DbValue] = [
+        DbValue.Integer(value: package_id),
+        DbValue.Text(value: version),
+        DbValue.Text(value: today)
+    ]
+    val _upsert = db.exec(upsert_sql, upsert_params)
+
+    # Increment total downloads on package
+    val update_sql = "UPDATE packages SET downloads = downloads + 1 WHERE id = ?"
+    val update_params: [DbValue] = [DbValue.Integer(value: package_id)]
+    val _update = db.exec(update_sql, update_params)
+
+fn total_package_count(db: Database) -> i64:
+    """Get the total number of packages in the registry."""
+    val sql = "SELECT COUNT(*) FROM packages"
+    val result = db.query(sql, [])
+    match result:
+        Ok(rows):
+            if rows.len() > 0:
+                return rows[0].get_int("COUNT(*)") ?? 0
+            0
+        Err(e): 0
+
+fn total_download_count(db: Database) -> i64:
+    """Get the total number of downloads across all packages."""
+    val sql = "SELECT COALESCE(SUM(downloads), 0) as total FROM packages"
+    val result = db.query(sql, [])
+    match result:
+        Ok(rows):
+            if rows.len() > 0:
+                return rows[0].get_int("total") ?? 0
+            0
+        Err(e): 0
+
+fn current_date_text() -> text:
+    """Get current date as YYYY-MM-DD text. Uses timestamp approximation."""
+    val ts = current_timestamp()
+    # Approximate date from Unix timestamp
+    val days = ts / 86400
+    val year = 1970 + (days / 365)
+    "{year}-01-01"
+
+extern fn current_timestamp() -> i64

@@ -1,0 +1,53 @@
+"""
+# QEMU RV32 Shared Baremetal Workload via Stable ELF Lane
+#
+# This is the primary RV32 shared-workload proof on this host.
+# It verifies a real baremetal library workload on RV32 through the stable
+# QEMU semihost ELF lane while the raw remote-JIT injection lane remains a
+# separate regression lane.
+"""
+
+val BINARY_PATH = "examples/09_embedded/baremetal/baremetal/hello_riscv32_collections.elf"
+val QEMU_BIN = "qemu-system-riscv32"
+val SHARED_WORKLOAD = "test/fixtures/remote_jit/baremetal_lib_workload_main.spl"
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn qemu_available() -> bool:
+    val result = rt_process_run("which", [QEMU_BIN])
+    result[2] == 0
+
+fn run_qemu(elf_path: text, timeout_ms: i64) -> (text, text, i32):
+    var args: [text] = [
+        "-M", "virt",
+        "-bios", "none",
+        "-kernel", elf_path,
+        "-nographic",
+        "-semihosting-config", "enable=on,target=native",
+    ]
+    rt_process_run_timeout(QEMU_BIN, args, timeout_ms)
+
+fn run_qemu_output(elf_path: text, timeout_ms: i64) -> text:
+    val result = run_qemu(elf_path, timeout_ms)
+    result[0] + result[1]
+
+val _can_run = qemu_available() and file_exists(BINARY_PATH)
+
+describe "QEMU RV32 Shared Baremetal Workload":
+    slow_it "uses the same workload fixture family as the host and stm32h7 lanes":
+        expect(file_exists(SHARED_WORKLOAD)).to_equal(true)
+
+    slow_it "runs the collections workload through the stable ELF lane":
+        if _can_run:
+            val output = run_qemu_output(BINARY_PATH, 10000)
+            expect(output).to_contain("PASS: FixedArray push/pop order correct")
+            expect(output).to_contain("PASS: FixedMap hash/put/get correct")
+            expect(output).to_contain("PASS: RingBuffer enqueue/dequeue with wrap-around correct")
+            expect(output).to_contain("=== Collection Tests Complete ===")
+        else:
+            print "[skip] QEMU RV32 semihost ELF lane unavailable"

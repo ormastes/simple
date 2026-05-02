@@ -1,0 +1,168 @@
+# Top Tool — Live Process Monitor
+# MDSOC: feature dimension, apps layer
+
+use os.userlib.process.{ProcessEntry, list_tasks}
+use os.userlib.system.{sysinfo, mem_info, uptime}
+
+struct TopView:
+    processes: [ProcessEntry]
+    sort_by: text           # "pid", "cpu", "mem", "name"
+    running: bool
+
+fn run_top(args: [text]) -> i32:
+    """Entry point for top command.
+
+    Flags: -d DELAY (refresh in seconds), -n COUNT (iterations)
+    Shows header with system info (uptime, tasks, memory)
+    then process table sorted by CPU.
+    """
+    if args.len() > 0 and (args[0] == "-h" or args[0] == "--help"):
+        print "usage: top [-d DELAY] [-n COUNT]"
+        print ""
+        print "Flags:"
+        print "  -d DELAY   Refresh delay in seconds"
+        print "  -n COUNT   Number of refresh iterations"
+        return 0
+
+    var delay_secs: i32 = 1
+    var max_iterations: i32 = -1  # -1 = infinite
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-d":
+            i = i + 1
+            if i < args.len():
+                val d = args[i].parse_i32()
+                if val Some(v) = d:
+                    delay_secs = v
+        else if arg == "-n":
+            i = i + 1
+            if i < args.len():
+                val n = args[i].parse_i32()
+                if val Some(v) = n:
+                    max_iterations = v
+        i = i + 1
+
+    var view = TopView(
+        processes: [],
+        sort_by: "cpu",
+        running: true
+    )
+
+    var iteration = 0
+    while view.running:
+        if max_iterations >= 0 and iteration >= max_iterations:
+            break
+
+        val refresh_result = _refresh_view(view)
+        if val Err(e) = refresh_result:
+            if _is_unavailable(e):
+                print "[SKIP] top: {e}"
+                return 0
+            print "error: {e}"
+            return 1
+        view = refresh_result.unwrap()
+
+        _render_view(view)
+
+        iteration = iteration + 1
+        if max_iterations >= 0 and iteration >= max_iterations:
+            break
+
+        pass_todo("sleep for delay_secs requires async/timer integration")
+
+    0
+
+fn _refresh_view(view: TopView) -> Result<TopView, text>:
+    val tasks_result = list_tasks()
+    if val Err(e) = tasks_result:
+        return Err("failed to list tasks: {e}")
+
+    val tasks = tasks_result.unwrap()
+    val sorted = _sort_by_cpu(tasks)
+    Ok(TopView(
+        processes: sorted,
+        sort_by: view.sort_by,
+        running: view.running
+    ))
+
+fn _render_view(view: TopView):
+    val info_result = sysinfo()
+    val up = uptime()
+    val mem = mem_info()
+
+    # Header
+    if val Ok(info) = info_result:
+        print _format_header(info, view.processes.len())
+
+    if val Ok(m) = mem:
+        print "Memory: {m.used_pages} / {m.total_pages} pages"
+
+    if val Ok(u) = up:
+        print "Uptime: {u} ns"
+
+    print ""
+    print "  PID  STATE     PRIORITY  CPU(tick)  MEM(pg)  NAME"
+    print "-----  --------  --------  ---------  -------  ----"
+
+    for entry in view.processes:
+        print _format_process_row(entry)
+
+    print ""
+
+fn _format_header(info: SystemInfo, task_count: i32) -> text:
+    "Tasks: {task_count} total"
+
+fn _format_process_row(entry: ProcessEntry) -> text:
+    val state_str = _format_state(entry.state)
+    val prio_str = _format_priority(entry.priority)
+    "{_pad_left("{entry.pid}", 5)}  {_pad_right(state_str, 8)}  {_pad_right(prio_str, 8)}  {_pad_left("{entry.cpu_ticks}", 9)}  {_pad_left("{entry.mem_pages}", 7)}  {entry.name}"
+
+fn _sort_by_cpu(entries: [ProcessEntry]) -> [ProcessEntry]:
+    # Simple insertion sort by cpu_ticks descending
+    var sorted: [ProcessEntry] = []
+    for entry in entries:
+        var inserted = false
+        var result: [ProcessEntry] = []
+        for existing in sorted:
+            if inserted == false and entry.cpu_ticks > existing.cpu_ticks:
+                result = result + [entry]
+                inserted = true
+            result = result + [existing]
+        if inserted == false:
+            result = result + [entry]
+        sorted = result
+    sorted
+
+fn _format_state(state: u8) -> text:
+    match state:
+        0: "Ready"
+        1: "Running"
+        2: "Blocked"
+        3: "Zombie"
+        _: "Unknown"
+
+fn _format_priority(priority: u8) -> text:
+    match priority:
+        0: "Realtime"
+        1: "High"
+        2: "Normal"
+        3: "Low"
+        4: "Idle"
+        _: "?"
+
+fn _pad_right(s: text, width: i32) -> text:
+    var result = s
+    while result.len() < width:
+        result = result + " "
+    result
+
+fn _pad_left(s: text, width: i32) -> text:
+    var result = s
+    while result.len() < width:
+        result = " " + result
+    result
+
+fn _is_unavailable(err: text) -> bool:
+    err.contains("code -38") or err.contains("code -19")

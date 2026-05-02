@@ -1,0 +1,43 @@
+"""
+# SimpleOS SPM pt-walk user-copy system specification
+
+**Feature ID:** FR-SPM-0001
+**Requirements:** REQ-SPM-0001-001..004
+**Plan:** doc/03_plan/sys_test/spm_pt_walk_user_copy.md
+**Design:** doc/05_design/spm_pt_walk_user_copy.md
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.memory.vmm.{vmm_pt_walk_user_read, vmm_pt_range_user_readable, vmm_copyin_bytes_from_space}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_EXEC, VMA_ANON}
+use os.posix.errno.{EFAULT}
+
+describe "SPM explicit-space user copy":
+    """System-level contract for SPM copy-in through ProcessVmSpace page tables."""
+
+    it "returns nil for an unmapped user pointer instead of identity-dereferencing":
+        var space = ProcessVmSpace(pml4: 0, id: 10, vma_count: 0, areas: [])
+        expect(vmm_pt_walk_user_read(space, 0x1000)).to_be_nil()
+
+    it "rejects execute-only user ranges before copy-in":
+        val area = VmArea(start: 0x2000, len: 4096, kind: VMA_ANON, flags: VMA_EXEC, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0x100000, id: 11, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        expect(vmm_pt_walk_user_read(space, 0x2000)).to_be_nil()
+
+    it "rejects cross-page ranges when the second page is not mapped":
+        val area = VmArea(start: 0x3000, len: 4096, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 12, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        expect(vmm_pt_range_user_readable(space, 0x3FF0, 32)).to_equal(false)
+
+    it "reports EFAULT on copy-in translation miss":
+        val area = VmArea(start: 0x4000, len: 4096, kind: VMA_ANON, flags: VMA_READ, backing: 0, backing_offset: 0)
+        var space = ProcessVmSpace(pml4: 0, id: 13, vma_count: 0, areas: [])
+        space.vma_count = 1
+        space.areas.push(area)
+        val result = vmm_copyin_bytes_from_space(space, 0x4000, 4)
+        expect(result.status.ok).to_equal(false)
+        expect(result.status.errno).to_equal(EFAULT)

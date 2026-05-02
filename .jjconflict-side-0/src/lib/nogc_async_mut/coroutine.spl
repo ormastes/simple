@@ -1,0 +1,392 @@
+# Standard Library -- Stackless Coroutines
+#
+# @tag:api
+# @tag:stdlib
+#
+# Zero-copy async primitives without stack switching.
+# Coroutines are state machines that can suspend (yield) and resume.
+#
+# Design: Manual enum-based state tracking. Each coroutine holds:
+#   - A state tag (which yield point we are at)
+#   - Saved local variables (slots)
+#   - A step function that dispatches on the current state
+#
+# The step function receives the coroutine and returns a CoroutineResult:
+#   - Yielded(value): suspended, call resume() to continue
+#   - Completed(value): finished, no more values
+#
+# Usage:
+#   val co = Coroutine(
+#       initial_slots: [0, 10],       # i=0, limit=10
+#       step_fn: fn(co):
+#           val state = co.state()
+#           val i     = co.slot(0)
+#           val limit = co.slot(1)
+#           if state == 0:
+#               if i < limit:
+#                   co.set_slot(0, i + 1)
+#                   co.set_state(0)           # loop back
+#                   CoroutineResult.yielded(i)
+#               else:
+#                   CoroutineResult.completed(nil)
+#           else:
+#               CoroutineResult.completed(nil)
+#   )
+#
+#   val r1 = co.resume()   # Yielded(0)
+#   val r2 = co.resume()   # Yielded(1)
+#   ...
+#
+#   # Or iterate:
+#   for x in coroutine_iter(co):
+#       print x
+#
+
+# ================================================================
+# CoroutineResult -- outcome of a single resume step
+# ================================================================
+
+class CoroutineResult:
+    """Result of resuming a coroutine.
+
+    Two variants:
+      - Yielded: coroutine suspended and produced a value
+      - Completed: coroutine finished (value may be nil)
+    """
+    _tag: text       # "yielded" or "completed"
+    _value: any
+
+    static fn yielded(value) -> CoroutineResult:
+        """Create a Yielded result carrying the given value."""
+        CoroutineResult(_tag: "yielded", _value: value)
+
+    static fn completed(value) -> CoroutineResult:
+        """Create a Completed result. Pass nil if no final value."""
+        CoroutineResult(_tag: "completed", _value: value)
+
+    fn is_yielded() -> bool:
+        """True if the coroutine suspended with a value."""
+        self._tag == "yielded"
+
+    fn is_completed() -> bool:
+        """True if the coroutine has finished."""
+        self._tag == "completed"
+
+    fn value():
+        """The value carried by this result (yield value or final value)."""
+        self._value
+
+# ================================================================
+# Coroutine -- stackless coroutine with manual state machine
+# ================================================================
+
+class Coroutine:
+    """A stackless coroutine backed by an explicit state machine.
+
+    The caller provides:
+      - initial_slots: array of initial local variable values
+      - step_fn: fn(coroutine) -> CoroutineResult
+        The step function reads/writes state and slots, then returns
+        Yielded(value) to suspend or Completed(value) to finish.
+
+    State management:
+      - state()       -> current state tag (integer)
+      - set_state(n)  -> set state tag for next resume
+      - slot(i)       -> read saved local at index i
+      - set_slot(i,v) -> write saved local at index i
+
+    Resume protocol:
+      - resume()      -> CoroutineResult
+        Calls step_fn once. If Completed, marks coroutine as done.
+        Subsequent resume() calls on a done coroutine return Completed(nil).
+    """
+    _state: i64
+    _slots: [any]
+    _step_fn: any       # fn(Coroutine) -> CoroutineResult
+    _done: bool
+
+    static fn new(initial_slots, step_fn) -> Coroutine:
+        """Create a new coroutine.
+
+        Args:
+            initial_slots: array of initial values for saved locals
+            step_fn: fn(coroutine) -> CoroutineResult
+        """
+        Coroutine(
+            _state: 0,
+            _slots: initial_slots,
+            _step_fn: step_fn,
+            _done: false
+        )
+
+    # ---- state accessors ----
+
+    fn state() -> i64:
+        """Current state tag (which yield point we are at)."""
+        self._state
+
+    me set_state(s: i64):
+        """Set the state tag for the next resume."""
+        self._state = s
+
+    fn slot(idx: i64):
+        """Read saved local variable at the given index."""
+        self._slots[idx]
+
+    me set_slot(idx: i64, value):
+        """Write saved local variable at the given index."""
+        self._slots[idx] = value
+
+    fn is_done() -> bool:
+        """True if the coroutine has completed."""
+        self._done
+
+    # ---- resume protocol ----
+
+    me resume() -> CoroutineResult:
+        """Resume the coroutine, executing one step.
+
+        Returns:
+            CoroutineResult.yielded(value) if suspended
+            CoroutineResult.completed(value) if finished
+
+        Once completed, subsequent calls return Completed(nil).
+        """
+        if self._done:
+            return CoroutineResult.completed(nil)
+
+        val result = self._step_fn(self)
+
+        if result.is_completed():
+            self._done = true
+
+        result
+
+# ================================================================
+# Iterator adapter -- use coroutines in for loops
+# ================================================================
+
+fn coroutine_iter(co: Coroutine):
+    """Create an iterator dict that wraps a coroutine.
+
+    Allows using a coroutine with the standard iterator protocol:
+
+        for x in coroutine_iter(co):
+            print x
+
+    The iterator yields values until the coroutine completes.
+    """
+    {
+        "type": "iterator",
+        "data": [],
+        "index": 0,
+        "generator": "coroutine",
+        "state": {"coroutine": co},
+        "done": false
+    }
+
+# ================================================================
+# Convenience constructors
+# ================================================================
+
+fn coroutine_from_array(items):
+    """Create a coroutine that yields each element of an array.
+
+    Example:
+        val co = coroutine_from_array([10, 20, 30])
+        co.resume()  # Yielded(10)
+        co.resume()  # Yielded(20)
+        co.resume()  # Yielded(30)
+        co.resume()  # Completed(nil)
+    """
+    Coroutine.new(
+        [0, items],
+        fn(c):
+            val idx = c.slot(0)
+            val arr = c.slot(1)
+            if idx < arr.len():
+                c.set_slot(0, idx + 1)
+                CoroutineResult.yielded(arr[idx])
+            else:
+                CoroutineResult.completed(nil)
+    )
+
+fn coroutine_range(start: i64, end_val: i64):
+    """Create a coroutine that yields integers from start up to (not including) end_val.
+
+    Example:
+        val co = coroutine_range(0, 5)
+        co.resume()  # Yielded(0)
+        co.resume()  # Yielded(1)
+        ...
+        co.resume()  # Yielded(4)
+        co.resume()  # Completed(nil)
+    """
+    Coroutine.new(
+        [start, end_val],
+        fn(c):
+            val i = c.slot(0)
+            val limit = c.slot(1)
+            if i < limit:
+                c.set_slot(0, i + 1)
+                CoroutineResult.yielded(i)
+            else:
+                CoroutineResult.completed(nil)
+    )
+
+fn coroutine_map(source: Coroutine, transform_fn):
+    """Create a coroutine that applies a function to each yielded value.
+
+    Example:
+        val co = coroutine_range(0, 3)
+        val doubled = coroutine_map(co, fn(x): x * 2)
+        doubled.resume()  # Yielded(0)
+        doubled.resume()  # Yielded(2)
+        doubled.resume()  # Yielded(4)
+        doubled.resume()  # Completed(nil)
+    """
+    Coroutine.new(
+        [source, transform_fn],
+        fn(c):
+            val src = c.slot(0)
+            val tfn = c.slot(1)
+            val result = src.resume()
+            if result.is_yielded():
+                CoroutineResult.yielded(tfn(result.value()))
+            else:
+                CoroutineResult.completed(nil)
+    )
+
+fn coroutine_filter(source: Coroutine, predicate_fn):
+    """Create a coroutine that only yields values matching a predicate.
+
+    Skips values where predicate_fn returns false, advancing the
+    source coroutine until a matching value is found or it completes.
+
+    Example:
+        val co = coroutine_range(0, 10)
+        val evens = coroutine_filter(co, fn(x): x % 2 == 0)
+        evens.resume()  # Yielded(0)
+        evens.resume()  # Yielded(2)
+        evens.resume()  # Yielded(4)
+    """
+    Coroutine.new(
+        [source, predicate_fn],
+        fn(c):
+            val src = c.slot(0)
+            val pred = c.slot(1)
+            var result = src.resume()
+            while result.is_yielded():
+                if pred(result.value()):
+                    return CoroutineResult.yielded(result.value())
+                result = src.resume()
+            CoroutineResult.completed(nil)
+    )
+
+fn coroutine_take(source: Coroutine, n: i64):
+    """Create a coroutine that yields at most n values from the source.
+
+    Example:
+        val co = coroutine_range(0, 1000)
+        val first5 = coroutine_take(co, 5)
+        # yields 0, 1, 2, 3, 4 then completes
+    """
+    Coroutine.new(
+        [source, 0, n],
+        fn(c):
+            val src   = c.slot(0)
+            val count = c.slot(1)
+            val limit = c.slot(2)
+            if count >= limit:
+                return CoroutineResult.completed(nil)
+            val result = src.resume()
+            if result.is_yielded():
+                c.set_slot(1, count + 1)
+                CoroutineResult.yielded(result.value())
+            else:
+                CoroutineResult.completed(nil)
+    )
+
+fn coroutine_chain(first: Coroutine, second: Coroutine):
+    """Create a coroutine that yields all values from first, then from second.
+
+    Example:
+        val a = coroutine_from_array([1, 2])
+        val b = coroutine_from_array([3, 4])
+        val chained = coroutine_chain(a, b)
+        # yields 1, 2, 3, 4
+    """
+    Coroutine.new(
+        [first, second, false],
+        fn(c):
+            val fst = c.slot(0)
+            val snd = c.slot(1)
+            val in_second = c.slot(2)
+            if in_second:
+                return snd.resume()
+            val result = fst.resume()
+            if result.is_yielded():
+                return result
+            # first exhausted, switch to second
+            c.set_slot(2, true)
+            snd.resume()
+    )
+
+fn coroutine_zip(a: Coroutine, b: Coroutine):
+    """Create a coroutine that yields pairs from two coroutines in lockstep.
+
+    Completes when either source completes.
+
+    Example:
+        val left  = coroutine_from_array([1, 2, 3])
+        val right = coroutine_from_array(["a", "b", "c"])
+        val zipped = coroutine_zip(left, right)
+        zipped.resume()  # Yielded((1, "a"))
+        zipped.resume()  # Yielded((2, "b"))
+        zipped.resume()  # Yielded((3, "c"))
+        zipped.resume()  # Completed(nil)
+    """
+    Coroutine.new(
+        [a, b],
+        fn(c):
+            val ca = c.slot(0)
+            val cb = c.slot(1)
+            val ra = ca.resume()
+            val rb = cb.resume()
+            if ra.is_yielded() and rb.is_yielded():
+                CoroutineResult.yielded((ra.value(), rb.value()))
+            else:
+                CoroutineResult.completed(nil)
+    )
+
+# ================================================================
+# Collect helper
+# ================================================================
+
+fn coroutine_collect(co: Coroutine):
+    """Exhaust a coroutine and collect all yielded values into an array.
+
+    Example:
+        val co = coroutine_range(0, 5)
+        coroutine_collect(co)  # [0, 1, 2, 3, 4]
+    """
+    var results = []
+    var result = co.resume()
+    while result.is_yielded():
+        results = results + [result.value()]
+        result = co.resume()
+    results
+
+fn coroutine_fold(co: Coroutine, initial, accumulate_fn):
+    """Fold (reduce) over all yielded values of a coroutine.
+
+    Example:
+        val co = coroutine_range(0, 5)
+        coroutine_fold(co, 0, fn(acc, x): acc + x)  # 10
+    """
+    var acc = initial
+    var result = co.resume()
+    while result.is_yielded():
+        acc = accumulate_fn(acc, result.value())
+        result = co.resume()
+    acc

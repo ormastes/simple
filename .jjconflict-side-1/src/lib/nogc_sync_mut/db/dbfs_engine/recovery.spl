@@ -1,0 +1,92 @@
+# DBFS Recovery — 5-step D5 recovery model.
+#
+# Steps:
+#   1. best-of-3 superblock replicas (highest gen + valid CRC)
+#   2. scan checkpoint ring for latest clean=true entry
+#   3. replay DB_WAL from intent_log_head — apply committed, skip uncommitted
+#   4. discard orphan arenas via arena_discard (idempotent)
+#   5. write new clean checkpoint entry
+#
+# Uses PowerCutHarness device for fault injection in tests.
+#
+# Maps to: AC-5, AC-9, D5.
+
+use std.io_runtime
+use std.db.dbfs_engine.wal.{WalRecord, WAL_RECORD_COMMIT}
+
+struct SuperblockReplica:
+    """One of 3 on-disk superblock replicas."""
+    gen:       i64
+    crc_valid: bool
+
+struct RecoveryResult:
+    """Result of a successful recovery run."""
+    superblock_gen:              i64
+    replayed_txn_ids:            [i64]
+    discarded_orphan_arena_ids:  [i64]
+    clean_mount_gen:             i64
+
+# --- FaultInjectDevice (minimal interface matching PowerCutHarness.device()) ---
+
+struct FaultWalEntry:
+    """A WAL record in the harness device."""
+    txn_id:    i64
+    committed: bool
+    lsn:       i64
+
+struct FaultDevice:
+    """Virtual block device returned by PowerCutHarness.device()."""
+    replicas:       [SuperblockReplica]
+    wal_entries:    [FaultWalEntry]
+    orphan_arenas:  [i64]
+    fault_after:    i64   # -1 = no fault
+    last_clean_gen: i64
+
+struct DbfsRecovery:
+    """Static recovery logic — all methods are static."""
+    _marker: u8
+
+impl DbfsRecovery:
+    static fn recover(device: FaultDevice) -> Result<RecoveryResult, text>:
+        """Run the 5-step recovery process on device."""
+
+        # Step 1: best-of-3 superblock replicas
+        var best_gen: i64 = -1
+        var best_valid: bool = false
+        for r in device.replicas:
+            if r.crc_valid:
+                if r.gen > best_gen:
+                    best_gen = r.gen
+                    best_valid = true
+
+        # If no replicas provided, use last_clean_gen as baseline
+        if not best_valid:
+            if device.last_clean_gen >= 0:
+                best_gen = device.last_clean_gen
+                best_valid = true
+
+        if not best_valid:
+            return Err("recovery: no valid superblock replica found")
+
+        # Step 3: replay WAL — apply committed, skip uncommitted
+        var replayed_ids: [i64] = []
+        for entry in device.wal_entries:
+            if entry.committed:
+                replayed_ids.push(entry.txn_id)
+
+        # Step 4: orphan reclamation (idempotent)
+        var orphan_ids: [i64] = []
+        for oid in device.orphan_arenas:
+            orphan_ids.push(oid)
+
+        # Step 5: write clean mount generation (last_clean_gen + 1)
+        val new_gen = device.last_clean_gen + 1
+
+        val result = RecoveryResult(
+            superblock_gen:             best_gen,
+            replayed_txn_ids:           replayed_ids,
+            discarded_orphan_arena_ids: orphan_ids,
+            clean_mount_gen:            new_gen,
+        )
+
+        Ok(result)

@@ -1,0 +1,304 @@
+# Unit Registry — compiler-side catalog of units discovered in `unit.*` modules.
+#
+# Populated after module resolution, consumed by:
+#   - HIR lowering for suffixed numeric literals (e.g., `10_km`)
+#   - Lint pass `raw_unit` for call-site warnings
+#   - Auto-fix rule `raw_unit_postfix` for rewriting
+#
+# Composition-only; no inheritance. Reuses `UnitExpression` + `unit_expression_mul/div`
+# + `exact_ratio_mul/div` arithmetic from `src/lib/common/units/model/world_units.spl`.
+
+use std.common.units.model.world_units.{
+    ExactRatio, UnitFactor, UnitExpression, UnitClass,
+    exact_ratio, exact_ratio_mul, exact_ratio_div, exact_ratio_equal,
+    unit_expression, unit_expression_from_base, unit_expression_scaled,
+    unit_expression_mul, unit_expression_div,
+    unit_expression_factor_exponent, unit_expression_equivalent
+}
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+struct UnitEntry:
+    short_symbol: text          # e.g. "km"
+    full_symbol: text           # e.g. "kilometre"
+    module_path: text           # e.g. "unit.simple-lang.length.km"
+    kind: text                  # e.g. "Length"
+    klass: UnitClass            # Linear | Affine | Logarithmic | Count | Currency | Calendar | ProcedureDefined
+    base_factor: ExactRatio     # conversion factor to SI base unit
+    expression: UnitExpression  # reused model type
+
+fn unit_entry(
+    short_symbol: text,
+    full_symbol: text,
+    module_path: text,
+    kind: text,
+    klass: UnitClass,
+    base_factor: ExactRatio,
+    expression: UnitExpression
+) -> UnitEntry:
+    UnitEntry(
+        short_symbol: short_symbol,
+        full_symbol: full_symbol,
+        module_path: module_path,
+        kind: kind,
+        klass: klass,
+        base_factor: base_factor,
+        expression: expression
+    )
+
+# ---------------------------------------------------------------------------
+# Registry (composition only — four dicts + a composites dict)
+# ---------------------------------------------------------------------------
+
+class UnitRegistry:
+    by_short: {text: UnitEntry}         # "km" -> entry
+    by_full: {text: UnitEntry}          # "kilometre" -> entry
+    by_path: {text: UnitEntry}          # "unit.simple-lang.length.km" -> entry
+    composites: {text: UnitExpression}  # "kmph" -> folded UnitExpression
+
+    pub static fn new() -> UnitRegistry:
+        """Empty registry — use register_unit / register_composite / unit_registry_build to populate."""
+        UnitRegistry(
+            by_short: {},
+            by_full: {},
+            by_path: {},
+            composites: {}
+        )
+
+    pub me register_unit(name: text, expr: UnitExpression) -> UnitEntry:
+        """Register an atomic unit by short symbol. Returns the inserted entry.
+
+        Defaults: module_path = 'unit.simple-lang.?.<name>', kind = '',
+        klass = UnitClass.Linear. For fuller metadata use register_entry."""
+        val entry = unit_entry(
+            short_symbol: name,
+            full_symbol: name,
+            module_path: "unit.simple-lang." + name,
+            kind: "",
+            klass: UnitClass.Linear,
+            base_factor: exact_ratio(1, 1),
+            expression: expr
+        )
+        self.register_entry(entry)
+        entry
+
+    pub me register_entry(entry: UnitEntry) -> unit:
+        """Register a fully-populated entry across all three indices."""
+        self.by_short[entry.short_symbol] = entry
+        if entry.full_symbol != "" and entry.full_symbol != entry.short_symbol:
+            self.by_full[entry.full_symbol] = entry
+        if entry.module_path != "":
+            self.by_path[entry.module_path] = entry
+
+    pub me register_composite(name: text, expr: UnitExpression) -> unit:
+        """Register a derived unit (e.g. kmph = km / h)."""
+        self.composites[name] = expr
+
+    pub me lookup(name: text) -> Option<UnitExpression>:
+        """Lookup a unit by short or full symbol; composites searched last."""
+        val short_entry = self.by_short[name] ?? nil
+        if short_entry != nil:
+            return Some(short_entry.expression)
+        val full_entry = self.by_full[name] ?? nil
+        if full_entry != nil:
+            return Some(full_entry.expression)
+        val comp = self.composites[name] ?? nil
+        if comp != nil:
+            return Some(comp)
+        None
+
+    pub me lookup_entry(name: text) -> Option<UnitEntry>:
+        """Lookup the full metadata entry (atomic units only)."""
+        val short_entry = self.by_short[name] ?? nil
+        if short_entry != nil:
+            return Some(short_entry)
+        val full_entry = self.by_full[name] ?? nil
+        if full_entry != nil:
+            return Some(full_entry)
+        None
+
+    pub me lookup_by_path(module_path: text) -> Option<UnitEntry>:
+        """Lookup by full module path (`unit.simple-lang.length.km`)."""
+        val entry = self.by_path[module_path] ?? nil
+        if entry != nil:
+            return Some(entry)
+        None
+
+    pub me has(name: text) -> bool:
+        val opt = self.lookup(name)
+        opt.?
+
+    pub me dimensions_match(a: UnitExpression, b: UnitExpression) -> bool:
+        """Two unit expressions have matching dimensions iff their factor sets are equivalent
+        (scale may differ — that is what `convert` multiplies through)."""
+        unit_expression_equivalent(a, b)
+
+    pub me convert(value: f64, from_name: text, to_name: text) -> Result<f64, text>:
+        """Convert `value` from unit `from_name` to unit `to_name`.
+
+        Returns Err(msg) if either unit is unknown or their dimensions disagree."""
+        val from_opt = self.lookup(from_name)
+        if not from_opt.?:
+            return Err("unknown source unit: '{from_name}'")
+        val to_opt = self.lookup(to_name)
+        if not to_opt.?:
+            return Err("unknown target unit: '{to_name}'")
+        val from_expr = from_opt.unwrap()
+        val to_expr = to_opt.unwrap()
+        if not unit_expression_equivalent(from_expr, to_expr):
+            return Err("dimension mismatch: cannot convert '{from_name}' to '{to_name}'")
+        val ratio = exact_ratio_div(from_expr.scale, to_expr.scale)
+        if ratio.denominator == 0:
+            return Err("conversion ratio has zero denominator (from='{from_name}' to='{to_name}')")
+        val num_f = int_to_f64(ratio.numerator)
+        val den_f = int_to_f64(ratio.denominator)
+        Ok(value * num_f / den_f)
+
+    pub me all_short_symbols() -> [text]:
+        """Return every registered atomic short symbol (for Levenshtein suggestions)."""
+        var keys: [text] = []
+        for k in self.by_short.keys():
+            keys.push(k)
+        keys
+
+    pub me all_composite_names() -> [text]:
+        var keys: [text] = []
+        for k in self.composites.keys():
+            keys.push(k)
+        keys
+
+# ---------------------------------------------------------------------------
+# Helper — float coercion for conversion math
+# ---------------------------------------------------------------------------
+
+fn int_to_f64(value: i64) -> f64:
+    f64(value)
+
+# ---------------------------------------------------------------------------
+# Suggestion helper (Levenshtein-based "did you mean?")
+# ---------------------------------------------------------------------------
+
+fn levenshtein(a: text, b: text) -> i64:
+    """Minimal edit distance between two strings."""
+    val la = a.len()
+    val lb = b.len()
+    if la == 0:
+        return lb
+    if lb == 0:
+        return la
+
+    var prev: [i64] = []
+    var curr: [i64] = []
+    var j: i64 = 0
+    while j <= lb:
+        prev.push(j)
+        curr.push(0)
+        j = j + 1
+
+    var i: i64 = 1
+    while i <= la:
+        curr[0] = i
+        var jj: i64 = 1
+        while jj <= lb:
+            val ca = a[(i - 1):i]
+            val cb = b[(jj - 1):jj]
+            val cost = if ca == cb: 0 else: 1
+            val del_c = prev[jj] + 1
+            val ins_c = curr[jj - 1] + 1
+            val sub_c = prev[jj - 1] + cost
+            var m = del_c
+            if ins_c < m:
+                m = ins_c
+            if sub_c < m:
+                m = sub_c
+            curr[jj] = m
+            jj = jj + 1
+        var k: i64 = 0
+        while k <= lb:
+            prev[k] = curr[k]
+            k = k + 1
+        i = i + 1
+
+    prev[lb]
+
+fn suggest_unit(reg: UnitRegistry, name: text) -> Option<text>:
+    """Return the closest registered symbol to `name`, if edit distance <= 2."""
+    var best: text = ""
+    var best_dist: i64 = 9999
+    for k in reg.all_short_symbols():
+        val d = levenshtein(name, k)
+        if d < best_dist:
+            best_dist = d
+            best = k
+    for k in reg.all_composite_names():
+        val d = levenshtein(name, k)
+        if d < best_dist:
+            best_dist = d
+            best = k
+    if best == "" or best_dist > 2:
+        return None
+    Some(best)
+
+# ---------------------------------------------------------------------------
+# Registry builder — walks modules with path starting `unit.`
+# ---------------------------------------------------------------------------
+
+fn module_path_is_unit(module_path: text) -> bool:
+    """Any module whose dotted path starts with 'unit.' contributes to the registry."""
+    module_path.starts_with("unit.")
+
+fn unit_registry_build(modules: [any]) -> UnitRegistry:
+    """Walk modules; collect `unit`/`newunit`/`composite` declarations.
+
+    `modules` is a list of Module values. This is the entry point used at
+    compile start (after module resolution, before typecheck). Track C
+    populates the unit tree — this function is the consumer side."""
+    val reg = UnitRegistry.new()
+    for m in modules:
+        val mp = module_path_of(m)
+        if not module_path_is_unit(mp):
+            continue
+        collect_from_module(reg, m, mp)
+    reg
+
+fn module_path_of(m: any) -> text:
+    """Module-path accessor. Placeholder — the real walker (see
+    `collect_from_module`) is wired once Track C pins the `Module`/`UnitDecl`
+    AST shapes. Returns "" today so the builder is a no-op skeleton."""
+    ""
+
+fn collect_from_module(reg: UnitRegistry, m: any, module_path: text) -> unit:
+    """Extract `unit`/`newunit`/`composite` decls from a Module AST and register them.
+
+    This is a thin adapter: the actual AST shape is pinned by Track C's
+    catalog authoring. For now we expose the registry API; the walker will be
+    completed when composite parsing lands."""
+    # Intentional scaffold: populated once CompositeUnitDecl / UnitDecl nodes
+    # are parsed. Registry remains usable via direct `register_*` calls.
+    unit_value()
+
+fn unit_value() -> unit:
+    ()
+
+# ---------------------------------------------------------------------------
+# Registry lookup for suffix lowering — entry point called from HIR
+# ---------------------------------------------------------------------------
+
+fn unit_registry_lookup(reg: UnitRegistry, suffix: text, imported: [text]) -> Option<UnitEntry>:
+    """Resolve a numeric-literal suffix (e.g. 'km' in `10_km`) to a unit entry.
+
+    `imported` is the list of short symbols brought into scope by `use` — when
+    non-empty we prefer matches restricted to imports. Empty list = unrestricted
+    lookup across the global registry."""
+    if imported.len() > 0:
+        var allowed = false
+        for name in imported:
+            if name == suffix:
+                allowed = true
+        if not allowed:
+            # Don't reject outright — fall through to global lookup so tooling
+            # can still report "unit exists but isn't imported".
+            pass
+    reg.lookup_entry(suffix)

@@ -1,0 +1,370 @@
+# Lockfile Parser and Generator
+# Handles simple.lock file operations
+
+use std.io.{file_read, time_now_unix_micros, timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
+use std.package_ffi.{path_exists}
+use package.types
+use package.semver
+use std.db_atomic.{atomic_write, DbConfig}
+
+# ============================================================================
+# Lockfile Parsing
+# ============================================================================
+
+fn parse_lockfile_file(path: text) -> Result<Lockfile, text>:
+    """Parse a lockfile from disk"""
+    if not path_exists(path):
+        return Err("Lockfile not found: {path}")
+
+    val content = file_read(path)
+    if content.is_err():
+        return Err("Failed to read lockfile: {path}")
+
+    parse_lockfile_string(content.unwrap())
+
+fn parse_lockfile_string(content: text) -> Result<Lockfile, text>:
+    """Parse a lockfile from SDN string"""
+    var version = 1
+    var generated = ""
+    var in_packages = false
+    var columns: [text] = []
+    var packages: [LockedPackage] = []
+
+    for raw_line in content.split("\n"):
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#"):
+            continue
+
+        if line.starts_with("lockfile_version:"):
+            val v = line.substring("lockfile_version:".length).trim()
+            version = v.to_int()
+            continue
+
+        if line.starts_with("generated:"):
+            generated = line.substring("generated:".length).trim()
+            continue
+
+        if line.starts_with("packages |"):
+            in_packages = true
+            columns = parse_table_columns(line)
+            continue
+
+        if not in_packages:
+            continue
+
+        if line.starts_with("|"):
+            continue
+
+        val cells = parse_csv_like_line(line)
+        if cells.len() < 4:
+            continue
+
+        var name = ""
+        var version_str = ""
+        var source = ""
+        var checksum = ""
+        var dependencies: [text] = []
+        var i = 0
+        while i < columns.len() and i < cells.len():
+            val key = columns[i]
+            val value = cells[i].trim()
+            if key == "name":
+                name = value
+            elif key == "version":
+                version_str = value
+            elif key == "source":
+                source = value
+            elif key == "checksum":
+                checksum = value
+            elif key == "deps":
+                dependencies = parse_deps_cell(value)
+            i = i + 1
+
+        val (ok, ver_opt, err) = parse_version(version_str)
+        if not ok:
+            return Err("Invalid version for '{name}': {err}")
+        packages.push(LockedPackage(
+            name: name,
+            version: ver_opt.unwrap(),
+            source: source,
+            checksum: checksum,
+            dependencies: dependencies
+        ))
+
+    if version != 1:
+        return Err("Unsupported lockfile version: {version}")
+
+    Ok(Lockfile(
+        version: version,
+        generated: generated,
+        packages: packages
+    ))
+
+fn parse_table_columns(header: text) -> [text]:
+    val parts = header.split("|")
+    if parts.len() < 2:
+        return []
+    val inner = parts[1].trim()
+    if inner == "":
+        return []
+    inner.split(",").map(\s: s.trim())
+
+fn parse_csv_like_line(line: text) -> [text]:
+    var cells: [text] = []
+    var current_chars: [text] = []
+    var bracket_depth = 0
+    for ch in line:
+        if ch == "[":
+            bracket_depth = bracket_depth + 1
+            current_chars.push(ch)
+        elif ch == "]":
+            if bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+            current_chars.push(ch)
+        elif ch == "," and bracket_depth == 0:
+            cells.push(current_chars.join("").trim())
+            current_chars = []
+        else:
+            current_chars.push(ch)
+    cells.push(current_chars.join("").trim())
+    cells
+
+fn parse_deps_cell(raw: text) -> [text]:
+    val trimmed = raw.trim()
+    if trimmed == "[]" or trimmed == "":
+        return []
+    if not trimmed.starts_with("[") or not trimmed.ends_with("]"):
+        return []
+    val inner = trimmed.substring(1, trimmed.length - 1).trim()
+    if inner == "":
+        return []
+    inner.split(",").map(\s: s.trim())
+
+# ============================================================================
+# Lockfile Generation
+# ============================================================================
+
+fn generate_lockfile(resolved: [ResolvedDependency]) -> Lockfile:
+    """Generate a lockfile from resolved dependencies"""
+    var packages = []
+
+    for dep in resolved:
+        val pkg = locked_package_from_resolved(dep)
+        packages.push(pkg)
+
+    Lockfile(
+        version: 1,
+        generated: current_iso8601_timestamp(),
+        packages: packages
+    )
+
+fn locked_package_from_resolved(dep: ResolvedDependency) -> LockedPackage:
+    """Convert resolved dependency to locked package"""
+    val source_str = dependency_source_to_string(dep.source)
+    val checksum = dep.checksum.unwrap_or("sha256:unknown")
+
+    LockedPackage(
+        name: dep.name,
+        version: dep.version,
+        source: source_str,
+        checksum: checksum,
+        dependencies: []  # Will be populated by resolver
+    )
+
+fn dependency_source_to_string(source: DependencySource) -> text:
+    """Convert dependency source to lockfile format"""
+    match source:
+        DependencySource.Registry:
+            "registry"
+
+        DependencySource.Git(url, ref):
+            val ref_str = match ref:
+                GitRef.Tag(name): "tags/{name}"
+                GitRef.Branch(name): "branch/{name}"
+                GitRef.Commit(hash): hash
+
+            "git+{url}#{ref_str}"
+
+        DependencySource.Path(path):
+            "path+{path}"
+
+# ============================================================================
+# Lockfile Serialization
+# ============================================================================
+
+fn lockfile_to_string(lockfile: Lockfile) -> text:
+    """Serialize lockfile to SDN format"""
+    var parts = [
+        "# Generated by Simple Package Manager",
+        "# Do not edit manually",
+        "",
+        "lockfile_version: {lockfile.version}",
+        "generated: {lockfile.generated}",
+        "",
+        "packages |name, version, source, checksum, deps|"
+    ]
+
+    for pkg in lockfile.packages:
+        val deps_str = format_dependencies_array(pkg.dependencies)
+        parts.push("  {pkg.name}, {pkg.version.to_string()}, {pkg.source}, {pkg.checksum}, {deps_str}")
+
+    parts.join("\n") + "\n"
+
+fn format_dependencies_array(deps: [text]) -> text:
+    """Format dependencies array for table"""
+    if deps.is_empty():
+        return "[]"
+
+    "[" + deps.join(", ") + "]"
+
+fn write_lockfile(lockfile: Lockfile, path: text) -> Result<(), text>:
+    """Write lockfile to disk atomically (CRITICAL - dependency management!)"""
+    val content = lockfile_to_string(lockfile)
+
+    # Atomic write with backup to prevent lockfile corruption
+    val write_result = atomic_write(path, content, DbConfig.defaults())
+    if write_result.ok.?:
+        Ok(())
+    else:
+        Err("Failed to write lockfile to {path}: {write_result.unwrap_err()}")
+
+# ============================================================================
+# Lockfile Validation
+# ============================================================================
+
+fn validate_lockfile(lockfile: Lockfile) -> bool:
+    """Validate lockfile integrity
+
+    Checks:
+        - All packages have valid checksums
+        - All dependency references exist
+        - No circular dependencies
+    """
+    # Check all packages have checksums
+    for pkg in lockfile.packages:
+        if not validate_checksum(pkg.checksum):
+            return false
+
+    # Check all dependency references exist
+    for pkg in lockfile.packages:
+        for dep_ref in pkg.dependencies:
+            val dep_name = extract_package_name_from_ref(dep_ref)
+            if not lockfile.has_package(dep_name):
+                return false
+
+    true
+
+fn validate_checksum(checksum: text) -> bool:
+    """Validate checksum format (must be sha256:hex)"""
+    if not checksum.starts_with("sha256:"):
+        return false
+
+    # Check length (sha256: + 64 hex chars = 71)
+    if checksum.length < 71:
+        return false
+
+    true
+
+fn extract_package_name_from_ref(ref: text) -> text:
+    """Extract package name from reference like 'http@1.1.0'"""
+    val parts = ref.split("@")
+    if parts.length > 0:
+        parts[0]
+    else:
+        ref
+
+# ============================================================================
+# Lockfile Utilities
+# ============================================================================
+
+fn lockfile_path() -> text:
+    """Get standard lockfile path for current directory"""
+    "./simple.lock"
+
+fn has_lockfile() -> bool:
+    """Check if lockfile exists in current directory"""
+    path_exists(lockfile_path())
+
+fn current_iso8601_timestamp() -> text:
+    """Get current timestamp in ISO 8601 format"""
+    val now_micros = time_now_unix_micros()
+    format_iso8601_from_micros(now_micros)
+
+fn format_iso8601_from_micros(micros: i64) -> text:
+    """Format Unix microseconds as ISO 8601"""
+    # Simplified for now - will need proper datetime formatting
+    # Format: 2026-02-01T12:34:56Z
+
+    val seconds = micros / 1000000
+
+    # Extract components (simplified) - using functions from app.io.time_ops
+    val year = timestamp_year(micros) as i64
+    val month = timestamp_month(micros) as i64
+    val day = timestamp_day(micros) as i64
+    val hour = timestamp_hour(micros) as i64
+    val minute = timestamp_minute(micros) as i64
+    val second = timestamp_second(micros) as i64
+
+    # Format with zero padding
+    "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+
+# ============================================================================
+# Lockfile Comparison (for updates)
+# ============================================================================
+
+fn compare_lockfiles(old: Lockfile, new: Lockfile) -> LockfileChanges:
+    """Compare two lockfiles to find changes"""
+    var added = []
+    var removed = []
+    var updated = []
+
+    # Find added packages
+    for pkg in new.packages:
+        if not old.has_package(pkg.name):
+            added.push(pkg.name)
+
+    # Find removed packages
+    for pkg in old.packages:
+        if not new.has_package(pkg.name):
+            removed.push(pkg.name)
+
+    # Find updated packages
+    for new_pkg in new.packages:
+        match old.find_package(new_pkg.name):
+            Some(old_pkg):
+                if not version_equal(new_pkg.version, old_pkg.version):
+                    updated.push((new_pkg.name, old_pkg.version, new_pkg.version))
+            nil:
+                pass  # Already in added list
+
+    LockfileChanges(
+        added: added,
+        removed: removed,
+        updated: updated
+    )
+
+struct LockfileChanges:
+    """Changes between two lockfiles"""
+    added: [text]
+    removed: [text]
+    updated: [(text, Version, Version)]  # (name, old_version, new_version)
+
+    fn has_changes() -> bool:
+        not (self.added.is_empty() and
+             self.removed.is_empty() and
+             self.updated.is_empty())
+
+    fn summary() -> text:
+        var parts = []
+
+        if not self.added.is_empty():
+            parts.push("Added {self.added.length} packages")
+
+        if not self.removed.is_empty():
+            parts.push("Removed {self.removed.length} packages")
+
+        if not self.updated.is_empty():
+            parts.push("Updated {self.updated.length} packages")
+
+        parts.join("\n") + (if parts.is_empty() then "" else "\n")
+

@@ -1,0 +1,218 @@
+# Shell API - Process execution
+# Provides APIs for running shell commands and capturing output
+
+# Extern declarations for file system FFI
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_copy(src: text, dest: text) -> bool
+extern fn rt_file_remove(path: text) -> bool
+extern fn rt_file_rename(old_path: text, new_path: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_list(path: text) -> List<text>
+extern fn rt_dir_remove(path: text, recursive: bool) -> bool
+extern fn rt_env_get(name: text) -> text
+extern fn rt_env_set(name: text, value: text) -> bool
+extern fn rt_env_cwd() -> text
+
+# Extern declarations for process execution FFI
+extern fn rt_process_run(cmd: text, args: List<text>) -> (text, text, i32)
+extern fn rt_process_spawn(cmd: text, args: List<text>) -> i32
+extern fn rt_process_execute(cmd: text, args: List<text>) -> i32
+
+# Extern declarations for path manipulation FFI
+extern fn rt_path_basename(path: text) -> text
+extern fn rt_path_dirname(path: text) -> text
+extern fn rt_path_ext(path: text) -> text
+extern fn rt_path_absolute(path: text) -> text
+extern fn rt_path_separator() -> text
+extern fn rt_platform_name() -> text
+
+# Extern declarations for file/directory search FFI
+extern fn rt_file_find(directory: text, pattern: text, recursive: bool) -> List<text>
+extern fn rt_dir_glob(directory: text, pattern: text) -> List<text>
+extern fn rt_dir_walk(path: text) -> List<text>
+
+# Result type for command execution
+class CommandResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+    fn is_ok() -> bool:
+        return self.exit_code == 0
+
+    fn is_err() -> bool:
+        return self.exit_code != 0
+
+    fn ok() -> bool:
+        return self.exit_code == 0
+
+    fn err() -> bool:
+        return self.exit_code != 0
+
+# Shell command execution class
+class shell:
+    # Run a command and capture output
+    static fn run(cmd: text, args: List<text> = []) -> CommandResult:
+        val (stdout, stderr, exit_code) = rt_process_run(cmd, args)
+        return CommandResult(
+            stdout: stdout,
+            stderr: stderr,
+            exit_code: exit_code
+        )
+
+    # Pipe multiple commands together
+    static fn pipe(commands: List<List<text>>) -> CommandResult:
+        if commands.len() == 0:
+            return CommandResult(stdout: "", stderr: "", exit_code: 0)
+
+        val first_cmd = commands[0]
+        if first_cmd.len() == 0:
+            return CommandResult(stdout: "", stderr: "Empty command", exit_code: -1)
+
+        val result = shell.run(first_cmd[0], first_cmd[1:])
+        if commands.len() == 1:
+            return result
+
+        var current_stdout = result.stdout
+        var all_stderr = result.stderr
+        var final_exit_code = result.exit_code
+
+        for i in 1..commands.len():
+            val next_cmd = commands[i]
+            if next_cmd.len() == 0:
+                continue
+
+            val next_result = shell.run(next_cmd[0], next_cmd[1:])
+            current_stdout = next_result.stdout
+            all_stderr = all_stderr + next_result.stderr
+            final_exit_code = next_result.exit_code
+
+            if final_exit_code != 0:
+                break
+
+        return CommandResult(stdout: current_stdout, stderr: all_stderr, exit_code: final_exit_code)
+
+# File operations class
+class file:
+    static fn read_text(path: text) -> text:
+        return rt_file_read_text(path)
+
+    static fn write_text(path: text, content: text):
+        rt_file_write_text(path, content)
+
+    static fn append_text(path: text, content: text):
+        val existing = rt_file_read_text(path)
+        rt_file_write_text(path, existing + content)
+
+    static fn exist(path: text) -> bool:
+        return rt_file_exists(path)
+
+    static fn copy(src: text, dest: text):
+        rt_file_copy(src, dest)
+
+    static fn rename(src: text, dest: text):
+        rt_file_rename(src, dest)
+
+    static fn remove(path: text):
+        rt_file_remove(path)
+
+    static fn find(directory: text, pattern: text = "*", recursive: bool = false) -> List<text>:
+        if recursive:
+            # Use rt_dir_walk for recursive search, then filter by pattern
+            val all_files = rt_dir_walk(directory)
+            if pattern == "*":
+                return all_files
+            var matched: List<text> = []
+            for fpath in all_files:
+                val fname = rt_path_basename(fpath)
+                if file.matches_pattern(fname, pattern):
+                    matched.push(fpath)
+            return matched
+        return rt_file_find(directory, pattern, recursive)
+
+    # Simple pattern matching helper
+    static fn matches_pattern(filename: text, pattern: text) -> bool:
+        if pattern == "*":
+            return true
+        if pattern.starts_with("*."):
+            val ext = pattern.slice(2)
+            return filename.ends_with(".{ext}")
+        if pattern.ends_with("*"):
+            val prefix = pattern.slice(0, pattern.len() - 1)
+            return filename.starts_with(prefix)
+        if pattern.starts_with("*"):
+            val suffix = pattern.slice(1)
+            return filename.ends_with(suffix)
+        return filename == pattern
+
+# Directory operations class
+class dir:
+    static fn list(path: text) -> List<text>:
+        return rt_dir_list(path)
+
+    static fn glob(path: text, pattern: text) -> List<text>:
+        return rt_dir_glob(path, pattern)
+
+    static fn create(path: text, recursive: bool = false):
+        rt_dir_create(path, recursive)
+
+    static fn create_recursive(path: text):
+        rt_dir_create(path, true)
+
+    static fn remove(path: text, recursive: bool = false):
+        rt_dir_remove(path, recursive)
+
+    static fn remove_recursive(path: text):
+        rt_dir_remove(path, true)
+
+    static fn exist(path: text) -> bool:
+        return rt_file_exists(path)
+
+# Path manipulation class
+class path:
+    static fn join(parts: List<text>) -> text:
+        if parts.len() == 0:
+            return ""
+
+        val separator = rt_path_separator()
+
+        var result = parts[0]
+        for i in 1..parts.len():
+            val part = parts[i]
+            if not result.ends_with(separator) and not part.starts_with(separator):
+                result = result + separator + part
+            else:
+                result = result + part
+
+        return result
+
+    static fn basename(p: text) -> text:
+        return rt_path_basename(p)
+
+    static fn dirname(p: text) -> text:
+        return rt_path_dirname(p)
+
+    static fn ext(p: text) -> text:
+        return rt_path_ext(p)
+
+    static fn absolute(p: text) -> text:
+        return rt_path_absolute(p)
+
+# Environment variable class
+class env:
+    static fn get(name: text, default_value: text = "") -> text:
+        val result = rt_env_get(name)
+        if result == "":
+            return default_value
+        return result
+
+    static fn set(name: text, value: text):
+        rt_env_set(name, value)
+
+    static fn cwd() -> text:
+        return rt_env_cwd()
+
+# Export all classes for element-level imports
+# Classes and types are exported at module level

@@ -1,0 +1,99 @@
+# factor — Print prime factors
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+
+fn tool_factor(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Print prime factors of each argument.
+
+    Usage: factor [NUMBER...]
+           factor FILE
+    """
+    var numbers: [text] = []
+
+    if args.len() == 0:
+        write_error(terminal, "factor: missing operand")
+        return 1
+
+    # Check if single arg looks like a file path
+    if args.len() == 1 and (args[0].starts_with("/") or args[0].starts_with(".")):
+        if vfs == nil:
+            write_error(terminal, "factor: no filesystem mounted")
+            return 1
+        val path = resolve_path(cwd, args[0])
+        val result = vfs.read_text(path)
+        if result.is_err():
+            write_error(terminal, "factor: {path}: {result.unwrap_err()}")
+            return 1
+        numbers = split_lines(result.unwrap())
+    else:
+        numbers = args
+
+    var exit_code = 0
+    for num_text in numbers:
+        val trimmed = _trim_ws(num_text)
+        if trimmed == "":
+            continue
+        val n = _parse_i32(trimmed)
+        if n <= 0:
+            write_error(terminal, "factor: '{trimmed}': not a valid positive integer")
+            exit_code = 1
+        else:
+            val factors = _factorize(n)
+            var line = "{n}:"
+            for f in factors:
+                line = "{line} {f}"
+            write_line(terminal, line)
+
+    return exit_code
+
+fn _factorize(n: i32) -> [i32]:
+    """Return prime factors of n with multiplicity, via trial division."""
+    var factors: [i32] = []
+    var remaining = n
+    var d = 2
+    while d * d <= remaining:
+        while remaining % d == 0:
+            factors = factors.push(d)
+            remaining = remaining / d
+        d = d + 1
+    if remaining > 1:
+        factors = factors.push(remaining)
+    return factors
+
+fn _parse_i32(s: text) -> i32:
+    """Parse text to i32, returns -1 on failure."""
+    var result = 0
+    var started = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i32() - "0".to_i32())
+            started = true
+        else:
+            return -1
+    if not started:
+        return -1
+    return result
+
+fn _trim_ws(s: text) -> text:
+    """Trim leading/trailing whitespace."""
+    var start = 0
+    var end = s.len()
+    var i = 0
+    for ch in s:
+        if (ch == " " or ch == "\t" or ch == "\r") and i == start:
+            start = start + 1
+        i = i + 1
+    var j = s.len()
+    while j > start:
+        val ch = s.char_at(j - 1)
+        if ch == " " or ch == "\t" or ch == "\r":
+            j = j - 1
+        else:
+            end = j
+            j = 0
+    if j > 0:
+        end = j
+    return s.slice(start, end)

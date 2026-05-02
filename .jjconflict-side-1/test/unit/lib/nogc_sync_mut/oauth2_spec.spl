@@ -1,0 +1,130 @@
+# Specs for std.nogc_sync_mut.oauth2
+#
+# Covers token-cache write/read/expire roundtrip, the absence of a leftover
+# .tmp file after a successful atomic write, and secret resolution from an
+# environment variable. The token endpoint itself is not exercised here —
+# that requires a live HTTP server and is covered by integration tests.
+
+use std.nogc_sync_mut.oauth2.{
+    oauth2_token_cache_load,
+    oauth2_token_cache_save,
+    oauth2_get_token_with_secret,
+    oauth2_get_token,
+    oauth2_parse_retry_after,
+    OAUTH2_EXPIRY_SAFETY_MARGIN,
+}
+use std.nogc_sync_mut.file_system.file_ops.{file_exists, file_delete, file_read_text}
+use std.nogc_sync_mut.env.variables.{env_set, env_get}
+use std.nogc_sync_mut.io.time_ops.{current_time_unix}
+
+
+fn _tmp_path(name: text) -> text:
+    "/tmp/oauth2_spec_{current_time_unix()}_{name}"
+
+
+describe "oauth2 token cache":
+
+    it "round-trips token and expires_at":
+        val path = _tmp_path("roundtrip.sdn")
+        file_delete(path)
+
+        val saved = oauth2_token_cache_save(path, "abc.eyJ.xyz", 1745000000)
+        expect saved == true
+
+        val (tok, exp) = oauth2_token_cache_load(path)
+        expect tok == "abc.eyJ.xyz"
+        expect exp == 1745000000
+
+        file_delete(path)
+
+    it "does not leave a .tmp sidecar on successful write":
+        val path = _tmp_path("nottemp.sdn")
+        file_delete(path)
+        file_delete("{path}.tmp")
+
+        val saved = oauth2_token_cache_save(path, "tok-1", 1745000100)
+        expect saved == true
+        expect file_exists(path) == true
+        expect file_exists("{path}.tmp") == false
+
+        file_delete(path)
+
+    it "returns empty when the cache file is missing":
+        val path = _tmp_path("missing.sdn")
+        file_delete(path)
+        val (tok, exp) = oauth2_token_cache_load(path)
+        expect tok == ""
+        expect exp == 0
+
+    it "short-circuits on a fresh cache hit (does not contact the network)":
+        # Pre-populate the cache with an expiry far in the future, then call
+        # oauth2_get_token_with_secret with deliberately bogus credentials —
+        # if the cache short-circuit works, the token endpoint is never
+        # contacted and we get the cached value back as (true, cached).
+        val path = _tmp_path("hit.sdn")
+        file_delete(path)
+        val now = current_time_unix()
+        oauth2_token_cache_save(path, "cached.value", now + 3600)
+
+        val (ok, tok) = oauth2_get_token_with_secret(
+            "bogus-tenant", "bogus-client", "bogus-secret",
+            "https://graph.microsoft.com/.default", path)
+        expect ok == true
+        expect tok == "cached.value"
+
+        file_delete(path)
+
+    it "treats cached tokens within the safety margin as stale":
+        # When expires_at is now (or any time within the safety margin), the
+        # reuse predicate (now + margin < expires_at) must be false, so the
+        # cache hit cannot short-circuit and the function must mint fresh.
+        val path = _tmp_path("expired.sdn")
+        file_delete(path)
+        val now = current_time_unix()
+        oauth2_token_cache_save(path, "old", now - 10)
+        val (tok, exp) = oauth2_token_cache_load(path)
+        expect tok == "old"
+        expect exp == now - 10
+        expect (now + OAUTH2_EXPIRY_SAFETY_MARGIN > exp) == true
+        file_delete(path)
+
+    it "escapes embedded double-quotes in token values":
+        val path = _tmp_path("escape.sdn")
+        file_delete(path)
+        val raw = "ab\"cd"
+        oauth2_token_cache_save(path, raw, 1745000200)
+        val (tok, _exp) = oauth2_token_cache_load(path)
+        expect tok == raw
+        file_delete(path)
+
+
+describe "oauth2 secret resolution":
+
+    it "reads the client secret from the named env var":
+        # We can't drive the real token endpoint here, but we can confirm
+        # that an unset env var short-circuits to (false, "") and that the
+        # function does call env_get with the supplied name.
+        env_set("ITF_OAUTH2_TEST_SECRET", "")
+        val (ok_empty, _tok_empty) = oauth2_get_token(
+            "tenant-x", "client-x", "ITF_OAUTH2_TEST_SECRET", "scope", "")
+        expect ok_empty == false
+
+    it "returns failure when the env-var name is empty":
+        val (ok, tok) = oauth2_get_token("t", "c", "", "s", "")
+        expect ok == false
+        expect tok == ""
+
+
+describe "oauth2 retry-after parsing":
+
+    it "parses a numeric seconds value":
+        expect oauth2_parse_retry_after("30") == 30
+
+    it "ignores trailing whitespace":
+        expect oauth2_parse_retry_after("  5  ") == 5
+
+    it "returns 0 on empty input":
+        expect oauth2_parse_retry_after("") == 0
+
+    it "returns 0 on non-numeric (HTTP-date) input":
+        expect oauth2_parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT") == 0

@@ -1,0 +1,254 @@
+# i18n (Internationalization) command handlers
+# Migrated from: src/driver/src/cli/i18n.rs
+# Purpose: Extract i18n strings and generate locale files
+
+# Run i18n command
+fn run_i18n(args: List<text>) -> i32:
+    # args[0] is "i18n", args[1] is the subcommand
+    if args.len() < 2 or args.any(\a: a == "--help" or a == "-h"):
+        print_i18n_help()
+        return 0
+
+    val subcommand = args[1]
+    match subcommand:
+        "extract" =>
+            # Find path argument
+            val path = find_non_flag_arg(args, 2, "src")
+
+            # Find output directory
+            val output = find_flag_value(args, flag1="-o", flag2="--output", default_val="i18n")
+
+            extract_i18n_strings(path=path, output=output)
+
+        "generate" =>
+            if args.len() < 3:
+                print_err("error: i18n generate requires a locale code")
+                print_err("Usage: simple i18n generate <locale> [-o <output>]")
+                return 1
+
+            val locale = args[2]
+
+            # Find path argument for extraction
+            val path = find_non_flag_arg(args, 3, "src")
+
+            # Find output directory
+            val output = find_flag_value(args, flag1="-o", flag2="--output", default_val="i18n")
+
+            generate_locale_template(locale=locale, path=path, output=output)
+
+        _ =>
+            print_err("error: unknown i18n subcommand: {subcommand}")
+            print_err("Run 'simple i18n --help' for usage")
+            1
+
+# Print i18n command help
+fn print_i18n_help():
+    print "Internationalization tools for Simple language"
+    print ""
+    print "Usage:"
+    print "  simple i18n extract [OPTIONS] [path]"
+    print "  simple i18n generate <locale> [OPTIONS] [path]"
+    print ""
+    print "Commands:"
+    print "  extract              Extract i18n strings from source files"
+    print "  generate <locale>    Generate a locale template file"
+    print ""
+    print "Options:"
+    print "  -o, --output <dir>   Output directory (default: i18n/)"
+    print "  path                 Source path to scan (default: src/)"
+    print ""
+    print "Examples:"
+    print "  simple i18n extract                    # Extract from src/ to i18n/"
+    print "  simple i18n extract app/ -o locale/    # Extract from app/ to locale/"
+    print "  simple i18n generate ko-KR             # Generate Korean locale template"
+    print "  simple i18n generate es-ES -o locale/  # Generate Spanish locale template"
+    print ""
+    print "i18n String Syntax:"
+    print "  Name_\"default text\"                    # Named string literal"
+    print "  Name_\"Hello {{user}}!\"{{user: name}}     # Template with args"
+    print ""
+    print "Generated Files:"
+    print "  __init__.spl            # Default locale (extracted strings)"
+    print "  __init__.<locale>.spl   # Locale-specific translations"
+
+# Extract i18n strings from source files
+fn extract_i18n_strings(path: text, output: text) -> i32:
+    print "Extracting i18n strings from {path}..."
+
+    # Create extractor
+    val extractor = create_i18n_extractor()
+    var file_count = 0
+    var error_count = 0
+
+    # Walk the source directory
+    val files = walk_directory(dir_path=path, extension=".spl")
+
+    for file_path in files:
+        file_count = file_count + 1
+
+        # Read file content
+        match read_file(file_path):
+            Ok(content) =>
+                # Parse module
+                match parse_module(content):
+                    Ok(module) =>
+                        extract_from_module(extractor, module=module, path=file_path)
+                    Err(e) =>
+                        print_err("  warning: parse error in {file_path}: {e}")
+                        error_count = error_count + 1
+            Err(e) =>
+                print_err("  warning: failed to read {file_path}: {e}")
+                error_count = error_count + 1
+
+    # Finish extraction
+    val result = finish_extraction(extractor)
+
+    # Print warnings
+    for warning in result.warnings:
+        print_err("  {warning}")
+
+    # Generate locale files
+    match generate_locale_files(output=output, result=result):
+        Ok(files) =>
+            print ""
+            print "Extracted {result.strings.len()} i18n strings from {file_count} files"
+
+            for file in files:
+                print "  Generated: {file}"
+
+            if error_count > 0:
+                print ""
+                print "  {error_count} files had errors"
+
+            0
+
+        Err(e) =>
+            print_err("error: failed to generate locale files: {e}")
+            1
+
+# Generate a locale template for a specific locale
+fn generate_locale_template(locale: text, path: text, output: text) -> i32:
+    print "Generating {locale} locale template from {path}..."
+
+    # Create extractor
+    val extractor = create_i18n_extractor()
+    var file_count = 0
+
+    # Walk the source directory
+    val files = walk_directory(dir_path=path, extension=".spl")
+
+    for file_path in files:
+        file_count = file_count + 1
+
+        # Read and parse file
+        match read_file(file_path):
+            Ok(content) =>
+                match parse_module(content):
+                    Ok(module) =>
+                        extract_from_module(extractor, module=module, path=file_path)
+                    Err(_) =>
+                        # Silently skip parse errors
+                        {}
+            Err(_) =>
+                # Silently skip read errors
+                {}
+
+    # Finish extraction
+    val result = finish_extraction(extractor)
+
+    # Generate locale template
+    match generate_locale_file(output=output, locale=locale, result=result):
+        Ok(file) =>
+            print ""
+            print "Generated locale template: {file}"
+            print "  {result.strings.len()} strings from {file_count} files"
+            print ""
+            print "Next steps:"
+            print "  1. Edit {file} and translate the values"
+            print "  2. Keep the val names unchanged (they are the keys)"
+            print "  3. Import the locale file in your application"
+
+            0
+
+        Err(e) =>
+            print_err("error: failed to generate locale template: {e}")
+            1
+
+# Helper: Find non-flag argument at or after index
+fn find_non_flag_arg(args: List<text>, start_idx: i32, default_val: text) -> text:
+    var idx = start_idx
+    while idx < args.len():
+        val arg = args[idx]
+        if not arg.starts_with("-") and not arg.starts_with("--"):
+            return arg
+        idx = idx + 1
+
+    default_val
+
+# Helper: Find flag value with default (reused from web_commands pattern)
+fn find_flag_value(args: List<text>, flag1: text, flag2: text, default_val: text) -> text:
+    # Try flag1
+    val pos1 = args.position(\a: a == flag1)
+    if pos1.is_some():
+        val idx = pos1.unwrap()
+        if idx + 1 < args.len():
+            return args[idx + 1]
+
+    # Try flag2
+    val pos2 = args.position(\a: a == flag2)
+    if pos2.is_some():
+        val idx = pos2.unwrap()
+        if idx + 1 < args.len():
+            return args[idx + 1]
+
+    # Return default value
+    default_val
+
+
+# Stub types and functions
+# NOTE: Placeholder - integrate with i18n module when available
+
+struct I18nExtractor:
+    strings: List<text>
+
+struct ExtractionResult:
+    strings: List<text>
+    warnings: List<text>
+
+# Stub functions for i18n operations
+fn create_i18n_extractor() -> I18nExtractor:
+    I18nExtractor(strings: [])
+
+fn extract_from_module(extractor: I18nExtractor, module: text, path: text):
+    # Stub: would extract i18n strings from AST
+    {}
+
+fn finish_extraction(extractor: I18nExtractor) -> ExtractionResult:
+    ExtractionResult(
+        strings: ["Hello_\"Hello!\"", "Goodbye_\"Goodbye!\""],
+        warnings: []
+    )
+
+fn walk_directory(dir_path: text, extension: text) -> List<text>:
+    # Stub: would walk directory and find .spl files
+    ["{dir_path}/example.spl", "{dir_path}/test.spl"]
+
+fn read_file(path: text) -> Result<text, text>:
+    # Stub: would read file content
+    Ok("fn main(): print \"Hello\"")
+
+fn parse_module(content: text) -> Result<text, text>:
+    # Stub: would parse module AST
+    Ok("module")
+
+fn generate_locale_files(output: text, result: ExtractionResult) -> Result<List<text>, text>:
+    # Stub: would generate locale files
+    Ok(["{output}/__init__.spl"])
+
+fn generate_locale_file(output: text, locale: text, result: ExtractionResult) -> Result<text, text>:
+    # Stub: would generate locale template file
+    Ok("{output}/__init__.{locale}.spl")
+
+# Helper for stderr output
+fn print_err(msg: text):
+    eprint msg

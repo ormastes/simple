@@ -1,0 +1,1741 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Virtual Memory Manager — Memory Layer (Layer 1)
+#
+# 4-level x86_64 page table management (PML4 -> PDPT -> PD -> PT).
+# Handles virtual-to-physical mapping, address space creation,
+# and kernel identity mapping.
+#
+# Page table entry format (x86_64):
+#   Bit 0:  Present
+#   Bit 1:  Read/Write
+#   Bit 2:  User/Supervisor
+#   Bit 3:  Write-Through
+#   Bit 4:  Cache Disable
+#   Bit 5:  Accessed
+#   Bit 6:  Dirty (PT only)
+#   Bit 7:  Page Size (1 = 2MB page in PD, 1GB in PDPT)
+#   Bit 63: No Execute (NX/XD)
+#
+# Address decomposition (48-bit virtual):
+#   [47:39] PML4 index   (9 bits, 512 entries)
+#   [38:30] PDPT index   (9 bits, 512 entries)
+#   [29:21] PD index     (9 bits, 512 entries)
+#   [20:12] PT index     (9 bits, 512 entries)
+#   [11:0]  Page offset  (12 bits, 4KB)
+
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, phys_addr_value, virt_addr_value}
+use os.kernel.types.task_types.{AddressSpace}
+use os.kernel.types.vmspace_types.{
+    VmArea, ProcessVmSpace,
+}
+use os.kernel.boot.mmio.{mmio_read8, mmio_read64, mmio_write64}
+use os.kernel.memory.pmm.{PhysMemManager}
+# ============================================================================
+# Constants
+# ============================================================================
+
+val PAGE_SIZE: u64 = 4096
+val ENTRIES_PER_TABLE: u64 = 512
+val TABLE_SIZE: u64 = 4096          # 512 entries * 8 bytes
+
+# Page table entry flag bits
+val PTE_PRESENT: u64 = 1 << 0
+val PTE_WRITABLE: u64 = 1 << 1
+val PTE_USER: u64 = 1 << 2
+val PTE_WRITE_THROUGH: u64 = 1 << 3
+val PTE_CACHE_DISABLE: u64 = 1 << 4
+val PTE_ACCESSED: u64 = 1 << 5
+val PTE_DIRTY: u64 = 1 << 6
+val PTE_HUGE_PAGE: u64 = 1 << 7
+val PTE_NO_EXECUTE: u64 = 1 << 63
+
+# Address mask to extract physical address from PTE (bits 12..51)
+val PTE_ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+
+# Identity map range: first 4GB
+val IDENTITY_MAP_END: u64 = 0x100000000    # 4GB
+val VMM_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+val VMM_MAX_VMAS: u64 = 256
+val VMM_VMA_ANON: u32 = 0
+val VMM_VMA_FILE: u32 = 1
+val VMM_VMA_SHARED: u32 = 2
+val VMM_VMA_EXEC: u32 = 4
+val VMM_VMA_COW: u32 = 8
+
+@cfg(x86_64)
+val VMM_KERNEL_SPACE_START: u64 = 0xFFFF800000000000
+@cfg(x86)
+val VMM_KERNEL_SPACE_START: u64 = 0xC0000000
+@cfg(arm64)
+val VMM_KERNEL_SPACE_START: u64 = 0xFFFF000000000000
+@cfg(arm32)
+val VMM_KERNEL_SPACE_START: u64 = 0xC0000000
+@cfg(riscv64)
+val VMM_KERNEL_SPACE_START: u64 = 0xFFFFFFC000000000
+@cfg(riscv32)
+val VMM_KERNEL_SPACE_START: u64 = 0xC0000000
+
+# ============================================================================
+# Virtual Memory Manager
+# ============================================================================
+
+struct VirtMemManager:
+    """4-level x86_64 page table manager.
+
+    Manages PML4 page tables for the kernel and per-process
+    address spaces. Allocates pages from the PMM for page tables.
+    """
+    pml4_phys: u64          # Physical address of kernel PML4
+    hhdm_offset: u64        # HHDM offset for phys-to-virt conversion
+
+impl VirtMemManager:
+    fn pml4_address() -> u64:
+        """Get physical address of PML4 (for CR3)."""
+        self.pml4_phys
+
+# ============================================================================
+# Address Decomposition
+# ============================================================================
+
+fn _pml4_index(virt: u64) -> u64:
+    """Extract PML4 index from virtual address (bits 47:39)."""
+    (virt >> 39) & 0x1FF
+
+fn _pdpt_index(virt: u64) -> u64:
+    """Extract PDPT index from virtual address (bits 38:30)."""
+    (virt >> 30) & 0x1FF
+
+fn _pd_index(virt: u64) -> u64:
+    """Extract Page Directory index from virtual address (bits 29:21)."""
+    (virt >> 21) & 0x1FF
+
+fn _pt_index(virt: u64) -> u64:
+    """Extract Page Table index from virtual address (bits 20:12)."""
+    (virt >> 12) & 0x1FF
+
+# ============================================================================
+# Page Table Entry Helpers
+# ============================================================================
+
+fn _flags_to_pte_bits(flags: VmFlags) -> u64:
+    """Convert VmFlags to x86_64 page table entry bits."""
+    var bits: u64 = 0
+
+    if flags.present:
+        bits = bits | PTE_PRESENT
+    if flags.writable:
+        bits = bits | PTE_WRITABLE
+    if flags.user:
+        bits = bits | PTE_USER
+    if flags.write_through:
+        bits = bits | PTE_WRITE_THROUGH
+    if flags.cache_disable:
+        bits = bits | PTE_CACHE_DISABLE
+    if flags.no_execute:
+        bits = bits | PTE_NO_EXECUTE
+
+    bits
+
+fn _read_pte(table_virt: u64, index: u64) -> u64:
+    """Read a page table entry."""
+    mmio_read64(table_virt + (index * 8))
+
+fn _write_pte(table_virt: u64, index: u64, value: u64):
+    """Write a page table entry."""
+    mmio_write64(table_virt + (index * 8), value)
+
+fn _pte_is_present(entry: u64) -> bool:
+    """Check if a PTE has the present bit set."""
+    (entry & PTE_PRESENT) != 0
+
+fn _pte_phys_addr(entry: u64) -> u64:
+    """Extract physical address from a PTE."""
+    entry & PTE_ADDR_MASK
+
+# ============================================================================
+# HHDM Address Conversion
+# ============================================================================
+
+# Global VMM instance
+var g_vmm: VirtMemManager = VirtMemManager(
+    pml4_phys: 0,
+    hhdm_offset: 0
+)
+# Initialized-flag workaround: the baremetal freestanding build stores a
+# `bool = false` module-level default as the NIL tag (0x3) rather than 0,
+# which makes `if not g_vmm_initialized` evaluate true *after* `vmm_init`
+# wrote `true`. Use a u64 sentinel (0 = not initialized, 1 = initialized)
+# so the representation is unambiguous.
+var g_vmm_initialized: u64 = 0
+
+# Monotonic address-space id counter. 0 is reserved for the kernel AS;
+# the first user address space created gets id 1. Wraps only after ~2^64
+# creations, so safe to treat as unique for debug/logging purposes.
+var g_next_as_id: u64 = 1
+
+fn _phys_to_virt(phys: u64) -> u64:
+    """Convert physical to virtual address via HHDM."""
+    phys + g_vmm.hhdm_offset
+
+# ============================================================================
+# PMM Interface (forward declarations)
+# ============================================================================
+
+extern fn pmm_alloc_page() -> PageFrame?
+extern fn pmm_free_page(frame: PageFrame)
+
+fn _alloc_table_page() -> u64:
+    """Allocate a zeroed page for a new page table.
+
+    Returns physical address of the new table, or 0 on failure.
+    """
+    val frame = pmm_alloc_page()
+    if val Some(f) = frame:
+        val phys = f.pfn * PAGE_SIZE
+        val virt = _phys_to_virt(phys)
+
+        # Zero the page table
+        var i: u64 = 0
+        while i < ENTRIES_PER_TABLE:
+            _write_pte(virt, i, 0)
+            i = i + 1
+
+        return phys
+
+    # Allocation failed
+    0
+
+# ============================================================================
+# Page Table Walk & Mapping
+# ============================================================================
+
+fn _ensure_table_entry(table_virt: u64, index: u64) -> u64:
+    """Ensure a page table entry points to a valid next-level table.
+
+    If the entry is not present, allocates a new table page.
+    Returns the virtual address of the next-level table, or 0 on failure.
+    """
+    val entry = _read_pte(table_virt, index)
+
+    if _pte_is_present(entry):
+        # Table exists, return its virtual address
+        val next_phys = _pte_phys_addr(entry)
+        return _phys_to_virt(next_phys)
+
+    # Allocate new table
+    val new_table_phys = _alloc_table_page()
+    if new_table_phys == 0:
+        return 0  # Allocation failed
+
+    # Write entry: present + writable + user (permissive for intermediate tables)
+    val new_entry = new_table_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER
+    _write_pte(table_virt, index, new_entry)
+
+    _phys_to_virt(new_table_phys)
+
+# ============================================================================
+# Forward declaration for serial debug
+# ============================================================================
+
+use os.kernel.log.klog_api.{log_raw_println}
+
+# ============================================================================
+# VMM Initialization
+# ============================================================================
+
+fn vmm_init(pmm_manager: PhysMemManager, hhdm_offset: u64):
+    """Initialize virtual memory manager.
+
+    Creates kernel PML4, identity-maps first 4GB, maps framebuffer.
+    Does NOT switch CR3 yet — caller should do that after all mappings.
+    """
+    log_raw_println("[VMM] Initializing virtual memory manager...")
+
+    g_vmm.hhdm_offset = hhdm_offset
+
+    # Allocate PML4
+    val pml4_phys = _alloc_table_page()
+    if pml4_phys == 0:
+        log_raw_println("[VMM] FATAL: Could not allocate PML4")
+        return
+
+    g_vmm.pml4_phys = pml4_phys
+    g_vmm_initialized = 1
+
+    log_raw_println("[VMM] PML4 at physical 0x{pml4_phys}")
+
+    # Identity-map first 4GB using 2MB huge pages for performance
+    log_raw_println("[VMM] Identity-mapping first 4GB...")
+    _identity_map_4gb()
+
+    log_raw_println("[VMM] VMM initialization complete")
+
+fn _identity_map_4gb():
+    """Identity-map first 4GB using 2MB huge pages.
+
+    Maps virtual 0x0..0x1_0000_0000 to physical 0x0..0x1_0000_0000.
+    Uses 2MB pages (PDE with huge-page bit) for efficiency.
+    """
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    # We need PML4[0] -> PDPT with 4 entries (one per 1GB)
+    val pdpt_virt = _ensure_table_entry(pml4_virt, 0)
+    if pdpt_virt == 0:
+        log_raw_println("[VMM] FATAL: Could not allocate PDPT for identity map")
+        return
+
+    # For each 1GB region (4 PDPT entries)
+    var gb: u64 = 0
+    while gb < 4:
+        # Allocate a Page Directory for this 1GB region
+        val pd_virt = _ensure_table_entry(pdpt_virt, gb)
+        if pd_virt == 0:
+            log_raw_println("[VMM] FATAL: Could not allocate PD for identity map")
+            return
+
+        # Fill PD with 512 x 2MB huge page entries
+        var pd_idx: u64 = 0
+        while pd_idx < ENTRIES_PER_TABLE:
+            val phys_addr = (gb * 0x40000000) + (pd_idx * 0x200000)  # gb*1GB + idx*2MB
+            val entry = phys_addr | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE_PAGE
+            _write_pte(pd_virt, pd_idx, entry)
+            pd_idx = pd_idx + 1
+
+        gb = gb + 1
+
+    log_raw_println("[VMM] Identity-mapped 4GB with 2MB pages (2048 entries)")
+
+# ============================================================================
+# Page Mapping (4KB pages)
+# ============================================================================
+
+fn vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map a single 4KB virtual page to a physical frame.
+
+    Walks the 4-level page table, creating intermediate tables as needed.
+    Enforces W^X: never sets both writable and executable.
+
+    Returns true on success, false on failure (e.g., out of memory).
+    """
+    val vaddr = virt_addr_value(virt)
+    val paddr = phys_addr_value(phys)
+
+    # W^X enforcement: never map a page as both writable and executable
+    var safe_flags = flags
+    if flags.writable and not flags.no_execute:
+        # Writable pages must not be executable
+        safe_flags = VmFlags(
+            present: flags.present,
+            writable: true,
+            user: flags.user,
+            write_through: flags.write_through,
+            cache_disable: flags.cache_disable,
+            no_execute: true
+        )
+
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    # Walk PML4 -> PDPT -> PD -> PT
+    val pdpt_virt = _ensure_table_entry(pml4_virt, _pml4_index(vaddr))
+    if pdpt_virt == 0:
+        return false
+
+    val pd_virt = _ensure_table_entry(pdpt_virt, _pdpt_index(vaddr))
+    if pd_virt == 0:
+        return false
+
+    val pt_virt = _ensure_table_entry(pd_virt, _pd_index(vaddr))
+    if pt_virt == 0:
+        return false
+
+    # Write the final PT entry
+    val pte_flags = _flags_to_pte_bits(safe_flags)
+    val entry = (paddr & PTE_ADDR_MASK) | pte_flags
+    _write_pte(pt_virt, _pt_index(vaddr), entry)
+
+    # Invalidate TLB for this virtual address
+    _invlpg(vaddr)
+
+    true
+
+fn vmm_unmap_page(virt: VirtAddr) -> bool:
+    """Unmap a single 4KB virtual page.
+
+    Clears the page table entry and invalidates the TLB.
+    Does NOT free the physical page — caller must do that.
+
+    Returns true if the page was mapped, false if it was not.
+    """
+    val vaddr = virt_addr_value(virt)
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    # Walk to the PT level — do NOT create tables (just check presence)
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if not _pte_is_present(pml4_entry):
+        return false
+
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if not _pte_is_present(pdpt_entry):
+        return false
+
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if not _pte_is_present(pd_entry):
+        return false
+
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    if not _pte_is_present(pt_entry):
+        return false
+
+    # Clear the entry
+    _write_pte(pt_virt, _pt_index(vaddr), 0)
+
+    # Invalidate TLB
+    _invlpg(vaddr)
+
+    true
+
+# ============================================================================
+# User Pointer Verification (copy_to_user guard)
+# ============================================================================
+
+struct VmmUserCopyStatus:
+    """Status returned by VMM user copy-in helpers.
+
+    `errno` is a positive POSIX errno value when ok is false.
+    `bytes_read` includes copied terminators for C strings.
+    """
+    ok: bool
+    errno: i32
+    bytes_read: u64
+
+struct VmmCopyBytesResult:
+    status: VmmUserCopyStatus
+    bytes: [u8]
+
+struct VmmCopyU64Result:
+    status: VmmUserCopyStatus
+    value: u64
+
+struct VmmCopyCstrResult:
+    status: VmmUserCopyStatus
+    value: text
+
+struct VmmCopyStringVectorResult:
+    status: VmmUserCopyStatus
+    values: [text]
+
+struct VmmPtWalkResult:
+    """Result of translating one user virtual address through a ProcessVmSpace."""
+    ok: bool
+    kernel_ptr: u64
+    bytes_until_page_end: u64
+
+fn _vmm_copy_ok(bytes_read: u64) -> VmmUserCopyStatus:
+    VmmUserCopyStatus(ok: true, errno: 0, bytes_read: bytes_read)
+
+fn _vmm_copy_err(errno: i32, bytes_read: u64) -> VmmUserCopyStatus:
+    VmmUserCopyStatus(ok: false, errno: errno, bytes_read: bytes_read)
+
+fn _vmm_copy_bytes_err(errno: i32) -> VmmCopyBytesResult:
+    VmmCopyBytesResult(status: _vmm_copy_err(errno, 0), bytes: [])
+
+fn _vmm_copy_u64_err(errno: i32) -> VmmCopyU64Result:
+    VmmCopyU64Result(status: _vmm_copy_err(errno, 0), value: 0)
+
+fn _vmm_copy_cstr_err(errno: i32, bytes_read: u64) -> VmmCopyCstrResult:
+    VmmCopyCstrResult(status: _vmm_copy_err(errno, bytes_read), value: "")
+
+fn _vmm_copy_vector_err(errno: i32, bytes_read: u64) -> VmmCopyStringVectorResult:
+    VmmCopyStringVectorResult(status: _vmm_copy_err(errno, bytes_read), values: [])
+
+fn _vmm_is_userspace_ptr(ptr: u64) -> bool:
+    ptr != 0 and ptr < VMM_KERNEL_SPACE_START
+
+fn _vmm_is_userspace_range(ptr: u64, size: u64) -> bool:
+    if ptr == 0 or size == 0:
+        return false
+    val end = ptr + size - 1
+    if end < ptr:
+        return false
+    _vmm_is_userspace_ptr(ptr) and _vmm_is_userspace_ptr(end)
+
+fn _vmm_verify_user_access(addr: u64, size: u64, required_bits: u64) -> bool:
+    if not _vmm_is_userspace_range(addr, size):
+        return false
+
+    val last = addr + size - 1
+    var page = addr - (addr % PAGE_SIZE)
+    val last_page = last - (last % PAGE_SIZE)
+
+    while page <= last_page:
+        if not _vmm_check_pte_flags(page, required_bits):
+            return false
+        if page == last_page:
+            return true
+        page = page + PAGE_SIZE
+    true
+
+fn vmm_verify_user_read(addr: u64, size: u64) -> bool:
+    """Verify that [addr, addr+size) is mapped as user-readable.
+
+    Rejects null, empty, wrapping, and kernel-space ranges, then checks every
+    covered page has PRESENT | USER at the leaf PTE. This is the read-side
+    counterpart to vmm_verify_user_write; write behavior is intentionally left
+    unchanged for existing callers.
+    """
+    _vmm_verify_user_access(addr, size, PTE_PRESENT | PTE_USER)
+
+fn _vmm_pt_walk(space: ProcessVmSpace, vaddr: u64, required_bits: u64) -> VmmPtWalkResult:
+    """Translate one user VA in `space` to a kernel-readable physmap pointer."""
+    if space.pml4 == 0:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+    if not _vmm_is_userspace_ptr(vaddr):
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    val pml4_virt = _phys_to_virt(space.pml4)
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if (pml4_entry & required_bits) != required_bits:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if (pdpt_entry & required_bits) != required_bits:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if (pd_entry & required_bits) != required_bits:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    if (pd_entry & PTE_HUGE_PAGE) != 0:
+        val offset = vaddr & 0x1FFFFF
+        return VmmPtWalkResult(
+            ok: true,
+            kernel_ptr: _phys_to_virt(_pte_phys_addr(pd_entry) + offset),
+            bytes_until_page_end: 0x200000 - offset
+        )
+
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    if (pt_entry & required_bits) != required_bits:
+        return VmmPtWalkResult(ok: false, kernel_ptr: 0, bytes_until_page_end: 0)
+
+    val page_offset = vaddr & 0xFFF
+    VmmPtWalkResult(
+        ok: true,
+        kernel_ptr: _phys_to_virt(_pte_phys_addr(pt_entry) + page_offset),
+        bytes_until_page_end: PAGE_SIZE - page_offset
+    )
+
+fn vmm_pt_walk_user_read(space: ProcessVmSpace, vaddr: u64) -> u64?:
+    """Translate one readable user VA in an explicit address space."""
+    if space.vma_count > 0:
+        val area = vma_find(space, vaddr)
+        if area == nil:
+            return nil
+        if (area.flags & 1) == 0:
+            return nil
+
+    val walked = _vmm_pt_walk(space, vaddr, PTE_PRESENT | PTE_USER)
+    if not walked.ok:
+        return nil
+    walked.kernel_ptr
+
+fn vmm_pt_range_user_readable(space: ProcessVmSpace, ptr: u64, len: u64) -> bool:
+    """Return true when every page in [ptr, ptr+len) translates for read."""
+    if ptr == 0 or len == 0 or ptr + len < ptr:
+        return false
+    var copied: u64 = 0
+    while copied < len:
+        val current = ptr + copied
+        if space.vma_count > 0:
+            val area = vma_find(space, current)
+            if area == nil:
+                return false
+            if (area.flags & 1) == 0:
+                return false
+        val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER)
+        if not walked.ok:
+            return false
+        copied = copied + walked.bytes_until_page_end
+    true
+
+fn vmm_pt_range_user_writable(space: ProcessVmSpace, ptr: u64, len: u64) -> bool:
+    """Return true when every page in [ptr, ptr+len) translates for write."""
+    if ptr == 0 or len == 0 or ptr + len < ptr:
+        return false
+    var copied: u64 = 0
+    while copied < len:
+        val current = ptr + copied
+        if space.vma_count > 0:
+            val area = vma_find(space, current)
+            if area == nil:
+                return false
+            if (area.flags & 2) == 0:
+                return false
+        val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER | PTE_WRITABLE)
+        if not walked.ok:
+            return false
+        copied = copied + walked.bytes_until_page_end
+    true
+
+fn vmm_copyin_bytes_from_space(space: ProcessVmSpace, ptr: u64, len: u64) -> VmmCopyBytesResult:
+    """Copy an exact byte range through an explicit address-space page walk."""
+    if ptr == 0:
+        return _vmm_copy_bytes_err(14)
+    if len == 0:
+        return VmmCopyBytesResult(status: _vmm_copy_ok(0), bytes: [])
+    if ptr + len < ptr:
+        return _vmm_copy_bytes_err(14)
+
+    var bytes: [u8] = []
+    var copied: u64 = 0
+    while copied < len:
+        val current = ptr + copied
+        if space.vma_count > 0:
+            val area = vma_find(space, current)
+            if area == nil:
+                return _vmm_copy_bytes_err(14)
+            if (area.flags & 1) == 0:
+                return _vmm_copy_bytes_err(14)
+        val walked = _vmm_pt_walk(space, current, PTE_PRESENT | PTE_USER)
+        if not walked.ok:
+            return _vmm_copy_bytes_err(14)
+        var chunk = walked.bytes_until_page_end
+        val remaining = len - copied
+        if chunk > remaining:
+            chunk = remaining
+        var i: u64 = 0
+        while i < chunk:
+            bytes.push(mmio_read8(walked.kernel_ptr + i))
+            i = i + 1
+        copied = copied + chunk
+
+    VmmCopyBytesResult(status: _vmm_copy_ok(len), bytes: bytes)
+
+fn _vmm_bytes_to_text(bytes: [u8]) -> text:
+    var chars: [text] = []
+    for b in bytes:
+        chars.push((b.to_i64()).to_char())
+    chars.join("")
+
+fn _vmm_copyin_current_byte(ptr: u64) -> u8?:
+    """Read one byte from the current userspace mapping through page tables."""
+    val translated = vmm_translate(VirtAddr(addr: ptr))
+    if val Some(phys) = translated:
+        return mmio_read8(_phys_to_virt(phys_addr_value(phys)))
+    nil
+
+fn vmm_copyin_bytes(ptr: u64, len: u64) -> VmmCopyBytesResult:
+    """Copy an exact byte range from userspace into kernel-owned memory."""
+    if ptr == 0:
+        return _vmm_copy_bytes_err(14)
+    if len == 0:
+        return VmmCopyBytesResult(status: _vmm_copy_ok(0), bytes: [])
+    if not vmm_verify_user_read(ptr, len):
+        return _vmm_copy_bytes_err(14)
+
+    var bytes: [u8] = []
+    var i: u64 = 0
+    while i < len:
+        val current = ptr + i
+        if current < ptr:
+            return _vmm_copy_bytes_err(14)
+        val read = _vmm_copyin_current_byte(current)
+        if val Some(byte) = read:
+            bytes.push(byte)
+        else:
+            return _vmm_copy_bytes_err(14)
+        i = i + 1
+
+    VmmCopyBytesResult(status: _vmm_copy_ok(len), bytes: bytes)
+
+fn vmm_copyin_u64(ptr: u64) -> VmmCopyU64Result:
+    """Copy a little-endian u64 from userspace."""
+    if ptr == 0:
+        return _vmm_copy_u64_err(14)
+    if not vmm_verify_user_read(ptr, 8):
+        return _vmm_copy_u64_err(14)
+
+    var value: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val current = ptr + i
+        if current < ptr:
+            return _vmm_copy_u64_err(14)
+        val read = _vmm_copyin_current_byte(current)
+        if val Some(byte) = read:
+            value = value | (byte.to_u64() << (i * 8))
+        else:
+            return _vmm_copy_u64_err(14)
+        i = i + 1
+
+    VmmCopyU64Result(status: _vmm_copy_ok(8), value: value)
+
+fn vmm_copyin_cstr(ptr: u64, max_len: u64) -> VmmCopyCstrResult:
+    """Copy a NUL-terminated userspace string, bounded by max_len bytes."""
+    if ptr == 0:
+        return _vmm_copy_cstr_err(14, 0)
+
+    var bytes: [u8] = []
+    var i: u64 = 0
+    while i < max_len:
+        val current = ptr + i
+        if current < ptr:
+            return _vmm_copy_cstr_err(14, i)
+        if not vmm_verify_user_read(current, 1):
+            return _vmm_copy_cstr_err(14, i)
+        val read = _vmm_copyin_current_byte(current)
+        if val Some(b) = read:
+            if b == 0u8:
+                return VmmCopyCstrResult(
+                    status: _vmm_copy_ok(i + 1),
+                    value: _vmm_bytes_to_text(bytes)
+                )
+            bytes.push(b)
+        else:
+            return _vmm_copy_cstr_err(14, i)
+        i = i + 1
+
+    _vmm_copy_cstr_err(7, i)
+
+fn vmm_copyin_string_vector(
+    vec_ptr: u64,
+    max_count: u64,
+    max_string_len: u64,
+    max_total_bytes: u64
+) -> VmmCopyStringVectorResult:
+    """Copy a NUL-terminated userspace char** vector into kernel text values.
+
+    A null vector pointer is a valid empty vector. A non-null vector must end
+    with a null item pointer before max_count entries are consumed.
+    """
+    if vec_ptr == 0:
+        return VmmCopyStringVectorResult(status: _vmm_copy_ok(0), values: [])
+
+    var out: [text] = []
+    var total_bytes: u64 = 0
+    var bytes_read: u64 = 0
+    var i: u64 = 0
+    while i < max_count:
+        if i > (VMM_U64_MAX / 8):
+            return _vmm_copy_vector_err(14, bytes_read)
+        val offset = i * 8
+        val slot = vec_ptr + offset
+        if slot < vec_ptr:
+            return _vmm_copy_vector_err(14, bytes_read)
+
+        val item_ptr_result = vmm_copyin_u64(slot)
+        if not item_ptr_result.status.ok:
+            return _vmm_copy_vector_err(item_ptr_result.status.errno, bytes_read)
+        if bytes_read > VMM_U64_MAX - 8:
+            return _vmm_copy_vector_err(7, bytes_read)
+        bytes_read = bytes_read + 8
+
+        val item_ptr = item_ptr_result.value
+        if item_ptr == 0:
+            return VmmCopyStringVectorResult(status: _vmm_copy_ok(bytes_read), values: out)
+
+        val item_result = vmm_copyin_cstr(item_ptr, max_string_len)
+        if not item_result.status.ok:
+            if bytes_read > VMM_U64_MAX - item_result.status.bytes_read:
+                return _vmm_copy_vector_err(7, bytes_read)
+            return _vmm_copy_vector_err(item_result.status.errno, bytes_read + item_result.status.bytes_read)
+
+        val item_bytes = item_result.status.bytes_read
+        if total_bytes + item_bytes < total_bytes:
+            return _vmm_copy_vector_err(7, bytes_read)
+        total_bytes = total_bytes + item_bytes
+        if total_bytes > max_total_bytes:
+            if bytes_read > VMM_U64_MAX - item_bytes:
+                return _vmm_copy_vector_err(7, bytes_read)
+            return _vmm_copy_vector_err(7, bytes_read + item_bytes)
+
+        if bytes_read > VMM_U64_MAX - item_bytes:
+            return _vmm_copy_vector_err(7, bytes_read)
+        bytes_read = bytes_read + item_bytes
+        out.push(item_result.value)
+        i = i + 1
+
+    _vmm_copy_vector_err(7, bytes_read)
+
+fn vmm_verify_user_write(addr: u64, size: u64) -> bool:
+    """Verify that [addr, addr+size) is mapped as user-writable.
+
+    Walks the page table for each page in the range and checks that the
+    leaf PTE has PRESENT | USER | WRITABLE set. Returns false if any page
+    in the range is unmapped, kernel-only, or read-only.
+
+    This is the kernel equivalent of Linux's access_ok() + page table check.
+    Must be called before the kernel writes to any user-provided pointer.
+    """
+    if size == 0:
+        return false
+
+    val required_bits = PTE_PRESENT | PTE_USER | PTE_WRITABLE
+
+    # Check each page in the range
+    var offset: u64 = 0
+    val end = addr + size
+    while addr + offset < end:
+        val vaddr = addr + offset
+        if not _vmm_check_pte_flags(vaddr, required_bits):
+            return false
+        offset = offset + PAGE_SIZE
+    true
+
+fn _vmm_check_pte_flags(vaddr: u64, required_bits: u64) -> bool:
+    """Walk page tables and verify the leaf PTE has all required_bits set.
+
+    Read-only walk — does not allocate or modify tables.
+    Handles both 4KB pages (PT level) and 2MB huge pages (PD level).
+    """
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    # PML4
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if not _pte_is_present(pml4_entry):
+        return false
+
+    # PDPT
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if not _pte_is_present(pdpt_entry):
+        return false
+
+    # PD
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if not _pte_is_present(pd_entry):
+        return false
+
+    # Check for 2MB huge page (PDE with huge-page bit)
+    if (pd_entry & PTE_HUGE_PAGE) != 0:
+        # Huge page — check PDE flags directly
+        return (pd_entry & required_bits) == required_bits
+
+    # 4KB page — walk to PT
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    if not _pte_is_present(pt_entry):
+        return false
+
+    (pt_entry & required_bits) == required_bits
+
+fn vmm_read_pte(virt: VirtAddr) -> u64:
+    """Read the page table entry for a virtual address.
+
+    Returns the raw PTE value (physical address + flags), or 0 if not mapped.
+    Handles both 4KB pages (PT level) and 2MB huge pages (PD level).
+    """
+    val vaddr = virt_addr_value(virt)
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if not _pte_is_present(pml4_entry):
+        return 0
+
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if not _pte_is_present(pdpt_entry):
+        return 0
+
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if not _pte_is_present(pd_entry):
+        return 0
+
+    # Check for 2MB huge page
+    if (pd_entry & PTE_HUGE_PAGE) != 0:
+        return pd_entry
+
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    pt_entry
+
+# ============================================================================
+# Address Space Management
+# ============================================================================
+
+fn vmm_create_address_space() -> u64:
+    """Create a new address space (PML4) for a process.
+
+    Allocates a fresh PML4 and copies the kernel mappings
+    (upper-half entries 256..511) from the kernel PML4.
+    Returns the physical address of the new PML4, or 0 on failure.
+    """
+    val new_pml4_phys = _alloc_table_page()
+    if new_pml4_phys == 0:
+        return 0
+
+    val new_pml4_virt = _phys_to_virt(new_pml4_phys)
+    val kernel_pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    # Copy kernel-space entries (upper half: indices 256..511)
+    # This ensures kernel is mapped in every address space
+    var i: u64 = 256
+    while i < ENTRIES_PER_TABLE:
+        val entry = _read_pte(kernel_pml4_virt, i)
+        _write_pte(new_pml4_virt, i, entry)
+        i = i + 1
+
+    new_pml4_phys
+
+fn vmm_switch_address_space(pml4_phys: u64):
+    """Switch to a different address space by loading CR3."""
+    _load_cr3(pml4_phys)
+
+# ============================================================================
+# Per-Process Address Space API (Phase 1)
+# ============================================================================
+#
+# These wrappers return the richer `AddressSpace` handle used by the scheduler
+# and by later phases (ELF segment mapper, process image builder). They reuse
+# the existing PML4 primitives above and add a monotonic id for debugging.
+
+fn create_user_address_space() -> AddressSpace:
+    """Allocate a fresh per-process address space.
+
+    Allocates a new PML4 page, copies the kernel-half entries (indices
+    256..511) from the kernel PML4 so the kernel remains mapped in every
+    user address space, and returns an `AddressSpace` handle carrying the
+    physical root and a monotonic id.
+
+    If the PMM is not yet online (e.g. early boot before `vmm_init`
+    completes) the allocation returns 0; in that case we fall back to
+    `phys_root = 1` (the legacy sentinel) and log a single line so the
+    kernel keeps booting instead of panicking.
+    """
+    # Gate on the concrete PML4 physical address instead of the
+    # g_vmm_initialized flag: in the baremetal build the bool/u64 init flag
+    # does not always propagate across module-boundary call contexts (second
+    # spawn sees the write-0 default despite `vmm_init` setting it to 1),
+    # but the struct-field `g_vmm.pml4_phys` write does survive. If the PML4
+    # phys was allocated, the VMM is ready.
+    if g_vmm.pml4_phys == 0:
+        log_raw_println("[VMM] create_user_address_space: VMM not initialized — legacy AS=1")
+        return AddressSpace(phys_root: 1, id: 0)
+
+    val phys = vmm_create_address_space()
+    if phys == 0:
+        # PMM not ready (or out of memory). Legacy sentinel keeps boot alive.
+        log_raw_println("[VMM] create_user_address_space: alloc failed — legacy AS=1")
+        return AddressSpace(phys_root: 1, id: 0)
+
+    val id = g_next_as_id
+    g_next_as_id = g_next_as_id + 1
+    AddressSpace(phys_root: phys, id: id)
+
+fn vmm_cow_clone_pages(pml4_phys: u64) -> u64:
+    """Shallow COW clone of a user address space (wave-4b scaffold).
+
+    Allocates a new PML4, copies kernel-half entries (256..511) unchanged,
+    and copies user-half entries (0..255) with PTE_WRITABLE cleared so the
+    next write from either parent or child traps into the COW fault handler.
+    Only the top PML4 level is walked here; deep PDPT/PD/PT writable
+    clearing is deferred to wave-4c.
+
+    Returns the new PML4 physical address, or 0 on allocation failure.
+    """
+    val new_pml4_phys = _alloc_table_page()
+    if new_pml4_phys == 0:
+        return 0
+
+    val new_pml4_virt = _phys_to_virt(new_pml4_phys)
+    val src_pml4_virt = _phys_to_virt(pml4_phys)
+
+    # User-half (0..255): copy present entries then deep-walk to clear writable
+    # on all leaf PTEs via _cow_clear_writable_recursive so both parent and
+    # child fault into the CoW handler on first write.
+    var i: u64 = 0
+    while i < 256:
+        val entry = _read_pte(src_pml4_virt, i)
+        if _pte_is_present(entry):
+            _write_pte(new_pml4_virt, i, entry & ~PTE_WRITABLE)
+        i = i + 1
+    # Clear writable on source PML4 user-half leaf PTEs (level 3 = PML4)
+    _cow_clear_writable_recursive(pml4_phys, 3)
+
+    # Kernel-half (256..511): shared unchanged
+    i = 256
+    while i < ENTRIES_PER_TABLE:
+        val entry = _read_pte(src_pml4_virt, i)
+        _write_pte(new_pml4_virt, i, entry)
+        i = i + 1
+
+    new_pml4_phys
+
+fn destroy_user_address_space(space: AddressSpace):
+    """Release page-table pages owned by a user address space.
+
+    Frees intermediate user-half page table pages (PDPT/PD/PT) via
+    `_free_user_half_subtree`, then frees the PML4 page itself.
+    Kernel-half entries (indices 256..511) are shared and are never freed.
+    """
+    if space.phys_root == 0 or space.phys_root == 1:
+        # Legacy sentinel or never-allocated — nothing to free.
+        return
+
+    val pml4_virt = _phys_to_virt(space.phys_root)
+    _free_user_half_subtree(pml4_virt)
+    val frame = PageFrame.from_phys_addr(PhysAddr(addr: space.phys_root))
+    pmm_free_page(frame)
+
+fn activate_user_address_space(space: AddressSpace):
+    """Install a user address space on the current CPU.
+
+    Writes CR3 (x86_64) / SATP (riscv64 via the arch-adapter in
+    `vmm_switch_address_space`). Safe to call on the legacy sentinel
+    (phys_root == 1): the call is skipped so early boot does not trap.
+    """
+    if space.phys_root == 0 or space.phys_root == 1:
+        # Not a real address space — skip the CR3/SATP write.
+        return
+    vmm_switch_address_space(space.phys_root)
+
+fn vmm_map_framebuffer(fb_phys: PhysAddr, fb_virt: VirtAddr, size: u64):
+    """Map framebuffer as write-combining, non-executable memory.
+
+    Maps the framebuffer region page-by-page with MMIO-appropriate flags:
+    write-through, cache-disable, no-execute.
+    """
+    val flags = VmFlags.mmio()
+    val page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE
+
+    var i: u64 = 0
+    while i < page_count:
+        val offset = i * PAGE_SIZE
+        val virt = VirtAddr(addr: virt_addr_value(fb_virt) + offset)
+        val phys = PhysAddr(addr: phys_addr_value(fb_phys) + offset)
+        vmm_map_page(virt, phys, flags)
+        i = i + 1
+
+    log_raw_println("[VMM] Mapped framebuffer: {page_count} pages at virt 0x{virt_addr_value(fb_virt)}")
+
+# ============================================================================
+# VMM Query Interface
+# ============================================================================
+
+fn vmm_get_manager() -> VirtMemManager:
+    """Get reference to the global VMM."""
+    g_vmm
+
+fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
+    """Translate virtual address to physical by walking page tables.
+
+    Returns nil if the address is not mapped.
+    """
+    val vaddr = virt_addr_value(virt)
+    val pml4_virt = _phys_to_virt(g_vmm.pml4_phys)
+
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if not _pte_is_present(pml4_entry):
+        return nil
+
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if not _pte_is_present(pdpt_entry):
+        return nil
+
+    # Check for 1GB huge page
+    if (pdpt_entry & PTE_HUGE_PAGE) != 0:
+        val base = _pte_phys_addr(pdpt_entry)
+        val offset = vaddr & 0x3FFFFFFF  # Lower 30 bits
+        return PhysAddr(addr: base + offset)
+
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if not _pte_is_present(pd_entry):
+        return nil
+
+    # Check for 2MB huge page
+    if (pd_entry & PTE_HUGE_PAGE) != 0:
+        val base = _pte_phys_addr(pd_entry)
+        val offset = vaddr & 0x1FFFFF  # Lower 21 bits
+        return PhysAddr(addr: base + offset)
+
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    if not _pte_is_present(pt_entry):
+        return nil
+
+    val base = _pte_phys_addr(pt_entry)
+    val offset = vaddr & 0xFFF  # Lower 12 bits
+    PhysAddr(addr: base + offset)
+
+# ============================================================================
+# Phase-2 VMM APIs
+# ============================================================================
+
+# rt_memcpy / rt_memset: bulk copy / fill primitives provided by the baremetal
+# runtime. See src/os/drivers/virtio/virtio_blk.spl for the slice-pointer trick
+# used below — the Simple fat-pointer layout is [data_ptr: u64, len: u64], so
+# dereferencing the header address with mmio_read64 yields the raw data base.
+extern fn rt_memcpy(dest: i64, src: i64, len: i64)
+extern fn rt_memset(dest: i64, val: i64, len: i64) -> i64
+extern fn unsafe_addr_of(ref: any) -> u64
+
+fn vmm_copy_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64):
+    """Bulk-copy `len` bytes from `src[src_offset..]` to physical `dst_phys` via HHDM.
+
+    Replaces per-byte copy loops used by the ELF segment mapper and the
+    user-stack initializer. Caller must ensure the destination range lies in
+    an HHDM-mapped physical page and that [src_offset, src_offset + len) is
+    in-bounds for `src`.
+    """
+    if len == 0:
+        return
+    val dst_virt = _phys_to_virt(dst_phys)
+    val src_hdr = unsafe_addr_of(src)
+    val src_data = mmio_read64(src_hdr)
+    rt_memcpy(dst_virt.to_i64(), (src_data + src_offset).to_i64(), len.to_i64())
+
+fn vmm_zero_phys_range(dst_phys: u64, len: u64):
+    """Zero `len` bytes at physical `dst_phys` via HHDM. Used for BSS tails."""
+    if len == 0:
+        return
+    val dst_virt = _phys_to_virt(dst_phys)
+    val _ = rt_memset(dst_virt.to_i64(), 0, len.to_i64())
+
+fn vmm_map_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map a 4KB page in an explicit address space without switching CR3.
+
+    Walks the page table rooted at space.phys_root, creating intermediate
+    tables as needed. Does NOT touch CR3 / the current address space.
+    Returns true on success, false on failure.
+    """
+    if space.phys_root == 0 or space.phys_root == 1:
+        return false
+
+    val vaddr = virt_addr_value(virt)
+    val paddr = phys_addr_value(phys)
+    # W^X enforcement
+    var safe_flags = flags
+    if flags.writable and not flags.no_execute:
+        safe_flags = VmFlags(
+            present: flags.present,
+            writable: true,
+            user: flags.user,
+            write_through: flags.write_through,
+            cache_disable: flags.cache_disable,
+            no_execute: true
+        )
+
+    val pml4_virt = _phys_to_virt(space.phys_root)
+
+    val pdpt_virt = _ensure_table_entry(pml4_virt, _pml4_index(vaddr))
+    if pdpt_virt == 0:
+        return false
+
+    val pd_virt = _ensure_table_entry(pdpt_virt, _pdpt_index(vaddr))
+    if pd_virt == 0:
+        return false
+
+    val pt_virt = _ensure_table_entry(pd_virt, _pd_index(vaddr))
+    if pt_virt == 0:
+        return false
+
+    val pte_flags = _flags_to_pte_bits(safe_flags)
+    val entry = (paddr & PTE_ADDR_MASK) | pte_flags
+    _write_pte(pt_virt, _pt_index(vaddr), entry)
+
+    true
+
+fn _cow_clear_writable_recursive(table_phys: u64, level: u32):
+    """Recursively clear PTE_WRITABLE on all leaf PTEs in the user half.
+
+    level 3 = PML4, level 2 = PDPT, level 1 = PD, level 0 = PT (leaf).
+    Only iterates user-half entries (indices 0..255) at the PML4 level.
+    At lower levels, iterates all 512 entries.
+    """
+    val table_virt = _phys_to_virt(table_phys)
+    # At PML4 (level 3) only walk user half (0..255); at lower levels walk all 512
+    var limit: u64 = ENTRIES_PER_TABLE
+    if level == 3:
+        limit = 256
+    var i: u64 = 0
+    while i < limit:
+        val entry = _read_pte(table_virt, i)
+        if _pte_is_present(entry):
+            if level == 0:
+                # Leaf PT: clear writable bit
+                _write_pte(table_virt, i, entry & ~PTE_WRITABLE)
+            else:
+                # Intermediate: recurse
+                val child_phys = _pte_phys_addr(entry)
+                _cow_clear_writable_recursive(child_phys, level - 1)
+        i = i + 1
+
+fn _free_user_half_subtree(pml4_virt: u64):
+    """Walk the user half of a PML4 and free all intermediate page table pages.
+
+    Frees PDPT, PD, and PT pages that were allocated for user mappings.
+    Does NOT free the PML4 page itself — caller owns that.
+    Does NOT free mapped physical frames — only intermediate table pages.
+    """
+    var i: u64 = 0
+    while i < 256:
+        val pdpt_entry = _read_pte(pml4_virt, i)
+        if _pte_is_present(pdpt_entry):
+            val pdpt_phys = _pte_phys_addr(pdpt_entry)
+            val pdpt_virt = _phys_to_virt(pdpt_phys)
+            var j: u64 = 0
+            while j < ENTRIES_PER_TABLE:
+                val pd_entry = _read_pte(pdpt_virt, j)
+                if _pte_is_present(pd_entry):
+                    val pd_phys = _pte_phys_addr(pd_entry)
+                    val pd_virt = _phys_to_virt(pd_phys)
+                    var k: u64 = 0
+                    while k < ENTRIES_PER_TABLE:
+                        val pt_entry = _read_pte(pd_virt, k)
+                        if _pte_is_present(pt_entry):
+                            val pt_phys = _pte_phys_addr(pt_entry)
+                            val pt_frame = PageFrame.from_phys_addr(PhysAddr(addr: pt_phys))
+                            pmm_free_page(pt_frame)
+                        k = k + 1
+                    val pd_frame = PageFrame.from_phys_addr(PhysAddr(addr: pd_phys))
+                    pmm_free_page(pd_frame)
+                j = j + 1
+            val pdpt_frame = PageFrame.from_phys_addr(PhysAddr(addr: pdpt_phys))
+            pmm_free_page(pdpt_frame)
+        i = i + 1
+
+# ============================================================================
+# CPU Primitives (inline assembly)
+# ============================================================================
+
+extern fn rt_read_cr3() -> u64
+extern fn rt_write_cr3(value: u64)
+extern fn rt_invlpg(addr: u64)
+
+fn _invlpg(vaddr: u64):
+    """Invalidate TLB entry for a virtual address."""
+    rt_invlpg(vaddr)
+
+fn _load_cr3(pml4_phys: u64):
+    """Load CR3 register with a new PML4 physical address."""
+    rt_write_cr3(pml4_phys)
+
+fn _read_cr3() -> u64:
+    """Read current CR3 register value."""
+    rt_read_cr3()
+
+# ============================================================================
+# PMM raw-address helpers (forward declarations for VMA layer)
+# ============================================================================
+
+extern fn pmm_alloc_page_raw() -> u64
+extern fn pmm_free_page_raw(pa: u64)
+extern fn pmm_ref_page(pa: u64)
+extern fn pmm_unref_page(pa: u64) -> u16
+
+# ============================================================================
+# ProcessVmSpace constructor helper
+# ============================================================================
+
+fn vmm_new_process_space(pml4: u64, id: u64) -> ProcessVmSpace:
+    """Create an empty ProcessVmSpace wrapping an existing PML4."""
+    ProcessVmSpace(
+        pml4: pml4,
+        id: id,
+        vma_count: 0,
+        areas: []
+    )
+
+# ============================================================================
+# VMA Internal Helpers
+# ============================================================================
+
+fn _vma_overlaps(a: VmArea, start: u64, end: u64) -> bool:
+    """Return true if VmArea `a` overlaps the range [start, end)."""
+    val a_end = a.start + a.len
+    (a.start < end) and (a_end > start)
+
+fn _vma_end(a: VmArea) -> u64:
+    a.start + a.len
+
+fn _align_down(addr: u64, align: u64) -> u64:
+    (addr / align) * align
+
+fn _align_up(addr: u64, align: u64) -> u64:
+    ((addr + align - 1) / align) * align
+
+# ============================================================================
+# VMA Operations
+# ============================================================================
+
+fn vma_add(space: ProcessVmSpace, area: VmArea) -> i32:
+    """Append a VmArea to the address space, rejecting overlaps.
+
+    Returns 0 on success, -EEXIST (-17) if the range overlaps an existing VMA,
+    -ENOMEM (-12) if the VMA table is full.
+    """
+    if space.vma_count >= VMM_MAX_VMAS:
+        return -12  # -ENOMEM
+
+    val new_end = area.start + area.len
+    var i: i32 = 0
+    while (i as u64) < space.vma_count:
+        val existing = space.areas[i]
+        if _vma_overlaps(existing, area.start, new_end):
+            return -17  # -EEXIST
+        i = i + 1
+
+    space.areas.push(area)
+    space.vma_count = space.vma_count + 1
+    0
+
+fn vma_find(space: ProcessVmSpace, vaddr: u64) -> VmArea?:
+    """Find the VmArea containing `vaddr`, or nil if none."""
+    var i: i32 = 0
+    while (i as u64) < space.vma_count:
+        val area = space.areas[i]
+        val area_end = area.start + area.len
+        if (vaddr >= area.start) and (vaddr < area_end):
+            return area
+        i = i + 1
+    nil
+
+fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
+    """Remove or split VMAs that intersect [vaddr, vaddr+len).
+
+    Implements the POSIX munmap semantic:
+    - A VMA fully covered by the range is deleted.
+    - A VMA partially overlapping at the start is trimmed from the right.
+    - A VMA partially overlapping at the end is trimmed from the left.
+    - A VMA split down the middle produces a tail fragment re-inserted
+      at the end of the array (low-overhead; order is not guaranteed).
+    Returns 0. Never fails (non-existent range is silently ignored).
+    """
+    val range_end = vaddr + len
+    var i: i32 = 0
+    while (i as u64) < space.vma_count:
+        val area = space.areas[i]
+        val area_end = area.start + area.len
+        if not _vma_overlaps(area, vaddr, range_end):
+            i = i + 1
+        else:
+            # Remove this entry by swapping with the last live entry
+            val last_idx = (space.vma_count - 1) as i32
+            space.areas[i] = space.areas[last_idx]
+            space.vma_count = space.vma_count - 1
+            # Pop the trailing slot
+            if space.areas.len() > (space.vma_count as i32):
+                space.areas.pop()
+
+            # Re-insert surviving fragments
+            if area.start < vaddr:
+                # Left fragment: [area.start .. vaddr)
+                val left = VmArea(
+                    start: area.start,
+                    len: vaddr - area.start,
+                    kind: area.kind,
+                    flags: area.flags,
+                    backing: area.backing,
+                    backing_offset: area.backing_offset
+                )
+                space.areas.push(left)
+                space.vma_count = space.vma_count + 1
+            if area_end > range_end:
+                # Right fragment: [range_end .. area_end)
+                val right_offset = range_end - area.start
+                val right = VmArea(
+                    start: range_end,
+                    len: area_end - range_end,
+                    kind: area.kind,
+                    flags: area.flags,
+                    backing: area.backing,
+                    backing_offset: area.backing_offset + right_offset
+                )
+                space.areas.push(right)
+                space.vma_count = space.vma_count + 1
+            # Do NOT advance i — the slot now holds a different (swapped) entry
+    0
+
+fn vma_split(space: ProcessVmSpace, vaddr: u64) -> i32:
+    """Split whichever VMA contains `vaddr` at that address.
+
+    Internal helper for munmap. After the split, [area.start..vaddr) and
+    [vaddr..area_end) are two separate VMAs. Returns 0 on success,
+    -EINVAL (-22) if `vaddr` is not inside any VMA or is already on a boundary.
+    """
+    var i: i32 = 0
+    while (i as u64) < space.vma_count:
+        val area = space.areas[i]
+        val area_end = area.start + area.len
+        if (vaddr > area.start) and (vaddr < area_end):
+            # Replace area[i] with left half
+            val left = VmArea(
+                start: area.start,
+                len: vaddr - area.start,
+                kind: area.kind,
+                flags: area.flags,
+                backing: area.backing,
+                backing_offset: area.backing_offset
+            )
+            space.areas[i] = left
+
+            # Append right half
+            val right_offset = vaddr - area.start
+            val right = VmArea(
+                start: vaddr,
+                len: area_end - vaddr,
+                kind: area.kind,
+                flags: area.flags,
+                backing: area.backing,
+                backing_offset: area.backing_offset + right_offset
+            )
+            space.areas.push(right)
+            space.vma_count = space.vma_count + 1
+            return 0
+        i = i + 1
+    -22  # -EINVAL
+
+# ============================================================================
+# Hint-address picker for vmm_mmap
+# ============================================================================
+
+# User virtual address space: 128TiB starting at 0x0001_0000_0000_0000 would
+# be ideal, but for simplicity we use the lower canonical half above 0x1_0000.
+val VMM_USER_HINT_BASE: u64 = 0x0000000000400000   # 4MB — below kernel
+val VMM_USER_HINT_LIMIT: u64 = 0x0000800000000000  # Top of lower canonical half
+
+fn _pick_free_vaddr(space: ProcessVmSpace, len: u64) -> u64:
+    """Find the lowest page-aligned address in user range with no VMA overlap.
+
+    O(N^2) in the number of VMAs — acceptable for up to VMM_MAX_VMAS entries.
+    Returns 0 if no suitable range exists.
+    """
+    var candidate = VMM_USER_HINT_BASE
+    while candidate + len <= VMM_USER_HINT_LIMIT:
+        val cand_end = candidate + len
+        var overlap = false
+        var i: i32 = 0
+        while (i as u64) < space.vma_count:
+            val area = space.areas[i]
+            if _vma_overlaps(area, candidate, cand_end):
+                # Skip past this VMA
+                candidate = _align_up(_vma_end(area), PAGE_SIZE)
+                overlap = true
+                break
+            i = i + 1
+        if not overlap:
+            return candidate
+    0
+
+# ============================================================================
+# Public mmap / munmap API
+# ============================================================================
+
+fn vmm_mmap(
+    space: ProcessVmSpace,
+    vaddr: u64,
+    len: u64,
+    flags: u32,
+    kind: u32,
+    backing: u64,
+    backing_offset: u64
+) -> i64:
+    """Reserve a virtual address range in `space` and add a VMA.
+
+    If `vaddr == 0`, a suitable address is chosen automatically.
+    No page-table entries are installed yet — pages are demand-faulted in.
+    Returns the chosen virtual address on success, or a negative errno on failure.
+
+    The caller (sys_mmap dispatcher) should pass:
+      flags = VMA_READ | VMA_WRITE | ... (bitfield of VMA_* constants)
+      kind  = VMM_VMA_ANON | VMA_FILE | VMA_SHARED
+      backing = file handle for VMA_FILE, else 0
+    """
+    if len == 0:
+        return -22  # -EINVAL
+
+    val aligned_len = _align_up(len, PAGE_SIZE)
+
+    var chosen: u64 = vaddr
+    if chosen == 0:
+        chosen = _pick_free_vaddr(space, aligned_len)
+        if chosen == 0:
+            return -12  # -ENOMEM
+    else:
+        chosen = _align_down(chosen, PAGE_SIZE)
+
+    val area = VmArea(
+        start: chosen,
+        len: aligned_len,
+        kind: kind,
+        flags: flags,
+        backing: backing,
+        backing_offset: backing_offset
+    )
+    val rc = vma_add(space, area)
+    if rc != 0:
+        return rc as i64
+
+    chosen as i64
+
+fn vmm_munmap(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
+    """Unmap [vaddr, vaddr+len) from `space`.
+
+    Splits/removes intersecting VMAs and clears page-table entries for
+    pages that were actually mapped. Returns 0 on success.
+    """
+    if len == 0:
+        return -22  # -EINVAL
+
+    val aligned_start = _align_down(vaddr, PAGE_SIZE)
+    val aligned_len   = _align_up(len, PAGE_SIZE)
+    val aligned_end   = aligned_start + aligned_len
+
+    # Remove VMAs first (the page-table side below may skip absent entries)
+    vma_remove(space, aligned_start, aligned_len)
+
+    # Unmap any present page-table entries in the range
+    var pg = aligned_start
+    while pg < aligned_end:
+        val virt = VirtAddr(addr: pg)
+        vmm_unmap_page(virt)
+        pg = pg + PAGE_SIZE
+
+    0
+
+# ============================================================================
+# Copy-on-Write: fork clone
+# ============================================================================
+
+fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
+    """Create a COW child address space from `parent_space`.
+
+    1. Allocates a new PML4 via `vmm_cow_clone_pages` (existing helper),
+       which copies user-half entries with PTE_WRITABLE cleared in both
+       parent and child.
+    2. Clones the parent's VMA list, marking every VMA with VMM_VMA_COW.
+    3. Bumps the PMM ref count for every page present in the parent PT.
+       (Refcount increment is on the full PML4 walk; a per-VMA pmm_ref_page
+       call is a TODO because the PT walk needs the HHDM helper.)
+
+    Returns the new ProcessVmSpace. The child's PML4 is ready for CR3 load.
+    """
+    val child_pml4 = vmm_cow_clone_pages(parent_space.pml4)
+
+    var child = ProcessVmSpace(
+        pml4: child_pml4,
+        id: g_next_as_id,
+        vma_count: 0,
+        areas: []
+    )
+    g_next_as_id = g_next_as_id + 1
+
+    # Clone VMA list, setting VMM_VMA_COW on all writable VMAs
+    var i: i32 = 0
+    while (i as u64) < parent_space.vma_count:
+        val src = parent_space.areas[i]
+        var child_flags = src.flags
+        if (src.flags & 2) != 0:
+            child_flags = child_flags | VMM_VMA_COW
+        val cloned = VmArea(
+            start: src.start,
+            len: src.len,
+            kind: src.kind,
+            flags: child_flags,
+            backing: src.backing,
+            backing_offset: src.backing_offset
+        )
+        child.areas.push(cloned)
+        child.vma_count = child.vma_count + 1
+
+        # Also mark parent VMA as COW so the parent faults on next write
+        if (src.flags & 2) != 0:
+            var parent_flags = src.flags | VMM_VMA_COW
+            parent_space.areas[i] = VmArea(
+                start: src.start,
+                len: src.len,
+                kind: src.kind,
+                flags: parent_flags,
+                backing: src.backing,
+                backing_offset: src.backing_offset
+            )
+
+        # TODO(mdsoc+): walk PT for each VMA page and call pmm_ref_page per
+        # physical frame so COW unref can safely free the last copy.
+        i = i + 1
+
+    child
+
+# ============================================================================
+# COW page fault handler
+# ============================================================================
+
+fn vmm_handle_cow_fault(space: ProcessVmSpace, fault_vaddr: u64) -> i32:
+    """Handle a COW write fault at `fault_vaddr` in `space`.
+
+    1. Confirm the faulting address is in a VMA with VMM_VMA_COW set.
+    2. Allocate a fresh physical page.
+    3. Copy the old page contents (read the original via HHDM).
+    4. Map the new page as RW in the faulting address space.
+    5. Clear VMM_VMA_COW + set VMA_WRITE on the VMA (now private).
+    Returns 0 on success, -EINVAL if not a COW fault, -ENOMEM if no pages.
+    """
+    val area_opt = vma_find(space, fault_vaddr)
+    if val Some(area) = area_opt:
+        if (area.flags & VMM_VMA_COW) == 0:
+            return -22  # -EINVAL — not a COW mapping
+
+        # Allocate replacement page
+        val new_pa = pmm_alloc_page_raw()
+        if new_pa == 0:
+            return -12  # -ENOMEM
+
+        # Copy old page content via HHDM
+        val page_base = _align_down(fault_vaddr, PAGE_SIZE)
+        # Read the old physical page by translating the virtual address
+        val old_pte = vmm_read_pte(VirtAddr(addr: page_base))
+        val old_pa = old_pte & PTE_ADDR_MASK
+        if old_pa != 0:
+            val old_virt = _phys_to_virt(old_pa)
+            val new_virt = _phys_to_virt(new_pa)
+            # Byte-by-byte copy of the 4KB page
+            var byte_idx: u64 = 0
+            while byte_idx < PAGE_SIZE:
+                val b = mmio_read64(old_virt + byte_idx)
+                mmio_write64(new_virt + byte_idx, b)
+                byte_idx = byte_idx + 8
+
+        # Map the new page as RW in the faulting address space
+        val as_handle = AddressSpace(phys_root: space.pml4, id: space.id)
+        val map_flags = VmFlags(bits: 7)   # VM_PRESENT | VM_WRITABLE | VM_USER = 1|2|4
+        val mapped = vmm_map_page_in(
+            as_handle,
+            VirtAddr(addr: page_base),
+            PhysAddr(addr: new_pa),
+            map_flags
+        )
+        if not mapped:
+            pmm_free_page_raw(new_pa)
+            return -12  # -ENOMEM
+
+        # Update VMA flags: clear COW, ensure WRITE is set
+        var i: i32 = 0
+        while (i as u64) < space.vma_count:
+            val a = space.areas[i]
+            if (fault_vaddr >= a.start) and (fault_vaddr < (a.start + a.len)):
+                val new_flags = (a.flags & ~VMM_VMA_COW) | 2
+                space.areas[i] = VmArea(
+                    start: a.start,
+                    len: a.len,
+                    kind: a.kind,
+                    flags: new_flags,
+                    backing: a.backing,
+                    backing_offset: a.backing_offset
+                )
+                break
+            i = i + 1
+
+        # Drop the reference on the old page (may free it if last holder)
+        if old_pa != 0:
+            val remaining = pmm_unref_page(old_pa)
+            if remaining == 0:
+                pmm_free_page_raw(old_pa)
+
+        return 0
+
+    -22  # -EINVAL — address not in any VMA
+
+# ============================================================================
+# Demand-paging fault handlers
+# ============================================================================
+
+fn vmm_handle_anon_fault(space: ProcessVmSpace, vaddr: u64) -> i32:
+    """Demand-page handler for anonymous (zero-filled) fault at `vaddr`.
+
+    Allocates a fresh physical page from the PMM, zeros it, and maps it
+    into the address space. Returns 0 on success, -ENOMEM if no pages.
+    """
+    val page_base = _align_down(vaddr, PAGE_SIZE)
+    val area_opt = vma_find(space, vaddr)
+    if val Some(area) = area_opt:
+        if area.kind != VMM_VMA_ANON:
+            return -22  # -EINVAL — wrong handler for this VMA kind
+
+        val pa = pmm_alloc_page_raw()
+        if pa == 0:
+            return -12  # -ENOMEM
+
+        # Zero the page via HHDM
+        val new_virt = _phys_to_virt(pa)
+        var zi: u64 = 0
+        while zi < PAGE_SIZE:
+            mmio_write64(new_virt + zi, 0)
+            zi = zi + 8
+
+        # Build PTE flags from VMA permission bits
+        var flag_bits: u32 = 1  # VM_PRESENT always
+        if (area.flags & 2) != 0:
+            flag_bits = flag_bits | 2   # VM_WRITABLE
+        flag_bits = flag_bits | 4       # VM_USER
+        if (area.flags & VMM_VMA_EXEC) == 0:
+            flag_bits = flag_bits | 32  # VM_NO_EXECUTE
+
+        val as_handle = AddressSpace(phys_root: space.pml4, id: space.id)
+        val map_flags = VmFlags(bits: flag_bits)
+        val mapped = vmm_map_page_in(
+            as_handle,
+            VirtAddr(addr: page_base),
+            PhysAddr(addr: pa),
+            map_flags
+        )
+        if not mapped:
+            pmm_free_page_raw(pa)
+            return -12  # -ENOMEM
+
+        return 0
+
+    -22  # -EINVAL — address not in any VMA
+
+fn vmm_handle_file_fault(space: ProcessVmSpace, vaddr: u64) -> i32:
+    """Demand-page handler for file-backed fault at `vaddr`.
+
+    # TODO(mdsoc+): needs VFS read path (Wave 3). Returns -ENOSYS until then.
+    """
+    -38  # -ENOSYS
+
+# ============================================================================
+# Page-table helper: mark a virtual page read-only
+# ============================================================================
+
+fn pt_set_ro(pml4: u64, vaddr: u64):
+    """Clear PTE_WRITABLE on the leaf PTE for `vaddr` in the page table
+    rooted at `pml4`. Used by vmm_cow_clone to make shared pages read-only.
+
+    This is a targeted write of a single PTE; does not allocate tables.
+    No-op if the address is not mapped.
+    """
+    val pml4_virt = _phys_to_virt(pml4)
+    val pml4_entry = _read_pte(pml4_virt, _pml4_index(vaddr))
+    if not _pte_is_present(pml4_entry):
+        return
+
+    val pdpt_virt = _phys_to_virt(_pte_phys_addr(pml4_entry))
+    val pdpt_entry = _read_pte(pdpt_virt, _pdpt_index(vaddr))
+    if not _pte_is_present(pdpt_entry):
+        return
+
+    val pd_virt = _phys_to_virt(_pte_phys_addr(pdpt_entry))
+    val pd_entry = _read_pte(pd_virt, _pd_index(vaddr))
+    if not _pte_is_present(pd_entry):
+        return
+
+    if (pd_entry & PTE_HUGE_PAGE) != 0:
+        # 2MB huge page — clear writable on PDE
+        _write_pte(pd_virt, _pd_index(vaddr), pd_entry & ~PTE_WRITABLE)
+        _invlpg(vaddr)
+        return
+
+    val pt_virt = _phys_to_virt(_pte_phys_addr(pd_entry))
+    val pt_entry = _read_pte(pt_virt, _pt_index(vaddr))
+    if _pte_is_present(pt_entry):
+        _write_pte(pt_virt, _pt_index(vaddr), pt_entry & ~PTE_WRITABLE)
+        _invlpg(vaddr)

@@ -1,0 +1,159 @@
+"""
+# Flash Messages
+
+Flash messages stored in session `_flash` key as a serialized list.
+Types: success, error, warning, info.
+
+Flash messages persist for one request only -- they are set during
+one request and available in the next, then cleared.
+
+## Usage
+
+```simple
+var session = {}
+session = flash_add(session, FlashType.Success, "Item created!")
+session = flash_add(session, FlashType.Error, "Could not save.")
+
+val messages = flash_get(session)
+for msg in messages:
+    print "{flash_type_to_text(msg.flash_type)}: {msg.message}"
+
+session = flash_clear(session)
+```
+"""
+
+# ============================================================================
+# Flash Message Types
+# ============================================================================
+
+enum FlashType:
+    """Type of flash message for styling."""
+    Success
+    Error
+    Warning
+    Info
+
+class FlashMessage:
+    """A single flash message with type and content."""
+    flash_type: FlashType
+    message: text
+
+# ============================================================================
+# Flash Type Conversion
+# ============================================================================
+
+fn flash_type_to_text(ft: FlashType) -> text:
+    """Convert FlashType to text for serialization."""
+    match ft:
+        FlashType.Success: "success"
+        FlashType.Error: "error"
+        FlashType.Warning: "warning"
+        FlashType.Info: "info"
+
+fn text_to_flash_type(s: text) -> FlashType:
+    """Parse text into FlashType. Defaults to Info on unknown."""
+    match s:
+        "success": FlashType.Success
+        "error": FlashType.Error
+        "warning": FlashType.Warning
+        "info": FlashType.Info
+        _: FlashType.Info
+
+# ============================================================================
+# Flash Operations
+# ============================================================================
+
+fn flash_add(session_data: Dict<text, text>, flash_type: FlashType, message: text) -> Dict<text, text>:
+    """Add a flash message to the session.
+
+    Messages are stored in the `_flash` key as pipe-delimited entries.
+    Each entry is `type:message`.
+
+    Args:
+        session_data: Current session data dict
+        flash_type: Type of flash message
+        message: Message content
+
+    Returns:
+        Updated session data with flash message added
+    """
+    val type_str = flash_type_to_text(flash_type)
+    val entry = "{type_str}:{message}"
+
+    var result = session_data
+    val existing = session_data.get("_flash")
+    if existing != nil:
+        val current = existing ?? ""
+        if current.len() > 0:
+            result["_flash"] = "{current}|{entry}"
+        else:
+            result["_flash"] = entry
+    else:
+        result["_flash"] = entry
+
+    result
+
+fn flash_get(session_data: Dict<text, text>) -> [FlashMessage]:
+    """Retrieve all flash messages from the session.
+
+    Parses the `_flash` key and returns structured FlashMessage list.
+    Does NOT clear messages -- call flash_clear separately.
+
+    Args:
+        session_data: Current session data dict
+
+    Returns:
+        List of flash messages (empty if none)
+    """
+    val raw = session_data.get("_flash")
+    if raw == nil:
+        return []
+
+    val flash_str = raw ?? ""
+    if flash_str.len() == 0:
+        return []
+
+    var messages: [FlashMessage] = []
+    val entries = flash_str.split("|")
+    for entry in entries:
+        val colon_pos = entry.index_of(":")
+        if colon_pos > 0:
+            val type_str = entry[0:colon_pos]
+            val msg = entry[colon_pos + 1:]
+            val ft = text_to_flash_type(type_str)
+            messages.push(FlashMessage(flash_type: ft, message: msg))
+
+    messages
+
+fn flash_clear(session_data: Dict<text, text>) -> Dict<text, text>:
+    """Remove all flash messages from the session.
+
+    Args:
+        session_data: Current session data dict
+
+    Returns:
+        Updated session data with flash messages removed
+    """
+    var result = session_data
+    result.remove("_flash")
+    result
+
+fn flash_has_messages(session_data: Dict<text, text>) -> bool:
+    """Check whether there are any flash messages in the session."""
+    val raw = session_data.get("_flash")
+    if raw == nil:
+        return false
+    val flash_str = raw ?? ""
+    flash_str.len() > 0
+
+fn flash_to_html(messages: [FlashMessage]) -> text:
+    """Render flash messages as HTML divs for easy template inclusion.
+
+    Returns:
+        HTML string with div elements for each message
+    """
+    var parts: [text] = []
+    for msg in messages:
+        val type_str = flash_type_to_text(msg.flash_type)
+        parts.push("<div class=\"flash flash-{type_str}\">{msg.message}</div>")
+    parts.join("\n")

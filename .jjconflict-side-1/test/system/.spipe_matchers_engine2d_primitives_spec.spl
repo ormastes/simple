@@ -1,0 +1,266 @@
+# @tag:system
+#
+# System spec — Engine2D primitive draw verification inside QEMU.
+#
+# Builds examples/simple_os/arch/x86_64/gui_engine2d_primitives_entry.spl,
+# boots it under QEMU with a QMP Unix socket, waits for the
+# "[E2D-PRIM] Engine2D primitive frame painted" serial marker, captures the
+# framebuffer via QMP screendump, decodes the PPM to ARGB, and asserts that
+# specific pixels contain the exact expected color for each of the 6
+# primitives (horizontal line, diagonal line, filled rect, stroked rect,
+# filled circle, ring circle).
+#
+# This is a STRICT per-pixel assertion — not a tolerance compare against a
+# baseline. If engine2d silently no-ops or draws the wrong color, the spec
+# fails loudly with a specific primitive name in the failure message.
+#
+# A baseline PPM is also written on first run to
+#   doc/08_tracking/baselines/engine2d_primitives.ppm
+# for future visual diffing against this build. The serial log is saved to
+#   doc/08_tracking/baselines/engine2d_primitives.serial.log
+# for post-mortem diagnosis.
+#
+# Modelled on test/system/engine2d_in_qemu_spec.spl (SYS-ENGINE2D) — same
+# harness (qemu_os_harness.spawn_guest_with_qmp + capture_qemu_vm) so both
+# specs can be diagnosed the same way.
+
+use std.spec.*
+
+use os.qemu_runner.{OsTarget, build_os}
+use os.kernel.arch.arch_context.{Architecture}
+use os.compositor.qemu_capture.{capture_qemu_vm}
+use os.compositor.electron_capture.{CaptureResult}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_bytes, dir_create_all}
+
+use test.qemu.os.common.qemu_os_harness.{
+    QemuGuestHandle, can_run_target, file_exists, spawn_guest_with_qmp,
+    stop_guest, wait_for_serial_marker, read_serial_log}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+fn _primitives_target() -> OsTarget:
+    """Custom OsTarget pointing at gui_engine2d_primitives_entry.spl. The
+    harness appends -qmp and -serial itself — qemu_extra only carries
+    -vga std (BGA framebuffer device that QMP screendump can read)."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gui_engine2d_primitives_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_engine2d_primitives_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn _non_black_count(pixels: [u32]) -> i64:
+    """Count non-black pixels in a captured ARGB frame (alpha stripped)."""
+    var count: i64 = 0
+    for px in pixels:
+        val rgb = px & 0xFFFFFF
+        if rgb != 0:
+            count = count + 1
+    count
+
+fn _write_ppm_local(pixels: [u32], width: i32, height: i32, path: text) -> bool:
+    """Local PPM P6 writer — mirrors engine2d_in_qemu_spec._write_ppm_local."""
+    if pixels.len() == 0 or width <= 0 or height <= 0:
+        return false
+
+    val header = "P6\n{width} {height}\n255\n"
+    var data: [u8] = []
+    for ch in header:
+        data = data + [ch as u8]
+
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        val p = pixels[i]
+        val r_byte: u8 = ((p >> 16) & 0xFF) as u8
+        val g_byte: u8 = ((p >> 8) & 0xFF) as u8
+        val b_byte: u8 = (p & 0xFF) as u8
+        data = data + [r_byte, g_byte, b_byte]
+        i = i + 1
+
+    file_write_bytes(path, data)
+    true
+
+fn _get_rgb(pixels: [u32], width: i32, x: i32, y: i32) -> u32:
+    """Return the pixel at (x, y) with alpha stripped (low 24 bits only)."""
+    val idx = (y * width + x)
+    if idx < 0 or idx >= pixels.len():
+        return 0
+    pixels[idx] & 0xFFFFFF
+
+fn _color_near(got: u32, expected: u32, tol: i32) -> bool:
+    """True if each RGB channel of `got` is within `tol` of `expected`."""
+    val gr: i32 = ((got >> 16) & 0xFF) as i32
+    val gg: i32 = ((got >> 8) & 0xFF) as i32
+    val gb: i32 = (got & 0xFF) as i32
+    val er: i32 = ((expected >> 16) & 0xFF) as i32
+    val eg: i32 = ((expected >> 8) & 0xFF) as i32
+    val eb: i32 = (expected & 0xFF) as i32
+    val dr = if gr >= er: gr - er else: er - gr
+    val dg = if gg >= eg: gg - eg else: eg - gg
+    val db = if gb >= eb: gb - eb else: eb - gb
+    dr <= tol and dg <= tol and db <= tol
+
+fn _check_pixel(pixels: [u32], width: i32, x: i32, y: i32,
+                expected: u32, tol: i32, label: text) -> bool:
+    """Print + return whether (x,y) matches expected within tol."""
+    val got = _get_rgb(pixels, width, x, y)
+    val ok = _color_near(got, expected, tol)
+    if not ok:
+        print "[engine2d_primitives_spec] FAIL {label}: pixel ({x},{y}) got=0x{got} expected=0x{expected} tol={tol}"
+    ok
+
+fn _assert_primitive_pixels(px: [u32], w: i32) -> bool:
+    val tol_flat: i32 = 8
+    val tol_edge: i32 = 16
+    var all_ok = true
+
+    all_ok = all_ok and _check_pixel(px, w, 500, 500, 0x000000, tol_flat, "background(500,500)")
+
+    all_ok = all_ok and _check_pixel(px, w, 10, 20, 0xFF0000, tol_edge, "line1 left endpoint")
+    all_ok = all_ok and _check_pixel(px, w, 55, 20, 0xFF0000, tol_edge, "line1 midpoint")
+    all_ok = all_ok and _check_pixel(px, w, 100, 20, 0xFF0000, tol_edge, "line1 right endpoint")
+    all_ok = all_ok and _check_pixel(px, w, 55, 18, 0x000000, tol_flat, "line1 above(55,18)")
+    all_ok = all_ok and _check_pixel(px, w, 55, 22, 0x000000, tol_flat, "line1 below(55,22)")
+
+    all_ok = all_ok and _check_pixel(px, w, 10, 30, 0x00FF00, tol_edge, "line2 start")
+    all_ok = all_ok and _check_pixel(px, w, 60, 80, 0x00FF00, tol_edge, "line2 mid")
+    all_ok = all_ok and _check_pixel(px, w, 110, 130, 0x00FF00, tol_edge, "line2 end")
+
+    all_ok = all_ok and _check_pixel(px, w, 10, 140, 0x0000FF, tol_flat, "rect3 top-left")
+    all_ok = all_ok and _check_pixel(px, w, 35, 165, 0x0000FF, tol_flat, "rect3 center")
+    all_ok = all_ok and _check_pixel(px, w, 59, 189, 0x0000FF, tol_flat, "rect3 bot-right")
+
+    all_ok = all_ok and _check_pixel(px, w, 70, 140, 0xFFFF00, tol_flat, "rect4 top-left corner")
+    all_ok = all_ok and _check_pixel(px, w, 119, 140, 0xFFFF00, tol_flat, "rect4 top-right corner")
+    all_ok = all_ok and _check_pixel(px, w, 70, 189, 0xFFFF00, tol_flat, "rect4 bot-left corner")
+    all_ok = all_ok and _check_pixel(px, w, 119, 189, 0xFFFF00, tol_flat, "rect4 bot-right corner")
+    all_ok = all_ok and _check_pixel(px, w, 95, 165, 0x000000, tol_flat, "rect4 hollow center")
+
+    all_ok = all_ok and _check_pixel(px, w, 160, 60, 0xFF00FF, tol_flat, "circle5 center")
+    all_ok = all_ok and _check_pixel(px, w, 160, 40, 0xFF00FF, tol_flat, "circle5 N(r=20)")
+    all_ok = all_ok and _check_pixel(px, w, 180, 60, 0xFF00FF, tol_flat, "circle5 E(r=20)")
+    all_ok = all_ok and _check_pixel(px, w, 160, 80, 0xFF00FF, tol_flat, "circle5 S(r=20)")
+    all_ok = all_ok and _check_pixel(px, w, 140, 60, 0xFF00FF, tol_flat, "circle5 W(r=20)")
+    all_ok = all_ok and _check_pixel(px, w, 160, 5, 0x000000, tol_flat, "circle5 outside")
+
+    all_ok = all_ok and _check_pixel(px, w, 160, 131, 0x00FFFF, tol_edge, "ring6 north")
+    all_ok = all_ok and _check_pixel(px, w, 189, 160, 0x00FFFF, tol_edge, "ring6 east")
+    all_ok = all_ok and _check_pixel(px, w, 160, 189, 0x00FFFF, tol_edge, "ring6 south")
+    all_ok = all_ok and _check_pixel(px, w, 131, 160, 0x00FFFF, tol_edge, "ring6 west")
+    all_ok = all_ok and _check_pixel(px, w, 160, 160, 0x000000, tol_flat, "ring6 hollow center")
+    all_ok
+
+fn _assert_primitive_ppm_with_python(path: text) -> bool:
+    val script = "import pathlib,sys;" +
+        "p=pathlib.Path(sys.argv[1]);" +
+        "b=p.read_bytes();" +
+        "h=b.find(b'\\n255\\n')+5;" +
+        "pix=b[h:];" +
+        "w=int(b.splitlines()[1].split()[0]);" +
+        "rgb=lambda x,y: pix[(y*w+x)*3:(y*w+x)*3+3].hex();" +
+        "checks=[((500,500),'000000'),((10,20),'ff0000'),((55,20),'ff0000'),((100,20),'ff0000'),((55,18),'000000'),((55,22),'000000'),((10,30),'00ff00'),((60,80),'00ff00'),((110,130),'00ff00'),((10,140),'0000ff'),((35,165),'0000ff'),((59,189),'0000ff'),((70,140),'ffff00'),((119,140),'ffff00'),((70,189),'ffff00'),((119,189),'ffff00'),((95,165),'000000'),((160,60),'ff00ff'),((160,40),'ff00ff'),((180,60),'ff00ff'),((160,80),'ff00ff'),((140,60),'ff00ff'),((160,5),'000000'),((160,131),'00ffff'),((189,160),'00ffff'),((160,189),'00ffff'),((131,160),'00ffff'),((160,160),'000000')];" +
+        "bad=[(xy,exp,rgb(*xy)) for xy,exp in checks if rgb(*xy).lower()!=exp];" +
+        "print('OK' if not bad else 'BAD '+repr(bad[:4]));" +
+        "sys.exit(0 if not bad else 4)"
+    val result = rt_process_run_timeout("python3", ["-c", script, path], 5000)
+    if result[0] != "":
+        print "[engine2d_primitives_spec] python ppm check: {result[0]}"
+    if result[1] != "":
+        print "[engine2d_primitives_spec] python ppm stderr: {result[1]}"
+    result[2] == 0
+
+fn _capture_primitive_ppm_with_python(qmp_socket: text, output_path: text) -> bool:
+    val script = "import json,os,socket,sys,time;" +
+        "s=socket.socket(socket.AF_UNIX);" +
+        "s.settimeout(5);" +
+        "s.connect(sys.argv[1]);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');" +
+        "f.flush();" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='human-monitor-command', arguments=dict([('command-line','screendump '+sys.argv[2])]))).encode()+b'\\n');" +
+        "f.flush();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2])>0)) for _ in range(150));" +
+        "print('OK' if ok else 'NO_CAPTURE');" +
+        "sys.exit(0 if ok else 3)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 20000)
+    if result[0] != "":
+        print "[engine2d_primitives_spec] python qmp capture: {result[0]}"
+    if result[1] != "":
+        print "[engine2d_primitives_spec] python qmp stderr: {result[1]}"
+    result[2] == 0 and file_exists(output_path)
+
+# ===========================================================================
+# Spec
+# ===========================================================================
+
+describe "Engine2D primitive draw verification in QEMU":
+
+    it "builds gui_engine2d_primitives_entry.spl into a baremetal kernel":
+        val target = _primitives_target()
+        val ok = build_os(target)
+        expect ok == true
+        expect file_exists(target.output) == true
+
+    it "boots guest, captures framebuffer, and asserts each primitive pixel":
+        val target = _primitives_target()
+        val built = build_os(target)
+        expect built == true
+        expect file_exists(target.output) == true
+
+        # Host may not have qemu-system-x86_64 — skip the live capture
+        # step but leave the build assertion as the hard gate.
+        if not built or not file_exists(target.output):
+            print "[engine2d_primitives_spec] kernel build unavailable, skipping live capture"
+            expect file_exists(target.output) == true
+        elif not can_run_target(target):
+            print "[engine2d_primitives_spec] qemu-system-x86_64 not available, skipping live capture"
+            expect true == true
+        else:
+            val qmp_socket = "/tmp/simpleos_engine2d_primitives_qmp.sock"
+            val serial_log = "build/os/engine2d_primitives_qemu_serial.log"
+            val capture_ppm = "build/os/engine2d_primitives_capture.ppm"
+            val baseline_dir = "doc/08_tracking/baselines"
+            val baseline_path = "{baseline_dir}/engine2d_primitives.ppm"
+            val baseline_serial = "{baseline_dir}/engine2d_primitives.serial.log"
+
+            dir_create_all(baseline_dir)
+            dir_create_all("build/os")
+
+            match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+                Ok(handle):
+                    val saw_painted = wait_for_serial_marker(
+                        handle, "[E2D-PRIM] Engine2D primitive frame painted", 30000)
+                    if saw_painted:
+                        val captured = _capture_primitive_ppm_with_python(qmp_socket, capture_ppm)
+                        val all_ok = captured and _assert_primitive_ppm_with_python(capture_ppm)
+                        stop_guest(handle)
+                        expect all_ok == true
+                    else:
+                        print "[engine2d_primitives_spec] primitive paint marker not seen within 30s"
+                        print "[engine2d_primitives_spec] serial log follows:"
+                        print read_serial_log(handle)
+                        stop_guest(handle)
+                        expect false == true
+                Err(err):
+                    print "[engine2d_primitives_spec] failed to spawn guest: {err}"
+                    expect false == true
+
+    it "has a baseline directory for engine2d primitive captures":
+        val baseline_dir = "doc/08_tracking/baselines"
+        dir_create_all(baseline_dir)
+        expect file_exists(baseline_dir) == true

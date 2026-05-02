@@ -1,0 +1,487 @@
+# VSCode Extension Manifest Generator
+# Auto-generate package.json from Simple extension code
+
+use core.json.{JsonBuilder, JsonValue, stringify, stringify_pretty}
+use core.result.{Result, Ok, Err}
+
+# Extension manifest
+pub class ExtensionManifest:
+    pub name: text
+    pub display_name: text
+    pub description: text
+    pub version: text
+    pub publisher: text
+    pub engines: Dict<text, text>
+    pub categories: List<text>
+    pub activationEvents: List<text>
+    pub main: text
+    pub contributes: ManifestContributes
+    pub scripts: Dict<text, text>
+    pub devDependencies: Dict<text, text>
+
+    pub fn new(name: text, version: text): ExtensionManifest =
+        """Create extension manifest.
+
+        Args:
+            name: Extension name (lowercase-with-dashes)
+            version: SemVer version
+
+        Returns:
+            Manifest with defaults
+
+        Example:
+            val manifest = ExtensionManifest.new("simple-lang", "1.0.0")
+            manifest.set_publisher("simple-lang")
+            manifest.add_language("simple")
+        """
+        ExtensionManifest {
+            name: name,
+            display_name: name,
+            description: "",
+            version: version,
+            publisher: "",
+            engines: {"vscode": "^1.80.0"},
+            categories: ["Programming Languages"],
+            activationEvents: ["onLanguage:simple"],
+            main: "./out/extension.js",
+            contributes: ManifestContributes.new(),
+            scripts: {
+                "compile": "tsc -p ./",
+                "watch": "tsc -watch -p ./",
+                "package": "vsce package"
+            },
+            devDependencies: {
+                "@types/vscode": "^1.80.0",
+                "typescript": "^5.0.0",
+                "@vscode/test-electron": "^2.3.0"
+            }
+        }
+
+    pub fn set_publisher(self, publisher: text):
+        """Set extension publisher."""
+        self.publisher = publisher
+
+    pub fn set_description(self, description: text):
+        """Set extension description."""
+        self.description = description
+
+    pub fn set_display_name(self, display_name: text):
+        """Set display name."""
+        self.display_name = display_name
+
+    pub fn add_activation_event(self, event: text):
+        """Add activation event.
+
+        Args:
+            event: Event string (e.g., "onCommand:simple.build")
+        """
+        self.activationEvents.append(event)
+
+    pub fn add_category(self, category: text):
+        """Add extension category.
+
+        Args:
+            category: Category (e.g., "Linters", "Formatters")
+        """
+        self.categories.append(category)
+
+    pub fn add_language(self, language_id: text):
+        """Add language support.
+
+        Args:
+            language_id: Language identifier
+        """
+        self.contributes.add_language(language_id)
+        self.add_activation_event("onLanguage:{language_id}")
+
+    pub fn add_command(self, command: text, title: text):
+        """Add command contribution.
+
+        Args:
+            command: Command ID
+            title: Command title
+        """
+        self.contributes.add_command(command, title)
+        self.add_activation_event("onCommand:{command}")
+
+    pub fn to_json(): text =
+        """Generate package.json content.
+
+        Returns:
+            JSON string for package.json with proper escaping
+        """
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("name", self.name)
+        builder = builder.set_string("displayName", self.display_name)
+        builder = builder.set_string("description", self.description)
+        builder = builder.set_string("version", self.version)
+        builder = builder.set_string("publisher", self.publisher)
+
+        # Engines
+        var engines_dict: Dict<text, JsonValue> = {}
+        for (key, value) in self.engines.items():
+            engines_dict[key] = JsonValue.text(value)
+        builder = builder.set_object("engines", engines_dict)
+
+        # Categories array
+        var categories_values: List<JsonValue> = []
+        for cat in self.categories:
+            categories_values.push(JsonValue.text(cat))
+        builder = builder.set_array("categories", categories_values)
+
+        # Activation events array
+        var events_values: List<JsonValue> = []
+        for event in self.activationEvents:
+            events_values.push(JsonValue.text(event))
+        builder = builder.set_array("activationEvents", events_values)
+
+        builder = builder.set_string("main", self.main)
+
+        # Contributes
+        builder = builder.set("contributes", self.contributes.to_json_value())
+
+        # Scripts
+        var scripts_dict: Dict<text, JsonValue> = {}
+        for (key, value) in self.scripts.items():
+            scripts_dict[key] = JsonValue.text(value)
+        builder = builder.set_object("scripts", scripts_dict)
+
+        # DevDependencies
+        var deps_dict: Dict<text, JsonValue> = {}
+        for (key, value) in self.devDependencies.items():
+            deps_dict[key] = JsonValue.text(value)
+        builder = builder.set_object("devDependencies", deps_dict)
+
+        stringify_pretty(builder.build(), 2)
+
+# Manifest contributions section
+pub class ManifestContributes:
+    pub languages: List<LanguageContribution>
+    pub commands: List<CommandContribution>
+    pub grammars: List<GrammarContribution>
+    pub themes: List<ThemeContribution>
+    pub configuration: Option<ConfigurationContribution>
+
+    pub fn new(): ManifestContributes =
+        """Create empty contributions."""
+        ManifestContributes {
+            languages: [],
+            commands: [],
+            grammars: [],
+            themes: [],
+            configuration: none
+        }
+
+    pub fn add_language(self, language_id: text):
+        """Add language contribution.
+
+        Args:
+            language_id: Language identifier
+        """
+        val lang = LanguageContribution {
+            id: language_id,
+            extensions: [".{language_id}"],
+            aliases: [language_id.capitalize()],
+            configuration: "./language-configuration.json"
+        }
+        self.languages.append(lang)
+
+    pub fn add_command(self, command: text, title: text):
+        """Add command contribution.
+
+        Args:
+            command: Command ID
+            title: Command title
+        """
+        val cmd = CommandContribution {
+            command: command,
+            title: title,
+            category: "Simple"
+        }
+        self.commands.append(cmd)
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue for proper serialization."""
+        var obj: Dict<text, JsonValue> = {}
+
+        # Languages
+        if self.languages.len() > 0:
+            var langs: List<JsonValue> = []
+            for lang in self.languages:
+                langs.push(lang.to_json_value())
+            obj["languages"] = JsonValue.Array(langs)
+
+        # Commands
+        if self.commands.len() > 0:
+            var cmds: List<JsonValue> = []
+            for cmd in self.commands:
+                cmds.push(cmd.to_json_value())
+            obj["commands"] = JsonValue.Array(cmds)
+
+        # Grammars
+        if self.grammars.len() > 0:
+            var grams: List<JsonValue> = []
+            for gram in self.grammars:
+                grams.push(gram.to_json_value())
+            obj["grammars"] = JsonValue.Array(grams)
+
+        # Themes
+        if self.themes.len() > 0:
+            var thms: List<JsonValue> = []
+            for theme in self.themes:
+                thms.push(theme.to_json_value())
+            obj["themes"] = JsonValue.Array(thms)
+
+        # Configuration
+        match self.configuration:
+            case Some(config):
+                obj["configuration"] = config.to_json_value()
+            case None:
+                pass
+
+        JsonValue.Object(obj)
+
+    pub fn to_json(): text =
+        """Convert to JSON string."""
+        stringify(self.to_json_value())
+
+# Language contribution
+pub class LanguageContribution:
+    pub id: text
+    pub extensions: List<text>
+    pub aliases: List<text>
+    pub configuration: text
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("id", self.id)
+
+        var exts: List<JsonValue> = []
+        for ext in self.extensions:
+            exts.push(JsonValue.text(ext))
+        builder = builder.set_array("extensions", exts)
+
+        var aliases: List<JsonValue> = []
+        for alias in self.aliases:
+            aliases.push(JsonValue.text(alias))
+        builder = builder.set_array("aliases", aliases)
+
+        builder = builder.set_string("configuration", self.configuration)
+        builder.build()
+
+    pub fn to_json(): text =
+        stringify(self.to_json_value())
+
+# Command contribution
+pub class CommandContribution:
+    pub command: text
+    pub title: text
+    pub category: text
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("command", self.command)
+        builder = builder.set_string("title", self.title)
+        builder = builder.set_string("category", self.category)
+        builder.build()
+
+    pub fn to_json(): text =
+        stringify(self.to_json_value())
+
+# Grammar contribution
+pub class GrammarContribution:
+    pub language: text
+    pub scopeName: text
+    pub path: text
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("language", self.language)
+        builder = builder.set_string("scopeName", self.scopeName)
+        builder = builder.set_string("path", self.path)
+        builder.build()
+
+# Theme contribution
+pub class ThemeContribution:
+    pub label: text
+    pub uiTheme: text
+    pub path: text
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("label", self.label)
+        builder = builder.set_string("uiTheme", self.uiTheme)
+        builder = builder.set_string("path", self.path)
+        builder.build()
+
+# Configuration contribution
+pub class ConfigurationContribution:
+    pub title: text
+    pub properties: Dict<text, ConfigProperty>
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("title", self.title)
+
+        var props_obj: Dict<text, JsonValue> = {}
+        for (key, prop) in self.properties.items():
+            props_obj[key] = prop.to_json_value()
+        builder = builder.set_object("properties", props_obj)
+
+        builder.build()
+
+# Configuration property
+pub class ConfigProperty:
+    pub property_type: text
+    pub default: text
+    pub description: text
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("type", self.property_type)
+        builder = builder.set_string("default", self.default)
+        builder = builder.set_string("description", self.description)
+        builder.build()
+
+# Manifest generator - extract info from extension code
+pub class ManifestGenerator:
+    pub manifest: ExtensionManifest
+
+    pub fn new(name: text, version: text): ManifestGenerator =
+        """Create manifest generator.
+
+        Args:
+            name: Extension name
+            version: Version
+
+        Returns:
+            Generator instance
+
+        Example:
+            val gen = ManifestGenerator.new("simple-lang", "1.0.0")
+            gen.scan_extension_file("extension.spl")
+            val package_json = gen.manifest.to_json()
+        """
+        ManifestGenerator {
+            manifest: ExtensionManifest.new(name, version)
+        }
+
+    pub fn scan_extension_file(self, path: text):
+        """Scan extension code to extract commands, languages, etc.
+
+        Args:
+            path: Path to extension.spl
+
+        Scans for:
+        - commands.register_command() calls
+        - languages.register_*_provider() calls
+        - workspace.create_file_system_watcher() patterns
+        """
+        @extern("runtime", "rt_file_read_text")
+        fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+        val content = _rt_file_read_text(path.ptr(), path.len())
+
+        # Parse extension file and extract registration patterns
+        for line in content.lines():
+            val trimmed = line.trim()
+
+            # Command registrations: commands.register_command("name", ...)
+            if trimmed.contains("register_command("):
+                val start = trimmed.index_of("\"").unwrap_or(-1)
+                if start >= 0:
+                    val after_quote = trimmed.substring(start + 1, trimmed.len())
+                    val end = after_quote.index_of("\"").unwrap_or(-1)
+                    if end >= 0:
+                        val cmd_name = after_quote.substring(0, end)
+                        self.manifest.add_command(cmd_name, cmd_name)
+
+            # Language provider registrations: languages.register_*_provider
+            elif trimmed.contains("register_language(") or trimmed.contains("register_*_provider("):
+                val start = trimmed.index_of("\"").unwrap_or(-1)
+                if start >= 0:
+                    val after_quote = trimmed.substring(start + 1, trimmed.len())
+                    val end = after_quote.index_of("\"").unwrap_or(-1)
+                    if end >= 0:
+                        val lang_id = after_quote.substring(0, end)
+                        self.manifest.add_language(lang_id, lang_id, [])
+
+            # Activation events: onLanguage:*, onCommand:*, etc.
+            elif trimmed.contains("activationEvents"):
+                # Will be handled when full JSON parsing is available
+                pass
+
+    pub fn set_metadata(
+        self,
+        publisher: text,
+        description: text,
+        display_name: text
+    ):
+        """Set extension metadata.
+
+        Args:
+            publisher: Publisher ID
+            description: Extension description
+            display_name: Display name
+        """
+        self.manifest.set_publisher(publisher)
+        self.manifest.set_description(description)
+        self.manifest.set_display_name(display_name)
+
+    pub fn generate(self): text =
+        """Generate package.json.
+
+        Returns:
+            package.json content
+        """
+        self.manifest.to_json()
+
+    pub fn write_to_file(self, path: text):
+        """Write package.json to file.
+
+        Args:
+            path: Output path
+        """
+        @extern("runtime", "rt_file_write_text")
+        fn _rt_file_write_text(path_ptr: &u8, path_len: u64, content_ptr: &u8, content_len: u64) -> bool
+
+        val json = self.generate()
+        _rt_file_write_text(path.ptr(), path.len(), json.ptr(), json.len())
+
+# Helper: Generate package.json from extension code
+pub fn generate_package_json(
+    extension_file: text,
+    name: text,
+    version: text,
+    publisher: text
+): text =
+    """Generate package.json from extension code.
+
+    Args:
+        extension_file: Path to extension.spl
+        name: Extension name
+        version: Version string
+        publisher: Publisher ID
+
+    Returns:
+        package.json content
+
+    Example:
+        val json = generate_package_json(
+            "extension.spl",
+            "simple-lang",
+            "1.0.0",
+            "simple-lang-team"
+        )
+        write_file("package.json", json)
+    """
+    val generator = ManifestGenerator.new(name, version)
+    generator.set_metadata(publisher, "Simple language support", "Simple Language")
+    generator.scan_extension_file(extension_file)
+    generator.generate()

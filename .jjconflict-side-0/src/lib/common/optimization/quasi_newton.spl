@@ -1,0 +1,168 @@
+# Quasi-Newton Methods Module
+# BFGS and L-BFGS optimization algorithms
+
+fn bfgs_optimize(f: fn(List<f64>) -> f64, grad_f: fn(List<f64>) -> List<f64>,
+                x0: List<f64>, config: OptimizationConfig) -> OptimizationResult:
+    var x = vector_copy(x0)
+    val n = x.length()
+    var H = matrix_identity(n)
+    var gradient = grad_f(x)
+    var iteration = 0
+    var converged = false
+    var prev_value = f(x)
+
+    while iteration < config.max_iterations:
+        val grad_norm = vector_norm(gradient)
+
+        if grad_norm < config.gradient_tolerance:
+            converged = true
+            return OptimizationResult(
+                solution: x,
+                objective_value: prev_value,
+                iterations: iteration,
+                converged: true,
+                gradient_norm: grad_norm,
+                message: "Converged: gradient norm below tolerance"
+            )
+
+        val neg_gradient = vector_scale(gradient, -1.0)
+        val direction = matrix_vector_multiply(H, neg_gradient)
+
+        val ls_result = backtracking_line_search(f, x, direction, gradient,
+                                                  1.0, 0.8, 0.0001)
+
+        val new_x = ls_result.new_point
+        val new_value = ls_result.new_value
+        val new_gradient = grad_f(new_x)
+
+        val s = vector_subtract(new_x, x)
+        val y = vector_subtract(new_gradient, gradient)
+        val sy = vector_dot(s, y)
+
+        if sy > 1e-10:
+            val Hy = matrix_vector_multiply(H, y)
+            val yHy = vector_dot(y, Hy)
+
+            val ss = outer_product(s, s)
+            val ss_scaled = matrix_scale(ss, 1.0 / sy)
+
+            val Hyy = outer_product(Hy, y)
+            val yHy_term = matrix_scale(Hyy, 1.0 / yHy)
+
+            val yHyH = outer_product(y, Hy)
+            val yHyH_term = matrix_scale(yHyH, 1.0 / yHy)
+
+            H = matrix_add(H, ss_scaled)
+            H = matrix_add(H, matrix_scale(yHy_term, -1.0))
+            H = matrix_add(H, matrix_scale(yHyH_term, -1.0))
+
+        x = new_x
+        gradient = new_gradient
+        prev_value = new_value
+        iteration = iteration + 1
+
+    OptimizationResult(
+        solution: x,
+        objective_value: f(x),
+        iterations: iteration,
+        converged: converged,
+        gradient_norm: vector_norm(gradient),
+        message: "Maximum iterations reached"
+    )
+
+fn lbfgs_two_loop_recursion(gradient: List<f64>, s_list: List<List<f64>>,
+                            y_list: List<List<f64>>, rho_list: List<f64>, m: i64) -> List<f64>:
+    val q = vector_copy(gradient)
+    val alpha_list = []
+
+    var i = m - 1
+    while i >= 0:
+        val alpha_i = rho_list[i] * vector_dot(s_list[i], q)
+        alpha_list.append(alpha_i)
+        val scaled_y = vector_scale(y_list[i], alpha_i)
+        val new_q = vector_subtract(q, scaled_y)
+        i = i - 1
+
+    var r = q
+    if m > 0:
+        val last_y = y_list[m - 1]
+        val last_s = s_list[m - 1]
+        val gamma = vector_dot(last_s, last_y) / vector_dot(last_y, last_y)
+        r = vector_scale(r, gamma)
+
+    i = 0
+    while i < m:
+        val beta = rho_list[i] * vector_dot(y_list[i], r)
+        val diff = alpha_list[m - 1 - i] - beta
+        val scaled_s = vector_scale(s_list[i], diff)
+        r = vector_add(r, scaled_s)
+        i = i + 1
+
+    r
+
+fn lbfgs_optimize(f: fn(List<f64>) -> f64, grad_f: fn(List<f64>) -> List<f64>,
+                 x0: List<f64>, config: OptimizationConfig, memory_size: i64) -> OptimizationResult:
+    var x = vector_copy(x0)
+    var gradient = grad_f(x)
+    var iteration = 0
+    var converged = false
+    var prev_value = f(x)
+
+    val s_list = []
+    val y_list = []
+    val rho_list = []
+    var m = 0
+
+    while iteration < config.max_iterations:
+        val grad_norm = vector_norm(gradient)
+
+        if grad_norm < config.gradient_tolerance:
+            converged = true
+            return OptimizationResult(
+                solution: x,
+                objective_value: prev_value,
+                iterations: iteration,
+                converged: true,
+                gradient_norm: grad_norm,
+                message: "Converged: gradient norm below tolerance"
+            )
+
+        val direction = lbfgs_two_loop_recursion(gradient, s_list, y_list, rho_list, m)
+        val neg_direction = vector_scale(direction, -1.0)
+
+        val ls_result = backtracking_line_search(f, x, neg_direction, gradient,
+                                                  1.0, 0.8, 0.0001)
+
+        val new_x = ls_result.new_point
+        val new_value = ls_result.new_value
+        val new_gradient = grad_f(new_x)
+
+        val s = vector_subtract(new_x, x)
+        val y = vector_subtract(new_gradient, gradient)
+        val sy = vector_dot(s, y)
+
+        if sy > 1e-10:
+            if m >= memory_size:
+                s_list.remove(0)
+                y_list.remove(0)
+                rho_list.remove(0)
+                m = m - 1
+
+            s_list.append(s)
+            y_list.append(y)
+            rho_list.append(1.0 / sy)
+            m = m + 1
+
+        x = new_x
+        gradient = new_gradient
+        prev_value = new_value
+        iteration = iteration + 1
+
+    OptimizationResult(
+        solution: x,
+        objective_value: f(x),
+        iterations: iteration,
+        converged: converged,
+        gradient_norm: vector_norm(gradient),
+        message: "Maximum iterations reached"
+    )

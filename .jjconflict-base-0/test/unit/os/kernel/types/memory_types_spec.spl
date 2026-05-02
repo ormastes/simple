@@ -1,0 +1,239 @@
+"""
+# Memory Types Specification
+
+**Feature IDs:** #OS-001
+**Category:** Runtime
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for PhysAddr, VirtAddr, PageFrame, and VmFlags kernel types.
+Validates construction, address arithmetic, and flag static constructors.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VmMap}
+
+
+# ============================================================================
+# Test Group 1: PhysAddr and VirtAddr
+# ============================================================================
+
+describe "MemoryTypes":
+    describe "PhysAddr":
+        it "stores the physical address value":
+            val pa = PhysAddr(addr: 0x1000)
+            expect(pa.addr).to_equal(0x1000)
+
+        it "supports zero address":
+            val pa = PhysAddr(addr: 0)
+            expect(pa.addr).to_equal(0)
+
+        it "supports large address":
+            val pa = PhysAddr(addr: 0xFFFFFFFF)
+            expect(pa.addr).to_equal(0xFFFFFFFF)
+
+    describe "VirtAddr":
+        it "stores the virtual address value":
+            val va = VirtAddr(addr: 0xDEAD0000)
+            expect(va.addr).to_equal(0xDEAD0000)
+
+        it "supports zero address":
+            val va = VirtAddr(addr: 0)
+            expect(va.addr).to_equal(0)
+
+
+# ============================================================================
+# Test Group 2: PageFrame
+# ============================================================================
+
+describe "PageFrame":
+    describe "construction":
+        it "stores the page frame number":
+            val frame = PageFrame(pfn: 42)
+            expect(frame.pfn).to_equal(42)
+
+        it "supports zero pfn":
+            val frame = PageFrame(pfn: 0)
+            expect(frame.pfn).to_equal(0)
+
+    describe "to_phys_addr":
+        it "converts pfn to physical address by multiplying by 4096":
+            val frame = PageFrame(pfn: 1)
+            val pa = frame.to_phys_addr()
+            expect(pa.addr).to_equal(4096)
+
+        it "converts pfn 42 to address 172032":
+            val frame = PageFrame(pfn: 42)
+            val pa = frame.to_phys_addr()
+            expect(pa.addr).to_equal(42 * 4096)
+
+        it "converts pfn 0 to address 0":
+            val frame = PageFrame(pfn: 0)
+            val pa = frame.to_phys_addr()
+            expect(pa.addr).to_equal(0)
+
+        it "converts pfn 256 to address 1048576 (1MB)":
+            val frame = PageFrame(pfn: 256)
+            val pa = frame.to_phys_addr()
+            expect(pa.addr).to_equal(1048576)
+
+    describe "from_phys_addr":
+        it "converts physical address to pfn by dividing by 4096":
+            val pa = PhysAddr(addr: 4096)
+            val frame = PageFrame.from_phys_addr(pa)
+            expect(frame.pfn).to_equal(1)
+
+        it "converts address 172032 to pfn 42":
+            val pa = PhysAddr(addr: 172032)
+            val frame = PageFrame.from_phys_addr(pa)
+            expect(frame.pfn).to_equal(42)
+
+        it "converts address 0 to pfn 0":
+            val pa = PhysAddr(addr: 0)
+            val frame = PageFrame.from_phys_addr(pa)
+            expect(frame.pfn).to_equal(0)
+
+        it "truncates non-aligned addresses":
+            val pa = PhysAddr(addr: 5000)
+            val frame = PageFrame.from_phys_addr(pa)
+            expect(frame.pfn).to_equal(1)
+
+    describe "round-trip":
+        it "pfn -> phys_addr -> pfn preserves the value":
+            val original = PageFrame(pfn: 100)
+            val pa = original.to_phys_addr()
+            val restored = PageFrame.from_phys_addr(pa)
+            expect(restored.pfn).to_equal(100)
+
+
+# ============================================================================
+# Test Group 3: VmFlags Static Constructors
+# ============================================================================
+
+describe "VmFlags":
+    describe "kernel_rw":
+        it "is present":
+            val flags = VmFlags.kernel_rw()
+            expect(flags.present).to_equal(true)
+
+        it "is writable":
+            val flags = VmFlags.kernel_rw()
+            expect(flags.writable).to_equal(true)
+
+        it "is not user-accessible":
+            val flags = VmFlags.kernel_rw()
+            expect(flags.user).to_equal(false)
+
+        it "has write_through disabled":
+            val flags = VmFlags.kernel_rw()
+            expect(flags.write_through).to_equal(false)
+
+        it "has cache_disable disabled":
+            val flags = VmFlags.kernel_rw()
+            expect(flags.cache_disable).to_equal(false)
+
+        it "has no_execute disabled":
+            val flags = VmFlags.kernel_rw()
+            expect(flags.no_execute).to_equal(false)
+
+    describe "kernel_ro":
+        it "is present":
+            val flags = VmFlags.kernel_ro()
+            expect(flags.present).to_equal(true)
+
+        it "is not writable":
+            val flags = VmFlags.kernel_ro()
+            expect(flags.writable).to_equal(false)
+
+        it "is not user-accessible":
+            val flags = VmFlags.kernel_ro()
+            expect(flags.user).to_equal(false)
+
+        it "has write_through disabled":
+            val flags = VmFlags.kernel_ro()
+            expect(flags.write_through).to_equal(false)
+
+        it "has cache_disable disabled":
+            val flags = VmFlags.kernel_ro()
+            expect(flags.cache_disable).to_equal(false)
+
+    describe "user_rw":
+        it "is present":
+            val flags = VmFlags.user_rw()
+            expect(flags.present).to_equal(true)
+
+        it "is writable":
+            val flags = VmFlags.user_rw()
+            expect(flags.writable).to_equal(true)
+
+        it "is user-accessible":
+            val flags = VmFlags.user_rw()
+            expect(flags.user).to_equal(true)
+
+        it "has no_execute enabled for data pages":
+            val flags = VmFlags.user_rw()
+            expect(flags.no_execute).to_equal(true)
+
+    describe "user_rx":
+        it "is present":
+            val flags = VmFlags.user_rx()
+            expect(flags.present).to_equal(true)
+
+        it "is not writable":
+            val flags = VmFlags.user_rx()
+            expect(flags.writable).to_equal(false)
+
+        it "is user-accessible":
+            val flags = VmFlags.user_rx()
+            expect(flags.user).to_equal(true)
+
+        it "has no_execute disabled for executable pages":
+            val flags = VmFlags.user_rx()
+            expect(flags.no_execute).to_equal(false)
+
+    describe "mmio":
+        it "is present":
+            val flags = VmFlags.mmio()
+            expect(flags.present).to_equal(true)
+
+        it "is writable":
+            val flags = VmFlags.mmio()
+            expect(flags.writable).to_equal(true)
+
+        it "is not user-accessible":
+            val flags = VmFlags.mmio()
+            expect(flags.user).to_equal(false)
+
+        it "has write_through enabled":
+            val flags = VmFlags.mmio()
+            expect(flags.write_through).to_equal(true)
+
+        it "has cache_disable enabled":
+            val flags = VmFlags.mmio()
+            expect(flags.cache_disable).to_equal(true)
+
+        it "has no_execute enabled":
+            val flags = VmFlags.mmio()
+            expect(flags.no_execute).to_equal(true)
+
+
+# ============================================================================
+# Test Group 4: VmMap
+# ============================================================================
+
+describe "VmMap":
+    it "stores all mapping fields":
+        val virt = VirtAddr(addr: 0x1000)
+        val phys = PhysAddr(addr: 0x2000)
+        val flags = VmFlags.kernel_rw()
+        val mapping = VmMap(virt: virt, phys: phys, size: 4096, flags: flags)
+        expect(mapping.virt.addr).to_equal(0x1000)
+        expect(mapping.phys.addr).to_equal(0x2000)
+        expect(mapping.size).to_equal(4096)
+        expect(mapping.flags.present).to_equal(true)

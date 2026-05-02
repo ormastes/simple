@@ -1,0 +1,135 @@
+# Simple Theme — Unified CSS-based theme system
+#
+# Bridges Stitch design tokens and standard CSS for the UI library and WM.
+
+# Phase 7: update path when glass_tokens moves to platforms/glass/
+use common.ui.glass.tokens.{GlassDesignTokens, StitchMetadata, GlassColorTokens, StitchMd3Colors}
+use common.ui.style.{UITheme, UIThemeColors, Spacing, BorderStyle, FontStyle}
+use common.ui.theme_registry.{ThemeId, theme_registry}
+class SimpleTheme:
+    name: text
+    metadata: StitchMetadata
+    tokens: GlassDesignTokens
+    custom_tokens: Dict<text, text>
+
+    static fn from_css(name: text, css: text) -> SimpleTheme:
+        """Parse a .simple-theme CSS file into a SimpleTheme object."""
+        val lines = css.split("\n")
+
+        val _reg = theme_registry()
+        val _ds_opt = _reg.design_system(ThemeId.GlassObsidianDark)
+        val _tok_opt = _reg.tokens(ThemeId.GlassObsidianDark)
+        # Phase 7: update path when glass_tokens moves to platforms/glass/
+        var metadata = if _ds_opt != nil: _ds_opt.metadata else: StitchMetadata.obsidian()
+        var tokens = if _tok_opt != nil: _tok_opt else: GlassDesignTokens.obsidian_dark()
+        var custom: Dict<text, text> = {}
+
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("--ui-bg:") or trimmed.starts_with("--app-background:"):
+                val var_name = if trimmed.starts_with("--ui-bg"): "--ui-bg" else: "--app-background"
+                val val_text = parse_css_var(trimmed, var_name)
+                tokens.colors.surface_level_0 = val_text
+                custom[var_name.slice(2)] = val_text
+            elif trimmed.starts_with("--ui-fg:") or trimmed.starts_with("--text-primary:"):
+                val var_name = if trimmed.starts_with("--ui-fg"): "--ui-fg" else: "--text-primary"
+                val val_text = parse_css_var(trimmed, var_name)
+                tokens.colors.text_primary = val_text
+                custom[var_name.slice(2)] = val_text
+            elif trimmed.starts_with("--ui-accent:") or trimmed.starts_with("--accent-color:"):
+                val var_name = if trimmed.starts_with("--ui-accent"): "--ui-accent" else: "--accent-color"
+                val val_text = parse_css_var(trimmed, var_name)
+                tokens.colors.accent = val_text
+                custom[var_name.slice(2)] = val_text
+            elif trimmed.starts_with("--glass-surface:") or trimmed.starts_with("--app-surface:"):
+                val var_name = if trimmed.starts_with("--glass-surface"): "--glass-surface" else: "--app-surface"
+                val val_text = parse_css_var(trimmed, var_name)
+                tokens.colors.surface_level_1 = val_text
+                custom[var_name.slice(2)] = val_text
+            elif trimmed.starts_with("--widget-radius:"):
+                val val_text = parse_css_var(trimmed, "--widget-radius")
+                custom["widget-radius"] = val_text
+                # Also try to update tokens if it's numeric
+                if val_text.ends_with("px"):
+                    # keep it simple for now, just store in custom
+                    pass_dn
+            elif trimmed.starts_with("--"):
+                # Generic CSS variable capture
+                val cp = trimmed.index_of(":")
+                match cp:
+                    case Some(idx):
+                        val key = trimmed[2:idx].trim()
+                        val val_text = parse_css_var(trimmed, "--" + key)
+                        custom[key] = val_text
+                    case _: pass_dn
+            elif trimmed.contains("@stitch.display_name:"):
+                metadata.display_name = parse_metadata_val(trimmed, "@stitch.display_name")
+            elif trimmed.contains("@stitch.color_mode:"):
+                metadata.color_mode = parse_metadata_val(trimmed, "@stitch.color_mode")
+            elif trimmed.contains("@stitch.project:"):
+                # metadata projection extraction
+                pass_dn
+
+        return SimpleTheme(
+            name: name,
+            metadata: metadata,
+            tokens: tokens,
+            custom_tokens: custom
+        )
+
+    me resolve_token(key: text) -> text:
+        """Resolve a semantic token to its value (hex/rgba/pixel)."""
+        # 1. Check custom tokens from CSS
+        match self.custom_tokens.get(key):
+            case Some(v): return v
+            case _: pass_dn
+
+        # 2. Check hardcoded token mappings
+        match key:
+            "app-background" => return self.tokens.colors.surface_level_0
+            "app-surface" => return self.tokens.colors.surface_level_1
+            "text-primary" => return self.tokens.colors.text_primary
+            "accent-color" => return self.tokens.colors.accent
+            "widget-radius" => return "{self.tokens.radius.md}px"
+            _ => return ""
+
+    me to_css() -> text:
+        """Generate a .simple-theme CSS file from this theme."""
+
+fn parse_metadata_val(line: text, key: text) -> text:
+    """Helper to extract @stitch metadata values from comments."""
+    if not line.contains("{key}:"):
+        return ""
+    val parts = line.split(":")
+    if parts.len() < 2:
+        return ""
+    return parts[1].trim()
+
+    me to_css() -> text:
+        """Generate a .simple-theme CSS file from this theme."""
+        var s = "/*\n"
+        s = "{s} @stitch.display_name: {self.metadata.display_name}\n"
+        s = "{s} @stitch.color_mode: {self.metadata.color_mode}\n"
+        s = "{s}*/\n\n"
+        
+        s = "{s}:root \{\n"
+        s = "{s}  /* Generated from SimpleTheme */\n"
+        s = "{s}  --ui-bg: {self.tokens.colors.surface_level_0};\n"
+        s = "{s}  --ui-fg: {self.tokens.colors.text_primary};\n"
+        s = "{s}  --ui-accent: {self.tokens.colors.accent};\n"
+        s = "{s}  --glass-surface: {self.tokens.colors.surface_level_1};\n"
+        s = "{s}  --glass-blur: {self.tokens.blur.surface_blur}px;\n"
+        s = "{s}\}\n"
+        return s
+
+fn parse_css_var(line: text, name: text) -> text:
+    """Helper to extract a CSS variable value from a line."""
+    if not line.contains("{name}:"):
+        return ""
+    val parts = line.split(":")
+    if parts.len() < 2:
+        return ""
+    var val_text = parts[1].trim()
+    if val_text.ends_with(";"):
+        val_text = val_text[0:val_text.len() - 1].trim()
+    return val_text

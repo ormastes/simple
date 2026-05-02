@@ -1,0 +1,139 @@
+# Dev-preview advisory lane; not a main gate.
+# ============================================================================
+# VS Code extension (src/app/vscode_extension/) + Simple-side backend
+# (src/app/ui.vscode/, src/app/simple_lsp_mcp/) are still evolving.
+# Advisory-only (continue-on-error: true) so red runs never block main.
+# Does node --check on shipped .js, compile-check of Simple sources, and
+# runs the extension package's own npm test if present.
+# ============================================================================
+
+name: VSCode Extension Tests (dev-preview, advisory)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/app/vscode_extension/**'
+      - 'src/app/ui.vscode/**'
+      - 'src/app/simple_lsp_mcp/**'
+      - 'test/unit/app/vscode_extension/**'
+      - '.github/workflows/vscode-tests.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/app/vscode_extension/**'
+      - 'src/app/ui.vscode/**'
+      - 'src/app/simple_lsp_mcp/**'
+      - 'test/unit/app/vscode_extension/**'
+      - '.github/workflows/vscode-tests.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dev-preview:
+    name: VS Code dev-preview check (advisory)
+    runs-on: ubuntu-latest
+    # Advisory-only: failures here MUST NOT block `main` merges.
+    continue-on-error: true
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify VS Code / LSP source trees exist
+        run: |
+          set -eu
+          missing=0
+          for p in \
+            src/app/vscode_extension/package.json \
+            src/app/ui.vscode \
+            src/app/simple_lsp_mcp ; do
+            if [ ! -e "$p" ]; then
+              echo "::warning::missing $p"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "Some VS Code paths missing; continuing advisory run."
+          else
+            echo "VS Code / LSP source trees present."
+          fi
+
+      - name: Syntax-check shipped extension JS (node --check)
+        working-directory: src/app/vscode_extension
+        run: |
+          if [ -d out ]; then
+            find out -maxdepth 3 -name '*.js' -print0 \
+              | xargs -0 -r -n1 sh -c \
+                  'node --check "$0" && echo "ok: $0" \
+                   || echo "::warning::syntax: $0"'
+          else
+            echo "::notice::src/app/vscode_extension/out missing; skip node --check"
+          fi
+
+      - name: Compile-check Simple-side sources
+        run: |
+          if [ -x bin/simple ]; then
+            bin/simple --version || true
+            for dir in src/app/ui.vscode src/app/simple_lsp_mcp ; do
+              bin/simple build --check "$dir" \
+                || echo "::warning::$dir compile-check failed (advisory)"
+            done
+          else
+            echo "::notice::bin/simple not present in CI seed; skip compile-check"
+          fi
+
+      - name: Simple-side unit tests (test/unit/app/vscode_extension, if present)
+        run: |
+          set -eu
+          unit_dir="test/unit/app/vscode_extension"
+          if [ ! -x bin/simple ]; then
+            echo "::notice::bin/simple not present in CI seed; skip Simple-side tests"
+            exit 0
+          fi
+          if [ -d "$unit_dir" ]; then
+            echo "Running bin/simple test $unit_dir"
+            bin/simple test "$unit_dir" \
+              || echo "::warning::$unit_dir tests failed (advisory)"
+          else
+            echo "::notice::$unit_dir not present; falling back to compile-check"
+            for f in \
+              src/app/ui.vscode \
+              src/app/simple_lsp_mcp ; do
+              if [ -e "$f" ]; then
+                bin/simple check "$f" \
+                  || echo "::warning::$f compile-check failed (advisory)"
+              fi
+            done
+          fi
+
+      - name: npm ci + npm test (extension, if present)
+        working-directory: src/app/vscode_extension
+        timeout-minutes: 6
+        run: |
+          if [ -f package.json ]; then
+            npm ci --no-audit --no-fund \
+              || echo "::warning::npm ci failed (advisory)"
+            npm test --if-present \
+              || echo "::warning::npm test failed (advisory)"
+          else
+            echo "::notice::no package.json; skip npm ci/test"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### VS Code dev-preview advisory summary"
+            echo "Advisory lane for src/app/vscode_extension + ui.vscode + simple_lsp_mcp."
+            echo "Red runs here MUST NOT block main."
+          } >> "$GITHUB_STEP_SUMMARY"

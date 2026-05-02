@@ -1,0 +1,1648 @@
+#!/bin/sh
+# Build a FAT32 disk image for SimpleOS QEMU testing.
+# Usage: sh scripts/make_os_disk.shs [size_mb] [output_path] [seed_dir] [arch]
+#
+# Creates a FAT32-formatted disk image with test fixture files.
+# Required by QEMU scenarios: x64-nvme-fat32, x64-desktop-disk, x64-full-stack
+#
+# Fixture files (used by test/system/os_*_spec.spl):
+#   hello.txt    — "Hello from SimpleOS!\n"  (storage read test)
+#   numbers.txt  — "1\n2\n3\n4\n5\n"        (multi-line read test)
+#   hello.spl    — Simple source file        (cat test)
+#   config.sdn   — SDN config fixture        (config read test)
+#   testdir/     — empty directory            (readdir/mkdir test)
+#
+# Tool priority: qemu-img/dd create, mformat/mkfs.fat format,
+# mtools or Python FAT32 populate, optional loop mount fallback.
+
+SIZE_MB="${1:-64}"
+OUTPUT="${2:-build/os/fat32.img}"
+SEED_DIR="${3:-}"
+ARCH_MODE="${4:-x86_64}"
+SIMPLEOS_IMAGE_VERSION="${SIMPLEOS_IMAGE_VERSION:-0.1.0}"
+SIMPLEOS_CLI_APP_CATALOG="${SIMPLEOS_CLI_APP_CATALOG:-scripts/simpleos_cli_app_catalog.txt}"
+SIMPLEOS_CLI_APP_CACHE_ROOT="${SIMPLEOS_CLI_APP_CACHE_ROOT:-build/os/simple_cli_apps}"
+SIMPLEOS_CLI_BUILD_TARGET="${SIMPLEOS_CLI_BUILD_TARGET:-x86_64-unknown-none}"
+SIMPLEOS_REQUIRED_CLI_APPS="${SIMPLEOS_REQUIRED_CLI_APPS:-}"
+POPULATED=0
+ELFSEEDED=0
+
+if [ -n "${SIMPLEOS_UEFI_KERNEL:-}" ] && [ -z "$SIMPLEOS_REQUIRED_CLI_APPS" ]; then
+    SIMPLEOS_REQUIRED_CLI_APPS="info"
+fi
+
+create_raw_image() {
+    mkdir -p "$(dirname "$OUTPUT")"
+    rm -f "$OUTPUT"
+    if command -v qemu-img >/dev/null 2>&1; then
+        if qemu-img create -f raw "$OUTPUT" "${SIZE_MB}M" >/dev/null; then
+            echo "[make_os_disk] Created ${SIZE_MB}MB raw image with qemu-img: $OUTPUT"
+            return 0
+        fi
+        echo "[make_os_disk] ERROR: qemu-img failed to create raw image: $OUTPUT"
+        return 1
+    fi
+    if dd if=/dev/zero of="$OUTPUT" bs=1M count="$SIZE_MB" 2>/dev/null; then
+        echo "[make_os_disk] Created ${SIZE_MB}MB raw image with dd: $OUTPUT"
+        return 0
+    fi
+    echo "[make_os_disk] ERROR: dd failed to create raw image: $OUTPUT"
+    return 1
+}
+
+format_fat32_image() {
+    if command -v mformat >/dev/null 2>&1; then
+        mformat -F -v "SIMPLEOS" -i "$OUTPUT" ::
+        echo "[make_os_disk] Formatted as FAT32 (mformat)"
+        return 0
+    fi
+    if command -v mkfs.fat >/dev/null 2>&1; then
+        mkfs.fat -F 32 -n "SIMPLEOS" "$OUTPUT"
+        echo "[make_os_disk] Formatted as FAT32 (mkfs.fat)"
+        return 0
+    fi
+    echo "[make_os_disk] ERROR: no FAT32 formatter found"
+    echo "[make_os_disk] Install mtools (mformat) or dosfstools (mkfs.fat)."
+    echo "[make_os_disk] Examples: apt install mtools dosfstools; brew install mtools dosfstools"
+    return 1
+}
+
+# ============================================================================
+# Write test fixture files to image
+# ============================================================================
+
+# Prepare fixture content in temp directory
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT
+
+ensure_image_capacity() {
+    if ! command -v du >/dev/null 2>&1; then
+        return 0
+    fi
+    staged_mb="$(du -sm "$TMPDIR" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    case "$staged_mb" in
+        ''|*[!0-9]*)
+            return 0
+            ;;
+    esac
+    required_mb=$((staged_mb + 96))
+    rounded_mb=$((((required_mb + 31) / 32) * 32))
+    if [ "$rounded_mb" -le "$SIZE_MB" ]; then
+        return 0
+    fi
+    echo "[make_os_disk] Growing FAT image from ${SIZE_MB}MB to ${rounded_mb}MB for ${staged_mb}MB staged payload"
+    SIZE_MB="$rounded_mb"
+    rm -f "$OUTPUT"
+    create_raw_image || return 1
+    format_fat32_image || return 1
+}
+
+create_raw_image || exit 1
+format_fat32_image || exit 1
+
+stage_simpleos_cli_catalog() {
+    [ -f "$SIMPLEOS_CLI_APP_CATALOG" ] || return 0
+
+    mkdir -p "$TMPDIR/SYS/APPS"
+    : > "$TMPDIR/SYS/APPS/SIMPLECLI.CAT"
+
+    case "$ARCH_MODE" in
+        x86_64|amd64|x64)
+            ;;
+        *)
+            while IFS='|' read -r app_name source_path smoke_tag; do
+                case "$app_name" in
+                    ""|\#*) continue ;;
+                esac
+                printf "%s|%s|%s|skipped-non-x86_64\n" "$app_name" "$source_path" "$smoke_tag" >> "$TMPDIR/SYS/APPS/SIMPLECLI.CAT"
+            done < "$SIMPLEOS_CLI_APP_CATALOG"
+            echo "[make_os_disk] Recorded Simple CLI catalog metadata for $ARCH_MODE (payload staging is x86_64-only)"
+            return 0
+            ;;
+    esac
+
+    mkdir -p "$SIMPLEOS_CLI_APP_CACHE_ROOT/$ARCH_MODE" "$SIMPLEOS_CLI_APP_CACHE_ROOT/logs" "$TMPDIR/SYS/APPS"
+    app_count=0
+    smoke_count=0
+
+    while IFS='|' read -r app_name source_path smoke_tag; do
+        case "$app_name" in
+            ""|\#*) continue ;;
+        esac
+
+        required_stage=0
+        case " $SIMPLEOS_REQUIRED_CLI_APPS " in
+            *" $app_name "*) required_stage=1 ;;
+        esac
+
+        if [ "$smoke_tag" != "smoke" ] && [ "$required_stage" -ne 1 ]; then
+            printf "%s|%s|%s|catalog-only\n" "$app_name" "$source_path" "$smoke_tag" >> "$TMPDIR/SYS/APPS/SIMPLECLI.CAT"
+            continue
+        fi
+
+        cache_path="$SIMPLEOS_CLI_APP_CACHE_ROOT/$ARCH_MODE/${app_name}.smf"
+        log_path="$SIMPLEOS_CLI_APP_CACHE_ROOT/logs/${app_name}.log"
+
+        if [ ! -f "$cache_path" ] || [ "$source_path" -nt "$cache_path" ] || [ "$SIMPLEOS_CLI_APP_CATALOG" -nt "$cache_path" ]; then
+            echo "[make_os_disk] Compiling Simple CLI app: $app_name"
+            if ! bin/simple compile "$source_path" --target "$SIMPLEOS_CLI_BUILD_TARGET" -o "$cache_path" >"$log_path" 2>&1; then
+                echo "[make_os_disk] ERROR: failed to compile $app_name from $source_path"
+                tail -n 40 "$log_path" 2>/dev/null || true
+                return 1
+            fi
+        fi
+
+        cp "$cache_path" "$TMPDIR/SYS/APPS/$app_name.smf" || return 1
+        cp "$cache_path" "$TMPDIR/SYS/APPS/$app_name" || return 1
+        printf "%s|%s|%s|staged\n" "$app_name" "$source_path" "$smoke_tag" >> "$TMPDIR/SYS/APPS/SIMPLECLI.CAT"
+        app_count=$((app_count + 1))
+        smoke_count=$((smoke_count + 1))
+    done < "$SIMPLEOS_CLI_APP_CATALOG"
+
+    echo "[make_os_disk] Staged $app_count Simple CLI apps into /SYS/APPS ($smoke_count smoke targets)"
+}
+
+echo "Hello from SimpleOS!" > "$TMPDIR/hello.txt"
+
+printf "1\n2\n3\n4\n5\n" > "$TMPDIR/numbers.txt"
+
+cat > "$TMPDIR/hello.spl" << 'SPLEOF'
+# Hello World for SimpleOS
+fn main():
+    print("Hello from SimpleOS!")
+SPLEOF
+
+cat > "$TMPDIR/config.sdn" << 'SDNEOF'
+hostname: "simpleos"
+version: "0.1.0"
+boot_mode: "serial"
+SDNEOF
+
+mkdir -p "$TMPDIR/SYS"
+printf "simpleos=%s\nfilesystem=fat32\nnvfs=available\n" "$SIMPLEOS_IMAGE_VERSION" > "$TMPDIR/SYS/VERSION.TXT"
+printf "nvfs-image-version=%s\n" "$SIMPLEOS_IMAGE_VERSION" > "$TMPDIR/SYS/NVFSVER.TXT"
+cp "$TMPDIR/SYS/VERSION.TXT" "$TMPDIR/VERSION.TXT"
+
+if command -v openssl >/dev/null 2>&1; then
+    if openssl genpkey -algorithm RSA \
+        -pkeyopt rsa_keygen_bits:2048 \
+        -out "$TMPDIR/SYS/HOST_RSA.PEM" >/dev/null 2>&1 \
+        && openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER \
+            -in "$TMPDIR/SYS/HOST_RSA.PEM" \
+            -out "$TMPDIR/SYS/HOST_RSA.DER" >/dev/null 2>&1; then
+        if command -v ssh-keygen >/dev/null 2>&1; then
+            if ssh-keygen -f "$TMPDIR/SYS/HOST_RSA.PEM" -y > "$TMPDIR/SYS/HOST_RSA.PUBTXT" 2>/dev/null; then
+                pub_b64="$(awk 'NR==1 { print $2 }' "$TMPDIR/SYS/HOST_RSA.PUBTXT")"
+                if [ -n "$pub_b64" ]; then
+                    if command -v base64 >/dev/null 2>&1; then
+                        printf '%s' "$pub_b64" | base64 -d > "$TMPDIR/SYS/HOST_RSA.BIN" 2>/dev/null || true
+                    elif command -v python3 >/dev/null 2>&1; then
+                        python3 - <<'PY' "$pub_b64" "$TMPDIR/SYS/HOST_RSA.BIN" >/dev/null 2>&1 || true
+import base64
+import pathlib
+import sys
+pathlib.Path(sys.argv[2]).write_bytes(base64.b64decode(sys.argv[1]))
+PY
+                    fi
+                fi
+            fi
+        fi
+    else
+        echo "[make_os_disk] WARNING: openssl RSA key generation failed -- SSH live lane stays Ed25519-only"
+    fi
+else
+    echo "[make_os_disk] WARNING: openssl not found -- SSH live lane stays Ed25519-only"
+fi
+
+cat > "$TMPDIR/BROWSER.APP" << 'APPEOF'
+# SimpleOS transitional disk launch manifest
+kind=resident_remote_app
+entry=browser_demo_remote_main
+app_id=/sys/apps/browser_demo
+APPEOF
+
+cat > "$TMPDIR/HELLO.APP" << 'APPEOF'
+# SimpleOS transitional disk launch manifest
+kind=resident_remote_app
+entry=hello_world_remote_main
+app_id=/sys/apps/hello_world
+APPEOF
+
+cat > "$TMPDIR/FILEMAN.APP" << 'APPEOF'
+# SimpleOS transitional disk launch manifest
+kind=resident_remote_app
+entry=file_manager_remote_main
+app_id=/sys/apps/file_manager
+APPEOF
+
+cat > "$TMPDIR/SHELL.APP" << 'APPEOF'
+# SimpleOS transitional disk launch manifest
+kind=resident_remote_app
+entry=shell_remote_main
+app_id=/sys/apps/shell
+APPEOF
+
+cat > "$TMPDIR/EDITOR.APP" << 'APPEOF'
+# SimpleOS transitional disk launch manifest
+kind=resident_remote_app
+entry=editor_remote_main
+app_id=/sys/apps/editor
+APPEOF
+
+cat > "$TMPDIR/SMUX.APP" << 'APPEOF'
+# SimpleOS transitional disk launch manifest
+kind=resident_remote_app
+entry=smux_remote_main
+app_id=/sys/apps/smux
+APPEOF
+
+cat > "$TMPDIR/SBROWSER.APP" << 'APPEOF'
+# SimpleOS filesystem app marker
+kind=fs_remote_app
+entry=simple_browser
+app_id=/sys/apps/simple_browser
+APPEOF
+
+cat > "$TMPDIR/SCOMP.APP" << 'APPEOF'
+# SimpleOS filesystem app marker
+kind=fs_remote_app
+entry=simple_compiler
+app_id=/sys/apps/simple_compiler
+APPEOF
+
+cat > "$TMPDIR/SINTERP.APP" << 'APPEOF'
+# SimpleOS filesystem app marker
+kind=fs_remote_app
+entry=simple_interpreter
+app_id=/sys/apps/simple_interpreter
+APPEOF
+
+cat > "$TMPDIR/SLOADER.APP" << 'APPEOF'
+# SimpleOS filesystem app marker
+kind=fs_remote_app
+entry=simple_loader
+app_id=/sys/apps/simple_loader
+APPEOF
+
+cat > "$TMPDIR/LLVM.APP" << 'APPEOF'
+# SimpleOS filesystem app marker
+kind=fs_remote_app
+entry=llvm
+app_id=/sys/apps/llvm
+APPEOF
+
+cat > "$TMPDIR/CLANG.APP" << 'APPEOF'
+# SimpleOS filesystem app marker
+kind=fs_remote_app
+entry=clang
+app_id=/sys/apps/clang
+APPEOF
+
+cat > "$TMPDIR/RUST.APP" << 'APPEOF'
+# SimpleOS filesystem app marker
+kind=fs_remote_app
+entry=rust
+app_id=/sys/apps/rust
+APPEOF
+
+mkdir -p "$TMPDIR/SYS/APPS"
+cp "$TMPDIR/BROWSER.APP" "$TMPDIR/SYS/APPS/BROWSER.APP"
+cp "$TMPDIR/HELLO.APP" "$TMPDIR/SYS/APPS/HELLO.APP"
+cp "$TMPDIR/FILEMAN.APP" "$TMPDIR/SYS/APPS/FILEMAN.APP"
+cp "$TMPDIR/SHELL.APP" "$TMPDIR/SYS/APPS/SHELL.APP"
+cp "$TMPDIR/EDITOR.APP" "$TMPDIR/SYS/APPS/EDITOR.APP"
+cp "$TMPDIR/SMUX.APP" "$TMPDIR/SYS/APPS/SMUX.APP"
+cp "$TMPDIR/SBROWSER.APP" "$TMPDIR/SYS/APPS/SBROWSER.APP"
+cp "$TMPDIR/SCOMP.APP" "$TMPDIR/SYS/APPS/SCOMP.APP"
+cp "$TMPDIR/SINTERP.APP" "$TMPDIR/SYS/APPS/SINTERP.APP"
+cp "$TMPDIR/SLOADER.APP" "$TMPDIR/SYS/APPS/SLOADER.APP"
+cp "$TMPDIR/LLVM.APP" "$TMPDIR/SYS/APPS/LLVM.APP"
+cp "$TMPDIR/CLANG.APP" "$TMPDIR/SYS/APPS/CLANG.APP"
+cp "$TMPDIR/RUST.APP" "$TMPDIR/SYS/APPS/RUST.APP"
+stage_simpleos_cli_catalog || exit 1
+
+mkdir -p "$TMPDIR/boot" "$TMPDIR/etc/pkg" "$TMPDIR/etc/shell" "$TMPDIR/bin" "$TMPDIR/sbin"
+mkdir -p "$TMPDIR/usr/bin" "$TMPDIR/usr/sbin" "$TMPDIR/usr/lib" "$TMPDIR/usr/libexec/simpleos-installer"
+mkdir -p "$TMPDIR/usr/local/bin" "$TMPDIR/usr/local/lib" "$TMPDIR/usr/local/share/themes"
+mkdir -p "$TMPDIR/var/db/pkg/installed" "$TMPDIR/var/cache/pkg" "$TMPDIR/var/log" "$TMPDIR/home"
+
+cat > "$TMPDIR/boot/kernel.elf" << 'EOFBOOT'
+# staged kernel placeholder for disk deployment
+arch = "x86_64"
+EOFBOOT
+
+stage_uefi_boot_media() {
+    if [ -z "${SIMPLEOS_UEFI_KERNEL:-}" ]; then
+        return 0
+    fi
+    if [ ! -f "$SIMPLEOS_UEFI_KERNEL" ]; then
+        echo "[make_os_disk] ERROR: SIMPLEOS_UEFI_KERNEL does not exist: $SIMPLEOS_UEFI_KERNEL"
+        return 1
+    fi
+
+    mkdir -p "$TMPDIR/EFI/BOOT" "$TMPDIR/boot/grub" "build/os/esp/EFI/BOOT" "build/os/esp/boot/grub"
+    cp "$SIMPLEOS_UEFI_KERNEL" "$TMPDIR/boot/kernel.elf"
+    cp "$SIMPLEOS_UEFI_KERNEL" "build/os/esp/boot/kernel.elf"
+    cat > "$TMPDIR/boot/grub/grub.cfg" << 'EOFGRUB'
+serial --unit=0 --speed=115200
+terminal_input serial console
+terminal_output serial console
+set timeout=0
+set default=0
+
+menuentry "SimpleOS desktop" {
+    search --no-floppy --file --set=root /BOOT/KERNEL.ELF
+    multiboot /BOOT/KERNEL.ELF
+    boot
+}
+EOFGRUB
+    cp "$TMPDIR/boot/grub/grub.cfg" "build/os/esp/boot/grub/grub.cfg"
+
+    if command -v grub-mkstandalone >/dev/null 2>&1; then
+        if grub-mkstandalone -O x86_64-efi \
+            --modules="part_gpt part_msdos fat normal multiboot search search_fs_file serial terminal configfile" \
+            -o "$TMPDIR/EFI/BOOT/BOOTX64.EFI" \
+            "/boot/grub/grub.cfg=$TMPDIR/boot/grub/grub.cfg" >/dev/null 2>&1; then
+            cp "$TMPDIR/EFI/BOOT/BOOTX64.EFI" "build/os/esp/EFI/BOOT/BOOTX64.EFI"
+            echo "[make_os_disk] Seeded GRUB x86_64 UEFI fallback loader"
+            return 0
+        fi
+        echo "[make_os_disk] WARNING: grub-mkstandalone failed -- trying monolithic grubx64.efi fallback"
+    fi
+
+    for candidate in \
+        /usr/lib/grub/x86_64-efi/monolithic/grubx64.efi \
+        /usr/share/grub/x86_64-efi/monolithic/grubx64.efi
+    do
+        if [ -f "$candidate" ]; then
+            cp "$candidate" "$TMPDIR/EFI/BOOT/BOOTX64.EFI"
+            cp "$candidate" "build/os/esp/EFI/BOOT/BOOTX64.EFI"
+            echo "[make_os_disk] Seeded monolithic GRUB x86_64 UEFI fallback loader"
+            return 0
+        fi
+    done
+
+    echo "[make_os_disk] ERROR: no x86_64 UEFI bootloader generator found"
+    echo "[make_os_disk] Install grub-efi-amd64-bin or provide SIMPLEOS_UEFI_BOOTLOADER."
+    return 1
+}
+
+stage_uefi_boot_media || exit 1
+
+cat > "$TMPDIR/etc/fstab" << 'EOFFSTAB'
+# SimpleOS filesystem table
+/dev/root / auto defaults 0 1
+/dev/efi /boot/efi fat32 defaults 0 2
+EOFFSTAB
+
+cat > "$TMPDIR/etc/rc.conf" << 'EOFRC'
+hostname="simpleos"
+simpleos_desktop="YES"
+EOFRC
+
+cat > "$TMPDIR/etc/pkg/repos.sdn" << 'EOFPKG'
+[repositories]
+local = "/var/cache/pkg/local"
+EOFPKG
+
+cat > "$TMPDIR/etc/shell/profile.sdn" << 'EOFSHELL'
+shell = "/bin/shell"
+EOFSHELL
+
+cat > "$TMPDIR/sbin/init" << 'EOFINIT'
+#!/bin/simple-init
+print("SIMPLEOS_INIT_OK")
+EOFINIT
+
+cat > "$TMPDIR/bin/shell" << 'EOFBIN'
+# shell placeholder
+EOFBIN
+
+cat > "$TMPDIR/usr/sbin/pkg" << 'EOFPKGBIN'
+# pkg placeholder
+EOFPKGBIN
+
+cat > "$TMPDIR/usr/local/bin/wget" << 'EOFWGET'
+# wget placeholder
+EOFWGET
+
+cat > "$TMPDIR/usr/bin/hello-world" << 'EOFHELLO'
+# hello-world app placeholder
+EOFHELLO
+
+cat > "$TMPDIR/SYS/APPS/hello_world" << 'EOFHELLOAPP'
+# hello_world app placeholder
+EOFHELLOAPP
+
+cat > "$TMPDIR/var/db/pkg/installed/simpleos-shell.sdn" << 'EOFPKGDB'
+[package]
+name = "simpleos-shell"
+EOFPKGDB
+
+cat > "$TMPDIR/deployed-files.sdn" << 'EOFMANIFEST'
+[artifact]
+kind = "disk-image"
+layout = "freebsd-like"
+EOFMANIFEST
+
+if [ -n "$SEED_DIR" ] && [ -d "$SEED_DIR" ]; then
+    cp -R "$SEED_DIR"/. "$TMPDIR"/
+fi
+
+stage_simpleos_toolchain_payloads() {
+    toolchain_lane_for_arch() {
+        case "$1" in
+            x86_64|amd64|x64) echo "x86_64-uefi-hardware" ;;
+            arm64|aarch64) echo "arm64-virtio-fat32-smf" ;;
+            arm32|armv7) echo "arm32-virtio-fat32-smf" ;;
+            riscv64|rv64) echo "riscv64-hosted" ;;
+            riscv32|rv32) echo "riscv32-virtio-fat32-smf" ;;
+            *) echo "$1-virtio-fat32-smf" ;;
+        esac
+    }
+
+    case "$ARCH_MODE" in
+        x86_64|amd64|x64)
+            ;;
+        *)
+            TOOLCHAIN_LANE="$(toolchain_lane_for_arch "$ARCH_MODE")"
+            mkdir -p "$TMPDIR/SYS" \
+                "$TMPDIR/SYS/APPS" \
+                "$TMPDIR/usr/share/simpleos/toolchain/llvm" \
+                "$TMPDIR/usr/share/simpleos/toolchain/clang" \
+                "$TMPDIR/usr/share/simpleos/toolchain/rust"
+            printf '%s\n' "SimpleOS LLVM standalone app v1" > "$TMPDIR/SYS/LLVMVER.TXT"
+            printf '%s\n' "clang version 20.0.0" > "$TMPDIR/SYS/CLANGVER.TXT"
+            printf '%s\n' "SimpleOS Rust standalone app v1" > "$TMPDIR/SYS/RUSTVER.TXT"
+            cat > "$TMPDIR/SYS/APPS/LLVMSMF.SMF" <<EOF
+SMF
+entry=/sys/apps/llvm
+EOF
+            cat > "$TMPDIR/SYS/APPS/CLANGSMF.SMF" <<EOF
+SMF
+entry=/sys/apps/clang
+EOF
+            cat > "$TMPDIR/SYS/APPS/RUSTSMF.SMF" <<EOF
+SMF
+entry=/sys/apps/rust
+EOF
+            cat > "$TMPDIR/SYS/LLVMMAN.TXT" <<EOF
+payload=llvm
+title=LLVM
+entry_app=/sys/apps/llvm
+mode=native-filesystem-app
+lane=${TOOLCHAIN_LANE}
+status=standalone-required
+capability_primary=local-ir-inspection
+proof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll
+capability_secondary=object-assembly-inspection
+proof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s
+capability_pipeline=compile-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step
+EOF
+            cat > "$TMPDIR/SYS/CLANGMAN.TXT" <<EOF
+payload=clang
+title=Clang
+entry_app=/sys/apps/clang
+mode=native-filesystem-app
+lane=${TOOLCHAIN_LANE}
+status=standalone-required
+capability_primary=local-c-source-inspection
+proof_primary=/usr/share/simpleos/toolchain/clang/hello.c
+capability_secondary=driver-flag-inspection
+proof_secondary=/usr/share/simpleos/toolchain/clang/flags.rsp
+capability_pipeline=compile-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step
+developer_export=/usr/bin/clang
+EOF
+            cat > "$TMPDIR/SYS/RUSTMAN.TXT" <<EOF
+payload=rust
+title=Rust
+entry_app=/sys/apps/rust
+mode=native-filesystem-app
+lane=${TOOLCHAIN_LANE}
+status=standalone-required
+capability_primary=local-source-inspection
+proof_primary=/usr/share/simpleos/toolchain/rust/hello.rs
+capability_secondary=package-layout-inspection
+proof_secondary=/usr/share/simpleos/toolchain/rust/Cargo.toml
+capability_pipeline=build-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step
+EOF
+cat > "$TMPDIR/SYS/TOOLSET.SDN" <<EOF
+[toolchain]
+lane = "${TOOLCHAIN_LANE}"
+llvm = "/sys/apps/llvm status=standalone-required"
+clang = "/sys/apps/clang status=standalone-required"
+rust = "/sys/apps/rust status=standalone-required"
+EOF
+            printf '%s\n' '; SimpleOS staged LLVM IR' > "$TMPDIR/usr/share/simpleos/toolchain/llvm/hello.ll"
+            printf '%s\n' '; SimpleOS staged assembly' > "$TMPDIR/usr/share/simpleos/toolchain/llvm/hello.s"
+            printf '%s\n' 'pipeline=compile-pipeline-step' 'input=/work/hello.simple' 'output=/work/hello.ll' 'next=/sys/apps/simple_loader' > "$TMPDIR/usr/share/simpleos/toolchain/llvm/pipeline.step"
+            printf '%s\n' '#include <stdio.h>' '' 'int main(void) {' '    puts("hello from simpleos clang");' '    return 0;' '}' > "$TMPDIR/usr/share/simpleos/toolchain/clang/hello.c"
+            printf '%s\n' '--target='${ARCH_MODE}'-unknown-simpleos' '-ffreestanding' '-nostdlib' '-O2' > "$TMPDIR/usr/share/simpleos/toolchain/clang/flags.rsp"
+            printf '%s\n' 'pipeline=compile-pipeline-step' 'input=/work/hello.c' 'output=/work/hello.o' 'next=/sys/apps/simple_loader' > "$TMPDIR/usr/share/simpleos/toolchain/clang/pipeline.step"
+            printf '%s\n' 'fn main() {' '    println!("hello from simpleos");' '}' > "$TMPDIR/usr/share/simpleos/toolchain/rust/hello.rs"
+            printf '%s\n' '[package]' 'name = "hello-simpleos"' 'version = "0.1.0"' > "$TMPDIR/usr/share/simpleos/toolchain/rust/Cargo.toml"
+            printf '%s\n' 'pipeline=build-pipeline-step' 'input=/work/Cargo.toml' 'output=/work/target/hello' 'next=/sys/apps/simple_loader' > "$TMPDIR/usr/share/simpleos/toolchain/rust/pipeline.step"
+            echo "[make_os_disk] Skipping LLVM/Clang/Rust/Ninja guest payload staging for $ARCH_MODE"
+            return 0
+            ;;
+    esac
+
+    if ! /bin/sh src/os/port/llvm/sysroot.shs >/dev/null 2>&1; then
+        echo "[make_os_disk] ERROR: sysroot build failed before guest toolchain staging"
+        return 1
+    fi
+
+    LLVM_ROOT="${SIMPLEOS_LLVM_STAGE_ROOT:-build/os/llvm/cross-x86_64}"
+    LLVM_BIN="$LLVM_ROOT/bin"
+    LLVM_CLANG="$LLVM_BIN/clang-20"
+    LLVM_LLD="$LLVM_BIN/lld"
+    LLVM_AR="$LLVM_BIN/llvm-ar"
+    LLVM_NM="$LLVM_BIN/llvm-nm"
+    LLVM_RANLIB="${SIMPLEOS_LLVM_RANLIB:-$(command -v llvm-ranlib 2>/dev/null || true)}"
+    LLVM_OBJDUMP="$LLVM_BIN/llvm-objdump"
+    LLVM_OBJCOPY="$LLVM_BIN/llvm-objcopy"
+    LLVM_STRIP="${SIMPLEOS_LLVM_STRIP:-$(command -v llvm-strip 2>/dev/null || true)}"
+
+    RUST_STAGE1_ROOT="${SIMPLEOS_RUST_STAGE1_ROOT:-$HOME/rust/build/x86_64-unknown-linux-gnu/stage1}"
+    RUST_RUSTC="$RUST_STAGE1_ROOT/bin/rustc"
+    RUST_CARGO="${SIMPLEOS_RUST_CARGO:-$(command -v cargo 2>/dev/null || true)}"
+    RUST_RUSTLIB_DIR="$RUST_STAGE1_ROOT/lib/rustlib/x86_64-unknown-simpleos"
+    NINJA_BIN="${SIMPLEOS_NINJA_BIN:-$(command -v ninja 2>/dev/null || true)}"
+
+    for required in \
+        "$LLVM_CLANG" \
+        "$LLVM_LLD" \
+        "$LLVM_AR" \
+        "$LLVM_NM" \
+        "$LLVM_RANLIB" \
+        "$LLVM_OBJDUMP" \
+        "$LLVM_OBJCOPY" \
+        "$LLVM_STRIP" \
+        "$RUST_RUSTC" \
+        "$RUST_CARGO" \
+        "$NINJA_BIN" \
+        "$RUST_RUSTLIB_DIR" \
+        "src/os/toolchain/rust/x86_64-unknown-simpleos.json" \
+        "src/os/toolchain/rust/cargo_config.toml" \
+        "build/os/sysroot/include" \
+        "build/os/sysroot/lib"
+    do
+        if [ ! -e "$required" ]; then
+            echo "[make_os_disk] WARNING: required host artifact missing for guest toolchain staging: $required"
+            echo "[make_os_disk] Falling back to metadata-only x86_64 toolchain staging"
+            TOOLCHAIN_LANE="x86_64-uefi-hardware"
+            mkdir -p "$TMPDIR/SYS" "$TMPDIR/SYS/APPS" \
+                "$TMPDIR/usr/share/simpleos/toolchain/llvm" \
+                "$TMPDIR/usr/share/simpleos/toolchain/clang" \
+                "$TMPDIR/usr/share/simpleos/toolchain/rust"
+            printf '%s\n' "SimpleOS LLVM standalone app v1" > "$TMPDIR/SYS/LLVMVER.TXT"
+            printf '%s\n' "clang version 20.0.0" > "$TMPDIR/SYS/CLANGVER.TXT"
+            printf '%s\n' "SimpleOS Rust standalone app v1" > "$TMPDIR/SYS/RUSTVER.TXT"
+            cat > "$TMPDIR/SYS/APPS/LLVMSMF.SMF" <<EOF
+SMF
+entry=/sys/apps/llvm
+EOF
+            cat > "$TMPDIR/SYS/APPS/CLANGSMF.SMF" <<EOF
+SMF
+entry=/sys/apps/clang
+EOF
+            cat > "$TMPDIR/SYS/APPS/RUSTSMF.SMF" <<EOF
+SMF
+entry=/sys/apps/rust
+EOF
+            cat > "$TMPDIR/SYS/LLVMMAN.TXT" <<EOF
+payload=llvm
+title=LLVM
+entry_app=/sys/apps/llvm
+mode=native-filesystem-app
+lane=$TOOLCHAIN_LANE
+status=standalone-required
+capability_primary=local-ir-inspection
+proof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll
+capability_secondary=object-assembly-inspection
+proof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s
+capability_pipeline=compile-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step
+developer_export=/usr/bin/clang
+EOF
+            cat > "$TMPDIR/SYS/CLANGMAN.TXT" <<EOF
+payload=clang
+title=Clang
+entry_app=/sys/apps/clang
+mode=native-filesystem-app
+lane=$TOOLCHAIN_LANE
+status=standalone-required
+capability_primary=local-c-source-inspection
+proof_primary=/usr/share/simpleos/toolchain/clang/hello.c
+capability_secondary=driver-flag-inspection
+proof_secondary=/usr/share/simpleos/toolchain/clang/flags.rsp
+capability_pipeline=compile-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step
+developer_export=/usr/bin/clang
+EOF
+            cat > "$TMPDIR/SYS/RUSTMAN.TXT" <<EOF
+payload=rust
+title=Rust
+entry_app=/sys/apps/rust
+mode=native-filesystem-app
+lane=$TOOLCHAIN_LANE
+status=standalone-required
+capability_primary=local-source-inspection
+proof_primary=/usr/share/simpleos/toolchain/rust/hello.rs
+capability_secondary=package-layout-inspection
+proof_secondary=/usr/share/simpleos/toolchain/rust/Cargo.toml
+capability_pipeline=build-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step
+developer_export=/usr/bin/rustc
+EOF
+            cat > "$TMPDIR/SYS/TOOLSET.SDN" <<EOF
+[toolchain]
+lane = "$TOOLCHAIN_LANE"
+llvm = "/sys/apps/llvm status=standalone-required"
+clang = "/sys/apps/clang status=standalone-required"
+rust = "/sys/apps/rust status=standalone-required"
+EOF
+            mkdir -p "$TMPDIR/usr/share/simpleos/toolchain/llvm" "$TMPDIR/usr/share/simpleos/toolchain/clang" "$TMPDIR/usr/share/simpleos/toolchain/rust"
+            printf '%s\n' '; SimpleOS staged LLVM IR' > "$TMPDIR/usr/share/simpleos/toolchain/llvm/hello.ll"
+            printf '%s\n' '; SimpleOS staged assembly' > "$TMPDIR/usr/share/simpleos/toolchain/llvm/hello.s"
+            printf '%s\n' 'pipeline=compile-pipeline-step' 'input=/work/hello.simple' 'output=/work/hello.ll' 'next=/sys/apps/simple_loader' > "$TMPDIR/usr/share/simpleos/toolchain/llvm/pipeline.step"
+            printf '%s\n' '#include <stdio.h>' '' 'int main(void) {' '    puts("hello from simpleos clang");' '    return 0;' '}' > "$TMPDIR/usr/share/simpleos/toolchain/clang/hello.c"
+            printf '%s\n' '--target=x86_64-unknown-simpleos' '-ffreestanding' '-nostdlib' '-O2' > "$TMPDIR/usr/share/simpleos/toolchain/clang/flags.rsp"
+            printf '%s\n' 'pipeline=compile-pipeline-step' 'input=/work/hello.c' 'output=/work/hello.o' 'next=/sys/apps/simple_loader' > "$TMPDIR/usr/share/simpleos/toolchain/clang/pipeline.step"
+            printf '%s\n' 'fn main() {' '    println!("hello from simpleos");' '}' > "$TMPDIR/usr/share/simpleos/toolchain/rust/hello.rs"
+            printf '%s\n' '[package]' 'name = "hello-simpleos"' 'version = "0.1.0"' > "$TMPDIR/usr/share/simpleos/toolchain/rust/Cargo.toml"
+            printf '%s\n' 'pipeline=build-pipeline-step' 'input=/work/Cargo.toml' 'output=/work/target/hello' 'next=/sys/apps/simple_loader' > "$TMPDIR/usr/share/simpleos/toolchain/rust/pipeline.step"
+            return 0
+        fi
+    done
+
+    mkdir -p \
+        "$TMPDIR/usr/bin" \
+        "$TMPDIR/usr/include" \
+        "$TMPDIR/usr/lib" \
+        "$TMPDIR/usr/lib/rustlib/x86_64-unknown-simpleos" \
+        "$TMPDIR/usr/libexec/simpleos-toolchain/llvm" \
+        "$TMPDIR/usr/libexec/simpleos-toolchain/rust" \
+        "$TMPDIR/usr/libexec/simpleos-toolchain/ninja" \
+        "$TMPDIR/usr/share/simpleos" \
+        "$TMPDIR/etc/cargo" \
+        "$TMPDIR/SYS"
+
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/cmake" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/clang" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/clang-20" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/lld" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/ld.lld" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/llvm-ar" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/llvm-nm" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/llvm-ranlib" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/llvm-objdump" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/llvm-objcopy" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/llvm-strip" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/rustc" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/cargo" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/cargo-simpleos" || return 1
+    cp "scripts/simpleos_guest_toolchain_wrapper.shs" "$TMPDIR/usr/bin/ninja" || return 1
+    chmod +x \
+        "$TMPDIR/usr/bin/cmake" \
+        "$TMPDIR/usr/bin/clang" \
+        "$TMPDIR/usr/bin/clang-20" \
+        "$TMPDIR/usr/bin/lld" \
+        "$TMPDIR/usr/bin/ld.lld" \
+        "$TMPDIR/usr/bin/llvm-ar" \
+        "$TMPDIR/usr/bin/llvm-nm" \
+        "$TMPDIR/usr/bin/llvm-ranlib" \
+        "$TMPDIR/usr/bin/llvm-objdump" \
+        "$TMPDIR/usr/bin/llvm-objcopy" \
+        "$TMPDIR/usr/bin/llvm-strip" \
+        "$TMPDIR/usr/bin/rustc" \
+        "$TMPDIR/usr/bin/cargo" \
+        "$TMPDIR/usr/bin/cargo-simpleos" \
+        "$TMPDIR/usr/bin/ninja" 2>/dev/null || true
+
+    cp -L "$LLVM_CLANG" "$TMPDIR/usr/libexec/simpleos-toolchain/llvm/clang" || return 1
+    cp -L "$LLVM_LLD" "$TMPDIR/usr/libexec/simpleos-toolchain/llvm/lld" || return 1
+    cp -L "$LLVM_AR" "$TMPDIR/usr/libexec/simpleos-toolchain/llvm/llvm-ar" || return 1
+    cp -L "$LLVM_NM" "$TMPDIR/usr/libexec/simpleos-toolchain/llvm/llvm-nm" || return 1
+    cp -L "$LLVM_RANLIB" "$TMPDIR/usr/libexec/simpleos-toolchain/llvm/llvm-ranlib" || return 1
+    cp -L "$LLVM_OBJDUMP" "$TMPDIR/usr/libexec/simpleos-toolchain/llvm/llvm-objdump" || return 1
+    cp -L "$LLVM_OBJCOPY" "$TMPDIR/usr/libexec/simpleos-toolchain/llvm/llvm-objcopy" || return 1
+    cp -L "$LLVM_STRIP" "$TMPDIR/usr/libexec/simpleos-toolchain/llvm/llvm-strip" || return 1
+
+    cp -L "$RUST_RUSTC" "$TMPDIR/usr/libexec/simpleos-toolchain/rust/rustc" || return 1
+    cp -L "$RUST_CARGO" "$TMPDIR/usr/libexec/simpleos-toolchain/rust/cargo" || return 1
+    cp -L "$NINJA_BIN" "$TMPDIR/usr/libexec/simpleos-toolchain/ninja/ninja" || return 1
+
+    cp -R build/os/sysroot/include/. "$TMPDIR/usr/include/" || return 1
+    cp -R build/os/sysroot/lib/. "$TMPDIR/usr/lib/" || return 1
+    if [ -d build/os/sysroot/share/simpleos ]; then
+        cp -R build/os/sysroot/share/simpleos/. "$TMPDIR/usr/share/simpleos/" || return 1
+    fi
+
+    cp -R "$RUST_RUSTLIB_DIR"/. "$TMPDIR/usr/lib/rustlib/x86_64-unknown-simpleos/" || return 1
+    cp "src/os/toolchain/rust/x86_64-unknown-simpleos.json" \
+        "$TMPDIR/usr/lib/rustlib/x86_64-unknown-simpleos/target.json" || return 1
+    cp "src/os/toolchain/rust/cargo_config.toml" "$TMPDIR/etc/cargo/config.toml" || return 1
+
+    CMAKE_VERSION_LINE="simple_cmake developer export 0.1.0"
+    LLVM_VERSION_LINE="SimpleOS LLVM standalone app v1"
+    CLANG_VERSION_LINE="$("$LLVM_CLANG" --version | sed -n '1p')"
+    RUST_VERSION_LINE="SimpleOS Rust standalone app v1"
+    CARGO_VERSION_LINE="$("$RUST_CARGO" --version | sed -n '1p')"
+    NINJA_VERSION_LINE="$("$NINJA_BIN" --version | sed -n '1p')"
+    RUSTLIB_FILE_COUNT="$(find "$RUST_RUSTLIB_DIR"/lib -maxdepth 1 -type f 2>/dev/null | wc -l | awk '{print $1}')"
+
+    printf '%s\n' "$CMAKE_VERSION_LINE" > "$TMPDIR/SYS/CMAKEVER.TXT"
+    printf '%s\n' "$LLVM_VERSION_LINE" > "$TMPDIR/SYS/LLVMVER.TXT"
+    printf '%s\n' "$CLANG_VERSION_LINE" > "$TMPDIR/SYS/CLANGVER.TXT"
+    printf '%s\n' "$RUST_VERSION_LINE" > "$TMPDIR/SYS/RUSTVER.TXT"
+    printf '%s\n' "$CARGO_VERSION_LINE" > "$TMPDIR/SYS/CARGOVER.TXT"
+    printf '%s\n' "$NINJA_VERSION_LINE" > "$TMPDIR/SYS/NINJAVER.TXT"
+
+    cat > "$TMPDIR/SYS/CMAKEMAN.TXT" <<EOF
+payload=cmake
+mode=developer-export
+lane=x86_64-uefi-hardware
+status=optional
+generator=Ninja
+version=$CMAKE_VERSION_LINE
+/usr/bin/cmake
+examples/cmake/simple_cmake.spl
+EOF
+
+    cat > "$TMPDIR/SYS/LLVMMAN.TXT" <<EOF
+payload=llvm
+title=LLVM
+entry_app=/sys/apps/llvm
+mode=native-filesystem-app
+lane=x86_64-uefi-hardware
+status=standalone-required
+version=$LLVM_VERSION_LINE
+capability_primary=local-ir-inspection
+proof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll
+capability_secondary=object-assembly-inspection
+proof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s
+capability_pipeline=compile-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step
+developer_export=/usr/bin/clang
+EOF
+
+    cat > "$TMPDIR/SYS/CLANGMAN.TXT" <<EOF
+payload=clang
+title=Clang
+entry_app=/sys/apps/clang
+mode=native-filesystem-app
+lane=x86_64-uefi-hardware
+status=standalone-required
+version=$CLANG_VERSION_LINE
+capability_primary=local-c-source-inspection
+proof_primary=/usr/share/simpleos/toolchain/clang/hello.c
+capability_secondary=driver-flag-inspection
+proof_secondary=/usr/share/simpleos/toolchain/clang/flags.rsp
+capability_pipeline=compile-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step
+developer_export=/usr/bin/clang
+EOF
+
+    cat > "$TMPDIR/SYS/RUSTMAN.TXT" <<EOF
+payload=rust
+title=Rust
+entry_app=/sys/apps/rust
+mode=native-filesystem-app
+lane=x86_64-uefi-hardware
+status=standalone-required
+rustc=$RUST_VERSION_LINE
+cargo=$CARGO_VERSION_LINE
+rustlib_files=$RUSTLIB_FILE_COUNT
+capability_primary=local-source-inspection
+proof_primary=/usr/share/simpleos/toolchain/rust/hello.rs
+capability_secondary=package-layout-inspection
+proof_secondary=/usr/share/simpleos/toolchain/rust/Cargo.toml
+capability_pipeline=build-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step
+developer_export=/usr/bin/rustc
+EOF
+
+    cat > "$TMPDIR/SYS/NINJAMAN.TXT" <<EOF
+payload=ninja
+mode=developer-export
+lane=x86_64-uefi-hardware
+status=optional
+version=$NINJA_VERSION_LINE
+/usr/bin/ninja
+examples/ninja/simple_ninja.spl
+EOF
+
+    cat > "$TMPDIR/SYS/TOOLSET.SDN" <<EOF
+[toolchain]
+lane = "x86_64-uefi-hardware"
+llvm = "/sys/apps/llvm status=standalone-required"
+clang = "/sys/apps/clang status=standalone-required"
+rust = "/sys/apps/rust status=standalone-required"
+cmake = "/usr/bin/cmake status=optional"
+ninja = "/usr/bin/ninja status=optional"
+EOF
+
+    mkdir -p "$TMPDIR/usr/share/simpleos/toolchain/llvm" "$TMPDIR/usr/share/simpleos/toolchain/clang" "$TMPDIR/usr/share/simpleos/toolchain/rust"
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/llvm/hello.ll" <<EOF
+; SimpleOS staged LLVM IR
+source_filename = "hello.simple"
+define i32 @main() {
+entry:
+  ret i32 0
+}
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/llvm/hello.s" <<EOF
+; SimpleOS staged x86_64 assembly
+_start:
+    xor %eax, %eax
+    ret
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/llvm/pipeline.step" <<EOF
+pipeline=compile-pipeline-step
+input=/work/hello.simple
+output=/work/hello.ll
+next=/sys/apps/simple_loader
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/clang/hello.c" <<EOF
+#include <stdio.h>
+
+int main(void) {
+    puts("hello from simpleos clang");
+    return 0;
+}
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/clang/flags.rsp" <<EOF
+--target=x86_64-unknown-simpleos
+-ffreestanding
+-nostdlib
+-O2
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/clang/pipeline.step" <<EOF
+pipeline=compile-pipeline-step
+input=/work/hello.c
+output=/work/hello.o
+next=/sys/apps/simple_loader
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/rust/hello.rs" <<EOF
+fn main() {
+    println!("hello from simpleos");
+}
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/rust/Cargo.toml" <<EOF
+[package]
+name = "hello-simpleos"
+version = "0.1.0"
+edition = "2021"
+EOF
+    cat > "$TMPDIR/usr/share/simpleos/toolchain/rust/pipeline.step" <<EOF
+pipeline=build-pipeline-step
+input=/work/Cargo.toml
+output=/work/target/hello
+next=/sys/apps/simple_loader
+EOF
+
+    echo "[make_os_disk] Staged x86_64 CMake/Ninja/LLVM/Clang/Rust guest payloads under /usr and /SYS"
+    return 0
+}
+
+HOST_CLANG="clang"
+HOST_LLD="ld.lld"
+if [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+    HOST_CLANG="/opt/homebrew/opt/llvm/bin/clang"
+elif [ -x /usr/local/opt/llvm/bin/clang ]; then
+    HOST_CLANG="/usr/local/opt/llvm/bin/clang"
+fi
+if [ -x /opt/homebrew/opt/llvm/bin/ld.lld ]; then
+    HOST_LLD="/opt/homebrew/opt/llvm/bin/ld.lld"
+elif [ -x /usr/local/opt/llvm/bin/ld.lld ]; then
+    HOST_LLD="/usr/local/opt/llvm/bin/ld.lld"
+elif [ -x /opt/homebrew/bin/ld.lld ]; then
+    HOST_LLD="/opt/homebrew/bin/ld.lld"
+elif [ -x /usr/local/bin/ld.lld ]; then
+    HOST_LLD="/usr/local/bin/ld.lld"
+fi
+
+stage_simpleos_toolchain_payloads || exit 1
+
+stage_mold_payload() {
+    case "$ARCH_MODE" in
+        x86_64|amd64|x64)
+            ;;
+        *)
+            echo "[make_os_disk] Skipping mold guest payload staging for $ARCH_MODE"
+            return 0
+            ;;
+    esac
+
+    MOLD_HOST_BIN="${SIMPLEOS_MOLD_BIN:-${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}/bin/mold/mold}"
+    if [ ! -f "$MOLD_HOST_BIN" ]; then
+        echo "[make_os_disk] mold not found at $MOLD_HOST_BIN -- skipping (run scripts/install-mold.shs to install)"
+        return 0
+    fi
+
+    mkdir -p "$TMPDIR/usr/bin" "$TMPDIR/SYS/APPS"
+    cp -L "$MOLD_HOST_BIN" "$TMPDIR/usr/bin/mold" || return 1
+    cp -L "$MOLD_HOST_BIN" "$TMPDIR/SYS/APPS/mold" || return 1
+
+    MOLD_VERSION_LINE="$("$MOLD_HOST_BIN" --version 2>/dev/null | sed -n '1p' || echo "unknown")"
+    cat > "$TMPDIR/SYS/MOLDMAN.TXT" <<EOF
+payload=mold
+mode=native-binary
+lane=x86_64-simpleos
+status=report-and-gate
+version=$MOLD_VERSION_LINE
+/usr/bin/mold
+/SYS/APPS/mold
+EOF
+
+    echo "[make_os_disk] Staged mold guest payload under /usr/bin/mold and /SYS/APPS/mold ($MOLD_VERSION_LINE)"
+    return 0
+}
+
+stage_mold_payload || exit 1
+
+build_disk_hello_elf() {
+    if ! command -v "$HOST_CLANG" >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: clang not found -- keeping hello-world placeholder"
+        return 1
+    fi
+    if ! command -v "$HOST_LLD" >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: ld.lld not found -- keeping hello-world placeholder"
+        return 1
+    fi
+    if ! /bin/sh src/os/port/llvm/sysroot.shs >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: sysroot build failed -- keeping hello-world placeholder"
+        return 1
+    fi
+
+    HELLO_OBJ="$TMPDIR/disk_hello.o"
+    HELLO_ELF="$TMPDIR/disk_hello.elf"
+    if ! "$HOST_CLANG" --target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
+        -I build/os/sysroot/include \
+        -c examples/simpleos_hello_c/disk_hello.c -o "$HELLO_OBJ"; then
+        echo "[make_os_disk] WARNING: clang build failed -- keeping hello-world placeholder"
+        return 1
+    fi
+    if ! "$HOST_LLD" -T build/os/sysroot/share/simpleos/simpleos.ld \
+        "$HELLO_OBJ" build/os/sysroot/lib/crt0.o \
+        -L build/os/sysroot/lib -lsimpleos_c \
+        -o "$HELLO_ELF"; then
+        echo "[make_os_disk] WARNING: ld.lld link failed -- keeping hello-world placeholder"
+        return 1
+    fi
+
+    cp "$HELLO_ELF" "$TMPDIR/usr/bin/hello-world"
+    cp "$HELLO_ELF" "$TMPDIR/SYS/APPS/hello_world"
+    echo "[make_os_disk] Seeded real hello-world ELF into /usr/bin and /sys/apps"
+    return 0
+}
+
+if [ "$ARCH_MODE" = "x86_64" ] && build_disk_hello_elf; then
+    ELFSEEDED=1
+fi
+
+restage_uefi_boot_files() {
+    if [ -z "${SIMPLEOS_UEFI_KERNEL:-}" ]; then
+        return 0
+    fi
+    mkdir -p "$TMPDIR/boot/grub"
+    if [ -f "build/os/esp/boot/kernel.elf" ]; then
+        cp "build/os/esp/boot/kernel.elf" "$TMPDIR/boot/kernel.elf" || return 1
+    elif [ -f "$SIMPLEOS_UEFI_KERNEL" ]; then
+        cp "$SIMPLEOS_UEFI_KERNEL" "$TMPDIR/boot/kernel.elf" || return 1
+    fi
+    if [ -f "build/os/esp/boot/grub/grub.cfg" ]; then
+        cp "build/os/esp/boot/grub/grub.cfg" "$TMPDIR/boot/grub/grub.cfg" || return 1
+    fi
+    if [ -f "build/os/esp/EFI/BOOT/BOOTX64.EFI" ]; then
+        mkdir -p "$TMPDIR/EFI/BOOT"
+        cp "build/os/esp/EFI/BOOT/BOOTX64.EFI" "$TMPDIR/EFI/BOOT/BOOTX64.EFI" || return 1
+    fi
+    if [ ! -f "$TMPDIR/EFI/BOOT/BOOTX64.EFI" ] || [ ! -f "$TMPDIR/boot/kernel.elf" ] || [ ! -f "$TMPDIR/boot/grub/grub.cfg" ]; then
+        echo "[make_os_disk] ERROR: UEFI boot files incomplete before FAT population"
+        return 1
+    fi
+    return 0
+}
+
+build_remote_window_elf() {
+    SRC="$1"
+    DEST_PRIMARY="$2"
+    DEST_SECONDARY="$3"
+    OBJ="$TMPDIR/$(basename "$SRC" .c).o"
+    ELF="$TMPDIR/$(basename "$SRC" .c).elf"
+
+    if ! command -v "$HOST_CLANG" >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! command -v "$HOST_LLD" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    if ! "$HOST_CLANG" --target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
+        -I build/os/sysroot/include \
+        -c "$SRC" -o "$OBJ"; then
+        echo "[make_os_disk] WARNING: clang build failed for $SRC"
+        return 1
+    fi
+    if ! "$HOST_LLD" -T build/os/sysroot/share/simpleos/simpleos.ld \
+        "$OBJ" build/os/sysroot/lib/crt0.o \
+        -L build/os/sysroot/lib -lsimpleos_c \
+        -o "$ELF"; then
+        echo "[make_os_disk] WARNING: ld.lld link failed for $SRC"
+        return 1
+    fi
+
+    cp "$ELF" "$DEST_PRIMARY"
+    if [ -n "$DEST_SECONDARY" ]; then
+        cp "$ELF" "$DEST_SECONDARY"
+    fi
+    echo "[make_os_disk] Seeded $(basename "$SRC" .c) ELF"
+    return 0
+}
+
+build_simple_app_elf() {
+    SRC="$1"
+    DEST_PRIMARY="$2"
+    DEST_SECONDARY="$3"
+    CACHE_KEY="$4"
+    CACHE_PATH="$SIMPLEOS_CLI_APP_CACHE_ROOT/$ARCH_MODE/${CACHE_KEY}.smf"
+    LOG_PATH="$SIMPLEOS_CLI_APP_CACHE_ROOT/logs/${CACHE_KEY}.log"
+
+    mkdir -p "$SIMPLEOS_CLI_APP_CACHE_ROOT/$ARCH_MODE" "$SIMPLEOS_CLI_APP_CACHE_ROOT/logs"
+
+    if [ ! -f "$CACHE_PATH" ] || [ "$SRC" -nt "$CACHE_PATH" ]; then
+        echo "[make_os_disk] Compiling Simple app: $CACHE_KEY"
+        if ! bin/simple compile "$SRC" --target "$SIMPLEOS_CLI_BUILD_TARGET" -o "$CACHE_PATH" >"$LOG_PATH" 2>&1; then
+            echo "[make_os_disk] ERROR: failed to compile $CACHE_KEY from $SRC"
+            tail -n 40 "$LOG_PATH" 2>/dev/null || true
+            return 1
+        fi
+    fi
+
+    cp "$CACHE_PATH" "$DEST_PRIMARY" || return 1
+    if [ -n "$DEST_SECONDARY" ]; then
+        cp "$CACHE_PATH" "$DEST_SECONDARY" || return 1
+    fi
+    echo "[make_os_disk] Seeded ${CACHE_KEY} ELF"
+    return 0
+}
+
+make_exec_smf() {
+    SRC_ELF="$1"
+    DEST_SMF="$2"
+    if [ ! -f "$SRC_ELF" ]; then
+        return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: python3 not found -- skipping SMF wrapper for $DEST_SMF"
+        return 1
+    fi
+    python3 - "$SRC_ELF" "$DEST_SMF" <<'PY'
+import pathlib
+import struct
+import sys
+
+src = pathlib.Path(sys.argv[1])
+dst = pathlib.Path(sys.argv[2])
+payload = src.read_bytes()
+header = bytearray(128)
+header[0:4] = b"SMF\0"
+struct.pack_into("<I", header, 52, len(payload))
+struct.pack_into("<I", header, 56, len(payload))
+dst.parent.mkdir(parents=True, exist_ok=True)
+dst.write_bytes(payload + header)
+PY
+}
+
+build_ring3_smoke_elf() {
+    if ! command -v "$HOST_CLANG" >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: clang not found -- skipping ring3_smoke ELF"
+        return 1
+    fi
+    if ! command -v "$HOST_LLD" >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: ld.lld not found -- skipping ring3_smoke ELF"
+        return 1
+    fi
+
+    RING3_SRC="examples/simpleos_ring3_smoke/ring3_smoke.S"
+    if [ ! -f "$RING3_SRC" ]; then
+        echo "[make_os_disk] WARNING: $RING3_SRC not found -- skipping ring3_smoke ELF"
+        return 1
+    fi
+
+    RING3_OBJ="$TMPDIR/ring3_smoke.o"
+    RING3_ELF="$TMPDIR/ring3_smoke.elf"
+
+    if ! "$HOST_CLANG" --target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
+        -c "$RING3_SRC" -o "$RING3_OBJ"; then
+        echo "[make_os_disk] WARNING: clang assemble failed for ring3_smoke -- skipping"
+        return 1
+    fi
+    if ! "$HOST_LLD" -e _start -static "$RING3_OBJ" -o "$RING3_ELF"; then
+        echo "[make_os_disk] WARNING: ld.lld link failed for ring3_smoke -- skipping"
+        return 1
+    fi
+
+    mkdir -p "$TMPDIR/SYS/APPS"
+    cp "$RING3_ELF" "$TMPDIR/SYS/APPS/RING3_SMOKE.SMF"
+    echo "[make_os_disk] Seeded ring3_smoke ELF into /sys/apps/ring3_smoke.smf"
+    return 0
+}
+
+build_arm_minimal_hello_elf() {
+    DEST="$TMPDIR/SYS/APPS/hello_world"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: python3 not found -- keeping hello-world placeholder"
+        return 1
+    fi
+    python3 - "$ARCH_MODE" "$DEST" <<'PY'
+import pathlib
+import struct
+import sys
+
+arch = sys.argv[1]
+dst = pathlib.Path(sys.argv[2])
+dst.parent.mkdir(parents=True, exist_ok=True)
+
+if arch in ("arm64", "aarch64"):
+    entry = 0x400000
+    code = bytes.fromhex("080080d2000080d2010000d400000014") + b"SIMPLEOS_ARM64_HELLO_ELF"
+    ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8)
+    ehdr = struct.pack("<16sHHIQQQIHHHHHH", ident, 2, 183, 1, entry, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+    phdr = struct.pack("<IIQQQQQQ", 1, 5, 0x1000, entry, entry, len(code), len(code), 0x1000)
+    payload = ehdr + phdr
+    payload += bytes(0x1000 - len(payload))
+    payload += code
+elif arch in ("arm32", "armv7"):
+    entry = 0x80000000
+    code = bytes.fromhex("0070a0e30000a0e3000000effeffffea") + b"SIMPLEOS_ARM32_HELLO_ELF"
+    ident = b"\x7fELF" + bytes([1, 1, 1, 0]) + bytes(8)
+    ehdr = struct.pack("<16sHHIIIIIHHHHHH", ident, 2, 40, 1, entry, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+    phdr = struct.pack("<IIIIIIII", 1, 0x100, entry, entry, len(code), len(code), 5, 0x1000)
+    payload = ehdr + phdr
+    payload += bytes(0x100 - len(payload))
+    payload += code
+else:
+    raise SystemExit(f"unsupported ARM fixture arch: {arch}")
+
+dst.write_bytes(payload)
+PY
+}
+
+build_arm_minimal_named_elf() {
+    APP_ID="$1"
+    DEST="$2"
+    MARKER="$3"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: python3 not found -- keeping ARM app placeholder for $APP_ID"
+        return 1
+    fi
+    python3 - "$ARCH_MODE" "$APP_ID" "$DEST" "$MARKER" <<'PY'
+import pathlib
+import struct
+import sys
+
+arch = sys.argv[1]
+app_id = sys.argv[2].encode()
+dst = pathlib.Path(sys.argv[3])
+marker = sys.argv[4].encode()
+dst.parent.mkdir(parents=True, exist_ok=True)
+
+payload_tag = marker + b"\0" + app_id
+
+if arch in ("arm64", "aarch64"):
+    entry = 0x400000
+    code = bytes.fromhex("080080d2000080d2010000d400000014") + payload_tag
+    ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8)
+    ehdr = struct.pack("<16sHHIQQQIHHHHHH", ident, 2, 183, 1, entry, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+    phdr = struct.pack("<IIQQQQQQ", 1, 5, 0x1000, entry, entry, len(code), len(code), 0x1000)
+    payload = ehdr + phdr
+    payload += bytes(0x1000 - len(payload))
+    payload += code
+elif arch in ("arm32", "armv7"):
+    entry = 0x80000000
+    code = bytes.fromhex("0070a0e30000a0e3000000effeffffea") + payload_tag
+    ident = b"\x7fELF" + bytes([1, 1, 1, 0]) + bytes(8)
+    ehdr = struct.pack("<16sHHIIIIIHHHHHH", ident, 2, 40, 1, entry, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+    phdr = struct.pack("<IIIIIIII", 1, 0x100, entry, entry, len(code), len(code), 5, 0x1000)
+    payload = ehdr + phdr
+    payload += bytes(0x100 - len(payload))
+    payload += code
+else:
+    raise SystemExit(f"unsupported ARM fixture arch: {arch}")
+
+dst.write_bytes(payload)
+PY
+}
+
+build_riscv_minimal_app_elves() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "[make_os_disk] WARNING: python3 not found -- keeping RISC-V app placeholders"
+        return 1
+    fi
+    python3 - "$ARCH_MODE" "$TMPDIR/SYS/APPS/hello_world" "$TMPDIR/SYS/APPS/browser_demo" <<'PY'
+import pathlib
+import struct
+import sys
+
+arch = sys.argv[1]
+hello_dst = pathlib.Path(sys.argv[2])
+gui_dst = pathlib.Path(sys.argv[3])
+hello_dst.parent.mkdir(parents=True, exist_ok=True)
+
+def rv_payload(bits: int, marker: bytes) -> bytes:
+    machine = 243
+    entry = 0x80000000
+    code = b"\x13\x00\x00\x00" + marker
+    if bits == 64:
+        ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + bytes(8)
+        ehdr = struct.pack("<16sHHIQQQIHHHHHH", ident, 2, machine, 1, entry, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+        phdr = struct.pack("<IIQQQQQQ", 1, 5, 0x100, entry, entry, len(code), len(code), 0x1000)
+    else:
+        ident = b"\x7fELF" + bytes([1, 1, 1, 0]) + bytes(8)
+        ehdr = struct.pack("<16sHHIIIIIHHHHHH", ident, 2, machine, 1, entry, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+        phdr = struct.pack("<IIIIIIII", 1, 0x100, entry, entry, len(code), len(code), 5, 0x1000)
+    payload = ehdr + phdr
+    payload += marker
+    payload += bytes(0x100 - len(payload))
+    payload += code
+    return payload
+
+if arch in ("riscv64", "rv64"):
+    hello = rv_payload(64, b"SIMPLEOS_RISCV64_HELLO_ELF")
+    gui = rv_payload(64, b"SIMPLEOS_RISCV64_GUI_ELF")
+elif arch in ("riscv32", "rv32"):
+    hello = rv_payload(32, b"SIMPLEOS_RISCV32_HELLO_ELF")
+    gui = rv_payload(32, b"SIMPLEOS_RISCV32_GUI_ELF")
+else:
+    raise SystemExit(f"unsupported RISC-V fixture arch: {arch}")
+
+hello_dst.write_bytes(hello)
+gui_dst.write_bytes(gui)
+PY
+}
+
+if [ "$ARCH_MODE" = "arm64" ] || [ "$ARCH_MODE" = "aarch64" ] || [ "$ARCH_MODE" = "arm32" ] || [ "$ARCH_MODE" = "armv7" ]; then
+    if build_arm_minimal_hello_elf; then
+        cp "$TMPDIR/SYS/APPS/hello_world" "$TMPDIR/usr/bin/hello-world"
+        ELFSEEDED=1
+        echo "[make_os_disk] Seeded ${ARCH_MODE} hello-world ELF into /sys/apps"
+    fi
+    make_exec_smf "$TMPDIR/SYS/APPS/hello_world" "$TMPDIR/HELLOSMF.SMF" || true
+    cp "$TMPDIR/HELLOSMF.SMF" "$TMPDIR/SYS/APPS/HELLOSMF.SMF" 2>/dev/null || true
+    build_arm_minimal_named_elf "/sys/apps/simple_compiler" "$TMPDIR/SYS/APPS/simple_compiler" "SIMPLEOS_${ARCH_MODE}_SIMPLE_COMPILER_ELF" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/simple_compiler" "$TMPDIR/SCOMPSMF.SMF" || true
+    cp "$TMPDIR/SCOMPSMF.SMF" "$TMPDIR/SYS/APPS/SCOMPSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/SCOMPSMF.SMF" "$TMPDIR/SYS/APPS/simple_compiler.smf" 2>/dev/null || true
+    build_arm_minimal_named_elf "/sys/apps/simple_interpreter" "$TMPDIR/SYS/APPS/simple_interpreter" "SIMPLEOS_${ARCH_MODE}_SIMPLE_INTERPRETER_ELF" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/simple_interpreter" "$TMPDIR/SINTSMF.SMF" || true
+    cp "$TMPDIR/SINTSMF.SMF" "$TMPDIR/SYS/APPS/SINTSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/SINTSMF.SMF" "$TMPDIR/SYS/APPS/simple_interpreter.smf" 2>/dev/null || true
+    build_arm_minimal_named_elf "/sys/apps/simple_loader" "$TMPDIR/SYS/APPS/simple_loader" "SIMPLEOS_${ARCH_MODE}_SIMPLE_LOADER_ELF" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/simple_loader" "$TMPDIR/SLOADSMF.SMF" || true
+    cp "$TMPDIR/SLOADSMF.SMF" "$TMPDIR/SYS/APPS/SLOADSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/SLOADSMF.SMF" "$TMPDIR/SYS/APPS/simple_loader.smf" 2>/dev/null || true
+    build_arm_minimal_named_elf "/sys/apps/llvm" "$TMPDIR/SYS/APPS/llvm" "SIMPLEOS_${ARCH_MODE}_LLVM_ELF" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/llvm" "$TMPDIR/LLVMSMF.SMF" || true
+    cp "$TMPDIR/LLVMSMF.SMF" "$TMPDIR/SYS/APPS/LLVMSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/LLVMSMF.SMF" "$TMPDIR/SYS/APPS/llvm.smf" 2>/dev/null || true
+    build_arm_minimal_named_elf "/sys/apps/clang" "$TMPDIR/SYS/APPS/clang" "SIMPLEOS_${ARCH_MODE}_CLANG_ELF" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/clang" "$TMPDIR/CLANGSMF.SMF" || true
+    cp "$TMPDIR/CLANGSMF.SMF" "$TMPDIR/SYS/APPS/CLANGSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/CLANGSMF.SMF" "$TMPDIR/SYS/APPS/clang.smf" 2>/dev/null || true
+    build_arm_minimal_named_elf "/sys/apps/rust" "$TMPDIR/SYS/APPS/rust" "SIMPLEOS_${ARCH_MODE}_RUST_ELF" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/rust" "$TMPDIR/RUSTSMF.SMF" || true
+    cp "$TMPDIR/RUSTSMF.SMF" "$TMPDIR/SYS/APPS/RUSTSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/RUSTSMF.SMF" "$TMPDIR/SYS/APPS/rust.smf" 2>/dev/null || true
+elif [ "$ARCH_MODE" = "riscv64" ] || [ "$ARCH_MODE" = "rv64" ] || [ "$ARCH_MODE" = "riscv32" ] || [ "$ARCH_MODE" = "rv32" ]; then
+    if build_riscv_minimal_app_elves; then
+        cp "$TMPDIR/SYS/APPS/hello_world" "$TMPDIR/usr/bin/hello-world"
+        cp "$TMPDIR/SYS/APPS/browser_demo" "$TMPDIR/usr/local/bin/browser-demo"
+        ELFSEEDED=1
+        echo "[make_os_disk] Seeded ${ARCH_MODE} SMF-first CLI and GUI ELF fixtures into /sys/apps"
+    fi
+    make_exec_smf "$TMPDIR/SYS/APPS/hello_world" "$TMPDIR/HELLOSMF.SMF" || true
+    cp "$TMPDIR/HELLOSMF.SMF" "$TMPDIR/SYS/APPS/HELLOSMF.SMF" 2>/dev/null || true
+    make_exec_smf "$TMPDIR/SYS/APPS/browser_demo" "$TMPDIR/BROWSMF.SMF" || true
+    cp "$TMPDIR/BROWSMF.SMF" "$TMPDIR/SYS/APPS/BROWSMF.SMF" 2>/dev/null || true
+else
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/hello_world_gui.c" \
+        "$TMPDIR/SYS/APPS/hello_world" \
+        "$TMPDIR/usr/bin/hello-world" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/hello_world" "$TMPDIR/HELLOSMF.SMF" || true
+    cp "$TMPDIR/HELLOSMF.SMF" "$TMPDIR/SYS/APPS/HELLOSMF.SMF" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/browser_demo_gui.c" \
+        "$TMPDIR/SYS/APPS/browser_demo" \
+        "$TMPDIR/usr/local/bin/browser-demo" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/browser_demo" "$TMPDIR/BROWSMF.SMF" || true
+    cp "$TMPDIR/BROWSMF.SMF" "$TMPDIR/SYS/APPS/BROWSMF.SMF" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/file_manager_gui.c" \
+        "$TMPDIR/SYS/APPS/file_manager" \
+        "$TMPDIR/usr/bin/file-manager" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/file_manager" "$TMPDIR/FILESMF.SMF" || true
+    cp "$TMPDIR/FILESMF.SMF" "$TMPDIR/SYS/APPS/FILESMF.SMF" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/terminal_gui.c" \
+        "$TMPDIR/SYS/APPS/shell" \
+        "$TMPDIR/bin/shell" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/shell" "$TMPDIR/SHELLSMF.SMF" || true
+    cp "$TMPDIR/SHELLSMF.SMF" "$TMPDIR/SYS/APPS/SHELLSMF.SMF" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/editor_gui.c" \
+        "$TMPDIR/SYS/APPS/editor" \
+        "$TMPDIR/usr/bin/editor" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/editor" "$TMPDIR/EDITORSM.SMF" || true
+    cp "$TMPDIR/EDITORSM.SMF" "$TMPDIR/SYS/APPS/EDITORSM.SMF" 2>/dev/null || true
+    build_simple_app_elf \
+        "src/app/hosted_apps/simple_browser_client.spl" \
+        "$TMPDIR/SYS/APPS/simple_browser" \
+        "$TMPDIR/usr/local/bin/simple-browser" \
+        "simple_browser" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/simple_browser" "$TMPDIR/SBROWSMF.SMF" || true
+    cp "$TMPDIR/SBROWSMF.SMF" "$TMPDIR/SYS/APPS/SBROWSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/SBROWSMF.SMF" "$TMPDIR/SYS/APPS/simple_browser.smf" 2>/dev/null || true
+    cp "$TMPDIR/SBROWSMF.SMF" "$TMPDIR/SYS/APPS/sbrowser.smf" 2>/dev/null || true
+    build_simple_app_elf \
+        "src/app/hosted_apps/smux_client.spl" \
+        "$TMPDIR/SYS/APPS/smux" \
+        "$TMPDIR/usr/bin/smux" \
+        "smux" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/smux" "$TMPDIR/SMUXSMF.SMF" || true
+    cp "$TMPDIR/SMUXSMF.SMF" "$TMPDIR/SYS/APPS/SMUXSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/SMUXSMF.SMF" "$TMPDIR/SYS/APPS/smux.smf" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/simple_compiler_gui.c" \
+        "$TMPDIR/SYS/APPS/simple_compiler" \
+        "$TMPDIR/usr/local/bin/simple-compiler" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/simple_compiler" "$TMPDIR/SCOMPSMF.SMF" || true
+    cp "$TMPDIR/SCOMPSMF.SMF" "$TMPDIR/SYS/APPS/SCOMPSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/SCOMPSMF.SMF" "$TMPDIR/SYS/APPS/simple_compiler.smf" 2>/dev/null || true
+    cp "$TMPDIR/SCOMPSMF.SMF" "$TMPDIR/SYS/APPS/scompiler.smf" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/simple_interpreter_gui.c" \
+        "$TMPDIR/SYS/APPS/simple_interpreter" \
+        "$TMPDIR/usr/local/bin/simple-interpreter" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/simple_interpreter" "$TMPDIR/SINTSMF.SMF" || true
+    cp "$TMPDIR/SINTSMF.SMF" "$TMPDIR/SYS/APPS/SINTSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/SINTSMF.SMF" "$TMPDIR/SYS/APPS/simple_interpreter.smf" 2>/dev/null || true
+    cp "$TMPDIR/SINTSMF.SMF" "$TMPDIR/SYS/APPS/sinterp.smf" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/simple_loader_gui.c" \
+        "$TMPDIR/SYS/APPS/simple_loader" \
+        "$TMPDIR/usr/local/bin/simple-loader" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/simple_loader" "$TMPDIR/SLOADSMF.SMF" || true
+    cp "$TMPDIR/SLOADSMF.SMF" "$TMPDIR/SYS/APPS/SLOADSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/SLOADSMF.SMF" "$TMPDIR/SYS/APPS/simple_loader.smf" 2>/dev/null || true
+    cp "$TMPDIR/SLOADSMF.SMF" "$TMPDIR/SYS/APPS/sloader.smf" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/llvm_gui.c" \
+        "$TMPDIR/SYS/APPS/llvm" \
+        "$TMPDIR/usr/local/bin/llvm" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/llvm" "$TMPDIR/LLVMSMF.SMF" || true
+    cp "$TMPDIR/LLVMSMF.SMF" "$TMPDIR/SYS/APPS/LLVMSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/LLVMSMF.SMF" "$TMPDIR/SYS/APPS/llvm.smf" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/clang_gui.c" \
+        "$TMPDIR/SYS/APPS/clang" \
+        "$TMPDIR/usr/local/bin/clang" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/clang" "$TMPDIR/CLANGSMF.SMF" || true
+    cp "$TMPDIR/CLANGSMF.SMF" "$TMPDIR/SYS/APPS/CLANGSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/CLANGSMF.SMF" "$TMPDIR/SYS/APPS/clang.smf" 2>/dev/null || true
+    build_remote_window_elf \
+        "examples/simpleos_remote_gui/rust_gui.c" \
+        "$TMPDIR/SYS/APPS/rust" \
+        "$TMPDIR/usr/local/bin/rust" || true
+    make_exec_smf "$TMPDIR/SYS/APPS/rust" "$TMPDIR/RUSTSMF.SMF" || true
+    cp "$TMPDIR/RUSTSMF.SMF" "$TMPDIR/SYS/APPS/RUSTSMF.SMF" 2>/dev/null || true
+    cp "$TMPDIR/RUSTSMF.SMF" "$TMPDIR/SYS/APPS/rust.smf" 2>/dev/null || true
+    # FR-SOS-024 Phase 3: ring-3 smoke ELF for the EnterUserBlocking test
+    build_ring3_smoke_elf || true
+fi
+
+restage_uefi_boot_files || exit 1
+
+populate_with_python_fat32() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 1
+    fi
+    python3 - "$OUTPUT" "$TMPDIR" <<'PY'
+import os
+import pathlib
+import struct
+import sys
+
+image = pathlib.Path(sys.argv[1])
+source = pathlib.Path(sys.argv[2])
+data = bytearray(image.read_bytes())
+
+bps = struct.unpack_from("<H", data, 11)[0]
+spc = data[13]
+reserved = struct.unpack_from("<H", data, 14)[0]
+fat_count = data[16]
+spf = struct.unpack_from("<I", data, 36)[0]
+root_cluster = struct.unpack_from("<I", data, 44)[0]
+fat0 = reserved * bps
+cluster0 = (reserved + fat_count * spf) * bps
+cluster_size = bps * spc
+data_clusters = (len(data) - cluster0) // cluster_size
+max_cluster = root_cluster + data_clusters - 1
+next_cluster = 3
+
+def cluster_offset(cluster):
+    return cluster0 + (cluster - 2) * cluster_size
+
+def set_fat(cluster, value):
+    for fat_index in range(fat_count):
+        off = fat0 + fat_index * spf * bps + cluster * 4
+        struct.pack_into("<I", data, off, value)
+
+def alloc_cluster():
+    global next_cluster
+    cluster = next_cluster
+    if cluster > max_cluster:
+        raise RuntimeError(
+            f"FAT32 image capacity exhausted: next cluster {cluster} exceeds max {max_cluster}"
+        )
+    next_cluster += 1
+    start = cluster_offset(cluster)
+    data[start:start + cluster_size] = b"\0" * cluster_size
+    set_fat(cluster, 0x0FFFFFFF)
+    return cluster
+
+def fat_name(path):
+    name = path.name.upper()
+    if "." in name:
+        base, ext = name.rsplit(".", 1)
+    else:
+        base, ext = name, ""
+    valid = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$~"
+    base = "".join(ch if ch in valid else "_" for ch in base)[:8]
+    ext = "".join(ch if ch in valid else "_" for ch in ext)[:3]
+    if not base:
+        raise ValueError(f"cannot encode empty FAT name for {path}")
+    return base.ljust(8) + ext.ljust(3)
+
+def fat_special_name(base):
+    return base.ljust(11)
+
+def write_dir_entry(dir_cluster, index, name11, attr, first_cluster, size):
+    off = cluster_offset(dir_cluster) + index * 32
+    entry = bytearray(32)
+    entry[0:11] = name11.encode("ascii")
+    entry[11] = attr
+    struct.pack_into("<H", entry, 20, (first_cluster >> 16) & 0xFFFF)
+    struct.pack_into("<H", entry, 26, first_cluster & 0xFFFF)
+    struct.pack_into("<I", entry, 28, size)
+    data[off:off + 32] = entry
+
+entries_per_cluster = cluster_size // 32
+dir_entries = {root_cluster: 0}
+dir_chains = {root_cluster: [root_cluster]}
+dirs = {source: root_cluster}
+
+def alloc_dir_slot(dir_cluster):
+    index = dir_entries[dir_cluster]
+    chain = dir_chains[dir_cluster]
+    chain_index = index // entries_per_cluster
+    entry_index = index % entries_per_cluster
+    if chain_index >= len(chain):
+        new_cluster = alloc_cluster()
+        set_fat(chain[-1], new_cluster)
+        chain.append(new_cluster)
+    dir_entries[dir_cluster] = index + 1
+    return chain[chain_index], entry_index
+
+def add_dir(path, parent_cluster):
+    cluster = alloc_cluster()
+    slot_cluster, index = alloc_dir_slot(parent_cluster)
+    write_dir_entry(slot_cluster, index, fat_name(path), 0x10, cluster, 0)
+    dirs[path] = cluster
+    parent_dir_cluster = 0 if parent_cluster == root_cluster else parent_cluster
+    write_dir_entry(cluster, 0, fat_special_name("."), 0x10, cluster, 0)
+    write_dir_entry(cluster, 1, fat_special_name(".."), 0x10, parent_dir_cluster, 0)
+    dir_entries[cluster] = 2
+    dir_chains[cluster] = [cluster]
+    return cluster
+
+def add_file(path, parent_cluster):
+    payload = path.read_bytes()
+    if not payload:
+        first = 0
+    else:
+        chunks = [payload[i:i + cluster_size] for i in range(0, len(payload), cluster_size)]
+        clusters = [alloc_cluster() for _ in chunks]
+        for i, (cluster, chunk) in enumerate(zip(clusters, chunks)):
+            start = cluster_offset(cluster)
+            data[start:start + len(chunk)] = chunk
+            if i + 1 < len(clusters):
+                set_fat(cluster, clusters[i + 1])
+        first = clusters[0]
+    slot_cluster, index = alloc_dir_slot(parent_cluster)
+    write_dir_entry(slot_cluster, index, fat_name(path), 0x20, first, len(payload))
+
+try:
+    for root, dirnames, filenames in os.walk(source):
+        root_path = pathlib.Path(root)
+        parent_cluster = dirs[root_path]
+        dirnames[:] = sorted(dirnames)
+        for dirname in dirnames:
+            child = root_path / dirname
+            add_dir(child, parent_cluster)
+        for filename in sorted(filenames):
+            path = root_path / filename
+            try:
+                add_file(path, parent_cluster)
+            except ValueError:
+                pass
+except RuntimeError as err:
+    print(f"PYTHON_FAT32_CAPACITY_EXHAUSTED: {err}", file=sys.stderr)
+    sys.exit(2)
+
+image.write_bytes(data)
+PY
+}
+
+retry_python_fat32_population() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 1
+    fi
+    attempts=0
+    while [ "$attempts" -lt 4 ]; do
+        attempts=$((attempts + 1))
+        if populate_with_python_fat32; then
+            return 0
+        fi
+        rc=$?
+        if [ "$rc" -ne 2 ]; then
+            return "$rc"
+        fi
+        next_size_mb=$((SIZE_MB + 64))
+        echo "[make_os_disk] Growing FAT image from ${SIZE_MB}MB to ${next_size_mb}MB after python capacity check"
+        SIZE_MB="$next_size_mb"
+        rm -f "$OUTPUT"
+        create_raw_image || return 1
+        format_fat32_image || return 1
+    done
+    return 1
+}
+
+ensure_image_capacity || exit 1
+
+# Method 1: mtools (works on macOS and Linux without root)
+if command -v mcopy >/dev/null 2>&1; then
+    mcopy -s -i "$OUTPUT" "$TMPDIR"/* ::
+    echo "[make_os_disk] Added filesystem tree (mtools)"
+    POPULATED=1
+
+# Method 2: pure userland fallback. It avoids privileged loop mounts and keeps
+# the QEMU disk lanes usable in unprivileged containers where Python exists.
+elif retry_python_fat32_population; then
+    echo "[make_os_disk] Added filesystem tree (python fat32 writer)"
+    POPULATED=1
+
+# Method 3: explicit loop mount fallback for developer machines.
+elif [ "$(uname -s)" = "Linux" ] && [ "${SIMPLEOS_DISK_ALLOW_LOOP:-0}" = "1" ]; then
+    MOUNTDIR="$(mktemp -d)"
+    if mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
+        cp -R "$TMPDIR"/. "$MOUNTDIR"/
+        sync
+        umount "$MOUNTDIR"
+        echo "[make_os_disk] Added filesystem tree (loop mount)"
+        POPULATED=1
+    elif [ "${SIMPLEOS_DISK_ALLOW_SUDO_LOOP:-0}" = "1" ] && command -v sudo >/dev/null 2>&1 && sudo mount -o loop "$OUTPUT" "$MOUNTDIR" 2>/dev/null; then
+        sudo cp -R "$TMPDIR"/. "$MOUNTDIR"/
+        sudo sync
+        sudo umount "$MOUNTDIR"
+        echo "[make_os_disk] Added filesystem tree (sudo loop mount)"
+        POPULATED=1
+    else
+        echo "[make_os_disk] WARNING: loop mount fallback failed"
+    fi
+    rmdir "$MOUNTDIR" 2>/dev/null || true
+else
+    echo "[make_os_disk] WARNING: no userland FAT32 population tool succeeded"
+fi
+
+if [ "$POPULATED" -ne 1 ]; then
+    echo "[make_os_disk] ERROR: FAT32 image was formatted but not populated"
+    echo "[make_os_disk] Install mtools for mcopy, or python3 for the built-in FAT32 writer."
+    echo "[make_os_disk] As a last resort on Linux, retry with SIMPLEOS_DISK_ALLOW_LOOP=1."
+    echo "[make_os_disk] Sudo loop fallback is opt-in: SIMPLEOS_DISK_ALLOW_SUDO_LOOP=1."
+    exit 1
+fi
+
+if [ "$ELFSEEDED" -eq 1 ]; then
+    echo "[make_os_disk] hello-world payload: real ELF"
+else
+    echo "[make_os_disk] hello-world payload: placeholder"
+fi
+
+echo "[make_os_disk] Done: $OUTPUT"

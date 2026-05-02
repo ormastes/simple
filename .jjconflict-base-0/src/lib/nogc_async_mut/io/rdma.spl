@@ -1,0 +1,129 @@
+"""
+# RDMA Transport Prototype
+
+Pure Simple model for an opt-in RDMA/exoskeleton transport. This does not make
+RDMA a default socket path; it only represents configured memory registrations,
+queue pairs, completions, and benchmark output for controlled deployments.
+"""
+
+struct RdmaTransportConfig:
+    """Configuration gate for RDMA transport."""
+    backend_name: text
+    explicit_enable: bool
+    protection_domain: u32
+
+struct RdmaMemoryRegion:
+    """Lifetime record for registered response memory."""
+    region_id: u64
+    addr: u64
+    byte_len: u64
+    owner: text
+    lkey: u32
+    rkey: u32
+    registered: bool
+
+struct RdmaQueuePair:
+    """One RDMA queue pair used by the exoskeleton transport."""
+    qp_id: u64
+    send_cq_id: u64
+    recv_cq_id: u64
+    owner: text
+    active: bool
+
+struct RdmaCompletion:
+    """Completion queue event surfaced to the async worker loop."""
+    cq_id: u64
+    wr_id: u64
+    byte_len: u64
+    ok: bool
+
+struct RdmaBenchmarkReport:
+    """Comparable portable TCP vs RDMA benchmark summary."""
+    fixture_name: text
+    portable_requests_per_sec: u64
+    rdma_requests_per_sec: u64
+    portable_p95_us: u64
+    rdma_p95_us: u64
+    backend_summary: text
+
+fn rdma_config_disabled() -> RdmaTransportConfig:
+    """Default portable configuration: RDMA disabled."""
+    RdmaTransportConfig(
+        backend_name: "portable-tcp",
+        explicit_enable: false,
+        protection_domain: 0u32
+    )
+
+fn rdma_config_explicit(backend_name: text, protection_domain: u32) -> RdmaTransportConfig:
+    """Create an explicitly enabled RDMA configuration."""
+    RdmaTransportConfig(
+        backend_name: backend_name,
+        explicit_enable: true,
+        protection_domain: protection_domain
+    )
+
+fn rdma_is_enabled(config: RdmaTransportConfig) -> bool:
+    config.explicit_enable and config.protection_domain != 0u32
+
+fn rdma_register_memory(config: RdmaTransportConfig, region_id: u64, addr: u64, byte_len: u64, owner: text) -> RdmaMemoryRegion:
+    """Register memory only when RDMA is explicitly enabled."""
+    val enabled = rdma_is_enabled(config) and addr != 0u64 and byte_len > 0u64
+    RdmaMemoryRegion(
+        region_id: region_id,
+        addr: addr,
+        byte_len: byte_len,
+        owner: owner,
+        lkey: if enabled: (region_id & 0xFFFF).to_u32() else: 0u32,
+        rkey: if enabled: ((region_id + 1u64) & 0xFFFF).to_u32() else: 0u32,
+        registered: enabled
+    )
+
+fn rdma_deregister_memory(region: RdmaMemoryRegion) -> RdmaMemoryRegion:
+    """End a memory-registration lifetime."""
+    RdmaMemoryRegion(
+        region_id: region.region_id,
+        addr: region.addr,
+        byte_len: region.byte_len,
+        owner: region.owner,
+        lkey: 0u32,
+        rkey: 0u32,
+        registered: false
+    )
+
+fn rdma_create_queue_pair(config: RdmaTransportConfig, qp_id: u64, owner: text) -> RdmaQueuePair:
+    """Create an active queue pair only for an enabled RDMA config."""
+    val active = rdma_is_enabled(config) and qp_id != 0u64
+    RdmaQueuePair(
+        qp_id: qp_id,
+        send_cq_id: if active: qp_id * 2u64 else: 0u64,
+        recv_cq_id: if active: qp_id * 2u64 + 1u64 else: 0u64,
+        owner: owner,
+        active: active
+    )
+
+fn rdma_poll_completion(qp: RdmaQueuePair, wr_id: u64, byte_len: u64, ok: bool) -> RdmaCompletion:
+    """Represent one completion queue poll result for worker integration."""
+    RdmaCompletion(
+        cq_id: qp.send_cq_id,
+        wr_id: wr_id,
+        byte_len: byte_len,
+        ok: qp.active and ok
+    )
+
+fn rdma_benchmark_report(fixture_name: text,
+                         portable_requests_per_sec: u64,
+                         rdma_requests_per_sec: u64,
+                         portable_p95_us: u64,
+                         rdma_p95_us: u64,
+                         backend_summary: text) -> RdmaBenchmarkReport:
+    RdmaBenchmarkReport(
+        fixture_name: fixture_name,
+        portable_requests_per_sec: portable_requests_per_sec,
+        rdma_requests_per_sec: rdma_requests_per_sec,
+        portable_p95_us: portable_p95_us,
+        rdma_p95_us: rdma_p95_us,
+        backend_summary: backend_summary
+    )
+
+fn rdma_benchmark_line(report: RdmaBenchmarkReport) -> text:
+    "{report.fixture_name}: portable_rps={report.portable_requests_per_sec}, rdma_rps={report.rdma_requests_per_sec}, portable_p95_us={report.portable_p95_us}, rdma_p95_us={report.rdma_p95_us}, backend={report.backend_summary}"

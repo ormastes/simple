@@ -1,0 +1,213 @@
+# OpenOCD Feature Registration
+# Registers OpenOCD+GDB handlers. Standard GDB ops at rank NATIVE,
+# plus OpenOCD-native ops (flash, reset, monitor) at rank NATIVE.
+
+use app.debug.remote.feature.features.{FeatureId, FeatureRank}
+use app.debug.remote.feature.registry.{FeatureHandler, FeatureRegistry}
+use app.debug.remote.protocol.openocd.OpenocdClient
+use app.debug.coordinator.VarInfo
+
+# Register all OpenOCD features
+fn register_openocd_features(registry: FeatureRegistry, client: OpenocdClient):
+    # Execution control (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.Halt, FeatureRank.NATIVE(), "openocd",
+        \args: client.halt(),
+        "OpenOCD+GDB -exec-interrupt"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.Resume, FeatureRank.NATIVE(), "openocd",
+        \args: client.resume(),
+        "OpenOCD+GDB -exec-continue"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.SingleStep, FeatureRank.NATIVE(), "openocd",
+        \args: client.single_step(),
+        "OpenOCD+GDB -exec-step"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.StepOver, FeatureRank.NATIVE(), "openocd",
+        \args: client.step_over(),
+        "OpenOCD+GDB -exec-next"
+    ))
+
+    # Memory (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadMemory, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_read_memory(client, args),
+        "OpenOCD+GDB -data-read-memory-bytes"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.WriteMemory, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_write_memory(client, args),
+        "OpenOCD+GDB -data-write-memory-bytes"
+    ))
+
+    # Registers (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadRegister, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_read_register(client, args),
+        "OpenOCD+GDB register read"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.WriteRegister, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_write_register(client, args),
+        "OpenOCD+GDB register write"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadAllRegisters, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_read_all_registers(client),
+        "OpenOCD+GDB all registers"
+    ))
+
+    # Breakpoints (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.SetBreakpoint, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_set_breakpoint(client, args),
+        "OpenOCD+GDB -break-insert"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ClearBreakpoint, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_clear_breakpoint(client, args),
+        "OpenOCD+GDB -break-delete"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.SetWatchpoint, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_set_watchpoint(client, args),
+        "OpenOCD+GDB -break-watch"
+    ))
+
+    # Inspection (via GDB)
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadLocals, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_read_locals(client),
+        "OpenOCD+GDB -stack-list-locals"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadArguments, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_read_arguments(client),
+        "OpenOCD+GDB -stack-list-arguments"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.EvaluateExpression, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_evaluate(client, args),
+        "OpenOCD+GDB -data-evaluate-expression"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadStackTrace, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_read_stack_trace(client),
+        "OpenOCD+GDB -stack-list-frames"
+    ))
+
+    # OpenOCD-native system operations (via telnet)
+    registry.register(FeatureHandler.of(
+        FeatureId.FlashProgram, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_flash_program(client, args),
+        "OpenOCD program (flash)"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.SystemReset, FeatureRank.NATIVE(), "openocd",
+        \args: client.system_reset(),
+        "OpenOCD reset halt"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.OpenocdMonitor, FeatureRank.NATIVE(), "openocd",
+        \args: openocd_monitor(client, args),
+        "OpenOCD telnet monitor command"
+    ))
+
+# --- Handler adapters ---
+
+fn openocd_read_memory(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("ReadMemory requires [addr, size]")
+    val addr = args[0].parse_int() ?? 0
+    val size = args[1].parse_int() ?? 0
+    val bytes = client.read_memory(addr, size)?
+    Ok(bytes.map(\b: "{b}").join(","))
+
+fn openocd_write_memory(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("WriteMemory requires [addr, data...]")
+    val addr = args[0].parse_int() ?? 0
+    var data: [i32] = []
+    for i in 1..args.len():
+        data.push(args[i].parse_int() ?? 0)
+    client.write_memory(addr, data)
+
+fn openocd_read_register(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("ReadRegister requires [name]")
+    val value = client.read_register(args[0])?
+    Ok("{value}")
+
+fn openocd_write_register(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("WriteRegister requires [name, value]")
+    val value = args[1].parse_int() ?? 0
+    client.write_register(args[0], value)
+
+fn openocd_read_all_registers(client: OpenocdClient) -> Result<text, text>:
+    val regs = client.read_all_registers()?
+    var parts: [text] = []
+    for key in regs.keys():
+        parts.push("{key}={regs[key]}")
+    Ok(parts.join(","))
+
+fn openocd_set_breakpoint(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("SetBreakpoint requires [location]")
+    val id = client.set_breakpoint(args[0])?
+    Ok("{id}")
+
+fn openocd_clear_breakpoint(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("ClearBreakpoint requires [id]")
+    val id = args[0].parse_int() ?? 0
+    client.delete_breakpoint(id)
+
+fn openocd_set_watchpoint(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("SetWatchpoint requires [expr, access?]")
+    val access = if args.len() > 1: args[1] else: "write"
+    val id = client.set_watchpoint(args[0], access)?
+    Ok("{id}")
+
+fn openocd_read_locals(client: OpenocdClient) -> Result<text, text>:
+    val vars = client.read_locals()?
+    Ok(serialize_openocd_vars(vars))
+
+fn openocd_read_arguments(client: OpenocdClient) -> Result<text, text>:
+    val vars = client.read_arguments()?
+    Ok(serialize_openocd_vars(vars))
+
+fn openocd_evaluate(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("EvaluateExpression requires [expr]")
+    client.evaluate(args[0])
+
+fn openocd_read_stack_trace(client: OpenocdClient) -> Result<text, text>:
+    val frames = client.stack_trace()?
+    var parts: [text] = []
+    for f in frames:
+        parts.push("{f.index}:{f.function_name}:{f.file}:{f.line}")
+    Ok(parts.join(";"))
+
+fn openocd_flash_program(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("FlashProgram requires [elf_path]")
+    client.flash_program(args[0])
+
+fn openocd_monitor(client: OpenocdClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("OpenocdMonitor requires [command]")
+    client.monitor(args[0])
+
+fn serialize_openocd_vars(vars: [VarInfo]) -> text:
+    var parts: [text] = []
+    for v in vars:
+        parts.push("{v.name}={v.value}:{v.type_name}")
+    parts.join(";")
+
+# --- Exports ---
+

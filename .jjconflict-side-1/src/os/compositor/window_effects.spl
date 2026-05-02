@@ -1,0 +1,462 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Window Effects — Advanced glass effects for window chrome
+#
+# Shared between hosted and QEMU window managers.
+# Multi-layer shadows, frosted blur, noise blend, focus ring glow,
+# inactive dimming, rounded corners. All via CompositorBackend trait.
+# Ported from QEMU ARM64 wm_entry.spl draw_glass_window.
+
+use os.compositor.display_backend.{CompositorBackend}
+use os.compositor.glass_port.{GlassPortConfig}
+use os.compositor.rendering_primitives.{rounded_rect_aa, filled_circle, draw_ring}
+use os.compositor.rendering_primitives.{gradient_h}
+use os.compositor.text_render.{draw_text_shadow}
+use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v, cap_read_pixel}
+
+# ============================================================================
+# Multi-layer Shadows (ported from QEMU active/inactive shadows)
+# ============================================================================
+
+fn draw_active_shadows(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassPortConfig):
+    """Draw multi-layer drop shadows for an active (focused) window.
+
+    QEMU uses 9+ shadow layers for depth; we use 4 layers for performance
+    while keeping the visual quality high on pure Simple backends.
+    """
+    # Layer 1: Wide soft shadow (36px blur, low alpha)
+    val s1_off: i32 = 3
+    cap_blend_rect(backend, x + s1_off, y + s1_off, w, h, 0x00000000, config.shadow_alpha)
+    cap_blur_region(backend, x + s1_off, y + s1_off, w + s1_off, h + s1_off, 20)
+
+    # Layer 2: Blue tint shadow
+    cap_blend_rect(backend, x + 2, y + 2, w + 4, h + 4, 0x00C8C8FF, 3)
+
+    # Layer 3: Tight contact shadow (asymmetric: overhead light y+4 near, y+6 far)
+    cap_blend_rect(backend, x + 4, y + h + 4, w, 4, 0x00000000, 55)
+    cap_blend_rect(backend, x + 6, y + h + 6, w - 4, 2, 0x00000000, 25)
+
+    # Layer 4: Bottom accent
+    cap_blend_rect(backend, x, y + h - 1, w, 2, config.accent_color, 10)
+
+    # Layer 5: Mid-depth shadow (no blur for interpreter performance)
+    cap_blend_rect(backend, x + 9, y + 9, w, h, 0x00000000, 25)
+
+    # Layer 6: Ambient halo (no heavy blur — use pre-expanded rect at low alpha)
+    cap_blend_rect(backend, x - 6, y + 6, w + 12, h + 6, 0x00000000, 15)
+
+    # Layer 7: Ground plane shadow
+    cap_blend_rect(backend, x - 10, y + h + 4, w + 20, 10, 0x00000000, 20)
+
+    # Layer 8: Colored accent shadow
+    cap_blend_rect(backend, x, y + h - 6, w, 6, config.accent_color, 8)
+
+    # Layer 9: Wide ambient (pre-expanded, no blur)
+    cap_blend_rect(backend, x - 10, y + 8, w + 20, h + 4, 0x00000000, 8)
+
+    # Blue-tinted ground shadow
+    cap_blend_rect(backend, x - 4, y + h + 2, w + 8, 4, 0x00102040, 12)
+
+fn draw_inactive_shadows(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassPortConfig):
+    """Draw subtle shadows for an inactive (unfocused) window."""
+    val off: i32 = 2
+    val alpha: u8 = config.shadow_alpha / 3
+    cap_blend_rect(backend, x + off, y + off, w, h, 0x00000000, alpha)
+    cap_blur_region(backend, x + off, y + off, w + off, h + off, 6)
+    cap_blend_rect(backend, x + 3, y + h, w, 2, 0x00000000, 15)
+
+    # Layer 3: Ambient shadow (pre-expanded, no blur for performance)
+    cap_blend_rect(backend, x - 4, y - 4, w + 8, h + 8, 0x00000000, 8)
+
+# ============================================================================
+# Frosted Glass Surface (cascading blur + color layers)
+# ============================================================================
+
+fn draw_frosted_surface(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassPortConfig):
+    """Draw frosted glass surface with cascading blur passes and iridescent layers.
+
+    QEMU uses 6 blur passes (16→10→6→4→3→2) + 10 color blends.
+    Pure Simple version uses 3 blur passes + 5 color blends for performance.
+    """
+    # Cascading blur passes (3 passes — optimized for interpreter speed)
+    cap_blur_region(backend, x, y, w, h, 16)
+    cap_blur_region(backend, x, y, w, h, 8)
+    cap_blur_region(backend, x, y, w, h, 4)
+
+    # Iridescent color layers
+    cap_blend_rect(backend, x, y, w, h, config.accent_color, 8)
+    cap_blend_rect(backend, x, y, w, h, 0x004080FF, 20)
+    cap_blend_rect(backend, x, y, w, h / 3, 0x00FFFFFF, 18)
+    cap_blend_rect(backend, x, y + h / 3, w, h / 3, 0x00FFE0B2, 6)
+    cap_blend_rect(backend, x, y + h * 2 / 3, w, h / 3, 0x001A2040, 10)
+    cap_blend_rect(backend, x, y, w, h, config.accent2_color, 5)
+    cap_blend_rect(backend, x, y, w, h / 4, 0x00FFFFFF, 28)
+    cap_blend_rect(backend, x, y, w, h, 0x00FF6B8A, 12)
+    cap_blend_rect(backend, x, y + h * 3 / 4, w, h / 4, 0x001A2040, 15)
+    cap_blend_rect(backend, x, y, w, h, 0x003060A0, 12)
+    cap_blend_rect(backend, x + 4, y + 2, w - 8, 1, 0x00FFFFFF, 6)
+    cap_blend_rect(backend, x, y, w, h, 0x00402060, 10)
+
+    # Warm amber top edge highlight
+    cap_blend_rect(backend, x + 20, y + 1, w - 40, 1, 0x00FFE0B2, 12)
+    # Top-left white accent
+    cap_blend_rect(backend, x + 2, y + 2, w - 4, h / 4, 0x00FFFFFF, 6)
+    # Subtle top shimmer
+    cap_blend_rect(backend, x + 10, y + 3, w - 20, 1, 0x00FFFFFF, 4)
+
+    # Glass surface with main color
+    cap_blend_rect(backend, x, y, w, h, config.surface_color, config.surface_alpha)
+
+    # Highlight lines (depth illusion)
+    cap_blend_rect(backend, x + 2, y + 1, w - 4, 1, 0x00FFFFFF, 40)
+    cap_blend_rect(backend, x + 4, y + 2, w - 8, 1, 0x00FFFFFF, 20)
+    cap_blend_rect(backend, x + 8, y + 3, w - 16, 1, 0x00FFFFFF, 10)
+    cap_blend_rect(backend, x + 4, y + 1, 40, 1, 0x00FFE0B8, 40)
+    cap_blend_rect(backend, x + 4, y + 2, 36, 1, 0x00FFFFFF, 20)
+    cap_blend_rect(backend, x + 2, y + 2, 30, 30, 0x00FFFFFF, 8)
+    cap_blend_rect(backend, x + 6, y + 4, 15, 15, 0x00FFFFFF, 12)
+
+# ============================================================================
+# Focus Ring (accent glow around focused window)
+# ============================================================================
+
+fn draw_focus_ring(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassPortConfig, title_h: i32):
+    """Draw glowing focus ring around a focused window.
+
+    Multi-layer accent-colored border with warm accent highlights.
+    Ported from QEMU's 10-line focus ring.
+    """
+    # Outer glow (wider, lower alpha)
+    cap_blend_rect(backend, x - 2, y - 2, w + 4, 2, config.accent_color, 80)
+    cap_blend_rect(backend, x - 2, y + h, w + 4, 2, config.accent_color, 80)
+    cap_blend_rect(backend, x - 2, y, 2, h, config.accent_color, 80)
+    cap_blend_rect(backend, x + w, y, 2, h, config.accent_color, 80)
+
+    # Inner accent ring
+    cap_blend_rect(backend, x - 1, y - 1, w + 2, 1, config.accent_color, 120)
+    cap_blend_rect(backend, x - 1, y + h, w + 2, 1, config.accent_color, 120)
+    cap_blend_rect(backend, x - 1, y, 1, h, config.accent_color, 120)
+    cap_blend_rect(backend, x + w, y, 1, h, config.accent_color, 120)
+
+    # Side accent2 stripes
+    cap_blend_rect(backend, x - 2, y + h / 4, 1, h / 2, config.accent2_color, 60)
+    cap_blend_rect(backend, x + w + 1, y + h / 4, 1, h / 2, config.accent2_color, 60)
+
+    # Warm highlight stripe at top
+    cap_blend_rect(backend, x + 4, y - 1, w - 8, 1, 0x00FFD0A0, 30)
+
+    # Bottom accent glow
+    cap_blend_rect(backend, x + 4, y + h, w - 8, 1, config.accent_color, 40)
+
+    # Layer 6: Extended ring (wider glow)
+    rounded_rect_aa(backend, x - 5, y - 5, w + 10, h + 10, config.accent_color, 27, 25)
+
+    # Layer 7: Accent inner border
+    rounded_rect_aa(backend, x, y, w, h, config.accent_color, 22, 25)
+
+    # Layer 8: Top shimmer
+    cap_blend_rect(backend, x + 4, y - 1, w / 3, 1, 0x00FFFFFF, 25)
+
+    # Layer 9: Content vibrancy stripe (below title)
+    cap_blend_rect(backend, x + 2, y + title_h, w - 4, 2, config.accent_color, 30)
+
+    # Layer 10: Content warm overlay
+    cap_blend_rect(backend, x + 2, y + title_h + 2, w - 4, h - title_h - 4, config.accent_color, 5)
+
+    # Layer 11: Inner content glow
+    rounded_rect_aa(backend, x + 2, y + 2, w - 4, h - 4, config.accent_color, 20, 8)
+
+# ============================================================================
+# Inactive Window Dimming
+# ============================================================================
+
+fn draw_inactive_dim(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, title_h: i32):
+    """Dim an inactive window by overlaying dark semi-transparent layers.
+
+    QEMU uses dark blue (203050) at 75% + black at 40% + title dim + blur.
+    """
+    cap_blend_rect(backend, x, y, w, h, 0x00203050, 75)
+    cap_blend_rect(backend, x, y, w, h, 0x00000000, 40)
+    # Title bar extra darkening
+    cap_blend_rect(backend, x, y, w, title_h, 0x00000000, 30)
+    cap_blur_region(backend, x, y, w, h, 5)
+
+# ============================================================================
+# Noise/Grain Texture (ordered dither approximation)
+# ============================================================================
+
+fn draw_noise_blend(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, alpha: u8):
+    """Apply frosted glass noise texture matching QEMU C rt_gui_noise_blend.
+    Uses C-compatible pseudo-random hash for ~37.5% pixel coverage with
+    white/black dither. Steps by 2 for interpreter performance.
+    """
+    var row: i32 = 0
+    while row < h:
+        var col: i32 = 0
+        while col < w:
+            val px = x + col
+            val py = y + row
+            # C-compatible hash: truncated constants to stay in i32 range
+            val h1 = px * 2654435
+            val h2 = py * 2246822
+            val hash = (h1 ^ h2) & 0x7FFFFFFF
+            # ~37.5% coverage: (hash & 7) < 3
+            if (hash & 7) < 3:
+                # Noise value: 0 or 1 (darken or lighten)
+                val noise_val = (hash >> 8) & 1
+                val noise_color: u32 = if noise_val == 1: 0x00FFFFFF else: 0x00000000
+                cap_blend_rect(backend, px, py, 1, 1, noise_color, alpha)
+            col = col + 2
+        row = row + 2
+
+# ============================================================================
+# Rainbow Edge Refraction
+# ============================================================================
+
+fn draw_rainbow_edge(backend: CompositorBackend, x: i32, y: i32, w: i32):
+    """Draw subtle RGB refraction stripes on window top edge.
+
+    3 horizontal color stripes at 12% opacity for prism effect.
+    """
+    cap_blend_rect(backend, x + 4, y, w - 8, 1, 0x00FF0000, 12)
+    cap_blend_rect(backend, x + 4, y + 1, w - 8, 1, 0x0000FF00, 12)
+    cap_blend_rect(backend, x + 4, y + 2, w - 8, 1, 0x000000FF, 12)
+
+# ============================================================================
+# Title Bar Effects
+# ============================================================================
+
+fn draw_glass_title_effects(backend: CompositorBackend, x: i32, y: i32, w: i32, title_h: i32, config: GlassPortConfig, focused: bool):
+    """Draw enhanced title bar effects over the glass window.
+
+    Includes gradient fill, highlight lines, and noise texture.
+    """
+    # Elevated title bar (higher opacity)
+    val title_alpha: u8 = if config.surface_alpha + 40 > 255: 255 else: config.surface_alpha + 40
+    cap_blend_rect(backend, x, y, w, title_h, config.surface_color, title_alpha)
+
+    # Top 40% lighter
+    cap_blend_rect(backend, x, y, w, title_h * 2 / 5, 0x00FFFFFF, 12)
+    # Bottom 30% darker
+    cap_blend_rect(backend, x, y + title_h * 7 / 10, w, title_h * 3 / 10, 0x00000000, 8)
+
+    # White top glow
+    cap_blend_rect(backend, x + 2, y + 1, w - 4, 1, 0x00FFFFFF, 40)
+
+    # Dark bottom transition
+    cap_blend_rect(backend, x, y + title_h - 2, w, 1, 0x00000000, 15)
+
+    # Subtle noise on title bar
+    draw_noise_blend(backend, x, y, w, title_h, 4)
+
+    # Accent tint on active window
+    if focused:
+        cap_blend_rect(backend, x, y, w, title_h, config.accent_color, 8)
+        # Gradient accent stripe
+        cap_blend_rect(backend, x + 10, y + title_h - 1, w - 20, 1, config.accent_color, 40)
+        # Gradient accent stripe (accent -> accent2)
+        gradient_h(backend, x + 20, y + title_h - 3, w - 40, 2, config.accent_color, config.accent2_color)
+        # Top highlight specular
+        cap_blend_rect(backend, x + 4, y + 1, 12, 2, 0x00FFFFFF, 30)
+
+    if not focused:
+        cap_blend_rect(backend, x, y, w, title_h, 0x00304060, 25)
+
+    # Separator line
+    cap_blend_rect(backend, x, y + title_h, w, 1, config.border_color, config.border_alpha)
+
+    # Dark underline below separator
+    cap_blend_rect(backend, x, y + title_h + 1, w, 2, 0x00000000, 12)
+
+    # Toolbar highlight
+    cap_blend_rect(backend, x + 2, y + title_h + 1, w - 4, 3, 0x00FFFFFF, 10)
+    # Inner light edge
+    cap_blend_rect(backend, x + 2, y + 2, w - 4, 1, 0x00FFFFFF, 12)
+
+    # Toolbar action buttons (3 small rounded rects, right side of title bar)
+    if focused:
+        val btn_w: i32 = 24
+        val btn_h: i32 = 14
+        val btn_y = y + title_h - btn_h - 6
+        val btn_base = x + w - 90
+        cap_blend_rect(backend, btn_base, btn_y, btn_w, btn_h, config.accent_color, 40)
+        cap_blend_rect(backend, btn_base + btn_w + 4, btn_y, btn_w, btn_h, config.surface_color, 40)
+        cap_blend_rect(backend, btn_base + (btn_w + 4) * 2, btn_y, btn_w, btn_h, config.surface_color, 40)
+
+# ============================================================================
+# Glass Border
+# ============================================================================
+
+fn draw_glass_border_enhanced(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32, config: GlassPortConfig):
+    """Draw enhanced glass border with outer glow."""
+    # Main border
+    cap_blend_rect(backend, x, y, w, 1, config.border_color, config.border_alpha)
+    cap_blend_rect(backend, x, y + h - 1, w, 1, config.border_color, config.border_alpha)
+    cap_blend_rect(backend, x, y, 1, h, config.border_color, config.border_alpha)
+    cap_blend_rect(backend, x + w - 1, y, 1, h, config.border_color, config.border_alpha)
+
+    # Outer glow (subtle white)
+    cap_blend_rect(backend, x - 1, y - 1, w + 2, 1, 0x00FFFFFF, 5)
+    cap_blend_rect(backend, x - 1, y + h, w + 2, 1, 0x00FFFFFF, 5)
+    cap_blend_rect(backend, x - 1, y, 1, h, 0x00FFFFFF, 5)
+    cap_blend_rect(backend, x + w, y, 1, h, 0x00FFFFFF, 5)
+
+    # Layer 3: Ultra-soft outer halo (rounded)
+    rounded_rect_aa(backend, x - 2, y - 2, w + 4, h + 4, 0x00FFFFFF, 24, 5)
+    # Layer 4: Inner edge highlight
+    rounded_rect_aa(backend, x + 1, y + 1, w - 2, h - 2, 0x00FFFFFF, 21, 6)
+    # Layer 5: Inner corner smoothing
+    rounded_rect_aa(backend, x + 1, y + 1, w - 2, h - 2, config.surface_color, 21, 8)
+
+# ============================================================================
+# Complete Glass Window (combines all effects)
+# ============================================================================
+
+fn draw_glass_window_enhanced(backend: CompositorBackend, x: i32, y: i32, w: i32, h: i32,
+                              title: text, focused: bool, config: GlassPortConfig, title_h: i32, dragging: bool):
+    """Draw a complete glass window with all visual effects.
+
+    Combines: shadows + frosted surface + border + title bar + traffic lights
+    + focus ring + noise + rainbow edge. Shared between all platforms.
+    """
+    # 1. Shadows (active vs inactive)
+    if focused:
+        draw_active_shadows(backend, x, y, w, h, config)
+        # Lifted shadow boost when dragging
+        if dragging:
+            cap_blend_rect(backend, x + 4, y + h + 8, w - 8, 6, 0x00000000, 40)
+            cap_blur_region(backend, x + 4, y + h + 8, w - 8, 6, 8)
+    else:
+        draw_inactive_shadows(backend, x, y, w, h, config)
+
+    # 2. Frosted glass surface
+    draw_frosted_surface(backend, x, y, w, h, config)
+
+    # 3. Enhanced border
+    draw_glass_border_enhanced(backend, x, y, w, h, config)
+
+    # 4. Title bar effects
+    draw_glass_title_effects(backend, x, y, w, title_h, config, focused)
+
+    # 5. Traffic light buttons (macOS style)
+    _draw_traffic_lights(backend, x, y, focused)
+
+    # 6. Title text (centered in title bar)
+    val text_fg: u32 = if focused: 0xFFFFFFFF else: 0xFFB0B0B0
+    val text_x = x + w / 2 - 32
+    val text_y = y + (title_h - 16) / 2
+    draw_text_shadow(backend, text_x, text_y, title, text_fg, 0x00000000, 40)
+
+    # 7. Rainbow edge refraction
+    if focused:
+        draw_rainbow_edge(backend, x, y, w)
+
+    # 8. Focus ring (only on focused windows)
+    if focused:
+        draw_focus_ring(backend, x, y, w, h, config, title_h)
+
+    # 9. Noise texture (title bar only for performance)
+    draw_noise_blend(backend, x, y, w, title_h, 3)
+
+    # 10. Inactive dimming
+    if not focused:
+        draw_inactive_dim(backend, x, y, w, h, title_h)
+
+# ============================================================================
+# Traffic Light Buttons (shared)
+# ============================================================================
+
+fn _draw_traffic_lights(backend: CompositorBackend, wx: i32, wy: i32, focused: bool):
+    """Draw macOS-style traffic light buttons (close/minimize/maximize).
+
+    Active: colored circles with X/minus/plus icons.
+    Inactive: gray circles.
+    """
+    val btn_y = wy + 8
+    val r: i32 = 6
+    val x_start: i32 = wx + 12
+    val spacing: i32 = 20
+
+    if focused:
+        # Close button (QEMU pink-red)
+        val close_x = x_start
+        val close_cy = btn_y + r
+        # 1. Outer ring
+        draw_ring(backend, close_x + r, close_cy, r + 1, 1, 0x00FF6B8A, 20)
+        # 2. Main circle
+        filled_circle(backend, close_x + r, close_cy, r, 0x00FF6B8A, 255)
+        # 3. Top-half gradient highlight
+        cap_blend_rect(backend, close_x + 2, btn_y + 2, r * 2 - 4, r - 2, 0x00FFFFFF, 18)
+        # 4. Soft specular dot
+        filled_circle(backend, close_x + r - 2, close_cy - 2, 2, 0x00FFFFFF, 60)
+        # 5. Inner ring
+        draw_ring(backend, close_x + r, close_cy, r - 1, 1, 0x00000000, 20)
+        # 6. X glyph (2px thick using draw_line-like pattern)
+        cap_blend_rect(backend, close_x + 4, btn_y + 4, 1, 1, 0x00000000, 180)
+        cap_blend_rect(backend, close_x + 5, btn_y + 5, 1, 1, 0x00000000, 180)
+        cap_blend_rect(backend, close_x + 6, btn_y + 6, 1, 1, 0x00000000, 180)
+        cap_blend_rect(backend, close_x + 7, btn_y + 7, 1, 1, 0x00000000, 180)
+        cap_blend_rect(backend, close_x + 8, btn_y + 4, 1, 1, 0x00000000, 180)
+        cap_blend_rect(backend, close_x + 7, btn_y + 5, 1, 1, 0x00000000, 180)
+        cap_blend_rect(backend, close_x + 5, btn_y + 7, 1, 1, 0x00000000, 180)
+        cap_blend_rect(backend, close_x + 4, btn_y + 8, 1, 1, 0x00000000, 180)
+        # 7. Bottom shadow
+        cap_blend_rect(backend, close_x + 3, btn_y + r * 2, r * 2 - 6, 2, 0x00000000, 40)
+
+        # Minimize button (QEMU purple-blue)
+        val min_x = x_start + spacing
+        val min_cy = btn_y + r
+        # 1. Outer ring
+        draw_ring(backend, min_x + r, min_cy, r + 1, 1, 0x008B8BFA, 20)
+        # 2. Main circle
+        filled_circle(backend, min_x + r, min_cy, r, 0x008B8BFA, 255)
+        # 3. Top-half gradient highlight
+        cap_blend_rect(backend, min_x + 2, btn_y + 2, r * 2 - 4, r - 2, 0x00FFFFFF, 18)
+        # 4. Soft specular dot
+        filled_circle(backend, min_x + r - 2, min_cy - 2, 2, 0x00FFFFFF, 60)
+        # 5. Inner ring
+        draw_ring(backend, min_x + r, min_cy, r - 1, 1, 0x00000000, 20)
+        # 6. Dash glyph
+        cap_blend_rect(backend, min_x + 3, btn_y + r, 6, 1, 0x00000000, 200)
+        # 7. Bottom shadow
+        cap_blend_rect(backend, min_x + 3, btn_y + r * 2, r * 2 - 6, 2, 0x00000000, 40)
+
+        # Maximize button (QEMU teal-green)
+        val max_x = x_start + spacing * 2
+        val max_cy = btn_y + r
+        # 1. Outer ring
+        draw_ring(backend, max_x + r, max_cy, r + 1, 1, 0x0050D0A0, 20)
+        # 2. Main circle
+        filled_circle(backend, max_x + r, max_cy, r, 0x0050D0A0, 255)
+        # 3. Top-half gradient highlight
+        cap_blend_rect(backend, max_x + 2, btn_y + 2, r * 2 - 4, r - 2, 0x00FFFFFF, 18)
+        # 4. Soft specular dot
+        filled_circle(backend, max_x + r - 2, max_cy - 2, 2, 0x00FFFFFF, 60)
+        # 5. Inner ring
+        draw_ring(backend, max_x + r, max_cy, r - 1, 1, 0x00000000, 20)
+        # 6. Plus glyph
+        cap_blend_rect(backend, max_x + 3, btn_y + r, 6, 1, 0x00000000, 200)
+        cap_blend_rect(backend, max_x + r, btn_y + 3, 1, 6, 0x00000000, 200)
+        # 7. Bottom shadow
+        cap_blend_rect(backend, max_x + 3, btn_y + r * 2, r * 2 - 6, 2, 0x00000000, 40)
+
+        # Reflection line below all buttons
+        cap_blend_rect(backend, x_start, btn_y + r * 2 + 2, spacing * 2 + r * 2, 2, 0x00FFFFFF, 8)
+    else:
+        # Inactive: gray circles
+        _draw_filled_circle_c(backend, x_start + r, btn_y + r, r, 0xFF808080)
+        _draw_filled_circle_c(backend, x_start + spacing + r, btn_y + r, r, 0xFF808080)
+        _draw_filled_circle_c(backend, x_start + spacing * 2 + r, btn_y + r, r, 0xFF808080)
+        # Inactive inset shadow
+        cap_blend_rect(backend, x_start + 2, btn_y + r * 2 - 1, 6, 1, 0x00000000, 25)
+        cap_blend_rect(backend, x_start + spacing + 2, btn_y + r * 2 - 1, 6, 1, 0x00000000, 25)
+        cap_blend_rect(backend, x_start + spacing * 2 + 2, btn_y + r * 2 - 1, 6, 1, 0x00000000, 25)
+
+fn _draw_filled_circle_c(backend: CompositorBackend, cx: i32, cy: i32, r: i32, color: u32):
+    """Draw a filled circle centered at (cx, cy) with radius r."""
+    var dy: i32 = 0 - r
+    while dy <= r:
+        val abs_dy = if dy < 0: 0 - dy else: dy
+        val hw = r - abs_dy
+        if hw > 0:
+            backend.fill_rect(cx - hw, cy + dy, hw * 2, 1, color)
+        dy = dy + 1

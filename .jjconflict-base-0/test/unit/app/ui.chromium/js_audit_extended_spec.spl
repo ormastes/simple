@@ -1,0 +1,157 @@
+# Feature: Chromium Shell JS Engine Maturity Audit — Extended Subset (V3, Row 5 — M9 follow-up)
+# Category: UI Components
+# Status: Implemented
+#
+# Compile-only spec for the extended test262 subset. Verifies:
+#
+#   * `js_audit_extended_subset` exposes ~20 hand-transcribed,
+#     test262-shaped cases covering arithmetic, strings, arrays, and
+#     control flow.
+#   * The runner contract (tally + classify) still holds when driven
+#     against the extended subset.
+#   * The `extended_subset_today` report snapshot matches the
+#     runner's output when fed the documented raw outcomes.
+#
+# No SFFI and no JS engine bring-up. The raw outcomes are drawn from
+# the report's doc-comment inventory so the spec asserts the runner
+# contract, not the pass count itself (coverage tracking, per the
+# Row 5 follow-up plan).
+
+use app.ui.chromium.js_audit.{
+    Test262Case,
+    Test262Runner,
+    js_audit_extended_subset,
+    OUTCOME_PASS,
+    OUTCOME_FAIL,
+    OUTCOME_CRASH,
+    OUTCOME_SKIP
+}
+use app.ui.chromium.js_audit_report.{Test262Report}
+
+# =========================================================================
+# Test Group 1: Extended subset shape
+# =========================================================================
+
+describe "Chromium M9 js_audit_extended_subset":
+    """Row 5 follow-up: ~20 hand-transcribed test262-shaped cases."""
+
+    it "exposes exactly twenty cases":
+        val subset = js_audit_extended_subset()
+        expect(subset.len() == 20).to_be_true()
+
+    it "every case has a non-empty name":
+        val subset = js_audit_extended_subset()
+        var ok = true
+        for c in subset:
+            if c.name.len() == 0:
+                ok = false
+        expect(ok).to_be_true()
+
+    it "every case has a non-empty source":
+        val subset = js_audit_extended_subset()
+        var ok = true
+        for c in subset:
+            if c.source.len() == 0:
+                ok = false
+        expect(ok).to_be_true()
+
+    it "contains exactly one negative case":
+        val subset = js_audit_extended_subset()
+        var negatives = 0
+        for c in subset:
+            if c.negative:
+                negatives = negatives + 1
+        expect(negatives == 1).to_be_true()
+
+    it "names are namespaced under ext/":
+        val subset = js_audit_extended_subset()
+        var ok = true
+        for c in subset:
+            val n = c.name
+            if n.len() < 4:
+                ok = false
+        expect(ok).to_be_true()
+
+# =========================================================================
+# Test Group 2: Runner contract on the extended subset
+# =========================================================================
+
+describe "Chromium M9 Test262Runner on extended subset":
+    """The runner's tally contract is stable across subset size."""
+
+    it "fresh runner against extended subset starts empty":
+        val subset = js_audit_extended_subset()
+        val r = Test262Runner.new("interpreter")
+        expect(r.total() == 0).to_be_true()
+        expect(subset.len() == 20).to_be_true()
+
+    it "driving 20 synthetic passes yields 20/0/0/0":
+        var r = Test262Runner.new("interpreter")
+        val subset = js_audit_extended_subset()
+        for c in subset:
+            val _ = r.run_case(c, OUTCOME_PASS)
+        expect(r.pass_count == 20).to_be_true()
+        expect(r.fail_count == 0).to_be_true()
+        expect(r.total() == 20).to_be_true()
+        expect(r.pass_rate_pct() == 100).to_be_true()
+
+    it "classify still flips the single negative case":
+        var r = Test262Runner.new("interpreter")
+        val subset = js_audit_extended_subset()
+        var flipped = 0
+        for c in subset:
+            if c.negative:
+                val resolved = r.classify(c, OUTCOME_FAIL)
+                if resolved == OUTCOME_PASS:
+                    flipped = flipped + 1
+        expect(flipped == 1).to_be_true()
+
+    it "driving the documented outcomes matches the extended snapshot":
+        # The report doc inventories 10 pass / 6 fail / 4 crash / 0 skip
+        # once the negative case has been classified. We feed the runner
+        # the pre-classified outcomes here so the tally matches the
+        # checked-in snapshot without requiring a real engine.
+        var r = Test262Runner.new("interpreter")
+        var i = 0
+        while i < 10:
+            r.record(OUTCOME_PASS)
+            i = i + 1
+        var j = 0
+        while j < 6:
+            r.record(OUTCOME_FAIL)
+            j = j + 1
+        var k = 0
+        while k < 4:
+            r.record(OUTCOME_CRASH)
+            k = k + 1
+        val rep = Test262Report.extended_subset_today()
+        expect(r.pass_count == rep.pass_count).to_be_true()
+        expect(r.fail_count == rep.fail_count).to_be_true()
+        expect(r.crash_count == rep.crash_count).to_be_true()
+        expect(r.skip_count == rep.skip_count).to_be_true()
+        expect(r.total() == rep.total()).to_be_true()
+
+# =========================================================================
+# Test Group 3: Extended subset snapshot
+# =========================================================================
+
+describe "Chromium M9 Test262Report.extended_subset_today":
+    """Checked-in pass-rate snapshot for the M9 extended subset."""
+
+    it "is tagged interpreter / m9-extended":
+        val rep = Test262Report.extended_subset_today()
+        expect(rep.backend == "interpreter").to_be_true()
+        expect(rep.subset == "m9-extended").to_be_true()
+
+    it "totals twenty cases":
+        val rep = Test262Report.extended_subset_today()
+        expect(rep.total() == 20).to_be_true()
+
+    it "pass rate is 50 percent":
+        # 10 pass / 20 total = 50.
+        val rep = Test262Report.extended_subset_today()
+        expect(rep.pass_rate_pct() == 50).to_be_true()
+
+    it "crash bucket is non-zero (array methods gap)":
+        val rep = Test262Report.extended_subset_today()
+        expect(rep.crash_count > 0).to_be_true()

@@ -1,0 +1,41 @@
+# ARM filesystem-exec spawn bridge.
+#
+# Keeps the ARM QEMU filesystem-exec acceptance entries out of the generic
+# syscall/scheduler closure while still exercising the shared SMF/ELF path
+# where the ARM freestanding ABI can return safely on ARM64 and keeping the
+# ARM32 acceptance lane on a lightweight filesystem probe path.
+
+@cfg(arm64)
+use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_spawn}
+
+@cfg(arm32)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+extern fn rt_arm_array_len_u32(arr: [u8]) -> u32
+
+var g_arm32_fs_exec_next_pid: i64 = 100
+
+@cfg(arm32)
+pub fn arm_fs_exec_spawn_path(path: text) -> i64:
+    """Return a stable synthetic pid once the ARM32 VFS lane resolves bytes."""
+    val bytes = arm_fs_exec_read_file_bytes(path)
+    if rt_arm_array_len_u32(bytes) <= 4:
+        return -2
+    val pid = g_arm32_fs_exec_next_pid
+    g_arm32_fs_exec_next_pid = g_arm32_fs_exec_next_pid + 1
+    pid
+
+@cfg(arm64)
+pub fn arm_fs_exec_spawn_path(path: text) -> i64:
+    """Use the ARM64-owned loader/handoff path on ARM64."""
+    arm64_fs_exec_spawn(path, [], [])
+
+@cfg(arm64)
+pub fn arm_fs_exec_spawn_hello_world_smf() -> i64:
+    """Probe the filesystem-backed `/sys/apps/hello_world.smf` process image."""
+    arm_fs_exec_spawn_path("/sys/apps/hello_world.smf")
+
+@cfg(arm32)
+pub fn arm_fs_exec_spawn_hello_world_smf() -> i64:
+    """Resolve `/sys/apps/hello_world.smf` through the ARM32 fs-exec byte lane."""
+    arm_fs_exec_spawn_path("/sys/apps/hello_world.smf")

@@ -1,0 +1,182 @@
+# Jira curl-shellout adapter specs.
+#
+# Feature: Jira REST v3 via `curl` subprocess - argv builders, response
+#          splitter, status-code mapping, ADF wrapper, JiraClient auth header.
+# Category: App | ITF | adapter_jira_curl
+# Status: Implementation
+#
+# These specs cover pure functions only (no live HTTP calls):
+#   1. JiraClient.auth_header() round-trips via base64 of "email:token"
+#   2. _build_curl_argv_get/_post/_download argv shape
+#   3. The brace-escape regression: "%{http_code}" must appear *literally*
+#      in the argv (this is the bug Agent F hit on issue #10).
+#   4. _split_response parses the trailing http_code line correctly.
+#   5. _status_message + _status_ok map HTTP statuses to error text.
+#   6. _adf_doc wraps plain text into a minimal Atlassian Document Format obj.
+
+use app.itf.adapter_jira_curl.{
+    JiraClient,
+    _build_curl_argv_get, _build_curl_argv_post, _build_curl_argv_download,
+    _split_response, _parse_status,
+    _status_message, _status_ok,
+    _adf_doc, _json_escape,
+    _normalize_base,
+}
+
+
+describe "Jira curl adapter":
+
+    context "JiraClient.auth_header":
+
+        it "produces a Basic <base64> header for known vector":
+            # base64("alice@example.com:tok-123") = YWxpY2VAZXhhbXBsZS5jb206dG9rLTEyMw==
+            # Verified independently with `printf '...' | base64`.
+            val client = JiraClient(
+                base_url: "https://acme.atlassian.net",
+                email: "alice@example.com",
+                api_token: "tok-123",
+                curl_path: "curl",
+            )
+            val header = client.auth_header()
+            expect(header.starts_with("Basic ")).to_equal(true)
+            expect(header).to_equal("Basic YWxpY2VAZXhhbXBsZS5jb206dG9rLTEyMw==")
+
+        it "returns empty string when email is missing":
+            val client = JiraClient(base_url: "https://x", email: "", api_token: "tok", curl_path: "curl")
+            expect(client.auth_header()).to_equal("")
+
+        it "returns empty string when token is missing":
+            val client = JiraClient(base_url: "https://x", email: "a@b", api_token: "", curl_path: "curl")
+            expect(client.auth_header()).to_equal("")
+
+    context "argv builders":
+
+        it "GET argv contains literal %\{http_code\} write-out token":
+            # Brace-escape regression check: the argv must carry the
+            # literal `%{http_code}` so curl emits the numeric status.
+            # If a future change silently interpolates the braces or
+            # strips the backslashes, this test catches it.
+            val argv = _build_curl_argv_get("Basic xyz", "https://x/rest/api/3/issue/X-1")
+            expect(argv.contains("\n%\{http_code\}")).to_equal(true)
+
+        it "GET argv carries Authorization and Accept headers":
+            val argv = _build_curl_argv_get("Basic xyz", "https://x/rest/api/3/issue/X-1")
+            expect(argv.contains("Authorization: Basic xyz")).to_equal(true)
+            expect(argv.contains("Accept: application/json")).to_equal(true)
+            expect(argv[argv.len() - 1]).to_equal("https://x/rest/api/3/issue/X-1")
+
+        it "POST argv adds -X POST and Content-Type":
+            val argv = _build_curl_argv_post("Basic z", "https://x/rest/api/3/search/jql", "{\"jql\":\"k\"}")
+            expect(argv.contains("-X")).to_equal(true)
+            expect(argv.contains("POST")).to_equal(true)
+            expect(argv.contains("Content-Type: application/json")).to_equal(true)
+            expect(argv.contains("{\"jql\":\"k\"}")).to_equal(true)
+
+        it "download argv uses -L -o and writes status without leading newline":
+            val argv = _build_curl_argv_download("Basic z", "https://x/rest/api/3/attachment/content/123", "/tmp/out.bin")
+            expect(argv.contains("-L")).to_equal(true)
+            expect(argv.contains("-o")).to_equal(true)
+            expect(argv.contains("/tmp/out.bin")).to_equal(true)
+            # download argv intentionally omits the "\n" prefix
+            expect(argv.contains("%\{http_code\}")).to_equal(true)
+
+    context "_split_response":
+
+        it "splits body and trailing 200 status":
+            val (body, code) = _split_response("{\"ok\":true}\n200")
+            expect(body).to_equal("{\"ok\":true}")
+            expect(code).to_equal(200)
+
+        it "handles 404 status":
+            val (_b, code) = _split_response("\n404")
+            expect(code).to_equal(404)
+
+        it "returns (\"\", 0) on empty stdout":
+            val (b, code) = _split_response("")
+            expect(b).to_equal("")
+            expect(code).to_equal(0)
+
+        it "returns (whole, 0) on no-newline non-numeric output":
+            val (b, code) = _split_response("garbage")
+            expect(b).to_equal("garbage")
+            expect(code).to_equal(0)
+
+        it "treats no-newline 3-digit-only as just a status":
+            val (b, code) = _split_response("204")
+            expect(b).to_equal("")
+            expect(code).to_equal(204)
+
+    context "_parse_status":
+
+        it "parses 200":
+            expect(_parse_status("200")).to_equal(200)
+
+        it "rejects non-digits":
+            expect(_parse_status("abc")).to_equal(0)
+
+        it "rejects too-short input":
+            expect(_parse_status("12")).to_equal(0)
+
+    context "_status_ok":
+
+        it "200 is ok":
+            expect(_status_ok(200)).to_equal(true)
+
+        it "299 is ok":
+            expect(_status_ok(299)).to_equal(true)
+
+        it "300 is not ok":
+            expect(_status_ok(300)).to_equal(false)
+
+        it "401 is not ok":
+            expect(_status_ok(401)).to_equal(false)
+
+    context "_status_message":
+
+        it "401 -> auth required":
+            val msg = _status_message(401, "")
+            expect(msg.contains("authentication required")).to_equal(true)
+
+        it "404 -> not found":
+            expect(_status_message(404, "").contains("not found")).to_equal(true)
+
+        it "429 -> rate limited":
+            expect(_status_message(429, "").contains("rate limited")).to_equal(true)
+
+        it "500 -> server error":
+            expect(_status_message(500, "boom").contains("server error")).to_equal(true)
+
+        it "0 -> transport error":
+            expect(_status_message(0, "no route").contains("transport error")).to_equal(true)
+
+    context "_adf_doc":
+
+        it "wraps plain text in an ADF document with type doc":
+            val adf = _adf_doc("hello")
+            expect(adf.contains("\"type\":\"doc\"")).to_equal(true)
+            expect(adf.contains("\"version\":1")).to_equal(true)
+            expect(adf.contains("\"type\":\"paragraph\"")).to_equal(true)
+            expect(adf.contains("\"text\":\"hello\"")).to_equal(true)
+
+        it "escapes embedded quotes":
+            val adf = _adf_doc("she said \"hi\"")
+            expect(adf.contains("\\\"hi\\\"")).to_equal(true)
+
+    context "_json_escape":
+
+        it "escapes a backslash":
+            expect(_json_escape("a\\b")).to_equal("a\\\\b")
+
+        it "escapes a quote":
+            expect(_json_escape("a\"b")).to_equal("a\\\"b")
+
+        it "escapes a newline":
+            expect(_json_escape("a\nb")).to_equal("a\\nb")
+
+    context "_normalize_base":
+
+        it "leaves a clean URL alone":
+            expect(_normalize_base("https://x.atlassian.net")).to_equal("https://x.atlassian.net")
+
+        it "strips a trailing slash":
+            expect(_normalize_base("https://x.atlassian.net/")).to_equal("https://x.atlassian.net")

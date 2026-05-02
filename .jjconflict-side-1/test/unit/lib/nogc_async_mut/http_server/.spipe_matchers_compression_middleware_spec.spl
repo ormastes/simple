@@ -1,0 +1,133 @@
+# Specification for src/lib/nogc_async_mut/http_server/compression_middleware.spl
+#
+# Verifies that compression_middleware reads Accept-Encoding from the request
+# headers (case-insensitively) and forwards to compress_response_for.
+
+use std.spipe.*
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+use std.nogc_async_mut.http_server.compression_middleware.{compression_middleware}
+
+# ---------------------------------------------------------------------------
+# Payload helpers — built at module level to avoid the it-block var-mutation
+# footgun (rebinds inside while loops don't persist across iterations under
+# interpreter mode).
+# ---------------------------------------------------------------------------
+
+fn _make_large_payload_bytes() -> [u8]:
+    # 300 bytes — above COMPRESSION_MIN_BODY_BYTES (256) so compression fires.
+    val unit: [u8] = [
+        0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8, 0x67u8, 0x68u8,
+        0x69u8, 0x6au8
+    ]
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < 30:
+        bytes = bytes + unit
+        i = i + 1
+    bytes
+
+fn _make_small_payload_bytes() -> [u8]:
+    # 10 bytes — below COMPRESSION_MIN_BODY_BYTES (256) so compression is skipped.
+    [0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8, 0x67u8, 0x68u8, 0x69u8, 0x6au8]
+
+fn _resp_with_bytes(body: [u8]) -> HttpResponseData:
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [("Content-Type", "text/plain")],
+        body: "",
+        body_bytes: body,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _req_with_header(name: text, value: text) -> HttpRequestData:
+    HttpRequestData(
+        method: "GET",
+        path: "/",
+        query: "",
+        version: "HTTP/1.1",
+        headers: [(name, value)],
+        body: "",
+        params: {},
+        peer_addr: "127.0.0.1"
+    )
+
+fn _req_no_headers() -> HttpRequestData:
+    HttpRequestData(
+        method: "GET",
+        path: "/",
+        query: "",
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: {},
+        peer_addr: "127.0.0.1"
+    )
+
+fn _find_content_encoding(headers: [(text, text)]) -> text:
+    for h in headers:
+        if h.0.lower() == "content-encoding":
+            return h.1
+    ""
+
+# ---------------------------------------------------------------------------
+# Specs
+# ---------------------------------------------------------------------------
+
+describe "compression_middleware":
+
+    it "compresses response with zstd when Accept-Encoding prefers zstd,gzip":
+        val req = _req_with_header("Accept-Encoding", "zstd, gzip")
+        val resp = _resp_with_bytes(_make_large_payload_bytes())
+        val out = compression_middleware(req, resp)
+        val enc = _find_content_encoding(out.headers)
+        expect enc == "zstd"
+        expect out.body_bytes.len() > 0 == true
+
+    it "compresses response with gzip when only gzip is in Accept-Encoding":
+        val req = _req_with_header("Accept-Encoding", "gzip")
+        val resp = _resp_with_bytes(_make_large_payload_bytes())
+        val out = compression_middleware(req, resp)
+        val enc = _find_content_encoding(out.headers)
+        expect enc == "gzip"
+        expect out.body_bytes.len() > 0 == true
+
+    it "returns response unchanged when Accept-Encoding header is absent":
+        val req = _req_no_headers()
+        val resp = _resp_with_bytes(_make_large_payload_bytes())
+        val out = compression_middleware(req, resp)
+        val enc = _find_content_encoding(out.headers)
+        expect enc == ""
+        expect out.body_bytes.len() == resp.body_bytes.len()
+
+    it "returns response unchanged when Accept-Encoding requests unsupported br only":
+        val req = _req_with_header("Accept-Encoding", "br")
+        val resp = _resp_with_bytes(_make_large_payload_bytes())
+        val out = compression_middleware(req, resp)
+        val enc = _find_content_encoding(out.headers)
+        expect enc == ""
+
+    it "returns response unchanged when body is smaller than compression threshold":
+        val req = _req_with_header("Accept-Encoding", "zstd, gzip")
+        val resp = _resp_with_bytes(_make_small_payload_bytes())
+        val out = compression_middleware(req, resp)
+        val enc = _find_content_encoding(out.headers)
+        expect enc == ""
+        expect out.body_bytes.len() == _make_small_payload_bytes().len()
+
+    it "matches Accept-Encoding header case-insensitively — lowercase accept-encoding":
+        val req = _req_with_header("accept-encoding", "gzip")
+        val resp = _resp_with_bytes(_make_large_payload_bytes())
+        val out = compression_middleware(req, resp)
+        val enc = _find_content_encoding(out.headers)
+        expect enc == "gzip"
+
+    it "matches Accept-Encoding header case-insensitively — uppercase ACCEPT-ENCODING":
+        val req = _req_with_header("ACCEPT-ENCODING", "gzip")
+        val resp = _resp_with_bytes(_make_large_payload_bytes())
+        val out = compression_middleware(req, resp)
+        val enc = _find_content_encoding(out.headers)
+        expect enc == "gzip"

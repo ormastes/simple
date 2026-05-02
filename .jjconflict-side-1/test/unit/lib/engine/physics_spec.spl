@@ -1,0 +1,135 @@
+"""
+Engine Physics — PhysicsWorld2D public API tests
+
+Tests physics world creation, body management, stepping, force/impulse
+application, transform queries, and body removal. Uses the pure Simple
+physics engine via PhysicsWorld2D.
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.engine.ids.{NodeId, RawHandle}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.units.{Seconds}
+use std.nogc_sync_mut.engine.physics.types.{PhysicsConfig, default_physics_config}
+use std.nogc_sync_mut.engine.physics.world.{PhysicsWorld2D}
+
+describe "PhysicsWorld2D":
+    it "create with default config":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        expect(world.bodies.len()).to_equal(0)
+        expect(world.colliders.len()).to_equal(0)
+        world.destroy()
+
+    it "add_dynamic_body and get_position returns initial position":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        val node_id = NodeId(raw: RawHandle.new(0, 1))
+        val ok = world.add_dynamic_body(node_id, 10.0, 20.0)
+        expect(ok).to_equal(true)
+        expect(world.bodies.len()).to_equal(1)
+        val pos = world.get_position(node_id)
+        val px_i = pos.x * 100.0
+        val py_i = pos.y * 100.0
+        expect(px_i).to_be_greater_than(999.0)
+        expect(px_i).to_be_less_than(1001.0)
+        expect(py_i).to_be_greater_than(1999.0)
+        expect(py_i).to_be_less_than(2001.0)
+        world.destroy()
+
+    it "add_static_body":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        val node_id = NodeId(raw: RawHandle.new(1, 1))
+        val ok = world.add_static_body(node_id, 0.0, -5.0)
+        expect(ok).to_equal(true)
+        expect(world.bodies.len()).to_equal(1)
+        world.destroy()
+
+    it "step does not crash":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        val node_id = NodeId(raw: RawHandle.new(0, 1))
+        val ok = world.add_dynamic_body(node_id, 0.0, 10.0)
+        expect(ok).to_equal(true)
+        # Step should not panic
+        world.step(Seconds(value: 0.016666))
+        world.step(Seconds(value: 0.016666))
+        world.destroy()
+
+    it "apply_force changes velocity":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        val node_id = NodeId(raw: RawHandle.new(0, 1))
+        val ok = world.add_dynamic_body(node_id, 0.0, 0.0)
+        expect(ok).to_equal(true)
+        val vel_before = world.get_velocity(node_id)
+        val vbx_i = vel_before.x * 1000.0
+        expect(vbx_i).to_be_greater_than(-1.0)
+        expect(vbx_i).to_be_less_than(1.0)
+        # Apply horizontal force and step
+        val force_ok = world.apply_force(node_id, Vec2(x: 1000.0, y: 0.0))
+        expect(force_ok).to_equal(true)
+        world.step(Seconds(value: 0.016666))
+        world.step(Seconds(value: 0.016666))
+        val vel_after = world.get_velocity(node_id)
+        # Velocity x should have increased from the force
+        expect(vel_after.x).to_be_greater_than(0.0)
+        world.destroy()
+
+    it "apply_impulse changes position after step":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        val node_id = NodeId(raw: RawHandle.new(0, 1))
+        val ok = world.add_dynamic_body(node_id, 0.0, 0.0)
+        expect(ok).to_equal(true)
+        val pos_before = world.get_position(node_id)
+        # Apply a strong horizontal impulse
+        val impulse_ok = world.apply_impulse(node_id, Vec2(x: 50.0, y: 0.0))
+        expect(impulse_ok).to_equal(true)
+        # Step multiple times to let the body move
+        world.step(Seconds(value: 0.016666))
+        world.step(Seconds(value: 0.016666))
+        world.step(Seconds(value: 0.016666))
+        val pos_after = world.get_position(node_id)
+        # X position should have increased
+        expect(pos_after.x).to_be_greater_than(pos_before.x)
+        world.destroy()
+
+    it "get_all_dynamic_transforms returns entries":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        val n1 = NodeId(raw: RawHandle.new(0, 1))
+        val n2 = NodeId(raw: RawHandle.new(1, 1))
+        val ok1 = world.add_dynamic_body(n1, 0.0, 0.0)
+        val ok2 = world.add_dynamic_body(n2, 5.0, 5.0)
+        expect(ok1).to_equal(true)
+        expect(ok2).to_equal(true)
+        val transforms = world.get_all_dynamic_transforms()
+        expect(transforms.len()).to_equal(2)
+        world.destroy()
+
+    it "remove_body removes the body":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        val node_id = NodeId(raw: RawHandle.new(0, 1))
+        val ok = world.add_dynamic_body(node_id, 0.0, 0.0)
+        expect(ok).to_equal(true)
+        expect(world.bodies.len()).to_equal(1)
+        val removed = world.remove_body(node_id)
+        expect(removed).to_equal(true)
+        expect(world.bodies.len()).to_equal(0)
+        world.destroy()
+
+    it "get_position returns zero for unknown node":
+        val config = default_physics_config()
+        var world = PhysicsWorld2D.create(config)
+        val unknown = NodeId(raw: RawHandle.new(99, 1))
+        val pos = world.get_position(unknown)
+        val px_i = pos.x * 1000.0
+        val py_i = pos.y * 1000.0
+        expect(px_i).to_be_greater_than(-1.0)
+        expect(px_i).to_be_less_than(1.0)
+        expect(py_i).to_be_greater_than(-1.0)
+        expect(py_i).to_be_less_than(1.0)
+        world.destroy()

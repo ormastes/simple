@@ -1,0 +1,386 @@
+# Chromium Shell Application (V3 simple_browser shell — M1)
+#
+# Owns one winit window and presents pixels produced by the in-tree
+# `BrowserCompositorBackend`. The compositor renders a single "Taskbar"
+# surface so the M1 acceptance check ("opens a window showing the existing
+# taskbar") is visible without depending on the WM IPC service that the
+# full `DesktopShell` requires.
+#
+# Mirrors `src/os/hosted/hosted_entry.spl` but routes the pixel path
+# through `BrowserCompositorBackend` + `ChromiumBackend.present_to_window()`
+# instead of `HostedCompositorBackend`'s native winit pixel buffer.
+#
+# M1 scope:
+#   - Single window, fixed size, no interactivity required.
+#   - Clean shutdown on the winit Close event.
+#   - No new FFI; reuses existing `rt_winit_*` surface.
+
+use app.ui.chromium.backend.{ChromiumBackend}
+use app.ui.chromium.engine_merge.{ChromiumEngine, engine_merge_root, engine_merge_panel}
+use app.ui.chromium.event_bridge.{ChromiumEventBridge}
+use app.ui.chromium.tab_manager.{TabManager}
+use common.ui.widget.{UIEvent}
+use os.compositor.compositor.{Compositor}
+use os.compositor.hosted_input_backend.{HostedInputBackend}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_add_child}
+
+extern fn rt_winit_event_loop_new() -> i64
+extern fn rt_winit_window_new(el: i64, w: i64, h: i64, title: text) -> i64
+extern fn rt_winit_event_loop_poll_events(el: i64, max: i64) -> i64
+extern fn rt_winit_event_get_type(ev: i64) -> i64
+extern fn rt_winit_event_free(ev: i64)
+extern fn rt_winit_window_free(win: i64)
+extern fn rt_winit_event_loop_free(el: i64)
+extern fn rt_thread_sleep(ms: i64)
+
+val EVT_CLOSE: i64 = 3
+val CHROMIUM_WINDOW_TITLE: text = "Simple Browser (V3 chromium shell)"
+val CHROMIUM_WINDOW_WIDTH: i64 = 1024
+val CHROMIUM_WINDOW_HEIGHT: i64 = 640
+
+# ============================================================================
+# M7 Interactivity — tab hotkey routing + click hit-testing
+# ============================================================================
+#
+# These are pure helpers so the routing logic is testable without a winit
+# event loop. `chromium_hotkey_action` maps a (raw-winit-keycode,
+# modifier-bitmask) pair to a symbolic tab action; `apply_hotkey_action`
+# mutates a `TabManager` according to that symbol. The split keeps the
+# decision table side-effect free so `interactivity_spec.spl` can assert
+# individual cases directly.
+#
+# Keybindings (mirrors Chrome / Firefox):
+#   Ctrl+T       -> "new_tab"      -> TabManager.new_tab("about:blank")
+#   Ctrl+W       -> "close_tab"    -> TabManager.close_tab(active_index)
+#   Ctrl+Tab     -> "next_tab"     -> switch_to((active + 1) % count)
+#   Ctrl+Shift+Tab -> "prev_tab"   -> switch_to((active - 1 + count) % count)
+#
+# The modifier bitmask matches `event_bridge`:
+#   0x01 = Shift, 0x02 = Ctrl, 0x04 = Alt, 0x08 = Meta/Super.
+#
+# The tab strip is laid out across the top `TAB_STRIP_HEIGHT` pixels of
+# the host window; `hit_test_tab_strip` returns the tab index under a
+# (window-space) click, or -1 if the click falls outside the strip.
+
+val TAB_STRIP_HEIGHT: i32 = 28
+
+val CHROMIUM_KEY_T: i64 = 84
+val CHROMIUM_KEY_W: i64 = 87
+val CHROMIUM_KEY_TAB: i64 = 9
+
+fn chromium_hotkey_action(keycode: i64, modifiers: i32) -> text:
+    """Map a raw (keycode, modifier-bitmask) pair to an M7 tab action.
+
+    Returns `"none"` when no binding matches — callers fall through to
+    the normal `event_bridge` translation in that case.
+    """
+    val has_shift = modifiers % 2 == 1
+    val has_ctrl = (modifiers / 2) % 2 == 1
+    if not has_ctrl:
+        return "none"
+    if keycode == CHROMIUM_KEY_T:
+        return "new_tab"
+    if keycode == CHROMIUM_KEY_W:
+        return "close_tab"
+    if keycode == CHROMIUM_KEY_TAB:
+        if has_shift:
+            return "prev_tab"
+        return "next_tab"
+    return "none"
+
+fn apply_hotkey_action(action: text, mgr: TabManager) -> bool:
+    """Apply an `chromium_hotkey_action` result to a `TabManager`.
+
+    Returns true if the manager state changed. `"none"` is a no-op and
+    returns false so the caller knows to run the normal event path.
+    """
+    match action:
+        "new_tab" =>
+            val _id = mgr.new_tab("about:blank")
+            return true
+        "close_tab" =>
+            if mgr.is_empty():
+                return false
+            return mgr.close_tab(mgr.active_index_of())
+        "next_tab" =>
+            val n = mgr.count()
+            if n <= 1:
+                return false
+            val cur = mgr.active_index_of()
+            val nxt: i32 = if cur + 1 >= n: 0 else: cur + 1
+            return mgr.switch_to(nxt)
+        "prev_tab" =>
+            val n = mgr.count()
+            if n <= 1:
+                return false
+            val cur = mgr.active_index_of()
+            val prv: i32 = if cur - 1 < 0: n - 1 else: cur - 1
+            return mgr.switch_to(prv)
+        _ =>
+            return false
+
+fn hit_test_tab_strip(mgr: TabManager, x: i32, y: i32, strip_width: i32) -> i32:
+    """Return the tab index under a (window-space) click point.
+
+    The tab strip is drawn across the top `TAB_STRIP_HEIGHT` pixels of the
+    window with each tab occupying `strip_width / count` horizontal
+    pixels. Returns -1 if the click falls below the strip, outside the
+    horizontal range, or the manager is empty.
+    """
+    if y < 0 or y >= TAB_STRIP_HEIGHT:
+        return -1
+    if x < 0 or x >= strip_width:
+        return -1
+    val n = mgr.count()
+    if n <= 0:
+        return -1
+    val slot: i32 = strip_width / n
+    if slot <= 0:
+        return -1
+    var idx: i32 = x / slot
+    if idx >= n:
+        idx = n - 1
+    return idx
+
+# ============================================================================
+# ChromiumApp
+# ============================================================================
+
+class ChromiumApp:
+    """V3 simple_browser shell application.
+
+    Owns the winit event loop, the host window, the compositor (driven by
+    the in-tree browser engine pixel buffer), and a render loop that
+    pumps events and presents frames.
+    """
+    event_loop: i64
+    window: i64
+    backend: ChromiumBackend
+    compositor: Compositor
+    input_bridge: ChromiumEventBridge
+    engine: ChromiumEngine
+    tab_manager: TabManager
+    running: bool
+
+impl ChromiumApp:
+
+    static fn new() -> Result<ChromiumApp, text>:
+        """Create a chromium shell app with one winit window and a
+        compositor backed by `BrowserCompositorBackend`.
+        """
+        val w: i64 = CHROMIUM_WINDOW_WIDTH
+        val h: i64 = CHROMIUM_WINDOW_HEIGHT
+
+        val event_loop = rt_winit_event_loop_new()
+        if event_loop == 0:
+            return Err("failed to create winit event loop")
+
+        val window = rt_winit_window_new(event_loop, w, h, CHROMIUM_WINDOW_TITLE)
+        if window == 0:
+            rt_winit_event_loop_free(event_loop)
+            return Err("failed to create chromium host window")
+
+        val w32: i32 = w.to_i32()
+        val h32: i32 = h.to_i32()
+        val backend = ChromiumBackend.new(window, w32, h32)
+        val input = HostedInputBackend.create(event_loop)
+
+        # Drive the compositor through the BrowserCompositorBackend so
+        # all rendering goes through the in-tree Simple browser engine
+        # pixel pipeline (M1 integration point per the milestone doc).
+        var compositor = Compositor.with_backends(
+            backend.display_backend(),
+            input,
+            w32,
+            h32
+        )
+
+        # Seed a single visible "Taskbar" surface so the M1 acceptance
+        # check ("opens a window showing the existing taskbar") is met
+        # without pulling in the full DesktopShell + WM IPC dependency.
+        # This mirrors `src/os/hosted/hosted_entry.spl`, which seeds
+        # placeholder windows for the same reason.
+        compositor.create_window("Taskbar", 0, h32 - 32, w32, 32)
+
+        # M4: build the merged browser engine entry point. All DOM /
+        # layout / paint work from here on goes through the canonical
+        # `std.gc_async_mut.gpu.browser_engine` path per ADR-002. The
+        # `ChromiumEngine` wrapper is the only place the shell touches
+        # engine internals, so M7 (WebGPU engine2d) can swap backends
+        # without editing app.spl.
+        val engine = ChromiumEngine.new(w32, h32)
+
+        # Warm the canonical pipeline once at startup so a crash in the
+        # merged engine surface the linker wired would show up here,
+        # not on the first user interaction. The resulting scene is
+        # discarded — the compositor owns the real frame buffer.
+        var warm_root: BeDomNode = engine_merge_root("#1E1E1EFF")
+        val warm_panel = engine_merge_panel(
+            w32.to_text() + "px",
+            "32px",
+            "#2D2D2DFF"
+        )
+        be_dom_add_child(warm_root, warm_panel)
+        val _warm_scene = engine.render_dom_to_scene(warm_root)
+
+        # M7: seed a TabManager with a single "about:blank" tab so the
+        # shell opens with one focused tab — matching Chrome / Firefox
+        # cold-start behaviour. Subsequent tabs are created via the
+        # Ctrl+T hotkey routed through `chromium_hotkey_action`.
+        var tab_manager = TabManager.new()
+        val _initial_tab = tab_manager.new_tab("about:blank")
+
+        return Ok(ChromiumApp(
+            event_loop: event_loop,
+            window: window,
+            backend: backend,
+            compositor: compositor,
+            input_bridge: ChromiumEventBridge.new(),
+            engine: engine,
+            tab_manager: tab_manager,
+            running: true
+        ))
+
+    me render_active_tab():
+        """M6 wire-up: route the active tab's dirty flag through the compositor.
+
+        On each frame the compositor renders only when the active tab is
+        marked dirty (or no tabs are open, in which case the last frame
+        remains on screen). After the compositor consumes the frame the
+        tab's dirty flag is cleared so subsequent frames are skipped until
+        the engine or an event marks it dirty again.
+
+        Offscreen (inactive) tabs are not rendered — their pixel buffers
+        are preserved but the compositor is not asked to process them.
+        """
+        if self.tab_manager.is_empty():
+            self.compositor.render_all()
+            self.backend.present_to_window()
+            return
+        val tab = self.tab_manager.active_tab()
+        if tab.dirty:
+            self.compositor.render_all()
+            self.backend.present_to_window()
+            self.tab_manager.active_tab().clear_dirty()
+
+    me run():
+        """Render-and-present loop.
+
+        M1 has no interactivity requirement, but we still pump the winit
+        event queue so the user can close the window cleanly. Each
+        iteration:
+          1. drain pending winit events; quit on Close
+          2. render_active_tab()      -> compositor only if active tab dirty
+          3. backend.present_to_window() -> blits to the host window
+          4. sleep ~16ms (~60 FPS cap)
+
+        M6 wire-up: the render path now goes through `render_active_tab()`
+        so each frame respects the active tab's dirty flag. Offscreen tabs
+        are skipped; the compositor only runs when there is work to do.
+        """
+        # Initial frame so the window is not blank before the first event.
+        # The initial tab created in `new()` starts dirty, so this is safe.
+        self.render_active_tab()
+
+        while self.running:
+            var ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
+            while ev != 0:
+                val event_type = rt_winit_event_get_type(ev)
+                # M2: feed the raw winit event type through the chromium
+                # event bridge so modifier-tracked UIEvents are produced
+                # even for events the compositor's HostedInputBackend
+                # does not poll (window close, mouse wheel).
+                #
+                # M7: after the bridge has updated its modifier state we
+                # also consult `chromium_hotkey_action` for tab hotkeys
+                # (Ctrl+T / Ctrl+W / Ctrl+Tab). Hotkeys short-circuit the
+                # normal UIEvent delivery so the tab-strip state never
+                # goes out of sync with the shell's modifier bridge.
+                val translated = self.input_bridge.on_event(
+                    event_type,
+                    0,       # keycode: populated by HostedInputBackend
+                    false,   # pressed
+                    0, 0,    # x, y
+                    0        # delta_y
+                )
+                if val ui_event = translated:
+                    self.handle_ui_event(ui_event)
+                if event_type == EVT_CLOSE:
+                    self.running = false
+                rt_winit_event_free(ev)
+                if not self.running:
+                    break
+                ev = rt_winit_event_loop_poll_events(self.event_loop, 100)
+
+            if self.running:
+                self.render_active_tab()
+                rt_thread_sleep(16)
+
+        self.shutdown()
+
+    me handle_ui_event(event: UIEvent):
+        """Route a translated UIEvent into the compositor / shell.
+
+        M2 observes `UIEvent.Quit` (close window). M7 also routes
+        `UIEvent.TouchPress` through the tab-strip hit tester so clicks
+        on the tab strip switch tabs, and forwards keyboard events to
+        `dispatch_key_ui_event` so the translated Ctrl+Q path keeps
+        working. The compositor's own `HostedInputBackend` still
+        handles in-content keyboard / mouse dispatch unchanged.
+        """
+        match event:
+            UIEvent.Quit =>
+                self.running = false
+            UIEvent.TouchPress(x, y) =>
+                val _hit = self.dispatch_click(x, y)
+            _ =>
+                # Other variants are already delivered through the
+                # compositor's hosted input backend for M2 / M7.
+                val _ignored = 0
+
+    me dispatch_raw_key(keycode: i64, pressed: bool) -> bool:
+        """M7 raw-key dispatch: runs the hotkey table before the normal
+        `event_bridge.on_key` translation.
+
+        Updates the bridge's modifier state first so a Ctrl-down that
+        arrives in the same poll cycle as the Ctrl+T release edge is
+        observed in the hotkey decision. Returns true when a hotkey
+        fired and the tab manager mutated — in that case the caller
+        should *not* forward the event to the normal UI path, to avoid
+        the compositor seeing a stray `t` KeyPress.
+
+        Release edges short-circuit after the modifier update so the
+        hotkey fires exactly once per press.
+        """
+        self.input_bridge.update_modifier(keycode, pressed)
+        if not pressed:
+            return false
+        val mods = self.input_bridge.modifiers_mask()
+        val action = chromium_hotkey_action(keycode, mods)
+        if action == "none":
+            return false
+        return apply_hotkey_action(action, self.tab_manager)
+
+    me dispatch_click(x: i32, y: i32) -> i32:
+        """M7 click routing: hit-test the tab strip and focus the hit
+        tab if any.
+
+        Returns the index of the tab that was focused, or -1 if the
+        click fell outside the tab strip (in which case the click is
+        left for the compositor / DOM hit-testing path). The strip
+        width is taken from the host window width so later milestones
+        can relayout the strip without touching this method.
+        """
+        val idx = hit_test_tab_strip(
+            self.tab_manager, x, y, CHROMIUM_WINDOW_WIDTH.to_i32()
+        )
+        if idx < 0:
+            return -1
+        val _ok = self.tab_manager.switch_to(idx)
+        return idx
+
+    me shutdown():
+        """Clean window teardown — no orphan threads (M1 acceptance)."""
+        self.compositor.stop()
+        rt_winit_window_free(self.window)
+        rt_winit_event_loop_free(self.event_loop)

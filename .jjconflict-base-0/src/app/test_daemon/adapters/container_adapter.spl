@@ -1,0 +1,264 @@
+# Container Adapter — Docker/Podman session adapter for test daemon
+#
+# Manages container lifecycle for running tests inside Docker or Podman
+# containers. Auto-detects which runtime is available. Uses `docker create`
+# + `docker start` (NOT `docker run --rm`) so containers persist across
+# reset/health-check cycles.
+
+use app.test_daemon.session_types.{
+    SessionKey, SessionDescriptor, SessionLease, TestSessionMeta,
+    SESSION_KIND_CONTAINER, LEASE_IDLE, LEASE_ACTIVE,
+    REUSE_EXCLUSIVE_REUSED, REUSE_FRESH_PER_TEST,
+    RESET_RECREATE, RESET_SOFT, RESET_HARD,
+    session_key_to_id, session_lease_new
+}
+use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
+use app.test_daemon.types.{TestResult, TRESP_COMPLETED, TRESP_FAILED}
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_hash_text(s: text) -> i64
+extern fn rt_shell_exec(cmd: text) -> text
+extern fn rt_shell_exit_code() -> i64
+
+# ============================================================================
+# Container Adapter
+# ============================================================================
+
+class ContainerAdapter:
+    base: SessionAdapter
+    runtime: text          # "docker" or "podman"
+    default_image: text    # e.g. "simple-test:latest"
+
+fn detect_container_runtime() -> text:
+    """
+    Detects which container runtime is available on the system.
+    Prefers docker over podman. Returns "none" if neither is found.
+    """
+    rt_shell_exec("docker --version 2>/dev/null")
+    if rt_shell_exit_code() == 0:
+        return "docker"
+    rt_shell_exec("podman --version 2>/dev/null")
+    if rt_shell_exit_code() == 0:
+        return "podman"
+    "none"
+
+fn container_adapter_new() -> ContainerAdapter:
+    val runtime = detect_container_runtime()
+    ContainerAdapter(
+        base: session_adapter_new(SESSION_KIND_CONTAINER, "container"),
+        runtime: runtime,
+        default_image: "simple-test:latest"
+    )
+
+# ============================================================================
+# Impl
+# ============================================================================
+
+impl ContainerAdapter:
+    fn can_handle(meta: TestSessionMeta) -> bool:
+        """
+        Returns true if this adapter handles the given test metadata.
+        Only handles SESSION_KIND_CONTAINER and requires a working runtime.
+        """
+        meta.session_kind == SESSION_KIND_CONTAINER and self.runtime != "none"
+
+    fn session_key(meta: TestSessionMeta) -> SessionKey:
+        """
+        Computes a session key from test metadata. The key is derived from
+        the container image (from meta.target or default_image) and runtime.
+        """
+        val image = if meta.target != "": meta.target else: self.default_image
+        val artifact_hash = if meta.artifact != "":
+            "{rt_hash_text(meta.artifact)}"
+        else:
+            "{rt_hash_text(image)}"
+        SessionKey(
+            kind: SESSION_KIND_CONTAINER,
+            target: "{self.runtime}:{image}",
+            artifact_hash: artifact_hash,
+            env_profile: "",
+            reuse_mode: meta.reuse_mode,
+            reset_policy: meta.reset_policy
+        )
+
+    me start(desc: SessionDescriptor) -> SessionLease:
+        """
+        Starts a new container session.
+        Uses `docker create` to create the container, then `docker start`
+        to start it. This two-step approach lets us manage the lifecycle
+        (restart, inspect, rm) without losing the container on exit.
+        """
+        val rt = self.runtime
+        if rt == "none":
+            return session_lease_new(desc.key)
+
+        val image = desc.key.target
+        val session_id = session_key_to_id(desc.key)
+        val container_name = "simple_test_{session_id}"
+
+        # Extract image from target (format: "runtime:image")
+        val actual_image = if image.contains(":"):
+            val parts = image.split(":")
+            # rejoin everything after the first colon (handles image:tag)
+            var img = ""
+            var i = 1
+            while i < parts.len():
+                if i > 1:
+                    img = "{img}:"
+                img = "{img}{parts[i]}"
+                i = i + 1
+            img
+        else:
+            self.default_image
+
+        # Build create command with volume mount for project
+        val create_cmd = "{rt} create --name {container_name} -v .:/workspace -w /workspace {actual_image} sleep infinity"
+        rt_shell_exec(create_cmd)
+        val create_exit = rt_shell_exit_code()
+
+        if create_exit != 0:
+            # Container may already exist from a previous run — remove and retry
+            rt_shell_exec("{rt} rm -f {container_name} 2>/dev/null")
+            rt_shell_exec(create_cmd)
+            if rt_shell_exit_code() != 0:
+                return session_lease_new(desc.key)
+
+        # Start the container
+        rt_shell_exec("{rt} start {container_name}")
+        if rt_shell_exit_code() != 0:
+            rt_shell_exec("{rt} rm -f {container_name} 2>/dev/null")
+            return session_lease_new(desc.key)
+
+        # Get container PID
+        val pid_output = rt_shell_exec("{rt} inspect --format='{{{{.State.Pid}}}}' {container_name} 2>/dev/null").trim()
+        val pid = pid_output.to_i64() ?? 0
+
+        val now = rt_time_now_unix_micros()
+        SessionLease(
+            session_id: container_name,
+            key: desc.key,
+            pid: pid,
+            qmp_socket: "",
+            status: LEASE_ACTIVE,
+            snapshot_name: "",
+            created_at: now,
+            last_used_at: now,
+            test_count: 0
+        )
+
+    fn health(lease: SessionLease) -> bool:
+        """
+        Checks if the container is still running by inspecting its state.
+        """
+        val rt = self.runtime
+        if rt == "none":
+            return false
+        val output = rt_shell_exec("{rt} inspect --format='{{{{.State.Running}}}}' {lease.session_id} 2>/dev/null").trim()
+        output == "true"
+
+    me reset(lease: SessionLease, policy: i64) -> bool:
+        """
+        Resets the container session according to the given policy.
+        - RESET_SOFT / RESET_HARD: restart the container
+        - RESET_RECREATE: remove and recreate from scratch
+        """
+        val rt = self.runtime
+        if rt == "none":
+            return false
+
+        if policy == RESET_SOFT or policy == RESET_HARD:
+            # Restart the running container
+            rt_shell_exec("{rt} restart {lease.session_id}")
+            return rt_shell_exit_code() == 0
+
+        if policy == RESET_RECREATE:
+            # Full teardown and rebuild
+            rt_shell_exec("{rt} rm -f {lease.session_id} 2>/dev/null")
+
+            # Extract image from key target
+            val image = lease.key.target
+            val actual_image = if image.contains(":"):
+                val parts = image.split(":")
+                var img = ""
+                var i = 1
+                while i < parts.len():
+                    if i > 1:
+                        img = "{img}:"
+                    img = "{img}{parts[i]}"
+                    i = i + 1
+                img
+            else:
+                self.default_image
+
+            # Recreate
+            val create_cmd = "{rt} create --name {lease.session_id} -v .:/workspace -w /workspace {actual_image} sleep infinity"
+            rt_shell_exec(create_cmd)
+            if rt_shell_exit_code() != 0:
+                return false
+
+            # Start
+            rt_shell_exec("{rt} start {lease.session_id}")
+            return rt_shell_exit_code() == 0
+
+        false
+
+    me execute(lease: SessionLease, test_path: text, timeout_ms: i64) -> TestResult:
+        """
+        Executes a test inside the container using `docker exec`.
+        Runs `bin/simple test <test_path>` inside the container workspace.
+        """
+        val rt = self.runtime
+        val start_time = rt_time_now_unix_micros()
+
+        if rt == "none":
+            return TestResult(
+                test_path: test_path,
+                status: TRESP_FAILED,
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                duration_ms: 0,
+                output: "no container runtime available",
+                cached: false
+            )
+
+        # Build the exec command with timeout
+        val timeout_sec = timeout_ms / 1000
+        val exec_cmd = "{rt} exec {lease.session_id} timeout {timeout_sec} bin/simple test {test_path}"
+        val output = rt_shell_exec(exec_cmd)
+        val exit_code = rt_shell_exit_code()
+        val end_time = rt_time_now_unix_micros()
+        val duration_ms = (end_time - start_time) / 1000
+
+        if exit_code == 0:
+            TestResult(
+                test_path: test_path,
+                status: TRESP_COMPLETED,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                duration_ms: duration_ms,
+                output: output,
+                cached: false
+            )
+        else:
+            TestResult(
+                test_path: test_path,
+                status: TRESP_FAILED,
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                duration_ms: duration_ms,
+                output: output,
+                cached: false
+            )
+
+    me stop(lease: SessionLease) -> bool:
+        """
+        Stops and removes the container forcefully.
+        """
+        val rt = self.runtime
+        if rt == "none":
+            return false
+        rt_shell_exec("{rt} rm -f {lease.session_id} 2>/dev/null")
+        rt_shell_exit_code() == 0

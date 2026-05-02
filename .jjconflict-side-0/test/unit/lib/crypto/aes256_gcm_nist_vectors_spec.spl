@@ -1,0 +1,294 @@
+# AES-256-GCM NIST SP 800-38D Appendix B Test Vectors
+#
+# Tests aes256_gcm_encrypt / aes256_gcm_decrypt against the four AES-256
+# test cases from NIST SP 800-38D Appendix B (TC13-TC16).
+#
+# TC13: all-zero 32-byte key, all-zero 12-byte IV, empty PT, empty AAD
+# TC14: all-zero 32-byte key, all-zero 12-byte IV, 16-byte zero PT, empty AAD
+# TC15: non-trivial key/IV, 64-byte PT, empty AAD
+# TC16: same key/IV as TC15, 60-byte PT, 20-byte AAD
+#
+# Source: NIST SP 800-38D (Nov 2007), Appendix B
+# Used by TLS_AES_256_GCM_SHA384 cipher suite (RFC 8446 0x1302).
+
+use os.crypto.aes256_gcm.{aes256_gcm_encrypt, aes256_gcm_decrypt, Aes256GcmResult}
+
+# ============================================================================
+# Vector helpers — built at module level to avoid it-block var-mutation footgun
+# (see memory: feedback_it_block_var_mutation.md)
+# ============================================================================
+
+# --- TC13: all-zero 32-byte key, all-zero IV, empty PT, empty AAD ---
+# Key:   0000...0000 (32 bytes)
+# Nonce: 000000000000000000000000
+# PT:    (empty)
+# AAD:   (empty)
+# CT:    (empty)
+# Tag:   530f8afbc74536b9a963b4f1c4cb738b
+
+fn _tc13_key() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _tc13_nonce() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _tc13_expected_tag() -> [u8]:
+    [0x53u8, 0x0fu8, 0x8au8, 0xfbu8, 0xc7u8, 0x45u8, 0x36u8, 0xb9u8,
+     0xa9u8, 0x63u8, 0xb4u8, 0xf1u8, 0xc4u8, 0xcbu8, 0x73u8, 0x8bu8]
+
+# --- TC14: all-zero 32-byte key, all-zero IV, 16-byte zero PT, empty AAD ---
+# CT:    cea7403d4d606b6e074ec5d3baf39d18
+# Tag:   d0d1c8a799996bf0265b98b5d48ab919
+
+fn _tc14_key() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _tc14_nonce() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _tc14_plaintext() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _tc14_expected_ct() -> [u8]:
+    [0xceu8, 0xa7u8, 0x40u8, 0x3du8, 0x4du8, 0x60u8, 0x6bu8, 0x6eu8,
+     0x07u8, 0x4eu8, 0xc5u8, 0xd3u8, 0xbau8, 0xf3u8, 0x9du8, 0x18u8]
+
+fn _tc14_expected_tag() -> [u8]:
+    [0xd0u8, 0xd1u8, 0xc8u8, 0xa7u8, 0x99u8, 0x99u8, 0x6bu8, 0xf0u8,
+     0x26u8, 0x5bu8, 0x98u8, 0xb5u8, 0xd4u8, 0x8au8, 0xb9u8, 0x19u8]
+
+# --- TC15: non-trivial 32-byte key, 64-byte PT, empty AAD ---
+# Key:   feffe9928665731c6d6a8f9467308308 feffe9928665731c6d6a8f9467308308
+# Nonce: cafebabefacedbaddecaf888
+# PT:    d9313225f88406e5a55909c5aff5269a 86a7a9531534f7da2e4c303d8a318a72
+#        1c3c0c95956809532fcf0e2449a6b525 b16aedf5aa0de657ba637b391aafd255
+# CT:    522dc1f099567d07f47f37a32a84427d 643a8cdcbfe5c0c97598a2bd2555d1aa
+#        8cb08e48590dbb3da7b08b1056828838 c5f61e6393ba7a0abcc9f662898015ad
+# Tag:   b094dac5d93471bdec1a502270e3cc6c
+
+fn _tc15_key() -> [u8]:
+    [0xfeu8, 0xffu8, 0xe9u8, 0x92u8, 0x86u8, 0x65u8, 0x73u8, 0x1cu8,
+     0x6du8, 0x6au8, 0x8fu8, 0x94u8, 0x67u8, 0x30u8, 0x83u8, 0x08u8,
+     0xfeu8, 0xffu8, 0xe9u8, 0x92u8, 0x86u8, 0x65u8, 0x73u8, 0x1cu8,
+     0x6du8, 0x6au8, 0x8fu8, 0x94u8, 0x67u8, 0x30u8, 0x83u8, 0x08u8]
+
+fn _tc15_nonce() -> [u8]:
+    [0xcau8, 0xfeu8, 0xbau8, 0xbeu8, 0xfau8, 0xceu8,
+     0xdbu8, 0xadu8, 0xdeu8, 0xcau8, 0xf8u8, 0x88u8]
+
+fn _tc15_plaintext() -> [u8]:
+    [0xd9u8, 0x31u8, 0x32u8, 0x25u8, 0xf8u8, 0x84u8, 0x06u8, 0xe5u8,
+     0xa5u8, 0x59u8, 0x09u8, 0xc5u8, 0xafu8, 0xf5u8, 0x26u8, 0x9au8,
+     0x86u8, 0xa7u8, 0xa9u8, 0x53u8, 0x15u8, 0x34u8, 0xf7u8, 0xdau8,
+     0x2eu8, 0x4cu8, 0x30u8, 0x3du8, 0x8au8, 0x31u8, 0x8au8, 0x72u8,
+     0x1cu8, 0x3cu8, 0x0cu8, 0x95u8, 0x95u8, 0x68u8, 0x09u8, 0x53u8,
+     0x2fu8, 0xcfu8, 0x0eu8, 0x24u8, 0x49u8, 0xa6u8, 0xb5u8, 0x25u8,
+     0xb1u8, 0x6au8, 0xedu8, 0xf5u8, 0xaau8, 0x0du8, 0xe6u8, 0x57u8,
+     0xbau8, 0x63u8, 0x7bu8, 0x39u8, 0x1au8, 0xafu8, 0xd2u8, 0x55u8]
+
+fn _tc15_expected_ct() -> [u8]:
+    [0x52u8, 0x2du8, 0xc1u8, 0xf0u8, 0x99u8, 0x56u8, 0x7du8, 0x07u8,
+     0xf4u8, 0x7fu8, 0x37u8, 0xa3u8, 0x2au8, 0x84u8, 0x42u8, 0x7du8,
+     0x64u8, 0x3au8, 0x8cu8, 0xdcu8, 0xbfu8, 0xe5u8, 0xc0u8, 0xc9u8,
+     0x75u8, 0x98u8, 0xa2u8, 0xbdu8, 0x25u8, 0x55u8, 0xd1u8, 0xaau8,
+     0x8cu8, 0xb0u8, 0x8eu8, 0x48u8, 0x59u8, 0x0du8, 0xbbu8, 0x3du8,
+     0xa7u8, 0xb0u8, 0x8bu8, 0x10u8, 0x56u8, 0x82u8, 0x88u8, 0x38u8,
+     0xc5u8, 0xf6u8, 0x1eu8, 0x63u8, 0x93u8, 0xbau8, 0x7au8, 0x0au8,
+     0xbcu8, 0xc9u8, 0xf6u8, 0x62u8, 0x89u8, 0x80u8, 0x15u8, 0xadu8]
+
+fn _tc15_expected_tag() -> [u8]:
+    [0xb0u8, 0x94u8, 0xdau8, 0xc5u8, 0xd9u8, 0x34u8, 0x71u8, 0xbdu8,
+     0xecu8, 0x1au8, 0x50u8, 0x22u8, 0x70u8, 0xe3u8, 0xccu8, 0x6cu8]
+
+# --- TC16: same key/nonce as TC15, 60-byte PT (TC15 PT minus last 4), 20-byte AAD ---
+# Tag:   76fc6ece0f4e1768cddf8853bb2d551b
+
+fn _tc16_key() -> [u8]:
+    [0xfeu8, 0xffu8, 0xe9u8, 0x92u8, 0x86u8, 0x65u8, 0x73u8, 0x1cu8,
+     0x6du8, 0x6au8, 0x8fu8, 0x94u8, 0x67u8, 0x30u8, 0x83u8, 0x08u8,
+     0xfeu8, 0xffu8, 0xe9u8, 0x92u8, 0x86u8, 0x65u8, 0x73u8, 0x1cu8,
+     0x6du8, 0x6au8, 0x8fu8, 0x94u8, 0x67u8, 0x30u8, 0x83u8, 0x08u8]
+
+fn _tc16_nonce() -> [u8]:
+    [0xcau8, 0xfeu8, 0xbau8, 0xbeu8, 0xfau8, 0xceu8,
+     0xdbu8, 0xadu8, 0xdeu8, 0xcau8, 0xf8u8, 0x88u8]
+
+fn _tc16_plaintext() -> [u8]:
+    [0xd9u8, 0x31u8, 0x32u8, 0x25u8, 0xf8u8, 0x84u8, 0x06u8, 0xe5u8,
+     0xa5u8, 0x59u8, 0x09u8, 0xc5u8, 0xafu8, 0xf5u8, 0x26u8, 0x9au8,
+     0x86u8, 0xa7u8, 0xa9u8, 0x53u8, 0x15u8, 0x34u8, 0xf7u8, 0xdau8,
+     0x2eu8, 0x4cu8, 0x30u8, 0x3du8, 0x8au8, 0x31u8, 0x8au8, 0x72u8,
+     0x1cu8, 0x3cu8, 0x0cu8, 0x95u8, 0x95u8, 0x68u8, 0x09u8, 0x53u8,
+     0x2fu8, 0xcfu8, 0x0eu8, 0x24u8, 0x49u8, 0xa6u8, 0xb5u8, 0x25u8,
+     0xb1u8, 0x6au8, 0xedu8, 0xf5u8, 0xaau8, 0x0du8, 0xe6u8, 0x57u8,
+     0xbau8, 0x63u8, 0x7bu8, 0x39u8]
+
+fn _tc16_aad() -> [u8]:
+    [0xfeu8, 0xedu8, 0xfau8, 0xceu8, 0xdeu8, 0xadu8, 0xbeu8, 0xefu8,
+     0xfeu8, 0xedu8, 0xfau8, 0xceu8, 0xdeu8, 0xadu8, 0xbeu8, 0xefu8,
+     0xabu8, 0xadu8, 0xdau8, 0xd2u8]
+
+fn _tc16_expected_ct() -> [u8]:
+    [0x52u8, 0x2du8, 0xc1u8, 0xf0u8, 0x99u8, 0x56u8, 0x7du8, 0x07u8,
+     0xf4u8, 0x7fu8, 0x37u8, 0xa3u8, 0x2au8, 0x84u8, 0x42u8, 0x7du8,
+     0x64u8, 0x3au8, 0x8cu8, 0xdcu8, 0xbfu8, 0xe5u8, 0xc0u8, 0xc9u8,
+     0x75u8, 0x98u8, 0xa2u8, 0xbdu8, 0x25u8, 0x55u8, 0xd1u8, 0xaau8,
+     0x8cu8, 0xb0u8, 0x8eu8, 0x48u8, 0x59u8, 0x0du8, 0xbbu8, 0x3du8,
+     0xa7u8, 0xb0u8, 0x8bu8, 0x10u8, 0x56u8, 0x82u8, 0x88u8, 0x38u8,
+     0xc5u8, 0xf6u8, 0x1eu8, 0x63u8, 0x93u8, 0xbau8, 0x7au8, 0x0au8,
+     0xbcu8, 0xc9u8, 0xf6u8, 0x62u8]
+
+fn _tc16_expected_tag() -> [u8]:
+    [0x76u8, 0xfcu8, 0x6eu8, 0xceu8, 0x0fu8, 0x4eu8, 0x17u8, 0x68u8,
+     0xcdu8, 0xdfu8, 0x88u8, 0x53u8, 0xbbu8, 0x2du8, 0x55u8, 0x1bu8]
+
+# ============================================================================
+# Helpers — split out ciphertext || tag
+# ============================================================================
+
+fn _split_ct(buf: [u8], ct_len: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < ct_len:
+        out.push(buf[i])
+        i = i + 1
+    out
+
+fn _split_tag(buf: [u8], ct_len: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = ct_len
+    while i < buf.len():
+        out.push(buf[i])
+        i = i + 1
+    out
+
+fn _corrupt_last_byte(tag: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < tag.len():
+        if i == tag.len() - 1:
+            out.push(tag[i] ^ 0xFFu8)
+        else:
+            out.push(tag[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "AES-256-GCM NIST SP 800-38D Appendix B vectors":
+
+    it "TC13 encrypt: empty PT + empty AAD - tag matches NIST SP 800-38D B.13":
+        val empty: [u8] = []
+        val out = aes256_gcm_encrypt(_tc13_key(), _tc13_nonce(), empty, empty)
+        val ct = _split_ct(out, 0)
+        val tag = _split_tag(out, 0)
+        expect(ct.len()).to_equal(0)
+        expect(tag).to_equal(_tc13_expected_tag())
+
+    it "TC13 decrypt: correct tag succeeds with empty plaintext":
+        val empty: [u8] = []
+        val result = aes256_gcm_decrypt(_tc13_key(), _tc13_nonce(), empty, empty, _tc13_expected_tag())
+        match result:
+            Aes256GcmResult.Ok(data):
+                expect(data.len()).to_equal(0)
+            Aes256GcmResult.Err(msg):
+                expect(false).to_equal(true)
+
+    it "TC13 decrypt: corrupted tag is rejected":
+        val empty: [u8] = []
+        val bad_tag = _corrupt_last_byte(_tc13_expected_tag())
+        val result = aes256_gcm_decrypt(_tc13_key(), _tc13_nonce(), empty, empty, bad_tag)
+        match result:
+            Aes256GcmResult.Ok(data):
+                expect(false).to_equal(true)
+            Aes256GcmResult.Err(msg):
+                expect(true).to_equal(true)
+
+    it "TC14 encrypt: 16-byte zero PT, empty AAD - ciphertext and tag match NIST SP 800-38D B.14":
+        val empty: [u8] = []
+        val out = aes256_gcm_encrypt(_tc14_key(), _tc14_nonce(), _tc14_plaintext(), empty)
+        val ct = _split_ct(out, 16)
+        val tag = _split_tag(out, 16)
+        expect(ct).to_equal(_tc14_expected_ct())
+        expect(tag).to_equal(_tc14_expected_tag())
+
+    it "TC14 decrypt: correct tag returns original plaintext":
+        val empty: [u8] = []
+        val result = aes256_gcm_decrypt(_tc14_key(), _tc14_nonce(), _tc14_expected_ct(), empty, _tc14_expected_tag())
+        match result:
+            Aes256GcmResult.Ok(data):
+                expect(data).to_equal(_tc14_plaintext())
+            Aes256GcmResult.Err(msg):
+                expect(false).to_equal(true)
+
+    it "TC14 decrypt: corrupted tag is rejected":
+        val empty: [u8] = []
+        val bad_tag = _corrupt_last_byte(_tc14_expected_tag())
+        val result = aes256_gcm_decrypt(_tc14_key(), _tc14_nonce(), _tc14_expected_ct(), empty, bad_tag)
+        match result:
+            Aes256GcmResult.Ok(data):
+                expect(false).to_equal(true)
+            Aes256GcmResult.Err(msg):
+                expect(true).to_equal(true)
+
+    it "TC15 encrypt: 64-byte PT, empty AAD - ciphertext and tag match NIST SP 800-38D B.15":
+        val empty: [u8] = []
+        val out = aes256_gcm_encrypt(_tc15_key(), _tc15_nonce(), _tc15_plaintext(), empty)
+        val ct = _split_ct(out, 64)
+        val tag = _split_tag(out, 64)
+        expect(ct).to_equal(_tc15_expected_ct())
+        expect(tag).to_equal(_tc15_expected_tag())
+
+    it "TC15 decrypt: correct tag returns original plaintext":
+        val empty: [u8] = []
+        val result = aes256_gcm_decrypt(_tc15_key(), _tc15_nonce(), _tc15_expected_ct(), empty, _tc15_expected_tag())
+        match result:
+            Aes256GcmResult.Ok(data):
+                expect(data).to_equal(_tc15_plaintext())
+            Aes256GcmResult.Err(msg):
+                expect(false).to_equal(true)
+
+    it "TC15 decrypt: corrupted tag is rejected":
+        val empty: [u8] = []
+        val bad_tag = _corrupt_last_byte(_tc15_expected_tag())
+        val result = aes256_gcm_decrypt(_tc15_key(), _tc15_nonce(), _tc15_expected_ct(), empty, bad_tag)
+        match result:
+            Aes256GcmResult.Ok(data):
+                expect(false).to_equal(true)
+            Aes256GcmResult.Err(msg):
+                expect(true).to_equal(true)
+
+    it "TC16 encrypt: 60-byte PT, 20-byte AAD - ciphertext and tag match NIST SP 800-38D B.16":
+        val out = aes256_gcm_encrypt(_tc16_key(), _tc16_nonce(), _tc16_plaintext(), _tc16_aad())
+        val ct = _split_ct(out, 60)
+        val tag = _split_tag(out, 60)
+        expect(ct).to_equal(_tc16_expected_ct())
+        expect(tag).to_equal(_tc16_expected_tag())
+
+    it "TC16 decrypt: correct tag returns original plaintext":
+        val result = aes256_gcm_decrypt(_tc16_key(), _tc16_nonce(), _tc16_expected_ct(), _tc16_aad(), _tc16_expected_tag())
+        match result:
+            Aes256GcmResult.Ok(data):
+                expect(data).to_equal(_tc16_plaintext())
+            Aes256GcmResult.Err(msg):
+                expect(false).to_equal(true)
+
+    it "TC16 decrypt: corrupted tag is rejected":
+        val bad_tag = _corrupt_last_byte(_tc16_expected_tag())
+        val result = aes256_gcm_decrypt(_tc16_key(), _tc16_nonce(), _tc16_expected_ct(), _tc16_aad(), bad_tag)
+        match result:
+            Aes256GcmResult.Ok(data):
+                expect(false).to_equal(true)
+            Aes256GcmResult.Err(msg):
+                expect(true).to_equal(true)

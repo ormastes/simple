@@ -1,0 +1,213 @@
+# Subpixel positioning helpers for LCD rendering
+
+use std.skia.feature.glyph.rasterize.{GlyphBitmap}
+
+enum SubpixelOffset:
+    Zero
+    OneThird
+    TwoThird
+
+enum LcdOrder:
+    Rgb
+    Bgr
+    Vrgb
+    Vbgr
+
+fn subpixel_offset(fractional_x: f64) -> SubpixelOffset:
+    if fractional_x < 0.17:
+        SubpixelOffset.Zero
+    else if fractional_x < 0.5:
+        SubpixelOffset.OneThird
+    else:
+        SubpixelOffset.TwoThird
+
+# FreeType FT_LCD_FILTER_DEFAULT 5-tap kernel: [0x08, 0x4d, 0x56, 0x4d, 0x08]
+# Sum = 0x08 + 0x4d + 0x56 + 0x4d + 0x08 = 256, so division by 256 keeps values in [0,255].
+# Input: N-wide grayscale row. Output: 3N-wide RGB bytes (R,G,B per source pixel).
+fn lcd_filter_5tap(gray_row: [u8], order: LcdOrder) -> [u8]:
+    val n = gray_row.len()
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        # Gather 5 taps with zero-padding at borders
+        val g_m2: i64 = if i >= 2: gray_row[i - 2] as i64 else: 0
+        val g_m1: i64 = if i >= 1: gray_row[i - 1] as i64 else: 0
+        val g_0: i64 = gray_row[i] as i64
+        val g_p1: i64 = if i + 1 < n: gray_row[i + 1] as i64 else: 0
+        val g_p2: i64 = if i + 2 < n: gray_row[i + 2] as i64 else: 0
+
+        # Red subpixel: tap centered at i-1
+        val g_r_m2: i64 = if i >= 3: gray_row[i - 3] as i64 else: 0
+        val g_r_m1: i64 = g_m2
+        val g_r_0: i64 = g_m1
+        val g_r_p1: i64 = g_0
+        val g_r_p2: i64 = g_p1
+        val r_raw: i64 = (g_r_m2 * 8 + g_r_m1 * 77 + g_r_0 * 86 + g_r_p1 * 77 + g_r_p2 * 8) / 256
+
+        # Green subpixel: tap centered at i
+        val g_raw: i64 = (g_m2 * 8 + g_m1 * 77 + g_0 * 86 + g_p1 * 77 + g_p2 * 8) / 256
+
+        # Blue subpixel: tap centered at i+1
+        val g_b_m2: i64 = g_m1
+        val g_b_m1: i64 = g_0
+        val g_b_0: i64 = g_p1
+        val g_b_p1: i64 = g_p2
+        val g_b_p2: i64 = if i + 3 < n: gray_row[i + 3] as i64 else: 0
+        val b_raw: i64 = (g_b_m2 * 8 + g_b_m1 * 77 + g_b_0 * 86 + g_b_p1 * 77 + g_b_p2 * 8) / 256
+
+        val r_clamped: i64 = if r_raw > 255: 255 else: r_raw
+        val g_clamped: i64 = if g_raw > 255: 255 else: g_raw
+        val b_clamped: i64 = if b_raw > 255: 255 else: b_raw
+
+        if order == LcdOrder.Rgb:
+            out = [...out, r_clamped as u8, g_clamped as u8, b_clamped as u8]
+        else if order == LcdOrder.Bgr:
+            out = [...out, b_clamped as u8, g_clamped as u8, r_clamped as u8]
+        else:
+            out = [...out, r_clamped as u8, g_clamped as u8, b_clamped as u8]
+        i = i + 1
+    out
+
+# Apply gamma correction to a single channel value.
+# If gamma == 1.0, returns value unchanged.
+# Otherwise applies: out = round(255 * (value/255)^gamma).
+fn apply_gamma_correction(channel_value: u8, gamma: f64) -> u8:
+    if gamma == 1.0:
+        channel_value
+    else:
+        val v: f64 = channel_value as f64 / 255.0
+        # Compute v^gamma via exp(gamma * ln(v)); handle v==0 edge case
+        val corrected: f64 = if v <= 0.0:
+            0.0
+        else:
+            # ln approximation via series is complex; use pow = exp(gamma * ln(v))
+            # Simple Taylor-free implementation: use iterative approach
+            # For typical gamma values we use: exp(gamma * log(v))
+            # log(v) for v in (0,1]: use identity ln(v) = ln(1-(1-v))
+            # To avoid stdlib dependency, implement exp and ln via iteration
+            val ln_v: f64 = ln_approx(v)
+            val exponent: f64 = gamma * ln_v
+            exp_approx(exponent)
+        val out_f: f64 = corrected * 255.0 + 0.5
+        val out_i: i64 = out_f as i64
+        val clamped: i64 = if out_i > 255: 255 else if out_i < 0: 0 else: out_i
+        clamped as u8
+
+# Natural logarithm approximation for x in (0, 2].
+# Uses identity: ln(x) = ln(1 + (x-1)) and series ln(1+t) = t - t^2/2 + t^3/3 - ...
+# Range-reduce: for x in (0,1] use ln(x) = -ln(1/x); for x in (1,2] use series directly.
+fn ln_approx(x: f64) -> f64:
+    if x <= 0.0:
+        -1000.0
+    else if x == 1.0:
+        0.0
+    else if x < 1.0:
+        val inv = 1.0 / x
+        val t = inv - 1.0
+        val t2 = t * t
+        val t3 = t2 * t
+        val t4 = t3 * t
+        val t5 = t4 * t
+        val t6 = t5 * t
+        val t7 = t6 * t
+        val t8 = t7 * t
+        val series = t - t2 / 2.0 + t3 / 3.0 - t4 / 4.0 + t5 / 5.0 - t6 / 6.0 + t7 / 7.0 - t8 / 8.0
+        0.0 - series
+    else:
+        val t = x - 1.0
+        val t2 = t * t
+        val t3 = t2 * t
+        val t4 = t3 * t
+        val t5 = t4 * t
+        val t6 = t5 * t
+        val t7 = t6 * t
+        val t8 = t7 * t
+        t - t2 / 2.0 + t3 / 3.0 - t4 / 4.0 + t5 / 5.0 - t6 / 6.0 + t7 / 7.0 - t8 / 8.0
+
+# Exponential approximation via Taylor series: e^x = sum(x^k / k!)
+# Accurate for x in roughly [-20, 0] (relevant range for gamma on [0,1]).
+fn exp_approx(x: f64) -> f64:
+    # Use 16 terms of Taylor series
+    val term0: f64 = 1.0
+    val term1: f64 = x
+    val term2: f64 = x * x / 2.0
+    val term3: f64 = x * x * x / 6.0
+    val x4: f64 = x * x * x * x
+    val term4: f64 = x4 / 24.0
+    val x5: f64 = x4 * x
+    val term5: f64 = x5 / 120.0
+    val x6: f64 = x5 * x
+    val term6: f64 = x6 / 720.0
+    val x7: f64 = x6 * x
+    val term7: f64 = x7 / 5040.0
+    val x8: f64 = x7 * x
+    val term8: f64 = x8 / 40320.0
+    val x9: f64 = x8 * x
+    val term9: f64 = x9 / 362880.0
+    val x10: f64 = x9 * x
+    val term10: f64 = x10 / 3628800.0
+    val x11: f64 = x10 * x
+    val term11: f64 = x11 / 39916800.0
+    val x12: f64 = x11 * x
+    val term12: f64 = x12 / 479001600.0
+    val result: f64 = term0 + term1 + term2 + term3 + term4 + term5 + term6 + term7 + term8 + term9 + term10 + term11 + term12
+    if result < 0.0: 0.0 else: result
+
+# Apply LCD subpixel filter row-by-row (Rgb/Bgr) or column-by-column (Vrgb/Vbgr).
+# Output GlyphBitmap has the same width/height but pixels holds 3 channels per
+# original pixel (width * height * 3 bytes total).
+fn apply_lcd_filter(bitmap: GlyphBitmap, order: LcdOrder) -> GlyphBitmap:
+    val w = bitmap.width
+    val h = bitmap.height
+    if order == LcdOrder.Rgb or order == LcdOrder.Bgr:
+        # Horizontal: filter each row independently
+        var out_pixels: [u8] = []
+        var row: i64 = 0
+        while row < h:
+            var gray_row: [u8] = []
+            var col: i64 = 0
+            while col < w:
+                val idx = row * w + col
+                gray_row = [...gray_row, bitmap.pixels[idx]]
+                col = col + 1
+            val filtered = lcd_filter_5tap(gray_row, order)
+            out_pixels = [...out_pixels, ...filtered]
+            row = row + 1
+        GlyphBitmap(width: w, height: h, left: bitmap.left, top: bitmap.top, pixels: out_pixels)
+    else:
+        # Vertical (Vrgb/Vbgr): filter each column independently
+        # Build column arrays then interleave into output
+        # Output layout: for each pixel (row, col) store R,G,B consecutively
+        # We compute each column's filtered result first
+        var col_results: [[u8]] = []
+        var col: i64 = 0
+        while col < w:
+            var gray_col: [u8] = []
+            var row: i64 = 0
+            while row < h:
+                val idx = row * w + col
+                gray_col = [...gray_col, bitmap.pixels[idx]]
+                row = row + 1
+            # Use Rgb for Vrgb, Bgr for Vbgr (channel order within the vertical filter)
+            val col_order = if order == LcdOrder.Vrgb: LcdOrder.Rgb else: LcdOrder.Bgr
+            val filtered = lcd_filter_5tap(gray_col, col_order)
+            col_results = [...col_results, filtered]
+            col = col + 1
+        # Assemble output: for each pixel (row, col), pick the 3 bytes from col_results[col]
+        # at position row*3, row*3+1, row*3+2
+        var out_pixels: [u8] = []
+        var row: i64 = 0
+        while row < h:
+            var col2: i64 = 0
+            while col2 < w:
+                val col_data = col_results[col2]
+                val base = row * 3
+                out_pixels = [...out_pixels, col_data[base], col_data[base + 1], col_data[base + 2]]
+                col2 = col2 + 1
+            row = row + 1
+        GlyphBitmap(width: w, height: h, left: bitmap.left, top: bitmap.top, pixels: out_pixels)
+
+fn apply_subpixel(bitmap: GlyphBitmap, offset: SubpixelOffset) -> GlyphBitmap:
+    # TODO(skia-glyph): use offset to shift filter kernel for subpixel positioning.
+    # For now applies default Rgb LCD filter.
+    apply_lcd_filter(bitmap, LcdOrder.Rgb)

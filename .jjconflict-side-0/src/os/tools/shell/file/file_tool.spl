@@ -1,0 +1,88 @@
+#![allow(unnamed_duplicate_typed_args)]
+# file — Identify file type
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.kernel.types.fs_types.{FsNodeKind}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
+
+fn tool_file(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Determine file type by content inspection.
+
+    Usage: file FILE...
+    """
+    if args.len() == 0:
+        write_error(terminal, "file: missing file operand")
+        return 1
+    if vfs == nil:
+        write_error(terminal, "file: no filesystem mounted")
+        return 1
+
+    var exit_code: i32 = 0
+    for filename in args:
+        val path = resolve_path(cwd, filename)
+        val stat_result = vfs.stat(path)
+        if stat_result.is_err():
+            write_error(terminal, "file: {path}: {stat_result.unwrap_err()}")
+            exit_code = 1
+        else:
+            val node = stat_result.unwrap()
+            if node.kind == FsNodeKind.Directory:
+                write_line(terminal, "{filename}: directory")
+            elif node.kind == FsNodeKind.Symlink:
+                write_line(terminal, "{filename}: symbolic link")
+            elif node.kind == FsNodeKind.Device:
+                write_line(terminal, "{filename}: device")
+            elif node.kind == FsNodeKind.Pipe:
+                write_line(terminal, "{filename}: pipe")
+            else:
+                # Try to detect by extension and content
+                val file_type = _detect_type(filename, vfs, path)
+                write_line(terminal, "{filename}: {file_type}")
+    return exit_code
+
+fn _detect_type(filename: text, vfs: VfsManager, path: text) -> text:
+    """Detect file type by extension and content inspection."""
+    # Check by extension first
+    if filename.ends_with(".spl"):
+        return "Simple source code"
+    if filename.ends_with(".shs"):
+        return "Simple shell script"
+    if filename.ends_with(".sdn"):
+        return "SDN data file"
+    if filename.ends_with(".md"):
+        return "Markdown document"
+    if filename.ends_with(".json"):
+        return "JSON data"
+    if filename.ends_with(".toml"):
+        return "TOML configuration"
+    if filename.ends_with(".yaml") or filename.ends_with(".yml"):
+        return "YAML configuration"
+    if filename.ends_with(".txt"):
+        return "ASCII text"
+    if filename.ends_with(".rs"):
+        return "Rust source code"
+    if filename.ends_with(".c") or filename.ends_with(".h"):
+        return "C source code"
+    if filename.ends_with(".js"):
+        return "JavaScript source code"
+    if filename.ends_with(".html"):
+        return "HTML document"
+    if filename.ends_with(".css"):
+        return "CSS stylesheet"
+    if filename.ends_with(".elf"):
+        return "ELF executable"
+
+    # Check content for magic bytes
+    val result = vfs.read_text(path)
+    if result.is_ok():
+        val content = result.unwrap()
+        if content.len() == 0:
+            return "empty"
+        if content.starts_with("#!"):
+            return "script"
+        if content.starts_with("{"):
+            return "JSON data"
+        return "data"
+    return "regular file"

@@ -1,0 +1,228 @@
+# Flex layout — CSS Flexbox Level 1 subset.
+#
+# Supported:
+#   - flex-direction: Row, Column (no reverse variants)
+#   - justify-content: Start, End, Center, SpaceBetween, SpaceAround
+#   - align-items: Start, End, Center, Stretch
+#   - flex-grow / flex-shrink: proportional free-space distribution
+#
+# Not supported:
+#   - flex-wrap (single-line only)
+#   - row-reverse / column-reverse
+#   - auto margins, min/max size constraints
+
+# ============================================================================
+# Enumerations
+# ============================================================================
+
+enum FlexDirection:
+    Row
+    Column
+
+enum JustifyContent:
+    Start
+    End
+    Center
+    SpaceBetween
+    SpaceAround
+
+enum AlignItems:
+    Start
+    End
+    Center
+    Stretch
+
+# ============================================================================
+# FlexItem — one child in the flex container
+# ============================================================================
+
+class FlexItem:
+    intrinsic_main_size: f64
+    intrinsic_cross_size: f64
+    flex_grow: f64
+    flex_shrink: f64
+    main_pos: f64
+    cross_pos: f64
+    main_size: f64
+    cross_size: f64
+
+# ============================================================================
+# FlexContainer — holds layout parameters
+# ============================================================================
+
+class FlexContainer:
+    direction: FlexDirection
+    justify: JustifyContent
+    align: AlignItems
+    container_main_size: f64
+    container_cross_size: f64
+
+# ============================================================================
+# Constructor helpers
+# ============================================================================
+
+fn flex_item_new(intrinsic_main: f64, intrinsic_cross: f64) -> FlexItem:
+    FlexItem(
+        intrinsic_main_size: intrinsic_main,
+        intrinsic_cross_size: intrinsic_cross,
+        flex_grow: 0.0,
+        flex_shrink: 1.0,
+        main_pos: 0.0,
+        cross_pos: 0.0,
+        main_size: intrinsic_main,
+        cross_size: intrinsic_cross
+    )
+
+fn flex_container_row(main_size: f64, cross_size: f64) -> FlexContainer:
+    FlexContainer(
+        direction: FlexDirection.Row,
+        justify: JustifyContent.Start,
+        align: AlignItems.Stretch,
+        container_main_size: main_size,
+        container_cross_size: cross_size
+    )
+
+fn flex_container_column(main_size: f64, cross_size: f64) -> FlexContainer:
+    FlexContainer(
+        direction: FlexDirection.Column,
+        justify: JustifyContent.Start,
+        align: AlignItems.Stretch,
+        container_main_size: main_size,
+        container_cross_size: cross_size
+    )
+
+# ============================================================================
+# layout_flex — main entry point
+# ============================================================================
+
+fn layout_flex(container: FlexContainer, items: [FlexItem]) -> [FlexItem]:
+    val n = items.len()
+
+    # --- Phase 0: copy intrinsic sizes into output size fields ---------------
+    val out: [FlexItem] = []
+    val i = 0
+    while i < n:
+        val item = items[i]
+        item.main_size = item.intrinsic_main_size
+        item.cross_size = item.intrinsic_cross_size
+        out.push(item)
+        i = i + 1
+
+    # --- Phase 1: flex-grow / flex-shrink distribution -----------------------
+
+    # Compute sum of base sizes
+    val total_base = 0.0
+    val j = 0
+    while j < n:
+        total_base = total_base + out[j].main_size
+        j = j + 1
+
+    val free = container.container_main_size - total_base
+
+    if free > 0.0:
+        # Distribute free space proportional to flex_grow
+        val total_grow = 0.0
+        val k = 0
+        while k < n:
+            total_grow = total_grow + out[k].flex_grow
+            k = k + 1
+        if total_grow > 0.0:
+            val g = 0
+            while g < n:
+                val share = out[g].flex_grow / total_grow * free
+                out[g].main_size = out[g].main_size + share
+                g = g + 1
+
+    if free < 0.0:
+        # Absorb overflow proportional to flex_shrink
+        val total_shrink = 0.0
+        val s = 0
+        while s < n:
+            total_shrink = total_shrink + out[s].flex_shrink
+            s = s + 1
+        if total_shrink > 0.0:
+            val overflow = free * -1.0
+            val h = 0
+            while h < n:
+                val share = out[h].flex_shrink / total_shrink * overflow
+                out[h].main_size = out[h].main_size - share
+                h = h + 1
+
+    # --- Phase 2: justify-content — positions along main axis ----------------
+
+    # Recompute total used size after grow/shrink
+    val total_used = 0.0
+    val tu = 0
+    while tu < n:
+        total_used = total_used + out[tu].main_size
+        tu = tu + 1
+
+    val remaining = container.container_main_size - total_used
+
+    if container.justify == JustifyContent.Start:
+        val cursor = 0.0
+        val p = 0
+        while p < n:
+            out[p].main_pos = cursor
+            cursor = cursor + out[p].main_size
+            p = p + 1
+
+    if container.justify == JustifyContent.End:
+        val cursor = remaining
+        val p = 0
+        while p < n:
+            out[p].main_pos = cursor
+            cursor = cursor + out[p].main_size
+            p = p + 1
+
+    if container.justify == JustifyContent.Center:
+        val cursor = remaining / 2.0
+        val p = 0
+        while p < n:
+            out[p].main_pos = cursor
+            cursor = cursor + out[p].main_size
+            p = p + 1
+
+    if container.justify == JustifyContent.SpaceBetween:
+        val gap = 0.0
+        if n > 1:
+            val denom = n - 1
+            gap = remaining / denom.to_f64()
+        val cursor = 0.0
+        val p = 0
+        while p < n:
+            out[p].main_pos = cursor
+            cursor = cursor + out[p].main_size + gap
+            p = p + 1
+
+    if container.justify == JustifyContent.SpaceAround:
+        val unit = 0.0
+        if n > 0:
+            unit = remaining / n.to_f64()
+        val cursor = unit / 2.0
+        val p = 0
+        while p < n:
+            out[p].main_pos = cursor
+            cursor = cursor + out[p].main_size + unit
+            p = p + 1
+
+    # --- Phase 3: align-items — positions along cross axis -------------------
+
+    val q = 0
+    while q < n:
+        if container.align == AlignItems.Start:
+            out[q].cross_pos = 0.0
+
+        if container.align == AlignItems.End:
+            out[q].cross_pos = container.container_cross_size - out[q].cross_size
+
+        if container.align == AlignItems.Center:
+            out[q].cross_pos = (container.container_cross_size - out[q].cross_size) / 2.0
+
+        if container.align == AlignItems.Stretch:
+            out[q].cross_pos = 0.0
+            out[q].cross_size = container.container_cross_size
+
+        q = q + 1
+
+    out

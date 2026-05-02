@@ -1,0 +1,1130 @@
+# C Backend - MIR to C++20 Translation (MirToC class)
+#
+# Contains the MirToC class with core translation methods.
+# Translates MIR to C++20 source code that links against runtime.h.
+# Follows the pattern of MirToLlvm in llvm_ir_builder.spl.
+# Generated code uses the spl_ runtime API for strings, arrays, dicts.
+#
+# Lower-level helpers (translate_binop, translate_unaryop, translate_container_call,
+# translate_composite_const, translate_operand, translate_const_value, etc.) are in
+# c_backend_translate_ops.spl (impl MirToC continued there).
+#
+# Output is C++20 suitable for clang++/g++ compilation:
+#   clang++ -std=c++20 -O2 generated.cpp runtime.c -o output
+
+use compiler.mir.mir_data.*
+use compiler.backend.c_type_mapper.{CTypeMapper}
+use compiler.backend.c_ir_builder.{CIRBuilder, escape_c_string}
+use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, CompiledModule}
+use compiler.backend.c_backend_translate_ops.*
+use compiler.backend.error_conversion.{is_result_type, map_result_type, emit_error_type_definitions, emit_error_converting_wrapper}
+use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typedef, emit_callback_typedef, emit_callback_trampoline, CallbackTypedef}
+use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_runtime_layout_asserts}
+from hir_definitions import {HirField}
+from hir_types import {HirType}
+
+# ============================================================================
+# Utility
+# ============================================================================
+
+# Sanitize a SPL type name containing generics to a valid C identifier.
+# Examples: "Box<i64>" -> "Box_i64", "Dict<Text, i64>" -> "Dict_Text_i64"
+fn sanitize_c_name(name: text) -> text:
+    var s = name.split("<").join("_")
+    s = s.split(">").join("")
+    s = s.split(",").join("_")
+    s = s.split(" ").join("")
+    s = s.split("::").join("_")
+    s
+
+# ============================================================================
+# MIR to C++ Translator
+# ============================================================================
+
+class MirToC:
+    """Translates MIR to C++20 source code."""
+    builder: CIRBuilder
+    type_mapper: CTypeMapper
+    local_map: Dict
+    local_types: Dict
+    stack_slots: Dict
+    stack_slot_sizes: Dict
+    string_counter: i64
+
+    static fn create(module_name: text) -> MirToC:
+        MirToC(
+            builder: CIRBuilder.create(module_name),
+            type_mapper: CTypeMapper.create(),
+            local_map: {},
+            local_types: {},
+            stack_slots: {},
+            stack_slot_sizes: {},
+            string_counter: 0
+        )
+
+    static fn create_for_target(module_name: text, target: CodegenTarget) -> MirToC:
+        MirToC(
+            builder: CIRBuilder.create(module_name),
+            type_mapper: CTypeMapper.create_for_target(target),
+            local_map: {},
+            local_types: {},
+            stack_slots: {},
+            stack_slot_sizes: {},
+            string_counter: 0
+        )
+
+    me emit_unsupported_panic(message: text):
+        """Emit a hard runtime panic instead of a placeholder result."""
+        self.builder.emit(r"spl_panic(" + "\"" + escape_c_string(message) + "\"" + r");")
+
+    me translate_module(module: MirModule) -> text:
+        """Translate entire MIR module to C++20 source (implementation file)."""
+        print "[translate_module] functions count: {module.functions.len()}"
+        print "[translate_module] types count: {module.types.len()}"
+        # Emit header preamble
+        self.builder.emit_header_file_header()
+
+        # Emit impl preamble
+        self.builder.emit_impl_file_header()
+
+        # Emit shared library lifecycle preamble
+        self.emit_shared_library_preamble()
+
+        # Emit named type definitions (sanitizes generic names like Box<i64> -> Box_i64)
+        self.emit_type_definitions(module)
+
+        # Forward declarations go to BOTH header and impl
+        self.builder.emit_header_raw(r"// Forward declarations")
+        self.builder.emit_raw(r"// Forward declarations")
+        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            val fn_name = func.name
+            val body = MirBody.from_function(func)
+            self.emit_forward_declaration(fn_name, body)
+        self.builder.emit_header_raw("")
+        self.builder.emit_blank()
+
+        # Function definitions go to impl only
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            val fn_name = func.name
+            val body = MirBody.from_function(func)
+            print "[translate_module] body.name={body.name} blocks={body.blocks.len()} locals={body.locals.len()} args={body.arg_count}"
+            for blk in body.blocks:
+                print "[translate_module]   block id={blk.id.id} insts={blk.instructions.len()} term={blk.terminator}"
+            self.translate_function(fn_name, body)
+
+        # Emit extern "C" wrappers for @export("C") functions and classes
+        self.emit_export_wrappers(module)
+
+        self.builder.build()
+
+    me build_header() -> text:
+        """Build the header file content."""
+        self.builder.build_header()
+
+    me emit_type_definitions(module: MirModule):
+        """Register and emit C struct/enum definitions for all named types in the module.
+        Sanitizes generic type names (e.g. Box<i64> -> Box_i64) to valid C identifiers."""
+        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+        # Pass 1: register all C names so cross-referencing field types resolve correctly
+        for key in module.types.keys():
+            val type_def = module.types[key]
+            val c_name = sanitize_c_name(type_def.name)
+            self.type_mapper.register_type(type_def.symbol.id, c_name)
+
+        # Pass 2: forward declarations (typedef) to header
+        for key in module.types.keys():
+            val type_def = module.types[key]
+            val c_name = sanitize_c_name(type_def.name)
+            match type_def.kind:
+                case Struct(_):
+                    self.builder.emit_header_raw("typedef struct " + c_name + "_s " + c_name + ";")
+                case Enum(_):
+                    self.builder.emit_header_raw("typedef struct " + c_name + "_s " + c_name + ";")
+                case _:
+                    eprint("Warning: [C-backend] unhandled type kind in emit_type_definitions forward decl, skipping")
+        self.builder.emit_header_raw("")
+
+        # Pass 3: full struct/enum definitions to header
+        for key in module.types.keys():
+            val type_def = module.types[key]
+            val c_name = sanitize_c_name(type_def.name)
+            match type_def.kind:
+                case Struct(fields):
+                    self.builder.emit_header_raw("struct " + c_name + "_s {")
+                    for field in fields:
+                        val field_c_type = self.type_mapper.map_type(field.type_)
+                        if field.has_bits_attr:
+                            self.builder.emit_header_raw("    " + field_c_type + " " + field.name + " : " + field.bits_width + ";")
+                        else:
+                            self.builder.emit_header_raw("    " + field_c_type + " " + field.name + ";")
+                    self.builder.emit_header_raw("};")
+                    self.builder.emit_header_raw("")
+                case Enum(variants):
+                    self.builder.emit_header_raw("struct " + c_name + "_s {")
+                    self.builder.emit_header_raw("    int64_t tag;")
+                    self.builder.emit_header_raw("    union {")
+                    for variant in variants:
+                        if variant.payload.?:
+                            val payload_ty = self.type_mapper.map_type(variant.payload.unwrap())
+                            self.builder.emit_header_raw("        " + payload_ty + " " + variant.name + "_payload;")
+                    self.builder.emit_header_raw("    } data;")
+                    self.builder.emit_header_raw("};")
+                    self.builder.emit_header_raw("")
+                case _:
+                    eprint("Warning: [C-backend] unhandled type kind in emit_type_definitions full def, skipping")
+
+    me emit_forward_declaration(name: text, body: MirBody):
+        """Emit forward declaration for a function to both header and impl."""
+        val ret_ty = self.type_mapper.map_return_type(body.return_ty)
+        var params: [text] = []
+        for i in 0..body.arg_count:
+            val param_ty = self.get_local_type_from_body(body, i)
+            params = params.push(param_ty + r" _l" + i)
+        val params_str = if params.len() == 0: "void" else: params.join(", ")
+        self.builder.emit_forward_decl(ret_ty, name, params_str)
+        self.builder.emit_header_raw(ret_ty + r" " + name + r"(" + params_str + r");")
+
+    me translate_function(name: text, body: MirBody):
+        """Translate a MIR function to C++."""
+        # Build local type map
+        self.local_types = {}
+        for local in body.locals:
+            val c_ty = self.type_mapper.map_type(local.type_)
+            self.local_types[local.id.id] = c_ty
+        # Precompute stack-backed storage for MIR ops that should not heap-allocate.
+        self.prepare_stack_slots(body)
+
+        # Build parameter list
+        var params: [text] = []
+        for i in 0..body.arg_count:
+            val param_ty = self.get_local_type(i)
+            params = params.push(param_ty + r" _l" + i)
+        val params_str = if params.len() == 0: "void" else: params.join(", ")
+
+        val ret_ty = self.type_mapper.map_return_type(body.return_ty)
+        self.builder.start_function(ret_ty, name, params_str)
+
+        # Declare all non-argument locals at function top
+        for local in body.locals:
+            match local.kind:
+                case Arg(_): pass_dn
+                case _:
+                    val ty = self.type_mapper.map_type(local.type_)
+                    if ty != "void":
+                        self.builder.emit_local_init(ty, r"_l" + local.id.id, self.zero_value(ty))
+        # Reusable function-local storage slots avoid spl_malloc leaks in generated code.
+        for local_id, slot_name in self.stack_slots:
+            val slot_size = self.stack_slot_sizes[local_id]
+            self.builder.emit(r"alignas(16) unsigned char " + slot_name + r"[" + slot_size + r"];")
+
+        self.builder.emit_blank()
+
+        # Translate basic blocks
+        for block in body.blocks:
+            self.translate_block(block)
+
+        self.builder.end_function()
+
+    me translate_block(block: MirBlock):
+        """Translate a MIR basic block to C labeled block."""
+        self.builder.emit_label(r"bb" + block.id.id)
+
+        for inst in block.instructions:
+            self.translate_instruction(inst)
+
+        self.translate_terminator(block.terminator)
+
+    me translate_instruction(inst: MirInst):
+        """Translate a MIR instruction to C++."""
+        match inst.kind:
+            # === Constants ===
+            case Const(dest, value, type_):
+                if self.translate_composite_const(dest, value):
+                    pass_dn
+                else:
+                    val dest_name = self.get_local(dest.id)
+                    val const_val = self.translate_const_value(value)
+                    self.builder.emit_assign(dest_name, const_val)
+
+            # === Copy/Move ===
+            case Copy(dest, src):
+                val dest_name = self.get_local(dest.id)
+                val src_name = self.get_local(src.id)
+                self.builder.emit_assign(dest_name, src_name)
+
+            case Move(dest, src):
+                val dest_name = self.get_local(dest.id)
+                val src_name = self.get_local(src.id)
+                self.builder.emit_assign(dest_name, src_name)
+
+            # === Binary Operations ===
+            case BinOp(dest, op, left, right):
+                self.translate_binop(dest, op, left, right)
+
+            # === Unary Operations ===
+            case UnaryOp(dest, op, operand):
+                self.translate_unaryop(dest, op, operand)
+
+            # === Memory Operations ===
+            case Alloc(dest, type_):
+                val size = self.type_mapper.size_of(type_)
+                val slot_name = self.ensure_stack_slot(dest.id, size)
+                self.emit_pointer_assign(dest.id, slot_name)
+
+            case Load(dest, ptr):
+                val dest_name = self.get_local(dest.id)
+                val ptr_val = self.translate_operand(ptr)
+                val ty = self.get_local_type(dest.id)
+                self.builder.emit_assign(dest_name, r"*(" + ty + r"*)" + ptr_val)
+
+            case Store(ptr, value):
+                val ptr_val = self.translate_operand(ptr)
+                val value_val = self.translate_operand(value)
+                val ty = self.get_operand_type(value)
+                self.builder.emit(r"*(" + ty + r"*)" + ptr_val + r" = " + value_val + r";")
+
+            case GetElementPtr(dest, base, indices):
+                val dest_name = self.get_local(dest.id)
+                val base_val = self.translate_operand(base)
+                # Simple single-index GEP -> pointer arithmetic
+                if indices.len() == 1:
+                    val idx_val = self.translate_operand(indices[0])
+                    self.builder.emit_assign(dest_name, r"(void*)((char*)" + base_val + r" + " + idx_val + r" * 8)")
+                else:
+                    self.builder.emit_assign(dest_name, r"(void*)" + base_val)
+                    self.builder.emit_comment(r"GEP with " + indices.len() + r" indices")
+
+            # === Function Calls ===
+            case Call(dest, func, args):
+                val func_val = self.translate_operand(func)
+                # Try container call interception first
+                if self.translate_container_call(func_val, dest, args):
+                    pass_dn
+                else:
+                    var arg_vals: [text] = []
+                    for arg in args:
+                        arg_vals = arg_vals.push(self.translate_operand(arg))
+                    val args_str = arg_vals.join(", ")
+                    if dest.?:
+                        val dest_name = self.get_local(dest.unwrap().id)
+                        val ret_ty = self.get_local_type(dest.unwrap().id)
+                        self.builder.emit_assign(dest_name, func_val + r"(" + args_str + r")")
+                    else:
+                        self.builder.emit(func_val + r"(" + args_str + r");")
+
+            case CallIndirect(dest, ptr, args, sig):
+                val ptr_val = self.translate_operand(ptr)
+                var arg_vals: [text] = []
+                for arg in args:
+                    arg_vals = arg_vals.push(self.translate_operand(arg))
+                val args_str = arg_vals.join(", ")
+                val ret_ty = self.type_mapper.map_type(sig.return_type)
+                if dest.?:
+                    val dest_name = self.get_local(dest.unwrap().id)
+                    self.builder.emit_assign(dest_name, r"((" + ret_ty + r"(*)(...))(" + ptr_val + r"))(" + args_str + r")")
+                else:
+                    self.builder.emit(r"((" + ret_ty + r"(*)(...))(" + ptr_val + r"))(" + args_str + r");")
+
+            # === Casts ===
+            case Cast(dest, operand, target):
+                val dest_name = self.get_local(dest.id)
+                val operand_val = self.translate_operand(operand)
+                val target_ty = self.type_mapper.map_type(target)
+                self.builder.emit_assign(dest_name, r"(" + target_ty + r")" + operand_val)
+
+            case Bitcast(dest, operand, target):
+                val dest_name = self.get_local(dest.id)
+                val operand_val = self.translate_operand(operand)
+                val target_ty = self.type_mapper.map_type(target)
+                self.builder.emit_assign(dest_name, r"(" + target_ty + r")" + operand_val)
+
+            # === Aggregates ===
+            case Aggregate(dest, kind, operands):
+                val num_fields = operands.len()
+                val byte_size = num_fields * 8
+                val slot_name = self.ensure_stack_slot(dest.id, byte_size)
+                self.builder.emit_comment(r"aggregate construction (" + num_fields + r" fields, " + byte_size + r" bytes) [stack slot]")
+                self.emit_pointer_assign(dest.id, slot_name)
+                var field_idx = 0
+                for op in operands:
+                    val field_val = self.translate_operand(op)
+                    self.builder.emit(r"((int64_t*)(void*)" + slot_name + r")[" + field_idx + r"] = (int64_t)" + field_val + r";")
+                    field_idx = field_idx + 1
+
+            case GetField(dest, base, field):
+                val dest_name = self.get_local(dest.id)
+                val base_val = self.translate_operand(base)
+                self.builder.emit_assign(dest_name, r"((int64_t*)" + base_val + r")[" + field + r"]")
+
+            case SetField(base, field, value):
+                val base_val = self.translate_operand(base)
+                val value_val = self.translate_operand(value)
+                self.builder.emit(r"((int64_t*)" + base_val + r")[" + field + r"] = " + value_val + r";")
+
+            # === Intrinsics ===
+            case Intrinsic(dest, name, args):
+                var arg_vals: [text] = []
+                for arg in args:
+                    arg_vals = arg_vals.push(self.translate_operand(arg))
+                val args_str = arg_vals.join(", ")
+                if dest.?:
+                    val dest_name = self.get_local(dest.unwrap().id)
+                    val ret_ty = self.get_local_type(dest.unwrap().id)
+                    self.builder.emit_assign(dest_name, r"__simple_intrinsic_" + name + r"(" + args_str + r")")
+                else:
+                    self.builder.emit(r"__simple_intrinsic_" + name + r"(" + args_str + r");")
+
+            case CheckedBinOp(dest, op, left, right):
+                self.translate_binop(dest, op, left, right)
+
+            # === Pipeline operators ===
+            case PipeForward(dest, value, func):
+                val dest_name = self.get_local(dest.id)
+                val value_val = self.translate_operand(value)
+                val func_val = self.translate_operand(func)
+                val ret_ty = self.get_local_type(dest.id)
+                self.builder.emit_assign(dest_name, r"((" + ret_ty + r"(*)(int64_t))(" + func_val + r"))(" + value_val + r")")
+
+            case Compose(dest, f, g, forward):
+                val dest_name = self.get_local(dest.id)
+                val f_val = self.translate_operand(f)
+                val g_val = self.translate_operand(g)
+                self.builder.emit_assign(dest_name, "(void*)0")
+                self.builder.emit_comment("compose (runtime support needed)")
+
+            case Parallel(dest, funcs):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit_assign(dest_name, "(void*)0")
+                self.builder.emit_comment(r"parallel (" + funcs.len() + r" functions)")
+
+            case LayerConnect(dest, layer1, layer2):
+                val dest_name = self.get_local(dest.id)
+                val l1_val = self.translate_operand(layer1)
+                val l2_val = self.translate_operand(layer2)
+                self.builder.emit_assign(dest_name, "(void*)0")
+                self.builder.emit_comment("layer connect (~>)")
+
+            # === Inline Assembly ===
+            case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
+                val volatile_str = if is_volatile: " volatile" else: ""
+                self.builder.emit(r"#if !(defined(_MSC_VER) && !defined(__clang__))")
+
+                # Convert template placeholders {0},{1} to GCC %0,%1 syntax
+                var c_template = asm_template
+                var placeholder_idx = 0
+                while placeholder_idx < 20:
+                    c_template = c_template.replace("{" + placeholder_idx.to_string() + "}", "%" + placeholder_idx.to_string())
+                    placeholder_idx = placeholder_idx + 1
+
+                # Build output constraints: "=r" (var), "=&r" (late_out_var)
+                var output_parts: [text] = []
+                for out_op in outputs:
+                    val constraint = self.asm_constraint_for_c(out_op.kind, out_op.location)
+                    val operand_val = self.translate_operand(out_op.operand)
+                    output_parts.push("\"" + constraint + "\" (" + operand_val + ")")
+
+                # Build input constraints: "r" (expr), "m" (addr)
+                var input_parts: [text] = []
+                for in_op in inputs:
+                    val constraint = self.asm_constraint_for_c(in_op.kind, in_op.location)
+                    val operand_val = self.translate_operand(in_op.operand)
+                    input_parts.push("\"" + constraint + "\" (" + operand_val + ")")
+
+                # Build clobber list: "memory", "cc", register names
+                var clobber_parts: [text] = []
+                for clob in clobbers:
+                    clobber_parts.push("\"" + clob + "\"")
+
+                # Emit GCC extended asm
+                var asm_str = "__asm__" + volatile_str + " (\n"
+                asm_str = asm_str + "    \"" + c_template + "\""
+
+                # Output operands section
+                asm_str = asm_str + "\n    : " + output_parts.join(", ")
+
+                # Input operands section
+                asm_str = asm_str + "\n    : " + input_parts.join(", ")
+
+                # Clobber section
+                if clobber_parts.len() > 0:
+                    asm_str = asm_str + "\n    : " + clobber_parts.join(", ")
+
+                asm_str = asm_str + "\n);"
+                self.builder.emit(asm_str)
+                self.builder.emit(r"#endif")
+
+            # === Debug/Nop ===
+            case DebugValue(local, name):
+                pass_dn
+
+            case Nop:
+                pass_dn
+
+            # === Async/Actor (unsupported on C backend) ===
+            case CreatePromise(dest, body, result_type):
+                self.emit_unsupported_panic("C backend does not support async CreatePromise lowering")
+
+            case Await(dest, promise):
+                self.emit_unsupported_panic("C backend does not support async Await lowering")
+
+            case Yield(value):
+                self.emit_unsupported_panic("C backend does not support async Yield lowering")
+
+            case Spawn(dest, handler, args):
+                self.emit_unsupported_panic("C backend does not support async Spawn lowering")
+
+            case Send(target, message):
+                self.emit_unsupported_panic("C backend does not support actor Send lowering")
+
+            case Receive(dest, timeout):
+                self.emit_unsupported_panic("C backend does not support actor Receive lowering")
+
+            # === Borrow checking ===
+            case Ref(dest, borrow_kind, place):
+                val dest_name = self.get_local(dest.id)
+                val place_val = self.get_local(place.local.id)
+                self.builder.emit_assign(dest_name, place_val)
+
+            # === GPU instructions (unsupported on C backend) ===
+            case GpuKernelDef(name):
+                self.emit_unsupported_panic("C backend does not support GPU kernel definitions")
+            case GpuLaunch(args):
+                self.emit_unsupported_panic("C backend does not support GPU launches")
+            case GpuGlobalId(dest, dim):
+                self.emit_unsupported_panic("C backend does not support GpuGlobalId")
+            case GpuLocalId(dest, dim):
+                self.emit_unsupported_panic("C backend does not support GpuLocalId")
+            case GpuBlockId(dest, dim):
+                self.emit_unsupported_panic("C backend does not support GpuBlockId")
+            case GpuBlockDim(dest, dim):
+                self.emit_unsupported_panic("C backend does not support GpuBlockDim")
+            case GpuGridDim(dest, dim):
+                self.emit_unsupported_panic("C backend does not support GpuGridDim")
+            case GpuBarrier(scope):
+                self.emit_unsupported_panic("C backend does not support GpuBarrier")
+            case GpuMemFence(scope):
+                self.emit_unsupported_panic("C backend does not support GpuMemFence")
+            case GpuSharedAlloc(dest, type_, size):
+                self.emit_unsupported_panic("C backend does not support GpuSharedAlloc")
+            case GpuAtomicOp(dest, op, ptr, value):
+                self.emit_unsupported_panic("C backend does not support GpuAtomicOp")
+            case GpuAtomicCas(dest, ptr, expected, desired):
+                self.emit_unsupported_panic("C backend does not support GpuAtomicCas")
+
+            # === VHDL instructions (unsupported on C backend) ===
+            case VhdlProcess(kind, body_block):
+                self.emit_unsupported_panic("C backend does not support VHDL process lowering")
+            case VhdlSignalAssign(target, value, delay_ns):
+                self.emit_unsupported_panic("C backend does not support VHDL signal assignment lowering")
+            case VhdlVarAssign(target, value):
+                self.emit_unsupported_panic("C backend does not support VHDL variable assignment lowering")
+            case VhdlPortMap(entity, instance, connections):
+                self.emit_unsupported_panic("C backend does not support VHDL port maps")
+            case VhdlResize(dest, operand, new_width, signed):
+                self.emit_unsupported_panic("C backend does not support VHDL resize")
+            case VhdlSlice(dest, signal, hi, lo):
+                self.emit_unsupported_panic("C backend does not support VHDL slice")
+            case VhdlConcat(dest, parts):
+                self.emit_unsupported_panic("C backend does not support VHDL concat")
+
+            # === SIMD instructions (unsupported on C backend) ===
+            case SimdAddF32x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD add_f32x4")
+            case SimdSubF32x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD sub_f32x4")
+            case SimdMulF32x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD mul_f32x4")
+            case SimdDivF32x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD div_f32x4")
+            case SimdFmaF32x4(dest, a, b, c):
+                self.emit_unsupported_panic("C backend does not support SIMD fma_f32x4")
+            case SimdAddF32x8(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD add_f32x8")
+            case SimdSubF32x8(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD sub_f32x8")
+            case SimdMulF32x8(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD mul_f32x8")
+            case SimdDivF32x8(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD div_f32x8")
+            case SimdFmaF32x8(dest, a, b, c):
+                self.emit_unsupported_panic("C backend does not support SIMD fma_f32x8")
+            case SimdAddF64x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD add_f64x4")
+            case SimdSubF64x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD sub_f64x4")
+            case SimdMulF64x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD mul_f64x4")
+            case SimdDivF64x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD div_f64x4")
+            case SimdFmaF64x4(dest, a, b, c):
+                self.emit_unsupported_panic("C backend does not support SIMD fma_f64x4")
+            case SimdAddI32x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD add_i32x4")
+            case SimdSubI32x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD sub_i32x4")
+            case SimdMulI32x4(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD mul_i32x4")
+            case SimdAddI32x8(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD add_i32x8")
+            case SimdSubI32x8(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD sub_i32x8")
+            case SimdMulI32x8(dest, a, b):
+                self.emit_unsupported_panic("C backend does not support SIMD mul_i32x8")
+            case SimdHaddF32x4(dest, a):
+                self.emit_unsupported_panic("C backend does not support SIMD hadd_f32x4")
+            case SimdHmaxF32x4(dest, a):
+                self.emit_unsupported_panic("C backend does not support SIMD hmax_f32x4")
+            case SimdHminF32x4(dest, a):
+                self.emit_unsupported_panic("C backend does not support SIMD hmin_f32x4")
+
+    # === Terminators ===
+
+    me translate_terminator(term: MirTerminator):
+        match term:
+            case Return(value):
+                if value.?:
+                    val val_str = self.translate_operand(value.unwrap())
+                    self.builder.emit_return(Some(val_str))
+                else:
+                    self.builder.emit_return(nil)
+
+            case Goto(target):
+                self.builder.emit_goto(r"bb" + target.id)
+
+            case If(cond, then_, else_):
+                val cond_val = self.translate_operand(cond)
+                self.builder.emit_if(cond_val + r" != 0", r"bb" + then_.id, r"bb" + else_.id)
+
+            case Switch(value, targets, default):
+                val discr_val = self.translate_operand(value)
+                self.builder.emit_switch_start(discr_val)
+                for switch_case in targets:
+                    self.builder.emit_switch_case(r"" + switch_case.value, r"bb" + switch_case.target.id)
+                self.builder.emit_switch_default(r"bb" + default.id)
+                self.builder.emit_switch_end()
+
+            case Unreachable:
+                self.builder.emit(r"SPL_UNREACHABLE();")
+
+            case Abort(message):
+                self.builder.emit(r"spl_panic(" + "\"" + message + "\"" + r");")
+
+            case CallTerminator(dest, func, args, normal, unwind):
+                val func_val = self.translate_operand(func)
+                var arg_vals: [text] = []
+                for arg in args:
+                    arg_vals = arg_vals.push(self.translate_operand(arg))
+                val args_str = arg_vals.join(", ")
+                if dest.?:
+                    val dest_name = self.get_local(dest.unwrap().id)
+                    self.builder.emit_assign(dest_name, func_val + r"(" + args_str + r")")
+                else:
+                    self.builder.emit(func_val + r"(" + args_str + r");")
+                self.builder.emit_goto(r"bb" + normal.id)
+
+    # ================================================================
+    # Shared Library Preamble
+    # ================================================================
+
+    me emit_shared_library_preamble():
+        """Emit shared library lifecycle declarations when SPL_SHARED_LIBRARY is defined."""
+        self.builder.emit_raw(r"#ifdef SPL_SHARED_LIBRARY")
+        self.builder.emit_raw(r"static int spl_library_initialized = 0;")
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void spl_library_init(void) {")
+        self.builder.emit_raw(r"    if (spl_library_initialized) return;")
+        self.builder.emit_raw(r"    spl_library_initialized = 1;")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void spl_library_shutdown(void) {")
+        self.builder.emit_raw(r"    if (!spl_library_initialized) return;")
+        self.builder.emit_raw(r"    spl_library_initialized = 0;")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+        self.builder.emit_raw(r"// Auto-init for shared libraries")
+        self.builder.emit_raw(r"#if defined(_WIN32)")
+        self.builder.emit_raw(r"#include <windows.h>")
+        self.builder.emit_raw(r"BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {")
+        self.builder.emit_raw(r"    if (reason == DLL_PROCESS_ATTACH) spl_library_init();")
+        self.builder.emit_raw(r"    else if (reason == DLL_PROCESS_DETACH) spl_library_shutdown();")
+        self.builder.emit_raw(r"    return TRUE;")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"#else")
+        self.builder.emit_raw(r"__attribute__((constructor)) static void _spl_auto_init(void) { spl_library_init(); }")
+        self.builder.emit_raw(r"__attribute__((destructor))  static void _spl_auto_fini(void) { spl_library_shutdown(); }")
+        self.builder.emit_raw(r"#endif")
+        self.builder.emit_raw(r"#endif // SPL_SHARED_LIBRARY")
+        self.builder.emit_raw(r"")
+
+    # ================================================================
+    # @export("C") Wrapper Generation
+    # ================================================================
+
+    me emit_export_wrappers(module: MirModule):
+        """Emit extern "C" wrappers for all @export("C") functions and classes."""
+        var has_exports = false
+
+        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+        # Check if there are any exports
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            if func.is_export_c:
+                has_exports = true
+        for _sym in module.types.keys():
+            val type_def = module.types[_sym]
+            if type_def.is_export_c:
+                has_exports = true
+
+        if not has_exports:
+            return
+
+        self.builder.emit_blank()
+        self.builder.emit_raw(r"// ================================================================")
+        self.builder.emit_raw(r"// @export(" + "\"C\"" + r") ABI Wrappers")
+        self.builder.emit_raw(r"// ================================================================")
+        self.builder.emit_blank()
+
+        # Emit error type infrastructure if any export returns Result<T,E>
+        var has_result_exports = false
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            if func.is_export_c and is_result_type(func.signature.return_type):
+                has_result_exports = true
+        if has_result_exports:
+            self.builder.emit_raw(emit_error_type_definitions())
+
+        # Emit callback typedefs for any function pointer parameters
+        val callback_typedefs = self._collect_callback_typedefs_from_module(module)
+        if callback_typedefs.len() > 0:
+            self.builder.emit_raw(r"// Callback typedefs (borrowed — caller retains ownership)")
+            var cb_idx = 0
+            while cb_idx < callback_typedefs.len():
+                self.builder.emit_raw(emit_callback_typedef(callback_typedefs[cb_idx]))
+                cb_idx = cb_idx + 1
+            self.builder.emit_blank()
+
+            # Emit trampolines for each callback typedef
+            var tr_idx = 0
+            while tr_idx < callback_typedefs.len():
+                val cb = callback_typedefs[tr_idx]
+                val trampoline_name = r"_spl_trampoline_" + cb.name
+                self.builder.emit_raw(emit_callback_trampoline(trampoline_name, cb))
+                self.builder.emit_blank()
+                tr_idx = tr_idx + 1
+
+        # Emit function wrappers
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            if func.is_export_c:
+                self.emit_function_export_wrapper(func)
+
+        # Emit class/struct wrappers
+        for _sym in module.types.keys():
+            val type_def = module.types[_sym]
+            if type_def.is_export_c:
+                self.emit_type_export_wrapper(type_def, module)
+
+        # Emit runtime layout verification function for @repr("C") / @export("C") types
+        self.emit_verify_layouts(module)
+
+    me emit_function_export_wrapper(func: MirFunction):
+        """Emit an extern "C" wrapper for a single @export("C") function.
+
+        Generates a C ABI function that forwards to the internal __simple_ function.
+        The wrapper uses the export_name if set, otherwise derives a clean name
+        by stripping the __simple_ prefix.
+
+        If the function returns Result<T,E>, the wrapper uses error out-parameter
+        pattern: T func_name(args..., spl_error_t** err_out)
+        """
+        val internal_name = func.name
+        val export_name = self.derive_export_name(func.export_name, internal_name)
+        val ret_ty = self.type_mapper.map_return_type(func.signature.return_type)
+        val is_void = ret_ty == "void"
+
+        # Build parameter list with clean names (a0, a1, ...) and C types
+        var wrapper_params: [text] = []
+        var forward_args: [text] = []
+        var param_idx = 0
+        for param_ty in func.signature.params:
+            val c_ty = self.type_mapper.map_type(param_ty)
+            val param_name = "a" + param_idx
+            # Handle text type: wrapper accepts const char*, converts to spl_text for internal call
+            val is_text_param = self.is_text_type(param_ty)
+            val is_cb_param = self.is_callback_param(param_ty)
+            if is_text_param:
+                wrapper_params = wrapper_params.push(r"const char* " + param_name)
+                forward_args = forward_args.push(r"spl_text_from_cstr(" + param_name + r")")
+            elif is_cb_param:
+                # Callback parameter: use the typedef'd function pointer type
+                val cb_type_name = match param_ty.kind:
+                    case Opaque(name): name
+                    case _: ""
+                val cb = build_callback_typedef(cb_type_name)
+                wrapper_params = wrapper_params.push(cb.name + " " + param_name)
+                forward_args = forward_args.push(param_name)
+            else:
+                wrapper_params = wrapper_params.push(c_ty + " " + param_name)
+                forward_args = forward_args.push(param_name)
+            param_idx = param_idx + 1
+
+        val params_str = if wrapper_params.len() == 0: "void" else: wrapper_params.join(", ")
+        val args_str = forward_args.join(", ")
+
+        # Check if this function returns Result<T,E>
+        if is_result_type(func.signature.return_type):
+            # Extract Result type info from the opaque name
+            val type_name = match func.signature.return_type.kind:
+                case Opaque(name): name
+                case _: "Result"
+            val mapping = map_result_type(type_name)
+
+            # Emit error-converting wrapper
+            val wrapper_code = emit_error_converting_wrapper(
+                export_name, internal_name,
+                mapping.ok_c_type, params_str, args_str,
+                mapping.is_void_ok
+            )
+            self.builder.emit_raw(wrapper_code)
+            return
+
+        # Handle text return type: internal returns spl_text, wrapper returns const char*
+        val is_text_return = self.is_text_type(func.signature.return_type)
+        val wrapper_ret_ty = if is_text_return: r"const char*" else: ret_ty
+
+        # Emit the extern "C" wrapper
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" " + wrapper_ret_ty + r" " + export_name + r"(" + params_str + r") {")
+        if is_void:
+            self.builder.emit_raw(r"    " + internal_name + r"(" + args_str + r");")
+        elif is_text_return:
+            self.builder.emit_raw(r"    return spl_text_to_cstr(" + internal_name + r"(" + args_str + r"));")
+        else:
+            self.builder.emit_raw(r"    return " + internal_name + r"(" + args_str + r");")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+
+    me emit_type_export_wrapper(type_def: MirTypeDef, module: MirModule):
+        """Emit extern "C" factory/method wrappers for an @export("C") class.
+
+        Generates:
+        - private handle wrapper struct
+        - spl_ClassName_create(args...) -> spl_ClassName_t   (constructor)
+        - spl_ClassName_destroy(spl_ClassName_t self)        (destructor)
+        - spl_ClassName_method(spl_ClassName_t self, ...) -> ret  (each method)
+        """
+        val class_name = type_def.name
+        val c_name = sanitize_c_name(class_name)
+        val prefix = if type_def.export_name != "": type_def.export_name else: "spl_" + c_name
+
+        self.builder.emit_raw(r"// --- @export(" + "\"C\"" + r") class: " + class_name + r" ---")
+        self.builder.emit_raw(r"struct " + prefix + r" {")
+        self.builder.emit_raw(r"    " + c_name + r" inner;")
+        self.builder.emit_raw(r"};")
+        self.builder.emit_raw(r"")
+
+        # Emit constructor: spl_ClassName_create(field_args...) -> void*
+        match type_def.kind:
+            case Struct(fields):
+                self.emit_class_create_wrapper(prefix, c_name, fields)
+                self.emit_class_destroy_wrapper(prefix, c_name)
+            case _:
+                self.builder.emit_raw(r"// Skipping non-struct type " + class_name + r" for export wrappers")
+                self.builder.emit_raw(r"")
+
+        # Find and emit method wrappers — look for functions that match ClassName pattern
+        # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            # Match methods: internal name pattern is __simple_ClassName_methodName
+            val method_prefix = r"__simple_" + c_name + r"_"
+            if func.name.starts_with(method_prefix):
+                val method_suffix = func.name.split(method_prefix)[1]
+                if method_suffix != "" and method_suffix != "new" and method_suffix != "drop":
+                    self.emit_class_method_wrapper(prefix, c_name, method_suffix, func)
+
+    me emit_class_create_wrapper(prefix: text, c_name: text, fields: [MirFieldDef]):
+        """Emit spl_ClassName_create(args...) -> spl_ClassName_t constructor wrapper."""
+        var params: [text] = []
+        var field_assigns: [text] = []
+        for field in fields:
+            val c_ty = self.type_mapper.map_type(field.type_)
+            params = params.push(c_ty + " " + field.name)
+            field_assigns = field_assigns.push(r"    obj->inner." + field.name + r" = " + field.name + r";")
+
+        val params_str = if params.len() == 0: "void" else: params.join(", ")
+
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" " + prefix + r"_t " + prefix + r"_create(" + params_str + r") {")
+        self.builder.emit_raw(r"    " + prefix + r"_t obj = (" + prefix + r"_t)spl_malloc(sizeof(struct " + prefix + r"));")
+        self.builder.emit_raw(r"    if (!obj) return nullptr;")
+        for assign in field_assigns:
+            self.builder.emit_raw(assign)
+        self.builder.emit_raw(r"    return obj;")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+
+    me emit_class_destroy_wrapper(prefix: text, c_name: text):
+        """Emit spl_ClassName_destroy(spl_ClassName_t self) destructor wrapper."""
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void " + prefix + r"_destroy(" + prefix + r"_t self) {")
+        self.builder.emit_raw(r"    if (self) spl_free(self);")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+
+    me emit_class_method_wrapper(prefix: text, c_name: text, method_name: text, func: MirFunction):
+        """Emit spl_ClassName_method(spl_ClassName_t self, args...) -> ret wrapper for a class method.
+
+        If the method returns Result<T,E>, generates an error-converting wrapper
+        with spl_error_t** err_out parameter instead.
+        """
+        val internal_name = func.name
+        val ret_ty = self.type_mapper.map_return_type(func.signature.return_type)
+        val is_void = ret_ty == "void"
+        val is_text_return = self.is_text_type(func.signature.return_type)
+        val wrapper_ret_ty = if is_text_return: r"const char*" else: ret_ty
+
+        # First param of internal method is 'self' pointer — map from opaque handle to inner object pointer
+        var wrapper_params: [text] = [prefix + r"_t self"]
+        var forward_args: [text] = [r"&self->inner"]
+        var param_idx = 0
+        for param_ty in func.signature.params:
+            if param_idx == 0:
+                # Skip self — already handled as void*
+                param_idx = param_idx + 1
+                continue
+            val c_ty = self.type_mapper.map_type(param_ty)
+            val arg_name = "a" + (param_idx - 1)
+            val is_text_param = self.is_text_type(param_ty)
+            val is_cb_param = self.is_callback_param(param_ty)
+            if is_text_param:
+                wrapper_params = wrapper_params.push(r"const char* " + arg_name)
+                forward_args = forward_args.push(r"spl_text_from_cstr(" + arg_name + r")")
+            elif is_cb_param:
+                val cb_type_name = match param_ty.kind:
+                    case Opaque(name): name
+                    case _: ""
+                val cb = build_callback_typedef(cb_type_name)
+                wrapper_params = wrapper_params.push(cb.name + " " + arg_name)
+                forward_args = forward_args.push(arg_name)
+            else:
+                wrapper_params = wrapper_params.push(c_ty + " " + arg_name)
+                forward_args = forward_args.push(arg_name)
+            param_idx = param_idx + 1
+
+        val params_str = wrapper_params.join(", ")
+        val args_str = forward_args.join(", ")
+
+        # Check if this method returns Result<T,E>
+        if is_result_type(func.signature.return_type):
+            val type_name = match func.signature.return_type.kind:
+                case Opaque(name): name
+                case _: "Result"
+            val mapping = map_result_type(type_name)
+            val full_export_name = prefix + "_" + method_name
+
+            val wrapper_code = emit_error_converting_wrapper(
+                full_export_name, internal_name,
+                mapping.ok_c_type, params_str, args_str,
+                mapping.is_void_ok
+            )
+            self.builder.emit_raw(wrapper_code)
+            return
+
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" " + wrapper_ret_ty + r" " + prefix + r"_" + method_name + r"(" + params_str + r") {")
+        if is_void:
+            self.builder.emit_raw(r"    " + internal_name + r"(" + args_str + r");")
+        elif is_text_return:
+            self.builder.emit_raw(r"    return spl_text_to_cstr(" + internal_name + r"(" + args_str + r"));")
+        else:
+            self.builder.emit_raw(r"    return " + internal_name + r"(" + args_str + r");")
+        self.builder.emit_raw(r"}")
+        self.builder.emit_raw(r"")
+
+    # ================================================================
+    # Runtime Layout Verification
+    # ================================================================
+
+    me emit_verify_layouts(module: MirModule):
+        """Emit spl_verify_layouts(void) function with runtime assert checks.
+
+        For each @export("C") struct type, emits assert(sizeof(...)) and
+        assert(offsetof(...)) calls. The generated function can be called
+        from an init path to catch layout drift when a shared library is
+        loaded against a different header version.
+
+        Skips emission entirely when no @export("C") struct types exist.
+        """
+        # Collect exported struct types
+        var repr_c_types: [MirTypeDef] = []
+        for _sym in module.types.keys():
+            val type_def = module.types[_sym]
+            if type_def.is_export_c:
+                match type_def.kind:
+                    case Struct(fields):
+                        if fields.len() > 0:
+                            repr_c_types.push(type_def)
+                    case _:
+                        pass_dn
+
+        if repr_c_types.len() == 0:
+            return
+
+        self.builder.emit_raw(r"// ================================================================")
+        self.builder.emit_raw(r"// Runtime Layout Verification")
+        self.builder.emit_raw(r"// ================================================================")
+        self.builder.emit_blank()
+        self.builder.emit_raw(r"#include <assert.h>")
+        self.builder.emit_raw(r"#include <stddef.h>")
+        self.builder.emit_blank()
+        self.builder.emit_raw(r"extern " + "\"C\"" + r" void spl_verify_layouts(void) {")
+
+        var ti = 0
+        while ti < repr_c_types.len():
+            val type_def = repr_c_types[ti]
+            val assert_block = self._build_runtime_asserts_for_type(type_def)
+            if assert_block != "":
+                self.builder.emit_raw(assert_block)
+            ti = ti + 1
+
+        self.builder.emit_raw(r"}")
+        self.builder.emit_blank()
+
+    fn _build_runtime_asserts_for_type(type_def: MirTypeDef) -> text:
+        """Build runtime assert lines for a single exported struct type.
+
+        Converts MirFieldDef to HirField, computes layout via verify_c_layout,
+        then generates assert() calls using generate_runtime_layout_asserts.
+        """
+        match type_def.kind:
+            case Struct(fields):
+                if fields.len() == 0:
+                    return ""
+
+                val c_name = sanitize_c_name(type_def.name)
+
+                # Build HirField list from MirFieldDef for layout computation
+                var hir_fields: [HirField] = []
+                var fi = 0
+                while fi < fields.len():
+                    val field = fields[fi]
+                    val hir_type = _mir_type_to_hir_type_for_layout(field.type_)
+                    hir_fields.push(HirField(
+                        name: field.name,
+                        type_: hir_type,
+                        has_bits_attr: field.has_bits_attr,
+                        bits_width: field.bits_width
+                    ))
+                    fi = fi + 1
+
+                val verification = verify_c_layout(c_name, hir_fields, layoutattr_c_repr())
+                generate_runtime_layout_asserts(verification)
+
+            case _:
+                ""
+
+    # ================================================================
+    # Export Name Derivation Helpers
+    # ================================================================
+
+    fn derive_export_name(custom_name: text, internal_name: text) -> text:
+        """Derive the C export name for a function.
+
+        If custom_name is non-empty, uses it directly.
+        Otherwise strips '__simple_' prefix from the internal name and
+        prefixes the public symbol with 'spl_' so the C backend matches
+        header generation and the documented export ABI.
+        """
+        if custom_name != "":
+            return custom_name
+        # Strip __simple_ prefix if present
+        if internal_name.starts_with(r"__simple_"):
+            return r"spl_" + internal_name.split(r"__simple_")[1]
+        if internal_name.starts_with(r"spl_"):
+            return internal_name
+        r"spl_" + internal_name
+
+    fn is_text_type(ty: MirType) -> bool:
+        """Check if a MIR type represents Simple's text type (maps to const char* in C)."""
+        match ty.kind:
+            case Opaque(name):
+                name == "str" or name == "text" or name == "Text"
+            case _: false
+
+    fn is_callback_param(ty: MirType) -> bool:
+        """Check if a MIR type represents a callback function pointer."""
+        match ty.kind:
+            case Opaque(name): is_callback_type(name)
+            case _: false
+
+    fn _collect_callback_typedefs_from_module(module: MirModule) -> [CallbackTypedef]:
+        """Collect all unique callback typedefs from exported functions in the module."""
+        var typedefs: [CallbackTypedef] = []
+        var seen_names: [text] = []
+
+        for _sym in module.functions.keys():
+            val func = module.functions[_sym]
+            if func.is_export_c:
+                for param_ty in func.signature.params:
+                    match param_ty.kind:
+                        case Opaque(name):
+                            if is_callback_type(name):
+                                val cb = build_callback_typedef(name)
+                                if not seen_names.contains(cb.name):
+                                    seen_names.push(cb.name)
+                                    typedefs.push(cb)
+                        case _:
+                            pass_dn
+
+        # Also check methods on exported types
+        for _sym in module.types.keys():
+            val type_def = module.types[_sym]
+            if type_def.is_export_c:
+                val c_name = sanitize_c_name(type_def.name)
+                val method_prefix = r"__simple_" + c_name + r"_"
+                for _fsym in module.functions.keys():
+                    val func = module.functions[_fsym]
+                    if func.name.starts_with(method_prefix):
+                        var pi = 1  # Skip self
+                        while pi < func.signature.params.len():
+                            match func.signature.params[pi].kind:
+                                case Opaque(name):
+                                    if is_callback_type(name):
+                                        val cb = build_callback_typedef(name)
+                                        if not seen_names.contains(cb.name):
+                                            seen_names.push(cb.name)
+                                            typedefs.push(cb)
+                                case _:
+                                    pass_dn
+                            pi = pi + 1
+
+        typedefs
+
+# ============================================================================
+# MIR-to-HirType Conversion for Layout
+# ============================================================================
+
+fn _mir_type_to_hir_type_for_layout(ty: MirType) -> HirType:
+    """Convert a MIR type to an approximate HirType for layout computation.
+
+    Maps MIR type kinds to HirType names for use with the type_layout
+    module's size/alignment computation. Mirrors the conversion in
+    c_header.spl but lives here to avoid circular imports.
+    """
+    match ty.kind:
+        case I64: HirType.named("i64")
+        case I32: HirType.named("i32")
+        case I16: HirType.named("i16")
+        case I8: HirType.named("i8")
+        case U64: HirType.named("u64")
+        case U32: HirType.named("u32")
+        case U16: HirType.named("u16")
+        case U8: HirType.named("u8")
+        case F64: HirType.named("f64")
+        case F32: HirType.named("f32")
+        case Bool: HirType.named("bool")
+        case Unit: HirType.named("unit")
+        case Ptr(_, _): HirType.named("usize")
+        case _: HirType.named("i64")
+
+# ============================================================================
+# Export
+# ============================================================================

@@ -1,0 +1,76 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.{CompressionCodec, CompressionError, decompress_bytes}
+
+fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
+    match err:
+        CompressionError.InvalidHeader(message):
+            expect(kind).to_equal("InvalidHeader")
+            expect(message).to_contain(message_part)
+        CompressionError.UnsupportedFeature(message):
+            expect(kind).to_equal("UnsupportedFeature")
+            expect(message).to_contain(message_part)
+        CompressionError.TruncatedInput(message):
+            expect(kind).to_equal("TruncatedInput")
+            expect(message).to_contain(message_part)
+        CompressionError.ChecksumMismatch(message):
+            expect(kind).to_equal("ChecksumMismatch")
+            expect(message).to_contain(message_part)
+        CompressionError.CorruptStream(message):
+            expect(kind).to_equal("CorruptStream")
+            expect(message).to_contain(message_part)
+        CompressionError.SizeLimitExceeded(limit):
+            expect(kind).to_equal("SizeLimitExceeded")
+            expect(limit >= 0).to_equal(true)
+
+fn _zstd_frame(expected_size: i64, block: [u8]) -> [u8]:
+    [
+        0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8,
+        0xA0u8,
+        (expected_size & 0xFF).to_u8(),
+        ((expected_size >> 8) & 0xFF).to_u8(),
+        ((expected_size >> 16) & 0xFF).to_u8(),
+        ((expected_size >> 24) & 0xFF).to_u8(),
+        block[0], block[1], block[2]
+    ] + block.slice(3, block.len())
+
+fn _compressed_block(payload: [u8]) -> [u8]:
+    val header = 1 | (2 << 1) | (payload.len() << 3)
+    [
+        (header & 0xFF).to_u8(),
+        ((header >> 8) & 0xFF).to_u8(),
+        ((header >> 16) & 0xFF).to_u8()
+    ] + payload
+
+fn _raw_literals_prefix() -> [u8]:
+    [
+        0x18u8,
+        0x61u8, 0x62u8, 0x63u8
+    ]
+
+describe "zstd sequence fse table parsing gates":
+    it "accepts predefined sequence tables up to the execution boundary":
+        val frame = _zstd_frame(3, _compressed_block(_raw_literals_prefix() + [0x01u8, 0x00u8]))
+        val decoded = decompress_bytes(frame, Some(CompressionCodec.zstd))
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fse sequence execution")
+
+    it "accepts fse-compressed ll/ml tables up to the execution boundary":
+        val frame = _zstd_frame(3, _compressed_block(_raw_literals_prefix() + [
+            0x01u8,
+            0x88u8,
+            0x10u8, 0x3Fu8,
+            0x10u8, 0x3Fu8
+        ]))
+        val decoded = decompress_bytes(frame, Some(CompressionCodec.zstd))
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fse sequence execution")
+
+    it "fails closed on truncated fse table descriptions":
+        val frame = _zstd_frame(3, _compressed_block(_raw_literals_prefix() + [
+            0x01u8,
+            0x80u8,
+            0x10u8
+        ]))
+        val decoded = decompress_bytes(frame, Some(CompressionCodec.zstd))
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "normalized counts")

@@ -1,0 +1,88 @@
+"""
+# RV64A Atomics Extension
+
+Atomic Memory Operations (AMO) and Load-Reserved/Store-Conditional support.
+"""
+
+use hardware.riscv_common.pkg.riscv_types_pkg.{AmoOp, AmoOrdering, AmoResult}
+
+# ---------------------------------------------------------------------------
+# AMO execution
+# ---------------------------------------------------------------------------
+
+fn _signed_max(a: i64, b: i64) -> i64:
+    if a >= b: a else: b
+
+fn _signed_min(a: i64, b: i64) -> i64:
+    if a <= b: a else: b
+
+fn _unsigned_gt(a: i64, b: i64) -> bool:
+    val a_sign = (a >> 63) and 1
+    val b_sign = (b >> 63) and 1
+    if a_sign != b_sign:
+        a_sign == 1
+    else:
+        a > b
+
+fn amo_execute(op: AmoOp, mem_val: i64, reg_val: i64) -> AmoResult:
+    """Execute an AMO operation. Returns old memory value and new value to store."""
+    val new_val = match op:
+        AmoOp.Swap: reg_val
+        AmoOp.Add: mem_val + reg_val
+        AmoOp.And: mem_val and reg_val
+        AmoOp.Or: mem_val or reg_val
+        AmoOp.Xor: mem_val xor reg_val
+        AmoOp.Max: _signed_max(mem_val, reg_val)
+        AmoOp.Min: _signed_min(mem_val, reg_val)
+        AmoOp.Maxu:
+            if _unsigned_gt(mem_val, reg_val): mem_val else: reg_val
+        AmoOp.Minu:
+            if _unsigned_gt(reg_val, mem_val): mem_val else: reg_val
+        _: reg_val
+
+    AmoResult(old_value: mem_val, new_value: new_val)
+
+# ---------------------------------------------------------------------------
+# Reservation set for LR/SC
+# ---------------------------------------------------------------------------
+
+class ReservationSet64:
+    valid: bool
+    addr: i64
+
+    static fn create() -> ReservationSet64:
+        ReservationSet64(valid: false, addr: 0)
+
+    me reserve(addr: i64):
+        """Set reservation on a doubleword-aligned address."""
+        self.valid = true
+        self.addr = addr and 0xFFFFFFFFFFFFFFF8  # Align to 8 bytes
+
+    me check_and_clear(addr: i64) -> bool:
+        """Check reservation and clear it. Returns true if reservation was valid."""
+        val aligned = addr and 0xFFFFFFFFFFFFFFF8
+        if self.valid and self.addr == aligned:
+            self.valid = false
+            true
+        else:
+            self.valid = false
+            false
+
+    me invalidate():
+        """Invalidate reservation (e.g., on any store to the reservation set)."""
+        self.valid = false
+
+# ---------------------------------------------------------------------------
+# AMO ordering decode
+# ---------------------------------------------------------------------------
+
+fn decode_amo_ordering(aq: i64, rl: i64) -> AmoOrdering:
+    """Decode acquire/release bits into ordering."""
+    if aq != 0 and rl != 0:
+        AmoOrdering.SeqCst
+    elif aq != 0:
+        AmoOrdering.Acquire
+    elif rl != 0:
+        AmoOrdering.Release
+    else:
+        AmoOrdering.Relaxed

@@ -1,0 +1,51 @@
+"""
+# MCP CLI Passthrough Diagnostics Regression
+
+Verifies that diagnostic MCP tools which are classified as CLI passthrough still
+return their intended MCP payloads instead of leaking unrelated `simple query`
+usage errors from the host CLI surface.
+"""
+
+use std.spec
+use app.io.mod.{shell}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn mcp_msg(body: text) -> text:
+    "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
+
+fn init_request(id: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+    mcp_msg(body)
+
+fn initialized_notification() -> text:
+    mcp_msg("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}")
+
+fn tool_call_request(id: text, name: text, args_json: text) -> text:
+    val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + args_json + "}}"
+    mcp_msg(body)
+
+fn send_mcp(messages: text) -> text:
+    val mk = shell("mktemp /tmp/mcp_cli_diag_input.XXXXXX")
+    val tmp = mk.stdout.trim()
+    rt_file_write_text(tmp, messages)
+    val result = shell("cat " + tmp + " | bin/simple_mcp_server 2>/dev/null; rm -f " + tmp)
+    result.stdout ?? ""
+
+describe "MCP CLI passthrough diagnostics regression":
+
+    it "simple_symbols returns symbol output instead of query usage error":
+        val req = tool_call_request("sym-1", "simple_symbols", "{\"path\":\"test/system/mcp/fixtures/tiny_valid.spl\"}")
+        val output = send_mcp(init_request("init-1") + initialized_notification() + req)
+        expect(output.contains("\"id\":\"sym-1\"")).to_equal(true)
+        expect(output.contains("-- symbols in test/system/mcp/fixtures/tiny_valid.spl --")).to_equal(true)
+        expect(output.contains("fn add")).to_equal(true)
+        expect(output.contains("query requires --generated")).to_equal(false)
+
+    it "simple_diagnostics returns structured content instead of query usage error":
+        val req = tool_call_request("diag-1", "simple_diagnostics", "{\"path\":\"test/system/mcp/fixtures/tiny_valid.spl\"}")
+        val output = send_mcp(init_request("init-2") + initialized_notification() + req)
+        expect(output.contains("\"id\":\"diag-1\"")).to_equal(true)
+        expect(output.contains("\"structuredContent\":{\"path\":\"test/system/mcp/fixtures/tiny_valid.spl\"")).to_equal(true)
+        expect(output.contains("\"diagnostics\":[")).to_equal(true)
+        expect(output.contains("query requires --generated")).to_equal(false)

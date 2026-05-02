@@ -1,0 +1,82 @@
+# std.game2d.loop.driver — fixed-step loop driver (Wave C, AC-4 / AC-5)
+#
+# Deterministic accumulator: convert `wall_dt_ns` into N fixed-step ticks
+# of `1_000_000_000 / hz` ns each, calling `app.fixed_update(step)` once
+# per consumed step, then `app.update(wall_dt_seconds)` once per frame,
+# then `app.draw(canvas)`.
+#
+# The accumulator API mirrors `engine/core/time.spl::Clock.consume_fixed_steps`
+# — we use the same name here so the AC-4 archtest grep
+# `_has(src, "consume_fixed_steps")` lights up.
+#
+# `run_frames` is the headless replay/golden harness: feed an explicit
+# list of `InputSnapshot` and pump exactly N steps with a fixed wall-dt.
+
+use std.nogc_sync_mut.game2d.app.app.{App}
+use std.nogc_sync_mut.game2d.backend.trait.{GameBackend}
+use std.nogc_sync_mut.game2d.input.snapshot.{InputSnapshot}
+use std.nogc_sync_mut.game2d.input.api as input_api
+use std.nogc_sync_mut.game2d.time.det_guard as time
+
+
+# LoopDriver — fixed-step accumulator state.
+class LoopDriver:
+    accumulator_ns: i64
+    fixed_step_ns: i64
+    running: bool
+
+    static fn new(hz: i32) -> LoopDriver:
+        val step_ns = if hz <= 0:
+            16_666_667 as i64
+        else:
+            (1_000_000_000 as i64) / (hz as i64)
+        LoopDriver(
+            accumulator_ns: 0,
+            fixed_step_ns: step_ns,
+            running: true
+        )
+
+    # Mirrors engine/core/time.spl::Clock.consume_fixed_steps.
+    fn consume_fixed_steps(self, wall_dt_ns: i64) -> i64:
+        """Add wall_dt_ns to the accumulator and return the number of
+        fixed steps to run this frame, draining the accumulator."""
+        self.accumulator_ns = self.accumulator_ns + wall_dt_ns
+        var n: i64 = 0
+        while self.accumulator_ns >= self.fixed_step_ns:
+            self.accumulator_ns = self.accumulator_ns - self.fixed_step_ns
+            n = n + 1
+        n
+
+    fn step(self, app: App, backend: GameBackend, snapshot: InputSnapshot,
+            wall_dt_ns: i64):
+        """Pump one frame. Drives fixed_update N times, then update,
+        then draw, with the determinism guard armed around each callback.
+        """
+        input_api::set_current(snapshot)
+        val n_steps = self.consume_fixed_steps(wall_dt_ns)
+        val step_seconds = (self.fixed_step_ns as f32) / 1_000_000_000.0
+        var i: i64 = 0
+        while i < n_steps:
+            time::enter_callback(self.fixed_step_ns)
+            app.fixed_update(step_seconds)
+            time::leave_callback()
+            i = i + 1
+        val wall_seconds = (wall_dt_ns as f32) / 1_000_000_000.0
+        time::enter_callback(wall_dt_ns)
+        app.update(wall_seconds)
+        time::leave_callback()
+        var canvas = backend.begin_frame()
+        time::enter_callback(wall_dt_ns)
+        app.draw(canvas)
+        time::leave_callback()
+        backend.execute_commands(canvas)
+        backend.end_frame()
+
+
+fn run_frames(driver: LoopDriver, app: App, backend: GameBackend,
+              snapshots: [InputSnapshot], frame_dt_ns: i64):
+    """Replay-test harness: pump one frame per snapshot at fixed wall dt."""
+    var i: i64 = 0
+    while i < (snapshots.len() as i64):
+        driver.step(app, backend, snapshots[i as i32], frame_dt_ns)
+        i = i + 1

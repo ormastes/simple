@@ -1,0 +1,91 @@
+# @tag:system
+# @tag:gui-entry-engine2d-wm-simple-web
+#
+# System spec — BGA WM + Simple Web + Engine2D check in QEMU.
+
+use std.spec.*
+
+use os.qemu_runner.{OsTarget, build_os, get_wm_simple_web_check_target}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp, stop_guest,
+    wait_for_serial_marker, read_serial_log}
+
+extern fn rt_get_cwd() -> text
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _build_once(target: OsTarget) -> bool:
+    if file_exists(target.output):
+        true
+    else:
+        build_os(target)
+
+fn _capture_and_assert_web_ppm(qmp_socket: text, output_path: text) -> bool:
+    val script = "import json,os,socket,sys,time;" +
+        "sock,out=sys.argv[1],sys.argv[2];" +
+        "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
+        "f=s.makefile('rwb',buffering=0);f.readline();" +
+        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');f.flush();f.readline();" +
+        "f.write(json.dumps(dict(execute='human-monitor-command',arguments=dict([('command-line','screendump '+out)]))).encode()+b'\\n');f.flush();f.readline();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(out) and os.path.getsize(out)>0)) for _ in range(150));" +
+        "b=open(out,'rb').read() if ok else b'';" +
+        "lines=b.splitlines();w,h=map(int,lines[1].split()) if ok and len(lines)>2 else (0,0);" +
+        "start=b.find(b'\\n255\\n')+5;pix=b[start:];" +
+        "rgb=lambda x,y: pix[(y*w+x)*3:(y*w+x)*3+3] if 0 <= (y*w+x)*3 and (y*w+x)*3+3 <= len(pix) else b'';" +
+        "near=lambda g,e,t=8: len(g)==3 and all(abs(g[i]-e[i])<=t for i in range(3));" +
+        "nb=sum(1 for i in range(0,len(pix),3) if pix[i:i+3] != b'\\x00\\x00\\x00');" +
+        "checks=[near(rgb(270,136),bytes.fromhex('ffffff')),near(rgb(270,190),bytes.fromhex('000000')),near(rgb(270,270),bytes.fromhex('000000'))];" +
+        "print('dims=%sx%s nonblack=%s checks=%s' % (w,h,nb,checks));" +
+        "sys.exit(0 if ok and w==1024 and h==768 and nb>0 and all(checks) else 4)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, output_path], 25000)
+    if result[0] != "":
+        print "[gui_entry_engine2d_wm_simple_web_spec] python ppm check: {result[0]}"
+    if result[1] != "":
+        print "[gui_entry_engine2d_wm_simple_web_spec] python ppm stderr: {result[1]}"
+    result[2] == 0 and file_exists(output_path)
+
+describe "WM Simple Web Engine2D BGA QEMU check":
+    it "builds, boots, reaches render markers, and captures Simple Web pixels":
+        val target = get_wm_simple_web_check_target()
+        expect(_build_once(target)).to_equal(true)
+        expect(file_exists(target.output)).to_equal(true)
+
+        if not can_run_target(target):
+            print "[gui_entry_engine2d_wm_simple_web_spec] qemu-system-x86_64 not available, skipping live capture"
+            expect(file_exists(target.output)).to_equal(true)
+            return
+
+        val qmp_socket = "/tmp/gui_entry_engine2d_wm_simple_web_qmp.sock"
+        val serial_log = "build/os/gui_entry_engine2d_wm_simple_web_serial.log"
+        val cwd = rt_get_cwd()
+        val capture_ppm = "{cwd}/build/os/gui_entry_engine2d_wm_simple_web_capture.ppm"
+
+        dir_create_all("build/os")
+
+        match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+            Ok(handle):
+                val saw_ready = wait_for_serial_marker(handle, "[integrated-demo] render-ready", 60000)
+                val serial = read_serial_log(handle)
+                val saw_wm = serial.contains("[wm-demo] wm-service-ready")
+                val saw_engine = serial.contains("[e2d-demo] engine-core-ready")
+                val saw_web = serial.contains("[web-demo] pixels-ready")
+
+                if not saw_wm or not saw_engine or not saw_web or not saw_ready:
+                    print "[gui_entry_engine2d_wm_simple_web_spec] missing marker wm={saw_wm} e2d={saw_engine} web={saw_web} ready={saw_ready}"
+                    stop_guest(handle)
+                    expect(saw_wm and saw_engine and saw_web and saw_ready).to_equal(true)
+                    return
+
+                val captured = _capture_and_assert_web_ppm(qmp_socket, capture_ppm)
+                if not captured:
+                    print "[gui_entry_engine2d_wm_simple_web_spec] QMP screendump or web pixel assertion failed"
+                    stop_guest(handle)
+                    expect(captured).to_equal(true)
+                    return
+
+                stop_guest(handle)
+                expect(file_exists(capture_ppm)).to_equal(true)
+            Err(err):
+                print "[gui_entry_engine2d_wm_simple_web_spec] failed to spawn guest: {err}"
+                expect(false).to_equal(true)

@@ -1,0 +1,199 @@
+# @cover src/compiler/70.backend/native_backend.spl 80%
+val NL = "\n"
+
+# Native Backend E2E System Tests
+#
+# System-level tests for the native compilation pipeline.
+# Focuses on features not covered in test/unit/compiler/native_compile_spec.spl:
+# structs, match expressions, while loops, error handling.
+#
+# Pattern from test/unit/compiler/native_compile_spec.spl
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+struct Pair:
+    left: i64
+    right: i64
+
+fn find_simple_binary() -> text:
+    if file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    if file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn file_write(path: text, content: text) -> bool:
+    val cmd = "cat > '" + path + "' << 'SIMPLE_WRITE_EOF'" + NL + content + NL + "SIMPLE_WRITE_EOF"
+    val (_stdout, _stderr, code) = shell(cmd)
+    code == 0
+
+fn write_source(path: text, content: text) -> bool:
+    val cmd = "cat > " + path + " << 'SIMPLE_WRITE_EOF'" + NL + content + NL + "SIMPLE_WRITE_EOF"
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    code == 0
+
+fn interp_print(varname: text) -> text:
+    "print \"" + "{" + varname + "}" + "\""
+
+fn file_exists(path: text) -> bool:
+    val (_stdout, _stderr, code) = shell("test -e '" + path + "'")
+    code == 0
+
+fn file_delete(path: text) -> bool:
+    val (_stdout, _stderr, code) = shell("rm -f '" + path + "'")
+    code == 0
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    rt_process_run(cmd, args)
+
+fn compile_native(source_path: text, output_path: text) -> (text, text, i64):
+    process_run(find_simple_binary(), ["compile", source_path, "--native", "-o", output_path])
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn gcc_available() -> bool:
+    val (_stdout, _stderr, code) = shell("command -v gcc >/dev/null 2>&1")
+    code == 0
+
+describe "Native Backend E2E - Control Flow":
+    slow_it "compiles while loop with counter":
+        if gcc_available() == false:
+            print "  (skipped: gcc not found)"
+            return
+
+        val src_path = "/tmp/sml_sys_while.spl"
+        val out_path = "/tmp/sml_sys_while_out"
+        val src = "fn main():" + NL + "    var i = 0" + NL + "    while i < 5:" + NL + "        i = i + 1" + NL + "    " + interp_print("i")
+        write_source(src_path, src)
+
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
+        expect comp_code == 0
+
+        val (stdout, stderr, code) = process_run(out_path, [])
+        expect code == 0
+        expect stdout.trim() == "5"
+
+        file_delete(src_path)
+        file_delete(out_path)
+
+    slow_it "compiles while loop with break":
+        if gcc_available() == false:
+            print "  (skipped: gcc not found)"
+            return
+
+        val src_path = "/tmp/sml_sys_break.spl"
+        val out_path = "/tmp/sml_sys_break_out"
+        val src = "fn main():" + NL + "    var i = 0" + NL + "    while true:" + NL + "        i = i + 1" + NL + "        if i >= 3:" + NL + "            break" + NL + "    " + interp_print("i")
+        write_source(src_path, src)
+
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
+        expect comp_code == 0
+
+        val (stdout, stderr, code) = process_run(out_path, [])
+        expect code == 0
+        expect stdout.trim() == "3"
+
+        file_delete(src_path)
+        file_delete(out_path)
+
+    slow_it "compiles nested if-else chain":
+        if gcc_available() == false:
+            print "  (skipped: gcc not found)"
+            return
+
+        val src_path = "/tmp/sml_sys_ifelse.spl"
+        val out_path = "/tmp/sml_sys_ifelse_out"
+        val src = "fn classify(x: i64) -> text:" + NL + "    if x < 0:" + NL + "        return \"negative\"" + NL + "    if x == 0:" + NL + "        return \"zero\"" + NL + "    return \"positive\"" + NL + NL + "fn main():" + NL + "    print classify(-1)" + NL + "    print classify(0)" + NL + "    print classify(1)"
+        write_source(src_path, src)
+
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
+        expect comp_code == 0
+
+        val (stdout, stderr, code) = process_run(out_path, [])
+        expect code == 0
+        expect (stdout).contains("negative")
+        expect (stdout).contains("zero")
+        expect (stdout).contains("positive")
+
+        file_delete(src_path)
+        file_delete(out_path)
+
+describe "Native Backend E2E - Structs and Pattern Matching":
+    slow_it "compiles struct construction and field access":
+        if gcc_available() == false:
+            print "  (skipped: gcc not found)"
+            return
+
+        val src_path = "/tmp/sml_sys_struct.spl"
+        val out_path = "/tmp/sml_sys_struct_out"
+        val src = "struct Pair:" + NL + "    left: i64" + NL + "    right: i64" + NL + NL + "fn main():" + NL + "    val pair = Pair(left: 20, right: 22)" + NL + "    print pair.left + pair.right"
+        write_source(src_path, src)
+
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
+        expect comp_code == 0
+
+        val (stdout, stderr, code) = process_run(out_path, [])
+        expect code == 0
+        expect stdout.trim() == "42"
+
+        file_delete(src_path)
+        file_delete(out_path)
+
+    slow_it "compiles match expressions":
+        if gcc_available() == false:
+            print "  (skipped: gcc not found)"
+            return
+
+        val src_path = "/tmp/sml_sys_match.spl"
+        val out_path = "/tmp/sml_sys_match_out"
+        val src = "fn main():" + NL + "    val value = 2" + NL + "    val label = match value:" + NL + "        0: \"zero\"" + NL + "        1: \"one\"" + NL + "        2: \"two\"" + NL + "        _: \"other\"" + NL + "    print label"
+        write_source(src_path, src)
+
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
+        expect comp_code == 0
+
+        val (stdout, stderr, code) = process_run(out_path, [])
+        expect code == 0
+        expect stdout.trim() == "two"
+
+        file_delete(src_path)
+        file_delete(out_path)
+
+describe "Native Backend E2E - Error Handling":
+    slow_it "reports non-zero exit code for missing source file":
+        if gcc_available() == false:
+            print "  (skipped: gcc not found)"
+            return
+
+        val src_path = "/tmp/sml_sys_missing_does_not_exist_xyz.spl"
+        val out_path = "/tmp/sml_sys_missing_out"
+
+        val (comp_out, comp_err, comp_code) = compile_native(src_path, out_path)
+        expect comp_code > 0
+
+    slow_it "reports non-zero exit code for syntax error in source":
+        if gcc_available() == false:
+            print "  (skipped: gcc not found)"
+            return
+
+        val src_path = "/tmp/sml_sys_syntax_err.spl"
+        val out_path = "/tmp/sml_sys_syntax_err_out"
+        file_write(src_path, "fn broken(: bad syntax here @@@@")
+
+        val (comp_out, comp_err, comp_code) = process_run(find_simple_binary(), ["run", "src/app/compile/native.spl", src_path, out_path])
+        expect comp_code > 0
+
+        file_delete(src_path)

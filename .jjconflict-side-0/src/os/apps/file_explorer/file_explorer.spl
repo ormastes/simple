@@ -1,0 +1,942 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Finder — macOS Finder-style File Explorer for SimpleOS
+#
+# Three-panel layout: sidebar (Favorites/Devices/Tags),
+# content area (column/list view modes), preview panel.
+# GUI mode via finder_state_to_html(); TUI via build_ui().
+#
+# MDSOC: feature dimension, file_explorer layer
+
+use common.ui.builder.{column, row, menubar, statusbar, tree_leaf, table_widget, panel, button, text_widget, label, build_tree_with_title, with_flex, with_width, list_widget, divider, scroll, textarea, with_readonly, sidebar, inspector}
+use common.ui.widget.{WidgetNode}
+use common.ui.session.{UISession}
+use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
+use os.services.vfs.vfs.{VfsManager}
+
+# =========================================================================
+# Sort Configuration
+# =========================================================================
+
+enum SortField:
+    """Column to sort file listing by."""
+    Name
+    Size
+    Date
+
+enum SortDirection:
+    """Sort direction."""
+    Ascending
+    Descending
+
+# =========================================================================
+# View Mode
+# =========================================================================
+
+enum ViewMode:
+    """File listing display mode."""
+    Column
+    List
+    Icon
+
+# =========================================================================
+# File Entry (display model)
+# =========================================================================
+
+struct FileEntry:
+    """Flattened directory entry for display."""
+    name: text
+    kind: FsNodeKind
+    size: u64
+    modified_ns: u64
+    permissions: u16
+
+fn dir_entry_to_file_entry(entry: DirEntry) -> FileEntry:
+    """Convert a DirEntry to a display FileEntry."""
+    return FileEntry(
+        name: entry.name,
+        kind: entry.node.kind,
+        size: entry.node.size,
+        modified_ns: entry.node.modified_ns,
+        permissions: entry.node.permissions
+    )
+
+fn format_size(bytes: u64) -> text:
+    """Format file size in human-readable form."""
+    if bytes < 1024:
+        return "{bytes} B"
+    val kb = bytes / 1024
+    if kb < 1024:
+        return "{kb} KB"
+    val mb = kb / 1024
+    if mb < 1024:
+        return "{mb} MB"
+    val gb = mb / 1024
+    return "{gb} GB"
+
+fn format_kind(kind: FsNodeKind) -> text:
+    """Format filesystem node kind for display."""
+    match kind:
+        FsNodeKind.File => "File"
+        FsNodeKind.Directory => "Dir"
+        FsNodeKind.Symlink => "Link"
+        FsNodeKind.Device => "Dev"
+        FsNodeKind.Pipe => "Pipe"
+
+fn kind_icon(kind: FsNodeKind) -> text:
+    """Icon prefix for filesystem node kind."""
+    match kind:
+        FsNodeKind.Directory => "[D] "
+        FsNodeKind.Symlink => "[L] "
+        FsNodeKind.Device => "[C] "
+        FsNodeKind.Pipe => "[P] "
+        _ => "    "
+
+# =========================================================================
+# Sidebar State
+# =========================================================================
+
+struct SidebarItem:
+    """A single item in the sidebar."""
+    label: text
+    path: text
+    icon: text
+
+struct SidebarSection:
+    """A titled group of sidebar items."""
+    title: text
+    items: [SidebarItem]
+
+# =========================================================================
+# Column State
+# =========================================================================
+
+struct ColumnState:
+    """A single column panel in the column/Miller view."""
+    path: text
+    entries: [FileEntry]
+    selected_index: i32
+
+# =========================================================================
+# Preview State
+# =========================================================================
+
+enum PreviewKind:
+    """What kind of item is being previewed."""
+    NoPreview
+    File
+    Directory
+    Text
+
+struct PreviewState:
+    """State for the preview panel."""
+    entry: FileEntry?
+    kind: PreviewKind
+    preview_lines: [text]
+    item_count: i32
+
+# =========================================================================
+# Navigation History
+# =========================================================================
+
+struct NavHistory:
+    """Back/forward navigation stack."""
+    back_stack: [text]
+    forward_stack: [text]
+
+# =========================================================================
+# FinderApp
+# =========================================================================
+
+class FinderApp:
+    """macOS Finder-style three-panel file explorer."""
+    sidebar_sections: [SidebarSection]
+    columns: [ColumnState]
+    active_column_index: i32
+    preview: PreviewState
+    preview_entry: FileEntry?
+    view_mode: ViewMode
+    search_query: text
+    vfs: VfsManager?
+    nav_history: NavHistory
+    sort_by: SortField
+    sort_dir: SortDirection
+    show_hidden: bool
+
+impl FinderApp:
+
+    static fn new(initial_path: text) -> FinderApp:
+        """Create a FinderApp with default sidebar, starting at initial_path (no VFS)."""
+        return FinderApp._init(initial_path, nil)
+
+    static fn new_with_vfs(vfs: VfsManager) -> FinderApp:
+        """Create a FinderApp with default sidebar and VFS, starting at root."""
+        return FinderApp._init("/", vfs)
+
+    static fn _init(initial_path: text, vfs: VfsManager?) -> FinderApp:
+        """Internal constructor shared by new() and new_with_vfs()."""
+        val favorites = SidebarSection(
+            title: "Favorites",
+            items: [
+                SidebarItem(label: "Home",         path: "/home/user",             icon: "[H]"),
+                SidebarItem(label: "Desktop",      path: "/home/user/Desktop",     icon: "[D]"),
+                SidebarItem(label: "Documents",    path: "/home/user/Documents",   icon: "[O]"),
+                SidebarItem(label: "Downloads",    path: "/home/user/Downloads",   icon: "[V]"),
+                SidebarItem(label: "Applications", path: "/usr/bin",               icon: "[A]")
+            ]
+        )
+        val devices = SidebarSection(
+            title: "Devices",
+            items: []
+        )
+        val tags = SidebarSection(
+            title: "Tags",
+            items: []
+        )
+        var app = FinderApp(
+            sidebar_sections: [favorites, devices, tags],
+            columns: [],
+            active_column_index: 0,
+            preview: PreviewState(
+                entry: nil,
+                kind: PreviewKind.NoPreview,
+                preview_lines: [],
+                item_count: 0
+            ),
+            preview_entry: nil,
+            view_mode: ViewMode.Column,
+            search_query: "",
+            vfs: vfs,
+            nav_history: NavHistory(back_stack: [], forward_stack: []),
+            sort_by: SortField.Name,
+            sort_dir: SortDirection.Ascending,
+            show_hidden: false
+        )
+        val first_col = app._load_column(initial_path)
+        app.columns = [first_col]
+        return app
+
+    me _load_column(path: text) -> ColumnState:
+        """Load a directory into a new ColumnState."""
+        var entries: [FileEntry] = []
+        if self.vfs != nil:
+            val result = self.vfs.readdir(path)
+            if result.is_ok():
+                val dir_entries = result.unwrap()
+                for entry in dir_entries:
+                    val fe = dir_entry_to_file_entry(entry)
+                    if self.show_hidden or not fe.name.starts_with("."):
+                        entries = entries.push(fe)
+                var dirs: [FileEntry] = []
+                var files: [FileEntry] = []
+                for entry in entries:
+                    match entry.kind:
+                        FsNodeKind.Directory:
+                            dirs = dirs.push(entry)
+                        _:
+                            files = files.push(entry)
+                dirs = _sort_file_entries(dirs, self.sort_by, self.sort_dir)
+                files = _sort_file_entries(files, self.sort_by, self.sort_dir)
+                entries = dirs + files
+        return ColumnState(path: path, entries: entries, selected_index: 0)
+
+    me _update_preview(entry: FileEntry):
+        """Update preview state for a selected entry."""
+        match entry.kind:
+            FsNodeKind.Directory:
+                var count = 0
+                if self.vfs != nil:
+                    val result = self.vfs.readdir(_join_path(self.columns[self.columns.len() - 1].path, entry.name))
+                    if result.is_ok():
+                        val dir_entries = result.unwrap()
+                        for _ in dir_entries:
+                            count = count + 1
+                self.preview = PreviewState(
+                    entry: entry,
+                    kind: PreviewKind.Directory,
+                    preview_lines: [],
+                    item_count: count
+                )
+                self.preview_entry = entry
+            FsNodeKind.File:
+                var lines: [text] = []
+                var pkinds = PreviewKind.File
+                if self.vfs != nil:
+                    val col_path = self.columns[self.columns.len() - 1].path
+                    val full_path = _join_path(col_path, entry.name)
+                    val result = self.vfs.read(full_path)
+                    if result.is_ok():
+                        val content_bytes = result.unwrap()
+                        val content = content_bytes.to_text()
+                        val content_lines = _split_lines(content)
+                        var line_count = 0
+                        for ln in content_lines:
+                            if line_count < 10:
+                                lines = lines.push(ln)
+                            line_count = line_count + 1
+                        pkinds = PreviewKind.Text
+                self.preview = PreviewState(
+                    entry: entry,
+                    kind: pkinds,
+                    preview_lines: lines,
+                    item_count: 0
+                )
+                self.preview_entry = entry
+            _:
+                self.preview = PreviewState(
+                    entry: entry,
+                    kind: PreviewKind.File,
+                    preview_lines: [],
+                    item_count: 0
+                )
+                self.preview_entry = entry
+
+    me push_column(path: text):
+        """Append a new ColumnState for path (public API for column view navigation)."""
+        val new_col = self._load_column(path)
+        self.columns = self.columns + [new_col]
+        self.active_column_index = self.columns.len() - 1
+
+    me pop_column():
+        """Remove the deepest column (public API). No-op if only one column remains."""
+        if self.columns.len() <= 1:
+            return
+        var trimmed: [ColumnState] = []
+        var i = 0
+        while i < self.columns.len() - 1:
+            trimmed = trimmed.push(self.columns[i])
+            i = i + 1
+        self.columns = trimmed
+        self.active_column_index = self.columns.len() - 1
+
+    me set_view_mode(mode: ViewMode):
+        """Switch the view mode (Column / List / Icon)."""
+        self.view_mode = mode
+
+    me handle_action(action: text):
+        """Dispatch on action string from toolbar/menu/keyboard."""
+        if action.starts_with("navigate_to:"):
+            val path = action.slice(12, action.len())
+            self._navigate_to(path)
+        elif action.starts_with("select_col:"):
+            val rest = action.slice(11, action.len())
+            val sep = _find_colon(rest)
+            if sep >= 0:
+                val col_str = rest.slice(0, sep)
+                val idx_str = rest.slice(sep + 1, rest.len())
+                val col_idx = col_str.parse_i32()
+                val item_idx = idx_str.parse_i32()
+                self._select_in_column(col_idx, item_idx)
+        elif action == "go_back":
+            self._navigate_back()
+        elif action == "go_forward":
+            self._navigate_forward()
+        elif action == "view_column":
+            self.view_mode = ViewMode.Column
+        elif action == "view_list":
+            self.view_mode = ViewMode.List
+        elif action == "view_icon":
+            self.view_mode = ViewMode.Icon
+        elif action.starts_with("search:"):
+            self.search_query = action.slice(7, action.len())
+        elif action == "open_selected":
+            self._open_selected()
+        elif action == "toggle_hidden":
+            self.show_hidden = not self.show_hidden
+            self._refresh_columns()
+        elif action == "navigate_up":
+            if self.columns.len() > 0:
+                val cur_path = self.columns[0].path
+                val parent = _parent_dir(cur_path)
+                self._navigate_to(parent)
+
+    me _navigate_to(path: text):
+        """Navigate to a path, pushing current root to back stack."""
+        if self.columns.len() > 0 and self.columns[0].path == path:
+            return
+        if self.columns.len() > 0:
+            self.nav_history.back_stack = self.nav_history.back_stack.push(self.columns[0].path)
+        self.nav_history.forward_stack = []
+        val new_col = self._load_column(path)
+        self.columns = [new_col]
+        self.preview = PreviewState(
+            entry: nil,
+            kind: PreviewKind.NoPreview,
+            preview_lines: [],
+            item_count: 0
+        )
+        self.preview_entry = nil
+
+    me _navigate_back():
+        """Pop the back stack and navigate."""
+        if self.nav_history.back_stack.len() == 0:
+            return
+        val prev = self.nav_history.back_stack[self.nav_history.back_stack.len() - 1]
+        var new_back: [text] = []
+        var i = 0
+        while i < self.nav_history.back_stack.len() - 1:
+            new_back = new_back.push(self.nav_history.back_stack[i])
+            i = i + 1
+        self.nav_history.back_stack = new_back
+        if self.columns.len() > 0:
+            self.nav_history.forward_stack = self.nav_history.forward_stack.push(self.columns[0].path)
+        val new_col = self._load_column(prev)
+        self.columns = [new_col]
+
+    me _navigate_forward():
+        """Pop the forward stack and navigate."""
+        if self.nav_history.forward_stack.len() == 0:
+            return
+        val next = self.nav_history.forward_stack[self.nav_history.forward_stack.len() - 1]
+        var new_fwd: [text] = []
+        var i = 0
+        while i < self.nav_history.forward_stack.len() - 1:
+            new_fwd = new_fwd.push(self.nav_history.forward_stack[i])
+            i = i + 1
+        self.nav_history.forward_stack = new_fwd
+        if self.columns.len() > 0:
+            self.nav_history.back_stack = self.nav_history.back_stack.push(self.columns[0].path)
+        val new_col = self._load_column(next)
+        self.columns = [new_col]
+
+    me _select_in_column(col_idx: i32, item_idx: i32):
+        """Select an item in a column, push new column if directory."""
+        if col_idx < 0 or col_idx >= self.columns.len():
+            return
+        val col = self.columns[col_idx]
+        if item_idx < 0 or item_idx >= col.entries.len():
+            return
+        var new_columns: [ColumnState] = []
+        var i = 0
+        while i <= col_idx:
+            if i == col_idx:
+                new_columns = new_columns.push(ColumnState(
+                    path: col.path,
+                    entries: col.entries,
+                    selected_index: item_idx
+                ))
+            else:
+                new_columns = new_columns.push(self.columns[i])
+            i = i + 1
+        self.columns = new_columns
+        val entry = col.entries[item_idx]
+        self._update_preview(entry)
+        if entry.kind == FsNodeKind.Directory and self.view_mode == ViewMode.Column:
+            val child_path = _join_path(col.path, entry.name)
+            val new_col = self._load_column(child_path)
+            self.columns = self.columns + [new_col]
+
+    me _open_selected():
+        """Open the selected item in the deepest column."""
+        if self.columns.len() == 0:
+            return
+        val last_col = self.columns[self.columns.len() - 1]
+        if last_col.selected_index < 0 or last_col.selected_index >= last_col.entries.len():
+            return
+        val entry = last_col.entries[last_col.selected_index]
+        match entry.kind:
+            FsNodeKind.Directory:
+                val child_path = _join_path(last_col.path, entry.name)
+                val new_col = self._load_column(child_path)
+                self.columns = self.columns + [new_col]
+            _:
+                pass_dn
+
+    me _refresh_columns():
+        """Reload all open columns from VFS."""
+        var refreshed: [ColumnState] = []
+        for col in self.columns:
+            val new_col = self._load_column(col.path)
+            refreshed = refreshed.push(ColumnState(
+                path: new_col.path,
+                entries: new_col.entries,
+                selected_index: col.selected_index
+            ))
+        self.columns = refreshed
+
+    me handle_key(key: text) -> bool:
+        """Handle keyboard navigation. Returns true if consumed."""
+        match key:
+            "arrow_right":
+                self._open_selected()
+                return true
+            "arrow_left":
+                if self.columns.len() > 1:
+                    var trimmed: [ColumnState] = []
+                    var i = 0
+                    while i < self.columns.len() - 1:
+                        trimmed = trimmed.push(self.columns[i])
+                        i = i + 1
+                    self.columns = trimmed
+                    return true
+                return false
+            "arrow_down":
+                if self.columns.len() > 0:
+                    val last_idx = self.columns.len() - 1
+                    val last = self.columns[last_idx]
+                    if last.selected_index < last.entries.len() - 1:
+                        self._select_in_column(last_idx, last.selected_index + 1)
+                    return true
+                return false
+            "arrow_up":
+                if self.columns.len() > 0:
+                    val last_idx = self.columns.len() - 1
+                    val last = self.columns[last_idx]
+                    if last.selected_index > 0:
+                        self._select_in_column(last_idx, last.selected_index - 1)
+                    return true
+                return false
+            "enter":
+                self._open_selected()
+                return true
+            "backspace":
+                if self.columns.len() > 0:
+                    val cur_path = self.columns[0].path
+                    val parent = _parent_dir(cur_path)
+                    if parent != cur_path:
+                        self._navigate_to(parent)
+                return true
+            "Meta+1":
+                self.view_mode = ViewMode.Column
+                return true
+            "Meta+2":
+                self.view_mode = ViewMode.List
+                return true
+            "Meta+3":
+                self.view_mode = ViewMode.Icon
+                return true
+            "Meta+f":
+                return true
+            "escape":
+                self.search_query = ""
+                return true
+            _ => return false
+
+    fn build_ui() -> UISession:
+        """Build the Finder three-panel TUI layout."""
+        val sidebar_widget = self._build_sidebar()
+        val content_widget = self._build_content_panel()
+        val preview_widget = self._build_preview_panel()
+
+        val cur_path = if self.columns.len() > 0: self.columns[0].path else: "/"
+        val total_items = if self.columns.len() > 0: self.columns[self.columns.len() - 1].entries.len() else: 0
+        val status_left = "{total_items} items"
+
+        val root = column("finder_root", [
+            menubar("finder_menu", [
+                "File: NewFolder|Open|GetInfo|MoveToTrash",
+                "Edit: Copy|Cut|Paste|SelectAll",
+                "View: Column|List|Icon|ShowHidden",
+                "Go: Back|Forward|Up|Home|Documents|Downloads"
+            ]),
+            row("finder_toolbar", [
+                button("finder_btn_back", "<", "go_back"),
+                button("finder_btn_fwd", ">", "go_forward"),
+                button("finder_btn_up", "Up", "navigate_up"),
+                button("finder_btn_col", "[=]", "view_column"),
+                button("finder_btn_list", "[-]", "view_list"),
+                button("finder_btn_icon", "[+]", "view_icon"),
+                with_flex(text_widget("finder_search", self.search_query), 1)
+            ]),
+            row("finder_content", [
+                with_width(sidebar_widget, 30),
+                with_flex(content_widget, 1),
+                with_width(preview_widget, 25)
+            ]),
+            statusbar("finder_status", status_left, cur_path)
+        ])
+
+        val title = "Finder - {cur_path}"
+        val tree = build_tree_with_title(root, title, "dark")
+        return UISession.new(tree)
+
+    fn _build_sidebar() -> WidgetNode:
+        """Build the sidebar panel with Favorites/Devices/Tags sections."""
+        var items: [WidgetNode] = []
+        var sec_idx = 0
+        for section in self.sidebar_sections:
+            items = items.push(label("finder_sec_hdr_{sec_idx}", section.title))
+            var item_idx = 0
+            for sidebar_item in section.items:
+                val display = "{sidebar_item.icon} {sidebar_item.label}"
+                items = items.push(tree_leaf("finder_sb_{sec_idx}_{item_idx}", display))
+                item_idx = item_idx + 1
+            if sec_idx < self.sidebar_sections.len() - 1:
+                items = items.push(divider("finder_sb_div_{sec_idx}"))
+            sec_idx = sec_idx + 1
+        return sidebar("finder_sidebar", items)
+
+    fn _build_content_panel() -> WidgetNode:
+        """Build content panel: column view, list, or icon."""
+        match self.view_mode:
+            ViewMode.Column => self._build_column_view()
+            ViewMode.List => self._build_list_view()
+            ViewMode.Icon => self._build_icon_view()
+
+    fn _build_column_view() -> WidgetNode:
+        """Build Miller columns view."""
+        var col_widgets: [WidgetNode] = []
+        var col_idx = 0
+        for col in self.columns:
+            var item_labels: [text] = []
+            var item_idx = 0
+            for entry in col.entries:
+                val icon = kind_icon(entry.kind)
+                val prefix = if item_idx == col.selected_index: "> " else: "  "
+                item_labels = item_labels.push("{prefix}{icon}{entry.name}")
+                item_idx = item_idx + 1
+            val col_widget = with_width(
+                panel("finder_col_{col_idx}", col.path, [
+                    list_widget("finder_col_list_{col_idx}", item_labels)
+                ]),
+                22
+            )
+            col_widgets = col_widgets.push(col_widget)
+            col_idx = col_idx + 1
+        return scroll("finder_col_scroll", 40, [row("finder_columns", col_widgets)])
+
+    fn _build_list_view() -> WidgetNode:
+        """Build flat table list view from the deepest column."""
+        val headers = ["Name", "Kind", "Size"]
+        var rows: [[text]] = []
+        if self.columns.len() > 0:
+            val last = self.columns[self.columns.len() - 1]
+            var item_idx = 0
+            for entry in last.entries:
+                val icon = kind_icon(entry.kind)
+                val prefix = if item_idx == last.selected_index: "> " else: "  "
+                rows = rows.push([
+                    "{prefix}{icon}{entry.name}",
+                    format_kind(entry.kind),
+                    format_size(entry.size)
+                ])
+                item_idx = item_idx + 1
+        return panel("finder_list_panel", "Files", [table_widget("finder_list_table", headers, rows)])
+
+    fn _build_icon_view() -> WidgetNode:
+        """Build icon grid view from the deepest column."""
+        var items: [WidgetNode] = []
+        if self.columns.len() > 0:
+            val last = self.columns[self.columns.len() - 1]
+            var item_idx = 0
+            for entry in last.entries:
+                val icon = kind_icon(entry.kind)
+                val prefix = if item_idx == last.selected_index: "[*] " else: "    "
+                items = items.push(label("finder_icon_{item_idx}", "{prefix}{icon}{entry.name}"))
+                item_idx = item_idx + 1
+        return panel("finder_icon_panel", "Icons", items)
+
+    fn _build_preview_panel() -> WidgetNode:
+        """Build preview panel for selected entry."""
+        if self.preview.entry == nil:
+            return inspector("finder_preview", "Preview", [
+                label("finder_prev_empty", "No selection")
+            ])
+        val entry = self.preview.entry
+        var items: [WidgetNode] = []
+        val icon_text = match entry.kind:
+            FsNodeKind.Directory => "[DIR]"
+            FsNodeKind.Symlink => "[LNK]"
+            FsNodeKind.Device => "[DEV]"
+            _ => "[FILE]"
+        items = items.push(label("finder_prev_icon", icon_text))
+        items = items.push(label("finder_prev_name", entry.name))
+        items = items.push(label("finder_prev_size", format_size(entry.size)))
+        items = items.push(label("finder_prev_kind", format_kind(entry.kind)))
+        items = items.push(label("finder_prev_modified", "Modified: {entry.modified_ns}"))
+        match self.preview.kind:
+            PreviewKind.Directory:
+                items = items.push(label("finder_prev_count", "{self.preview.item_count} items"))
+            PreviewKind.Text:
+                var preview_text = ""
+                for ln in self.preview.preview_lines:
+                    if preview_text == "":
+                        preview_text = ln
+                    else:
+                        preview_text = "{preview_text}\n{ln}"
+                items = items.push(with_readonly(textarea("finder_prev_text", preview_text, "", 10)))
+            _ => pass_dn
+        return inspector("finder_preview", "Preview", items)
+
+    fn to_state_text() -> text:
+        """Serialize app state for the web renderer."""
+        var col_paths = ""
+        var first_col = true
+        for col in self.columns:
+            if first_col:
+                col_paths = col.path
+                first_col = false
+            else:
+                col_paths = "{col_paths},{col.path}"
+        val cur_path = if self.columns.len() > 0: self.columns[0].path else: "/"
+        var sel_name = ""
+        if self.columns.len() > 0:
+            val last = self.columns[self.columns.len() - 1]
+            if last.selected_index >= 0 and last.selected_index < last.entries.len():
+                sel_name = last.entries[last.selected_index].name
+        # Determine selected sidebar path
+        var sidebar_sel = cur_path
+        for section in self.sidebar_sections:
+            for sidebar_item in section.items:
+                if sidebar_item.path == cur_path:
+                    sidebar_sel = sidebar_item.path
+        # Collect mounted device paths from Devices section
+        var mounts_str = ""
+        val devices_section = self.sidebar_sections[1]
+        var first_mount = true
+        for mount_item in devices_section.items:
+            if first_mount:
+                mounts_str = mount_item.path
+                first_mount = false
+            else:
+                mounts_str = "{mounts_str},{mount_item.path}"
+        val preview_kind_str = match self.preview.kind:
+            PreviewKind.NoPreview => "none"
+            PreviewKind.File => "binary"
+            PreviewKind.Directory => "dir"
+            PreviewKind.Text => "text"
+        var preview_lines_str = ""
+        if self.preview.kind == PreviewKind.Text:
+            var first_line = true
+            for ln in self.preview.preview_lines:
+                if first_line:
+                    preview_lines_str = ln
+                    first_line = false
+                else:
+                    preview_lines_str = "{preview_lines_str}\\n{ln}"
+        var preview_size_str = "0"
+        var preview_date_str = "unknown"
+        if self.preview.entry != nil:
+            val entry = self.preview.entry
+            preview_size_str = "{entry.size}"
+            preview_date_str = _ns_to_date_approx(entry.modified_ns as i64)
+        var result = "path:{cur_path}|col:{col_paths}|sel:{sel_name}|sidebar_sel:{sidebar_sel}|mounts:{mounts_str}|preview_kind:{preview_kind_str}|preview_size:{preview_size_str}|preview_date:{preview_date_str}"
+        if preview_lines_str != "":
+            result = "{result}|preview_lines:{preview_lines_str}"
+        return result
+
+# =========================================================================
+# Public state_text serialization (module-level wrapper)
+# =========================================================================
+
+fn _ns_to_date_approx(ns: i64) -> text:
+    """Approximate a nanosecond timestamp to a YYYY-M-D date string."""
+    val seconds = ns / 1000000000
+    val days_since_epoch = seconds / 86400
+    val year = 1970 + (days_since_epoch / 365)
+    val day_of_year = days_since_epoch - ((year - 1970) * 365)
+    val month = (day_of_year / 30) + 1
+    val day = (day_of_year - ((month - 1) * 30)) + 1
+    return "{year}-{month}-{day}"
+
+fn finder_state_text(app: FinderApp) -> text:
+    """Serialize FinderApp state to pipe-delimited state_text for the web renderer."""
+    return app.to_state_text()
+
+# =========================================================================
+# HTML Renderer
+# =========================================================================
+
+fn finder_state_to_html(state_text: text, theme: text) -> text:
+    """Generate full themed HTML for the Finder GUI from state_text."""
+    use app.ui.web.html.{generate_css}
+    val css = generate_css(theme)
+    val finder_css = _finder_css()
+    val body = _finder_html_from_state(state_text)
+    return "<html><head><style>" + css + finder_css + "body { margin: 0; overflow: hidden; }</style></head><body>" + body + "</body></html>"
+
+fn _finder_css() -> text:
+    """CSS block for the Finder three-panel layout using --glass-* variables."""
+    return ".finder-root{display:flex;flex-direction:row;height:calc(100vh - 36px);overflow:hidden;background:var(--glass-background,rgba(20,20,30,0.92))}.finder-sidebar{width:200px;min-width:160px;border-right:1px solid var(--glass-border,rgba(255,255,255,0.08));overflow-y:auto;padding:8px 0;background:var(--glass-surface-secondary,rgba(30,30,40,0.85))}.finder-sidebar-section-header{font-size:10px;letter-spacing:0.08em;color:var(--glass-text-secondary);padding:8px 12px 4px;text-transform:uppercase}.finder-sidebar-item{display:flex;align-items:center;gap:6px;padding:5px 12px;cursor:pointer;border-radius:6px;margin:1px 6px;color:var(--glass-text-primary,#e8e8f0)}.finder-sidebar-item--selected{background:var(--glass-accent);color:#fff}.finder-columns{flex:1;display:flex;flex-direction:row;overflow-x:auto;gap:1px}.finder-column{min-width:200px;border-right:1px solid var(--glass-border,rgba(255,255,255,0.08));overflow-y:auto;padding:4px 0}.finder-column-item{padding:5px 14px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--glass-text-primary,#e8e8f0)}.finder-column-item--selected{background:var(--glass-accent);color:#fff}.finder-preview{width:220px;min-width:180px;border-left:1px solid var(--glass-border,rgba(255,255,255,0.08));padding:16px 12px;overflow-y:auto;background:var(--glass-surface-secondary,rgba(30,30,40,0.85))}.finder-preview-icon{font-size:48px;text-align:center;margin-bottom:12px}.finder-preview-name{font-weight:600;text-align:center;margin-bottom:12px;color:var(--glass-text-primary,#e8e8f0);word-break:break-all}.finder-preview-meta{display:grid;grid-template-columns:auto 1fr;gap:4px 8px;font-size:12px;margin-bottom:12px}.finder-preview-label{color:var(--glass-text-secondary)}.finder-preview-value{color:var(--glass-text-primary,#e8e8f0)}.finder-preview-text-content{font-family:monospace;font-size:11px;white-space:pre-wrap;border-top:1px solid var(--glass-border,rgba(255,255,255,0.08));padding-top:8px;max-height:200px;overflow-y:auto}"
+
+fn _finder_html_from_state(state_text: text) -> text:
+    """Parse state_text and emit the .finder-root HTML."""
+    var path = "/"
+    var col_paths: [text] = []
+    var sel_name = ""
+    var mounts: [text] = []
+    var preview_kind = "none"
+    var preview_size = ""
+    var preview_date = ""
+    var preview_lines = ""
+
+    val parts = state_text.split("|")
+    for part in parts:
+        val sep = _find_colon(part)
+        if sep >= 0:
+            val key = part.slice(0, sep)
+            val value = part.slice(sep + 1, part.len())
+            if key == "path":
+                path = value
+            elif key == "col":
+                col_paths = value.split(",")
+            elif key == "sel":
+                sel_name = value
+            elif key == "mounts":
+                if value != "":
+                    mounts = value.split(",")
+            elif key == "preview_kind":
+                preview_kind = value
+            elif key == "preview_size":
+                preview_size = value
+            elif key == "preview_date":
+                preview_date = value
+            elif key == "preview_lines":
+                preview_lines = value
+
+    val sidebar_html = _finder_sidebar_html(path, mounts)
+    val columns_html = _finder_columns_html(col_paths, sel_name)
+    val preview_html = _finder_preview_html(sel_name, preview_kind, preview_size, preview_date, preview_lines)
+
+    return "<div class='finder-root'>" + sidebar_html + columns_html + preview_html + "</div>"
+
+fn _finder_sidebar_html(cur_path: text, mounts: [text]) -> text:
+    """Build the sidebar HTML."""
+    val favorites = [
+        ["[H]", "Home", "/home/user"],
+        ["[D]", "Desktop", "/home/user/Desktop"],
+        ["[O]", "Documents", "/home/user/Documents"],
+        ["[V]", "Downloads", "/home/user/Downloads"],
+        ["[A]", "Applications", "/usr/bin"]
+    ]
+    var fav_items = ""
+    for fav in favorites:
+        val selected = if fav[2] == cur_path: " finder-sidebar-item--selected" else: ""
+        fav_items = fav_items + "<div class='finder-sidebar-item{selected}'><span>" + fav[0] + "</span> " + fav[1] + "</div>"
+
+    var dev_items = ""
+    for mount in mounts:
+        val selected = if mount == cur_path: " finder-sidebar-item--selected" else: ""
+        dev_items = dev_items + "<div class='finder-sidebar-item{selected}'>" + mount + "</div>"
+    if dev_items == "":
+        dev_items = "<div class='finder-sidebar-item' style='color:var(--glass-text-secondary);font-style:italic'>No devices</div>"
+
+    return "<div class='finder-sidebar'><div class='finder-sidebar-section-header'>FAVORITES</div>" + fav_items + "<div class='finder-sidebar-section-header'>DEVICES</div>" + dev_items + "<div class='finder-sidebar-section-header'>TAGS</div></div>"
+
+fn _finder_columns_html(col_paths: [text], sel_name: text) -> text:
+    """Build the columns area HTML."""
+    if col_paths.len() == 0:
+        return "<div class='finder-columns'><div class='finder-column'></div></div>"
+    var cols_html = ""
+    var col_idx = 0
+    for col_path in col_paths:
+        val is_last = col_idx == col_paths.len() - 1
+        val item_html = if is_last and sel_name != "":
+            "<div class='finder-column-item finder-column-item--selected'>" + sel_name + "</div>"
+        else:
+            "<div class='finder-column-item'>" + col_path + "</div>"
+        cols_html = cols_html + "<div class='finder-column'>" + item_html + "</div>"
+        col_idx = col_idx + 1
+    return "<div class='finder-columns'>" + cols_html + "</div>"
+
+fn _finder_preview_html(sel_name: text, preview_kind: text, preview_size: text, preview_date: text, preview_lines: text) -> text:
+    """Build the preview panel HTML."""
+    if sel_name == "" or preview_kind == "none":
+        return "<div class='finder-preview'><div class='finder-preview-icon' style='color:var(--glass-text-secondary)'>?</div><div class='finder-preview-name' style='color:var(--glass-text-secondary)'>No selection</div></div>"
+
+    val icon = if preview_kind == "dir": "&#128193;"
+        elif preview_kind == "text": "&#128196;"
+        elif preview_kind == "image": "&#128444;"
+        else: "&#128196;"
+
+    var meta_html = ""
+    if preview_size != "":
+        meta_html = meta_html + "<div class='finder-preview-label'>Size</div><div class='finder-preview-value'>" + preview_size + " B</div>"
+    if preview_date != "":
+        meta_html = meta_html + "<div class='finder-preview-label'>Modified</div><div class='finder-preview-value'>" + preview_date + "</div>"
+    val kind_label = if preview_kind == "dir": "Folder"
+        elif preview_kind == "text": "Text File"
+        elif preview_kind == "binary": "File"
+        else: "File"
+    meta_html = meta_html + "<div class='finder-preview-label'>Kind</div><div class='finder-preview-value'>" + kind_label + "</div>"
+
+    var text_preview = ""
+    if preview_kind == "text" and preview_lines != "":
+        val display_lines = preview_lines.replace("\\n", "\n")
+        text_preview = "<div class='finder-preview-text-content simple-web-muted'>" + display_lines + "</div>"
+
+    return "<div class='finder-preview'><div class='finder-preview-icon'>" + icon + "</div><div class='finder-preview-name'>" + sel_name + "</div><div class='finder-preview-meta'>" + meta_html + "</div>" + text_preview + "</div>"
+
+# =========================================================================
+# Sorting Helpers
+# =========================================================================
+
+fn _sort_file_entries(entries: [FileEntry], by: SortField, dir: SortDirection) -> [FileEntry]:
+    """Sort file entries by the given field and direction (insertion sort)."""
+    var sorted: [FileEntry] = entries
+    var i = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        var j = i - 1
+        while j >= 0 and _compare_entries(sorted[j], key, by, dir) > 0:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    return sorted
+
+fn _compare_entries(a: FileEntry, b: FileEntry, by: SortField, dir: SortDirection) -> i32:
+    """Compare two file entries. Returns >0 if a should come after b."""
+    val raw = match by:
+        SortField.Name:
+            if a.name < b.name: -1
+            elif a.name > b.name: 1
+            else: 0
+        SortField.Size:
+            if a.size < b.size: -1
+            elif a.size > b.size: 1
+            else: 0
+        SortField.Date:
+            if a.modified_ns < b.modified_ns: -1
+            elif a.modified_ns > b.modified_ns: 1
+            else: 0
+    match dir:
+        SortDirection.Ascending => raw
+        SortDirection.Descending => -raw
+
+# =========================================================================
+# Path Helpers
+# =========================================================================
+
+fn _parent_dir(path: text) -> text:
+    """Get parent directory path."""
+    if path == "/" or path == "":
+        return "/"
+    var last_slash = 0
+    var i = 0
+    for ch in path:
+        if ch == "/":
+            last_slash = i
+        i = i + 1
+    if last_slash == 0:
+        return "/"
+    return path.slice(0, last_slash)
+
+fn _join_path(base: text, name: text) -> text:
+    """Join a base path and filename."""
+    if base == "/":
+        return "/{name}"
+    return "{base}/{name}"
+
+fn _split_lines(text_content: text) -> [text]:
+    """Split text into lines."""
+    var lines: [text] = []
+    var current = ""
+    for ch in text_content:
+        if ch == "\n":
+            lines = lines.push(current)
+            current = ""
+        else:
+            current = "{current}{ch}"
+    if current != "":
+        lines = lines.push(current)
+    return lines
+
+fn _find_colon(s: text) -> i32:
+    """Find the index of the first colon in a string, or -1."""
+    var i = 0
+    for ch in s:
+        if ch == ":":
+            return i
+        i = i + 1
+    return -1
+

@@ -1,0 +1,664 @@
+//! Tests for native project builder.
+
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+use crate::codegen::common_backend::module_prefix_from_path;
+use crate::incremental::SourceInfo;
+use super::*;
+
+fn simd_tier_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
+    let _guard = simd_tier_env_lock().lock().unwrap();
+    let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+    std::env::set_var("SIMPLE_SIMD_TIER", value);
+    let result = f();
+    match previous.as_deref() {
+        Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+        None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+    }
+    result
+}
+
+#[test]
+fn debug_os_entry_closure() {
+    // Navigate from CARGO_MANIFEST_DIR (compiler/) up to repo root
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // manifest_dir = .../src/compiler_rust/compiler
+    let project_root = manifest_dir
+        .parent()
+        .unwrap() // src/compiler_rust
+        .parent()
+        .unwrap() // src
+        .parent()
+        .unwrap() // repo root
+        .to_path_buf();
+
+    let entry = project_root.join("examples/simple_os/arch/x86_64/os_entry.spl");
+    if !entry.exists() {
+        eprintln!("entry not found at {}", entry.display());
+        return;
+    }
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), PathBuf::from("/tmp/x"))
+        .source_dir(project_root.join("src/os"))
+        .entry_file(entry.clone());
+
+    let files = builder.discover_reachable_files_with_sources(&entry).unwrap();
+    eprintln!("=== {} files discovered ===", files.len());
+    for (p, _) in &files {
+        let ps = p.to_string_lossy();
+        if ps.contains("shell_app")
+            || ps.contains("/vfs")
+            || ps.contains("terminal")
+            || ps.contains("hello_world")
+            || ps.contains("fs_types")
+        {
+            eprintln!("  {}", p.display());
+        }
+    }
+    panic!("see stderr above");
+}
+
+#[test]
+fn test_module_prefix_from_path() {
+    let source_root = PathBuf::from("/project/src");
+
+    assert_eq!(
+        module_prefix_from_path(
+            &PathBuf::from("/project/src/compiler/10.frontend/core/lexer.spl"),
+            &source_root
+        ),
+        "compiler__frontend__core__lexer"
+    );
+
+    assert_eq!(
+        module_prefix_from_path(&PathBuf::from("/project/src/app/cli/main.spl"), &source_root),
+        "app__cli__main"
+    );
+
+    assert_eq!(
+        module_prefix_from_path(&PathBuf::from("/project/src/lib/common/text.spl"), &source_root),
+        "lib__common__text"
+    );
+}
+
+#[test]
+fn test_collect_spl_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    std::fs::write(dir.join("a.spl"), "# test").unwrap();
+    std::fs::write(dir.join("b.txt"), "not spl").unwrap();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/c.spl"), "# test").unwrap();
+
+    let mut files = Vec::new();
+    collect_spl_files_recursive(dir, &mut files);
+    assert_eq!(files.len(), 2);
+}
+
+#[test]
+fn test_content_hash_consistency() {
+    let h1 = content_hash("fn main(): return 42");
+    let h2 = content_hash("fn main(): return 42");
+    assert_eq!(h1, h2);
+
+    let h3 = content_hash("fn main(): return 0");
+    assert_ne!(h1, h3);
+}
+
+#[test]
+fn test_content_hash_matches_source_info() {
+    let content = "fn main(): return 42";
+    let hash = content_hash(content);
+
+    let mut info = SourceInfo::new(PathBuf::from("test.spl"));
+    info.update_from_content(content);
+
+    assert_eq!(hash, info.content_hash);
+}
+
+#[test]
+fn test_object_cache_key_separates_simd_tiers() {
+    let scalar = with_simd_tier_env("scalar", || {
+        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+    });
+    let avx2 = with_simd_tier_env("x86_64_avx2", || {
+        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+    });
+
+    assert_ne!(scalar, avx2);
+}
+
+#[test]
+fn test_incremental_cache_dir_default() {
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"));
+    assert_eq!(builder.cache_dir(), PathBuf::from("/project/.simple/native_cache"));
+}
+
+#[test]
+fn test_source_dir_preserves_logical_path() {
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple"))
+        .source_dir(PathBuf::from("src/app/mcp_t32"));
+    assert_eq!(builder.source_dirs, vec![PathBuf::from("/project/src/app/mcp_t32")]);
+}
+
+#[test]
+fn test_native_hir_resolver_roots_include_project_src_for_narrow_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    std::fs::create_dir_all(project_root.join("src/os/kernel/types")).unwrap();
+    std::fs::create_dir_all(project_root.join("src/lib")).unwrap();
+    std::fs::create_dir_all(project_root.join("examples/simple_os")).unwrap();
+
+    let roots = native_hir_resolver_roots(
+        &project_root,
+        &[
+            project_root.join("src/os"),
+            project_root.join("src/lib"),
+            project_root.join("examples/simple_os"),
+        ],
+    );
+
+    assert!(roots
+        .iter()
+        .any(|root| root == &safe_canonicalize(&project_root.join("src"))));
+    assert!(roots
+        .iter()
+        .any(|root| root == &safe_canonicalize(&project_root.join("src/os"))));
+    assert!(roots
+        .iter()
+        .any(|root| root == &safe_canonicalize(&project_root.join("src/lib"))));
+    assert!(roots
+        .iter()
+        .any(|root| root == &safe_canonicalize(&project_root.join("examples/simple_os"))));
+}
+
+#[test]
+fn test_incremental_cache_dir_custom() {
+    let config = NativeBuildConfig {
+        cache_dir: Some(PathBuf::from("/tmp/my_cache")),
+        ..Default::default()
+    };
+
+    let builder =
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
+
+    assert_eq!(builder.cache_dir(), PathBuf::from("/tmp/my_cache"));
+}
+
+#[test]
+fn test_default_config_mangle() {
+    let config = NativeBuildConfig::default();
+    assert!(
+        !config.no_mangle,
+        "no_mangle should default to false (mangling enabled)"
+    );
+    assert!(config.incremental, "incremental should default to true");
+    assert!(!config.clean, "clean should default to false");
+}
+
+#[test]
+fn test_discover_files_includes_explicit_entry_outside_source_dirs() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_dir = project_root.join("src");
+    let tools_dir = project_root.join("examples/tool");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&tools_dir).unwrap();
+
+    let lib_file = src_dir.join("lib.spl");
+    let entry_file = tools_dir.join("main.spl");
+    std::fs::write(&lib_file, "fn helper(): pass").unwrap();
+    std::fs::write(&entry_file, "fn main(): pass").unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(src_dir)
+        .entry_file(entry_file.clone());
+
+    let files = builder.discover_files().unwrap();
+    assert!(!files.iter().any(|path| same_file_path(path, &lib_file)));
+    assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+    assert_eq!(files.len(), 1);
+}
+
+#[test]
+fn test_discover_files_from_entry_excludes_unrelated_source_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_app_dir = project_root.join("src/app/mcp_t32");
+    let examples_dir = project_root.join("examples/tool");
+    std::fs::create_dir_all(&src_app_dir).unwrap();
+    std::fs::create_dir_all(&examples_dir).unwrap();
+
+    let helper_file = src_app_dir.join("helper.spl");
+    let unrelated_file = project_root.join("src/unrelated.spl");
+    let entry_file = examples_dir.join("main.spl");
+
+    std::fs::write(&helper_file, "fn helper() -> i64:\n    return 1\n").unwrap();
+    std::fs::write(&unrelated_file, "fn unrelated() -> i64:\n    return 2\n").unwrap();
+    std::fs::write(
+        &entry_file,
+        "use app.mcp_t32.helper\nfn main() -> i64:\n    return helper()\n",
+    )
+    .unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(project_root.join("src"))
+        .entry_file(entry_file.clone());
+
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+    assert!(files.iter().any(|path| same_file_path(path, &helper_file)));
+    assert!(!files.iter().any(|path| same_file_path(path, &unrelated_file)));
+    assert_eq!(files.len(), 2);
+}
+
+#[test]
+fn test_discover_files_from_entry_uses_matching_source_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let examples_root = project_root.join("examples/tooling");
+    let package_dir = examples_root.join("t32_mcp");
+    std::fs::create_dir_all(&package_dir).unwrap();
+
+    let entry_file = package_dir.join("main.spl");
+    let dep_file = package_dir.join("protocol.spl");
+
+    std::fs::write(&dep_file, "fn ping() -> text:\n    return \"pong\"\n").unwrap();
+    std::fs::write(
+        &entry_file,
+        "use t32_mcp.protocol.{ping}\nfn main() -> text:\n    return ping()\n",
+    )
+    .unwrap();
+
+    let builder = NativeProjectBuilder::new(project_root.clone(), project_root.join("bin/tool"))
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(examples_root)
+        .entry_file(entry_file.clone());
+
+    let files = builder.discover_files().unwrap();
+    assert!(files.iter().any(|path| same_file_path(path, &entry_file)));
+    assert!(files.iter().any(|path| same_file_path(path, &dep_file)));
+    assert_eq!(files.len(), 2);
+}
+
+#[test]
+fn test_runtime_bundle_auto_prefers_runtime_for_non_compiler_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("libsimple_runtime.a");
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&runtime, b"runtime").unwrap();
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let mut builder =
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_mcp_native"))
+            .config(config);
+    builder.entry_file = Some(PathBuf::from(
+        "/project/examples/10_tooling/trace32_tools/t32_mcp/frontend_light.spl",
+    ));
+
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
+    assert_eq!(selected, runtime);
+    assert!(!is_native_all);
+}
+
+#[test]
+fn test_runtime_bundle_auto_prefers_native_all_for_compiler_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("libsimple_runtime.a");
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&runtime, b"runtime").unwrap();
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let mut builder = NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple_native"))
+        .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
+
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
+    assert_eq!(selected, native_all);
+    assert!(is_native_all);
+}
+
+#[test]
+fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let mut builder = NativeProjectBuilder::new(
+        PathBuf::from("/project"),
+        PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"),
+    )
+    .config(config);
+    builder.entry_file = Some(PathBuf::from(
+        "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
+    ));
+
+    let selected_runtime = builder.selected_runtime_library(temp.path());
+    let err = builder
+        .reject_unexpected_native_all(selected_runtime.as_ref())
+        .unwrap_err();
+    assert!(err.contains("refused oversized runtime bundle"));
+    assert!(err.contains("tool_runner.spl"));
+}
+
+#[test]
+fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "all".to_string();
+
+    let mut builder = NativeProjectBuilder::new(
+        PathBuf::from("/project"),
+        PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"),
+    )
+    .config(config);
+    builder.entry_file = Some(PathBuf::from(
+        "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
+    ));
+
+    let selected_runtime = builder.selected_runtime_library(temp.path());
+    builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
+}
+
+#[test]
+fn test_freestanding_linker_uses_c_compiler_without_runtime_bundle_probe() {
+    let temp = tempfile::tempdir().unwrap();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("kernel.elf")).config(
+        NativeBuildConfig {
+            target: Some(simple_common::target::Target::new(
+                simple_common::target::TargetArch::Riscv64,
+                simple_common::target::TargetOS::None,
+            )),
+            ..Default::default()
+        },
+    );
+
+    let cc = super::tools::find_c_compiler();
+    let cxx = super::tools::find_cxx_compiler();
+
+    assert!(!cc.is_empty());
+    if cc != cxx {
+        assert_ne!(cc, cxx);
+    }
+    assert!(builder.config.target.is_some());
+}
+
+#[test]
+fn test_build_use_map_glob_import_populates_symbol_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    std::fs::create_dir_all(lib_root.join("nogc_async_mut_noalloc/log")).unwrap();
+
+    let logger_path = lib_root.join("nogc_async_mut_noalloc/log/logger.spl");
+    let consumer_path = src_root.join("app/consumer.spl");
+    std::fs::create_dir_all(consumer_path.parent().unwrap()).unwrap();
+
+    std::fs::write(&logger_path, "fn log_info(msg: text):\n    pass\n").unwrap();
+    std::fs::write(&consumer_path, "use lib.nogc_async_mut_noalloc.log.*\nfn main():\n    log_info(\"x\")\n").unwrap();
+
+    let file_sources = vec![
+        (logger_path.clone(), std::fs::read_to_string(&logger_path).unwrap()),
+        (consumer_path.clone(), std::fs::read_to_string(&consumer_path).unwrap()),
+    ];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let expected = format!(
+        "{}__log_info",
+        module_prefix_from_path(&logger_path, &lib_root)
+    );
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+
+    assert_eq!(use_map.get("log_info"), Some(&expected));
+}
+
+#[test]
+fn test_re_exports_include_glob_imported_facade_symbols() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    let os_root = src_root.join("os");
+    std::fs::create_dir_all(lib_root.join("nogc_async_mut_noalloc/log")).unwrap();
+    std::fs::create_dir_all(os_root.join("kernel/log")).unwrap();
+    std::fs::create_dir_all(src_root.join("app")).unwrap();
+
+    let logger_path = lib_root.join("nogc_async_mut_noalloc/log/logger.spl");
+    let facade_path = os_root.join("kernel/log/klog_api.spl");
+    let consumer_path = src_root.join("app/consumer.spl");
+
+    std::fs::write(&logger_path, "fn log_info(msg: text):\n    pass\n").unwrap();
+    std::fs::write(&facade_path, "use lib.nogc_async_mut_noalloc.log.*\nexport log_info\n").unwrap();
+    std::fs::write(&consumer_path, "use os.kernel.log.klog_api.{log_info}\nfn main():\n    log_info(\"x\")\n").unwrap();
+
+    let file_sources = vec![
+        (logger_path.clone(), std::fs::read_to_string(&logger_path).unwrap()),
+        (facade_path.clone(), std::fs::read_to_string(&facade_path).unwrap()),
+        (consumer_path.clone(), std::fs::read_to_string(&consumer_path).unwrap()),
+    ];
+    let source_dirs = vec![lib_root.clone(), os_root.clone(), src_root.join("app")];
+    let result = super::imports::build_import_map(&file_sources, &source_dirs, &src_root);
+    let expected = format!(
+        "{}__log_info",
+        module_prefix_from_path(&logger_path, &lib_root)
+    );
+    let facade_prefix = module_prefix_from_path(&facade_path, &os_root);
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+
+    assert_eq!(
+        result
+            .re_exports
+            .get(&facade_prefix)
+            .and_then(|exports| exports.get("log_info")),
+        Some(&expected)
+    );
+    assert_eq!(use_map.get("log_info"), Some(&expected));
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[test]
+fn test_runtime_retention_symbols_include_object_undefineds_and_roots() {
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_c = temp.path().join("runtime.c");
+    let app_c = temp.path().join("app.c");
+    let runtime_o = temp.path().join("runtime.o");
+    let app_o = temp.path().join("app.o");
+
+    std::fs::write(
+        &runtime_c,
+        r#"
+void rt_used(void) {}
+void rt_unused(void) {}
+void __simple_runtime_init(void) {}
+void __simple_runtime_shutdown(void) {}
+void rt_set_args(void) {}
+void rt_function_not_found(void) {}
+void rt_string_new(void) {}
+void rt_string_data(void) {}
+void rt_string_len(void) {}
+void rt_array_new(void) {}
+void rt_array_len(void) {}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &app_c,
+        r#"
+extern void rt_used(void);
+void app_call(void) { rt_used(); }
+"#,
+    )
+    .unwrap();
+
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&runtime_c)
+        .arg("-o")
+        .arg(&runtime_o)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&app_c)
+        .arg("-o")
+        .arg(&app_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        populate_global_struct_defs: false,
+    };
+
+    let roots =
+        NativeProjectBuilder::runtime_retention_symbols(&[app_o.clone()], &app_o, None, &runtime_o, &imports).unwrap();
+
+    assert!(roots.contains(&"rt_used".to_string()));
+    assert!(roots.contains(&"__simple_runtime_init".to_string()));
+    assert!(roots.contains(&"rt_function_not_found".to_string()));
+    assert!(!roots.contains(&"rt_unused".to_string()));
+}
+
+#[test]
+fn test_compiler_rt_builtin_symbols_are_not_stub_candidates() {
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__adddf3"));
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__fixunsdfdi"));
+    assert!(super::tools::is_compiler_rt_builtin_symbol("__muldi3"));
+    assert!(!super::tools::is_compiler_rt_builtin_symbol(
+        "examples__simple_os___start"
+    ));
+}
+
+#[test]
+fn test_cxx_abi_symbols_are_not_stub_candidates() {
+    assert!(super::tools::is_system_symbol("__Znwm"));
+    assert!(super::tools::is_system_symbol("_Znwm"));
+    assert!(super::tools::is_system_symbol("__ZN4llvm2cl6OptionE"));
+    assert!(!super::tools::is_system_symbol("app__mcp__main"));
+}
+
+#[test]
+fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
+    let temp = tempfile::tempdir().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let boot_c = temp.path().join("boot.c");
+    let simple_c = temp.path().join("simple.c");
+    let boot_o = temp.path().join("boot.o");
+    let simple_o = temp.path().join("simple.o");
+
+    std::fs::write(
+        &boot_c,
+        r#"
+        __attribute__((weak)) long spl_handle_enter_user_blocking(unsigned long a0, unsigned long a1, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+            (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+            return -38;
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        &simple_c,
+        r#"
+        long kernel__abi__syscall_shim__spl_handle_enter_user_blocking(unsigned long a0, unsigned long a1, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5) {
+            (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
+            return 14;
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&boot_c)
+        .arg("-o")
+        .arg(&boot_o)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&simple_c)
+        .arg("-o")
+        .arg(&simple_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        populate_global_struct_defs: false,
+    };
+
+    let aliases = NativeProjectBuilder::freestanding_weak_boot_defsyms(&[simple_o], &[boot_o], &imports).unwrap();
+
+    assert_eq!(
+        aliases,
+        vec![(
+            "spl_handle_enter_user_blocking".to_string(),
+            "kernel__abi__syscall_shim__spl_handle_enter_user_blocking".to_string()
+        )]
+    );
+}

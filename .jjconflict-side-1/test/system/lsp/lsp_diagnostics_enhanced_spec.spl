@@ -1,0 +1,189 @@
+# @cover src/app/cli/query.spl 80%
+# @cover src/compiler/35.semantics/lint/sffi_lint.spl 60%
+# LSP Enhanced Diagnostics System Test
+#
+# Tests that the query check subcommand produces correct diagnostic output
+# for the new lint passes: unused variables, deprecated patterns, unreachable
+# code, and match exhaustiveness.
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+fn find_simple_binary() -> text:
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn run_check_json(file: text) -> text:
+    """Run query check on a file with JSON output and return stdout."""
+    val (stdout, _stderr, _code) = rt_process_run(find_simple_binary(), ["run", "src/app/cli/query.spl", "check", file, "--format", "json"])
+    stdout ?? ""
+
+fn run_check_text(file: text) -> (text, i64):
+    """Run query check on a file with text output and return (stdout, exit_code)."""
+    val (stdout, _stderr, code) = rt_process_run(find_simple_binary(), ["run", "src/app/cli/query.spl", "check", file, "--format", "text"])
+    (stdout ?? "", code)
+
+fn write_temp_file(name: text, content: text) -> text:
+    """Write a temporary .spl file for testing."""
+    val path = "/tmp/simple_lsp_test_{name}.spl"
+    rt_file_write_text(path, content)
+    path
+
+fn output_contains_field(output: text, field: text, value: text) -> bool:
+    """Check if JSON output contains a field with a specific value."""
+    val pattern = "\"{field}\":{value}"
+    val pattern2 = "\"{field}\": {value}"
+    output.contains(pattern) or output.contains(pattern2)
+
+fn output_contains_code(output: text, code: text) -> bool:
+    """Check if JSON output contains a diagnostic with the given code."""
+    val pattern = "\"code\":\"{code}\""
+    val pattern2 = "\"code\": \"{code}\""
+    output.contains(pattern) or output.contains(pattern2)
+
+fn output_contains_severity(output: text, severity: i64) -> bool:
+    """Check if JSON output contains a diagnostic with the given severity.
+    Severity: 1=Error, 2=Warning, 3=Information, 4=Hint
+    """
+    val pattern = "\"severity\":{severity}"
+    val pattern2 = "\"severity\": {severity}"
+    output.contains(pattern) or output.contains(pattern2)
+
+fn output_contains_tag(output: text, tag: i64) -> bool:
+    """Check if JSON output contains a diagnostic with the given tag.
+    Tags: 1=Unnecessary, 2=Deprecated
+    """
+    val pattern = "\"tags\":[{tag}]"
+    val pattern2 = "\"tags\": [{tag}]"
+    output.contains(pattern) or output.contains(pattern2)
+
+# ============================================================================
+# Syntax Error Diagnostics
+# ============================================================================
+
+describe "LSP Enhanced Diagnostics":
+    slow_it "syntax error produces Error severity diagnostic":
+        val path = write_temp_file("syntax_err", "fn broken(\n    val x = \n")
+        val output = run_check_json(path)
+        # Severity 1 = Error
+        val has_error_severity = output_contains_severity(output, 1)
+        expect(has_error_severity).to_equal(true)
+
+    # ============================================================================
+    # Unused Variable Diagnostics
+    # ============================================================================
+
+    slow_it "unused variable produces Warning severity with Unnecessary tag":
+        val code = "fn test_unused():\n    val unused_var = 42\n    val used_var = 10\n    print used_var\n"
+        val path = write_temp_file("unused_var", code)
+        val output = run_check_json(path)
+        # Should contain a warning (severity 2)
+        val has_warning = output_contains_severity(output, 2)
+        expect(has_warning).to_equal(true)
+        # Should mention the unused variable
+        val mentions_unused = output.contains("unused_var")
+        expect(mentions_unused).to_equal(true)
+
+    # ============================================================================
+    # Deprecated Pattern Diagnostics
+    # ============================================================================
+
+    slow_it "deprecated Type__method pattern produces Warning with Deprecated tag":
+        val code = "fn test_deprecated():\n    val result = Vec__new()\n"
+        val path = write_temp_file("deprecated", code)
+        val output = run_check_json(path)
+        # Should contain DEPR001 code
+        val has_depr001 = output_contains_code(output, "DEPR001")
+        expect(has_depr001).to_equal(true)
+        # Should have Deprecated tag (tag value 2)
+        val has_deprecated_tag = output_contains_tag(output, 2)
+        expect(has_deprecated_tag).to_equal(true)
+
+    slow_it "deprecated .new() constructor produces Warning with Deprecated tag":
+        val code = "fn test_new():\n    val p = Point.new(1, 2)\n"
+        val path = write_temp_file("deprecated_new", code)
+        val output = run_check_json(path)
+        # Should contain DEPR002 code
+        val has_depr002 = output_contains_code(output, "DEPR002")
+        expect(has_depr002).to_equal(true)
+        # Should have Deprecated tag (tag value 2)
+        val has_deprecated_tag = output_contains_tag(output, 2)
+        expect(has_deprecated_tag).to_equal(true)
+
+    # ============================================================================
+    # Unreachable Code Diagnostics
+    # ============================================================================
+
+    slow_it "unreachable code after return produces Warning with Unnecessary tag":
+        val code = "fn test_unreachable() -> i64:\n    return 42\n    val x = 10\n"
+        val path = write_temp_file("unreachable", code)
+        val output = run_check_json(path)
+        # Should contain UNREACH001 code
+        val has_unreach = output_contains_code(output, "UNREACH001")
+        expect(has_unreach).to_equal(true)
+        # Should have Unnecessary tag (tag value 1)
+        val has_unnecessary_tag = output_contains_tag(output, 1)
+        expect(has_unnecessary_tag).to_equal(true)
+
+    # ============================================================================
+    # Match Exhaustiveness Diagnostics
+    # ============================================================================
+
+    slow_it "non-exhaustive match produces Warning":
+        val code = "fn test_match(x: i64) -> text:\n    match x:\n        case 1: \"one\"\n        case 2: \"two\"\n"
+        val path = write_temp_file("match_exhaust", code)
+        val output = run_check_json(path)
+        # Should have some warning output (severity 2 = Warning)
+        # Match exhaustiveness is a heuristic check
+        val has_output = output.len() > 0
+        expect(has_output).to_equal(true)
+
+    # ============================================================================
+    # JSON Output Structure
+    # ============================================================================
+
+    slow_it "structured JSON output from query check contains correct fields":
+        val code = "fn test_json():\n    val result = Vec__new()\n"
+        val path = write_temp_file("json_fields", code)
+        val output = run_check_json(path)
+        # Verify JSON output contains expected field names
+        val has_severity = output.contains("\"severity\"")
+        val has_code_field = output.contains("\"code\"")
+        val has_message = output.contains("\"message\"")
+        val has_line = output.contains("\"line\"")
+        val has_col = output.contains("\"col\"")
+        val has_tags = output.contains("\"tags\"")
+        val has_source = output.contains("\"source\"")
+        expect(has_severity).to_equal(true)
+        expect(has_code_field).to_equal(true)
+        expect(has_message).to_equal(true)
+        expect(has_line).to_equal(true)
+        expect(has_col).to_equal(true)
+        expect(has_tags).to_equal(true)
+        expect(has_source).to_equal(true)
+
+    slow_it "clean code produces no warnings":
+        val code = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+        val path = write_temp_file("clean", code)
+        val (output, exit_code) = run_check_text(path)
+        expect(exit_code).to_equal(0)

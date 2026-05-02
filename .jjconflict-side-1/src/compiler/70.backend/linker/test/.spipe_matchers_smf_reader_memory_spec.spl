@@ -1,0 +1,116 @@
+"""SMF reader memory specification tests."""
+
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+
+fn append_minimal_header(data: [u8], section_offset: i32, symbol_offset: i32) -> [u8]:
+    var out = data
+
+    out.push(83)
+    out.push(77)
+    out.push(70)
+    out.push(0)
+    out.push(1)
+    out.push(1)
+    out.push(1)
+    out.push(0)
+
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+
+    out.push(section_offset.to_u8())
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+
+    out.push(symbol_offset.to_u8())
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+
+    out.push(0)
+    out.push(0)
+    out.push(0)
+    out.push(0)
+
+    var i = 0
+    while i < 8:
+        out.push(0)
+        i = i + 1
+
+    while out.len() < data.len() + 128:
+        out.push(0)
+
+    out
+
+fn create_minimal_smf() -> [u8]:
+    append_minimal_header([], 128, 128)
+
+fn create_trailer_smf() -> [u8]:
+    append_minimal_header([9, 8, 7, 6, 5], 5, 5)
+
+describe "Smf Reader Memory":
+    """
+    ## Basic Tests
+
+    Validates SMF reader memory functionality.
+    """
+    it "rejects data that is too small":
+        val result = SmfReaderMemory.from_data([1, 2, 3])
+        expect result.is_err() == true
+
+    it "rejects invalid magic":
+        var data: [u8] = [66, 65, 68, 0]
+        while data.len() < 128:
+            data.push(0)
+
+        val result = SmfReaderMemory.from_data(data)
+        expect result.is_err() == true
+
+    it "accepts a minimal valid SMF and parses the header":
+        val reader = SmfReaderMemory.from_data(create_minimal_smf()).unwrap()
+        val header = reader.get_header()
+        val (major, minor) = header.version
+
+        expect major == 1
+        expect minor == 1
+        expect header.section_count == 0
+        expect header.symbol_count == 0
+        expect reader.data_size() == 128
+        expect reader.exported_symbols().len() == 0
+
+    it "accepts v1.1 SMF with header trailer at EOF minus 128":
+        val reader = SmfReaderMemory.from_data(create_trailer_smf()).unwrap()
+        val header = reader.get_header()
+        val (major, minor) = header.version
+
+        expect major == 1
+        expect minor == 1
+        expect header.header_offset == 5
+        expect header.section_table_offset == 5
+        expect header.symbol_table_offset == 5
+        expect reader.data_size() == 133

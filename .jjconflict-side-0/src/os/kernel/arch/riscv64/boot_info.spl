@@ -1,0 +1,195 @@
+# RISC-V 64 Boot Info — OpenSBI/DTB Metadata
+#
+# This module owns the high-level, testable boot metadata API. The hardware
+# entry module stays in boot.spl so RV64 native entry-closure builds do not
+# link DTB parsing, arrays, formatted strings, or runtime text helpers into the
+# first-stage boot object.
+
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr}
+use os.kernel.boot.ports.{BootOutputPort, BootMemoryRegion, FramebufferInfo, MemoryRegionKind}
+use os.kernel.boot.dtb_parser.{parse_dtb, DtbDeviceInfo}
+use os.kernel.arch.arch_context.{Architecture}
+
+val QEMU_RAM_BASE: u64 = 0x80000000
+val QEMU_RAM_SIZE: u64 = 128 * 1024 * 1024
+val QEMU_KERNEL_BASE: u64 = 0x80200000
+val QEMU_UART_BASE: u64 = 0x10000000
+val QEMU_PLIC_BASE: u64 = 0x0C000000
+val QEMU_CLINT_BASE: u64 = 0x02000000
+val DEFAULT_KERNEL_SIZE: u64 = 2 * 1024 * 1024
+
+struct Rv64Boot:
+    """RISC-V 64-bit S-mode boot metadata provider via OpenSBI."""
+    pass_dn
+
+var g_hart_id: u64 = 0
+var g_dtb_addr: u64 = 0
+var g_dtb_info: DtbDeviceInfo = DtbDeviceInfo(
+    uart_base: 0, uart_size: 0,
+    plic_base: 0, plic_size: 0,
+    clint_base: 0, clint_size: 0,
+    ram_base: 0, ram_size: 0,
+    hart_count: 0, valid: false
+)
+var g_dtb_valid_cached: bool = false
+var g_uart_base_cached: u64 = QEMU_UART_BASE
+var g_plic_base_cached: u64 = QEMU_PLIC_BASE
+var g_clint_base_cached: u64 = QEMU_CLINT_BASE
+var g_ram_base_cached: u64 = QEMU_RAM_BASE
+var g_ram_size_cached: u64 = QEMU_RAM_SIZE
+
+fn _uart_base() -> u64:
+    return g_uart_base_cached
+
+fn _plic_base() -> u64:
+    return g_plic_base_cached
+
+fn _clint_base() -> u64:
+    return g_clint_base_cached
+
+fn _ram_base() -> u64:
+    return g_ram_base_cached
+
+fn _ram_size() -> u64:
+    return g_ram_size_cached
+
+fn _pick_nonzero(valid: bool, value: u64, fallback: u64) -> u64:
+    if valid and value != 0:
+        return value
+    return fallback
+
+fn _save_boot_args(hart_id: u64, dtb_addr: u64):
+    val dtb_info = parse_dtb(dtb_addr)
+    g_hart_id = hart_id
+    g_dtb_addr = dtb_addr
+    g_dtb_info = dtb_info
+    g_dtb_valid_cached = dtb_info.valid
+    g_uart_base_cached = _pick_nonzero(dtb_info.valid, dtb_info.uart_base, QEMU_UART_BASE)
+    g_plic_base_cached = _pick_nonzero(dtb_info.valid, dtb_info.plic_base, QEMU_PLIC_BASE)
+    g_clint_base_cached = _pick_nonzero(dtb_info.valid, dtb_info.clint_base, QEMU_CLINT_BASE)
+    g_ram_base_cached = _pick_nonzero(dtb_info.valid, dtb_info.ram_base, QEMU_RAM_BASE)
+    g_ram_size_cached = _pick_nonzero(dtb_info.valid, dtb_info.ram_size, QEMU_RAM_SIZE)
+
+fn _build_memory_map() -> [BootMemoryRegion]:
+    var regions: [BootMemoryRegion] = []
+    val ram_base = _ram_base()
+    val ram_size = _ram_size()
+    val kernel_base = QEMU_KERNEL_BASE
+
+    regions.push(BootMemoryRegion(
+        base: PhysAddr(addr: ram_base),
+        size: kernel_base - ram_base,
+        kind: MemoryRegionKind.Reserved
+    ))
+    regions.push(BootMemoryRegion(
+        base: PhysAddr(addr: kernel_base),
+        size: DEFAULT_KERNEL_SIZE,
+        kind: MemoryRegionKind.Kernel
+    ))
+
+    val usable_start = kernel_base + DEFAULT_KERNEL_SIZE
+    val usable_size = (ram_base + ram_size) - usable_start
+    regions.push(BootMemoryRegion(
+        base: PhysAddr(addr: usable_start),
+        size: usable_size,
+        kind: MemoryRegionKind.Usable
+    ))
+    regions
+
+fn _build_boot_output() -> BootOutputPort:
+    val memory_map = _build_memory_map()
+    val framebuffer = FramebufferInfo(
+        addr: PhysAddr(addr: 0),
+        width: 0,
+        height: 0,
+        pitch: 0,
+        bpp: 0
+    )
+    BootOutputPort(
+        memory_map: memory_map,
+        framebuffer: framebuffer,
+        rsdp_addr: nil,
+        kernel_phys_base: PhysAddr(addr: QEMU_KERNEL_BASE),
+        kernel_virt_base: VirtAddr(addr: QEMU_KERNEL_BASE),
+        kernel_size: DEFAULT_KERNEL_SIZE,
+        serial_base: _uart_base(),
+        serial_is_mmio: true,
+        arch: Architecture.Riscv64,
+        hhdm_offset: 0
+    )
+
+fn rv64_boot_save_boot_args(hart_id: u64, dtb_addr: u64):
+    _save_boot_args(hart_id, dtb_addr)
+
+fn rv64_boot_parse_boot_info() -> BootOutputPort:
+    return _build_boot_output()
+
+fn rv64_boot_hart_id() -> u64:
+    val hart_id = g_hart_id
+    return hart_id
+
+fn rv64_boot_dtb_address() -> u64:
+    val dtb_addr = g_dtb_addr
+    return dtb_addr
+
+fn rv64_boot_dtb_valid() -> bool:
+    val dtb_valid = g_dtb_valid_cached
+    return dtb_valid
+
+fn rv64_boot_uart_base() -> u64:
+    val uart_base = _uart_base()
+    return uart_base
+
+fn rv64_boot_ram_base() -> u64:
+    val ram_base = _ram_base()
+    return ram_base
+
+fn rv64_boot_ram_size() -> u64:
+    val ram_size = _ram_size()
+    return ram_size
+
+impl Rv64Boot:
+    fn save_boot_args(hart_id: u64, dtb_addr: u64):
+        _save_boot_args(hart_id, dtb_addr)
+
+    fn parse_boot_info() -> BootOutputPort:
+        return _build_boot_output()
+
+    fn hart_id() -> u64:
+        val hart_id = g_hart_id
+        return hart_id
+
+    fn dtb_address() -> u64:
+        val dtb_addr = g_dtb_addr
+        return dtb_addr
+
+    fn dtb_info() -> DtbDeviceInfo:
+        val dtb_info = g_dtb_info
+        return dtb_info
+
+    fn dtb_valid() -> bool:
+        val dtb_valid = g_dtb_valid_cached
+        return dtb_valid
+
+    fn kernel_load_address() -> u64:
+        return QEMU_KERNEL_BASE
+
+    fn uart_base() -> u64:
+        val uart_base = _uart_base()
+        return uart_base
+
+    fn plic_base() -> u64:
+        val plic_base = _plic_base()
+        return plic_base
+
+    fn clint_base() -> u64:
+        val clint_base = _clint_base()
+        return clint_base
+
+    fn ram_base() -> u64:
+        val ram_base = _ram_base()
+        return ram_base
+
+    fn ram_size() -> u64:
+        val ram_size = _ram_size()
+        return ram_size

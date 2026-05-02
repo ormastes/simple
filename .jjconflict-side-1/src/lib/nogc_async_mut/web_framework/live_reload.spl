@@ -1,0 +1,164 @@
+"""
+# Live Reload Server
+
+WebSocket-based development server for automatic page refresh.
+Watches file system changes and notifies connected browsers
+via WebSocket to reload the page.
+
+## Usage
+
+```simple
+var lr = LiveReloadServer(watch_dirs: ["views", "public"], port: 35729)
+lr.start()?
+
+# In templates, inject the live reload script:
+val script = live_reload_script(35729)
+```
+"""
+
+# ============================================================================
+# Live Reload Server
+# ============================================================================
+
+class LiveReloadServer:
+    """WebSocket server for live reload in development.
+
+    Watches specified directories for changes and sends reload
+    notifications to connected browser clients via WebSocket.
+    """
+    watch_dirs: [text]
+    port: i64
+    is_running: bool
+    client_count: i64
+
+impl LiveReloadServer:
+    static fn new(watch_dirs: [text], port: i64) -> LiveReloadServer:
+        """Create a new live reload server.
+
+        Args:
+            watch_dirs: Directories to watch for changes
+            port: WebSocket port (default: 35729)
+
+        Returns:
+            LiveReloadServer instance
+        """
+        LiveReloadServer(
+            watch_dirs: watch_dirs,
+            port: port,
+            is_running: false,
+            client_count: 0
+        )
+
+    me start() -> Result<(), text>:
+        """Start the live reload WebSocket server.
+
+        Begins watching directories and listening for WebSocket connections.
+
+        Returns:
+            Ok(()) when server is listening
+        """
+        self.is_running = true
+        print "[LiveReload] Watching {self.watch_dirs.len()} directories on port {self.port}"
+        for dir in self.watch_dirs:
+            print "[LiveReload]   - {dir}"
+        Ok(())
+
+    me stop():
+        """Stop the live reload server."""
+        self.is_running = false
+        print "[LiveReload] Stopped"
+
+    me notify_clients():
+        """Notify all connected clients to reload.
+
+        Sends a reload command via WebSocket to all connected
+        browser clients.
+        """
+        if self.client_count > 0:
+            print "[LiveReload] Notifying {self.client_count} clients to reload"
+
+    fn is_active() -> bool:
+        """Check if the live reload server is running."""
+        self.is_running
+
+# ============================================================================
+# Client-Side Script
+# ============================================================================
+
+fn live_reload_script(port: i64) -> text:
+    """Generate JavaScript for live reload WebSocket client.
+
+    This script connects to the live reload server and automatically
+    reloads the page when notified of changes.
+
+    Args:
+        port: WebSocket server port
+
+    Returns:
+        HTML script tag with live reload JavaScript
+    """
+    val js = """<script>
+(function() {
+  var ws = null;
+  var retryInterval = 1000;
+  var maxRetries = 30;
+  var retries = 0;
+
+  function connect() {
+    ws = new WebSocket('ws://localhost:""" + "{port}" + """');
+
+    ws.onopen = function() {
+      console.log('[LiveReload] Connected');
+      retries = 0;
+    };
+
+    ws.onmessage = function(event) {
+      var data = event.data;
+      if (data === 'reload') {
+        console.log('[LiveReload] Reloading...');
+        window.location.reload();
+      } else if (data === 'css-reload') {
+        console.log('[LiveReload] Reloading CSS...');
+        var links = document.querySelectorAll('link[rel="stylesheet"]');
+        links.forEach(function(link) {
+          var href = link.getAttribute('href');
+          if (href) {
+            var sep = href.indexOf('?') >= 0 ? '&' : '?';
+            link.setAttribute('href', href + sep + '_lr=' + Date.now());
+          }
+        });
+      }
+    };
+
+    ws.onclose = function() {
+      ws = null;
+      if (retries < maxRetries) {
+        retries++;
+        console.log('[LiveReload] Disconnected. Retry ' + retries + '/' + maxRetries);
+        setTimeout(connect, retryInterval);
+      }
+    };
+
+    ws.onerror = function() {
+      ws.close();
+    };
+  }
+
+  connect();
+})();
+</script>"""
+    js
+
+fn live_reload_script_conditional(port: i64, env: text) -> text:
+    """Generate live reload script only in development mode.
+
+    Args:
+        port: WebSocket server port
+        env: Application environment ("development", "production", etc.)
+
+    Returns:
+        Script tag in development, empty string otherwise
+    """
+    if env == "development" or env == "dev":
+        return live_reload_script(port)
+    ""

@@ -1,0 +1,431 @@
+# UI access protocol HTTP route specification
+#
+# Verifies the additive /api/test/ui/* routes through the shared handler.
+
+use std.spec.{describe, it, expect}
+use common.ui.builder.{column, text_widget, button, text_field, build_tree}
+use common.ui.session.{UISession}
+use common.ui.widget.{UIEvent}
+use common.ui.access_store.{UiAccessStore}
+use app.ui.test_api.handler.{handle_test_request}
+
+fn _session_with_popup() -> UISession:
+    val root = column("root").child(
+        text_widget("title", "Hello Access")
+    ).child(
+        text_field("name_input", "Ada", "Name")
+    ).child(
+        button("submit_btn", "Submit", "submit")
+    )
+    val tree = build_tree(root)
+    var session = UISession.new(tree)
+    val popup_tree = build_tree(
+        column("popup_root").child(button("ok_btn", "OK", "ok"))
+    )
+    session.open_surface("popup", popup_tree)
+    session.set_active_surface("popup")
+    return session
+
+describe "ui_access_protocol HTTP routes":
+    it "returns a state-derived snapshot without a session and a multi-surface snapshot with one":
+        val session = _session_with_popup()
+        val fallback = handle_test_request(
+            "/api/test/ui/snapshot",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            nil
+        )
+        expect(fallback.0).to_equal(200)
+        expect(fallback.2).to_contain("\"main\"")
+        val live = handle_test_request(
+            "/api/test/ui/snapshot",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(live.0).to_equal(200)
+        expect(live.2).to_contain("\"popup\"")
+        expect(live.2).to_contain("\"protocol_version\":1")
+
+    it "serves named surfaces and rejects missing ones":
+        val session = _session_with_popup()
+        val found = handle_test_request(
+            "/api/test/ui/surface?id=popup",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(found.0).to_equal(200)
+        expect(found.2).to_contain("\"surface_id\":\"popup\"")
+        expect(found.2).to_contain("popup#ok_btn")
+        val missing = handle_test_request(
+            "/api/test/ui/surface?id=missing",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing.0).to_equal(404)
+        expect(missing.2).to_contain("Surface not found")
+
+    it "returns history for the active surface and falls back to empty without a session":
+        var session = _session_with_popup()
+        session.dispatch(UIEvent.Action(name: "submit"))
+        val live = handle_test_request(
+            "/api/test/ui/history?surface_id=popup&count=5",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(live.0).to_equal(200)
+        expect(live.2).to_contain("\"surface_id\":\"popup\"")
+        expect(live.2).to_contain("\"event_kind\":\"action\"")
+        val fallback = handle_test_request(
+            "/api/test/ui/history?count=5",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            nil
+        )
+        expect(fallback.0).to_equal(200)
+        expect(fallback.2).to_equal("[]")
+
+    it "serves persisted history when a store is attached":
+        var session = _session_with_popup()
+        var store = UiAccessStore.memory()?
+        session.attach_access_store(store)
+        session.dispatch(UIEvent.Action(name: "submit"))
+        session.access_events = []
+        val live = handle_test_request(
+            "/api/test/ui/history?surface_id=popup&count=5",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(live.0).to_equal(200)
+        expect(live.2).to_contain("\"surface_id\":\"popup\"")
+        expect(live.2).to_contain("\"event_kind\":\"action\"")
+
+    it "observes canonical nodes and rejects missing selectors":
+        val session = _session_with_popup()
+        val found = handle_test_request(
+            "/api/test/ui/observe?canonical_id=popup#ok_btn",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(found.0).to_equal(200)
+        expect(found.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        expect(found.2).to_contain("\"kind\":\"button\"")
+        val missing = handle_test_request(
+            "/api/test/ui/observe",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing.0).to_equal(400)
+        expect(missing.2).to_contain("Missing selector")
+
+    it "queries structured canonical nodes and rejects missing canonical targets":
+        val session = _session_with_popup()
+        val found = handle_test_request(
+            "/api/test/ui/query?surface_id=popup&kind=button&text=OK&focused_only=false&limit=1",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(found.0).to_equal(200)
+        expect(found.1).to_equal("application/json")
+        expect(found.2).to_contain("\"match_count\":1")
+        expect(found.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        val missing = handle_test_request(
+            "/api/test/ui/query?canonical_id=popup#missing",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing.0).to_equal(404)
+        expect(missing.2).to_contain("Canonical node not found")
+
+    it "ensures bounded declarative expectations over canonical queries":
+        val session = _session_with_popup()
+        val missing = handle_test_request(
+            "/api/test/ui/ensure?surface_id=popup&kind=button&text=Missing&expectation=absent",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing.0).to_equal(200)
+        expect(missing.2).to_contain("\"satisfied\":true")
+        val focus = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"surface_id\":\"popup\",\"canonical_id\":\"popup#ok_btn\",\"state_key\":\"focused\",\"state_value\":\"true\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(focus.0).to_equal(200)
+        val ensured = handle_test_request(
+            "/api/test/ui/ensure?surface_id=popup&kind=button&focused_only=true&expectation=match_count&expected_value=1&limit=1",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(ensured.0).to_equal(200)
+        expect(ensured.2).to_contain("\"satisfied\":true")
+        expect(ensured.2).to_contain("\"match_count\":1")
+        expect(ensured.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+
+    it "preserves focused semantics across state, observe, and query":
+        val session = _session_with_popup()
+        val empty = handle_test_request(
+            "/api/test/ui/query?surface_id=popup&kind=button&focused_only=true&limit=1",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(empty.0).to_equal(200)
+        expect(empty.2).to_contain("\"match_count\":0")
+        val focus = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"surface_id\":\"popup\",\"canonical_id\":\"popup#ok_btn\",\"state_key\":\"focused\",\"state_value\":\"true\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(focus.0).to_equal(200)
+        expect(focus.2).to_contain("\"ok\":true")
+        val observed = handle_test_request(
+            "/api/test/ui/observe?canonical_id=popup#ok_btn",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(observed.0).to_equal(200)
+        expect(observed.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        expect(observed.2).to_contain("\"focused\":true")
+        val query = handle_test_request(
+            "/api/test/ui/query?surface_id=popup&kind=button&focused_only=true&limit=1",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(query.0).to_equal(200)
+        expect(query.2).to_contain("\"match_count\":1")
+        expect(query.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+
+    it "reads and sets declarative UI state":
+        val session = _session_with_popup()
+        val read = handle_test_request(
+            "/api/test/ui/state?canonical_id=popup#ok_btn",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(read.0).to_equal(200)
+        expect(read.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        val read_key = handle_test_request(
+            "/api/test/ui/state?canonical_id=popup#ok_btn&state_key=focused",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(read_key.0).to_equal(200)
+        expect(read_key.2).to_contain("\"state_key\":\"focused\"")
+        expect(read_key.2).to_contain("\"state_value\":\"false\"")
+        val surface_read = handle_test_request(
+            "/api/test/ui/state?surface_id=popup&state_key=active",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(surface_read.0).to_equal(200)
+        expect(surface_read.2).to_contain("\"surface_id\":\"popup\"")
+        expect(surface_read.2).to_contain("\"state_value\":\"true\"")
+        val write = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"surface_id\":\"main\",\"canonical_id\":\"main#submit_btn\",\"state_key\":\"invoke\",\"state_value\":\"true\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(write.0).to_equal(200)
+        expect(write.2).to_contain("\"ok\":true")
+        expect(write.2).to_contain("click_submit_btn")
+        val selected_false = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"surface_id\":\"main\",\"canonical_id\":\"main#submit_btn\",\"state_key\":\"selected\",\"state_value\":\"false\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(selected_false.0).to_equal(200)
+        expect(selected_false.2).to_contain("\"state_key\":\"selected\"")
+        expect(selected_false.2).to_contain("\"state_value\":\"false\"")
+        val missing = handle_test_request(
+            "/api/test/ui/state",
+            "POST",
+            "{\"state_value\":\"true\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing.0).to_equal(400)
+        expect(missing.2).to_contain("Missing required field: state_key")
+        val unsupported_key = handle_test_request(
+            "/api/test/ui/state?canonical_id=popup#ok_btn&state_key=bogus",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(unsupported_key.0).to_equal(400)
+        expect(unsupported_key.2).to_contain("Unsupported state key")
+
+    it "reads and writes typed values for value-bearing nodes":
+        val session = _session_with_popup()
+        val read = handle_test_request(
+            "/api/test/ui/value?canonical_id=main#name_input",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(read.0).to_equal(200)
+        expect(read.2).to_contain("\"canonical_id\":\"main#name_input\"")
+        expect(read.2).to_contain("\"value\":\"Ada\"")
+        val write = handle_test_request(
+            "/api/test/ui/value",
+            "POST",
+            "{\"surface_id\":\"main\",\"canonical_id\":\"main#name_input\",\"value\":\"Grace\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(write.0).to_equal(200)
+        expect(write.2).to_contain("\"value\":\"Grace\"")
+        val unsupported = handle_test_request(
+            "/api/test/ui/value?canonical_id=main#submit_btn",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(unsupported.0).to_equal(400)
+        expect(unsupported.2).to_contain("Unsupported value target")
+
+    it "serves additive adapter snapshots and visual probes":
+        val session = _session_with_popup()
+        val adapter = handle_test_request(
+            "/api/test/ui/adapter_snapshot?surface_id=popup",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(adapter.0).to_equal(200)
+        expect(adapter.2).to_contain("\"source_kind\":\"session\"")
+        expect(adapter.2).to_contain("\"surface_id\":\"popup\"")
+        expect(adapter.2).to_contain("\"issues\":[]")
+        val probe = handle_test_request(
+            "/api/test/ui/visual_probe?surface_id=popup",
+            "GET",
+            "",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(probe.0).to_equal(200)
+        expect(probe.2).to_contain("\"active_surface\":\"popup\"")
+        expect(probe.2).to_contain("\"captured\":false")
+        expect(probe.2).to_contain("\"mark_id\":\"mark_1\"")
+
+    it "accepts canonical actions, switches surface, and rejects empty or missing targets":
+        val session = _session_with_popup()
+        val ok = handle_test_request(
+            "/api/test/ui/act",
+            "POST",
+            "{\"surface_id\":\"popup\",\"canonical_id\":\"popup#ok_btn\",\"action\":\"click\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(ok.0).to_equal(200)
+        expect(ok.2).to_contain("\"surface_id\":\"popup\"")
+        expect(ok.2).to_contain("\"canonical_id\":\"popup#ok_btn\"")
+        expect(session.active_surface()).to_equal("popup")
+        val semantic = handle_test_request(
+            "/api/test/ui/act",
+            "POST",
+            "{\"surface_id\":\"main\",\"canonical_id\":\"main#submit_btn\",\"action\":\"submit\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(semantic.0).to_equal(200)
+        expect(semantic.2).to_contain("\"surface_id\":\"main\"")
+        expect(session.active_surface()).to_equal("main")
+        val missing_target = handle_test_request(
+            "/api/test/ui/act",
+            "POST",
+            "{\"action\":\"click\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(missing_target.0).to_equal(400)
+        expect(missing_target.2).to_contain("Missing required field: surface_id")
+        val invalid_surface = handle_test_request(
+            "/api/test/ui/act",
+            "POST",
+            "{\"surface_id\":\"missing\",\"action\":\"click\"}",
+            session.current_state(),
+            \event: pass_dn,
+            session
+        )
+        expect(invalid_surface.0).to_equal(404)
+        expect(invalid_surface.2).to_contain("Surface not found")

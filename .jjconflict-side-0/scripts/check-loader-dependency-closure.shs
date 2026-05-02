@@ -1,0 +1,191 @@
+#!/bin/sh
+# Check loader dependency closure and report direct/transitive startup-path deps.
+
+set -eu
+
+repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+python3 - "$repo_root" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+import tomllib
+
+repo_root = pathlib.Path(sys.argv[1])
+workspace_root = repo_root / "src/compiler_rust"
+workspace_manifest = workspace_root / "Cargo.toml"
+loader_manifest = workspace_root / "loader/Cargo.toml"
+
+expected = {
+    "simple-loader": {
+        "normal": {"simple-common", "thiserror", "tracing"},
+        "target:cfg(unix)": {"libc"},
+        "target:cfg(windows)": {"windows-sys"},
+        "dev": {"tempfile"},
+    },
+    "simple-native-loader": {
+        "normal": {"libc", "libloading", "simple-common", "simple-runtime-abi", "thiserror"},
+        "target:cfg(windows)": {"windows-sys"},
+        "dev": {"cc", "tempfile"},
+    },
+    "simple-common": {
+        "normal": {"ahash", "memmap2", "serde", "serde_json", "simple-runtime-abi", "thiserror", "tracing"},
+        "dev": {"tempfile"},
+    },
+    "simple-native-all": {
+        "normal": {"simple-common", "simple-compiler", "simple-driver", "simple-runtime", "spl_hosted_runtime"},
+    },
+}
+
+def dep_bucket(dep: dict) -> str:
+    kind = dep.get("kind")
+    target = dep.get("target")
+    if kind == "dev":
+        return "dev"
+    if target:
+        return f"target:{target}"
+    return "normal"
+
+def dep_mode(dep: dict) -> str:
+    flags = []
+    if dep.get("kind") == "dev":
+        flags.append("test-only")
+    if dep.get("target"):
+        flags.append("platform-gated")
+    if dep.get("optional"):
+        flags.append("feature-gated")
+    if dep.get("uses_default_features", True):
+        flags.append("default")
+    else:
+        flags.append("defaults-off")
+    if dep.get("features"):
+        flags.append("features=" + ",".join(dep["features"]))
+    return ", ".join(flags)
+
+def parse_metadata(manifest_path: pathlib.Path) -> dict:
+    result = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(manifest_path), "--no-deps"],
+        check=True,
+        text=True,
+        capture_output=True,
+        cwd=repo_root,
+    )
+    return json.loads(result.stdout)
+
+def package_map(metadata: dict) -> dict:
+    return {pkg["name"]: pkg for pkg in metadata["packages"]}
+
+workspace_meta = parse_metadata(workspace_manifest)
+packages = package_map(workspace_meta)
+
+loader_doc = tomllib.loads(loader_manifest.read_text())
+
+direct_reports = []
+errors = []
+
+def collect_manifest_deps(doc: dict) -> list[dict]:
+    rows = []
+    for section_name, deps in (
+        ("normal", doc.get("dependencies", {})),
+        ("dev", doc.get("dev-dependencies", {})),
+    ):
+        for name, value in deps.items():
+            rows.append(
+                {
+                    "name": name,
+                    "bucket": section_name,
+                    "target": None,
+                    "kind": "dev" if section_name == "dev" else None,
+                    "optional": bool(isinstance(value, dict) and value.get("optional")),
+                    "uses_default_features": not (isinstance(value, dict) and value.get("default-features") is False),
+                    "features": list(value.get("features", [])) if isinstance(value, dict) else [],
+                }
+            )
+    for target_name, target_data in doc.get("target", {}).items():
+        for dep_name, value in target_data.get("dependencies", {}).items():
+            rows.append(
+                {
+                    "name": dep_name,
+                    "bucket": f"target:{target_name}",
+                    "target": target_name,
+                    "kind": None,
+                    "optional": bool(isinstance(value, dict) and value.get("optional")),
+                    "uses_default_features": not (isinstance(value, dict) and value.get("default-features") is False),
+                    "features": list(value.get("features", [])) if isinstance(value, dict) else [],
+                }
+            )
+    return rows
+
+def emit_direct(crate_name: str, deps: list[dict]) -> None:
+    actual = {}
+    for dep in deps:
+        bucket = dep.get("bucket") or dep_bucket(dep)
+        actual.setdefault(bucket, set()).add(dep["name"])
+        direct_reports.append((crate_name, dep["name"], bucket, dep_mode(dep)))
+
+    for bucket, expected_names in expected.get(crate_name, {}).items():
+        found = actual.get(bucket, set())
+        if found != expected_names:
+            errors.append(
+                f"{crate_name} {bucket} deps mismatch: expected {sorted(expected_names)}, found {sorted(found)}"
+            )
+
+    extra_buckets = set(actual) - set(expected.get(crate_name, {}))
+    if extra_buckets:
+        errors.append(f"{crate_name} has unexpected dependency buckets: {sorted(extra_buckets)}")
+
+for crate_name in ("simple-native-loader", "simple-common", "simple-native-all"):
+    emit_direct(crate_name, packages[crate_name]["dependencies"])
+
+emit_direct("simple-loader", collect_manifest_deps(loader_doc))
+
+tree_cmd = [
+    "cargo",
+    "tree",
+    "--manifest-path",
+    str(workspace_manifest),
+    "-p",
+    "simple-native-loader",
+    "-e",
+    "normal",
+    "--prefix",
+    "none",
+]
+tree = subprocess.run(tree_cmd, check=True, text=True, capture_output=True, cwd=repo_root).stdout.splitlines()
+transitive = []
+seen_transitive = set()
+for line in tree:
+    if " v" not in line:
+        continue
+    name = line.split(" v", 1)[0].strip()
+    if name == "simple-native-loader":
+        continue
+    if name not in seen_transitive:
+        seen_transitive.add(name)
+        transitive.append(name)
+
+if "simple-runtime" in transitive:
+    errors.append("simple-native-loader still depends on simple-runtime in the normal dependency tree")
+
+print("Loader dependency closure report")
+print("")
+print("Direct dependencies")
+for crate_name, dep_name, bucket, mode in sorted(direct_reports):
+    print(f"- {crate_name}: {dep_name} [{bucket}] ({mode})")
+
+print("")
+print("simple-native-loader transitive startup-path deps")
+for name in transitive:
+    print(f"- {name}")
+
+if errors:
+    print("")
+    print("FAIL")
+    for error in errors:
+        print(f"- {error}")
+    sys.exit(1)
+
+print("")
+print("PASS")
+PY

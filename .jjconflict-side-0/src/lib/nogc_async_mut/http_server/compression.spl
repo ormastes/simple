@@ -1,0 +1,185 @@
+# HTTP server response-body compression dispatcher.
+#
+# Maps a negotiated Content-Encoding name (from `negotiate_encoding` in
+# `lib/nogc_sync_mut/http/accept_encoding.spl`) to a concrete encoder call,
+# returning the compressed bytes.
+#
+# Currently wired:
+#
+# - `"zstd"` and `"lz4"` go through the typed `lib/common/compress` façade.
+#
+# Not yet wired (return `Err` with a specific reason — fix in a follow-up
+# commit, do not silently fall through to identity):
+#
+# - `"gzip"` — the in-tree `lib/nogc_sync_mut/compression/gzip` module is
+#   untyped and not exposed through the common compress façade; integrating
+#   it requires either adding `CompressionCodec.gzip` to
+#   `lib/common/compress/types.spl` with proper `[u8]` signatures, or
+#   exporting it through this layer once its signature is verified.
+# - `"br"` — needs the brotli encoder from Phase 3 of the compression pass.
+# - `"deflate"` — same blocker as gzip (deflate lives under the gzip module
+#   tree).
+# - `"identity"` and `""` — no compression; callers should detect these
+#   before invoking this dispatcher.
+
+use std.common.compress.{
+    CompressionCodec,
+    CompressionOptions,
+    CompressionError,
+    default_compression_options,
+    try_compress_bytes,
+}
+use std.http_server.types.{HttpResponseData}
+use std.nogc_sync_mut.http.accept_encoding.{negotiate_encoding}
+
+# Minimum body size below which compression is not worth the framing overhead.
+# Tuned conservatively — Brotli/Zstd both need >= ~150 bytes input to break
+# even on small payloads.
+val COMPRESSION_MIN_BODY_BYTES: i64 = 256
+
+# Apply Content-Encoding negotiation and compression to a response.
+#
+# - Reads `Accept-Encoding` from the request side (already extracted to
+#   `accept_header`; pass "" if absent).
+# - Negotiates against `supported_encodings()`.
+# - If a codec is chosen and the response is eligible (see below), compresses
+#   the body, sets `body_bytes`, clears `body: text`, adds `Content-Encoding`,
+#   and removes any pre-existing `Content-Length`.
+# - Otherwise returns `resp` unchanged.
+#
+# A response is INELIGIBLE for compression when:
+#
+# - `body_file != ""` — sendfile path; the kernel does the I/O and we cannot
+#   intercept the bytes.
+# - `chunked == true` — chunked transfer; full-buffer compression would break
+#   streaming. Per-chunk compression is a separate (HTTP/2-style) feature.
+# - Total payload < COMPRESSION_MIN_BODY_BYTES — overhead exceeds savings.
+# - Existing `Content-Encoding` header present — already encoded; do not
+#   double-compress.
+#
+# This is a pure function over the response — caller is responsible for
+# choosing whether to ultimately route through `set_response` (text path) or
+# `set_response_bytes` (binary path) based on the returned `body_bytes.len()`.
+fn compress_response_for(resp: HttpResponseData, accept_header: text) -> HttpResponseData:
+    if not _is_compression_eligible(resp):
+        return resp
+    val chosen = negotiate_encoding(accept_header, supported_encodings())
+    if chosen.len() == 0:
+        return resp
+    val body_bytes = _resp_body_as_bytes(resp)
+    if body_bytes.len() < COMPRESSION_MIN_BODY_BYTES:
+        return resp
+    val compressed_res = compress_response_body(body_bytes, chosen)
+    if compressed_res.is_err():
+        # Compression failed (codec not yet wired or runtime error). Fall
+        # through to identity — DO NOT silently emit a Content-Encoding
+        # header without compressed bytes.
+        return resp
+    val compressed = compressed_res.unwrap()
+    HttpResponseData(
+        status: resp.status,
+        reason: resp.reason,
+        headers: _set_content_encoding(_strip_content_length(resp.headers), chosen),
+        body: "",
+        body_bytes: compressed,
+        body_file: resp.body_file,
+        body_offset: resp.body_offset,
+        body_length: resp.body_length,
+        chunked: resp.chunked
+    )
+
+# ----------------------------------------------------------------------------
+# Eligibility + header helpers (pure)
+# ----------------------------------------------------------------------------
+
+fn _is_compression_eligible(resp: HttpResponseData) -> bool:
+    if resp.body_file.len() > 0:
+        return false
+    if resp.chunked:
+        return false
+    if _has_content_encoding(resp.headers):
+        return false
+    true
+
+fn _has_content_encoding(headers: [(text, text)]) -> bool:
+    for h in headers:
+        if h.0.lower() == "content-encoding":
+            return true
+    false
+
+fn _strip_content_length(headers: [(text, text)]) -> [(text, text)]:
+    var out: [(text, text)] = []
+    for h in headers:
+        if h.0.lower() != "content-length":
+            out = out + [h]
+    out
+
+fn _set_content_encoding(headers: [(text, text)], encoding: text) -> [(text, text)]:
+    # Replace any existing Content-Encoding (defensive — eligibility check
+    # above already rejects responses that have one) and append.
+    var out: [(text, text)] = []
+    for h in headers:
+        if h.0.lower() != "content-encoding":
+            out = out + [h]
+    out = out + [("Content-Encoding", encoding)]
+    out
+
+fn _resp_body_as_bytes(resp: HttpResponseData) -> [u8]:
+    # Prefer existing body_bytes if populated; else convert text body via
+    # the same helper response.spl uses.
+    if resp.body_bytes.len() > 0:
+        return resp.body_bytes
+    rt_text_to_bytes(resp.body)
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# Compress `body` with the named encoding. Returns the compressed bytes or an
+# error message describing why the encoding is not supported.
+#
+# `encoding` is a lowercase token like "gzip", "br", "zstd", "lz4", "deflate",
+# or "" (identity). Identity is treated as a programmer error — the caller
+# should not have invoked this dispatcher with no encoding to apply.
+fn compress_response_body(body: [u8], encoding: text) -> Result<[u8], text>:
+    match encoding:
+        "zstd":
+            _compress_via_facade(body, CompressionCodec.zstd)
+        "lz4":
+            _compress_via_facade(body, CompressionCodec.lz4)
+        "gzip":
+            Err("Content-Encoding 'gzip' is not yet wired into the common compress façade; pending gzip module integration")
+        "deflate":
+            Err("Content-Encoding 'deflate' is not yet wired; pending gzip module integration")
+        "br":
+            Err("Content-Encoding 'br' is not yet implemented; pending Phase 3 brotli encoder")
+        "":
+            Err("compress_response_body called with empty encoding (caller should skip compression)")
+        "identity":
+            Err("compress_response_body called with 'identity' encoding (caller should skip compression)")
+        _:
+            Err("unknown Content-Encoding '" + encoding + "'")
+
+# Returns the list of Content-Encoding names this dispatcher can produce
+# right now. Useful as input to `negotiate_encoding`. Order is server
+# preference: stronger compression first.
+fn supported_encodings() -> [text]:
+    ["zstd", "lz4"]
+
+# ----------------------------------------------------------------------------
+# Internal helpers
+# ----------------------------------------------------------------------------
+
+fn _compress_via_facade(body: [u8], codec: CompressionCodec) -> Result<[u8], text>:
+    val options = default_compression_options(codec)
+    val result = try_compress_bytes(body, options)
+    if result.is_err():
+        return Err(_format_compression_error(result.unwrap_err()))
+    Ok(result.unwrap())
+
+fn _format_compression_error(err: CompressionError) -> text:
+    match err:
+        CompressionError.InvalidHeader(msg): "compress: invalid header: " + msg
+        CompressionError.UnsupportedFeature(msg): "compress: unsupported: " + msg
+        CompressionError.TruncatedInput(msg): "compress: truncated: " + msg
+        CompressionError.ChecksumMismatch(msg): "compress: checksum: " + msg
+        CompressionError.CorruptStream(msg): "compress: corrupt stream: " + msg
+        CompressionError.SizeLimitExceeded(limit): "compress: size limit exceeded: " + limit.to_text()

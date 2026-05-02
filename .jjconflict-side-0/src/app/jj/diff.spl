@@ -1,0 +1,166 @@
+# JJ Diff - Diff output with stat parsing
+#
+# Wraps `jj diff` and `jj diff --stat` for showing changes.
+# Usage: use app.jj.diff.{jj_diff, jj_diff_stat, DiffResult, DiffStat}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# A single file's diff statistics
+struct DiffStat:
+    path: text
+    added: i64
+    removed: i64
+
+    fn display() -> text:
+        "{self.path} | +{self.added} -{self.removed}"
+
+# Structured diff result
+struct DiffResult:
+    stats: [DiffStat]
+    total_added: i64
+    total_removed: i64
+    total_files: i64
+    raw_output: text
+    exit_code: i64
+
+    fn display() -> text:
+        if self.stats.len() == 0:
+            return "No changes"
+        var lines: [text] = []
+        for s in self.stats:
+            lines.push(s.display())
+        lines.push("")
+        lines.push("{self.total_files} file(s) changed, +{self.total_added} -{self.total_removed}")
+        lines.join("\n")
+
+fn jj_diff(revision: text, paths: [text]) -> DiffResult:
+    """Run jj diff and return raw output"""
+    var jj_args = ["--no-pager", "--color", "never", "diff"]
+
+    if revision != "":
+        jj_args.push("-r")
+        jj_args.push(revision)
+
+    for p in paths:
+        jj_args.push(p)
+
+    val (stdout, stderr, code) = rt_process_run("jj", jj_args)
+
+    DiffResult(
+        stats: [],
+        total_added: 0,
+        total_removed: 0,
+        total_files: 0,
+        raw_output: if stdout != "": stdout else: stderr,
+        exit_code: code
+    )
+
+fn jj_diff_stat(revision: text) -> DiffResult:
+    """Run jj diff --stat and parse output into structured data"""
+    var jj_args = ["--no-pager", "--color", "never", "diff", "--stat"]
+
+    if revision != "":
+        jj_args.push("-r")
+        jj_args.push(revision)
+
+    val (stdout, stderr, code) = rt_process_run("jj", jj_args)
+
+    if code != 0:
+        return DiffResult(
+            stats: [],
+            total_added: 0,
+            total_removed: 0,
+            total_files: 0,
+            raw_output: if stderr != "": stderr else: stdout,
+            exit_code: code
+        )
+
+    # Parse --stat output
+    # Typical format:
+    # src/foo.spl | 10 +++---
+    # src/bar.spl |  3 +++
+    # 2 files changed, 8 insertions(+), 5 deletions(-)
+    var stats: [DiffStat] = []
+    var total_added = 0
+    var total_removed = 0
+
+    val lines = stdout.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            pass_dn
+        elif trimmed.contains("file") and trimmed.contains("changed"):
+            # Summary line - skip, we calculate our own totals
+            pass_dn
+        elif trimmed.contains("|"):
+            # File stat line: "path | N ++--"
+            val pipe_idx = trimmed.index_of("|")
+            if pipe_idx >= 0:
+                val path = trimmed[0:pipe_idx].trim()
+                val rest = trimmed[pipe_idx + 1:].trim()
+                # Count + and - characters
+                var added = 0
+                var removed = 0
+                var j = 0
+                while j < rest.len():
+                    val ch = rest[j:j + 1]
+                    if ch == "+":
+                        added = added + 1
+                    elif ch == "-":
+                        removed = removed + 1
+                    j = j + 1
+                stats.push(DiffStat(path: path, added: added, removed: removed))
+                total_added = total_added + added
+                total_removed = total_removed + removed
+
+    DiffResult(
+        stats: stats,
+        total_added: total_added,
+        total_removed: total_removed,
+        total_files: stats.len(),
+        raw_output: stdout,
+        exit_code: code
+    )
+
+fn run_diff(args: [text]) -> i64:
+    """CLI entry point for jj diff
+
+    Usage:
+      simple jj diff               - Show diff for working copy
+      simple jj diff --stat        - Show diff statistics
+      simple jj diff -r REV        - Show diff for specific revision
+      simple jj diff path1 path2   - Show diff for specific files
+    """
+    var revision = ""
+    var show_stat = false
+    var paths: [text] = []
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-r" and i + 1 < args.len():
+            i = i + 1
+            revision = args[i]
+        elif arg == "--stat":
+            show_stat = true
+        elif not arg.starts_with("-"):
+            paths.push(arg)
+        i = i + 1
+
+    if show_stat:
+        val result = jj_diff_stat(revision)
+        if result.exit_code != 0:
+            print "Error running jj diff --stat:"
+            print result.raw_output
+            return result.exit_code
+        print result.display()
+        return 0
+
+    val result = jj_diff(revision, paths)
+    if result.exit_code != 0:
+        print "Error running jj diff:"
+        print result.raw_output
+        return result.exit_code
+
+    print result.raw_output
+    0

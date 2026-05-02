@@ -1,0 +1,135 @@
+# Plugin system for web_ui.
+# Provides Plugin trait, PluginRegistry, and built-in FsPlugin.
+
+use std.nogc_sync_mut.web_ui.command.{CommandRegistry}
+use std.nogc_sync_mut.web_ui.event_bus.{EventBus}
+
+# Plugin lifecycle trait.
+# Plugins register commands and event handlers during on_init.
+trait Plugin:
+    fn name() -> text
+    fn required_capabilities() -> List<text>
+    me on_init(commands: CommandRegistry, events: EventBus)
+    me on_shutdown()
+
+# Plugin registration entry with initialization state.
+class PluginEntry:
+    plugin: Plugin
+    initialized: bool
+
+    static fn create(plugin: Plugin) -> PluginEntry:
+        PluginEntry(plugin: plugin, initialized: false)
+
+# Registry managing plugin lifecycle.
+class PluginRegistry:
+    plugins: List<PluginEntry>
+
+    static fn create() -> PluginRegistry:
+        PluginRegistry(plugins: List<PluginEntry>())
+
+    # Register a plugin (deferred initialization).
+    me register(plugin: Plugin):
+        val entry = PluginEntry.create(plugin)
+        self.plugins.push(entry)
+
+    # Initialize all registered plugins.
+    me init_all(commands: CommandRegistry, events: EventBus):
+        for entry in self.plugins:
+            if not entry.initialized:
+                entry.plugin.on_init(commands, events)
+                entry.initialized = true
+
+    # Shutdown all plugins in reverse order.
+    me shutdown_all():
+        var i = self.plugins.len() - 1
+        while i >= 0:
+            var entry = self.plugins.get(i)
+            if entry.initialized:
+                entry.plugin.on_shutdown()
+                entry.initialized = false
+            i = i - 1
+
+    # Check if a plugin is registered by name.
+    fn has_plugin(name: text) -> bool:
+        for entry in self.plugins:
+            if entry.plugin.name() == name:
+                return true
+        false
+
+    # Get count of registered plugins.
+    fn plugin_count() -> i64:
+        self.plugins.len()
+
+# ============================================================================
+# Built-in FsPlugin — file system access with scope restriction
+# ============================================================================
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+# File system plugin with scoped path access.
+class FsPlugin:
+    allowed_paths: List<text>
+
+    static fn create(allowed_paths: List<text>) -> FsPlugin:
+        FsPlugin(allowed_paths: allowed_paths)
+
+    # Check if a path is within the allowed scope.
+    fn is_path_allowed(path: text) -> bool:
+        if self.allowed_paths.len() == 0:
+            return false
+        for allowed in self.allowed_paths:
+            if path.starts_with(allowed):
+                return true
+        false
+
+impl Plugin for FsPlugin:
+    fn name() -> text: "fs"
+
+    fn required_capabilities() -> List<text>:
+        var caps = List<text>()
+        caps.push("fs:read")
+        caps.push("fs:write")
+        caps
+
+    me on_init(commands: CommandRegistry, events: EventBus):
+        val scope = self.allowed_paths
+
+        commands.register("read_file", \args:
+            if args.len() == 0:
+                return Err("read_file requires a file path")
+            val file_path = args.get(0)
+            if not self.is_path_allowed(file_path):
+                return Err("Path not in allowed scope: {file_path}")
+            if not rt_file_exists(file_path):
+                return Err("File not found: {file_path}")
+            val content = rt_file_read_text(file_path)
+            Ok(content)
+        )
+
+        commands.register("write_file", \args:
+            if args.len() < 2:
+                return Err("write_file requires path and content")
+            val file_path = args.get(0)
+            val content = args.get(1)
+            if not self.is_path_allowed(file_path):
+                return Err("Path not in allowed scope: {file_path}")
+            rt_file_write_text(file_path, content)
+            Ok("ok")
+        )
+
+        commands.register("file_exists", \args:
+            if args.len() == 0:
+                return Err("file_exists requires a file path")
+            val file_path = args.get(0)
+            if not self.is_path_allowed(file_path):
+                return Err("Path not in allowed scope: {file_path}")
+            if rt_file_exists(file_path):
+                Ok("true")
+            else:
+                Ok("false")
+        )
+
+    me on_shutdown():
+        pass_dn

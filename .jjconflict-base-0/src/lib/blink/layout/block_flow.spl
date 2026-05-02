@@ -1,0 +1,189 @@
+# Block formatting context — vertical block layout arithmetic.
+#
+# Mirrors Blink's LayoutBlockFlow for the simplest case: a tree of block
+# boxes, each with width/height/margin/padding/border, stacked vertically
+# inside their parent. No floats, no positioning, no margin collapse.
+#
+# Caller supplies computed values; this module outputs absolute positions.
+
+use std.lib.skia.entity.geometry.{SkRect}
+
+# ============================================================================
+# BoxGeometry — per-box box-model dimensions (all in px, pre-computed)
+# ============================================================================
+
+class BoxGeometry:
+    width: f64
+    height: f64
+    margin_top: f64
+    margin_right: f64
+    margin_bottom: f64
+    margin_left: f64
+    padding_top: f64
+    padding_right: f64
+    padding_bottom: f64
+    padding_left: f64
+    border_top: f64
+    border_right: f64
+    border_bottom: f64
+    border_left: f64
+
+# ============================================================================
+# LayoutBox — one node in the layout tree
+# ============================================================================
+
+class LayoutBox:
+    id: i64
+    geometry: BoxGeometry
+    children_ids: [i64]
+    computed_rect: SkRect
+
+# ============================================================================
+# LayoutContext — the flat box pool + viewport
+# ============================================================================
+
+class LayoutContext:
+    boxes: [LayoutBox]
+    root_id: i64
+    viewport_width: f64
+    viewport_height: f64
+
+# ============================================================================
+# Free functions
+# ============================================================================
+
+fn box_geometry_zero() -> BoxGeometry:
+    BoxGeometry(
+        width: 0.0,
+        height: 0.0,
+        margin_top: 0.0,
+        margin_right: 0.0,
+        margin_bottom: 0.0,
+        margin_left: 0.0,
+        padding_top: 0.0,
+        padding_right: 0.0,
+        padding_bottom: 0.0,
+        padding_left: 0.0,
+        border_top: 0.0,
+        border_right: 0.0,
+        border_bottom: 0.0,
+        border_left: 0.0
+    )
+
+fn box_geometry_new(width: f64, height: f64, margin_all: f64, padding_all: f64, border_all: f64) -> BoxGeometry:
+    BoxGeometry(
+        width: width,
+        height: height,
+        margin_top: margin_all,
+        margin_right: margin_all,
+        margin_bottom: margin_all,
+        margin_left: margin_all,
+        padding_top: padding_all,
+        padding_right: padding_all,
+        padding_bottom: padding_all,
+        padding_left: padding_all,
+        border_top: border_all,
+        border_right: border_all,
+        border_bottom: border_all,
+        border_left: border_all
+    )
+
+fn layout_box_new(id: i64, geometry: BoxGeometry) -> LayoutBox:
+    val zero_rect = SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+    LayoutBox(
+        id: id,
+        geometry: geometry,
+        children_ids: [],
+        computed_rect: zero_rect
+    )
+
+fn layout_context_new(viewport_w: f64, viewport_h: f64) -> LayoutContext:
+    LayoutContext(
+        boxes: [],
+        root_id: -1,
+        viewport_width: viewport_w,
+        viewport_height: viewport_h
+    )
+
+# ============================================================================
+# Methods on LayoutContext
+# ============================================================================
+
+impl LayoutContext:
+    me fn add_box(box: LayoutBox):
+        self.boxes.push(box)
+
+    me fn set_root(id: i64):
+        self.root_id = id
+
+    fn get_box(id: i64) -> Option<LayoutBox>:
+        val i = 0
+        val len = self.boxes.len()
+        val result: Option<LayoutBox> = None
+        while i < len:
+            if self.boxes[i].id == id:
+                result = Some(self.boxes[i])
+            i = i + 1
+        result
+
+    me fn _layout_box(id: i64, parent_x: f64, parent_y: f64):
+        # Find the box index
+        val box_idx = -1
+        val i = 0
+        val len = self.boxes.len()
+        while i < len:
+            if self.boxes[i].id == id:
+                box_idx = i
+            i = i + 1
+        if box_idx == -1:
+            pass_do_nothing
+
+        val geo = self.boxes[box_idx].geometry
+
+        # Position of the border-box origin in the parent coordinate space
+        val box_left = parent_x + geo.margin_left
+        val box_top = parent_y + geo.margin_top
+        val box_right = box_left + geo.width
+        val box_bottom = box_top + geo.height
+
+        self.boxes[box_idx].computed_rect = SkRect(
+            left: box_left,
+            top: box_top,
+            right: box_right,
+            bottom: box_bottom
+        )
+
+        # Walk children: content area starts at border + padding inside the box
+        val content_x = box_left + geo.border_left + geo.padding_left
+        val content_y = box_top + geo.border_top + geo.padding_top
+        val cursor_y = content_y
+
+        val c = 0
+        val child_count = self.boxes[box_idx].children_ids.len()
+        while c < child_count:
+            val child_id = self.boxes[box_idx].children_ids[c]
+            self._layout_box(child_id, content_x, cursor_y)
+            # Advance cursor by the child's full margin-box height
+            val child_idx = 0
+            val k = 0
+            val blen = self.boxes.len()
+            while k < blen:
+                if self.boxes[k].id == child_id:
+                    child_idx = k
+                k = k + 1
+            val child_geo = self.boxes[child_idx].geometry
+            cursor_y = cursor_y + child_geo.margin_top + child_geo.height + child_geo.margin_bottom
+            c = c + 1
+
+    me fn compute_layout():
+        if self.root_id == -1:
+            pass_do_nothing
+        self._layout_box(self.root_id, 0.0, 0.0)
+
+    fn total_height_for(id: i64) -> f64:
+        val opt = self.get_box(id)
+        if opt is None:
+            0.0
+        else:
+            val b = opt.unwrap()
+            b.computed_rect.bottom - b.computed_rect.top

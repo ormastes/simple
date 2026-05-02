@@ -1,0 +1,284 @@
+# MIR Effect Tracking System
+#
+# Effect tracking for formal verification and production use.
+# Two sections: Lean-aligned core types and production helpers.
+#
+# Port of rust/compiler/src/mir/effects.rs (661 lines)
+
+
+# ============================================================================
+# Section 1: Lean-Aligned Core (Formal Verification)
+# ============================================================================
+
+# AsyncEffect — matches AsyncCompile.lean exactly (3 variants)
+# Lean: inductive Effect | compute | io | wait
+
+enum AsyncEffect:
+    """Effect type matching AsyncCompile.lean exactly."""
+    Compute     # Pure computation
+    Io          # I/O operation (non-blocking)
+    Wait        # Blocking wait operation
+
+fn is_async(e: AsyncEffect) -> bool:
+    """Lean: def is_async (e : Effect) : Bool"""
+    match e:
+        case Wait: false
+        case Compute | Io: true
+
+fn pipeline_safe(es: [AsyncEffect]) -> bool:
+    """Lean: def pipelineSafe (es : List Effect) : Prop"""
+    for e in es:
+        if not is_async(e):
+            return false
+    true
+
+fn append_safe(a: [AsyncEffect], b: [AsyncEffect]) -> [AsyncEffect]:
+    """Lean: theorem append_safe — if both safe, result is safe."""
+    a.merge(b)
+
+# NogcInstr — matches NogcCompile.lean exactly (3 variants)
+# Lean: inductive Instr | const | add | gcAlloc
+
+enum NogcInstr:
+    Const(i64)
+    Add
+    GcAlloc
+
+fn nogc(p: [NogcInstr]) -> bool:
+    """Lean: def nogc (p : List Instr) : Prop"""
+    for i in p:
+        match i:
+            case GcAlloc:
+                return false
+            case _:
+                pass
+    true
+
+# ============================================================================
+# Section 2: Production Helpers
+# ============================================================================
+
+enum Effect:
+    """Combined effect type for production use.
+
+    Combines async safety and GC safety into a single enum,
+    extended with capability-related effects.
+    """
+    Compute     # Pure computation, no side effects
+    Io          # I/O operation (non-blocking)
+    Wait        # Blocking wait operation
+    GcAlloc     # GC allocation
+    Net         # Network operation (requires @net capability)
+    Fs          # Filesystem operation (requires @fs capability)
+    Unsafe      # Unsafe/unchecked operation (requires @unsafe capability)
+
+impl Effect:
+    fn is_async() -> bool:
+        not (match self: case Wait: true; case _: false)
+
+    fn is_nogc() -> bool:
+        not (match self: case GcAlloc: true; case _: false)
+
+    fn is_pure() -> bool:
+        match self: case Compute: true; case _: false
+
+    fn is_net() -> bool:
+        match self: case Net: true; case _: false
+
+    fn is_fs() -> bool:
+        match self: case Fs: true; case _: false
+
+    fn is_unsafe() -> bool:
+        match self: case Unsafe: true; case _: false
+
+    fn to_async() -> AsyncEffect:
+        match self:
+            case Compute: AsyncEffect.Compute
+            case Io: AsyncEffect.Io
+            case Wait: AsyncEffect.Wait
+            case GcAlloc: AsyncEffect.Compute
+            case Net: AsyncEffect.Io
+            case Fs: AsyncEffect.Io
+            case Unsafe: AsyncEffect.Compute
+
+    fn name() -> text:
+        match self:
+            case Compute: "compute"
+            case Io: "io"
+            case Wait: "wait"
+            case GcAlloc: "gc_alloc"
+            case Net: "net"
+            case Fs: "fs"
+            case Unsafe: "unsafe"
+
+    static fn from_text(name: text) -> Effect?:
+        match name:
+            case "compute" | "pure": Some(Effect.Compute)
+            case "io": Some(Effect.Io)
+            case "wait" | "async": Some(Effect.Wait)
+            case "gc_alloc": Some(Effect.GcAlloc)
+            case "net": Some(Effect.Net)
+            case "fs": Some(Effect.Fs)
+            case "unsafe": Some(Effect.Unsafe)
+            case _: nil
+
+# ============================================================================
+# Effect Set
+# ============================================================================
+
+class EffectSet:
+    """Effect set for a sequence of instructions.
+    Supports composition via append, matching Lean's list-based model.
+    """
+    effects: [Effect]
+
+impl EffectSet:
+    static fn empty() -> EffectSet:
+        EffectSet(effects: [])
+
+    me push(effect: Effect):
+        self.effects = self.effects.push(effect)
+
+    fn is_pipeline_safe() -> bool:
+        """All effects are async (non-blocking)."""
+        for e in self.effects:
+            if not e.is_async():
+                return false
+        true
+
+    fn is_nogc() -> bool:
+        """No effects involve GC."""
+        for e in self.effects:
+            if not e.is_nogc():
+                return false
+        true
+
+    fn is_pure() -> bool:
+        for e in self.effects:
+            if not e.is_pure():
+                return false
+        true
+
+    fn is_empty() -> bool:
+        self.effects.len() == 0
+
+    me append(other: EffectSet):
+        self.effects = self.effects.merge(other.effects)
+
+    fn has_net() -> bool:
+        for e in self.effects:
+            if e.is_net():
+                return true
+        false
+
+    fn has_fs() -> bool:
+        for e in self.effects:
+            if e.is_fs():
+                return true
+        false
+
+    fn has_unsafe() -> bool:
+        for e in self.effects:
+            if e.is_unsafe():
+                return true
+        false
+
+    fn effect_kinds() -> [Effect]:
+        """Get unique effect kinds."""
+        var kinds: [Effect] = []
+        for e in self.effects:
+            var exists = false
+            for k in kinds:
+                if k.name() == e.name():
+                    exists = true
+                    break
+            if not exists:
+                kinds = kinds.push(e)
+        kinds
+
+    fn to_async() -> [AsyncEffect]:
+        var out: [AsyncEffect] = []
+        for e in self.effects:
+            out = out.push(e.to_async())
+        out
+
+# ============================================================================
+# Builtin Functions with Known Effects
+# ============================================================================
+
+enum BuiltinFunc:
+    # Blocking
+    Await
+    Wait
+    Join
+    Recv
+    Sleep
+    # GC
+    GcAlloc
+    GcNew
+    Box
+    # I/O
+    Print
+    Println
+    Read
+    Write
+    Send
+    Spawn
+    # Network
+    HttpGet
+    HttpPost
+    TcpConnect
+    TcpListen
+    UdpBind
+    # Filesystem
+    ReadFile
+    WriteFile
+    OpenFile
+    DeleteFile
+    ListDir
+    CreateDir
+    # Unsafe
+    UnsafePtr
+    UnsafeDeref
+    UnsafeCast
+
+fn builtin_effect(b: BuiltinFunc) -> Effect:
+    match b:
+        case Await | Wait | Join | Recv | Sleep: Effect.Wait
+        case GcAlloc | GcNew | Box: Effect.GcAlloc
+        case Print | Println | Read | Write | Send | Spawn: Effect.Io
+        case HttpGet | HttpPost | TcpConnect | TcpListen | UdpBind: Effect.Net
+        case ReadFile | WriteFile | OpenFile | DeleteFile | ListDir | CreateDir: Effect.Fs
+        case UnsafePtr | UnsafeDeref | UnsafeCast: Effect.Unsafe
+
+fn builtin_from_name(name: text) -> BuiltinFunc?:
+    match name:
+        case "await": Some(BuiltinFunc.Await)
+        case "wait": Some(BuiltinFunc.Wait)
+        case "join": Some(BuiltinFunc.Join)
+        case "recv": Some(BuiltinFunc.Recv)
+        case "sleep": Some(BuiltinFunc.Sleep)
+        case "gc_alloc": Some(BuiltinFunc.GcAlloc)
+        case "gc_new": Some(BuiltinFunc.GcNew)
+        case "box": Some(BuiltinFunc.Box)
+        case "print": Some(BuiltinFunc.Print)
+        case "println": Some(BuiltinFunc.Println)
+        case "read": Some(BuiltinFunc.Read)
+        case "write": Some(BuiltinFunc.Write)
+        case "send": Some(BuiltinFunc.Send)
+        case "spawn": Some(BuiltinFunc.Spawn)
+        case "http_get": Some(BuiltinFunc.HttpGet)
+        case "http_post": Some(BuiltinFunc.HttpPost)
+        case "tcp_connect": Some(BuiltinFunc.TcpConnect)
+        case "tcp_listen": Some(BuiltinFunc.TcpListen)
+        case "udp_bind": Some(BuiltinFunc.UdpBind)
+        case "read_file": Some(BuiltinFunc.ReadFile)
+        case "write_file": Some(BuiltinFunc.WriteFile)
+        case "open_file": Some(BuiltinFunc.OpenFile)
+        case "delete_file": Some(BuiltinFunc.DeleteFile)
+        case "list_dir": Some(BuiltinFunc.ListDir)
+        case "create_dir": Some(BuiltinFunc.CreateDir)
+        case "unsafe_ptr": Some(BuiltinFunc.UnsafePtr)
+        case "unsafe_deref": Some(BuiltinFunc.UnsafeDeref)
+        case "unsafe_cast": Some(BuiltinFunc.UnsafeCast)
+        case _: nil

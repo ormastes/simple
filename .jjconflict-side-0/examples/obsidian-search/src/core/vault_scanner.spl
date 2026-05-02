@@ -1,0 +1,123 @@
+# Vault scanner — walks Obsidian vault directory, filters .md files
+#
+# Scans a vault directory recursively and returns all markdown file paths,
+# excluding configured patterns like .obsidian/, .trash/, node_modules/.
+
+extern fn rt_dir_walk(path: text) -> [text]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_path_join(a: text, b: text) -> text
+extern fn rt_getcwd() -> text
+extern fn rt_env_get(name: text) -> text
+
+# Default exclude patterns for Obsidian vaults
+val DEFAULT_EXCLUDES: [text] = [".obsidian/", ".trash/", "node_modules/", ".git/", "/archive/"]
+
+var SCAN_CACHE_VAULT_PATH = ""
+var SCAN_CACHE_FILES: [text] = []
+
+# --- Check if path should be excluded ---
+
+fn should_exclude(path: text, excludes: [text]) -> bool:
+    for pattern in excludes:
+        if path.contains(pattern):
+            return true
+    false
+
+# --- Check if path is a markdown file ---
+
+fn is_markdown(path: text) -> bool:
+    path.ends_with(".md")
+
+# --- Resolve vault path from env vars ---
+
+fn resolve_vault_path() -> text:
+    val abs_path = rt_env_get("OBSIDIAN_VAULT_PATH") ?? ""
+    if abs_path != "":
+        return abs_path
+    val rel_path = rt_env_get("OBSIDIAN_RELATIVE_VAULT_PATH") ?? ""
+    if rel_path != "":
+        return rt_path_join(rt_getcwd(), rel_path)
+    ""
+
+# --- Scan vault for markdown files ---
+
+/**
+Recursively scan a vault directory for markdown files.
+Excludes `.obsidian/`, `.trash/`, `node_modules/`, `.git/` by default.
+
+```sdoctest
+>>> val files = scan_vault("/path/to/vault")
+>>> # Returns all .md files, excluding hidden/system dirs
+```
+*/
+fn scan_vault(vault_path: text) -> [text]:
+    if vault_path == "":
+        return []
+    if SCAN_CACHE_VAULT_PATH == vault_path:
+        return SCAN_CACHE_FILES
+    SCAN_CACHE_VAULT_PATH = ""
+    SCAN_CACHE_FILES = []
+    val files = scan_vault_with_excludes(vault_path, DEFAULT_EXCLUDES)
+    SCAN_CACHE_VAULT_PATH = vault_path
+    SCAN_CACHE_FILES = files
+    files
+
+fn scan_vault_with_excludes(vault_path: text, excludes: [text]) -> [text]:
+    val all_files = rt_dir_walk(vault_path) ?? []
+    var result: [text] = []
+    for file in all_files:
+        if is_markdown(file) and not should_exclude(file, excludes):
+            result.push(file)
+    result
+
+# --- Scan with fallback to default paths ---
+
+fn scan_default_paths() -> [text]:
+    val cwd_val = rt_getcwd()
+    var result: [text] = []
+    val cwd_files = scan_vault_with_excludes(cwd_val, DEFAULT_EXCLUDES)
+    for f in cwd_files:
+        result.push(f)
+    val doc_path = rt_path_join(cwd_val, "doc")
+    if rt_file_exists(doc_path):
+        val doc_files = scan_vault_with_excludes(doc_path, DEFAULT_EXCLUDES)
+        for f in doc_files:
+            if not result.contains(f):
+                result.push(f)
+    result
+
+fn scan_vault_or_defaults(vault_path: text) -> [text]:
+    if vault_path != "":
+        return scan_vault(vault_path)
+    scan_default_paths()
+
+fn invalidate_scan_vault_cache(vault_path: text):
+    if vault_path == "" or SCAN_CACHE_VAULT_PATH == vault_path:
+        SCAN_CACHE_VAULT_PATH = ""
+        SCAN_CACHE_FILES = []
+
+# --- Get relative path from vault root ---
+
+/**
+Strip vault root prefix from a full path to get the relative path.
+
+```sdoctest
+>>> relative_path("/vault/daily/2024-01-15.md", "/vault")
+daily/2024-01-15.md
+>>> relative_path("/other/file.md", "/vault")
+/other/file.md
+```
+*/
+fn relative_path(full_path: text, vault_path: text) -> text:
+    val vault_len = vault_path.len()
+    if full_path.starts_with(vault_path):
+        var rel = full_path.substring(vault_len, full_path.len())
+        if rel.starts_with("/"):
+            rel = rel.substring(1, rel.len())
+        return rel
+    full_path
+
+# --- Check if vault path is valid ---
+
+fn is_valid_vault(path: text) -> bool:
+    rt_file_exists(path)

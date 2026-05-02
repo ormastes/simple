@@ -1,0 +1,147 @@
+# Build Installer CLI Dispatcher
+#
+# Thin wrapper that dispatches `simple build installer` to the installer library.
+# Usage:
+#   simple build installer                     # Build all available
+#   simple build installer --platform=deb      # Build specific platform
+#   simple build installer --platform=all      # Build all
+#   simple build installer --check-tools       # Show tool availability
+
+use std.io_runtime (file_exists, file_read)
+
+use lib.nogc_sync_mut.package.installer (
+    InstallerPlatform, InstallerConfig, InstallerResult,
+    default_config, detect_all_tools, print_tool_status,
+    build_installer, build_all_installers
+)
+
+
+fn handle_installer(args: [text]) -> i64:
+    """Handle 'simple build installer' subcommand."""
+
+    # Parse args
+    var platform_name = "all"
+    var check_tools_only = false
+
+    for arg in args:
+        if arg == "--help" or arg == "-h":
+            print_installer_help()
+            return 0
+        else if arg == "--check-tools":
+            check_tools_only = true
+        else if arg.starts_with("--platform="):
+            platform_name = arg.substring(11)
+
+    # Check tools mode
+    if check_tools_only:
+        val tools = detect_all_tools()
+        print_tool_status(tools)
+        return 0
+
+    # Load config
+    val config = load_config()
+
+    print "Simple Language Installer Builder"
+    print "Version: {config.version}"
+    print ""
+
+    # Build
+    if platform_name == "all":
+        val results = build_all_installers(config)
+        print_results(results)
+        val failures = results.filter(\r: not r.success)
+        if failures.len() > 0:
+            return 1
+        return 0
+    else:
+        val platform_opt = InstallerPlatform.from_string(platform_name)
+        if platform_opt.? == false:
+            print "Error: Unknown platform '{platform_name}'"
+            print "Valid platforms: deb, rpm, macos, freebsd, windows, all"
+            return 1
+
+        val platform = match platform_opt:
+            Some(value): value
+            nil: InstallerPlatform.All
+
+        val result = build_installer(platform, config)
+        print_single_result(result)
+        if result.success:
+            return 0
+        else:
+            return 1
+
+
+fn load_config() -> InstallerConfig:
+    """Load installer config from VERSION file and defaults."""
+    var config = default_config()
+
+    # Read version from VERSION file
+    if file_exists("VERSION"):
+        config = InstallerConfig(
+            version: file_read("VERSION").trim(),
+            package_name: config.package_name,
+            description: config.description,
+            maintainer: config.maintainer,
+            homepage: config.homepage,
+            license: config.license,
+            source_dir: config.source_dir,
+            output_dir: config.output_dir,
+            architecture: config.architecture
+        )
+
+    config
+
+
+fn print_results(results: [InstallerResult]):
+    """Print build results summary."""
+    print "Build Results:"
+    print "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    for result in results:
+        val status = if result.success: "OK" else: "FAIL"
+        print "  [{status}] {result.platform.description()}"
+        if result.success:
+            print "        -> {result.output_path}"
+        else:
+            print "        {result.message}"
+
+    val ok_count = results.filter(\r: r.success).len()
+    val total = results.len()
+    print ""
+    print "{ok_count}/{total} packages built successfully"
+
+
+fn print_single_result(result: InstallerResult):
+    """Print a single build result."""
+    if result.success:
+        print "OK: {result.message}"
+        print "Output: {result.output_path}"
+    else:
+        print "FAIL: {result.message}"
+
+
+fn print_installer_help():
+    """Print help text."""
+    print "Simple Build System - Installer Command"
+    print ""
+    print "Usage: simple build installer [options]"
+    print ""
+    print "Generate native installation packages for multiple platforms."
+    print ""
+    print "Options:"
+    print "  --platform=<name>    Target platform (default: all)"
+    print "                       Values: deb, rpm, macos, freebsd, windows, all"
+    print "  --check-tools        Show available packaging tools"
+    print "  --help, -h           Show this help"
+    print ""
+    print "Required Tools:"
+    print "  FPM        - deb, rpm, macos, freebsd  (gem install fpm)"
+    print "  makensis   - windows                    (apt install nsis)"
+    print "  dpkg-deb   - deb fallback               (apt install dpkg)"
+    print ""
+    print "Examples:"
+    print "  simple build installer                     # Build all available"
+    print "  simple build installer --platform=deb      # Debian package only"
+    print "  simple build installer --platform=windows  # Windows installer only"
+    print "  simple build installer --check-tools       # Check tool availability"

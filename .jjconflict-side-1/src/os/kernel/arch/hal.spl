@@ -1,0 +1,447 @@
+# HAL — Generic Hardware Abstraction Layer
+#
+# Architecture-generic HAL functions that delegate to arch-specific
+# implementations via @cfg conditional compilation.
+#
+# x86_64: fully implemented, delegates to x86_64/ submodules.
+# arm64, arm32, riscv64, riscv32, x86_32: imports stripped to x86_64-only
+# build closure. Re-add per-arch imports when building those targets.
+#
+# Compile-time arch selection: @cfg(x86_64), @cfg(arm64), etc.
+# Only the active arch's function body is compiled into the final binary.
+#
+# NOTE: @cfg does NOT gate `use` statements — the import closure walker
+# pulls all imported modules regardless of @cfg guards. To avoid leaking
+# foreign-arch inline-asm into simple_asm_blocks.c, all non-x86_64 use
+# lines have been removed. Non-x86_64 @cfg function bodies are also removed
+# since their symbols are no longer imported. Other arch owners must add
+# their imports back when building for their target.
+
+use os.kernel.boot.ports.{BootOutputPort}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags}
+use os.kernel.arch.arch_context.{ArchContext, JmpBuf, ExtendedCtx, BootArgs}
+use os.kernel.memory.pmm.{PhysMemManager}
+
+# x86_64 arch imports
+use os.kernel.arch.x86_64.console.{serial_init, serial_write_byte, serial_write, serial_writeln}
+use os.kernel.arch.x86_64.boot.{X86Boot}
+use os.kernel.arch.x86_64.cpu.{cli, sti, hlt, halt_loop, reboot as x86_64_reboot, invlpg, read_cr3, write_cr3}
+use os.kernel.arch.x86_64.paging.{vmm_init, vmm_map_page, vmm_unmap_page, vmm_translate, vmm_create_address_space, vmm_switch_address_space}
+use os.kernel.arch.x86_64.interrupt.{X86Interrupt}
+use os.kernel.arch.x86_64.timer.{X86Timer}
+use os.kernel.arch.x86_64.context.{X86ContextSwitch}
+
+# ============================================================================
+# Traits (interface definitions)
+# ============================================================================
+
+trait HalConsole:
+    """Early serial console output — first thing initialized at boot."""
+    fn console_init()
+    fn console_write_byte(b: u8)
+    fn console_write(msg: text)
+    fn console_writeln(msg: text)
+
+trait HalBoot:
+    """Boot protocol parsing — extracts memory map, framebuffer, etc."""
+    fn parse_boot_info() -> BootOutputPort
+
+trait HalCpu:
+    """CPU control primitives — interrupt toggling, halt, TLB flush."""
+    fn cpu_disable_interrupts()
+    fn cpu_enable_interrupts()
+    fn cpu_halt()
+    fn cpu_halt_loop()
+    fn cpu_flush_tlb(vaddr: u64)
+    fn cpu_flush_tlb_all()
+    fn cpu_id() -> u64
+    fn cpu_address_width() -> u32
+
+trait HalPower:
+    """Machine-level power controls exposed through syscall-safe facades."""
+    fn system_reset() -> i64
+
+trait HalPaging:
+    """Page table management — map, unmap, translate virtual addresses."""
+    fn paging_init(boot_info: BootOutputPort)
+    fn paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool
+    fn paging_unmap(virt: VirtAddr) -> bool
+    fn paging_translate(virt: VirtAddr) -> PhysAddr?
+    fn paging_create_address_space() -> u64
+    fn paging_switch_address_space(root_phys: u64)
+    fn paging_levels() -> u32
+
+trait HalInterrupt:
+    """Interrupt controller — IRQ enable/disable, acknowledge, handler registration."""
+    fn interrupt_init()
+    fn interrupt_enable_irq(irq: u32)
+    fn interrupt_disable_irq(irq: u32)
+    fn interrupt_acknowledge(irq: u32)
+    fn interrupt_set_handler(irq: u32, handler: u64)
+    fn interrupt_set_priority(irq: u32, priority: u32)
+
+trait HalTimer:
+    """Preemption timer — periodic tick or one-shot deadline for scheduling."""
+    fn timer_init(frequency_hz: u64)
+    fn timer_set_deadline(ticks: u64)
+    fn timer_current_ticks() -> u64
+    fn timer_ticks_per_second() -> u64
+
+trait HalContext:
+    """Context switching — save/restore/initialize CPU register state."""
+    fn context_save() -> ArchContext
+    fn context_restore(ctx: ArchContext)
+    fn context_init(entry: u64, stack: u64, arg: u64) -> ArchContext
+    # Reserved for FP/SIMD extended save (Wave 3 may implement per arch).
+    # Default: NotImplemented. Implementing archs override this.
+    fn context_save_extended(buf: ExtendedCtx) -> Result<i32, HalError>:
+        Result.Err(HalError.NotImplemented)
+
+# ============================================================================
+# Hardening / runtime-glue traits — added 2026-04-25 for AC-3 + AC-5.
+# Wave 1 declares signatures only. Per-arch impls land in Wave 3 under
+# arch/<arch>/{entropy,cstart,syscall_entry,canary,barrier,cache}.spl.
+# HalSmp/HalPerCpu are SHAPE-ONLY this round — bodies deferred.
+# ============================================================================
+
+enum HalError:
+    """Generic HAL error class. Per-trait specializations may add variants."""
+    NotImplemented
+    Unsupported
+    InvalidArgument
+    DeviceFault
+    NoEntropy
+    OutOfRange
+
+enum CstartError:
+    """C-runtime startup errors raised from cstart_init / setjmp / longjmp."""
+    NotImplemented
+    BootArgsInvalid
+    StackUnaligned
+    BssZeroFailed
+    EnvSetupFailed
+
+trait HalEntropy:
+    """Best-effort early entropy source for canary seeding and KASLR.
+    Per-arch: x86=RDRAND/RDSEED, arm64=RNDR (probed) else CNTVCT,
+    arm32=CNTVCT+DTB mix, riscv=sbi_get_random else cycle+time+instret."""
+    fn hal_random_seed_u64() -> u64
+
+trait HalCstart:
+    """C-runtime startup — replaces simpleos_crt0.S / simpleos_setjmp.S.
+    Per-arch impls in arch/<arch>/cstart.spl."""
+    fn cstart_init(boot_args: BootArgs) -> Result<i32, CstartError>
+    fn setjmp(buf: JmpBuf) -> i32
+    fn longjmp(buf: JmpBuf, val: i32) -> i32     # noreturn — i32 placeholder
+    fn exit(code: i32) -> i32                     # noreturn — i32 placeholder
+
+trait HalSyscall:
+    """Syscall vector install + dispatch — single cap-check site.
+    Args: syscall number + up to 6 register args (System-V / AAPCS / RV)."""
+    fn install_vector() -> Result<i32, HalError>
+    fn dispatch(no: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64
+
+trait HalCanary:
+    """Stack canary seeded from HalEntropy. Replaces 0xDEADBEEF constant."""
+    fn canary_init(seed: u64)
+    fn canary_value() -> u64
+    fn canary_fail() -> i32                       # noreturn — i32 placeholder
+
+trait HalBarrier:
+    """Memory barriers — load/store/full + iomem read/write.
+    Mandatory for ARM/RISC-V; x86 is mostly TSO but iomem still needs MFENCE."""
+    fn load_barrier()
+    fn store_barrier()
+    fn full_barrier()
+    fn iomem_read_barrier()
+    fn iomem_write_barrier()
+
+trait HalCache:
+    """Cache maintenance — sync I-cache after JIT, clean/invalidate D-cache for DMA."""
+    fn sync_icache(start: usize, len: usize)
+    fn dcache_clean(start: usize, len: usize)
+    fn dcache_invalidate(start: usize, len: usize)
+
+trait HalSmp:
+    """Multi-CPU bring-up + IPI. SHAPE ONLY — implementations deferred post-AC-4."""
+    fn cpu_count() -> u32
+    fn cpu_start(idx: u32, entry: u64) -> Result<i32, HalError>
+    fn ipi(target: u32, vec: u8)
+
+trait HalPerCpu:
+    """Per-CPU storage base register. SHAPE ONLY — implementations deferred."""
+    fn percpu_set_base(addr: usize)
+    fn percpu_get_base() -> usize
+
+# ============================================================================
+# Console (4 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_console_init():
+    """Initialize serial console — COM1 at 0x3F8, 115200 baud, 8N1."""
+    serial_init()
+
+@cfg(x86_64)
+fn hal_console_write_byte(b: u8):
+    """Write a single byte to COM1 serial port."""
+    serial_write_byte(b)
+
+@cfg(x86_64)
+fn hal_console_write(s: text):
+    """Write string to COM1 serial console."""
+    serial_write(s)
+
+@cfg(x86_64)
+fn hal_console_writeln(s: text):
+    """Write string + newline to COM1 serial console."""
+    serial_writeln(s)
+
+# ============================================================================
+# Boot (1 function)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_parse_boot_info() -> BootOutputPort:
+    """Parse Limine boot protocol responses on x86_64."""
+    val boot = X86Boot()
+    boot.parse_hhdm()
+    boot.build_boot_output()
+
+# ============================================================================
+# CPU (8 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_disable_interrupts():
+    """Disable maskable interrupts — x86_64 CLI instruction."""
+    cli()
+
+@cfg(x86_64)
+fn hal_enable_interrupts():
+    """Enable maskable interrupts — x86_64 STI instruction."""
+    sti()
+
+@cfg(x86_64)
+fn hal_halt():
+    """Halt CPU until next interrupt — x86_64 HLT instruction."""
+    hlt()
+
+@cfg(x86_64)
+fn hal_halt_loop():
+    """Halt CPU in infinite loop — x86_64 CLI; HLT loop."""
+    halt_loop()
+
+# ============================================================================
+# Power Control
+# ============================================================================
+
+var _hal_reset_test_mode: u64 = 0
+var _hal_reset_requested_for_test: u64 = 0
+
+fn hal_reset_set_test_mode(enabled: bool):
+    """Enable a test-only reset latch so syscall tests cannot reset QEMU."""
+    if enabled:
+        _hal_reset_test_mode = 1
+        _hal_reset_requested_for_test = 0
+    else:
+        _hal_reset_test_mode = 0
+        _hal_reset_requested_for_test = 0
+
+fn hal_reset_requested_for_test() -> bool:
+    """Return whether hal_system_reset() was requested while test mode was active."""
+    _hal_reset_requested_for_test != 0
+
+fn hal_system_reset() -> i64:
+    """Request a machine reset through the active architecture backend.
+
+    Returns 0 only in test mode. On real hardware/QEMU the backend should not
+    return; if it does, callers receive -38 to match ENOSYS-style syscall
+    fallback behavior.
+    """
+    if _hal_reset_test_mode != 0:
+        _hal_reset_requested_for_test = 1
+        return 0
+    _hal_system_reset_arch()
+
+@cfg(x86_64)
+fn _hal_system_reset_arch() -> i64:
+    """Reset x86_64 via the reset control register."""
+    x86_64_reboot()
+    -38
+
+@cfg(x86_64)
+fn hal_flush_tlb(addr: u64):
+    """Flush TLB entry for virtual address — x86_64 INVLPG instruction."""
+    invlpg(addr)
+
+@cfg(x86_64)
+fn hal_flush_tlb_all():
+    """Flush entire TLB — x86_64 reload CR3."""
+    val cr3 = read_cr3()
+    write_cr3(cr3)
+
+@cfg(x86_64)
+fn hal_cpu_id() -> u64:
+    """Return current CPU ID — x86_64 APIC ID (0 for single-CPU)."""
+    0
+
+@cfg(x86_64)
+fn hal_address_width() -> u32:
+    """Return virtual address width — 48 bits (canonical x86_64)."""
+    48
+
+# ============================================================================
+# Paging (7 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_paging_init(boot_info: BootOutputPort):
+    """Initialize 4-level page tables — x86_64 PML4, identity-map 4GB."""
+    # Extract PMM and HHDM offset from boot_info for vmm_init
+    # The PMM should already be initialized before paging_init is called.
+    # We pass a default PhysMemManager; the real PMM is wired via extern.
+    vmm_init(PhysMemManager(), boot_info.hhdm_offset)
+
+@cfg(x86_64)
+fn hal_paging_map(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
+    """Map 4KB virtual page — x86_64 4-level walk."""
+    vmm_map_page(virt, phys, flags)
+
+@cfg(x86_64)
+fn hal_paging_unmap(virt: VirtAddr) -> bool:
+    """Unmap 4KB virtual page — x86_64 clear PTE + INVLPG."""
+    vmm_unmap_page(virt)
+
+@cfg(x86_64)
+fn hal_paging_translate(virt: VirtAddr) -> PhysAddr?:
+    """Translate virtual to physical — x86_64 page table walk."""
+    vmm_translate(virt)
+
+@cfg(x86_64)
+fn hal_paging_create_address_space() -> u64:
+    """Create new PML4 — x86_64 allocate + copy kernel mappings."""
+    vmm_create_address_space()
+
+@cfg(x86_64)
+fn hal_paging_switch_address_space(root_phys: u64):
+    """Switch address space — x86_64 write CR3."""
+    vmm_switch_address_space(root_phys)
+
+@cfg(x86_64)
+fn hal_paging_levels() -> u32:
+    """Return page table levels — 4 for x86_64 (PML4/PDPT/PD/PT)."""
+    4
+
+# ============================================================================
+# Interrupt (6 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_interrupt_init():
+    """Initialize IDT + APIC/PIC — x86_64 interrupt controller."""
+    var intr = X86Interrupt()
+    intr.init()
+
+@cfg(x86_64)
+fn hal_interrupt_enable_irq(irq: u32):
+    """Enable IRQ line — x86_64 IOAPIC/PIC unmask."""
+    var intr = X86Interrupt()
+    intr.set_irq_mask(irq as u64, false)
+
+@cfg(x86_64)
+fn hal_interrupt_disable_irq(irq: u32):
+    """Disable IRQ line — x86_64 IOAPIC/PIC mask."""
+    var intr = X86Interrupt()
+    intr.set_irq_mask(irq as u64, true)
+
+@cfg(x86_64)
+fn hal_interrupt_acknowledge(irq: u32):
+    """Acknowledge IRQ — x86_64 LAPIC EOI."""
+    var intr = X86Interrupt()
+    intr.send_eoi(irq as u64)
+
+@cfg(x86_64)
+fn hal_interrupt_set_handler(irq: u32, handler: u64):
+    """Set IRQ handler — x86_64 write IDT entry for vector."""
+    var intr = X86Interrupt()
+    intr.register_handler(irq as u64, handler)
+
+@cfg(x86_64)
+fn hal_interrupt_set_priority(irq: u32, priority: u32):
+    """Set IRQ priority — x86_64 IOAPIC redirection / LAPIC TPR."""
+    # x86_64 LAPIC uses fixed priority scheme via vector numbers.
+    # Priority is implicitly vector / 16. No dynamic priority on legacy PIC.
+    pass_todo("x86_64 IOAPIC priority routing not yet wired")
+
+# ============================================================================
+# Timer (4 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_timer_init(frequency_hz: u64):
+    """Initialize timer — x86_64 APIC timer calibrated via PIT."""
+    var timer = X86Timer()
+    timer.init()
+
+@cfg(x86_64)
+fn hal_timer_set_deadline(delay_us: u64):
+    """Set one-shot timer deadline in microseconds.
+
+    HAL contract: delay_us is a relative delay in microseconds.
+    The x86_64 implementation converts to APIC timer ticks internally.
+    """
+    var timer = X86Timer()
+    timer.set_oneshot(delay_us)
+
+@cfg(x86_64)
+fn hal_timer_current_ticks() -> u64:
+    """Read current tick count — x86_64 TSC via RDTSC."""
+    var timer = X86Timer()
+    timer.current_ticks()
+
+@cfg(x86_64)
+fn hal_timer_ticks_per_second() -> u64:
+    """Return timer frequency — x86_64 calibrated TSC/APIC frequency."""
+    var timer = X86Timer()
+    timer.ticks_per_second()
+
+# ============================================================================
+# Context (3 functions)
+# ============================================================================
+
+@cfg(x86_64)
+fn hal_context_save() -> ArchContext:
+    """Save current CPU state — x86_64 GPRs + rflags + segments.
+
+    Note: A true register save requires inline assembly or a dedicated
+    save trampoline. This function creates a minimal context suitable
+    for use as the 'from' side of context_switch, where the switch
+    assembly itself saves the live registers into this slot.
+    The returned context is a placeholder that context_switch will
+    overwrite with actual register values.
+    """
+    var ctx_switch = X86ContextSwitch()
+    val x86_ctx = ctx_switch.create(0, 0, false)
+    ArchContext.X86_64(ctx: x86_ctx)
+
+@cfg(x86_64)
+fn hal_context_restore(ctx: ArchContext):
+    """Restore CPU state — x86_64 load GPRs + rflags + segments."""
+    match ctx:
+        ArchContext.X86_64(x86_ctx):
+            var ctx_switch = X86ContextSwitch()
+            # Create a dummy "from" context; switch loads "to" context
+            val dummy = ctx_switch.create(0, 0, false)
+            ctx_switch.switch(dummy, x86_ctx)
+        _:
+            pass_todo("context_restore: architecture mismatch")
+
+@cfg(x86_64)
+fn hal_context_init(entry: u64, stack: u64, arg: u64) -> ArchContext:
+    """Create new task context — x86_64 set rip=entry, rsp=stack, rdi=arg."""
+    var ctx_switch = X86ContextSwitch()
+    var x86_ctx = ctx_switch.create(entry, stack, false)
+    # Pass arg as first parameter (rdi in System V ABI)
+    x86_ctx.rdi = arg
+    ArchContext.X86_64(ctx: x86_ctx)

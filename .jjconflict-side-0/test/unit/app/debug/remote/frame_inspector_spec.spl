@@ -1,0 +1,279 @@
+# Frame Inspector Specification
+# Tests FrameDetail and VariableDetail construction, to_string(), and serialize().
+# Since FrameInspector requires a live GDB MI client, these tests focus on
+# the data structures that represent frame and variable information.
+
+# --- Local FrameDetail for testing ---
+
+class FrameDetail:
+    index: i64
+    function_name: text
+    file: text
+    line: i64
+    address: i64
+    full_path: text
+
+    static fn of(index: i64, function_name: text, file: text, line: i64) -> FrameDetail:
+        FrameDetail(
+            index: index,
+            function_name: function_name,
+            file: file,
+            line: line,
+            address: 0,
+            full_path: ""
+        )
+
+    static fn full(index: i64, function_name: text, file: text, line: i64, address: i64, full_path: text) -> FrameDetail:
+        FrameDetail(
+            index: index,
+            function_name: function_name,
+            file: file,
+            line: line,
+            address: address,
+            full_path: full_path
+        )
+
+impl FrameDetail:
+    fn to_string() -> text:
+        var addr_str = ""
+        if self.address > 0:
+            addr_str = " (0x{self.address})"
+        "#{self.index} {self.function_name} at {self.file}:{self.line}{addr_str}"
+
+    fn serialize() -> text:
+        "{self.index}|{self.function_name}|{self.file}|{self.line}|{self.address}|{self.full_path}"
+
+# --- Local VariableDetail for testing ---
+
+class VariableDetail:
+    name: text
+    value: text
+    var_type: text
+    num_children: i64
+    is_argument: bool
+
+    static fn of(name: text, value: text, var_type: text) -> VariableDetail:
+        VariableDetail(
+            name: name,
+            value: value,
+            var_type: var_type,
+            num_children: 0,
+            is_argument: false
+        )
+
+    static fn arg(name: text, value: text, var_type: text) -> VariableDetail:
+        VariableDetail(
+            name: name,
+            value: value,
+            var_type: var_type,
+            num_children: 0,
+            is_argument: true
+        )
+
+impl VariableDetail:
+    fn to_string() -> text:
+        var type_str = ""
+        if self.var_type.len() > 0:
+            type_str = " : {self.var_type}"
+        var arg_str = ""
+        if self.is_argument:
+            arg_str = " [arg]"
+        "{self.name} = {self.value}{type_str}{arg_str}"
+
+    fn serialize() -> text:
+        var arg_flag = "0"
+        if self.is_argument:
+            arg_flag = "1"
+        "{self.name}|{self.value}|{self.var_type}|{self.num_children}|{arg_flag}"
+
+# ============================================================================
+# FrameDetail Tests
+# ============================================================================
+
+describe "FrameDetail":
+    describe "construction with of()":
+        it "creates a frame with index, function, file, and line":
+            val frame = FrameDetail.of(0, "main", "main.spl", 10)
+            expect(frame.index).to_equal(0)
+            expect(frame.function_name).to_equal("main")
+            expect(frame.file).to_equal("main.spl")
+            expect(frame.line).to_equal(10)
+
+        it "sets address to 0 by default":
+            val frame = FrameDetail.of(0, "main", "main.spl", 10)
+            expect(frame.address).to_equal(0)
+
+        it "sets full_path to empty by default":
+            val frame = FrameDetail.of(0, "main", "main.spl", 10)
+            expect(frame.full_path).to_equal("")
+
+    describe "construction with full()":
+        it "creates a frame with all fields":
+            val frame = FrameDetail.full(2, "process", "worker.spl", 55, 4096, "/home/user/worker.spl")
+            expect(frame.index).to_equal(2)
+            expect(frame.function_name).to_equal("process")
+            expect(frame.file).to_equal("worker.spl")
+            expect(frame.line).to_equal(55)
+            expect(frame.address).to_equal(4096)
+            expect(frame.full_path).to_equal("/home/user/worker.spl")
+
+        it "creates a frame with address 0":
+            val frame = FrameDetail.full(0, "main", "main.spl", 1, 0, "/main.spl")
+            expect(frame.address).to_equal(0)
+
+    describe "to_string()":
+        it "formats frame without address when address is 0":
+            val frame = FrameDetail.of(0, "main", "main.spl", 10)
+            val s = frame.to_string()
+            expect(s).to_equal("#0 main at main.spl:10")
+
+        it "formats frame with address when address > 0":
+            val frame = FrameDetail.full(1, "helper", "util.spl", 25, 8192, "")
+            val s = frame.to_string()
+            expect(s).to_contain("#1 helper at util.spl:25")
+            expect(s).to_contain("(0x")
+
+        it "includes frame index in output":
+            val frame = FrameDetail.of(3, "deep_call", "deep.spl", 99)
+            val s = frame.to_string()
+            expect(s).to_start_with("#3")
+
+        it "includes function name in output":
+            val frame = FrameDetail.of(0, "my_function", "test.spl", 1)
+            val s = frame.to_string()
+            expect(s).to_contain("my_function")
+
+    describe "serialize()":
+        it "serializes with pipe delimiters":
+            val frame = FrameDetail.of(0, "main", "main.spl", 10)
+            val s = frame.serialize()
+            expect(s).to_equal("0|main|main.spl|10|0|")
+
+        it "serializes full frame with all fields":
+            val frame = FrameDetail.full(2, "process", "worker.spl", 55, 4096, "/home/user/worker.spl")
+            val s = frame.serialize()
+            expect(s).to_equal("2|process|worker.spl|55|4096|/home/user/worker.spl")
+
+        it "serializes frame with empty file":
+            val frame = FrameDetail.of(0, "unknown", "", 0)
+            val s = frame.serialize()
+            expect(s).to_equal("0|unknown||0|0|")
+
+        it "preserves all field values in serialization":
+            val frame = FrameDetail.full(5, "deep", "nested.spl", 200, 65536, "/abs/nested.spl")
+            val s = frame.serialize()
+            expect(s).to_contain("5|")
+            expect(s).to_contain("|deep|")
+            expect(s).to_contain("|nested.spl|")
+            expect(s).to_contain("|200|")
+            expect(s).to_contain("|65536|")
+            expect(s).to_end_with("/abs/nested.spl")
+
+# ============================================================================
+# VariableDetail Tests
+# ============================================================================
+
+describe "VariableDetail":
+    describe "construction with of()":
+        it "creates a local variable detail":
+            val v = VariableDetail.of("count", "42", "i64")
+            expect(v.name).to_equal("count")
+            expect(v.value).to_equal("42")
+            expect(v.var_type).to_equal("i64")
+
+        it "sets num_children to 0 by default":
+            val v = VariableDetail.of("x", "10", "i64")
+            expect(v.num_children).to_equal(0)
+
+        it "sets is_argument to false by default":
+            val v = VariableDetail.of("x", "10", "i64")
+            expect(v.is_argument).to_equal(false)
+
+    describe "construction with arg()":
+        it "creates an argument variable detail":
+            val v = VariableDetail.arg("param", "hello", "text")
+            expect(v.name).to_equal("param")
+            expect(v.value).to_equal("hello")
+            expect(v.var_type).to_equal("text")
+
+        it "sets is_argument to true":
+            val v = VariableDetail.arg("n", "5", "i64")
+            expect(v.is_argument).to_equal(true)
+
+        it "sets num_children to 0 by default":
+            val v = VariableDetail.arg("data", "{}", "struct")
+            expect(v.num_children).to_equal(0)
+
+    describe "to_string()":
+        it "formats local variable with type":
+            val v = VariableDetail.of("count", "42", "i64")
+            val s = v.to_string()
+            expect(s).to_equal("count = 42 : i64")
+
+        it "formats variable without type when type is empty":
+            val v = VariableDetail.of("x", "10", "")
+            val s = v.to_string()
+            expect(s).to_equal("x = 10")
+
+        it "formats argument variable with [arg] marker":
+            val v = VariableDetail.arg("param", "hello", "text")
+            val s = v.to_string()
+            expect(s).to_equal("param = hello : text [arg]")
+
+        it "formats argument without type but with [arg]":
+            val v = VariableDetail.arg("n", "5", "")
+            val s = v.to_string()
+            expect(s).to_equal("n = 5 [arg]")
+
+        it "includes variable name in output":
+            val v = VariableDetail.of("my_var", "100", "i64")
+            val s = v.to_string()
+            expect(s).to_start_with("my_var")
+
+        it "includes value in output":
+            val v = VariableDetail.of("msg", "hello world", "text")
+            val s = v.to_string()
+            expect(s).to_contain("hello world")
+
+    describe "serialize()":
+        it "serializes a local variable":
+            val v = VariableDetail.of("count", "42", "i64")
+            val s = v.serialize()
+            expect(s).to_equal("count|42|i64|0|0")
+
+        it "serializes an argument variable":
+            val v = VariableDetail.arg("param", "hello", "text")
+            val s = v.serialize()
+            expect(s).to_equal("param|hello|text|0|1")
+
+        it "serializes variable with empty type":
+            val v = VariableDetail.of("x", "10", "")
+            val s = v.serialize()
+            expect(s).to_equal("x|10||0|0")
+
+        it "serializes variable with num_children":
+            var v = VariableDetail.of("arr", "[1,2,3]", "array")
+            v.num_children = 3
+            val s = v.serialize()
+            expect(s).to_equal("arr|[1,2,3]|array|3|0")
+
+        it "preserves argument flag as 1 in serialization":
+            val v = VariableDetail.arg("n", "0", "i64")
+            val s = v.serialize()
+            expect(s).to_end_with("|1")
+
+        it "preserves local flag as 0 in serialization":
+            val v = VariableDetail.of("n", "0", "i64")
+            val s = v.serialize()
+            expect(s).to_end_with("|0")
+
+    describe "field mutation":
+        it "can modify num_children":
+            var v = VariableDetail.of("obj", "{}", "struct")
+            v.num_children = 5
+            expect(v.num_children).to_equal(5)
+
+        it "can modify value":
+            var v = VariableDetail.of("counter", "0", "i64")
+            v.value = "10"
+            expect(v.value).to_equal("10")

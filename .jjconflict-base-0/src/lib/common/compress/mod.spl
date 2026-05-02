@@ -1,0 +1,119 @@
+use compress.types.{CompressionCodec, CompressionLevel, CompressionOptions, CompressionError, CompressionEncoderState, CompressionDecoderState}
+use compress.utilities.{compression_level, default_compression_options, new_encoder_state, new_decoder_state, encoder_write, decoder_write, detect_codec}
+use compress.lz4.{lz4_compress_block, lz4_compress_block_with_level, lz4_decompress_block, lz4_compress_frame, lz4_decompress_frame}
+use compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
+use compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
+
+fn _validate_level(codec: CompressionCodec, level: CompressionLevel) -> Result<(), CompressionError>:
+    val result = compression_level(codec, level.value)
+    if result.is_err():
+        return Err(result.unwrap_err())
+    if codec == CompressionCodec.lz4 and level.value != 1:
+        return Err(CompressionError.UnsupportedFeature("lz4 levels other than 1 are not supported by the current façade implementation"))
+    if codec == CompressionCodec.zstd and level.value != 3:
+        return Err(CompressionError.UnsupportedFeature("zstd levels other than 3 are not supported by the current façade implementation"))
+    Ok(())
+
+fn _require_content_size_matches_input(input: [u8], content_size: i64?, codec_name: text) -> Result<i64, CompressionError>:
+    if content_size == nil:
+        return Ok(input.len())
+    val size = content_size ?? input.len()
+    if size < 0:
+        return Err(CompressionError.UnsupportedFeature(codec_name + " content_size must be >= 0"))
+    if size != input.len():
+        return Err(CompressionError.UnsupportedFeature(codec_name + " content_size must match the input length"))
+    Ok(size)
+
+fn _validate_dictionary_options(options: CompressionOptions, codec_name: text, support_message: text) -> Result<(), CompressionError>:
+    if options.dictionary_id != nil and (options.dictionary_id ?? 0) < 0:
+        return Err(CompressionError.UnsupportedFeature(codec_name + " dictionary_id must be >= 0"))
+    if options.dictionary_id != nil and options.dictionary_bytes == nil:
+        return Err(CompressionError.UnsupportedFeature(codec_name + " dictionary_id requires dictionary_bytes"))
+    if options.dictionary_bytes != nil or options.dictionary_id != nil:
+        return Err(CompressionError.UnsupportedFeature(support_message))
+    Ok(())
+
+fn _validate_encode_options(input: [u8], options: CompressionOptions) -> Result<(), CompressionError>:
+    val level_res = _validate_level(options.codec, options.level)
+    if level_res.is_err():
+        return Err(level_res.unwrap_err())
+    match options.codec:
+        CompressionCodec.lz4:
+            if options.block_mode == "block":
+                if options.checksum:
+                    return Err(CompressionError.UnsupportedFeature("lz4 block mode does not support checksum"))
+                if options.content_size != nil:
+                    return Err(CompressionError.UnsupportedFeature("lz4 block mode does not support content_size"))
+                return _validate_dictionary_options(options, "lz4", "lz4 block dictionaries are not supported")
+            if options.block_mode != "frame":
+                return Err(CompressionError.UnsupportedFeature("lz4 block_mode must be block or frame"))
+            val dictionary_res = _validate_dictionary_options(options, "lz4", "lz4 frame dictionaries are not supported")
+            if dictionary_res.is_err():
+                return Err(dictionary_res.unwrap_err())
+            val content_size_res = _require_content_size_matches_input(input, options.content_size, "lz4")
+            if content_size_res.is_err():
+                return Err(content_size_res.unwrap_err())
+            return Ok(())
+        CompressionCodec.zstd:
+            if options.block_mode != "frame":
+                return Err(CompressionError.UnsupportedFeature("zstd block_mode must be frame"))
+            val dictionary_res = _validate_dictionary_options(options, "zstd", "zstd dictionaries are not supported by the current façade implementation")
+            if dictionary_res.is_err():
+                return Err(dictionary_res.unwrap_err())
+            val content_size_res = _require_content_size_matches_input(input, options.content_size, "zstd")
+            if content_size_res.is_err():
+                return Err(content_size_res.unwrap_err())
+            return Ok(())
+        CompressionCodec.lzma2:
+            if options.block_mode != "frame":
+                return Err(CompressionError.UnsupportedFeature("lzma2 block_mode must be frame"))
+            if not options.checksum:
+                return Err(CompressionError.UnsupportedFeature("lzma2 frame encoding requires checksum=true because the current xz encoder always emits CRC32"))
+            val dictionary_res = _validate_dictionary_options(options, "lzma2", "lzma2 dictionaries are not supported")
+            if dictionary_res.is_err():
+                return Err(dictionary_res.unwrap_err())
+            val content_size_res = _require_content_size_matches_input(input, options.content_size, "lzma2")
+            if content_size_res.is_err():
+                return Err(content_size_res.unwrap_err())
+            return Ok(())
+
+fn compress_bytes(input: [u8], options: CompressionOptions) -> [u8]:
+    try_compress_bytes(input, options).unwrap()
+
+fn try_compress_bytes(input: [u8], options: CompressionOptions) -> Result<[u8], CompressionError>:
+    val validate_res = _validate_encode_options(input, options)
+    if validate_res.is_err():
+        return Err(validate_res.unwrap_err())
+    match options.codec:
+        CompressionCodec.lz4:
+            if options.block_mode == "block":
+                return Ok(lz4_compress_block_with_level(input, options.level.value))
+            return Ok(lz4_compress_frame(input, options))
+        CompressionCodec.zstd:
+            return Ok(zstd_compress_frame(input, options))
+        CompressionCodec.lzma2:
+            return Ok(lzma2_compress_xz(input, options))
+
+fn decompress_bytes(input: [u8], codec_hint: CompressionCodec?) -> Result<[u8], CompressionError>:
+    val codec_res = detect_codec(input, codec_hint)
+    if codec_res.is_err():
+        return Err(codec_res.unwrap_err())
+    match codec_res.unwrap():
+        CompressionCodec.lz4:
+            if input.len() >= 4 and input[0] == 0x04u8 and input[1] == 0x22u8 and input[2] == 0x4Du8 and input[3] == 0x18u8:
+                lz4_decompress_frame(input)
+            else:
+                lz4_decompress_block(input)
+        CompressionCodec.zstd:
+            zstd_decompress_frame(input)
+        CompressionCodec.lzma2:
+            lzma2_decompress_xz(input)
+
+fn encoder_finish(state: CompressionEncoderState) -> [u8]:
+    compress_bytes(state.pending, state.options)
+
+fn encoder_finish_checked(state: CompressionEncoderState) -> Result<[u8], CompressionError>:
+    try_compress_bytes(state.pending, state.options)
+
+fn decoder_finish(state: CompressionDecoderState) -> Result<[u8], CompressionError>:
+    decompress_bytes(state.pending, state.codec_hint)

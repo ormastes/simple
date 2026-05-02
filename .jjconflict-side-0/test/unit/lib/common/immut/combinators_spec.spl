@@ -1,0 +1,366 @@
+# Combinators and Pipeline -- Functional Combinator Tests
+#
+# Tests for standalone combinator functions and the Pipeline class
+# from nogc_async_immut/combinators.
+
+use lib.combinators.{pmap, pfilter, pfold, pzip, pflat_map, pgroup_by, ppartition, ptake_while, pdrop_while, pscan, pany, pall, pfind, pfind_index, pdistinct, pchunk}
+use lib.combinators.pipeline.{Pipeline, Pipeline__new, Pipeline__of}
+
+describe "Combinators":
+
+    # ========================================================================
+    # pmap
+    # ========================================================================
+
+    describe "pmap":
+        it "applies identity function":
+            val result = pmap([1, 2, 3], \x: x)
+            expect(result).to_equal([1, 2, 3])
+
+        it "doubles each element":
+            val result = pmap([1, 2, 3], \x: x * 2)
+            expect(result).to_equal([2, 4, 6])
+
+        it "handles empty array":
+            val result = pmap([], \x: x + 1)
+            expect(result).to_equal([])
+
+    # ========================================================================
+    # pfilter
+    # ========================================================================
+
+    describe "pfilter":
+        it "filters even numbers":
+            val result = pfilter([1, 2, 3, 4, 5, 6], \x: x % 2 == 0)
+            expect(result).to_equal([2, 4, 6])
+
+        it "filters with no matches returns empty":
+            val result = pfilter([1, 3, 5], \x: x % 2 == 0)
+            expect(result).to_equal([])
+
+        it "filters with all matches returns all":
+            val result = pfilter([2, 4, 6], \x: x % 2 == 0)
+            expect(result).to_equal([2, 4, 6])
+
+    # ========================================================================
+    # pfold
+    # ========================================================================
+
+    describe "pfold":
+        it "sums array":
+            val result = pfold([1, 2, 3, 4], 0, \a, x: a + x)
+            expect(result).to_equal(10)
+
+        it "folds empty array returns init":
+            val result = pfold([], 42, \a, x: a + x)
+            expect(result).to_equal(42)
+
+        it "multiplies array":
+            val result = pfold([1, 2, 3, 4], 1, \a, x: a * x)
+            expect(result).to_equal(24)
+
+    # ========================================================================
+    # pzip
+    # ========================================================================
+
+    describe "pzip":
+        it "zips two equal-length arrays":
+            val result = pzip([1, 2, 3], [4, 5, 6])
+            expect(result.len()).to_equal(3)
+            expect(result[0]).to_equal([1, 4])
+            expect(result[1]).to_equal([2, 5])
+            expect(result[2]).to_equal([3, 6])
+
+        it "truncates to shorter array":
+            val result = pzip([1, 2], [10, 20, 30])
+            expect(result.len()).to_equal(2)
+
+        it "handles empty first array":
+            val result = pzip([], [1, 2, 3])
+            expect(result.len()).to_equal(0)
+
+    # ========================================================================
+    # pflat_map
+    # ========================================================================
+
+    describe "pflat_map":
+        it "flattens mapped arrays":
+            val result = pflat_map([1, 2, 3], \x: [x, x * 10])
+            expect(result).to_equal([1, 10, 2, 20, 3, 30])
+
+        it "handles empty inner arrays":
+            val result = pflat_map([1, 2, 3], \x: [])
+            expect(result).to_equal([])
+
+    # ========================================================================
+    # pgroup_by
+    # ========================================================================
+
+    describe "pgroup_by":
+        it "groups by modulo":
+            val result = pgroup_by([1, 2, 3, 4, 5, 6], \x: x % 2)
+            expect(result.len()).to_equal(2)
+            # First group is odd (1 % 2 == 1), second is even (2 % 2 == 0)
+            expect(result[0][0]).to_equal(1)
+            expect(result[0][1]).to_equal([1, 3, 5])
+            expect(result[1][0]).to_equal(0)
+            expect(result[1][1]).to_equal([2, 4, 6])
+
+        it "single group for constant key":
+            val result = pgroup_by([10, 20, 30], \x: "all")
+            expect(result.len()).to_equal(1)
+            expect(result[0][1]).to_equal([10, 20, 30])
+
+    # ========================================================================
+    # ppartition
+    # ========================================================================
+
+    describe "ppartition":
+        it "splits into matching and non-matching":
+            val result = ppartition([1, 2, 3, 4, 5], \x: x > 3)
+            expect(result[0]).to_equal([4, 5])
+            expect(result[1]).to_equal([1, 2, 3])
+
+        it "all matching gives empty non-matching":
+            val result = ppartition([10, 20], \x: x > 0)
+            expect(result[0]).to_equal([10, 20])
+            expect(result[1]).to_equal([])
+
+    # ========================================================================
+    # ptake_while / pdrop_while
+    # ========================================================================
+
+    describe "ptake_while":
+        it "takes elements while predicate holds":
+            val result = ptake_while([1, 2, 3, 10, 4, 5], \x: x < 5)
+            expect(result).to_equal([1, 2, 3])
+
+        it "takes all if predicate always true":
+            val result = ptake_while([1, 2, 3], \x: x > 0)
+            expect(result).to_equal([1, 2, 3])
+
+        it "takes none if first element fails":
+            val result = ptake_while([10, 1, 2], \x: x < 5)
+            expect(result).to_equal([])
+
+    describe "pdrop_while":
+        it "drops elements while predicate holds":
+            val result = pdrop_while([1, 2, 3, 10, 4], \x: x < 5)
+            expect(result).to_equal([10, 4])
+
+        it "drops all if predicate always true":
+            val result = pdrop_while([1, 2, 3], \x: x > 0)
+            expect(result).to_equal([])
+
+        it "drops none if first element fails":
+            val result = pdrop_while([10, 1, 2], \x: x < 5)
+            expect(result).to_equal([10, 1, 2])
+
+    # ========================================================================
+    # pscan
+    # ========================================================================
+
+    describe "pscan":
+        it "returns intermediate accumulator values":
+            val result = pscan([1, 2, 3, 4], 0, \a, x: a + x)
+            expect(result).to_equal([1, 3, 6, 10])
+
+        it "handles single element":
+            val result = pscan([5], 0, \a, x: a + x)
+            expect(result).to_equal([5])
+
+        it "handles empty array":
+            val result = pscan([], 0, \a, x: a + x)
+            expect(result).to_equal([])
+
+    # ========================================================================
+    # pany / pall
+    # ========================================================================
+
+    describe "pany":
+        it "returns true if any element matches":
+            val result = pany([1, 2, 3], \x: x == 2)
+            expect(result).to_equal(true)
+
+        it "returns false if no element matches":
+            val result = pany([1, 2, 3], \x: x == 10)
+            expect(result).to_equal(false)
+
+        it "returns false for empty array":
+            val result = pany([], \x: x == 1)
+            expect(result).to_equal(false)
+
+    describe "pall":
+        it "returns true if all elements match":
+            val result = pall([2, 4, 6], \x: x % 2 == 0)
+            expect(result).to_equal(true)
+
+        it "returns false if any element fails":
+            val result = pall([2, 3, 6], \x: x % 2 == 0)
+            expect(result).to_equal(false)
+
+        it "returns true for empty array":
+            val result = pall([], \x: x > 0)
+            expect(result).to_equal(true)
+
+    # ========================================================================
+    # pfind / pfind_index
+    # ========================================================================
+
+    describe "pfind":
+        it "returns first matching element":
+            val result = pfind([1, 2, 3, 4], \x: x > 2)
+            expect(result).to_equal(3)
+
+        it "returns nil when no match":
+            val result = pfind([1, 2, 3], \x: x > 10)
+            expect(result).to_be_nil()
+
+    describe "pfind_index":
+        it "returns index of first match":
+            val result = pfind_index([10, 20, 30], \x: x == 20)
+            expect(result).to_equal(1)
+
+        it "returns -1 when no match":
+            val result = pfind_index([1, 2, 3], \x: x == 99)
+            expect(result).to_equal(-1)
+
+    # ========================================================================
+    # pdistinct
+    # ========================================================================
+
+    describe "pdistinct":
+        it "removes duplicates preserving order":
+            val result = pdistinct([1, 2, 3, 2, 1, 4])
+            expect(result).to_equal([1, 2, 3, 4])
+
+        it "handles already unique array":
+            val result = pdistinct([5, 10, 15])
+            expect(result).to_equal([5, 10, 15])
+
+        it "handles empty array":
+            val result = pdistinct([])
+            expect(result).to_equal([])
+
+    # ========================================================================
+    # pchunk
+    # ========================================================================
+
+    describe "pchunk":
+        it "splits into equal chunks":
+            val result = pchunk([1, 2, 3, 4, 5, 6], 2)
+            expect(result.len()).to_equal(3)
+            expect(result[0]).to_equal([1, 2])
+            expect(result[1]).to_equal([3, 4])
+            expect(result[2]).to_equal([5, 6])
+
+        it "last chunk may be smaller":
+            val result = pchunk([1, 2, 3, 4, 5], 3)
+            expect(result.len()).to_equal(2)
+            expect(result[0]).to_equal([1, 2, 3])
+            expect(result[1]).to_equal([4, 5])
+
+        it "chunk size larger than array":
+            val result = pchunk([1, 2], 10)
+            expect(result.len()).to_equal(1)
+            expect(result[0]).to_equal([1, 2])
+
+    # ========================================================================
+    # Pipeline
+    # ========================================================================
+
+    describe "Pipeline creation":
+        it "creates empty pipeline":
+            val p = Pipeline.new()
+            expect(p.len()).to_equal(0)
+            expect(p.is_empty()).to_equal(true)
+
+        it "Pipeline__of creates from steps":
+            val p = Pipeline.of([])
+            expect(p.is_empty()).to_equal(true)
+
+    describe "Pipeline map":
+        it "applies map step":
+            val p = Pipeline.new().map(\x: x * 2)
+            val result = p.run([1, 2, 3])
+            expect(result).to_equal([2, 4, 6])
+
+        it "has one step after map":
+            val p = Pipeline.new().map(\x: x)
+            expect(p.len()).to_equal(1)
+
+    describe "Pipeline filter":
+        it "applies filter step":
+            val p = Pipeline.new().filter(\x: x > 2)
+            val result = p.run([1, 2, 3, 4, 5])
+            expect(result).to_equal([3, 4, 5])
+
+    describe "Pipeline chaining":
+        it "chains map then filter":
+            val p = Pipeline.new().map(\x: x * 2).filter(\x: x > 4)
+            val result = p.run([1, 2, 3, 4])
+            expect(result).to_equal([6, 8])
+
+        it "chains filter then map":
+            val p = Pipeline.new().filter(\x: x > 2).map(\x: x * 10)
+            val result = p.run([1, 2, 3, 4])
+            expect(result).to_equal([30, 40])
+
+        it "has correct step count":
+            val p = Pipeline.new().map(\x: x).filter(\x: true).map(\x: x)
+            expect(p.len()).to_equal(3)
+
+    describe "Pipeline take and drop":
+        it "takes first n elements":
+            val p = Pipeline.new().take(3)
+            val result = p.run([10, 20, 30, 40, 50])
+            expect(result).to_equal([10, 20, 30])
+
+        it "drops first n elements":
+            val p = Pipeline.new().drop(2)
+            val result = p.run([10, 20, 30, 40, 50])
+            expect(result).to_equal([30, 40, 50])
+
+        it "take more than length returns all":
+            val p = Pipeline.new().take(100)
+            val result = p.run([1, 2])
+            expect(result).to_equal([1, 2])
+
+    describe "Pipeline flat_map":
+        it "maps and flattens":
+            val p = Pipeline.new().flat_map(\x: [x, x])
+            val result = p.run([1, 2, 3])
+            expect(result).to_equal([1, 1, 2, 2, 3, 3])
+
+    describe "Pipeline distinct":
+        it "removes duplicates":
+            val p = Pipeline.new().distinct()
+            val result = p.run([1, 2, 1, 3, 2])
+            expect(result).to_equal([1, 2, 3])
+
+    describe "Pipeline chunk":
+        it "splits into chunks":
+            val p = Pipeline.new().chunk(2)
+            val result = p.run([1, 2, 3, 4])
+            expect(result.len()).to_equal(2)
+            expect(result[0]).to_equal([1, 2])
+            expect(result[1]).to_equal([3, 4])
+
+    describe "Pipeline run on empty":
+        it "returns empty for empty input":
+            val p = Pipeline.new().map(\x: x * 2).filter(\x: x > 0)
+            val result = p.run([])
+            expect(result).to_equal([])
+
+    describe "Pipeline immutability":
+        it "builder returns new pipeline":
+            val p1 = Pipeline.new()
+            val p2 = p1.map(\x: x * 2)
+            expect(p1.len()).to_equal(0)
+            expect(p2.len()).to_equal(1)
+
+        it "original pipeline unchanged after chaining":
+            val base = Pipeline.new().filter(\x: x > 0)
+            val extended = base.map(\x: x * 10)
+            expect(base.len()).to_equal(1)
+            expect(extended.len()).to_equal(2)

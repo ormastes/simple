@@ -1,0 +1,129 @@
+#![allow(unnamed_duplicate_typed_args)]
+# LLM Diagnostics — Timeline
+#
+# Merges events from hooks and transcript into a unified
+# chronological event stream. Supports filtering by type.
+
+use std.nogc_async_mut.llm_diagnostics.types.{
+    DiagEvent,
+    EVENT_SESSION_START, EVENT_SESSION_END,
+    EVENT_TOOL_PRE, EVENT_TOOL_POST, EVENT_TOOL_FAILURE,
+    EVENT_SUBAGENT_START, EVENT_SUBAGENT_STOP,
+    EVENT_ELICITATION, EVENT_ELICITATION_RESULT,
+    EVENT_USER_PROMPT, EVENT_PRE_COMPACT,
+    EVENT_TRANSCRIPT_TURN
+}
+
+# --- Sorting ---
+
+fn sort_events_by_time(events: [DiagEvent]) -> [DiagEvent]:
+    """Sort events chronologically by timestamp (ascending)."""
+    var sorted: [DiagEvent] = []
+    for e in events:
+        sorted.push(e)
+    # Insertion sort (fine for typical session sizes <10K events)
+    var i = 1
+    while i < sorted.len():
+        var j = i
+        while j > 0 and sorted[j].timestamp < sorted[j - 1].timestamp:
+            val tmp = sorted[j]
+            sorted[j] = sorted[j - 1]
+            sorted[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+    sorted
+
+# --- Filtering ---
+
+fn filter_events_by_type(events: [DiagEvent], event_type: text) -> [DiagEvent]:
+    """Keep only events of the given type."""
+    var filtered: [DiagEvent] = []
+    for e in events:
+        if e.event_type == event_type:
+            filtered.push(e)
+    filtered
+
+fn filter_events_by_types(events: [DiagEvent], types: [text]) -> [DiagEvent]:
+    """Keep only events matching any of the given types."""
+    var filtered: [DiagEvent] = []
+    for e in events:
+        if types.contains(e.event_type):
+            filtered.push(e)
+    filtered
+
+fn filter_events_by_agent(events: [DiagEvent], agent_id: text) -> [DiagEvent]:
+    """Keep only events for a specific agent."""
+    var filtered: [DiagEvent] = []
+    for e in events:
+        if e.agent_id == agent_id:
+            filtered.push(e)
+    filtered
+
+fn exclude_event_types(events: [DiagEvent], types: [text]) -> [DiagEvent]:
+    """Remove events of the given types (show/hide support)."""
+    var filtered: [DiagEvent] = []
+    for e in events:
+        if not types.contains(e.event_type):
+            filtered.push(e)
+    filtered
+
+# --- Merging ---
+
+fn merge_timelines(a: [DiagEvent], b: [DiagEvent]) -> [DiagEvent]:
+    """Merge two sorted event lists into one sorted list."""
+    var merged: [DiagEvent] = []
+    var i = 0
+    var j = 0
+    while i < a.len() and j < b.len():
+        if a[i].timestamp <= b[j].timestamp:
+            merged.push(a[i])
+            i = i + 1
+        else:
+            merged.push(b[j])
+            j = j + 1
+    while i < a.len():
+        merged.push(a[i])
+        i = i + 1
+    while j < b.len():
+        merged.push(b[j])
+        j = j + 1
+    merged
+
+# --- Windowing ---
+
+fn events_in_time_range(events: [DiagEvent], start_ms: i64, end_ms: i64) -> [DiagEvent]:
+    """Get events within a time window."""
+    var windowed: [DiagEvent] = []
+    for e in events:
+        if e.timestamp >= start_ms and e.timestamp <= end_ms:
+            windowed.push(e)
+    windowed
+
+fn events_last_n_seconds(events: [DiagEvent], now_ms: i64, seconds: i64) -> [DiagEvent]:
+    """Get events from the last N seconds."""
+    val start_ms = now_ms - (seconds * 1000)
+    events_in_time_range(events, start_ms, now_ms)
+
+# --- Convenience ---
+
+fn tool_events_only(events: [DiagEvent]) -> [DiagEvent]:
+    """Get only tool-related events."""
+    filter_events_by_types(events, [EVENT_TOOL_PRE, EVENT_TOOL_POST, EVENT_TOOL_FAILURE])
+
+fn mcp_events_only(events: [DiagEvent]) -> [DiagEvent]:
+    """Get only MCP-related events (tool events where tool_name starts with mcp__)."""
+    var filtered: [DiagEvent] = []
+    for e in events:
+        if (e.event_type == EVENT_TOOL_PRE or e.event_type == EVENT_TOOL_POST or e.event_type == EVENT_TOOL_FAILURE):
+            # Check if data contains mcp__ prefix in tool_name
+            if e.data.contains("mcp__"):
+                filtered.push(e)
+    filtered
+
+fn agent_events_only(events: [DiagEvent]) -> [DiagEvent]:
+    """Get only agent-related events."""
+    filter_events_by_types(events, [EVENT_SUBAGENT_START, EVENT_SUBAGENT_STOP])
+
+fn session_events_only(events: [DiagEvent]) -> [DiagEvent]:
+    """Get only session lifecycle events."""
+    filter_events_by_types(events, [EVENT_SESSION_START, EVENT_SESSION_END, EVENT_PRE_COMPACT])

@@ -1,0 +1,394 @@
+# UI Patch Wire Encoding — v1 JSON
+#
+# Serialises/deserialises UIPatch and PatchEnvelope to/from JSON text.
+# One encoder branch per PatchKind variant.
+#
+# JSON ID convention: canonical node IDs use the form "surface_id#widget_id".
+# Fields map 1-to-1 with UIPatch struct fields:
+#   target_id  → "id" (node being changed) or child "id" for InsertChild
+#   parent_id  → "parent"
+#   prop_key   → "key"
+#   prop_value → "value"
+#
+# NOTE: out-of-scope callsites in handler.spl and mcp_os_server.spl construct
+# UiAccessSnapshot without the new snapshot_revision field — they must be
+# updated in a follow-up pass (Agent D / Phase 2 ticket).
+
+use common.string_builder.{StringBuilder}
+use common.ui.patch.{UIPatch, PatchKind}
+use common.ui.access.{UiAccessSnapshot}
+
+# =========================================================================
+# Wire error
+# =========================================================================
+
+struct WireError:
+    code: text
+    message: text
+
+# =========================================================================
+# Patch envelope
+# =========================================================================
+
+struct PatchEnvelope:
+    session_id: text
+    snapshot_revision: u64
+    from_sequence: i64
+    to_sequence: i64
+    patches: [UIPatch]
+
+# =========================================================================
+# Private JSON helpers (escape_json_string is not pub in ws_handler.spl,
+# so we duplicate the same logic here)
+# =========================================================================
+
+fn _escape_json(value: text) -> text:
+    val sb = StringBuilder.new()
+    var idx = 0
+    while idx < value.len():
+        val ch = value[idx]
+        if ch == "\"":
+            sb.push("\\\"")
+        elif ch == "\\":
+            sb.push("\\\\")
+        elif ch == "\n":
+            sb.push("\\n")
+        elif ch == "\r":
+            sb.push("\\r")
+        elif ch == "\t":
+            sb.push("\\t")
+        else:
+            sb.push(ch)
+        idx = idx + 1
+    return sb.to_text()
+
+fn _jstr(value: text) -> text:
+    return "\"{_escape_json(value)}\""
+
+fn _jpair(key: text, value: text) -> text:
+    return "{_jstr(key)}:{value}"
+
+# =========================================================================
+# Node encoding (minimal canonical shape for InsertChild / ReplaceNode)
+# =========================================================================
+
+fn _encode_node_inline(p: UIPatch) -> text:
+    if p.node == nil:
+        return "null"
+    val node = p.node
+    return "{" +
+        _jpair(key: "canonical_id", value: _jstr(node.id)) +
+        "}"
+
+# =========================================================================
+# Patch encoding
+# =========================================================================
+
+fn encode_patch(p: UIPatch) -> text:
+    """Encode a single UIPatch to a JSON string (v1 wire format)."""
+    match p.kind:
+        PatchKind.InsertChild:
+            return "{" +
+                _jpair(key: "op", value: _jstr("insert_child")) + "," +
+                _jpair(key: "parent", value: _jstr(p.parent_id)) + "," +
+                _jpair(key: "index", value: "0") + "," +
+                _jpair(key: "node", value: _encode_node_inline(p)) +
+                "}"
+        PatchKind.RemoveChild:
+            return "{" +
+                _jpair(key: "op", value: _jstr("remove_child")) + "," +
+                _jpair(key: "parent", value: _jstr(p.parent_id)) + "," +
+                _jpair(key: "index", value: "0") +
+                "}"
+        PatchKind.ReplaceNode:
+            return "{" +
+                _jpair(key: "op", value: _jstr("replace_node")) + "," +
+                _jpair(key: "id", value: _jstr(p.target_id)) + "," +
+                _jpair(key: "node", value: _encode_node_inline(p)) +
+                "}"
+        PatchKind.UpdateProp:
+            return "{" +
+                _jpair(key: "op", value: _jstr("update_prop")) + "," +
+                _jpair(key: "id", value: _jstr(p.target_id)) + "," +
+                _jpair(key: "key", value: _jstr(p.prop_key)) + "," +
+                _jpair(key: "value", value: _jstr(p.prop_value)) +
+                "}"
+        PatchKind.RemoveProp:
+            return "{" +
+                _jpair(key: "op", value: _jstr("remove_prop")) + "," +
+                _jpair(key: "id", value: _jstr(p.target_id)) + "," +
+                _jpair(key: "key", value: _jstr(p.prop_key)) +
+                "}"
+        PatchKind.UpdateLayout:
+            return "{" +
+                _jpair(key: "op", value: _jstr("update_layout")) + "," +
+                _jpair(key: "id", value: _jstr(p.target_id)) + "," +
+                _jpair(key: "x", value: "0") + "," +
+                _jpair(key: "y", value: "0") + "," +
+                _jpair(key: "w", value: "0") + "," +
+                _jpair(key: "h", value: "0") +
+                "}"
+        PatchKind.UpdateVisibility:
+            val visible_val = if p.prop_value == "false": "false" else: "true"
+            return "{" +
+                _jpair(key: "op", value: _jstr("update_visibility")) + "," +
+                _jpair(key: "id", value: _jstr(p.target_id)) + "," +
+                "\"visible\":{visible_val}" +
+                "}"
+        PatchKind.MoveChild:
+            return "{" +
+                _jpair(key: "op", value: _jstr("move_child")) + "," +
+                _jpair(key: "parent", value: _jstr(p.parent_id)) + "," +
+                "\"from\":0," +
+                "\"to\":0" +
+                "}"
+
+# =========================================================================
+# Patch decoding
+# =========================================================================
+
+fn decode_patch(s: text) -> Result<UIPatch, WireError>:
+    """Decode a JSON string back to a UIPatch (v1 wire format).
+    # Example:
+    #   val p = UIPatch.new_prop(PatchKind.UpdateProp, "surf#w1", "text", "Hello")
+    #   val encoded = encode_patch(p)
+    #   val decoded = decode_patch(encoded)
+    """
+    val op = _extract_text_field(s, "op")
+    if op == nil or op == "":
+        return Err(WireError(code: "missing_op", message: "no 'op' field in patch JSON"))
+    if op == "insert_child":
+        val parent = _extract_text_field(s, "parent")
+        val node_id = _extract_nested_text_field(s, "node", "canonical_id")
+        return Ok(UIPatch(
+            kind: PatchKind.InsertChild,
+            target_id: if node_id == nil: "" else: node_id,
+            parent_id: if parent == nil: "" else: parent,
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        ))
+    if op == "remove_child":
+        val parent = _extract_text_field(s, "parent")
+        return Ok(UIPatch(
+            kind: PatchKind.RemoveChild,
+            target_id: "",
+            parent_id: if parent == nil: "" else: parent,
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        ))
+    if op == "replace_node":
+        val id = _extract_text_field(s, "id")
+        return Ok(UIPatch(
+            kind: PatchKind.ReplaceNode,
+            target_id: if id == nil: "" else: id,
+            parent_id: "",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        ))
+    if op == "update_prop":
+        val id = _extract_text_field(s, "id")
+        val key = _extract_text_field(s, "key")
+        val value = _extract_text_field(s, "value")
+        return Ok(UIPatch(
+            kind: PatchKind.UpdateProp,
+            target_id: if id == nil: "" else: id,
+            parent_id: "",
+            prop_key: if key == nil: "" else: key,
+            prop_value: if value == nil: "" else: value,
+            node: nil
+        ))
+    if op == "remove_prop":
+        val id = _extract_text_field(s, "id")
+        val key = _extract_text_field(s, "key")
+        return Ok(UIPatch(
+            kind: PatchKind.RemoveProp,
+            target_id: if id == nil: "" else: id,
+            parent_id: "",
+            prop_key: if key == nil: "" else: key,
+            prop_value: "",
+            node: nil
+        ))
+    if op == "update_layout":
+        val id = _extract_text_field(s, "id")
+        return Ok(UIPatch(
+            kind: PatchKind.UpdateLayout,
+            target_id: if id == nil: "" else: id,
+            parent_id: "",
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        ))
+    if op == "update_visibility":
+        val id = _extract_text_field(s, "id")
+        val vis = _extract_text_field(s, "visible")
+        return Ok(UIPatch(
+            kind: PatchKind.UpdateVisibility,
+            target_id: if id == nil: "" else: id,
+            parent_id: "",
+            prop_key: "",
+            prop_value: if vis == nil: "true" else: vis,
+            node: nil
+        ))
+    if op == "move_child":
+        val parent = _extract_text_field(s, "parent")
+        return Ok(UIPatch(
+            kind: PatchKind.MoveChild,
+            target_id: "",
+            parent_id: if parent == nil: "" else: parent,
+            prop_key: "",
+            prop_value: "",
+            node: nil
+        ))
+    return Err(WireError(code: "unknown_op", message: "unknown op: {op}"))
+
+# =========================================================================
+# Envelope encoding / decoding
+# =========================================================================
+
+fn encode_envelope(e: PatchEnvelope) -> text:
+    """Encode a PatchEnvelope to a JSON string."""
+    val sb = StringBuilder.new()
+    sb.push("[")
+    var first = true
+    for p in e.patches:
+        if not first:
+            sb.push(",")
+        sb.push(encode_patch(p))
+        first = false
+    sb.push("]")
+    val patches_json = sb.to_text()
+    return "{" +
+        _jpair(key: "session_id", value: _jstr(e.session_id)) + "," +
+        _jpair(key: "snapshot_revision", value: "{e.snapshot_revision}") + "," +
+        _jpair(key: "from_sequence", value: "{e.from_sequence}") + "," +
+        _jpair(key: "to_sequence", value: "{e.to_sequence}") + "," +
+        _jpair(key: "patches", value: patches_json) +
+        "}"
+
+fn decode_envelope(s: text) -> Result<PatchEnvelope, WireError>:
+    """Decode a JSON string to a PatchEnvelope."""
+    val session_id = _extract_text_field(s, "session_id")
+    val rev_str = _extract_text_field(s, "snapshot_revision")
+    val from_str = _extract_text_field(s, "from_sequence")
+    val to_str = _extract_text_field(s, "to_sequence")
+    val rev: u64 = if rev_str == nil or rev_str == "": 0 else: _parse_u64(rev_str)
+    val from_seq: i64 = if from_str == nil or from_str == "": 0 else: _parse_i64(from_str)
+    val to_seq: i64 = if to_str == nil or to_str == "": 0 else: _parse_i64(to_str)
+    return Ok(PatchEnvelope(
+        session_id: if session_id == nil: "" else: session_id,
+        snapshot_revision: rev,
+        from_sequence: from_seq,
+        to_sequence: to_seq,
+        patches: []
+    ))
+
+# =========================================================================
+# Minimal JSON field extraction helpers
+# =========================================================================
+
+fn _extract_text_field(json: text, field: text) -> text?:
+    """Extract the value of a simple quoted string or number field from flat JSON."""
+    val key = "\"{field}\":"
+    val pos = json.find(key)
+    if pos < 0:
+        return nil
+    val start = pos + key.len()
+    if start >= json.len():
+        return nil
+    val first_ch = json[start]
+    if first_ch == "\"":
+        # quoted string
+        val inner_start = start + 1
+        var end = inner_start
+        while end < json.len() and json[end] != "\"":
+            if json[end] == "\\":
+                end = end + 1
+            end = end + 1
+        return json.slice(inner_start, end)
+    else:
+        # number / boolean — read until , } ]
+        var end = start
+        while end < json.len():
+            val ch = json[end]
+            if ch == "," or ch == "}" or ch == "]":
+                return json.slice(start, end).trim()
+            end = end + 1
+        return json.slice(start, json.len()).trim()
+
+fn _extract_nested_text_field(json: text, outer_key: text, inner_key: text) -> text?:
+    """Extract a field from within a nested JSON object value."""
+    val key = "\"{outer_key}\":"
+    val pos = json.find(key)
+    if pos < 0:
+        return nil
+    val after_key = pos + key.len()
+    val brace = _find_from(json, "{", after_key)
+    if brace < 0:
+        return nil
+    val close_brace = _find_from(json, "}", brace)
+    if close_brace < 0:
+        return nil
+    val inner = json.slice(brace, close_brace + 1)
+    return _extract_text_field(inner, inner_key)
+
+fn _parse_u64(s: text) -> u64:
+    if s == "":
+        return 0 as u64
+    var i = 0
+    var acc: u64 = 0 as u64
+    while i < s.len():
+        val digit = _digit(s.slice(i, i + 1))
+        if digit < 0:
+            break
+        acc = (acc * (10 as u64)) + (digit as u64)
+        i = i + 1
+    return acc
+
+fn _parse_i64(s: text) -> i64:
+    if s == "":
+        return 0
+    var sign = 1
+    var start = 0
+    if s.slice(0, 1) == "-":
+        sign = -1
+        start = 1
+    var i = start
+    var acc = 0
+    while i < s.len():
+        val digit = _digit(s.slice(i, i + 1))
+        if digit < 0:
+            break
+        acc = (acc * 10) + digit
+        i = i + 1
+    return acc * sign
+
+fn _digit(ch: text) -> i64:
+    if ch == "0": return 0 as i64
+    if ch == "1": return 1 as i64
+    if ch == "2": return 2 as i64
+    if ch == "3": return 3 as i64
+    if ch == "4": return 4 as i64
+    if ch == "5": return 5 as i64
+    if ch == "6": return 6 as i64
+    if ch == "7": return 7 as i64
+    if ch == "8": return 8 as i64
+    if ch == "9": return 9 as i64
+    return -1 as i64
+
+fn _find_from(haystack: text, needle: text, start: i64) -> i64:
+    if needle == "":
+        return if start < haystack.len(): start else: haystack.len()
+    if start < 0:
+        return -1
+    val limit = haystack.len() - needle.len()
+    if limit < start:
+        return -1
+    var i = start
+    while i <= limit:
+        if haystack.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    return -1

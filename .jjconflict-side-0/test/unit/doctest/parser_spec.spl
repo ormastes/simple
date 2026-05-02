@@ -1,0 +1,166 @@
+/// Unit tests for doctest parser
+
+import test.unit.*
+import std.doctest.parser.*
+
+describe "DoctestParser":
+    context "parse_docstring":
+        it "parses simple example with output":
+            content = ">>> 1 + 1\n2\n"
+            examples = parse_docstring(content)
+            
+            expect examples.len to eq 1
+            expect examples[0].code to eq ["1 + 1"]
+            match examples[0].expected:
+                case Expected.Output(out):
+                    expect out to eq "2"
+                case _:
+                    fail "Expected Output, got ${examples[0].expected}"
+        
+        it "parses multiple lines of code":
+            content = ">>> x = 1\n>>> y = 2\n>>> x + y\n3\n"
+            examples = parse_docstring(content)
+            
+            expect examples.len to eq 1
+            expect examples[0].code to eq ["x = 1", "y = 2", "x + y"]
+            match examples[0].expected:
+                case Expected.Output(out):
+                    expect out to eq "3"
+        
+        it "parses continuation lines with ...":
+            content = ">>> for i in [1, 2, 3]:\n...     print i\n1\n2\n3\n"
+            examples = parse_docstring(content)
+            
+            expect examples.len to eq 1
+            expect examples[0].code to eq ["for i in [1, 2, 3]:", "    print i"]
+        
+        it "parses exception expectations":
+            content = ">>> 1 / 0\nError: DivisionByZero\n"
+            examples = parse_docstring(content)
+            
+            expect examples.len to eq 1
+            match examples[0].expected:
+                case Expected.Exception(type, msg):
+                    expect type to eq "DivisionByZero"
+                    expect msg to eq Option.None
+        
+        it "parses exception with message":
+            content = ">>> parse_int 'abc'\nError: ParseError: invalid digit\n"
+            examples = parse_docstring(content)
+            
+            match examples[0].expected:
+                case Expected.Exception(type, msg):
+                    expect type to eq "ParseError"
+                    expect msg to eq Option.Some("invalid digit")
+        
+        it "parses empty output":
+            content = ">>> print ''\n\n>>> 1 + 1\n2\n"
+            examples = parse_docstring(content)
+            
+            expect examples.len to eq 2
+            match examples[0].expected:
+                case Expected.Empty:
+                    pass
+                case _:
+                    fail "Expected Empty"
+        
+        it "parses setup block":
+            content = "Setup:\n>>> db = Database.connect()\n\nExample:\n>>> db.query('SELECT 1')\n1\n"
+            examples = parse_docstring(content)
+            
+            expect examples.len to eq 1
+            expect examples[0].setup to eq ["db = Database.connect()"]
+            expect examples[0].code to eq ["db.query('SELECT 1')"]
+        
+        it "parses teardown block":
+            content = ">>> db.query('SELECT 1')\n1\n\nTeardown:\n>>> db.close()\n"
+            examples = parse_docstring(content)
+            
+            expect examples.len to eq 1
+            expect examples[0].teardown to eq ["db.close()"]
+        
+        it "separates multiple examples by blank lines":
+            content = ">>> 1 + 1\n2\n\n>>> 2 + 2\n4\n"
+            examples = parse_docstring(content)
+            
+            expect examples.len to eq 2
+            expect examples[0].code to eq ["1 + 1"]
+            expect examples[1].code to eq ["2 + 2"]
+        
+        it "handles multi-line output":
+            content = ">>> print 'line1\\nline2\\nline3'\nline1\nline2\nline3\n"
+            examples = parse_docstring(content)
+            
+            match examples[0].expected:
+                case Expected.Output(out):
+                    expect out to eq "line1\nline2\nline3"
+    
+    context "extract_docstrings":
+        it "extracts single docstring":
+            source = "/// Doc comment\n/// Line 2\nfn foo(): pass\n"
+            docstrings = extract_docstrings(source, "test.spl")
+            
+            expect docstrings.len to eq 1
+            (content, line) = docstrings[0]
+            expect content to eq "Doc comment\nLine 2"
+            expect line to eq 1
+        
+        it "extracts multiple docstrings":
+            source = "/// Fn1 doc\nfn foo(): pass\n\n/// Fn2 doc\nfn bar(): pass\n"
+            docstrings = extract_docstrings(source, "test.spl")
+            
+            expect docstrings.len to eq 2
+            expect docstrings[0].0 to eq "Fn1 doc"
+            expect docstrings[1].0 to eq "Fn2 doc"
+        
+        it "ignores non-doc comments":
+            source = "# Regular comment\n/// Doc comment\nfn foo(): pass\n"
+            docstrings = extract_docstrings(source, "test.spl")
+            
+            expect docstrings.len to eq 1
+            expect docstrings[0].0 to eq "Doc comment"
+    
+    context "parse_expected":
+        it "parses plain output":
+            lines = ["42"]
+            expected = parse_expected(lines)
+            
+            match expected:
+                case Expected.Output(out):
+                    expect out to eq "42"
+        
+        it "parses multi-line output":
+            lines = ["line1", "line2", "line3"]
+            expected = parse_expected(lines)
+            
+            match expected:
+                case Expected.Output(out):
+                    expect out to eq "line1\nline2\nline3"
+        
+        it "parses exception":
+            lines = ["Error: ValueError"]
+            expected = parse_expected(lines)
+            
+            match expected:
+                case Expected.Exception(type, msg):
+                    expect type to eq "ValueError"
+                    expect msg to eq Option.None
+        
+        it "parses exception with message":
+            lines = ["Error: ValueError: invalid input"]
+            expected = parse_expected(lines)
+            
+            match expected:
+                case Expected.Exception(type, msg):
+                    expect type to eq "ValueError"
+                    expect msg to eq Option.Some("invalid input")
+        
+        it "handles empty lines":
+            lines = []
+            expected = parse_expected(lines)
+            
+            match expected:
+                case Expected.Empty:
+                    pass
+                case _:
+                    fail "Expected Empty"

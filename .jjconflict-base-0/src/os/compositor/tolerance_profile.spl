@@ -1,0 +1,165 @@
+# Tolerance Profile — Composable per-region threshold system
+#
+# Defines tolerance profiles for pixel comparison: per-region-type thresholds
+# (strict for solid fills, relaxed for text/AA/blur regions), profile presets,
+# and profile merging for compositional use.
+#
+# All profiles are plain structs with factory functions — no inheritance.
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct RegionTolerance:
+    """Tolerance settings for a specific region type."""
+    region_type: text      # "solid", "text", "blur", "gradient", "decoration"
+    threshold: i32         # Per-channel RGB threshold (0 = exact)
+    yiq_threshold: f64     # YIQ perceptual distance threshold
+    min_match_pct: i64     # Minimum acceptable match percentage (0-10000)
+
+struct ToleranceProfile:
+    """Composable tolerance profile for pixel comparison."""
+    name: text
+    default_threshold: i32
+    default_yiq_threshold: f64
+    regions: [RegionTolerance]
+
+# ============================================================================
+# Preset Profiles
+# ============================================================================
+
+fn profile_strict() -> ToleranceProfile:
+    """Strict profile: bounded-delta perceptual match.
+
+    Applies YIQ perceptual tolerance (0.30) to handle inherent rasterizer
+    differences (fontdue vs CoreText/ClearType AA gradients) while keeping
+    overall match floor tight. Acceptance gate in html_compat.spl requires
+    the perceptual match percentage to meet a strict floor (see gh#2).
+    """
+    ToleranceProfile(
+        name: "strict",
+        default_threshold: 0,
+        default_yiq_threshold: 0.30,
+        regions: []
+    )
+
+fn profile_text_tolerant() -> ToleranceProfile:
+    """Text-tolerant profile: relaxed thresholds for text regions.
+
+    Accounts for font rasterization differences between renderers
+    (FreeType vs Skia/CoreText/DirectWrite).
+    """
+    ToleranceProfile(
+        name: "text_tolerant",
+        default_threshold: 8,
+        default_yiq_threshold: 0.3,
+        regions: [
+            RegionTolerance(
+                region_type: "text",
+                threshold: 12,
+                yiq_threshold: 0.4,
+                min_match_pct: 9500
+            ),
+            RegionTolerance(
+                region_type: "solid",
+                threshold: 2,
+                yiq_threshold: 0.05,
+                min_match_pct: 9990
+            )
+        ]
+    )
+
+fn profile_glass_blur() -> ToleranceProfile:
+    """Glass blur profile: tolerant of blur quality differences.
+
+    The software compositor uses 5-pass box blur approximation while
+    Electron/Chromium uses Gaussian blur via Skia. These produce
+    visually similar but not pixel-identical results.
+    """
+    ToleranceProfile(
+        name: "glass_blur",
+        default_threshold: 12,
+        default_yiq_threshold: 0.4,
+        regions: [
+            RegionTolerance(
+                region_type: "blur",
+                threshold: 16,
+                yiq_threshold: 0.5,
+                min_match_pct: 9200
+            ),
+            RegionTolerance(
+                region_type: "solid",
+                threshold: 2,
+                yiq_threshold: 0.05,
+                min_match_pct: 9990
+            )
+        ]
+    )
+
+fn profile_wm_default() -> ToleranceProfile:
+    """WM default profile: composite tolerance for typical WM scenes.
+
+    Combines strict thresholds for solid regions with relaxed thresholds
+    for text, blur, and gradient regions. Suitable for golden test
+    with >=99% match requirement.
+    """
+    ToleranceProfile(
+        name: "wm_default",
+        default_threshold: 4,
+        default_yiq_threshold: 0.2,
+        regions: [
+            RegionTolerance(
+                region_type: "solid",
+                threshold: 2,
+                yiq_threshold: 0.05,
+                min_match_pct: 9990
+            ),
+            RegionTolerance(
+                region_type: "text",
+                threshold: 10,
+                yiq_threshold: 0.35,
+                min_match_pct: 9500
+            ),
+            RegionTolerance(
+                region_type: "blur",
+                threshold: 14,
+                yiq_threshold: 0.45,
+                min_match_pct: 9300
+            ),
+            RegionTolerance(
+                region_type: "gradient",
+                threshold: 6,
+                yiq_threshold: 0.15,
+                min_match_pct: 9800
+            ),
+            RegionTolerance(
+                region_type: "decoration",
+                threshold: 8,
+                yiq_threshold: 0.25,
+                min_match_pct: 9700
+            )
+        ]
+    )
+
+# ============================================================================
+# Profile Merging
+# ============================================================================
+
+fn merge_profiles(base: ToleranceProfile, overlay: ToleranceProfile) -> ToleranceProfile:
+    """Merge two profiles: overlay's settings take precedence.
+
+    The merged profile uses the overlay's name, default thresholds,
+    and combines regions from both profiles (overlay regions appended).
+    """
+    var merged_regions: [RegionTolerance] = []
+    for r in base.regions:
+        merged_regions = merged_regions + [r]
+    for r in overlay.regions:
+        merged_regions = merged_regions + [r]
+
+    ToleranceProfile(
+        name: overlay.name,
+        default_threshold: overlay.default_threshold,
+        default_yiq_threshold: overlay.default_yiq_threshold,
+        regions: merged_regions
+    )

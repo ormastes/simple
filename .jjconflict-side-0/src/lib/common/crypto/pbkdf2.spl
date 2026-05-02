@@ -1,0 +1,285 @@
+# PBKDF2 (Password-Based Key Derivation Function 2)
+#
+# Password-based key derivation using HMAC
+# Recommended for password hashing with high iteration count (100,000+)
+#
+# Supports PBKDF2-HMAC-SHA256 and PBKDF2-HMAC-SHA512
+#
+# Performance note (2026-05-01):
+# The inner-loop hot path bypasses the generic HMAC API for HMAC-SHA-256.
+# Once per `pbkdf2_sha256_bytes` call we precompute K_ipad / K_opad as
+# 64-byte blocks AND the SHA-256 state after consuming each first block
+# (`h_inner_prefix`, `h_outer_prefix`). For each PBKDF2 iteration the
+# 96-byte HMAC inputs (K_xpad || 32-byte msg) only require ONE additional
+# SHA-256 block compute each — halving block work versus calling
+# hmac_sha256_bytes which re-prepares the key block every call.
+#
+# Additionally the deterministic SHA-256 padding suffix for our exact
+# 96-byte HMAC layout is materialised once into `inner_tail_buf` /
+# `outer_tail_buf` (constants 0x80, zero-fill, big-endian length=768);
+# each iteration only patches the 32 leading payload bytes via
+# in-place index assignment, eliminating 100+ per-iteration list pushes.
+#
+# This brings c=4096 PBKDF2-HMAC-SHA-256 in interpreter mode under the
+# 60s test-runner watchdog (was: ~3 min, blocked TC3/TC5/TC6 of
+# draft-josefsson-pbkdf2-test-vectors-00). The SHA-512 path is left
+# unchanged here; see FR pbkdf2_native_runtime_helpers_2026-05-01.md
+# for the runtime-helper followup that targets c=80000 SHA-512 vectors.
+
+mod crypto.types
+mod crypto.hmac
+mod crypto.sha256
+
+use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha512_bytes}
+use std.crypto.sha256.{sha256_initial_hash, sha256_process_block, sha256_bytes}
+
+# =============================================================================
+# PBKDF2-HMAC-SHA256
+# =============================================================================
+
+# PBKDF2-HMAC-SHA256
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_sha256(password: text, salt: text, iterations: i64) -> list:
+    val password_bytes = text_to_bytes(password)
+    val salt_bytes = text_to_bytes(salt)
+    pbkdf2_sha256_bytes(password_bytes, salt_bytes, iterations, 32)
+
+# Build the 64-byte K_ipad / K_opad blocks for HMAC-SHA-256.
+# Returns (k_ipad_block, k_opad_block) — each a 64-element list of i64.
+# reason: positional pbkdf2 helper
+fn _pbkdf2_sha256_pads(password_bytes: list) -> tuple:
+    val block_size = 64
+
+    var k = []
+    if password_bytes.len() > block_size:
+        k = sha256_bytes(password_bytes)
+    else:
+        var ki = 0
+        while ki < password_bytes.len():
+            k.push(password_bytes.get(ki))
+            ki = ki + 1
+
+    while k.len() < block_size:
+        k.push(0)
+
+    var k_ipad = []
+    var k_opad = []
+    var i = 0
+    while i < block_size:
+        val kb = k.get(i)
+        k_ipad.push(kb ^ 0x36)
+        k_opad.push(kb ^ 0x5c)
+        i = i + 1
+    (k_ipad, k_opad)
+
+# Build a 64-byte SHA-256 tail block template for an HMAC input of the form
+# (64-byte K_xpad) || (32-byte payload). With 96 input bytes the SHA-256
+# padding deterministically becomes:
+#   block[0..32]  = payload   (filled in by caller per iteration)
+#   block[32]     = 0x80
+#   block[33..62] = 0x00
+#   block[62]     = 0x03
+#   block[63]     = 0x00
+# (length is 768 bits = 0x0300 — fits in the low 16 bits of the 64-bit
+# big-endian length field, so the upper 6 length bytes are zero.)
+# reason: positional pbkdf2 helper
+fn _pbkdf2_sha256_make_tail_template() -> list:
+    var block = []
+    var i = 0
+    while i < 32:
+        block.push(0)
+        i = i + 1
+    block.push(0x80)
+    while block.len() < 62:
+        block.push(0)
+    block.push(0x03)
+    block.push(0x00)
+    block
+
+# PBKDF2-HMAC-SHA256 with byte inputs
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_sha256_bytes(password_bytes: list, salt_bytes: list, iterations: i64, key_length: i64) -> list:
+    val hash_len = 32  # SHA-256 output length
+    val blocks_needed = (key_length + hash_len - 1) / hash_len
+
+    # Cache K_ipad / K_opad and their SHA-256 prefix states once per call.
+    val pads = _pbkdf2_sha256_pads(password_bytes)
+    val k_ipad = pads.get(0)
+    val k_opad = pads.get(1)
+    val initial_h = sha256_initial_hash()
+    val h_ipad_prefix = sha256_process_block(initial_h, k_ipad)
+    val h_opad_prefix = sha256_process_block(initial_h, k_opad)
+
+    # Pre-built tail templates with the constant SHA-256 padding suffix
+    # for the deterministic 96-byte HMAC input layout.
+    var inner_tail_buf = _pbkdf2_sha256_make_tail_template()
+    var outer_tail_buf = _pbkdf2_sha256_make_tail_template()
+
+    var result = []
+    var block_num = 1
+
+    while block_num <= blocks_needed:
+        # U_1 = HMAC(password, salt || INT(block_num)). Variable-length
+        # input goes through the generic HMAC path.
+        var salt_with_block = []
+        var i = 0
+        while i < salt_bytes.len():
+            salt_with_block.push(salt_bytes.get(i))
+            i = i + 1
+        salt_with_block.push((block_num >> 24) & 0xFF)
+        salt_with_block.push((block_num >> 16) & 0xFF)
+        salt_with_block.push((block_num >> 8) & 0xFF)
+        salt_with_block.push(block_num & 0xFF)
+
+        var u = hmac_sha256_bytes(password_bytes, salt_with_block)
+
+        # Initialise t = U_1 (32 bytes).
+        var t = []
+        i = 0
+        while i < 32:
+            t.push(u.get(i))
+            i = i + 1
+
+        # Inner iterations: each U_j = HMAC(password, U_{j-1}) where the
+        # message is exactly 32 bytes — fast path with cached prefix
+        # states and pre-built tail templates.
+        var iteration = 1
+        while iteration < iterations:
+            # Patch payload bytes 0..32 of the inner tail buffer with U_{j-1}.
+            i = 0
+            while i < 32:
+                inner_tail_buf[i] = u.get(i)
+                i = i + 1
+
+            val h_inner = sha256_process_block(h_ipad_prefix, inner_tail_buf)
+
+            # Splice the 8 inner-state words into the first 32 bytes of the
+            # outer tail buffer (big-endian).
+            var oi = 0
+            while oi < 8:
+                val w = h_inner.get(oi)
+                val base = oi * 4
+                outer_tail_buf[base] = (w >> 24) & 0xFF
+                outer_tail_buf[base + 1] = (w >> 16) & 0xFF
+                outer_tail_buf[base + 2] = (w >> 8) & 0xFF
+                outer_tail_buf[base + 3] = w & 0xFF
+                oi = oi + 1
+
+            val h_outer = sha256_process_block(h_opad_prefix, outer_tail_buf)
+
+            # Materialise the new U as bytes AND fold it into t in one pass.
+            var new_u = []
+            var ui = 0
+            while ui < 8:
+                val w2 = h_outer.get(ui)
+                new_u.push((w2 >> 24) & 0xFF)
+                new_u.push((w2 >> 16) & 0xFF)
+                new_u.push((w2 >> 8) & 0xFF)
+                new_u.push(w2 & 0xFF)
+                ui = ui + 1
+            u = new_u
+
+            # In-place XOR fold: t ^= u (32 bytes).
+            i = 0
+            while i < 32:
+                t[i] = t.get(i) ^ u.get(i)
+                i = i + 1
+
+            iteration = iteration + 1
+
+        # Append t to result.
+        i = 0
+        while i < 32:
+            result.push(t.get(i))
+            i = i + 1
+
+        block_num = block_num + 1
+
+    # Truncate to desired length.
+    var final_result = []
+    var i = 0
+    while i < key_length && i < result.len():
+        final_result.push(result.get(i))
+        i = i + 1
+
+    final_result
+
+# =============================================================================
+# PBKDF2-HMAC-SHA512
+# =============================================================================
+
+# PBKDF2-HMAC-SHA512
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_sha512(password: text, salt: text, iterations: i64) -> list:
+    val password_bytes = text_to_bytes(password)
+    val salt_bytes = text_to_bytes(salt)
+    pbkdf2_sha512_bytes(password_bytes, salt_bytes, iterations, 64)
+
+# PBKDF2-HMAC-SHA512 with byte inputs
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_sha512_bytes(password_bytes: list, salt_bytes: list, iterations: i64, key_length: i64) -> list:
+    val hash_len = 64  # SHA-512 output length
+    val blocks_needed = (key_length + hash_len - 1) / hash_len
+
+    var result = []
+    var block_num = 1
+
+    while block_num <= blocks_needed:
+        var salt_with_block = []
+        var i = 0
+        while i < salt_bytes.len():
+            salt_with_block.push(salt_bytes.get(i))
+            i = i + 1
+
+        salt_with_block.push((block_num >> 24) & 0xFF)
+        salt_with_block.push((block_num >> 16) & 0xFF)
+        salt_with_block.push((block_num >> 8) & 0xFF)
+        salt_with_block.push(block_num & 0xFF)
+
+        var u = hmac_sha512_bytes(password_bytes, salt_with_block)
+        var t = []
+        i = 0
+        while i < u.len():
+            t.push(u.get(i))
+            i = i + 1
+
+        var iteration = 1
+        while iteration < iterations:
+            u = hmac_sha512_bytes(password_bytes, u)
+            t = xor_bytes(t, u)
+            iteration = iteration + 1
+
+        i = 0
+        while i < t.len():
+            result.push(t.get(i))
+            i = i + 1
+
+        block_num = block_num + 1
+
+    var final_result = []
+    var i = 0
+    while i < key_length && i < result.len():
+        final_result.push(result.get(i))
+        i = i + 1
+
+    final_result
+
+# =============================================================================
+# Generic PBKDF2 with algorithm selection
+# =============================================================================
+
+# PBKDF2 with algorithm selection
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_with_algorithm(password: text, salt: text, iterations: i64, algorithm: text) -> list:
+    if algorithm == "sha256":
+        pbkdf2_sha256(password, salt, iterations)
+    else:
+        if algorithm == "sha512":
+            pbkdf2_sha512(password, salt, iterations)
+        else:
+            # Default to SHA-256
+            pbkdf2_sha256(password, salt, iterations)
+
+# Get recommended iterations for PBKDF2
+fn get_recommended_pbkdf2_iterations() -> i64:
+    100000

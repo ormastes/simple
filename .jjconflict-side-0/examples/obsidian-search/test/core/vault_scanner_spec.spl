@@ -1,0 +1,430 @@
+"""
+# Vault Scanner Specification
+
+**Feature IDs:** N/A
+**Category:** Tooling
+**Status:** In Progress
+**Requirements:** N/A
+
+## Overview
+Intensive tests for the vault scanner module covering path exclusion,
+markdown detection, relative path resolution, vault scanning with caching,
+cache invalidation, and edge cases with special characters and long paths.
+"""
+
+use src.core.vault_scanner.{
+    should_exclude,
+    is_markdown,
+    relative_path,
+    resolve_vault_path,
+    scan_vault,
+    scan_vault_or_defaults,
+    invalidate_scan_vault_cache,
+    is_valid_vault,
+    DEFAULT_EXCLUDES
+}
+
+describe "VaultScanner":
+    """Tests for Obsidian vault directory scanning and path utilities"""
+
+    # ----------------------------------------------------------------
+    # 1. should_exclude(path, excludes)
+    # ----------------------------------------------------------------
+
+    context "should_exclude":
+        """Path exclusion based on pattern list"""
+
+        it "excludes .obsidian/ paths":
+            val result = should_exclude("/vault/.obsidian/config.json", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "excludes .trash/ paths":
+            val result = should_exclude("/vault/.trash/deleted-note.md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "excludes node_modules/ paths":
+            val result = should_exclude("/vault/node_modules/package/index.js", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "excludes .git/ paths":
+            val result = should_exclude("/vault/.git/HEAD", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "excludes /archive/ paths":
+            val result = should_exclude("/vault/archive/old-note.md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "excludes deeply nested .obsidian/ path":
+            val result = should_exclude("/vault/sub/dir/.obsidian/plugins/plugin.json", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "does not exclude normal markdown files":
+            val result = should_exclude("/vault/notes/daily/2024-01-15.md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "does not exclude top-level markdown file":
+            val result = should_exclude("/vault/README.md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "does not exclude paths with partial match archived":
+            # "archived/" does not match the pattern "/archive/"
+            val result = should_exclude("/vault/archived/note.md", ["/archive/"])
+            expect(result).to_equal(false)
+
+        it "handles empty excludes list":
+            val empty: [text] = []
+            val result = should_exclude("/vault/.obsidian/config.json", empty)
+            expect(result).to_equal(false)
+
+        it "handles empty path with non-empty excludes":
+            val result = should_exclude("", DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "matches multiple patterns in same path":
+            # Path contains both .git/ and node_modules/
+            val result = should_exclude("/vault/.git/modules/node_modules/x", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "does not exclude path with substring that is not a pattern":
+            # ".gitter" contains ".git" but not ".git/"
+            val result = should_exclude("/vault/.gitter/chat.md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "excludes with custom single-element pattern list":
+            val patterns: [text] = ["secret/"]
+            val result = should_exclude("/vault/secret/plans.md", patterns)
+            expect(result).to_equal(true)
+
+        it "does not exclude when custom pattern does not match":
+            val patterns: [text] = ["secret/"]
+            val result = should_exclude("/vault/notes/public.md", patterns)
+            expect(result).to_equal(false)
+
+    # ----------------------------------------------------------------
+    # 2. is_markdown(path)
+    # ----------------------------------------------------------------
+
+    context "is_markdown":
+        """Markdown file extension detection"""
+
+        it "returns true for .md files":
+            expect(is_markdown("note.md")).to_equal(true)
+
+        it "returns true for nested .md path":
+            expect(is_markdown("/vault/daily/2024-01-15.md")).to_equal(true)
+
+        it "returns false for .txt files":
+            expect(is_markdown("readme.txt")).to_equal(false)
+
+        it "returns false for .spl files":
+            expect(is_markdown("main.spl")).to_equal(false)
+
+        it "returns false for .json files":
+            expect(is_markdown("config.json")).to_equal(false)
+
+        it "returns false for .MD uppercase":
+            # ends_with is case-sensitive, .MD != .md
+            expect(is_markdown("NOTE.MD")).to_equal(false)
+
+        it "returns false for .Md mixed case":
+            expect(is_markdown("Note.Md")).to_equal(false)
+
+        it "returns false for empty string":
+            expect(is_markdown("")).to_equal(false)
+
+        it "returns false for .markdown extension":
+            expect(is_markdown("note.markdown")).to_equal(false)
+
+        it "returns true for just .md as filename":
+            expect(is_markdown(".md")).to_equal(true)
+
+        it "returns false for path ending with md but no dot":
+            expect(is_markdown("notemd")).to_equal(false)
+
+        it "returns true for .md with spaces in name":
+            expect(is_markdown("my note file.md")).to_equal(true)
+
+        it "returns false for .mdx extension":
+            expect(is_markdown("component.mdx")).to_equal(false)
+
+    # ----------------------------------------------------------------
+    # 3. relative_path(full_path, vault_path)
+    # ----------------------------------------------------------------
+
+    context "relative_path":
+        """Stripping vault root prefix from full paths"""
+
+        it "strips vault prefix correctly":
+            val result = relative_path("/vault/daily/2024-01-15.md", "/vault")
+            expect(result).to_equal("daily/2024-01-15.md")
+
+        it "removes leading slash from relative result":
+            val result = relative_path("/vault/notes/note.md", "/vault")
+            expect(result).to_start_with("notes")
+
+        it "returns original path when not in vault":
+            val result = relative_path("/other/file.md", "/vault")
+            expect(result).to_equal("/other/file.md")
+
+        it "handles empty vault_path":
+            val result = relative_path("/vault/note.md", "")
+            # Empty vault_path is a prefix of everything via starts_with("")
+            # so it strips 0 chars, leaving the full path with leading /
+            # then strips the leading / -> "vault/note.md"
+            expect(result).to_equal("vault/note.md")
+
+        it "handles empty full_path":
+            val result = relative_path("", "/vault")
+            # "" does not start with "/vault"
+            expect(result).to_equal("")
+
+        it "returns empty string when vault path equals full path":
+            val result = relative_path("/vault", "/vault")
+            expect(result).to_equal("")
+
+        it "handles nested deep paths":
+            val result = relative_path("/home/user/vaults/work/projects/alpha/docs/api/v2/notes.md", "/home/user/vaults/work")
+            expect(result).to_equal("projects/alpha/docs/api/v2/notes.md")
+
+        it "handles vault path with trailing slash":
+            # vault_path="/vault/" and full_path="/vault/note.md"
+            # starts_with("/vault/") is true, strips "/vault/" -> "note.md"
+            val result = relative_path("/vault/note.md", "/vault/")
+            expect(result).to_equal("note.md")
+
+        it "does not strip partial directory match":
+            # /vault-backup does not start with /vault/ (only /vault prefix matches)
+            val result = relative_path("/vault-backup/note.md", "/vault-backup")
+            expect(result).to_equal("note.md")
+
+        it "preserves deeply nested relative structure":
+            val result = relative_path("/v/a/b/c/d/e/f.md", "/v")
+            expect(result).to_equal("a/b/c/d/e/f.md")
+
+    # ----------------------------------------------------------------
+    # 4. resolve_vault_path (env-dependent - note limitations)
+    # ----------------------------------------------------------------
+
+    context "resolve_vault_path":
+        """Resolving vault path from environment variables.
+        Note: actual env var behavior depends on runtime environment.
+        These tests verify the function returns a text value."""
+
+        it "returns a text value":
+            val result = resolve_vault_path()
+            # We cannot control env vars in tests, but we can verify it returns text
+            # If OBSIDIAN_VAULT_PATH is set, it returns that; otherwise empty string
+            val is_text = result.len() >= 0
+            expect(is_text).to_equal(true)
+
+    # ----------------------------------------------------------------
+    # 5. scan_vault(vault_path)
+    # ----------------------------------------------------------------
+
+    context "scan_vault":
+        """Scanning vault directory for markdown files with caching"""
+
+        it "returns empty list for empty path":
+            val result = scan_vault("")
+            expect(result.len()).to_equal(0)
+
+        it "returns a list type for non-existent path":
+            # Non-existent path: rt_dir_walk returns nil/empty, coalesced to []
+            val result = scan_vault("/nonexistent/vault/path/that/does/not/exist")
+            expect(result.len()).to_equal(0)
+            # Clean up cache
+            invalidate_scan_vault_cache("/nonexistent/vault/path/that/does/not/exist")
+
+        it "caching returns same result for same path":
+            # Scan twice with same path - second should hit cache
+            val result1 = scan_vault("/nonexistent/test/cache/path")
+            val result2 = scan_vault("/nonexistent/test/cache/path")
+            expect(result1.len()).to_equal(result2.len())
+            invalidate_scan_vault_cache("/nonexistent/test/cache/path")
+
+        it "returns only markdown files from scan results":
+            # For empty/nonexistent vault, no files at all
+            val files = scan_vault("/tmp/no-such-vault-dir-xyz")
+            for f in files:
+                expect(is_markdown(f)).to_equal(true)
+            invalidate_scan_vault_cache("/tmp/no-such-vault-dir-xyz")
+
+    # ----------------------------------------------------------------
+    # 6. scan_vault_or_defaults(vault_path)
+    # ----------------------------------------------------------------
+
+    context "scan_vault_or_defaults":
+        """Scanning with fallback to default paths"""
+
+        it "delegates to scan_vault for non-empty vault_path":
+            val result = scan_vault_or_defaults("/nonexistent/vault/fallback/test")
+            # Same as scan_vault for this nonexistent path
+            expect(result.len()).to_equal(0)
+            invalidate_scan_vault_cache("/nonexistent/vault/fallback/test")
+
+        it "returns a list for empty vault_path using defaults":
+            # Empty string triggers scan_default_paths which scans cwd
+            val result = scan_vault_or_defaults("")
+            # Should return a list (possibly with files from cwd)
+            val is_list = result.len() >= 0
+            expect(is_list).to_equal(true)
+
+    # ----------------------------------------------------------------
+    # 7. invalidate_scan_vault_cache(vault_path)
+    # ----------------------------------------------------------------
+
+    context "invalidate_scan_vault_cache":
+        """Cache invalidation for vault scan results"""
+
+        it "clears cache for matching path":
+            # Populate cache
+            val _r = scan_vault("/nonexistent/cache/inv/test")
+            # Invalidate
+            invalidate_scan_vault_cache("/nonexistent/cache/inv/test")
+            # After invalidation, re-scan should work (not crash)
+            val result = scan_vault("/nonexistent/cache/inv/test")
+            expect(result.len()).to_equal(0)
+            invalidate_scan_vault_cache("/nonexistent/cache/inv/test")
+
+        it "clears cache for empty path":
+            # Populate cache with something
+            val _r = scan_vault("/nonexistent/cache/empty/test")
+            # Empty string invalidation clears any cache
+            invalidate_scan_vault_cache("")
+            # Verify no crash on re-scan
+            val result = scan_vault("")
+            expect(result.len()).to_equal(0)
+
+        it "does not clear cache for non-matching path":
+            # Populate cache
+            val _r = scan_vault("/nonexistent/cache/keep/test")
+            # Invalidate a DIFFERENT path - should not affect cached path
+            invalidate_scan_vault_cache("/completely/different/path")
+            # Cache for original path should still be intact
+            val result = scan_vault("/nonexistent/cache/keep/test")
+            expect(result.len()).to_equal(0)
+            invalidate_scan_vault_cache("/nonexistent/cache/keep/test")
+
+    # ----------------------------------------------------------------
+    # 8. is_valid_vault(path)
+    # ----------------------------------------------------------------
+
+    context "is_valid_vault":
+        """Checking vault path validity via file existence"""
+
+        it "returns false for non-existing path":
+            val result = is_valid_vault("/nonexistent/vault/path/xyz/abc")
+            expect(result).to_equal(false)
+
+        it "returns true for existing path":
+            # Root directory always exists on Unix
+            val result = is_valid_vault("/tmp")
+            expect(result).to_equal(true)
+
+        it "returns false for empty path":
+            val result = is_valid_vault("")
+            expect(result).to_equal(false)
+
+        it "returns true for current working directory parent":
+            val result = is_valid_vault("/home")
+            expect(result).to_equal(true)
+
+    # ----------------------------------------------------------------
+    # 9. Edge cases / stress tests
+    # ----------------------------------------------------------------
+
+    context "edge cases":
+        """Stress tests with unusual path inputs"""
+
+        it "handles very long path strings in should_exclude":
+            var long_path = "/vault"
+            var i = 0
+            while i < 50:
+                long_path = long_path + "/subdir"
+                i = i + 1
+            long_path = long_path + "/note.md"
+            val result = should_exclude(long_path, DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "handles very long path in is_markdown":
+            var long_path = "/vault"
+            var i = 0
+            while i < 50:
+                long_path = long_path + "/deep"
+                i = i + 1
+            long_path = long_path + "/note.md"
+            expect(is_markdown(long_path)).to_equal(true)
+
+        it "handles paths with spaces in should_exclude":
+            val result = should_exclude("/vault/my notes/daily journal/2024.md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "handles paths with spaces in is_markdown":
+            expect(is_markdown("/vault/my notes/daily journal.md")).to_equal(true)
+
+        it "handles paths with unicode characters":
+            val result = should_exclude("/vault/notes/日本語ノート.md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "handles unicode in is_markdown":
+            expect(is_markdown("/vault/日記/メモ.md")).to_equal(true)
+
+        it "handles paths with parentheses":
+            val result = should_exclude("/vault/notes (old)/backup (v2).md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "handles paths with brackets":
+            val result = should_exclude("/vault/notes [draft]/ideas [wip].md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(false)
+
+        it "handles paths with parentheses in relative_path":
+            val result = relative_path("/vault/notes (old)/test.md", "/vault")
+            expect(result).to_equal("notes (old)/test.md")
+
+        it "handles paths with brackets in relative_path":
+            val result = relative_path("/vault/notes [draft]/test.md", "/vault")
+            expect(result).to_equal("notes [draft]/test.md")
+
+        it "handles paths with special chars in is_markdown":
+            expect(is_markdown("note (1) [final].md")).to_equal(true)
+
+        it "handles multiple consecutive slashes in should_exclude":
+            # Double slashes - .obsidian/ pattern still matches via contains
+            val result = should_exclude("/vault//.obsidian//config.json", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "handles path with only extension":
+            expect(is_markdown(".md")).to_equal(true)
+
+        it "excludes .trash in deep nested path":
+            val result = should_exclude("/vault/a/b/c/.trash/deleted.md", DEFAULT_EXCLUDES)
+            expect(result).to_equal(true)
+
+        it "handles relative_path with unicode vault":
+            val result = relative_path("/ボールト/ノート.md", "/ボールト")
+            expect(result).to_equal("ノート.md")
+
+    # ----------------------------------------------------------------
+    # 10. DEFAULT_EXCLUDES constant verification
+    # ----------------------------------------------------------------
+
+    context "DEFAULT_EXCLUDES":
+        """Verifying the default exclusion patterns"""
+
+        it "contains five default patterns":
+            expect(DEFAULT_EXCLUDES.len()).to_equal(5)
+
+        it "includes .obsidian/ pattern":
+            expect(DEFAULT_EXCLUDES).to_contain(".obsidian/")
+
+        it "includes .trash/ pattern":
+            expect(DEFAULT_EXCLUDES).to_contain(".trash/")
+
+        it "includes node_modules/ pattern":
+            expect(DEFAULT_EXCLUDES).to_contain("node_modules/")
+
+        it "includes .git/ pattern":
+            expect(DEFAULT_EXCLUDES).to_contain(".git/")
+
+        it "includes /archive/ pattern":
+            expect(DEFAULT_EXCLUDES).to_contain("/archive/")

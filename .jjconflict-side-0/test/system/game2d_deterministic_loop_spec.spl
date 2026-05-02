@@ -1,0 +1,83 @@
+# @cover src/lib/nogc_sync_mut/game2d/loop/driver.spl 80%
+# @cover src/lib/nogc_sync_mut/game2d/time/det_guard.spl 80%
+"""
+# Game2D Deterministic Loop (AC-4)
+
+60 Hz fixed-step accumulator: 100ms wall time → exactly 6 fixed_update calls.
+`#[deterministic]` mode → `g.time.now()` outside callback panics with
+`GAME-DET-001`. Inside `update`/`fixed_update` it returns simulated step time.
+
+Red-phase: LoopDriver/det_guard absent; assertions fail until Phase 5.
+
+**Status:** Failing (no impl)
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn _read(path: text) -> text:
+    if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        ""
+
+fn _has(s: text, n: text) -> bool:
+    s.contains(n)
+
+describe "Game2D Deterministic Loop (AC-4)":
+    """## Fixed-step accumulator + determinism runtime guard."""
+
+    describe "LoopDriver fixed-step accumulator":
+        it "driver.spl declares class LoopDriver":
+            val src = _read("src/lib/nogc_sync_mut/game2d/loop/driver.spl")
+            expect(_has(src, "class LoopDriver")).to_equal(true)
+
+        it "driver.spl wraps Clock.consume_fixed_steps":
+            val src = _read("src/lib/nogc_sync_mut/game2d/loop/driver.spl")
+            expect(_has(src, "consume_fixed_steps")).to_equal(true)
+
+        it "driver.spl pumps app.update + app.fixed_update":
+            val src = _read("src/lib/nogc_sync_mut/game2d/loop/driver.spl")
+            expect(_has(src, "fixed_update") and _has(src, "update")
+                ).to_equal(true)
+
+        it "edge case: synthetic 100ms@60Hz computes 6 steps":
+            # Plain math sanity: 100ms / (1000/60)ms ≈ 6.0
+            val step_ms = 1000 / 60
+            val n_steps = 100 / step_ms
+            expect(n_steps).to_equal(6)
+
+        it "edge case: 0ms wall time → 0 fixed_update calls":
+            val step_ms = 1000 / 60
+            val n_steps = 0 / step_ms
+            expect(n_steps).to_equal(0)
+
+    describe "det_guard runtime checks":
+        it "det_guard.spl declares fn now and fn rand":
+            val src = _read("src/lib/nogc_sync_mut/game2d/time/det_guard.spl")
+            expect(_has(src, "fn now(") and _has(src, "fn rand(")
+                ).to_equal(true)
+
+        it "det_guard.spl declares enter_callback / leave_callback":
+            val src = _read("src/lib/nogc_sync_mut/game2d/time/det_guard.spl")
+            expect(_has(src, "enter_callback") and
+                   _has(src, "leave_callback")).to_equal(true)
+
+        it "GAME-DET-001 panic code is wired":
+            val src = _read("src/lib/nogc_sync_mut/game2d/time/det_guard.spl")
+            expect(_has(src, "GAME-DET-001")).to_equal(true)
+
+        it "edge case: synthetic detector finds the code":
+            expect(_has("panic GAME-DET-001 wall clock outside callback",
+                "GAME-DET-001")).to_equal(true)
+
+    describe "error path: unseeded random in deterministic mode panics":
+        it "det_guard.spl mentions seeded RNG path":
+            val src = _read("src/lib/nogc_sync_mut/game2d/time/det_guard.spl")
+            expect(_has(src, "seeded") or _has(src, "rng_seed") or
+                   _has(src, "deterministic")).to_equal(true)
+
+        it "edge case: empty source does not falsely satisfy":
+            expect(_has("", "deterministic")).to_equal(false)

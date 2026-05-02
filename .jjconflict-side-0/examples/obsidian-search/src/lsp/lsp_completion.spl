@@ -1,0 +1,111 @@
+#![allow(export_outside_init)]
+#![allow(unnamed_duplicate_typed_args)]
+# Obsidian LSP — Completion Provider
+# Provides completions for wikilinks ([[) and tags (#).
+#
+# Trigger characters: [ and #
+# - After [[: complete with vault note names
+# - After #: complete with known tags
+
+export handle_completion
+
+use src.util.json_helpers.{js, jp, jo, jo2, jo3, jo4, ja, ji, jb, jnull, safe_substr}
+use src.lsp.lsp_json.{extract_position_line, extract_position_char, extract_td_uri}
+use src.lsp.lsp_document.{vault_get_note_names, vault_get_tags, doc_store_get_content, get_line_content}
+
+# ---------------------------------------------------------------------------
+# Completion handler
+# ---------------------------------------------------------------------------
+
+fn handle_completion(params: text) -> text:
+    val uri = extract_td_uri(params)
+    val line = extract_position_line(params)
+    val character = extract_position_char(params)
+
+    val content = doc_store_get_content(uri)
+    val line_text = get_line_content(content, line)
+
+    # Determine trigger context
+    val context = get_completion_context(line_text, character)
+
+    var items: [text] = []
+
+    if context == "wikilink":
+        # Complete with vault note names
+        val note_names = vault_get_note_names()
+        for name in note_names:
+            items.push(make_completion_item(name, 17, "Note", name + "]]"))
+    elif context == "tag":
+        # Complete with known tags
+        val tags = vault_get_tags()
+        for tag in tags:
+            items.push(make_completion_item(tag, 14, "Tag", tag))
+    else:
+        # No special context, return empty
+        return empty_completion_list()
+
+    # Build CompletionList
+    jo2(jp("isIncomplete", jb(false)), jp("items", ja(items)))
+
+# ---------------------------------------------------------------------------
+# Completion context detection
+# ---------------------------------------------------------------------------
+
+fn get_completion_context(line_text: text, character: i64) -> text:
+    if character < 1:
+        return ""
+    if line_text == "":
+        return ""
+
+    # Check for [[ trigger (wikilink)
+    if character >= 2:
+        val c1 = safe_substr(line_text, character - 2, character - 1)
+        val c2 = safe_substr(line_text, character - 1, character)
+        if c1 == "[" and c2 == "[":
+            return "wikilink"
+
+    # Also check if we are inside an existing [[ ... (partial wikilink)
+    var i = character - 1
+    while i >= 1:
+        val ch = safe_substr(line_text, i, i + 1)
+        if ch == "]":
+            break  # Past a closing bracket
+        if ch == "[":
+            val prev = safe_substr(line_text, i - 1, i)
+            if prev == "[":
+                return "wikilink"
+            break
+        i = i - 1
+
+    # Check for # trigger (tag)
+    if character >= 1:
+        val prev_ch = safe_substr(line_text, character - 1, character)
+        if prev_ch == "#":
+            # Make sure it's not a heading (## or preceded by # at line start)
+            if character == 1:
+                # # at position 0 could be heading
+                return ""
+            val before = safe_substr(line_text, character - 2, character - 1)
+            if before == "#":
+                return ""  # Part of heading ##
+            if before == " " or before == "\t":
+                return "tag"
+            return ""
+
+    ""
+
+# ---------------------------------------------------------------------------
+# Completion item builder
+# ---------------------------------------------------------------------------
+
+fn make_completion_item(label: text, kind: i64, detail: text, insert_text: text) -> text:
+    # CompletionItem kinds: 1=Text, 3=Function, 6=Variable, 14=Keyword, 17=File, 18=Reference
+    jo4(
+        jp("label", js(label)),
+        jp("kind", ji(kind)),
+        jp("detail", js(detail)),
+        jp("insertText", js(insert_text))
+    )
+
+fn empty_completion_list() -> text:
+    jo2(jp("isIncomplete", jb(false)), jp("items", ja([])))

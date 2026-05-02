@@ -1,0 +1,260 @@
+# Dock — iOS-style bottom bar with app icons
+#
+# Displays pinned apps and recent apps in a centered floating bar.
+# Auto-hides after inactivity, shows on hover/key.
+#
+# MDSOC: feature dimension, desktop layer
+
+use os.services.launcher.launcher.{launcher_get_app_count, launcher_get_app_name, launcher_get_app_icon, launcher_launch_by_index, launcher_is_running}
+use std.window_protocol.geometry.{WindowId, Px}
+
+# ============================================================================
+# Dock Item
+# ============================================================================
+
+struct DockItem:
+    """A single item in the dock (pinned or running app)."""
+    app_name: text
+    icon_char: text      # Single character as icon
+    is_pinned: bool
+    is_running: bool
+    window_id: WindowId?  # nil if not running
+
+# ============================================================================
+# Dock
+# ============================================================================
+
+class Dock:
+    """iOS-style dock bar at the bottom of the screen.
+
+    Displays pinned and running apps as icon tiles in a centered
+    floating bar.  Supports auto-hide after a configurable number
+    of idle frames.
+    """
+    items: [DockItem]
+    visible: bool
+    x: Px
+    y: Px
+    width: Px
+    height: Px
+    screen_width: Px
+    screen_height: Px
+    selected_index: i64
+    auto_hide: bool
+    hide_timer: i64      # frames until auto-hide
+
+impl Dock:
+
+    static fn create(screen_width: Px, screen_height: Px) -> Dock:
+        """Create a dock with default pinned items, centered at screen bottom."""
+        val defaults = default_dock_items()
+        val item_size: i32 = 48
+        val padding: i32 = 16
+        val dock_h: i32 = 64
+        val dock_w = defaults.len().to_i32() * item_size + padding * 2
+        val sw = screen_width.value
+        val sh = screen_height.value
+        val dock_x = (sw - dock_w) / 2
+        val dock_y = sh - dock_h - 8
+
+        Dock(
+            items: defaults,
+            visible: true,
+            x: Px(value: dock_x),
+            y: Px(value: dock_y),
+            width: Px(value: dock_w),
+            height: Px(value: dock_h),
+            screen_width: screen_width,
+            screen_height: screen_height,
+            selected_index: 0,
+            auto_hide: true,
+            hide_timer: 300
+        )
+
+    me add_pinned(app_name: text, icon_char: text):
+        """Add a pinned app to the dock."""
+        val item = DockItem(
+            app_name: app_name,
+            icon_char: icon_char,
+            is_pinned: true,
+            is_running: false,
+            window_id: nil
+        )
+        self.items = self.items.push(item)
+        self._recalculate_size()
+
+    me add_running(app_name: text, icon_char: text, window_id: WindowId):
+        """Add a running app to the dock (or mark existing pinned item as running)."""
+        # Check if already pinned — just mark running
+        var idx: i64 = 0
+        while idx < self.items.len():
+            if self.items[idx].app_name == app_name:
+                var item = self.items[idx]
+                self.items[idx] = DockItem(
+                    app_name: item.app_name,
+                    icon_char: item.icon_char,
+                    is_pinned: item.is_pinned,
+                    is_running: true,
+                    window_id: window_id
+                )
+                return
+            idx = idx + 1
+
+        # Not pinned — add as running-only
+        val item = DockItem(
+            app_name: app_name,
+            icon_char: icon_char,
+            is_pinned: false,
+            is_running: true,
+            window_id: window_id
+        )
+        self.items = self.items.push(item)
+        self._recalculate_size()
+
+    me remove_running(window_id: WindowId):
+        """Remove a running app by window ID.
+
+        If the item is pinned, it stays but becomes not-running.
+        If it is unpinned, it is removed entirely.
+        """
+        var new_items: [DockItem] = []
+        var idx: i64 = 0
+        while idx < self.items.len():
+            val item = self.items[idx]
+            val matches = if item.window_id != nil: item.window_id.value == window_id.value else: false
+            if matches:
+                if item.is_pinned:
+                    # Keep pinned item but mark not running
+                    new_items = new_items.push(DockItem(
+                        app_name: item.app_name,
+                        icon_char: item.icon_char,
+                        is_pinned: true,
+                        is_running: false,
+                        window_id: nil
+                    ))
+                # else: unpinned running item — drop it
+            else:
+                new_items = new_items.push(item)
+            idx = idx + 1
+        self.items = new_items
+        self._recalculate_size()
+
+    me show():
+        """Show the dock."""
+        self.visible = true
+        self.hide_timer = 300
+
+    me hide():
+        """Hide the dock."""
+        self.visible = false
+
+    me toggle():
+        """Toggle dock visibility."""
+        if self.visible:
+            self.visible = false
+        else:
+            self.visible = true
+            self.hide_timer = 300
+
+    me select_next():
+        """Move selection to next item (wraps around)."""
+        if self.items.len() == 0:
+            return
+        self.selected_index = (self.selected_index + 1) % self.items.len()
+
+    me select_prev():
+        """Move selection to previous item (wraps around)."""
+        if self.items.len() == 0:
+            return
+        self.selected_index = self.selected_index - 1
+        if self.selected_index < 0:
+            self.selected_index = self.items.len() - 1
+
+    fn get_selected() -> DockItem?:
+        """Return the currently selected dock item, or nil."""
+        if self.items.len() == 0:
+            return nil
+        if self.selected_index < 0 or self.selected_index >= self.items.len():
+            return nil
+        self.items[self.selected_index]
+
+    fn compute_position() -> (Px, Px, Px, Px):
+        """Compute dock (x, y, width, height) centered at screen bottom."""
+        val item_size: i32 = 48
+        val padding: i32 = 16
+        val dock_h: i32 = 64
+        val dock_w = self.items.len().to_i32() * item_size + padding * 2
+        val sw = self.screen_width.value
+        val sh = self.screen_height.value
+        val dock_x = (sw - dock_w) / 2
+        val dock_y = sh - dock_h - 8
+        (Px(value: dock_x), Px(value: dock_y), Px(value: dock_w), Px(value: dock_h))
+
+    me tick():
+        """Decrement hide timer; auto-hide when expired."""
+        if not self.auto_hide:
+            return
+        if not self.visible:
+            return
+        self.hide_timer = self.hide_timer - 1
+        if self.hide_timer <= 0:
+            self.hide()
+
+    me _recalculate_size():
+        """Recalculate dock position and size after items change."""
+        val pos = self.compute_position()
+        self.x = pos.0
+        self.y = pos.1
+        self.width = pos.2
+        self.height = pos.3
+
+# ============================================================================
+# Default Dock Items
+# ============================================================================
+
+fn default_dock_items() -> [DockItem]:
+    """Return default pinned apps matching SimpleOS app manifest."""
+    [
+        DockItem(app_name: "Terminal", icon_char: ">", is_pinned: true, is_running: false, window_id: nil),
+        DockItem(app_name: "Editor", icon_char: "E", is_pinned: true, is_running: false, window_id: nil),
+        DockItem(app_name: "Files", icon_char: "F", is_pinned: true, is_running: false, window_id: nil),
+        DockItem(app_name: "Monitor", icon_char: "M", is_pinned: true, is_running: false, window_id: nil),
+        DockItem(app_name: "Settings", icon_char: "S", is_pinned: true, is_running: false, window_id: nil),
+        DockItem(app_name: "Hello World", icon_char: "H", is_pinned: true, is_running: false, window_id: nil),
+        DockItem(app_name: "Browser Demo", icon_char: "B", is_pinned: false, is_running: false, window_id: nil)
+    ]
+
+# ============================================================================
+# Launcher Integration
+# ============================================================================
+
+fn dock_populate_from_launcher() -> [DockItem]:
+    """Read the launcher's app registry and create dock items for each app.
+
+    Queries the launcher service for all registered apps and builds
+    a DockItem list reflecting their name, icon, and running state.
+    """
+    var items: [DockItem] = []
+    val count = launcher_get_app_count()
+    var i: u64 = 0
+    while i < count:
+        val name = launcher_get_app_name(i)
+        val icon = launcher_get_app_icon(i)
+        val running = launcher_is_running(i)
+        if name != "":
+            items = items.push(DockItem(
+                app_name: name,
+                icon_char: icon,
+                is_pinned: true,
+                is_running: running,
+                window_id: nil
+            ))
+        i = i + 1
+    items
+
+fn dock_handle_click(index: u64):
+    """Handle a dock item click by launching the app at the given index.
+
+    Delegates to the launcher service to spawn the app binary.
+    """
+    launcher_launch_by_index(index)

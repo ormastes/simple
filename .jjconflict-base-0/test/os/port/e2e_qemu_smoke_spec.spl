@@ -1,0 +1,156 @@
+## Phase-3 end-to-end QEMU SimpleOS smoke test.
+##
+## Gates on SIMPLEOS_QEMU_SMOKE. When unset all it-blocks skip cleanly.
+## When set, step 1 boots the disk image once, captures serial output, and
+## each subsequent step greps the shared capture for its [phase-3-*] marker.
+##
+## Run:
+##   bin/simple test test/os/port/e2e_qemu_smoke_spec.spl
+##   SIMPLEOS_QEMU_SMOKE=1 bin/simple test test/os/port/e2e_qemu_smoke_spec.spl
+
+use std.spec
+use os.qemu_runner.{boot_disk_image_serial}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+## Cached serial output from a single QEMU boot shared across all it-blocks.
+var _serial_cache: text = ""
+var _boot_attempted: bool = false
+
+fn qemu_smoke_gate() -> text:
+    """Return SIMPLEOS_QEMU_SMOKE env var, or empty string if unset."""
+    val v = rt_env_get("SIMPLEOS_QEMU_SMOKE")
+    if v == nil:
+        ""
+    else:
+        v
+
+fn _disk_image_path() -> text:
+    """Resolve disk image: SIMPLEOS_DISK_IMAGE env override, else default."""
+    val override = rt_env_get("SIMPLEOS_DISK_IMAGE")
+    if override == nil or override == "":
+        "build/os/simpleos_disk.img"
+    else:
+        override
+
+fn ensure_serial() -> text:
+    """Boot QEMU once, cache serial output; subsequent calls return cache."""
+    if _boot_attempted:
+        return _serial_cache
+    _boot_attempted = true
+    val image = _disk_image_path()
+    if not rt_file_exists(image):
+        _serial_cache = "[boot-error: disk image not found: " + image + "]"
+        return _serial_cache
+    val (stdout, stderr, _exit) = boot_disk_image_serial(image, 60000)
+    _serial_cache = stdout + stderr
+    _serial_cache
+
+describe "Phase-3 end-to-end QEMU SimpleOS smoke test":
+    """
+    Encodes the 6-step Phase-3 verification pipeline. Each step is a
+    separate it-block so failures are reported individually. All cases
+    skip cleanly when SIMPLEOS_QEMU_SMOKE is not set.
+    """
+
+    it "step 1 [phase-3-boot]: QEMU boots initramfs+FAT32 with IF-08 [BOOT] markers":
+        """
+        IF-08 contract: kernel emits [BOOT] init on COM1 within 60 s.
+        Expected serial marker: [phase-3-boot]
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        val serial = ensure_serial()
+        serial.to_contain("[phase-3-boot]")
+
+    it "step 2 [phase-3-clang]: clang cross-compiles hello.c for x86_64-simpleos (exit 0)":
+        """
+        Verifies the LLVM sysroot (IF-05) is wired correctly inside the guest.
+        Expected serial marker: [phase-3-clang]
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        val serial = ensure_serial()
+        serial.to_contain("[phase-3-clang]")
+
+    it "step 3 [phase-3-nm]: llvm-nm finds main symbol in hello.o":
+        """
+        Confirms hello.o from step 2 contains a valid ELF symbol table.
+        Expected serial marker: [phase-3-nm]
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        val serial = ensure_serial()
+        serial.to_contain("[phase-3-nm]")
+
+    it "step 4 [phase-3-rustc]: rustc cross-compiles hello.rs, ELF contains _start":
+        """
+        Verifies the Rust PAL (IF-04) and libstd sysroot are functional.
+        Expected serial marker: [phase-3-rustc]
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        val serial = ensure_serial()
+        serial.to_contain("[phase-3-rustc]")
+
+    it "step 5 [phase-3-cargo]: cargo offline build succeeds for vendored hello_rs crate":
+        """
+        Verifies the Cargo vendored protocol (IF-10) and offline build path.
+        Expected serial marker: [phase-3-cargo]
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        val serial = ensure_serial()
+        serial.to_contain("[phase-3-cargo]")
+
+    it "step 6 [phase-3-convergence]: simple native-build stage3=stage4 convergence (IF-09)":
+        """
+        IF-09 bootstrap verifier: stage3 compiled by stage2 must be byte-identical
+        to stage4 compiled by stage3 (or equal auto_stub counts).
+        Expected serial marker: [phase-3-convergence]
+        """
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        val serial = ensure_serial()
+        serial.to_contain("[phase-3-convergence]")
+
+describe "phase-3 IF-08 marker registry":
+    """
+    Enumerates all 6 expected [phase-3] serial markers as an ordered list.
+    The QEMU runner (src/os/qemu_runner.spl) greps for these on COM1 output.
+    """
+
+    it "all 6 phase-3 markers are registered in canonical order":
+        val gate = qemu_smoke_gate()
+        if gate == "":
+            return "skip: SIMPLEOS_QEMU_SMOKE not set"
+        val markers = [
+            "[phase-3-boot]",
+            "[phase-3-clang]",
+            "[phase-3-nm]",
+            "[phase-3-rustc]",
+            "[phase-3-cargo]",
+            "[phase-3-convergence]"
+        ]
+        markers.len().to_equal(6)
+        markers[0].to_equal("[phase-3-boot]")
+        markers[1].to_equal("[phase-3-clang]")
+        markers[2].to_equal("[phase-3-nm]")
+        markers[3].to_equal("[phase-3-rustc]")
+        markers[4].to_equal("[phase-3-cargo]")
+        markers[5].to_equal("[phase-3-convergence]")
+        ## Assert all markers are distinct (no duplicates)
+        var i: i32 = 0
+        while i < markers.len():
+            var j: i32 = i + 1
+            while j < markers.len():
+                (markers[i] == markers[j]).to_equal(false)
+                j = j + 1
+            i = i + 1

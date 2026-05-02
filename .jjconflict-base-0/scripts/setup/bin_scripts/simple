@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+
+bootstrap_bin=""
+for candidate in \
+  "$repo_root/src/compiler_rust/target/bootstrap/simple" \
+  "$repo_root/src/compiler_rust/target/bootstrap/simple.exe"
+do
+  if [[ -x "$candidate" ]]; then
+    bootstrap_bin="$candidate"
+    break
+  fi
+done
+
+browser_launch_requested() {
+  case "${1:-}" in
+    browser)
+      return 0
+      ;;
+    run)
+      case "${2:-}" in
+        src/app/ui.browser/main.spl|"$repo_root/src/app/ui.browser/main.spl")
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+binary_has_winit_runtime() {
+  [[ -x "$1" ]] || return 1
+  LC_ALL=C grep -aq "rt_winit_event_loop_new" "$1"
+}
+
+dispatch_launcher_command() {
+  local runtime_bin="$1"
+  shift
+
+  case "${1:-}" in
+    duplicate-check)
+      exec "$runtime_bin" run "$repo_root/src/compiler/90.tools/duplicate_check/main.spl" "$@"
+      ;;
+    stats)
+      exec "$runtime_bin" run "$repo_root/src/app/cli/stats_entry.spl" "$@"
+      ;;
+    *)
+      exec "$runtime_bin" "$@"
+      ;;
+  esac
+}
+
+if browser_launch_requested "$@"; then
+  for candidate in \
+    "$repo_root/src/compiler_rust/target/gui/debug/simple" \
+    "$repo_root/src/compiler_rust/target/debug/simple" \
+    "$repo_root/src/compiler_rust/target/release/simple" \
+    "$repo_root/src/compiler_rust/target/bootstrap/simple"
+  do
+    if binary_has_winit_runtime "$candidate"; then
+      if [[ "${1:-}" == "browser" ]]; then
+        exec "$candidate" run "$repo_root/src/app/ui.browser/main.spl" "${@:2}"
+      fi
+      exec "$candidate" "$@"
+    fi
+  done
+  echo "error: Simple browser requires a GUI-enabled driver." >&2
+  echo "hint: cd \"$repo_root/src/compiler_rust\" && CARGO_TARGET_DIR=target/gui cargo build -p simple-driver --features gui" >&2
+  exit 1
+fi
+
+if [[ "${1:-}" == "test" || "${1:-}" == "os" ]]; then
+  for candidate in \
+    "$repo_root/src/compiler_rust/target/release/simple" \
+    "$repo_root/src/compiler_rust/target/debug/simple"
+  do
+    if [[ -x "$candidate" ]]; then
+      exec "$candidate" "$@"
+    fi
+  done
+fi
+
+release_bin=""
+
+platform_candidates=()
+host_os="$(uname -s 2>/dev/null || echo unknown)"
+host_arch="$(uname -m 2>/dev/null || echo unknown)"
+case "$host_arch" in
+  arm64|aarch64) norm_arch="aarch64" ;;
+  x86_64|amd64) norm_arch="x86_64" ;;
+  *) norm_arch="$host_arch" ;;
+esac
+case "$host_os:$norm_arch" in
+  Darwin:aarch64)
+    platform_candidates+=(
+      "$repo_root/bin/release/aarch64-apple-darwin-macho/simple"
+      "$repo_root/bin/release/aarch64-apple-darwin/simple"
+      "$repo_root/bin/release/darwin-aarch64/simple"
+      "$repo_root/bin/release/macos-arm64/simple"
+    )
+    ;;
+  Darwin:x86_64)
+    platform_candidates+=(
+      "$repo_root/bin/release/x86_64-apple-darwin-macho/simple"
+      "$repo_root/bin/release/x86_64-apple-darwin/simple"
+      "$repo_root/bin/release/darwin-x86_64/simple"
+      "$repo_root/bin/release/macos-x86_64/simple"
+    )
+    ;;
+  Linux:x86_64)
+    platform_candidates+=(
+      "$repo_root/bin/release/x86_64-unknown-linux-gnu/simple"
+      "$repo_root/bin/release/linux-x86_64/simple"
+    )
+    ;;
+  Linux:aarch64)
+    platform_candidates+=(
+      "$repo_root/bin/release/aarch64-unknown-linux-gnu/simple"
+      "$repo_root/bin/release/linux-aarch64/simple"
+    )
+    ;;
+  FreeBSD:x86_64)
+    platform_candidates+=(
+      "$repo_root/bin/release/x86_64-unknown-freebsd/simple"
+      "$repo_root/bin/release/freebsd-x86_64/simple"
+    )
+    ;;
+esac
+
+for candidate in \
+  "${platform_candidates[@]}" \
+  "$repo_root/bin/release/x86_64-unknown-linux-gnu/simple" \
+  "$repo_root/bin/release/aarch64-unknown-linux-gnu/simple" \
+  "$repo_root/bin/release/linux-x86_64/simple" \
+  "$repo_root/bin/release/linux-aarch64/simple" \
+  "$repo_root/bin/release/x86_64-pc-windows-msvc/simple.exe" \
+  "$repo_root/bin/release/x86_64-pc-windows-gnu/simple.exe" \
+  "$repo_root/bin/release/aarch64-pc-windows-msvc/simple.exe" \
+  "$repo_root/bin/release/aarch64-pc-windows-gnu/simple.exe" \
+  "$repo_root/bin/release/simple.exe" \
+  "$repo_root/bin/release/simple" \
+  "$repo_root/src/compiler_rust/target/release/simple" \
+  "$repo_root/src/compiler_rust/target/release/simple.exe"
+do
+  if [[ -x "$candidate" ]]; then
+    release_bin="$candidate"
+    break
+  fi
+done
+
+if [[ -n "$release_bin" ]]; then
+  dispatch_launcher_command "$release_bin" "$@"
+fi
+
+if [[ -x "$bootstrap_bin" ]]; then
+  dispatch_launcher_command "$bootstrap_bin" "$@"
+fi
+
+echo "error: no Simple runtime found" >&2
+exit 1

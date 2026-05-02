@@ -1,0 +1,424 @@
+# XHCI Register Layout — xHCI Host Controller Interface registers
+#
+# MDSOC: feature dimension, drivers layer
+# xHCI specification: https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf
+#
+# Register layout:
+#   0x00         Capability registers  (XhciCapRegs)
+#   cap_base + cap_length  Operational registers  (XhciOpRegs)
+#   op_base + 0x400 + 0x10*port  Per-port registers  (XhciPortRegs)
+#   mmio_base + rtsoff  Runtime registers  (XhciRuntimeRegs)
+#   mmio_base + dboff   Doorbell array    (XhciDoorbell)
+
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
+
+# ============================================================================
+# PCI class codes for xHCI
+# ============================================================================
+
+val USB_XHCI_CLASS: u32    = 0x0C   # Serial Bus Controller
+val USB_XHCI_SUBCLASS: u32 = 0x03   # USB
+val USB_XHCI_PROGIF: u32   = 0x30   # xHCI programming interface
+
+# ============================================================================
+# USBCMD register bit masks
+# ============================================================================
+
+val USBCMD_RUN: u32  = 0x1   # Run/Stop — 1 = run, 0 = stop
+val USBCMD_HCRST: u32 = 0x2  # Host Controller Reset
+val USBCMD_INTE: u32  = 0x4  # Interrupter Enable
+val USBCMD_HSEE: u32  = 0x8  # Host System Error Enable
+
+# ============================================================================
+# USBSTS register bit masks
+# ============================================================================
+
+val USBSTS_HCH: u32  = 0x1   # HCHalted — set when R/S=0 and controller stopped
+val USBSTS_HSE: u32  = 0x4   # Host System Error
+val USBSTS_EINT: u32 = 0x8   # Event Interrupt
+val USBSTS_PCD: u32  = 0x10  # Port Change Detect
+
+# ============================================================================
+# PORTSC register bit masks and fields
+# ============================================================================
+
+val PORTSC_CCS: u32   = 0x00000001  # Current Connect Status
+val PORTSC_PED: u32   = 0x00000002  # Port Enabled/Disabled
+val PORTSC_PR: u32    = 0x00000010  # Port Reset (bit 4)
+val PORTSC_PP: u32    = 0x00000200  # Port Power (bit 9)
+
+# PLS (Port Link State) — bits 5-8
+val PORTSC_PLS_MASK: u32   = 0x000001E0   # bits [8:5]
+val PORTSC_PLS_SHIFT: u32  = 5
+
+# Port Speed — bits 10-13
+val PORTSC_SPEED_MASK: u32  = 0x00003C00  # bits [13:10]
+val PORTSC_SPEED_SHIFT: u32 = 10
+
+# Port Link State values
+val PORTSC_PLS_U0: u32         = 0   # Active
+val PORTSC_PLS_U1: u32         = 1
+val PORTSC_PLS_U2: u32         = 2
+val PORTSC_PLS_U3: u32         = 3   # Suspend
+val PORTSC_PLS_DISABLED: u32   = 4
+val PORTSC_PLS_RXDETECT: u32   = 5
+val PORTSC_PLS_INACTIVE: u32   = 6
+val PORTSC_PLS_POLLING: u32    = 7
+val PORTSC_PLS_RECOVERY: u32   = 8
+val PORTSC_PLS_HOTRESET: u32   = 9
+val PORTSC_PLS_COMPLIANCE: u32 = 10
+val PORTSC_PLS_LOOPBACK: u32   = 11
+
+# ============================================================================
+# Capability Registers (at mmio_base + 0x00)
+# ============================================================================
+
+class XhciCapRegs:
+    """xHCI capability registers — read-only, at the controller MMIO base.
+
+    All fields describe controller capabilities and give offsets to other
+    register blocks. Read once during initialization.
+    """
+    base: u64   # MMIO base address
+
+impl XhciCapRegs:
+    static fn new(mmio_base: u64) -> XhciCapRegs:
+        XhciCapRegs(base: mmio_base)
+
+    fn caplength() -> u8:
+        """CAPLENGTH (offset 0x00, u8) — length of capability register space."""
+        (mmio_read32(self.base) & 0xFF).to_u8()
+
+    fn hciversion() -> u16:
+        """HCIVERSION (offset 0x02, u16) — BCD-encoded interface version number."""
+        ((mmio_read32(self.base) >> 16) & 0xFFFF).to_u16()
+
+    fn hcsparams1() -> u32:
+        """HCSPARAMS1 (offset 0x04) — MaxSlots[7:0], MaxIntrs[18:8], MaxPorts[31:24]."""
+        mmio_read32(self.base + 0x04)
+
+    fn hcsparams2() -> u32:
+        """HCSPARAMS2 (offset 0x08) — IST, ERST max, max scratchpad bufs."""
+        mmio_read32(self.base + 0x08)
+
+    fn hcsparams3() -> u32:
+        """HCSPARAMS3 (offset 0x0C) — U1/U2 exit latencies."""
+        mmio_read32(self.base + 0x0C)
+
+    fn hccparams1() -> u32:
+        """HCCPARAMS1 (offset 0x10) — AC64, BNC, CSZ, PPC, PIND, LHRC, LTC, NSS, PAE, SPC, SEC, CFC, MaxPSASize, xECP."""
+        mmio_read32(self.base + 0x10)
+
+    fn dboff() -> u32:
+        """DBOFF (offset 0x14) — Doorbell Array Offset from MMIO base (32-bit aligned)."""
+        mmio_read32(self.base + 0x14)
+
+    fn rtsoff() -> u32:
+        """RTSOFF (offset 0x18) — Runtime Register Space Offset from MMIO base (32-byte aligned)."""
+        mmio_read32(self.base + 0x18)
+
+    # Convenience extractors from HCSPARAMS1
+
+    fn max_slots() -> u8:
+        """Maximum number of device slots supported."""
+        (self.hcsparams1() & 0xFF).to_u8()
+
+    fn max_intrs() -> u16:
+        """Maximum number of interrupters."""
+        ((self.hcsparams1() >> 8) & 0x7FF).to_u16()
+
+    fn max_ports() -> u8:
+        """Maximum number of downstream-facing ports."""
+        ((self.hcsparams1() >> 24) & 0xFF).to_u8()
+
+    # Convenience helpers for derived base addresses
+
+    fn op_base() -> u64:
+        """Base address of Operational Register Space."""
+        self.base + self.caplength().to_u64()
+
+    fn db_base() -> u64:
+        """Base address of Doorbell Array."""
+        self.base + self.dboff().to_u64()
+
+    fn rt_base() -> u64:
+        """Base address of Runtime Register Space."""
+        self.base + self.rtsoff().to_u64()
+
+# ============================================================================
+# Operational Registers (at op_base = mmio_base + cap_length)
+# ============================================================================
+
+class XhciOpRegs:
+    """xHCI operational registers — control and status for the host controller."""
+    base: u64   # op_base = mmio_base + CAPLENGTH
+
+impl XhciOpRegs:
+    static fn new(op_base: u64) -> XhciOpRegs:
+        XhciOpRegs(base: op_base)
+
+    # ---- USBCMD (offset 0x00) ----
+
+    fn read_usbcmd() -> u32:
+        """Read USBCMD register."""
+        mmio_read32(self.base + 0x00)
+
+    me write_usbcmd(value: u32):
+        """Write USBCMD register."""
+        mmio_write32(self.base + 0x00, value)
+
+    me set_run(enable: bool):
+        """Set or clear the Run/Stop bit (USBCMD_RUN)."""
+        val cmd = self.read_usbcmd()
+        if enable:
+            self.write_usbcmd(cmd | USBCMD_RUN)
+        else:
+            self.write_usbcmd(cmd & ~USBCMD_RUN)
+
+    me reset():
+        """Assert HCRST; caller must poll until USBSTS.HCH clears."""
+        val cmd = self.read_usbcmd()
+        self.write_usbcmd(cmd | USBCMD_HCRST)
+
+    me set_inte(enable: bool):
+        """Enable or disable global interrupt (USBCMD_INTE)."""
+        val cmd = self.read_usbcmd()
+        if enable:
+            self.write_usbcmd(cmd | USBCMD_INTE)
+        else:
+            self.write_usbcmd(cmd & ~USBCMD_INTE)
+
+    # ---- USBSTS (offset 0x04) ----
+
+    fn read_usbsts() -> u32:
+        """Read USBSTS register."""
+        mmio_read32(self.base + 0x04)
+
+    fn is_halted() -> bool:
+        """True when HCHalted bit is set (controller stopped)."""
+        (self.read_usbsts() & USBSTS_HCH) != 0
+
+    fn has_event_interrupt() -> bool:
+        """True when EINT is set."""
+        (self.read_usbsts() & USBSTS_EINT) != 0
+
+    me clear_event_interrupt():
+        """Write-1-to-clear EINT bit."""
+        mmio_write32(self.base + 0x04, USBSTS_EINT)
+
+    # ---- PAGESIZE (offset 0x08) ----
+
+    fn read_pagesize() -> u32:
+        """PAGESIZE — bit N set means controller supports 2^(N+12) byte pages."""
+        mmio_read32(self.base + 0x08)
+
+    # ---- DNCTRL (offset 0x14) ----
+
+    fn read_dnctrl() -> u32:
+        """Device Notification Control register."""
+        mmio_read32(self.base + 0x14)
+
+    me write_dnctrl(value: u32):
+        mmio_write32(self.base + 0x14, value)
+
+    # ---- CRCR (offset 0x18, 64-bit) ----
+
+    fn read_crcr() -> u64:
+        """Command Ring Control Register (64-bit)."""
+        mmio_read64(self.base + 0x18)
+
+    me write_crcr(value: u64):
+        """Write CRCR — sets command ring dequeue pointer + cycle state."""
+        mmio_write64(self.base + 0x18, value)
+
+    # ---- DCBAAP (offset 0x30, 64-bit) ----
+
+    fn read_dcbaap() -> u64:
+        """Device Context Base Address Array Pointer (64-bit, 64-byte aligned)."""
+        mmio_read64(self.base + 0x30)
+
+    me write_dcbaap(addr: u64):
+        """Set DCBAAP to physical address of the device context base array."""
+        mmio_write64(self.base + 0x30, addr)
+
+    # ---- CONFIG (offset 0x38) ----
+
+    fn read_config() -> u32:
+        """CONFIG register — MaxSlotsEn in bits [7:0]."""
+        mmio_read32(self.base + 0x38)
+
+    me write_config(value: u32):
+        mmio_write32(self.base + 0x38, value)
+
+    me set_max_slots(n: u8):
+        """Set MaxSlotsEn field (bits [7:0]) of CONFIG."""
+        val cfg = self.read_config() & 0xFFFFFF00
+        self.write_config(cfg | n.to_u32())
+
+# ============================================================================
+# Port Registers (at op_base + 0x400 + 0x10 * port_index)
+# ============================================================================
+
+class XhciPortRegs:
+    """xHCI per-port registers for one downstream-facing port."""
+    base: u64   # op_base + 0x400 + 0x10 * port
+
+impl XhciPortRegs:
+    static fn new(op_base: u64, port: u32) -> XhciPortRegs:
+        XhciPortRegs(base: op_base + 0x400 + (0x10 * port).to_u64())
+
+    # ---- PORTSC (offset 0x00) ----
+
+    fn read_portsc() -> u32:
+        """Port Status and Control register."""
+        mmio_read32(self.base + 0x00)
+
+    me write_portsc(value: u32):
+        """Write PORTSC — be careful: some bits are write-1-to-clear."""
+        mmio_write32(self.base + 0x00, value)
+
+    fn is_connected() -> bool:
+        """Current Connect Status (CCS) bit."""
+        (self.read_portsc() & PORTSC_CCS) != 0
+
+    fn is_enabled() -> bool:
+        """Port Enabled/Disabled (PED) bit."""
+        (self.read_portsc() & PORTSC_PED) != 0
+
+    fn is_powered() -> bool:
+        """Port Power (PP) bit."""
+        (self.read_portsc() & PORTSC_PP) != 0
+
+    fn port_speed() -> u8:
+        """Port Speed field (bits [13:10]) — PSI value from Extended Capability."""
+        ((self.read_portsc() & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT).to_u8()
+
+    fn link_state() -> u8:
+        """PLS field (bits [8:5])."""
+        ((self.read_portsc() & PORTSC_PLS_MASK) >> PORTSC_PLS_SHIFT).to_u8()
+
+    me reset_port():
+        """Assert Port Reset (PR) while preserving PP."""
+        val sc = self.read_portsc()
+        self.write_portsc((sc | PORTSC_PR) & ~PORTSC_PED)
+
+    # ---- PORTPMSC (offset 0x04) ----
+
+    fn read_portpmsc() -> u32:
+        """Port Power Management Status and Control."""
+        mmio_read32(self.base + 0x04)
+
+    me write_portpmsc(value: u32):
+        mmio_write32(self.base + 0x04, value)
+
+    # ---- PORTLI (offset 0x08) ----
+
+    fn read_portli() -> u32:
+        """Port Link Info register."""
+        mmio_read32(self.base + 0x08)
+
+# ============================================================================
+# Doorbell Array (at mmio_base + DBOFF)
+# ============================================================================
+
+class XhciDoorbell:
+    """xHCI Doorbell Array — one 32-bit doorbell register per slot.
+
+    Slot 0 is the host controller command doorbell.
+    Slots 1..MaxSlots are device endpoint doorbells.
+    """
+    base: u64   # mmio_base + DBOFF
+
+impl XhciDoorbell:
+    static fn new(db_base: u64) -> XhciDoorbell:
+        XhciDoorbell(base: db_base)
+
+    fn ring(slot: u32, target: u32):
+        """Ring doorbell for slot with the given target (endpoint + stream ID).
+
+        slot=0  → command ring doorbell (target=0)
+        slot=N  → device N doorbell; target encodes endpoint index + stream ID
+        """
+        mmio_write32(self.base + (4 * slot).to_u64(), target)
+
+# ============================================================================
+# Runtime Registers (at mmio_base + RTSOFF)
+# ============================================================================
+
+val XHCI_IR_BASE_OFFSET: u64 = 0x20   # First interrupter at rt_base + 0x20
+val XHCI_IR_STRIDE: u64      = 0x20   # Each interrupter register set is 32 bytes
+
+# Per-interrupter register offsets
+val XHCI_IR_IMAN: u64   = 0x00  # Interrupt Management
+val XHCI_IR_IMOD: u64   = 0x04  # Interrupt Moderation
+val XHCI_IR_ERSTSZ: u64 = 0x08  # Event Ring Segment Table Size
+val XHCI_IR_ERSTBA: u64 = 0x10  # Event Ring Segment Table Base Address (64-bit)
+val XHCI_IR_ERDP: u64   = 0x18  # Event Ring Dequeue Pointer (64-bit)
+
+# IMAN bits
+val IMAN_IP: u32  = 0x1   # Interrupt Pending (write-1-to-clear)
+val IMAN_IE: u32  = 0x2   # Interrupt Enable
+
+class XhciRuntimeRegs:
+    """xHCI Runtime Register Space — MFINDEX and per-interrupter registers."""
+    base: u64   # mmio_base + RTSOFF
+
+impl XhciRuntimeRegs:
+    static fn new(rt_base: u64) -> XhciRuntimeRegs:
+        XhciRuntimeRegs(base: rt_base)
+
+    fn read_mfindex() -> u32:
+        """MFINDEX (offset 0x00) — microframe index, increments every 125 µs."""
+        mmio_read32(self.base + 0x00)
+
+    fn ir_base(n: u32) -> u64:
+        """Base address of interrupter N's register set."""
+        self.base + XHCI_IR_BASE_OFFSET + (XHCI_IR_STRIDE * n.to_u64())
+
+    # ---- Per-interrupter accessors ----
+
+    fn read_iman(n: u32) -> u32:
+        """Read IMAN for interrupter N."""
+        mmio_read32(self.ir_base(n) + XHCI_IR_IMAN)
+
+    me write_iman(n: u32, value: u32):
+        """Write IMAN for interrupter N."""
+        mmio_write32(self.ir_base(n) + XHCI_IR_IMAN, value)
+
+    me enable_interrupt(n: u32):
+        """Set IE bit in IMAN for interrupter N."""
+        val iman = self.read_iman(n)
+        self.write_iman(n, iman | IMAN_IE)
+
+    me clear_interrupt_pending(n: u32):
+        """Clear IP (write-1-to-clear) in IMAN for interrupter N."""
+        self.write_iman(n, IMAN_IP)
+
+    fn read_imod(n: u32) -> u32:
+        """Read IMOD (Interrupt Moderation Interval/Counter) for interrupter N."""
+        mmio_read32(self.ir_base(n) + XHCI_IR_IMOD)
+
+    me write_imod(n: u32, value: u32):
+        mmio_write32(self.ir_base(n) + XHCI_IR_IMOD, value)
+
+    fn read_erstsz(n: u32) -> u32:
+        """Event Ring Segment Table Size for interrupter N."""
+        mmio_read32(self.ir_base(n) + XHCI_IR_ERSTSZ)
+
+    me write_erstsz(n: u32, value: u32):
+        mmio_write32(self.ir_base(n) + XHCI_IR_ERSTSZ, value)
+
+    fn read_erstba(n: u32) -> u64:
+        """Event Ring Segment Table Base Address (64-bit) for interrupter N."""
+        mmio_read64(self.ir_base(n) + XHCI_IR_ERSTBA)
+
+    me write_erstba(n: u32, addr: u64):
+        mmio_write64(self.ir_base(n) + XHCI_IR_ERSTBA, addr)
+
+    fn read_erdp(n: u32) -> u64:
+        """Event Ring Dequeue Pointer (64-bit) for interrupter N."""
+        mmio_read64(self.ir_base(n) + XHCI_IR_ERDP)
+
+    me write_erdp(n: u32, ptr: u64):
+        """Write ERDP — advance dequeue pointer; bit 3 = Event Handler Busy."""
+        mmio_write64(self.ir_base(n) + XHCI_IR_ERDP, ptr)

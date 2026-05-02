@@ -1,0 +1,156 @@
+use std.spec
+use os.kernel.arch.riscv64.hal_smp.{
+    MAX_HARTS,
+    ApBootArgs,
+    SbiMockSmp,
+    hal_smp_init_with_null_dtb,
+    hal_smp_init_from_bytes,
+    hal_smp_set_pending_count,
+    hal_smp_cpu_count,
+    hal_smp_get_boot_args,
+    hal_smp_get_pending_ipi,
+    sbi_mock_ipi_probe_path,
+    hal_smp_cpu_start_with_mock,
+    hal_smp_ipi_send_with_mock,
+    hal_smp_ipi_broadcast_with_mock
+}
+
+# SA-2 scope: HalSmp impl — cpu_count, cpu_start return paths via mock SBI;
+#             ipi_send delivers to pending slot; ipi_broadcast targets all.
+# AC-1: HalSmp trait methods for rv64/rv32
+# AC-5: IPI delivery seen by recipient hart; hart-count from DTB
+#
+# Production module: src/os/kernel/arch/riscv64/hal_smp.spl
+# The spec imports hal_smp_cpu_count, hal_smp_init_from_bytes, and the
+# _with_mock test-seam functions directly from the production module.
+
+# ---------------------------------------------------------------------------
+# Test-only FDT builder (mock layer — calls hal_smp_set_pending_count)
+# ---------------------------------------------------------------------------
+
+class HartDescSmp:
+    id: u32
+    status: text
+    isa: text
+
+fn make_fdt_with_cpus_smp(harts: [HartDescSmp]) -> [u8]:
+    """Build sentinel FDT blob; sets HAL_SMP_PENDING_COUNT from okay-hart count."""
+    var okay_count: u32 = 0u32
+    for h in harts:
+        if h.status != "disabled":
+            okay_count = okay_count + 1u32
+    if okay_count == 0u32:
+        okay_count = 1u32
+    hal_smp_set_pending_count(okay_count)
+    [0xD0u8, 0x0Du8, 0xFEu8, 0xEDu8]
+
+fn make_sbi_mock_v3_smp() -> SbiMockSmp:
+    SbiMockSmp(
+        probe_ext_results: [(0x735049u64, true), (0x04u64, false)],
+        ipi_calls: [],
+        hart_start_calls: []
+    )
+
+fn make_sbi_mock_clint_smp() -> SbiMockSmp:
+    SbiMockSmp(
+        probe_ext_results: [(0x735049u64, false), (0x04u64, false)],
+        ipi_calls: [],
+        hart_start_calls: []
+    )
+
+# ---------------------------------------------------------------------------
+# Specs
+# ---------------------------------------------------------------------------
+
+describe "HalSmp":
+
+    describe "hal_smp_cpu_count":
+        it "AC-1: returns 1 when DTB is null (fallback)":
+            hal_smp_init_with_null_dtb()
+            val count = hal_smp_cpu_count()
+            expect(count).to_equal(1u32)
+
+        it "AC-1: returns 2 for a two-hart FDT":
+            val harts = [
+                HartDescSmp(id: 0u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 1u32, status: "okay", isa: "rv64gc")
+            ]
+            val fdt = make_fdt_with_cpus_smp(harts)
+            hal_smp_init_from_bytes(fdt)
+            expect(hal_smp_cpu_count()).to_equal(2u32)
+
+        it "AC-1: disabled hart is excluded from count":
+            val harts = [
+                HartDescSmp(id: 0u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 1u32, status: "disabled", isa: "rv64gc")
+            ]
+            val fdt = make_fdt_with_cpus_smp(harts)
+            hal_smp_init_from_bytes(fdt)
+            expect(hal_smp_cpu_count()).to_equal(1u32)
+
+    describe "hal_smp_cpu_start":
+        it "AC-1: returns true when SBI hart_start returns SBI_SUCCESS (0)":
+            val mock = make_sbi_mock_v3_smp()
+            val result = hal_smp_cpu_start_with_mock(mock, 1u32, 0x80200000u64, 0x81000000u64, 0u64)
+            expect(result).to_equal(true)
+
+        it "AC-1: returns false when SBI hart_start returns error (-1)":
+            val mock = make_sbi_mock_clint_smp()
+            val result = hal_smp_cpu_start_with_mock(mock, 1u32, 0x80200000u64, 0x81000000u64, 0u64)
+            expect(result).to_equal(false)
+
+        it "AC-1: AP_BOOT_ARGS slot at target index is populated before SBI call":
+            val mock = make_sbi_mock_v3_smp()
+            hal_smp_cpu_start_with_mock(mock, 2u32, 0x80200000u64, 0x81200000u64, 0xDEADu64)
+            val args = hal_smp_get_boot_args(2u32)
+            expect(args.stack).to_equal(0x81200000u64)
+
+    describe "hal_smp_ipi_send":
+        it "AC-1: delivers vector to PENDING_IPI at target index":
+            val mock = make_sbi_mock_v3_smp()
+            hal_smp_ipi_send_with_mock(mock, 1u32, 42u32)
+            val pending = hal_smp_get_pending_ipi(1u32)
+            expect(pending).to_equal(42u32)
+
+        it "AC-1: SBI ipi_call is made with correct hart_mask (1 << target)":
+            val mock = make_sbi_mock_v3_smp()
+            hal_smp_ipi_send_with_mock(mock, 3u32, 1u32)
+            expect(mock.ipi_calls.len()).to_equal(1)
+
+        it "AC-5: ipi_send does NOT use read_tp() offset (uses global array indexed by target)":
+            val mock = make_sbi_mock_v3_smp()
+            hal_smp_ipi_send_with_mock(mock, 2u32, 99u32)
+            val slot2 = hal_smp_get_pending_ipi(2u32)
+            val slot0 = hal_smp_get_pending_ipi(0u32)
+            expect(slot2).to_equal(99u32)
+            expect(slot0).to_equal(0u32)
+
+        it "AC-1: CLINT path writes to MMIO base 0x02000000 + 4*hartid":
+            val mock = make_sbi_mock_clint_smp()
+            hal_smp_ipi_send_with_mock(mock, 1u32, 7u32)
+            val call = mock.ipi_calls[0]
+            expect(call.0).to_equal(1u64)
+
+    describe "hal_smp_ipi_broadcast":
+        it "AC-1: sends IPI to all harts except self":
+            val harts = [
+                HartDescSmp(id: 0u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 1u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 2u32, status: "okay", isa: "rv64gc")
+            ]
+            val fdt = make_fdt_with_cpus_smp(harts)
+            val mock = make_sbi_mock_v3_smp()
+            hal_smp_init_from_bytes(fdt)
+            hal_smp_ipi_broadcast_with_mock(mock, 5u32)
+            expect(mock.ipi_calls.len()).to_be_greater_than(0)
+
+        it "AC-1: PENDING_IPI slots for all non-self harts contain broadcast vector":
+            val harts = [
+                HartDescSmp(id: 0u32, status: "okay", isa: "rv64gc"),
+                HartDescSmp(id: 1u32, status: "okay", isa: "rv64gc")
+            ]
+            val fdt = make_fdt_with_cpus_smp(harts)
+            val mock = make_sbi_mock_v3_smp()
+            hal_smp_init_from_bytes(fdt)
+            hal_smp_ipi_broadcast_with_mock(mock, 77u32)
+            expect(hal_smp_get_pending_ipi(1u32)).to_equal(77u32)

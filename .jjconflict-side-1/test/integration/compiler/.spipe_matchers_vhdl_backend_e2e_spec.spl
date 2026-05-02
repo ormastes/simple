@@ -1,0 +1,1818 @@
+# @cover src/compiler/70.backend/backend/vhdl_backend.spl 80%
+# VHDL Backend End-to-End Integration Tests
+#
+# Tests the complete VHDL backend pipeline: MIR construction → VhdlBackend.compile()
+# → VHDL output → GHDL analysis/elaboration validation.
+#
+# These tests verify that backend-generated VHDL is accepted by a real
+# VHDL-2008 toolchain (GHDL), not just structurally plausible text.
+#
+# **Feature IDs:** #vhdl-backend, #ghdl-validation
+# **Category:** Integration
+# **Difficulty:** 4/5
+
+use compiler.backend.backend.vhdl.vhdl_builder.VhdlBuilder
+use compiler.backend.backend.vhdl_backend.{VhdlBackend, VhdlCompiledModule}
+use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, compileoptions_default_options, BackendKind}
+use compiler.backend.backend.vhdl_type_mapper.VhdlTypeMapper
+use compiler.mir.mir_data.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use app.io.vhdl_ffi.{ghdl_available, ghdl_analyze, ghdl_elaborate, ghdl_run, ghdl_synth, ghdl_analyze_and_elaborate, vhdl_write_file, vhdl_read_file}
+
+# ============================================================================
+# Test Utilities
+# ============================================================================
+
+fn check(condition: bool):
+    expect condition == true
+
+fn check_msg(condition: bool, msg: text):
+    if not condition:
+        expect msg == ""
+
+fn empty_span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1)
+
+fn make_type(kind: MirTypeKind) -> MirType:
+    MirType(kind: kind)
+
+fn make_i32() -> MirType:
+    make_type(MirTypeKind.I32)
+
+fn make_u8() -> MirType:
+    make_type(MirTypeKind.U8)
+
+fn make_bool() -> MirType:
+    make_type(MirTypeKind.Bool)
+
+fn make_field(name: text, ty: MirType) -> MirFieldDef:
+    MirFieldDef(name: name, type_: ty, offset: 0, has_bits_attr: false, bits_width: 0)
+
+fn make_type_def(symbol: SymbolId, name: text, kind: MirTypeDefKind) -> MirTypeDef:
+    MirTypeDef(symbol: symbol, name: name, kind: kind, is_export_c: false, export_name: "")
+
+fn make_variant(name: text, discriminant: i64) -> MirVariantDef:
+    MirVariantDef(name: name, discriminant: discriminant, payload: nil)
+
+fn make_backend() -> VhdlBackend:
+    val options = compileoptions_default_options()
+    VhdlBackend.create(CodegenTarget.Riscv32, options)
+
+fn make_resolved_backend() -> VhdlBackend:
+    val options = compileoptions_default_options()
+    VhdlBackend.create_resolved(CodegenTarget.Riscv32, options)
+
+fn make_arg_local(id: i64, index: i64, name: text, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Arg(index))
+
+fn make_return_local(id: i64, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: ty, kind: LocalKind.Return)
+
+fn make_temp_local(id: i64, name: text, ty: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: Some(name), type_: ty, kind: LocalKind.Temp)
+
+fn make_function(name: text, params: [MirType], return_ty: MirType, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 0),
+        name: name,
+        signature: MirSignature(params: params, return_type: return_ty, is_variadic: false),
+        locals: locals,
+        blocks: blocks,
+        entry_block: BlockId.entry(),
+        span: empty_span(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        driver_manifest_attr: nil
+    )
+
+fn make_module(name: text, func: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[func.symbol] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn make_add_module() -> MirModule:
+    val locals = [
+        make_arg_local(0, 0, "a", make_i32()),
+        make_arg_local(1, 1, "b", make_i32()),
+        make_return_local(2, make_i32()),
+        make_temp_local(3, "sum", make_i32())
+    ]
+
+    val add_inst = MirInst(
+        kind: MirInstKind.BinOp(
+            LocalId(id: 3),
+            MirBinOp.Add,
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+            MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+        ),
+        span: empty_span()
+    )
+    val assign_inst = MirInst(
+        kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 3)),
+        span: empty_span()
+    )
+
+    val block = MirBlock(id: BlockId(id: 0), instructions: [add_inst, assign_inst], terminator: nil)
+    val func = make_function("add", [make_i32(), make_i32()], make_i32(), locals, [block])
+    make_module("add_module", func)
+
+fn make_add_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\nentity add_tb is\nend entity add_tb;\n\narchitecture tb of add_tb is\n    signal a : signed(31 downto 0) := to_signed(2, 32);\n    signal b : signed(31 downto 0) := to_signed(3, 32);\n    signal result_out : signed(31 downto 0);\nbegin\n    dut: entity work.add\n        port map (\n            a => a,\n            b => b,\n            result_out => result_out\n        );\n\n    stim: process\n    begin\n        wait for 1 ns;\n        assert to_integer(result_out) = 5\n            report \"expected 2 + 3 = 5\"\n            severity failure;\n        report \"add_tb PASS\";\n        wait;\n    end process;\nend architecture tb;\n"
+
+fn compile_add_vhdl() -> text:
+    val backend = make_backend()
+    val module = make_add_module()
+    val result = backend.compile(module)
+    check_msg(result.is_ok(), "Backend compilation failed for add")
+    result.unwrap().vhdl
+
+fn write_and_analyze(vhdl_code: text, filename: text) -> bool:
+    """Write VHDL to temp file and run GHDL analysis."""
+    val path = "/tmp/simple_vhdl_e2e_{filename}.vhd"
+    check(vhdl_write_file(path, vhdl_code))
+    val result = ghdl_analyze(path)
+    if not result.success:
+        print "GHDL analysis failed for {filename}:"
+        print "  stdout: {result.stdout}"
+        print "  stderr: {result.stderr}"
+    result.success
+
+# ============================================================================
+# Backend Compilation: Entity/Architecture Generation
+# ============================================================================
+
+describe "VHDL Backend E2E - Entity Generation":
+    """
+    ## Backend-Generated Entity/Architecture Validation
+
+    Tests that MIR functions compiled through VhdlBackend produce
+    structurally valid VHDL entities accepted by GHDL.
+    """
+
+    it "compiles simple adder to valid VHDL entity":
+        val backend = make_backend()
+
+        # Build a simple add function: fn add(a: i32, b: i32) -> i32
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, make_i32()),
+            make_temp_local(3, "sum", make_i32())
+        ]
+
+        val add_inst = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 3),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+
+        val assign_inst = MirInst(
+            kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 3)),
+            span: empty_span()
+        )
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [add_inst, assign_inst],
+            terminator: nil
+        )
+
+        val func = make_function("adder", [make_i32(), make_i32()], make_i32(), locals, [block])
+        val module = make_module("adder_module", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed")
+
+        val compiled = result.unwrap()
+        val vhdl = compiled.vhdl
+
+        # Structural checks
+        check(vhdl.contains("library ieee;"))
+        check(vhdl.contains("entity adder is"))
+        check(vhdl.contains("architecture rtl of adder is"))
+        check(vhdl.contains("a : in signed(31 downto 0)"))
+        check(vhdl.contains("b : in signed(31 downto 0)"))
+        check(vhdl.contains("result_out : out signed(31 downto 0)"))
+        check(vhdl.contains("sum <= a + b;"))
+
+    it "compiles boolean comparison to valid VHDL":
+        val backend = make_backend()
+
+        # fn compare(a: i32, b: i32) -> bool
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, make_bool())
+        ]
+
+        val cmp_inst = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 2),
+                MirBinOp.Eq,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [cmp_inst],
+            terminator: nil
+        )
+
+        val func = make_function("comparator", [make_i32(), make_i32()], make_bool(), locals, [block])
+        val module = make_module("cmp_module", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for comparator")
+
+        val compiled = result.unwrap()
+        check(compiled.vhdl.contains("entity comparator is"))
+        check(compiled.vhdl.contains("result_out : out bit"))
+
+    it "compiles local copies to signal assignments":
+        val backend = make_backend()
+
+        # MIR shape for: tmp = a + 1; x = tmp; return x
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_return_local(1, make_i32()),
+            make_temp_local(2, "tmp", make_i32()),
+            MirLocal(id: LocalId(id: 3), name: Some("x"), type_: make_i32(), kind: LocalKind.Var)
+        ]
+
+        val add_inst = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 2),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val store_inst = MirInst(
+            kind: MirInstKind.Copy(LocalId(id: 3), LocalId(id: 2)),
+            span: empty_span()
+        )
+        val load_inst = MirInst(
+            kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 3)),
+            span: empty_span()
+        )
+
+        val block = MirBlock(id: BlockId(id: 0), instructions: [add_inst, store_inst, load_inst], terminator: nil)
+        val func = make_function("local_store", [make_i32()], make_i32(), locals, [block])
+        val module = make_module("local_store_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for local copies")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("signal x : signed(31 downto 0);"))
+        check(vhdl.contains("tmp <= a + to_signed(1, 32);"))
+        check(vhdl.contains("x <= tmp;"))
+        check(vhdl.contains("result_out <= x;"))
+
+    it "compiles return terminator to result assignment":
+        val backend = make_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_return_local(1, make_i32())
+        ]
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+        )
+        val func = make_function("return_arg", [make_i32()], make_i32(), locals, [block])
+        val module = make_module("return_arg_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for return terminator")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("result_out <= a;"))
+
+    it "compiles if terminator return arms to result mux":
+        val backend = make_resolved_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32())
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+        )
+
+        val func = make_function("select_i32", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("select_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for if terminator")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("flag : in std_logic"))
+        check(vhdl.contains("result_out <= a when flag = '1' else b;"))
+
+    it "compiles branch-local computations inside combinational process":
+        val backend = make_resolved_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32()),
+            make_temp_local(4, "then_tmp", make_i32()),
+            make_temp_local(5, "else_tmp", make_i32())
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 4),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_sub = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 5),
+                MirBinOp.Sub,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_sub],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+
+        val func = make_function("select_computed_i32", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("select_computed_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for computed if terminator")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("variable v_then_tmp : signed(31 downto 0);"))
+        check(vhdl.contains("if flag = '1' then"))
+        check(vhdl.contains("v_then_tmp := a + to_signed(1, 32);"))
+        check(vhdl.contains("result_out <= v_then_tmp;"))
+        check(vhdl.contains("v_else_tmp := b - to_signed(1, 32);"))
+        check(vhdl.contains("result_out <= v_else_tmp;"))
+
+    it "compiles branch-local VHDL resize slice and concat inside combinational process":
+        val backend = make_resolved_backend()
+        val u32 = MirType(kind: MirTypeKind.U32)
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_u8()),
+            make_arg_local(2, 2, "b", make_u8()),
+            make_return_local(3, u32),
+            make_temp_local(4, "then_wide", u32),
+            make_temp_local(5, "cat", u32),
+            make_temp_local(6, "low", make_u8()),
+            make_temp_local(7, "else_wide", u32)
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_resize = MirInst(
+            kind: MirInstKind.VhdlResize(
+                LocalId(id: 4),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                32,
+                false
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_resize],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_concat = MirInst(
+            kind: MirInstKind.VhdlConcat(
+                LocalId(id: 5),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val else_slice = MirInst(
+            kind: MirInstKind.VhdlSlice(
+                LocalId(id: 6),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5))),
+                7,
+                0
+            ),
+            span: empty_span()
+        )
+        val else_resize = MirInst(
+            kind: MirInstKind.VhdlResize(
+                LocalId(id: 7),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6))),
+                32,
+                false
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_concat, else_slice, else_resize],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+        )
+
+        val func = make_function("select_vhdl_width_ops", [make_bool(), make_u8(), make_u8()], u32, locals, [entry, then_block, else_block])
+        val module = make_module("select_vhdl_width_ops_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for process VHDL width ops")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("variable v_then_wide : unsigned(31 downto 0);"))
+        check(vhdl.contains("v_then_wide := resize(a, 32);"))
+        check(vhdl.contains("v_cat := b & b & b & b;"))
+        check(vhdl.contains("v_low := v_cat(7 downto 0);"))
+        check(vhdl.contains("v_else_wide := resize(v_low, 32);"))
+        check(vhdl.contains("result_out <= v_else_wide;"))
+
+    it "compiles branch-local VHDL signal and variable assignments inside combinational process":
+        val backend = make_resolved_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32()),
+            make_temp_local(4, "tmp", make_i32())
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_assign = MirInst(
+            kind: MirInstKind.VhdlVarAssign(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_assign],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_assign = MirInst(
+            kind: MirInstKind.VhdlSignalAssign(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                nil
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_assign],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+
+        val func = make_function("select_vhdl_assigns", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("select_vhdl_assigns_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for process VHDL assigns")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("v_tmp := a;"))
+        check(vhdl.contains("result_out <= v_tmp;"))
+        check(vhdl.contains("result_out <= b;"))
+
+    it "compiles checked binary op and integer casts":
+        val backend = make_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, make_i32()),
+            make_temp_local(3, "sum", make_i32()),
+            make_temp_local(4, "wide", MirType(kind: MirTypeKind.I64)),
+            make_temp_local(5, "narrow", make_i32())
+        ]
+
+        val checked_add = MirInst(
+            kind: MirInstKind.CheckedBinOp(
+                LocalId(id: 3),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+        val widen = MirInst(
+            kind: MirInstKind.Cast(
+                LocalId(id: 4),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirType(kind: MirTypeKind.I64)
+            ),
+            span: empty_span()
+        )
+        val narrow = MirInst(
+            kind: MirInstKind.Bitcast(
+                LocalId(id: 5),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4))),
+                make_i32()
+            ),
+            span: empty_span()
+        )
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [checked_add, widen, narrow],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+        val func = make_function("cast_checked", [make_i32(), make_i32()], make_i32(), locals, [block])
+        val module = make_module("cast_checked_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for checked op/cast")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("sum <= a + b;"))
+        check(vhdl.contains("wide <= resize(signed(sum), 64);"))
+        check(vhdl.contains("narrow <= resize(signed(wide), 32);"))
+        check(vhdl.contains("result_out <= narrow;"))
+
+    it "compiles typed bool casts and shift counts":
+        val backend = make_backend()
+        val u32 = MirType(kind: MirTypeKind.U32)
+        val u8 = MirType(kind: MirTypeKind.U8)
+
+        val locals = [
+            make_arg_local(0, 0, "data", u32),
+            make_arg_local(1, 1, "shamt_u", u8),
+            make_arg_local(2, 2, "shamt_s", make_i32()),
+            make_arg_local(3, 3, "flag", make_bool()),
+            make_return_local(4, u32),
+            make_temp_local(5, "flag_from_data", make_bool()),
+            make_temp_local(6, "count_from_flag", u8),
+            make_temp_local(7, "shl_const", u32),
+            make_temp_local(8, "shl_signal", u32),
+            make_temp_local(9, "shr_signed", u32)
+        ]
+
+        val int_to_bool = MirInst(
+            kind: MirInstKind.Cast(
+                LocalId(id: 5),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                make_bool()
+            ),
+            span: empty_span()
+        )
+        val bool_to_unsigned = MirInst(
+            kind: MirInstKind.Cast(
+                LocalId(id: 6),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                u8
+            ),
+            span: empty_span()
+        )
+        val shl_const = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 7),
+                MirBinOp.Shl,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(3), u8))
+            ),
+            span: empty_span()
+        )
+        val shl_signal = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 8),
+                MirBinOp.Shl,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+        val shr_signed = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 9),
+                MirBinOp.Shr,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+            ),
+            span: empty_span()
+        )
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [int_to_bool, bool_to_unsigned, shl_const, shl_signal, shr_signed],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 9)))))
+        )
+        val func = make_function("typed_ops", [u32, u8, make_i32(), make_bool()], u32, locals, [block])
+        val module = make_module("typed_ops_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for typed casts/shifts")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("flag_from_data <= '1' when data /= to_unsigned(0, 32) else '0';"))
+        check(vhdl.contains("count_from_flag <= to_unsigned(1, 8) when flag = '1' else to_unsigned(0, 8);"))
+        check(vhdl.contains("shl_const <= shift_left(data, 3);"))
+        check(vhdl.contains("shl_signal <= shift_left(data, to_integer(shamt_u));"))
+        check(vhdl.contains("shr_signed <= shift_right(data, to_integer(unsigned(shamt_s)));"))
+
+    it "compiles remainder and bitwise not operations":
+        val backend = make_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, make_i32()),
+            make_temp_local(3, "rem_value", make_i32()),
+            make_temp_local(4, "inverted", make_i32())
+        ]
+
+        val rem_inst = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 3),
+                MirBinOp.Rem,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+            ),
+            span: empty_span()
+        )
+        val bitnot_inst = MirInst(
+            kind: MirInstKind.UnaryOp(
+                LocalId(id: 4),
+                MirUnaryOp.BitNot,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [rem_inst, bitnot_inst],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val func = make_function("rem_not", [make_i32(), make_i32()], make_i32(), locals, [block])
+        val module = make_module("rem_not_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for rem/bitnot")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("rem_value <= a mod b;"))
+        check(vhdl.contains("inverted <= not rem_value;"))
+        check(vhdl.contains("result_out <= inverted;"))
+
+    it "compiles goto terminator to return block":
+        val backend = make_backend()
+
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_return_local(1, make_i32())
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.Goto(BlockId(id: 1))
+        )
+        val ret = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+        )
+        val func = make_function("goto_return", [make_i32()], make_i32(), locals, [entry, ret])
+        val module = make_module("goto_return_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for goto return")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("result_out <= a;"))
+
+    it "compiles goto chains and if arms that jump to returns":
+        val backend = make_backend()
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_jump = MirBlock(id: BlockId(id: 1), instructions: [], terminator: MirTerminator.Goto(BlockId(id: 3)))
+        val else_jump = MirBlock(id: BlockId(id: 2), instructions: [], terminator: MirTerminator.Goto(BlockId(id: 4)))
+        val then_ret = MirBlock(
+            id: BlockId(id: 3),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+        )
+        val else_ret = MirBlock(
+            id: BlockId(id: 4),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+        )
+
+        val func = make_function("select_jump", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_jump, else_jump, then_ret, else_ret])
+        val module = make_module("select_jump_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for if/goto return chain")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("result_out <= a when flag = '1' else b;"))
+
+    it "compiles switch terminator return targets to conditional result":
+        val backend = make_backend()
+        val u8 = MirType(kind: MirTypeKind.U8)
+        val locals = [
+            make_arg_local(0, 0, "sel", u8),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_arg_local(3, 3, "c", make_i32()),
+            make_return_local(4, make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [
+                    SwitchCase(value: 0, target: BlockId(id: 1)),
+                    SwitchCase(value: 1, target: BlockId(id: 2))
+                ],
+                BlockId(id: 3)
+            )
+        )
+        val case_zero = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+        )
+        val case_one = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))))
+        )
+        val default_case = MirBlock(
+            id: BlockId(id: 3),
+            instructions: [],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("select_switch", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
+        val module = make_module("switch_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for switch terminator")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("result_out <= a when sel = to_unsigned(0, 8) else b when sel = to_unsigned(1, 8) else c;"))
+
+    it "compiles switch targets with computations inside combinational process":
+        val backend = make_resolved_backend()
+        val u8 = make_u8()
+        val locals = [
+            make_arg_local(0, 0, "sel", u8),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_arg_local(3, 3, "c", make_i32()),
+            make_return_local(4, make_i32()),
+            make_temp_local(5, "case_zero_tmp", make_i32()),
+            make_temp_local(6, "case_one_tmp", make_i32()),
+            make_temp_local(7, "default_tmp", make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [
+                    SwitchCase(value: 0, target: BlockId(id: 1)),
+                    SwitchCase(value: 1, target: BlockId(id: 2))
+                ],
+                BlockId(id: 3)
+            )
+        )
+        val case_zero_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 5),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val case_zero = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [case_zero_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+        val case_one_sub = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 6),
+                MirBinOp.Sub,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val case_one = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [case_one_sub],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6)))))
+        )
+        val default_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 7),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(2), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val default_case = MirBlock(
+            id: BlockId(id: 3),
+            instructions: [default_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+        )
+        val func = make_function("select_switch_computed", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
+        val module = make_module("switch_computed_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for computed switch terminator")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("if sel = to_unsigned(0, 8) then"))
+        check(vhdl.contains("elsif sel = to_unsigned(1, 8) then"))
+        check(vhdl.contains("v_case_zero_tmp := a + to_signed(1, 32);"))
+        check(vhdl.contains("v_case_one_tmp := b - to_signed(1, 32);"))
+        check(vhdl.contains("v_default_tmp := c + to_signed(2, 32);"))
+        check(vhdl.contains("result_out <= v_default_tmp;"))
+
+    it "compiles struct aggregate to named record assignment":
+        val backend = make_backend()
+        val point_symbol = SymbolId(id: 42)
+        val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
+        val fields = [
+            make_field("x", make_i32()),
+            make_field("y", make_i32())
+        ]
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[point_symbol] = make_type_def(point_symbol, "Point", MirTypeDefKind.Struct(fields))
+
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_return_local(2, point_type),
+            make_temp_local(3, "point_sig", point_type)
+        ]
+        val aggregate = MirInst(
+            kind: MirInstKind.Aggregate(
+                LocalId(id: 3),
+                AggregateKind.Struct(point_symbol),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [aggregate],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("make_point", [make_i32(), make_i32()], point_type, locals, [block])
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[func.symbol] = func
+        val module = MirModule(name: "point_mod", functions: functions, statics: {}, constants: {}, types: types)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for struct aggregate")
+
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        check(compiled.package_vhdl.unwrap().contains("type Point is record"))
+        val vhdl = compiled.vhdl
+        check(vhdl.contains("result_out : out Point"))
+        check(vhdl.contains("signal point_sig : Point;"))
+        check(vhdl.contains("point_sig <= (x => a, y => b);"))
+        check(vhdl.contains("result_out <= point_sig;"))
+
+    it "compiles branch-local struct aggregates inside combinational process":
+        val backend = make_resolved_backend()
+        val point_symbol = SymbolId(id: 44)
+        val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
+        val fields = [
+            make_field("x", make_i32()),
+            make_field("y", make_i32())
+        ]
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[point_symbol] = make_type_def(point_symbol, "BranchPoint", MirTypeDefKind.Struct(fields))
+
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, point_type),
+            make_temp_local(4, "then_point", point_type),
+            make_temp_local(5, "else_point", point_type)
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_aggregate = MirInst(
+            kind: MirInstKind.Aggregate(
+                LocalId(id: 4),
+                AggregateKind.Struct(point_symbol),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_aggregate],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_aggregate = MirInst(
+            kind: MirInstKind.Aggregate(
+                LocalId(id: 5),
+                AggregateKind.Struct(point_symbol),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_aggregate],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+
+        val func = make_function("select_point", [make_bool(), make_i32(), make_i32()], point_type, locals, [entry, then_block, else_block])
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[func.symbol] = func
+        val module = MirModule(name: "branch_point_mod", functions: functions, statics: {}, constants: {}, types: types)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for branch-local struct aggregate")
+
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        check(compiled.package_vhdl.unwrap().contains("type BranchPoint is record"))
+        val vhdl = compiled.vhdl
+        check(vhdl.contains("comb: process(all)"))
+        check(vhdl.contains("variable v_then_point : BranchPoint;"))
+        check(vhdl.contains("v_then_point := (x => a, y => b);"))
+        check(vhdl.contains("result_out <= v_then_point;"))
+        check(vhdl.contains("v_else_point := (x => b, y => a);"))
+        check(vhdl.contains("result_out <= v_else_point;"))
+
+    it "compiles struct field get and set":
+        val backend = make_backend()
+        val point_symbol = SymbolId(id: 43)
+        val point_type = MirType(kind: MirTypeKind.Struct(point_symbol))
+        val fields = [
+            make_field("x", make_i32()),
+            make_field("y", make_i32())
+        ]
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[point_symbol] = make_type_def(point_symbol, "Point2", MirTypeDefKind.Struct(fields))
+
+        val locals = [
+            make_arg_local(0, 0, "new_y", make_i32()),
+            make_return_local(1, make_i32()),
+            make_temp_local(2, "point_sig", point_type),
+            make_temp_local(3, "x_out", make_i32())
+        ]
+        val set_y = MirInst(
+            kind: MirInstKind.SetField(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                1,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+            ),
+            span: empty_span()
+        )
+        val get_x = MirInst(
+            kind: MirInstKind.GetField(
+                LocalId(id: 3),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                0
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [set_y, get_x],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("point_fields", [make_i32()], make_i32(), locals, [block])
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[func.symbol] = func
+        val module = MirModule(name: "point_fields_mod", functions: functions, statics: {}, constants: {}, types: types)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for struct fields")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("signal point_sig : Point2;"))
+        check(vhdl.contains("point_sig.y <= new_y;"))
+        check(vhdl.contains("x_out <= point_sig.x;"))
+        check(vhdl.contains("result_out <= x_out;"))
+
+    it "compiles array aggregate assignment":
+        val backend = make_backend()
+        val array_type = MirType(kind: MirTypeKind.Array(make_i32(), 2))
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_arg_local(1, 1, "b", make_i32()),
+            make_temp_local(2, "arr_sig", array_type)
+        ]
+        val aggregate = MirInst(
+            kind: MirInstKind.Aggregate(
+                LocalId(id: 2),
+                AggregateKind.Array(make_i32()),
+                [
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))
+                ]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [aggregate],
+            terminator: nil
+        )
+        val func = make_function("make_pair_array", [make_i32(), make_i32()], make_type(MirTypeKind.Unit), locals, [block])
+        val module = make_module("array_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for array aggregate")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("signal arr_sig : array (0 to 1) of signed(31 downto 0);"))
+        check(vhdl.contains("arr_sig <= (0 => a, 1 => b);"))
+
+    it "compiles explicit VHDL port map component instantiation":
+        val backend = make_backend()
+        val locals = [
+            make_arg_local(0, 0, "lhs", make_i32()),
+            make_arg_local(1, 1, "rhs", make_i32()),
+            make_return_local(2, make_i32()),
+            make_temp_local(3, "sum_sig", make_i32())
+        ]
+        val port_map = MirInst(
+            kind: MirInstKind.VhdlPortMap(
+                "adder",
+                "u_add",
+                [
+                    ("a", MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))),
+                    ("b", MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))),
+                    ("result_out", MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))))
+                ]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [port_map],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+        )
+        val func = make_function("uses_adder", [make_i32(), make_i32()], make_i32(), locals, [block])
+        val module = make_module("port_map_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for VHDL port map")
+
+        val vhdl = result.unwrap().vhdl
+        check(vhdl.contains("u_add: entity work.adder"))
+        check(vhdl.contains("port map ("))
+        check(vhdl.contains("a => lhs,"))
+        check(vhdl.contains("b => rhs,"))
+        check(vhdl.contains("result_out => sum_sig"))
+        check(vhdl.contains("result_out <= sum_sig;"))
+
+    it "rejects unsupported MIR instruction with hard error":
+        val backend = make_backend()
+
+        # Use a Call instruction which is unsupported in VHDL
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_return_local(1, make_i32())
+        ]
+
+        val call_inst = MirInst(
+            kind: MirInstKind.Call(
+                Some(LocalId(id: 1)),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("missing_helper"), MirType(kind: MirTypeKind.Opaque(name: "fnptr")))),
+                [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))]
+            ),
+            span: empty_span()
+        )
+
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [call_inst],
+            terminator: nil
+        )
+
+        val func = make_function("bad_func", [make_i32()], make_i32(), locals, [block])
+        val module = make_module("bad_module", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for unsupported Call instruction")
+
+    it "rejects storage allocation as unsupported synthesizable VHDL":
+        val backend = make_backend()
+        val ptr_type = MirType(kind: MirTypeKind.Ptr(make_i32(), true))
+        val locals = [
+            make_return_local(0, make_i32()),
+            make_temp_local(1, "ptr", ptr_type)
+        ]
+        val alloc_inst = MirInst(
+            kind: MirInstKind.Alloc(LocalId(id: 1), make_i32()),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [alloc_inst],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))))
+        )
+        val func = make_function("bad_alloc", [], make_i32(), locals, [block])
+        val module = make_module("bad_alloc_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for unsupported Alloc instruction")
+
+    it "rejects pointer address arithmetic as unsupported synthesizable VHDL":
+        val backend = make_backend()
+        val ptr_type = MirType(kind: MirTypeKind.Ptr(make_i32(), true))
+        val locals = [
+            make_arg_local(0, 0, "ptr", ptr_type),
+            make_return_local(1, make_i32()),
+            make_temp_local(2, "next_ptr", ptr_type)
+        ]
+        val gep_inst = MirInst(
+            kind: MirInstKind.GetElementPtr(
+                LocalId(id: 2),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [gep_inst],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), make_i32()))))
+        )
+        val func = make_function("bad_gep", [ptr_type], make_i32(), locals, [block])
+        val module = make_module("bad_gep_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for unsupported GetElementPtr instruction")
+
+    it "rejects indirect calls as unsupported synthesizable VHDL":
+        val backend = make_backend()
+        val ptr_type = MirType(kind: MirTypeKind.Ptr(make_i32(), false))
+        val locals = [
+            make_arg_local(0, 0, "fn_ptr", ptr_type),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_return_local(2, make_i32())
+        ]
+        val call_inst = MirInst(
+            kind: MirInstKind.CallIndirect(
+                Some(LocalId(id: 2)),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))],
+                MirSignature(params: [make_i32()], return_type: make_i32(), is_variadic: false)
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [call_inst],
+            terminator: nil
+        )
+        val func = make_function("bad_call_indirect", [ptr_type, make_i32()], make_i32(), locals, [block])
+        val module = make_module("bad_call_indirect_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for unsupported CallIndirect instruction")
+
+    it "rejects arbitrary intrinsics as unsupported synthesizable VHDL":
+        val backend = make_backend()
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_return_local(1, make_i32())
+        ]
+        val intrinsic_inst = MirInst(
+            kind: MirInstKind.Intrinsic(
+                Some(LocalId(id: 1)),
+                "host_only",
+                [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))]
+            ),
+            span: empty_span()
+        )
+        val block = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [intrinsic_inst],
+            terminator: nil
+        )
+        val func = make_function("bad_intrinsic", [make_i32()], make_i32(), locals, [block])
+        val module = make_module("bad_intrinsic_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for unsupported Intrinsic instruction")
+
+    it "rejects delayed signal assignment inside structured process":
+        val backend = make_resolved_backend()
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32()),
+            make_temp_local(4, "tmp", make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 4),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val delayed_assign = MirInst(
+            kind: MirInstKind.VhdlSignalAssign(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                Some(10)
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [delayed_assign],
+            terminator: MirTerminator.Return(nil)
+        )
+        val func = make_function("bad_delayed_process_assign", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("bad_delayed_process_assign_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected hard error for delayed signal assignment inside process")
+
+# ============================================================================
+# Backend Compilation: Package Generation
+# ============================================================================
+
+describe "VHDL Backend E2E - Package Generation":
+    """
+    ## Backend-Generated Package Validation
+
+    Tests that MIR modules with type/constant definitions compile to
+    valid VHDL packages.
+    """
+
+    it "compiles struct type to VHDL record package":
+        val backend = make_backend()
+
+        val struct_fields = [
+            make_field("x", make_i32()),
+            make_field("y", make_i32())
+        ]
+
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        val point_symbol = SymbolId(id: 0)
+        types[point_symbol] = make_type_def(point_symbol, "Point", MirTypeDefKind.Struct(struct_fields))
+
+        val module = MirModule(
+            name: "geom",
+            functions: {},
+            statics: {},
+            constants: {},
+            types: types
+        )
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Package compilation failed")
+
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        val pkg = compiled.package_vhdl.unwrap()
+        check(pkg.contains("package geom_pkg is"))
+        check(pkg.contains("type Point is record"))
+        check(pkg.contains("x : signed(31 downto 0);"))
+        check(pkg.contains("y : signed(31 downto 0);"))
+        check(pkg.contains("end record"))
+        check(pkg.contains("end package geom_pkg;"))
+
+    it "compiles enum type to VHDL enumeration":
+        val backend = make_backend()
+
+        val variants = [
+            make_variant("Idle", 0),
+            make_variant("Running", 1),
+            make_variant("Done", 2)
+        ]
+
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        val state_symbol = SymbolId(id: 0)
+        types[state_symbol] = make_type_def(state_symbol, "State", MirTypeDefKind.Enum(variants))
+
+        val module = MirModule(
+            name: "fsm",
+            functions: {},
+            statics: {},
+            constants: {},
+            types: types
+        )
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Enum package compilation failed")
+
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        val pkg = compiled.package_vhdl.unwrap()
+        check(pkg.contains("type State is (Idle, Running, Done);"))
+
+# ============================================================================
+# GHDL Validation: Backend-Generated VHDL
+# ============================================================================
+
+describe "VHDL Backend E2E - GHDL Validation", tag: ["only-compiled", "slow"]:
+    """
+    ## GHDL Analysis/Elaboration of Backend-Generated VHDL
+
+    The authoritative proof that backend-generated VHDL is valid:
+    feed it to GHDL and verify it passes analysis and elaboration.
+
+    Requires GHDL to be installed. Tests are skipped if GHDL is not available.
+    """
+
+    slow_it "backend-generated adder passes GHDL analysis":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val valid = write_and_analyze(compile_add_vhdl(), "adder")
+        check_msg(valid, "GHDL rejected backend-generated add VHDL")
+
+    slow_it "backend-generated add passes GHDL elaboration and synthesis":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val add_vhdl = compile_add_vhdl()
+        val path = "/tmp/simple_vhdl_e2e_add_roundtrip.vhd"
+        check(vhdl_write_file(path, add_vhdl))
+
+        val analyze = ghdl_analyze(path)
+        check_msg(analyze.success, "GHDL analysis failed for generated add VHDL")
+
+        val elaborate = ghdl_elaborate("add")
+        check_msg(elaborate.success, "GHDL elaboration failed for generated add entity")
+
+        val synth = ghdl_synth("add")
+        check_msg(synth.success, "GHDL synthesis failed for generated add entity")
+
+    slow_it "backend-generated add testbench simulates 2 plus 3 equals 5":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val add_vhdl = compile_add_vhdl()
+        val add_path = "/tmp/simple_vhdl_e2e_add_tb_dut.vhd"
+        check(vhdl_write_file(add_path, add_vhdl))
+        val add_analyze = ghdl_analyze(add_path)
+        check_msg(add_analyze.success, "GHDL analysis failed for generated add DUT")
+
+        val tb_path = "/tmp/simple_vhdl_e2e_add_tb.vhd"
+        val tb_vhdl = make_add_testbench()
+        check(vhdl_write_file(tb_path, tb_vhdl))
+        val tb_analyze = ghdl_analyze(tb_path)
+        check_msg(tb_analyze.success, "GHDL analysis failed for generated add testbench")
+
+        val elaborate = ghdl_elaborate("add_tb")
+        check_msg(elaborate.success, "GHDL elaboration failed for generated add testbench")
+
+        val run_result = ghdl_run("add_tb", Some("10ns"))
+        check_msg(run_result.success, "GHDL simulation failed for generated add testbench")
+
+    slow_it "backend-generated package passes GHDL analysis":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val backend = make_backend()
+        val struct_fields = [
+            make_field("x", make_i32()),
+            make_field("y", make_i32())
+        ]
+
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        val point_symbol = SymbolId(id: 0)
+        types[point_symbol] = make_type_def(point_symbol, "Point", MirTypeDefKind.Struct(struct_fields))
+
+        val module = MirModule(name: "geom", functions: {}, statics: {}, constants: {}, types: types)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Package compilation failed")
+
+        val compiled = result.unwrap()
+        check(compiled.package_vhdl.?)
+        val pkg_valid = write_and_analyze(compiled.package_vhdl.unwrap(), "geom_pkg")
+        check_msg(pkg_valid, "GHDL rejected backend-generated package VHDL")
+
+    slow_it "backend-generated entity with package elaborates":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val backend = make_resolved_backend()
+        val locals = [
+            make_arg_local(0, 0, "a", make_i32()),
+            make_return_local(1, make_i32())
+        ]
+
+        val nop_inst = MirInst(kind: MirInstKind.Nop, span: empty_span())
+        val copy_inst = MirInst(
+            kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)),
+            span: empty_span()
+        )
+
+        val block = MirBlock(id: BlockId(id: 0), instructions: [nop_inst, copy_inst], terminator: nil)
+        val func = make_function("passthrough", [make_i32()], make_i32(), locals, [block])
+        val module = make_module("pass_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for passthrough")
+
+        val compiled = result.unwrap()
+        val valid = write_and_analyze(compiled.vhdl, "passthrough")
+        check_msg(valid, "GHDL rejected backend-generated passthrough VHDL")
+
+    slow_it "backend-generated computed if process passes GHDL analysis and elaboration":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val backend = make_resolved_backend()
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_return_local(3, make_i32()),
+            make_temp_local(4, "then_tmp", make_i32()),
+            make_temp_local(5, "else_tmp", make_i32())
+        ]
+
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.If(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                BlockId(id: 1),
+                BlockId(id: 2)
+            )
+        )
+        val then_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 4),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val then_block = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [then_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 4)))))
+        )
+        val else_sub = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 5),
+                MirBinOp.Sub,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val else_block = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [else_sub],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+
+        val func = make_function("select_computed_i32", [make_bool(), make_i32(), make_i32()], make_i32(), locals, [entry, then_block, else_block])
+        val module = make_module("select_computed_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for computed if process")
+
+        val path = "/tmp/simple_vhdl_e2e_select_computed_i32.vhd"
+        check(vhdl_write_file(path, result.unwrap().vhdl))
+        val valid = ghdl_analyze_and_elaborate(path, "select_computed_i32")
+        check_msg(valid.success, "GHDL rejected backend-generated computed if process VHDL")
+
+    slow_it "backend-generated switch process passes GHDL analysis and elaboration":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val backend = make_resolved_backend()
+        val u8 = make_u8()
+        val locals = [
+            make_arg_local(0, 0, "sel", u8),
+            make_arg_local(1, 1, "a", make_i32()),
+            make_arg_local(2, 2, "b", make_i32()),
+            make_arg_local(3, 3, "c", make_i32()),
+            make_return_local(4, make_i32()),
+            make_temp_local(5, "case_zero_tmp", make_i32()),
+            make_temp_local(6, "case_one_tmp", make_i32()),
+            make_temp_local(7, "default_tmp", make_i32())
+        ]
+        val entry = MirBlock(
+            id: BlockId(id: 0),
+            instructions: [],
+            terminator: MirTerminator.Switch(
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))),
+                [
+                    SwitchCase(value: 0, target: BlockId(id: 1)),
+                    SwitchCase(value: 1, target: BlockId(id: 2))
+                ],
+                BlockId(id: 3)
+            )
+        )
+        val case_zero_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 5),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val case_zero = MirBlock(
+            id: BlockId(id: 1),
+            instructions: [case_zero_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 5)))))
+        )
+        val case_one_sub = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 6),
+                MirBinOp.Sub,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(1), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val case_one = MirBlock(
+            id: BlockId(id: 2),
+            instructions: [case_one_sub],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 6)))))
+        )
+        val default_add = MirInst(
+            kind: MirInstKind.BinOp(
+                LocalId(id: 7),
+                MirBinOp.Add,
+                MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3))),
+                MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(2), make_i32()))
+            ),
+            span: empty_span()
+        )
+        val default_case = MirBlock(
+            id: BlockId(id: 3),
+            instructions: [default_add],
+            terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 7)))))
+        )
+        val func = make_function("select_switch_computed", [u8, make_i32(), make_i32(), make_i32()], make_i32(), locals, [entry, case_zero, case_one, default_case])
+        val module = make_module("switch_computed_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Backend compilation failed for computed switch process")
+
+        val path = "/tmp/simple_vhdl_e2e_select_switch_computed.vhd"
+        check(vhdl_write_file(path, result.unwrap().vhdl))
+        val valid = ghdl_analyze_and_elaborate(path, "select_switch_computed")
+        check_msg(valid.success, "GHDL rejected backend-generated switch process VHDL")
+
+    slow_it "GHDL rejects intentionally invalid VHDL":
+        if not ghdl_available():
+            print "SKIP: GHDL not available"
+            return
+
+        val invalid_vhdl = "this is not valid VHDL at all;"
+        val path = "/tmp/simple_vhdl_e2e_negative.vhd"
+        check(vhdl_write_file(path, invalid_vhdl))
+        val result = ghdl_analyze(path)
+        check_msg(not result.success, "GHDL should reject invalid VHDL")
+        check(result.exit_code != 0)
+
+# ============================================================================
+# Backend Error Handling
+# ============================================================================
+
+describe "VHDL Backend E2E - Error Handling":
+    """
+    ## Fail-Fast Behavior
+
+    Verifies that the backend rejects unsupported constructs with
+    deterministic, actionable error messages.
+    """
+
+    it "rejects float type with clear error":
+        val backend = make_backend()
+        val locals = [
+            make_arg_local(0, 0, "x", MirType(kind: MirTypeKind.F64)),
+            make_return_local(1, MirType(kind: MirTypeKind.F64))
+        ]
+
+        val copy_inst = MirInst(
+            kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)),
+            span: empty_span()
+        )
+
+        val block = MirBlock(id: BlockId(id: 0), instructions: [copy_inst], terminator: nil)
+        val func = make_function("bad_float", [MirType(kind: MirTypeKind.F64)], MirType(kind: MirTypeKind.F64), locals, [block])
+        val module = make_module("float_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected error for f64 type in VHDL backend")
+
+    it "rejects float constant with clear error":
+        val backend = make_backend()
+        val locals = [
+            make_return_local(0, make_i32()),
+            make_temp_local(1, "bad", make_i32())
+        ]
+
+        val float_const = MirInst(
+            kind: MirInstKind.Const(
+                LocalId(id: 1),
+                MirConstValue.Float(3.14),
+                MirType(kind: MirTypeKind.F64)
+            ),
+            span: empty_span()
+        )
+
+        val block = MirBlock(id: BlockId(id: 0), instructions: [float_const], terminator: nil)
+        val func = make_function("bad_const", [], make_i32(), locals, [block])
+        val module = make_module("const_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_err(), "Expected error for float constant in VHDL backend")
+
+    it "Codegen trait returns Vhdl backend kind":
+        val backend = make_backend()
+        expect backend.backend_kind() == BackendKind.Vhdl
+        expect backend.backend_name() == "vhdl"
+
+# ============================================================================
+# Resolved vs Unresolved Types
+# ============================================================================
+
+describe "VHDL Backend E2E - Resolved Types":
+    """
+    ## std_logic vs bit Mode
+
+    Tests that resolved mode correctly uses std_logic instead of bit.
+    """
+
+    it "uses bit for unresolved backend":
+        val backend = make_backend()
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_return_local(1, make_bool())
+        ]
+        val copy = MirInst(kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)), span: empty_span())
+        val block = MirBlock(id: BlockId(id: 0), instructions: [copy], terminator: nil)
+        val func = make_function("id_bool", [make_bool()], make_bool(), locals, [block])
+        val module = make_module("bool_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Unresolved bool compilation failed")
+        check(result.unwrap().vhdl.contains("bit"))
+
+    it "uses std_logic for resolved backend":
+        val backend = make_resolved_backend()
+        val locals = [
+            make_arg_local(0, 0, "flag", make_bool()),
+            make_return_local(1, make_bool())
+        ]
+        val copy = MirInst(kind: MirInstKind.Copy(LocalId(id: 1), LocalId(id: 0)), span: empty_span())
+        val block = MirBlock(id: BlockId(id: 0), instructions: [copy], terminator: nil)
+        val func = make_function("id_bool_resolved", [make_bool()], make_bool(), locals, [block])
+        val module = make_module("bool_resolved_mod", func)
+
+        val result = backend.compile(module)
+        check_msg(result.is_ok(), "Resolved bool compilation failed")
+        check(result.unwrap().vhdl.contains("std_logic"))

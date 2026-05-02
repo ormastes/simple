@@ -1,0 +1,87 @@
+# Simple (.spl) replacement for build_embedded_table.sh
+# Build RISC-V 32 with Embedded String Table
+# This version embeds the string table directly in the binary's .smt section.
+# No external .smt files needed - QEMU reads table from binary memory.
+
+use app.io.mod.{shell, shell_bool, shell_output, file_exists, print, exit}
+use std.text.{trim}
+
+fn detect_assembler() -> text:
+    if (shell_bool("command -v clang-16") and
+        shell_bool("command -v lld-16")):
+        print "Using LLVM toolchain (clang-16 + lld-16)\n"
+        return "clang-16"
+    else if (shell_bool("command -v clang") and
+             shell_bool("command -v lld")):
+        print "Using LLVM toolchain (clang + lld)\n"
+        return "clang"
+    else:
+        print "Error: LLVM not found\n"
+        print "Install: sudo apt install clang-16 lld-16\n"
+        exit(1)
+    return ""
+
+fn main():
+    print "Building RISC-V 32 with Embedded String Table\n"
+    print "\n"
+
+    val assembler = detect_assembler()
+    print "\n"
+
+    # Build
+    print "Compiling hello_riscv32_embedded_table.s...\n"
+    val cmd = "{assembler} -target riscv32-unknown-none -march=rv32i -mabi=ilp32 -nostdlib -static -Wl,-Ttext=0x80000000 -Wl,--no-relax -fuse-ld=lld hello_riscv32_embedded_table.s -o hello_riscv32_embedded_table.elf"
+    val result = shell(cmd)
+    if result.exit_code != 0:
+        print "Build failed\n"
+        exit(1)
+
+    if file_exists("hello_riscv32_embedded_table.elf"):
+        val size_bytes = trim(shell_output("du -b hello_riscv32_embedded_table.elf | cut -f1"))
+        val size_kb = trim(shell_output("echo \"scale=1; {size_bytes} / 1024\" | bc"))
+        print "\n"
+        print "Built: hello_riscv32_embedded_table.elf ({size_bytes} bytes, {size_kb}KB)\n"
+        print "\n"
+
+        # Show sections
+        if shell_bool("command -v llvm-objdump"):
+            print "ELF Sections:\n"
+            val sections = shell_output("llvm-objdump -h hello_riscv32_embedded_table.elf | grep -E '\\.text|\\.smt|\\.data'")
+            print "{sections}\n"
+            print "\n"
+        else if shell_bool("command -v riscv64-unknown-elf-objdump"):
+            print "ELF Sections:\n"
+            val sections = shell_output("riscv64-unknown-elf-objdump -h hello_riscv32_embedded_table.elf | grep -E '\\.text|\\.smt|\\.data'")
+            print "{sections}\n"
+            print "\n"
+
+        # Show size comparison
+        if file_exists("hello_riscv32_semihost.elf"):
+            val text_size = trim(shell_output("du -b hello_riscv32_semihost.elf | cut -f1"))
+            val reduction = trim(shell_output("echo $(( 100 - ({size_bytes} * 100 / {text_size}) ))"))
+            print "Size Comparison:\n"
+            print "  Text mode (embedded strings):  {text_size} bytes\n"
+            print "  Embedded table (IDs only):     {size_bytes} bytes\n"
+            print "  Reduction:                     {reduction}%\n"
+            print "\n"
+
+        # Display string table
+        print "String Table Contents:\n"
+        if shell_bool("command -v llvm-objdump"):
+            val table_info = shell_output("llvm-objdump -s -j .smt hello_riscv32_embedded_table.elf 2>/dev/null || echo '  (use readelf to inspect .smt section)'")
+            print "{table_info}\n"
+
+        print "\n"
+        print "Build complete!\n"
+        print "\n"
+        print "To test with custom QEMU:\n"
+        print "  resources/qemu/bin/qemu-system-riscv32-simple \\\n"
+        print "    -M virt -bios none \\\n"
+        print "    -kernel hello_riscv32_embedded_table.elf \\\n"
+        print "    -nographic \\\n"
+        print "    -semihosting-config enable=on\n"
+    else:
+        print "Build failed\n"
+        exit(1)
+
+main()

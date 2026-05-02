@@ -1,0 +1,191 @@
+# @cover src/lib/nogc_sync_mut/ndarray/ndarray.spl 80%
+"""
+# NDArray Constructors Specification
+
+**Feature IDs:** scilib-ndarray-ctor
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Plan:** doc/03_plan/agent_tasks/scilib_port_ndarray.md
+**Design:** doc/05_design/scilib_port_architecture.md
+**Research:** doc/01_research/scilib_fortran_port/02_python_api_surface.md
+
+## Overview
+
+NDArray<T> constructors for the std.ndarray namespace — the typed-array
+substrate underneath std.linalg, std.df, and std.ml. Public API uses typed
+wrappers (Float64, Int64, Index, Shape, DType, Device) — never raw primitive
+types. Allocator path goes through `rt_f64_array_alloc` / `rt_i64_array_alloc`
+(PERF-SUGAR-001 hard gate, T-PERFSUGAR-01).
+
+## Behavior
+
+- `zeros(shape)`, `ones(shape)`, `full(shape, fill)` — eager fill
+- `empty(shape)` — uninitialized memory; assert shape and len only
+- `arange(start, end, step)` — half-open interval, mirrors NumPy
+- `linspace(start, end, n)` — closed interval, n points
+- `eye(n)` — n×n identity matrix
+- `array(seq)` — from a Simple sequence; dtype inferred
+
+Tasks covered: T-NDARRAY-09 (zeros/ones/empty/full/eye), T-NDARRAY-10
+(from_seq / array), T-NDARRAY-11 (arange/linspace).
+
+## Implementation Notes
+
+All ctors must respect OQ-F: the underlying typed buffer alloc is gated on
+T-PERFSUGAR-01 (`rt_f64_array_alloc` family) being shipped first. These specs
+will fail until both T-PERFSUGAR-01 and T-NDARRAY-09/10/11 land — that is
+TDD; no skip(), no weakened assertions (per `feedback_no_coverups`).
+"""
+
+use std.spipe.*
+use std.ndarray.*
+
+
+# ============================================================================
+# Test Group 1: zeros / ones / full / empty / eye
+# ============================================================================
+
+describe "NDArray eager-fill constructors":
+    """
+    ## Eager-fill ctors
+
+    `zeros`, `ones`, `full`, `eye` allocate a typed buffer and write the
+    fill value across all elements. `empty` allocates without writing.
+    """
+
+    context "zeros":
+        it "produces an all-zero 1-D array of length 4 with dtype Float64":
+            val a = zeros(Shape.new([Index.new(4)]))
+            expect a.shape == Shape.new([Index.new(4)])
+            expect a.len() == Index.new(4)
+            expect a.dtype == DType.F64
+            expect a.get(Index.new(0)) == Float64.new(0.0)
+            expect a.get(Index.new(3)) == Float64.new(0.0)
+
+        it "produces an all-zero 2x3 matrix":
+            val a = zeros(Shape.new([Index.new(2), Index.new(3)]))
+            expect a.shape == Shape.new([Index.new(2), Index.new(3)])
+            expect a.len() == Index.new(6)
+            expect a.get_at([Index.new(1), Index.new(2)]) == Float64.new(0.0)
+
+    context "ones":
+        it "produces an all-ones 1-D array of length 5":
+            val a = ones(Shape.new([Index.new(5)]))
+            expect a.len() == Index.new(5)
+            expect a.get(Index.new(0)) == Float64.new(1.0)
+            expect a.get(Index.new(4)) == Float64.new(1.0)
+
+    context "full":
+        it "fills a 3-element array with Float64.new(2.5)":
+            val a = full(Shape.new([Index.new(3)]), Float64.new(2.5))
+            expect a.get(Index.new(0)) == Float64.new(2.5)
+            expect a.get(Index.new(1)) == Float64.new(2.5)
+            expect a.get(Index.new(2)) == Float64.new(2.5)
+
+    context "empty":
+        it "produces an array of the requested shape and length without asserting contents":
+            val a = empty(Shape.new([Index.new(2), Index.new(2)]))
+            expect a.shape == Shape.new([Index.new(2), Index.new(2)])
+            expect a.len() == Index.new(4)
+
+    context "eye":
+        it "produces an n×n identity matrix":
+            val a = eye(Index.new(3))
+            expect a.shape == Shape.new([Index.new(3), Index.new(3)])
+            expect a.get_at([Index.new(0), Index.new(0)]) == Float64.new(1.0)
+            expect a.get_at([Index.new(1), Index.new(1)]) == Float64.new(1.0)
+            expect a.get_at([Index.new(0), Index.new(1)]) == Float64.new(0.0)
+            expect a.get_at([Index.new(2), Index.new(0)]) == Float64.new(0.0)
+
+
+# ============================================================================
+# Test Group 2: arange / linspace
+# ============================================================================
+
+describe "NDArray range/sequence constructors":
+    """
+    ## Range ctors
+
+    `arange(start, end, step)` is a half-open interval (NumPy parity).
+    `linspace(start, end, n)` is a closed interval with n equally-spaced
+    points (also NumPy parity).
+    """
+
+    context "arange":
+        it "produces [0, 1, 2, 3] for arange(0, 4, 1)":
+            val a = arange(Float64.new(0.0), Float64.new(4.0), Float64.new(1.0))
+            expect a.len() == Index.new(4)
+            expect a.get(Index.new(0)) == Float64.new(0.0)
+            expect a.get(Index.new(3)) == Float64.new(3.0)
+
+        it "produces [0, 2, 4] for arange(0, 6, 2)":
+            val a = arange(Float64.new(0.0), Float64.new(6.0), Float64.new(2.0))
+            expect a.len() == Index.new(3)
+            expect a.get(Index.new(2)) == Float64.new(4.0)
+
+    context "linspace":
+        it "produces [0.0, 0.5, 1.0] for linspace(0, 1, 3) — closed interval":
+            val a = linspace(Float64.new(0.0), Float64.new(1.0), Index.new(3))
+            expect a.len() == Index.new(3)
+            expect a.get(Index.new(0)) == Float64.new(0.0)
+            expect a.get(Index.new(1)) == Float64.new(0.5)
+            expect a.get(Index.new(2)) == Float64.new(1.0)
+
+        it "produces a single-point array for linspace(start, end, 1)":
+            val a = linspace(Float64.new(2.0), Float64.new(7.0), Index.new(1))
+            expect a.len() == Index.new(1)
+            expect a.get(Index.new(0)) == Float64.new(2.0)
+
+
+# ============================================================================
+# Test Group 3: array() — from Simple sequence
+# ============================================================================
+
+describe "NDArray.array (from sequence)":
+    """
+    ## from_seq / array
+
+    `array(seq)` constructs an NDArray<Float64> from a Simple list of
+    typed scalars. dtype is inferred from the first element.
+    """
+
+    context "1-D Float64 sequence":
+        it "preserves length and element values":
+            val a = array([Float64.new(1.5), Float64.new(2.5), Float64.new(3.5)])
+            expect a.shape == Shape.new([Index.new(3)])
+            expect a.dtype == DType.F64
+            expect a.get(Index.new(0)) == Float64.new(1.5)
+            expect a.get(Index.new(2)) == Float64.new(3.5)
+
+    context "Int64 sequence":
+        it "constructs an Int64-typed ndarray":
+            val a = array_i64([Int64.new(10), Int64.new(20), Int64.new(30)])
+            expect a.dtype == DType.I64
+            expect a.get(Index.new(1)) == Int64.new(20)
+
+
+# ============================================================================
+# Test Group 4: Error / edge conditions
+# ============================================================================
+
+describe "NDArray ctor error paths":
+    """
+    ## Error handling
+
+    Constructors return Result<NDArray<T>, NdarrayError> on invalid input
+    (negative size, mismatched seq length, invalid step). Per language
+    rule: `Result<T, E>` + `?`; no exceptions.
+    """
+
+    it "returns an error for negative shape dim":
+        val r = try_zeros(Shape.new([Index.new(-1)]))
+        expect r.is_err() == true
+
+    it "returns an error for arange step=0":
+        val r = try_arange(Float64.new(0.0), Float64.new(4.0), Float64.new(0.0))
+        expect r.is_err() == true
+
+    it "returns an error for linspace n=0":
+        val r = try_linspace(Float64.new(0.0), Float64.new(1.0), Index.new(0))
+        expect r.is_err() == true

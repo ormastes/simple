@@ -1,0 +1,201 @@
+# WidgetStore Specification
+#
+# Tests session-scoped WidgetStore: record CRUD, prop get/set,
+# child registration, WidgetNode store-param methods, and
+# store isolation (two stores share no data).
+
+use common.ui.widget.{WidgetNode, WidgetRecord, WidgetProp, default_widget_record}
+use common.ui.widget_store.{WidgetStore, new_widget_store}
+
+
+# ============================================================================
+# Empty Store
+# ============================================================================
+
+describe "WidgetStore creation":
+    it "creates an empty store with zero records":
+        val store = WidgetStore.new()
+        expect store.record_count() to_equal 0
+        expect store.prop_count() to_equal 0
+
+
+# ============================================================================
+# Record Operations
+# ============================================================================
+
+describe "WidgetStore upsert_record":
+    it "inserts a record and retrieves it by id":
+        val store = new_widget_store()
+        val record = default_widget_record("ws_rec1", "panel")
+        store.upsert_record(record)
+        expect store.record_count() to_equal 1
+        val found = store.get_record("ws_rec1")
+        expect found != nil to_equal true
+
+    it "replaces an existing record with the same id":
+        val store = new_widget_store()
+        val r1 = default_widget_record("ws_rec2", "panel")
+        store.upsert_record(r1)
+        val r2 = WidgetRecord(id: "ws_rec2", kind: "text", layout: "hbox", visible: false, focused: false)
+        store.upsert_record(r2)
+        expect store.record_count() to_equal 1
+        val found = store.get_record("ws_rec2")
+        expect found.kind to_equal "text"
+
+    it "returns nil for a missing record":
+        val store = new_widget_store()
+        val found = store.get_record("ws_missing")
+        expect found to_be_nil
+
+describe "WidgetStore require_record":
+    it "creates a default panel when record is missing":
+        val store = new_widget_store()
+        val record = store.require_record("ws_auto1")
+        expect record.kind to_equal "panel"
+        expect store.record_count() to_equal 1
+
+
+# ============================================================================
+# Prop Operations
+# ============================================================================
+
+describe "WidgetStore set_prop and get_prop":
+    it "sets and gets a property":
+        val store = new_widget_store()
+        store.set_prop("ws_p1", "color", "red")
+        expect store.get_prop("ws_p1", "color") to_equal "red"
+        expect store.prop_count() to_equal 1
+
+    it "returns empty string for missing prop":
+        val store = new_widget_store()
+        expect store.get_prop("ws_p2", "missing") to_equal ""
+
+    it "replaces an existing prop value":
+        val store = new_widget_store()
+        store.set_prop("ws_p3", "label", "old")
+        store.set_prop("ws_p3", "label", "new")
+        expect store.get_prop("ws_p3", "label") to_equal "new"
+        expect store.prop_count() to_equal 1
+
+
+# ============================================================================
+# Child Operations
+# ============================================================================
+
+describe "WidgetStore register_child":
+    it "registers children and retrieves child ids":
+        val store = new_widget_store()
+        store.register_child("ws_parent", "ws_child1")
+        store.register_child("ws_parent", "ws_child2")
+        val ids = store.get_child_ids("ws_parent")
+        expect ids.len() to_equal 2
+
+    it "avoids duplicate child registration":
+        val store = new_widget_store()
+        store.register_child("ws_parent2", "ws_dup1")
+        store.register_child("ws_parent2", "ws_dup1")
+        val ids = store.get_child_ids("ws_parent2")
+        expect ids.len() to_equal 1
+
+    it "returns empty list when no children registered":
+        val store = new_widget_store()
+        val ids = store.get_child_ids("ws_no_parent")
+        expect ids.len() to_equal 0
+
+
+# ============================================================================
+# Node Operations
+# ============================================================================
+
+describe "WidgetStore get_node":
+    it "returns a WidgetNode handle when record exists":
+        val store = new_widget_store()
+        store.upsert_record(default_widget_record("ws_node1", "text"))
+        val node = store.get_node("ws_node1")
+        expect node != nil to_equal true
+
+    it "returns nil when record does not exist":
+        val store = new_widget_store()
+        val node = store.get_node("ws_ghost")
+        expect node to_be_nil
+
+
+# ============================================================================
+# WidgetNode Store-Param Methods
+# ============================================================================
+
+describe "WidgetNode get_prop_from and set_prop_in":
+    it "reads and writes props through a store":
+        val store = new_widget_store()
+        store.upsert_record(default_widget_record("ws_spn1", "panel"))
+        val node = WidgetNode(id: "ws_spn1")
+        node.set_prop_in(store, "title", "Hello")
+        expect node.get_prop_from(store, "title") to_equal "Hello"
+
+    it "has_prop_in returns false when prop is absent":
+        val store = new_widget_store()
+        val node = WidgetNode(id: "ws_spn2")
+        expect node.has_prop_in(store, "nope") to_equal false
+
+describe "WidgetNode children_from":
+    it "returns child nodes from a store":
+        val store = new_widget_store()
+        store.upsert_record(default_widget_record("ws_sp_parent", "panel"))
+        store.upsert_record(default_widget_record("ws_sp_child1", "text"))
+        store.upsert_record(default_widget_record("ws_sp_child2", "text"))
+        store.register_child("ws_sp_parent", "ws_sp_child1")
+        store.register_child("ws_sp_parent", "ws_sp_child2")
+        val parent = WidgetNode(id: "ws_sp_parent")
+        val children = parent.children_from(store)
+        expect children.len() to_equal 2
+
+describe "WidgetNode kind_name_from":
+    it "returns the kind from a store record":
+        val store = new_widget_store()
+        store.upsert_record(default_widget_record("ws_kind1", "button"))
+        val node = WidgetNode(id: "ws_kind1")
+        expect node.kind_name_from(store) to_equal "button"
+
+describe "WidgetNode find_by_id_in":
+    it "finds a node by id in a store-backed tree":
+        val store = new_widget_store()
+        store.upsert_record(default_widget_record("ws_find_root", "panel"))
+        store.upsert_record(default_widget_record("ws_find_leaf", "text"))
+        store.register_child("ws_find_root", "ws_find_leaf")
+        val root = WidgetNode(id: "ws_find_root")
+        val found = root.find_by_id_in(store, "ws_find_leaf")
+        expect found != nil to_equal true
+
+    it "returns nil when target id is not in the tree":
+        val store = new_widget_store()
+        store.upsert_record(default_widget_record("ws_find_root2", "panel"))
+        val root = WidgetNode(id: "ws_find_root2")
+        val found = root.find_by_id_in(store, "ws_find_ghost")
+        expect found to_be_nil
+
+describe "WidgetNode collect_ids_from":
+    it "collects all ids in a store-backed tree":
+        val store = new_widget_store()
+        store.upsert_record(default_widget_record("ws_coll_root", "panel"))
+        store.upsert_record(default_widget_record("ws_coll_a", "text"))
+        store.upsert_record(default_widget_record("ws_coll_b", "text"))
+        store.register_child("ws_coll_root", "ws_coll_a")
+        store.register_child("ws_coll_root", "ws_coll_b")
+        val root = WidgetNode(id: "ws_coll_root")
+        val ids = root.collect_ids_from(store)
+        expect ids.len() to_equal 3
+
+
+# ============================================================================
+# Store Isolation
+# ============================================================================
+
+describe "WidgetStore isolation":
+    it "two stores do not share data":
+        val store_a = new_widget_store()
+        val store_b = new_widget_store()
+        store_a.upsert_record(default_widget_record("ws_iso1", "panel"))
+        store_a.set_prop("ws_iso1", "color", "blue")
+        expect store_a.record_count() to_equal 1
+        expect store_b.record_count() to_equal 0
+        expect store_b.get_prop("ws_iso1", "color") to_equal ""

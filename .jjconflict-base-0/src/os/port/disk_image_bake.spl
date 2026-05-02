@@ -1,0 +1,273 @@
+# SimpleOS Phase-2 I5 bake harness — combines initramfs + FAT32 disk image.
+#
+# Pre-built artifacts must exist:
+#   /tmp/hello_rs_simpleos/target/target/release/hello_rs  (Rust ELF)
+#   /tmp/hello_c.o  (cross-compiled C object)
+#
+# Run:
+#   bin/simple run src/os/port/disk_image_bake.spl
+#
+# IF-13 wave-4d (this revision): the previous wave-4 bake emitted a 32 MiB
+# FAT32 stub via an in-interpreter array-doubling pad because the per-element
+# zero-pad in disk_image.build() was intractable (>30s/MiB). With
+# rt_file_truncate now available, disk_image.build() writes only the ~150 KiB
+# structural prefix and asks the kernel to zero-extend, so we can call the
+# real builders with embedded payloads here.
+#
+# Opt-in fast path (BUG-FAT32-BAKE-FATSIZE-TOO-SMALL):
+#   touch build/os/.bake_use_mkfs_fat
+# When the marker exists AND mkfs.fat + mcopy are on PATH, bake shells out to
+# scripts/bake_disk_via_mkfs.shs which uses host dosfstools/mtools to produce a
+# conforming FAT32 image in milliseconds, bypassing the interpreter perf wall.
+# If either tool is missing the existing interpreter path is used unchanged.
+
+use std.io_runtime as io
+use std.process
+use std.common.{str_last_index_of}
+use os.port.initramfs_pack.{PackConfig, PayloadEntry as InitramfsPayloadEntry,
+    cmd_build, validate_image}
+use os.port.disk_image.{DiskImageConfig, PayloadEntry, build}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn _load_payload(path: text, name83: text) -> Result<PayloadEntry, text>:
+    """Read a file and wrap as a FAT32 8.3 directory entry (flat root placement)."""
+    _load_payload_at(path, name83, "")
+
+fn _load_payload_at(path: text, name83: text, guest_path: text) -> Result<PayloadEntry, text>:
+    """Read a file and wrap as a FAT32 PayloadEntry with an optional guest VFS path."""
+    if not io.file_exists(path):
+        return Err("bake: payload missing: " + path)
+    val data: [u8] = rt_file_read_bytes(path) ?? []
+    if data.length == 0:
+        return Err("bake: payload empty or unreadable: " + path)
+    Ok(PayloadEntry(path: name83, data: data, guest_path: guest_path))
+
+fn _build_initramfs(out_initramfs: text, hello_rs_path: text, hello_c_path: text) -> Result<(), text>:
+    """Build a real initramfs image and inject the bake payloads into it."""
+    var payloads: List<InitramfsPayloadEntry> = [
+        InitramfsPayloadEntry(
+            host_path: hello_rs_path,
+            guest_path: "/usr/share/test/hello_rs",
+            is_dir: false,
+        ),
+    ]
+    if io.file_exists(hello_c_path):
+        payloads.push(InitramfsPayloadEntry(
+            host_path: hello_c_path,
+            guest_path: "/usr/share/test/hello_c.o",
+            is_dir: false,
+        ))
+
+    val config = PackConfig(
+        simple_binary: "build/bootstrap/stage3/simple_simpleos",
+        llvm_prefix: "build/os/llvm/cross/bin",
+        sysroot: "build/os/sysroot",
+        source_tree: "src",
+        output: out_initramfs,
+        staging: out_initramfs + ".staging",
+        payloads: payloads,
+    )
+    cmd_build(config)
+    if not validate_image(out_initramfs):
+        return Err("bake: initramfs validation failed: " + out_initramfs)
+    Ok(())
+
+fn _host_tool_available(tool: text) -> bool:
+    """Return true if `tool` is on the host PATH (via `which`)."""
+    val result = process.run("which", [tool])
+    result.exit_code == 0
+
+fn _fat83_to_filename(name83: text) -> text:
+    """Convert FAT 8.3 raw field (11 chars, space-padded) to a dotted filename.
+
+    Examples:
+      "VERSION TXT" -> "VERSION.TXT"
+      "BROWSMFSMF " -> "BROWSMF.SMF"
+      "HELLORS    " -> "HELLORS"
+    """
+    val trimmed = name83.trim()
+    if trimmed.length <= 8:
+        return trimmed
+    val base = trimmed.substring(0, 8).trim()
+    val ext = trimmed.substring(8, trimmed.length).trim()
+    if ext.length == 0:
+        return base
+    base + "." + ext
+
+fn _bake_via_mkfs_fat(out_disk: text, payloads: [PayloadEntry], size_mb: u64) -> Result<(), text>:
+    """Fast path: stage payloads to a temp dir then invoke scripts/bake_disk_via_mkfs.shs.
+
+    Requires mkfs.fat and mcopy to be on the host PATH.  Falls back gracefully
+    (returns Err) so the caller can switch to the interpreter path.
+    """
+    val staging = "build/os/bake_fat32_staging"
+    io.dir_create_all(staging)
+
+    # Write each in-memory payload to the staging directory.
+    # If the entry carries a guest_path (e.g. /sys/apps/simple), mirror the full
+    # directory tree under staging/ so mcopy -s picks it up at the right location.
+    # Entries without a guest_path land at flat root as before.
+    for entry in payloads:
+        var dest: text
+        if entry.guest_path.length > 0:
+            # guest_path must start with / (e.g. /sys/apps/simple).
+            # Stage at staging/sys/apps/simple so mcopy -s picks it up.
+            dest = staging + entry.guest_path
+            val last_slash: i64 = str_last_index_of(dest, "/")
+            if last_slash > 0:
+                val parent = dest.substring(0, last_slash as u64)
+                io.dir_create_all(parent)
+        else:
+            val filename = _fat83_to_filename(entry.path)
+            dest = staging + "/" + filename
+        if not rt_file_write_bytes(dest, entry.data):
+            return Err("bake: failed to stage payload: " + dest)
+
+    # Invoke the shell helper: sh scripts/bake_disk_via_mkfs.shs <img> <mb> <staging_dir>
+    val mb_str = size_mb.to_text()
+    val bake_result = process.run("sh", [
+        "scripts/bake_disk_via_mkfs.shs",
+        out_disk,
+        mb_str,
+        staging,
+    ])
+    if bake_result.exit_code != 0:
+        return Err("bake: bake_disk_via_mkfs.shs failed (exit=" + bake_result.exit_code.to_text() + "): " + bake_result.stderr)
+    if bake_result.stdout.length > 0:
+        print bake_result.stdout
+    Ok(())
+
+fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
+    """Produce FAT32 disk image + validated initramfs image from pre-built ELF artifacts."""
+    val hello_rs_path      = "/tmp/hello_rs_simpleos/target/target/release/hello_rs"
+    val hello_c_path       = "/tmp/hello_c.o"
+    val clang_static_path  = "build/os/clang_static/bin/clang_static"
+    val rustc_static_path  = "build/os/rust_static/bin/rustc_static"
+    val simple_path        = "bin/release/x86_64-unknown-linux-gnu/simple"
+
+    # --- Step 1: load hello_rs ---
+    val rs_entry = match _load_payload(hello_rs_path, "HELLORS    "):
+        case Ok(e):
+            print "bake: loaded hello_rs (" + io.file_size(hello_rs_path).to_text() + " bytes)"
+            e
+        case Err(msg):
+            return Err(msg)
+
+    # --- Step 2: load hello_c.o (informational only — wave-4a embeds first payload) ---
+    if io.file_exists(hello_c_path):
+        print "bake: loaded hello_c.o (" + io.file_size(hello_c_path).to_text() + " bytes)"
+    else:
+        print "bake: warning — hello_c.o not found (skipped, wave-4a single-payload limit)"
+
+    # --- Step 3: ensure output dir + build real FAT32 image ---
+    io.dir_create_all("build/os")
+    var payloads: [PayloadEntry] = [rs_entry]
+
+    # --- Step 3-fixtures: VERSION.TXT + BROWSMF.SMF (mount-probe satisfaction) ---
+    # The kernel's _vfs_boot_init_pure_nvme_fat32 requires both files to mount.
+    # Wave-4a flat-bake puts files at root; Team S's mount-probe fallback (commit
+    # bbdd694a05) reads /BROWSMF.SMF after /SYS/APPS/BROWSMF.SMF fails.
+    val version_bytes: [u8] = [83u8, 105u8, 109u8, 112u8, 108u8, 101u8, 79u8, 83u8, 32u8, 80u8, 49u8, 10u8]
+    payloads.push(PayloadEntry(path: "VERSION TXT", data: version_bytes, guest_path: ""))
+    print "bake: added VERSION.TXT stub (12 bytes)"
+    # BROWSMF stand-in: reuse the hello_rs ELF — kernel only checks ELF magic.
+    val brow_entry = PayloadEntry(path: "BROWSMFSMF ", data: rs_entry.data, guest_path: "")
+    payloads.push(brow_entry)
+    print "bake: added BROWSMF.SMF stand-in (mirrors hello_rs ELF)"
+
+    # --- Step 3a/3b: optionally bake clang_static + rustc_static ---
+    # Skipped if either marker file is absent (default-off mode keeps bake fast).
+    # To enable: `touch build/os/.bake_include_toolchain` before running bake.
+    # 100+ MB binaries through interpreter take 5+ min (BUG-INTERPRETER-PERF).
+    if io.file_exists("build/os/.bake_include_toolchain"):
+        if io.file_exists(clang_static_path):
+            match _load_payload(clang_static_path, "CLANGSTCSMF"):
+                case Ok(e):
+                    print "bake: loaded clang_static (" + io.file_size(clang_static_path).to_text() + " bytes)"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: clang_static load failed (skipped)"
+        if io.file_exists(rustc_static_path):
+            match _load_payload(rustc_static_path, "RUSTCSTCSMF"):
+                case Ok(e):
+                    print "bake: loaded rustc_static (" + io.file_size(rustc_static_path).to_text() + " bytes)"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: rustc_static load failed (skipped)"
+        if io.file_exists(simple_path):
+            val simple_size = io.file_size(simple_path)
+            # Root entry /SIMPLSTC.SMF — vfs_init reader reads this path at boot.
+            match _load_payload(simple_path, "SIMPLSTCSMF"):
+                case Ok(e):
+                    print "bake: loaded simple -> /SIMPLSTC.SMF (" + simple_size.to_text() + " bytes)"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: simple root entry failed (skipped)"
+            # /sys/apps/simple — legacy mount-probe path.
+            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/sys/apps/simple"):
+                case Ok(e):
+                    print "bake: loaded simple -> /sys/apps/simple"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: simple /sys/apps entry failed (skipped)"
+            # /usr/bin/simple — shell PATH lookup (PATH=/usr/bin:/sys/apps).
+            match _load_payload_at(simple_path, "SIMPLSTCSMF", "/usr/bin/simple"):
+                case Ok(e):
+                    print "bake: loaded simple -> /usr/bin/simple"
+                    payloads.push(e)
+                case Err(_):
+                    print "bake: simple /usr/bin entry failed (skipped)"
+    else:
+        print "bake: toolchain skipped (touch build/os/.bake_include_toolchain to embed)"
+
+    val size_mb: u64 = 32u64
+    val cfg = DiskImageConfig(size_mb: size_mb, payloads: payloads)
+
+    # --- Opt-in fast path via mkfs.fat + mcopy (BUG-FAT32-BAKE-FATSIZE-TOO-SMALL) ---
+    # Gate: marker file exists AND both host tools are on PATH.
+    # If any gate fails, fall through to the interpreter builder unchanged.
+    var used_fast_path = false
+    if io.file_exists("build/os/.bake_use_mkfs_fat"):
+        if _host_tool_available("mkfs.fat"):
+            if _host_tool_available("mcopy"):
+                print "bake: using mkfs.fat+mcopy fast path (build/os/.bake_use_mkfs_fat present)"
+                match _bake_via_mkfs_fat(out_disk, payloads, size_mb):
+                    case Ok(()):
+                        used_fast_path = true
+                    case Err(e):
+                        print "bake: fast path failed (" + e + "); falling back to interpreter path"
+            else:
+                print "bake: mcopy not found on PATH; falling back to interpreter path (install mtools to use fast path)"
+        else:
+            print "bake: mkfs.fat not found on PATH; falling back to interpreter path"
+
+    if not used_fast_path:
+        match build(cfg, out_disk):
+            case Ok(()):
+                ()
+            case Err(e):
+                return Err("bake: disk_image.build failed: " + e)
+
+    val img_size = io.file_size(out_disk)
+    print "bake: disk image written: " + out_disk + " (" + img_size.to_text() + " bytes)"
+
+    # --- Step 4: build real initramfs image with injected payloads ---
+    match _build_initramfs(out_initramfs, hello_rs_path, hello_c_path):
+        case Ok(()):
+            print "bake: initramfs image written: " + out_initramfs
+        case Err(e):
+            return Err(e)
+
+    Ok(())
+
+fn main():
+    """Entry: bin/simple src/os/port/disk_image_bake.spl"""
+    val disk = "build/os/simpleos_disk.img"
+    val initramfs = "build/os/simpleos_initramfs.cpio.zst"
+    match bake(disk, initramfs):
+        case Ok(()):
+            print "bake done: " + disk + "  " + initramfs
+        case Err(e):
+            print "bake FAILED: " + e

@@ -1,0 +1,90 @@
+# TreeSitter Specification
+#
+# **Feature IDs:** #TS-CORE-001
+# **Category:** Compiler | Parser
+# **Status:** Active
+# @cover src/compiler/10.frontend/treesitter.spl 80%
+#
+# Core outline parsing tests — TreeSitter.new(source).parse_outline()
+
+use compiler.treesitter.*
+
+
+describe "TreeSitter Outline Parsing", tag: ["only-compiled"]:
+    it "parses single function":
+        val src = "fn main() -> i64:\n    0\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.functions.len()).to_equal(1)
+
+    it "finds function name":
+        val src = "fn hello():\n    42\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.functions[0].name).to_equal("hello")
+
+    it "parses class declaration":
+        val src = "class Point:\n    x: i64\n    y: i64\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.classes.len()).to_equal(1)
+
+    it "parses multiple declarations":
+        val src = "fn a():\n    1\n\nfn b():\n    2\n\nclass C:\n    v: i64\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.functions.len()).to_equal(2)
+        expect(outline.classes.len()).to_equal(1)
+
+    it "handles empty source":
+        var ts = TreeSitter.new("")
+        val outline = ts.parse_outline()
+        expect(outline.functions.len()).to_equal(0)
+        expect(outline.classes.len()).to_equal(0)
+
+    it "captures canonical asm block outline without warning":
+        val src = "fn test():\n    asm { cli }\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.asm_blocks.len()).to_equal(1)
+        expect(outline.asm_blocks[0].payload).to_equal("cli")
+        expect(outline.asm_blocks[0].syntax_form).to_equal("braced")
+        expect(outline.asm_blocks[0].is_legacy).to_equal(false)
+        expect(outline.errors.len()).to_equal(0)
+
+    it "captures volatile asm block with ARM hash immediate":
+        val src = "fn test():\n    asm volatile { bkpt #0 }\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.asm_blocks.len()).to_equal(1)
+        expect(outline.asm_blocks[0].is_volatile).to_equal(true)
+        expect(outline.asm_blocks[0].payload).to_equal("bkpt #0")
+
+    it "captures RISC-V asm operands with commas":
+        val src = "fn test():\n    asm { fence rw, rw }\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.asm_blocks[0].payload).to_equal("fence rw, rw")
+
+    it "keeps placeholder braces inside asm content":
+        val src = "fn test():\n    asm { mov {out}, eax }\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.asm_blocks[0].payload).to_equal("mov {out}, eax")
+
+    it "warns for legacy parenthesized asm":
+        val src = "fn test():\n    asm(\"nop\")\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.asm_blocks.len()).to_equal(1)
+        expect(outline.asm_blocks[0].is_legacy).to_equal(true)
+        expect(outline.asm_blocks[0].syntax_form).to_equal("paren")
+        expect(outline.errors.len()).to_equal(1)
+
+    it "warns for legacy colon asm":
+        val src = "fn test():\n    asm: \"nop\"\n"
+        var ts = TreeSitter.new(src)
+        val outline = ts.parse_outline()
+        expect(outline.asm_blocks.len()).to_equal(1)
+        expect(outline.asm_blocks[0].syntax_form).to_equal("colon_string")
+        expect(outline.errors.len()).to_equal(1)

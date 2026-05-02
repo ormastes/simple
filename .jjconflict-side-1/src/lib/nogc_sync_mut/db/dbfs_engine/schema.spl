@@ -1,0 +1,616 @@
+# DBFS Catalog Schema — all 11 D3 tables.
+#
+# Each table has a Key struct, a Row struct, and a SchemaTable<Row, Key>
+# that provides insert() / get() backed by an in-memory list (pager
+# integration deferred to Phase 6 per MDSOC staging).
+#
+# Key shapes (D3, locked):
+#   INODE:         InodeKey(ino_id)
+#   DENTRY:        DentryKey(parent_ino, name: text)   ← text key, NOT name_hash
+#   FILE_VERSION:  FileVersionKey(ino_id, gen)
+#   EXTENT_REF:    ExtentRefKey(ino_id, gen, logical_offset)
+#   EXTENT:        ExtentKey(extent_id)
+#   BLOCK_BLOB:    BlockBlobKey(blob_id)
+#   XATTR:         XattrKey(ino_id, name)
+#   ACL_ENTRY:     AclEntryKey(ino_id, principal)
+#   TXN:           TxnKey(txn_id)
+#   WAL_RECORD:    WalRecordKey(lsn)
+#   STORAGE_CLASS: StorageClassKey(class_id)
+#
+# Maps to: AC-3, AC-10, AC-9, D3.
+
+use std.io_runtime
+
+# ============================================================
+# INODE
+# ============================================================
+
+struct InodeKey:
+    ino_id: i64
+
+struct InodeRow:
+    ino_id:     i64
+    gen:        i64
+    mode:       u32
+    uid:        u32
+    gid:        u32
+    link_count: i64
+    size:       i64
+    mtime:      i64
+    ctime:      i64
+    flags:      u32
+
+# ============================================================
+# DENTRY
+# ============================================================
+
+struct DentryKey:
+    parent_ino: i64
+    name:       text
+
+struct DentryRow:
+    parent_ino: i64
+    name:       text
+    child_ino:  i64
+    gen:        i64
+
+# ============================================================
+# FILE_VERSION
+# ============================================================
+
+struct FileVersionKey:
+    ino_id: i64
+    gen:    i64
+
+struct FileVersionRow:
+    ino_id:          i64
+    gen:             i64
+    root_extent_ref: i64
+    version_flags:   u32
+
+# ============================================================
+# EXTENT_REF
+# ============================================================
+
+struct ExtentRefKey:
+    ino_id:         i64
+    gen:            i64
+    logical_offset: i64
+
+struct ExtentRefRow:
+    ino_id:         i64
+    gen:            i64
+    logical_offset: i64
+    length:         i64
+    extent_id:      i64
+
+# ============================================================
+# EXTENT
+# ============================================================
+
+struct ExtentKey:
+    extent_id: i64
+
+struct ExtentRow:
+    extent_id:     i64
+    blob_id:       i64
+    offset_in_blob: i64
+    length:        i64
+    checksum:      u64
+    compression:   u8
+    birth_gen:     i64
+    storage_class: i64
+
+# ============================================================
+# BLOCK_BLOB
+# ============================================================
+
+struct BlockBlobKey:
+    blob_id: i64
+
+struct BlockBlobRow:
+    blob_id:      i64
+    backend:      i64
+    backend_addr: i64
+    length:       i64
+
+# ============================================================
+# XATTR
+# ============================================================
+
+struct XattrKey:
+    ino_id: i64
+    name:   text
+
+struct XattrRow:
+    ino_id: i64
+    name:   text
+    value:  text
+
+# ============================================================
+# ACL_ENTRY
+# ============================================================
+
+struct AclEntryKey:
+    ino_id:    i64
+    principal: text
+
+struct AclEntryRow:
+    ino_id:    i64
+    principal: text
+    perms:     u32
+    allow_deny: u8
+
+# ============================================================
+# TXN
+# ============================================================
+
+struct TxnKey:
+    txn_id: i64
+
+struct TxnRow:
+    txn_id:    i64
+    status:    u8
+    lsn_first: i64
+    lsn_last:  i64
+
+# ============================================================
+# WAL_RECORD
+# ============================================================
+
+struct WalRecordKey:
+    lsn: i64
+
+struct WalRecordRow:
+    lsn:         i64
+    txn_id:      i64
+    record_type: i64
+    payload:     text
+
+# ============================================================
+# STORAGE_CLASS
+# ============================================================
+
+struct StorageClassKey:
+    class_id: i64
+
+struct StorageClassRow:
+    class_id:     i64
+    backend_kind: i64
+    hints:        text
+
+# ============================================================
+# Generic SchemaTable — in-memory backing for all tables
+# ============================================================
+
+struct InodeTableEntry:
+    key: InodeKey
+    row: InodeRow
+
+struct DentryTableEntry:
+    key: DentryKey
+    row: DentryRow
+
+struct FileVersionTableEntry:
+    key: FileVersionKey
+    row: FileVersionRow
+
+struct ExtentRefTableEntry:
+    key: ExtentRefKey
+    row: ExtentRefRow
+
+struct ExtentTableEntry:
+    key: ExtentKey
+    row: ExtentRow
+
+struct BlockBlobTableEntry:
+    key: BlockBlobKey
+    row: BlockBlobRow
+
+struct XattrTableEntry:
+    key: XattrKey
+    row: XattrRow
+
+struct AclEntryTableEntry:
+    key: AclEntryKey
+    row: AclEntryRow
+
+struct TxnTableEntry:
+    key: TxnKey
+    row: TxnRow
+
+struct WalRecordTableEntry:
+    key: WalRecordKey
+    row: WalRecordRow
+
+struct StorageClassTableEntry:
+    key: StorageClassKey
+    row: StorageClassRow
+
+# --- Typed table implementations ---
+
+struct InodeTable:
+    entries: [InodeTableEntry]
+    next_id: i64
+
+impl InodeTable:
+    static fn new() -> InodeTable:
+        InodeTable(entries: [], next_id: 1)
+
+    fn _find_idx(id: i64) -> i32:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].key.ino_id == id:
+                return i
+            i = i + 1
+        -1
+
+    me fn insert(row: InodeRow) -> Result<i64, text>:
+        val idx = self._find_idx(row.ino_id)
+        if idx >= 0:
+            self.entries[idx].row = row
+            return Ok(row.ino_id)
+        val key = InodeKey(ino_id: row.ino_id)
+        self.entries.push(InodeTableEntry(key: key, row: row))
+        Ok(row.ino_id)
+
+    fn get(key: InodeKey) -> Result<InodeRow, text>:
+        val idx = self._find_idx(key.ino_id)
+        if idx >= 0:
+            return Ok(self.entries[idx].row)
+        Err("schema: INODE not found")
+
+struct DentryTable:
+    entries: [DentryTableEntry]
+
+impl DentryTable:
+    static fn new() -> DentryTable:
+        DentryTable(entries: [])
+
+    me fn insert(row: DentryRow) -> Result<i64, text>:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.parent_ino == row.parent_ino and
+                self.entries[i].key.name == row.name):
+                self.entries[i].row = row
+                return Ok(row.child_ino)
+            i = i + 1
+        val key = DentryKey(parent_ino: row.parent_ino, name: row.name)
+        self.entries.push(DentryTableEntry(key: key, row: row))
+        Ok(row.child_ino)
+
+    fn get(key: DentryKey) -> Result<DentryRow, text>:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.parent_ino == key.parent_ino and
+                self.entries[i].key.name == key.name):
+                return Ok(self.entries[i].row)
+            i = i + 1
+        Err("schema: DENTRY not found")
+
+    fn list_children(parent_ino: i64) -> [DentryRow]:
+        var result: [DentryRow] = []
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].key.parent_ino == parent_ino:
+                result.push(self.entries[i].row)
+            i = i + 1
+        result
+
+    me fn remove(key: DentryKey) -> Result<(), text>:
+        var idx: i32 = -1
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.parent_ino == key.parent_ino and
+                self.entries[i].key.name == key.name):
+                idx = i
+            i = i + 1
+        if idx < 0:
+            return Err("schema: DENTRY not found for remove")
+        self.entries.remove(idx)
+        Ok(())
+
+struct FileVersionTable:
+    entries: [FileVersionTableEntry]
+
+impl FileVersionTable:
+    static fn new() -> FileVersionTable:
+        FileVersionTable(entries: [])
+
+    me fn insert(row: FileVersionRow) -> Result<i64, text>:
+        val key = FileVersionKey(ino_id: row.ino_id, gen: row.gen)
+        self.entries.push(FileVersionTableEntry(key: key, row: row))
+        Ok(row.ino_id)
+
+    fn get(key: FileVersionKey) -> Result<FileVersionRow, text>:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.ino_id == key.ino_id and
+                self.entries[i].key.gen == key.gen):
+                return Ok(self.entries[i].row)
+            i = i + 1
+        Err("schema: FILE_VERSION not found")
+
+struct ExtentRefTable:
+    entries: [ExtentRefTableEntry]
+
+impl ExtentRefTable:
+    static fn new() -> ExtentRefTable:
+        ExtentRefTable(entries: [])
+
+    me fn insert(row: ExtentRefRow) -> Result<i64, text>:
+        val key = ExtentRefKey(ino_id: row.ino_id, gen: row.gen, logical_offset: row.logical_offset)
+        # Replace if same key exists
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.ino_id == key.ino_id and
+                self.entries[i].key.gen == key.gen and
+                self.entries[i].key.logical_offset == key.logical_offset):
+                self.entries[i].row = row
+                return Ok(row.extent_id)
+            i = i + 1
+        self.entries.push(ExtentRefTableEntry(key: key, row: row))
+        Ok(row.extent_id)
+
+    fn get(key: ExtentRefKey) -> Result<ExtentRefRow, text>:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.ino_id == key.ino_id and
+                self.entries[i].key.gen == key.gen and
+                self.entries[i].key.logical_offset == key.logical_offset):
+                return Ok(self.entries[i].row)
+            i = i + 1
+        Err("schema: EXTENT_REF not found")
+
+struct ExtentTable:
+    entries: [ExtentTableEntry]
+
+impl ExtentTable:
+    static fn new() -> ExtentTable:
+        ExtentTable(entries: [])
+
+    fn _find_idx(id: i64) -> i32:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].key.extent_id == id:
+                return i
+            i = i + 1
+        -1
+
+    me fn insert(row: ExtentRow) -> Result<i64, text>:
+        self.entries.push(ExtentTableEntry(key: ExtentKey(extent_id: row.extent_id), row: row))
+        Ok(row.extent_id)
+
+    fn get(key: ExtentKey) -> Result<ExtentRow, text>:
+        val idx = self._find_idx(key.extent_id)
+        if idx >= 0:
+            return Ok(self.entries[idx].row)
+        Err("schema: EXTENT not found")
+
+struct BlockBlobTable:
+    entries: [BlockBlobTableEntry]
+
+impl BlockBlobTable:
+    static fn new() -> BlockBlobTable:
+        BlockBlobTable(entries: [])
+
+    fn _find_idx(id: i64) -> i32:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].key.blob_id == id:
+                return i
+            i = i + 1
+        -1
+
+    me fn insert(row: BlockBlobRow) -> Result<i64, text>:
+        self.entries.push(BlockBlobTableEntry(key: BlockBlobKey(blob_id: row.blob_id), row: row))
+        Ok(row.blob_id)
+
+    fn get(key: BlockBlobKey) -> Result<BlockBlobRow, text>:
+        val idx = self._find_idx(key.blob_id)
+        if idx >= 0:
+            return Ok(self.entries[idx].row)
+        Err("schema: BLOCK_BLOB not found")
+
+struct XattrTable:
+    entries: [XattrTableEntry]
+
+impl XattrTable:
+    static fn new() -> XattrTable:
+        XattrTable(entries: [])
+
+    me fn insert(row: XattrRow) -> Result<i64, text>:
+        val key = XattrKey(ino_id: row.ino_id, name: row.name)
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.ino_id == key.ino_id and
+                self.entries[i].key.name == key.name):
+                self.entries[i].row = row
+                return Ok(0)
+            i = i + 1
+        self.entries.push(XattrTableEntry(key: key, row: row))
+        Ok(0)
+
+    fn get(key: XattrKey) -> Result<XattrRow, text>:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.ino_id == key.ino_id and
+                self.entries[i].key.name == key.name):
+                return Ok(self.entries[i].row)
+            i = i + 1
+        Err("schema: XATTR not found")
+
+struct AclEntryTable:
+    entries: [AclEntryTableEntry]
+
+impl AclEntryTable:
+    static fn new() -> AclEntryTable:
+        AclEntryTable(entries: [])
+
+    me fn insert(row: AclEntryRow) -> Result<i64, text>:
+        val key = AclEntryKey(ino_id: row.ino_id, principal: row.principal)
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.ino_id == key.ino_id and
+                self.entries[i].key.principal == key.principal):
+                self.entries[i].row = row
+                return Ok(0)
+            i = i + 1
+        self.entries.push(AclEntryTableEntry(key: key, row: row))
+        Ok(0)
+
+    fn get(key: AclEntryKey) -> Result<AclEntryRow, text>:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if (self.entries[i].key.ino_id == key.ino_id and
+                self.entries[i].key.principal == key.principal):
+                return Ok(self.entries[i].row)
+            i = i + 1
+        Err("schema: ACL_ENTRY not found")
+
+struct TxnTable:
+    entries: [TxnTableEntry]
+
+impl TxnTable:
+    static fn new() -> TxnTable:
+        TxnTable(entries: [])
+
+    fn _find_idx(id: i64) -> i32:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].key.txn_id == id:
+                return i
+            i = i + 1
+        -1
+
+    me fn insert(row: TxnRow) -> Result<i64, text>:
+        val idx = self._find_idx(row.txn_id)
+        if idx >= 0:
+            self.entries[idx].row = row
+            return Ok(row.txn_id)
+        self.entries.push(TxnTableEntry(key: TxnKey(txn_id: row.txn_id), row: row))
+        Ok(row.txn_id)
+
+    fn get(key: TxnKey) -> Result<TxnRow, text>:
+        val idx = self._find_idx(key.txn_id)
+        if idx >= 0:
+            return Ok(self.entries[idx].row)
+        Err("schema: TXN not found")
+
+struct WalRecordTable:
+    entries: [WalRecordTableEntry]
+
+impl WalRecordTable:
+    static fn new() -> WalRecordTable:
+        WalRecordTable(entries: [])
+
+    fn _find_idx(lsn: i64) -> i32:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].key.lsn == lsn:
+                return i
+            i = i + 1
+        -1
+
+    me fn insert(row: WalRecordRow) -> Result<i64, text>:
+        self.entries.push(WalRecordTableEntry(key: WalRecordKey(lsn: row.lsn), row: row))
+        Ok(row.lsn)
+
+    fn get(key: WalRecordKey) -> Result<WalRecordRow, text>:
+        val idx = self._find_idx(key.lsn)
+        if idx >= 0:
+            return Ok(self.entries[idx].row)
+        Err("schema: WAL_RECORD not found")
+
+struct StorageClassTable:
+    entries: [StorageClassTableEntry]
+
+impl StorageClassTable:
+    static fn new() -> StorageClassTable:
+        # Pre-populate with the 6 static rows
+        val entries: [StorageClassTableEntry] = [
+            StorageClassTableEntry(key: StorageClassKey(class_id: 0), row: StorageClassRow(class_id: 0, backend_kind: 0, hints: "META_DURABLE")),
+            StorageClassTableEntry(key: StorageClassKey(class_id: 1), row: StorageClassRow(class_id: 1, backend_kind: 1, hints: "DB_WAL")),
+            StorageClassTableEntry(key: StorageClassKey(class_id: 2), row: StorageClassRow(class_id: 2, backend_kind: 2, hints: "DB_TEMP")),
+            StorageClassTableEntry(key: StorageClassKey(class_id: 3), row: StorageClassRow(class_id: 3, backend_kind: 3, hints: "MODEL_IMMUTABLE")),
+            StorageClassTableEntry(key: StorageClassKey(class_id: 4), row: StorageClassRow(class_id: 4, backend_kind: 4, hints: "GENERAL_MUTABLE")),
+            StorageClassTableEntry(key: StorageClassKey(class_id: 5), row: StorageClassRow(class_id: 5, backend_kind: 5, hints: "CHECKPOINT_SNAPSHOT"))
+        ]
+        StorageClassTable(entries: entries)
+
+    fn _find_idx(id: i64) -> i32:
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].key.class_id == id:
+                return i
+            i = i + 1
+        -1
+
+    me fn insert(row: StorageClassRow) -> Result<i64, text>:
+        val idx = self._find_idx(row.class_id)
+        if idx >= 0:
+            self.entries[idx].row = row
+            return Ok(row.class_id)
+        self.entries.push(StorageClassTableEntry(key: StorageClassKey(class_id: row.class_id), row: row))
+        Ok(row.class_id)
+
+    fn get(key: StorageClassKey) -> Result<StorageClassRow, text>:
+        val idx = self._find_idx(key.class_id)
+        if idx >= 0:
+            return Ok(self.entries[idx].row)
+        Err("schema: STORAGE_CLASS not found")
+
+    fn scan_all() -> Result<[StorageClassRow], text>:
+        """Return all storage class rows."""
+        var result: [StorageClassRow] = []
+        for entry in self.entries:
+            result.push(entry.row)
+        Ok(result)
+
+# ============================================================
+# SchemaTable — facade that exposes all 11 typed tables
+# ============================================================
+
+struct SchemaTable:
+    """Facade providing named constructors for all 11 D3 catalog tables.
+
+    Usage:
+        val tbl = SchemaTable.inode()
+        tbl.insert(row).unwrap()
+        val got = tbl.get(InodeKey(ino_id: 1)).unwrap()
+    """
+    _marker: u8   # ensures non-zero size
+
+impl SchemaTable:
+    static fn inode() -> InodeTable:
+        InodeTable.new()
+
+    static fn dentry() -> DentryTable:
+        DentryTable.new()
+
+    static fn file_version() -> FileVersionTable:
+        FileVersionTable.new()
+
+    static fn extent_ref() -> ExtentRefTable:
+        ExtentRefTable.new()
+
+    static fn extent() -> ExtentTable:
+        ExtentTable.new()
+
+    static fn block_blob() -> BlockBlobTable:
+        BlockBlobTable.new()
+
+    static fn xattr() -> XattrTable:
+        XattrTable.new()
+
+    static fn acl_entry() -> AclEntryTable:
+        AclEntryTable.new()
+
+    static fn txn() -> TxnTable:
+        TxnTable.new()
+
+    static fn wal_record() -> WalRecordTable:
+        WalRecordTable.new()
+
+    static fn storage_class() -> StorageClassTable:
+        StorageClassTable.new()

@@ -1,0 +1,304 @@
+# Simple Language Syntax Migration Tool - fix if val pattern
+# Migrated from: scripts/fix_if_val_pattern.py
+# Purpose: Fix 'if val Some(x) = ...' pattern to use match instead
+
+use fs.{read_text, write_text}
+use regex.{replace_all, is_match}
+
+# use file_utils.{find_spl_files, count_changed_lines}  # TODO: Import file utils module
+
+# Migration statistics
+struct FixIfValStats:
+    files_processed: u64
+    files_modified: u64
+    patterns_fixed: u64
+
+impl FixIfValStats:
+    # Create empty stats
+    static fn new() -> FixIfValStats:
+        FixIfValStats(
+            files_processed: 0,
+            files_modified: 0,
+            patterns_fixed: 0
+        )
+
+    # Record processed file
+    me add_processed():
+        self.files_processed = self.files_processed + 1
+
+    # Record modified file
+    me add_modified(patterns: u64):
+        self.files_modified = self.files_modified + 1
+        self.patterns_fixed = self.patterns_fixed + patterns
+
+    # Generate summary report
+    fn summary() -> text:
+        var report = ""
+        report = report + "=== Fix If-Val Pattern Complete ===\n"
+        report = report + "Files processed: {self.files_processed}\n"
+        report = report + "Files modified: {self.files_modified}\n"
+        report = report + "Patterns fixed: {self.patterns_fixed}\n"
+        report
+
+# File migration result
+struct MigrationResult:
+    modified: bool
+    patterns_fixed: u64
+    error: text
+
+impl MigrationResult:
+    # No changes made
+    static fn unchanged() -> MigrationResult:
+        MigrationResult(
+            modified: false,
+            patterns_fixed: 0,
+            error: ""
+        )
+
+    # Changes made successfully
+    static fn fixed(patterns: u64) -> MigrationResult:
+        MigrationResult(
+            modified: true,
+            patterns_fixed: patterns,
+            error: ""
+        )
+
+    # Error occurred
+    static fn error(message: text) -> MigrationResult:
+        MigrationResult(
+            modified: false,
+            patterns_fixed: 0,
+            error: message
+        )
+
+# Fix if-val-Some pattern in content
+fn fix_if_val_content(content: text) -> text:
+    # Two transformation passes needed:
+    #
+    # Pass 1: Statement form - Simple single-line case
+    # Converts: if val Some(x) = opt: ... else: ...
+    # To: match opt: case Some(x): ... case None: ...
+    #
+    # Pass 2: Expression form - Assignment with if-val
+    # Converts: val result = if val Some(x) = opt: ... else: ...
+    # To: val result = match opt: case Some(x): ... case None: ...
+    #
+    # Note: This is a simplified implementation for common single-line cases.
+    # Complex multi-line patterns with preserved indentation would require
+    # a more sophisticated AST-based transformation.
+
+    var result = content
+
+    # Pass 1: Statement form (simple cases)
+    # Pattern: if val Some(var) = expr: body else: else_body
+    result = replace_all(
+        r"if\s+val\s+Some\((\w+)\)\s*=\s*([^:]+):",
+        result,
+        "match $2: case Some($1):"
+    )
+
+    # Pass 2: Fix the else clause to become case None
+    # This is a simple heuristic - find "else:" after our pattern and convert to "case None:"
+    # Note: This may need refinement for nested structures
+    result = replace_all(
+        r"(match\s+\w+:\s+case\s+Some\(\w+\):.*?)\s+else:",
+        result,
+        "$1 case None:"
+    )
+
+    result
+
+# Fix if-val patterns in a single file
+fn fix_if_val_file(filepath: text) -> MigrationResult:
+    # Read file content
+    match read_text(filepath):
+        Ok(content):
+            # Check if 'if val Some' exists in content (optimization)
+            if not content.contains("if val Some"):
+                return MigrationResult.unchanged()
+
+            # Apply if-val pattern fixes
+            val fixed_content = fix_if_val_content(content)
+
+            # Check if anything changed
+            if fixed_content == content:
+                MigrationResult.unchanged()
+            else:
+                # Write fixed content
+                match write_text(filepath, fixed_content):
+                    Ok(_):
+                        # Count patterns fixed (lines changed)
+                        val changed = count_changed_lines(content, fixed_content)
+                        MigrationResult.fixed(changed)
+                    Err(e):
+                        MigrationResult.error("Failed to write file: {e}")
+        Err(e):
+            MigrationResult.error("Failed to read file: {e}")
+
+# Note: find_spl_files is now imported from file_utils
+# It automatically filters out target, .git, .migration_backup directories
+
+# Run fix on all .spl files in directory
+fn run_fix_if_val(root_dir: text) -> FixIfValStats:
+    var stats = FixIfValStats.new()
+
+    # Find all .spl files
+    val files = find_spl_files(root_dir)
+
+    # Process each file
+    var i = 0
+    while i < files.len():
+        val filepath = files[i]
+        stats.add_processed()
+
+        val result = fix_if_val_file(filepath)
+        if result.modified:
+            stats.add_modified(result.patterns_fixed)
+        elif not result.error.is_empty():
+            # Error occurred, but continue processing
+            print "Error processing {filepath}: {result.error}"
+
+        i = i + 1
+
+    stats
+
+# Pattern documentation
+struct FixIfValPattern:
+    name: text
+    description: text
+    before: text
+    after: text
+    notes: text
+
+impl FixIfValPattern:
+    # Create a pattern description
+    static fn new(name: text, desc: text, before: text, after: text, notes: text) -> FixIfValPattern:
+        FixIfValPattern(
+            name: name,
+            description: desc,
+            before: before,
+            after: after,
+            notes: notes
+        )
+
+# Get all transformation patterns
+fn get_fix_if_val_patterns() -> List<FixIfValPattern>:
+    [
+        FixIfValPattern.new(
+            "statement_form",
+            "Convert if-val-Some statement to match",
+            "if val Some(x) = opt:\n    use_x()\nelse:\n    handle_none()",
+            "match opt:\n    case Some(x):\n        use_x()\n    case None:\n        handle_none()",
+            "Statement form with multi-line bodies"
+        ),
+        FixIfValPattern.new(
+            "expression_form",
+            "Convert if-val-Some expression to match",
+            "val result = if val Some(x) = opt:\n    x * 2\nelse:\n    0",
+            "val result = match opt:\n    case Some(x):\n        x * 2\n    case None:\n        0",
+            "Expression form for assignments"
+        )
+    ]
+
+# Print transformation examples
+fn print_fix_if_val_examples() -> text:
+    var output = ""
+    output = output + "=== Fix If-Val-Some Pattern Migration ===\n\n"
+    output = output + "This migration fixes invalid 'if val Some(x) = ...' syntax\n"
+    output = output + "by converting to proper match expressions.\n\n"
+
+    val patterns = get_fix_if_val_patterns()
+    var i = 0
+    while i < patterns.len():
+        val pattern = patterns[i]
+        output = output + "{i + 1}. {pattern.name}\n"
+        output = output + "   {pattern.description}\n"
+        output = output + "   Before:\n"
+
+        # Indent the before code
+        val before_lines = pattern.before.split("\n")
+        var j = 0
+        while j < before_lines.len():
+            output = output + "      {before_lines[j]}\n"
+            j = j + 1
+
+        output = output + "   After:\n"
+
+        # Indent the after code
+        val after_lines = pattern.after.split("\n")
+        var k = 0
+        while k < after_lines.len():
+            output = output + "      {after_lines[k]}\n"
+            k = k + 1
+
+        output = output + "   Note: {pattern.notes}\n\n"
+        i = i + 1
+
+    output
+
+# CLI options for fix_if_val command
+struct FixIfValOptions:
+    root_dir: text
+    show_help: bool
+
+impl FixIfValOptions:
+    # Create default options
+    static fn default() -> FixIfValOptions:
+        FixIfValOptions(
+            root_dir: "simple/std_lib/src/spec",
+            show_help: false
+        )
+
+    # Parse CLI arguments
+    static fn parse(args: List<text>) -> FixIfValOptions:
+        var options = FixIfValOptions.default()
+        var i = 0
+
+        while i < args.len():
+            val arg = args[i]
+
+            if arg == "--help" or arg == "-h":
+                options.show_help = true
+            elif not arg.starts_with("-"):
+                # Positional argument: root directory
+                options.root_dir = arg
+
+            i = i + 1
+
+        options
+
+# Print usage help for fix_if_val
+fn print_fix_if_val_help() -> text:
+    var help = ""
+    help = help + "Usage: simple fix-if-val [OPTIONS] [ROOT_DIR]\n\n"
+    help = help + "Fix 'if val Some(x) = ...' patterns to use match expressions instead.\n\n"
+    help = help + "Arguments:\n"
+    help = help + "  ROOT_DIR         Directory to process (default: simple/std_lib/src/spec)\n\n"
+    help = help + "Options:\n"
+    help = help + "  -h, --help       Show this help message\n\n"
+    help = help + "Examples:\n"
+    help = help + "  simple fix-if-val                         # Fix in default spec directory\n"
+    help = help + "  simple fix-if-val src/                    # Fix in src/ directory\n"
+    help
+
+# Main entry point
+fn main_fix_if_val(args: List<text>) -> Result<(), text>:
+    val options = FixIfValOptions.parse(args)
+
+    # Show help if requested
+    if options.show_help:
+        print print_fix_if_val_help()
+        return Ok(())
+
+    print "Fixing if-val-Some patterns in: {options.root_dir}"
+
+    # Run the fix
+    val stats = run_fix_if_val(options.root_dir)
+
+    # Print summary
+    print stats.summary()
+
+    # Print pattern examples for reference
+    print print_fix_if_val_examples()
+
+    Ok(())

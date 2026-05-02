@@ -1,0 +1,128 @@
+#![allow(unnamed_duplicate_typed_args)]
+# UI Backend Factory
+#
+# Factory function to create render backends by name.
+# Returns Result<any, text> wrapping either NoneBackend or BrowserBackend.
+#
+# Supported modes:
+#   - "none" / "headless" — NoneBackend (no-op, for tests)
+#   - "browser" / "os"    — BrowserBackend (browser engine pipeline)
+
+use common.ui.widget.{UITree, UIState, UIEvent}
+use common.ui.capability.{Capability, NotSupported}
+use os.compositor.browser_backend.{BrowserBackend}
+use app.ui.none.event_queue.{EventQueue}
+use app.ui.tui.backend.{TuiBackend}
+use app.ui.web.backend.{WebBackend}
+use app.ui.tauri.backend.{TauriBackend}
+
+# =========================================================================
+# NoneBackend — minimal no-op backend for headless/test use
+# =========================================================================
+
+class NoneBackend:
+    _name: text
+    _event_queue: EventQueue
+    _render_count: i32
+
+impl NoneBackend:
+    static fn create(name: text) -> NoneBackend:
+        NoneBackend(_name: name, _event_queue: EventQueue.new(), _render_count: 0)
+
+    fn init() -> Result<bool, text>:
+        Ok(true)
+
+    fn shutdown():
+        pass_dn
+
+    me render(state: UIState) -> Result<bool, text>:
+        self._render_count = self._render_count + 1
+        Ok(true)
+
+    fn render_html(state: UIState) -> text:
+        ""
+
+    me poll_event(timeout_ms: i32) -> UIEvent?:
+        self._event_queue.dequeue()
+
+    fn supports_mouse() -> bool: false
+    fn supports_color() -> bool: false
+    fn supports_images() -> bool: false
+    fn supports_touch() -> bool: false
+
+    fn viewport_width() -> i32: 80
+    fn viewport_height() -> i32: 24
+
+    fn backend_name() -> text:
+        self._name
+
+    fn capabilities() -> [Capability]:
+        []
+
+    fn show_notification(title: text, body: text) -> Result<bool, NotSupported>:
+        Err(NotSupported.for_capability("show_notification", Capability.Notification, self._name))
+
+    fn render_image(node: any, rect: any) -> Result<bool, NotSupported>:
+        Err(NotSupported.for_capability("render_image", Capability.Images, self._name))
+
+    me inject_event(event: UIEvent):
+        self._event_queue.push(event)
+
+    fn render_count() -> i32:
+        self._render_count
+
+# =========================================================================
+# Factory
+# =========================================================================
+
+fn create_backend(mode: text, port: i64) -> Result<any, text>:
+    """Create a render backend by mode name.
+
+    Supported modes: "none", "headless", "browser", "os"
+    Returns Err for unknown modes.
+
+    The "browser" and "os" modes create a BrowserBackend with a default
+    1024x768 viewport and glass_dark theme. For custom dimensions, use
+    create_browser_backend() or create_os_backend() directly.
+    """
+    if mode == "none" or mode == "headless":
+        return Ok(NoneBackend.create("none"))
+    if mode == "tui":
+        return Ok(TuiBackend.new())
+    if mode == "web":
+        return Ok(WebBackend.new(port as i32))
+    if mode == "tauri":
+        val result = TauriBackend.new(port as i32)
+        match result:
+            Ok(backend):
+                return Ok(backend)
+            Err(e):
+                return Err(e)
+    if mode == "browser" or mode == "os":
+        return Ok(create_browser_backend(1024, 768, "glass_dark"))
+    Err("Unknown backend mode: {mode}")
+
+fn create_browser_backend(width: i32, height: i32, theme: text) -> BrowserBackend:
+    """Create a browser-engine render backend.
+
+    This backend routes widget trees through the full browser engine
+    pipeline (DOM -> CSS layout -> paint -> render_scene -> pixels).
+
+    Args:
+        width  - viewport width in pixels
+        height - viewport height in pixels
+        theme  - "dark", "light", "glass_dark", "glass_light", "ios_dark", "ios_light"
+    """
+    BrowserBackend.new(width, height, theme)
+
+fn create_os_backend(width: i32, height: i32) -> BrowserBackend:
+    """Create the default OS render backend (browser engine, glass_dark theme).
+
+    Convenience alias for create_browser_backend with the glass_dark theme,
+    suitable for SimpleOS compositor integration.
+    """
+    create_browser_backend(width, height, "glass_dark")
+
+fn create_sync_backend(mode: text, port: i64) -> Result<any, text>:
+    """Create a synchronous render backend (alias for create_backend)."""
+    create_backend(mode, port)

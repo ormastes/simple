@@ -1,0 +1,271 @@
+# URL parser — WHATWG URL Living Standard (subset).
+#
+# Mirrors Chromium's url::GURL parsing. Handles:
+#   - Scheme: http, https, file, data, about, ftp
+#   - Authority: host + optional port
+#   - Path, query (?k=v&k=v), fragment (#hash)
+#   - URL-encoded characters in path/query (percent-decoded)
+#
+# NOT implemented (out of scope):
+#   - IDN / punycode host normalization
+#   - Query parameter ordering preservation
+#   - Relative URL resolution (use absolute URLs only)
+
+# ============================================================================
+# ParsedUrl — the parsed URL record
+# ============================================================================
+
+class ParsedUrl:
+    scheme: String
+    host: String
+    port: i64
+    path: String
+    query: String
+    fragment: String
+    is_valid: bool
+
+fn parsed_url_empty() -> ParsedUrl:
+    ParsedUrl(
+        scheme: "",
+        host: "",
+        port: 0,
+        path: "",
+        query: "",
+        fragment: "",
+        is_valid: false
+    )
+
+# ============================================================================
+# Helpers — hex digits & byte classification
+# ============================================================================
+
+fn hex_digit_value(c: i64) -> i64:
+    if c >= 48 and c <= 57:
+        return c - 48
+    if c >= 65 and c <= 70:
+        return (c - 65) + 10
+    if c >= 97 and c <= 102:
+        return (c - 97) + 10
+    return -1
+
+fn byte_to_hex(b: i64) -> String:
+    val digits = "0123456789ABCDEF"
+    val hi = (b / 16) % 16
+    val lo = b % 16
+    val s0 = digits.byte_at(hi)
+    val s1 = digits.byte_at(lo)
+    var out: String = ""
+    out = out.append_byte(s0)
+    out = out.append_byte(s1)
+    out
+
+fn is_digit(c: i64) -> bool:
+    c >= 48 and c <= 57
+
+# ============================================================================
+# parse_url — WHATWG-subset absolute URL parser
+# ============================================================================
+
+fn parse_url(input: String) -> ParsedUrl:
+    val result = parsed_url_empty()
+    val n = input.len().to_i64()
+    if n == 0:
+        return result
+
+    # Find scheme terminator ':'
+    var colon_idx: i64 = -1
+    var i: i64 = 0
+    while i < n:
+        val c = input.byte_at(i)
+        if c == 58:  # ':'
+            colon_idx = i
+            i = n
+        else:
+            i = i + 1
+    if colon_idx <= 0:
+        return result
+    result.scheme = input.slice(0, colon_idx)
+
+    # Remainder after the scheme colon
+    var pos: i64 = colon_idx + 1
+    # Authority if next two chars are '//'
+    if pos + 1 < n and input.byte_at(pos) == 47 and input.byte_at(pos + 1) == 47:
+        pos = pos + 2
+        # Authority runs until '/', '?', '#', or end
+        var auth_end: i64 = n
+        var j: i64 = pos
+        while j < n:
+            val c = input.byte_at(j)
+            if c == 47 or c == 63 or c == 35:
+                auth_end = j
+                j = n
+            else:
+                j = j + 1
+        val authority = input.slice(pos, auth_end)
+        # Split host and port on ':'
+        val auth_n = authority.len().to_i64()
+        var port_colon: i64 = -1
+        var k: i64 = 0
+        while k < auth_n:
+            if authority.byte_at(k) == 58:
+                port_colon = k
+                k = auth_n
+            else:
+                k = k + 1
+        if port_colon < 0:
+            result.host = authority
+        else:
+            result.host = authority.slice(0, port_colon)
+            val port_str = authority.slice(port_colon + 1, auth_n)
+            var port_val: i64 = 0
+            var m: i64 = 0
+            val port_len = port_str.len().to_i64()
+            var port_ok: bool = port_len > 0
+            while m < port_len:
+                val pc = port_str.byte_at(m)
+                if is_digit(pc):
+                    port_val = (port_val * 10) + (pc - 48)
+                    m = m + 1
+                else:
+                    port_ok = false
+                    m = port_len
+            if port_ok:
+                result.port = port_val
+        pos = auth_end
+
+    # Fragment: last '#' in the remainder
+    var hash_idx: i64 = -1
+    var q_idx: i64 = -1
+    var r: i64 = pos
+    while r < n:
+        val c = input.byte_at(r)
+        if c == 35 and hash_idx < 0:
+            hash_idx = r
+        if c == 63 and q_idx < 0 and hash_idx < 0:
+            q_idx = r
+        r = r + 1
+
+    var path_end: i64 = n
+    if q_idx >= 0:
+        path_end = q_idx
+    else:
+        if hash_idx >= 0:
+            path_end = hash_idx
+
+    result.path = input.slice(pos, path_end)
+
+    if q_idx >= 0:
+        var q_end: i64 = n
+        if hash_idx >= 0:
+            q_end = hash_idx
+        result.query = input.slice(q_idx + 1, q_end)
+
+    if hash_idx >= 0:
+        result.fragment = input.slice(hash_idx + 1, n)
+
+    # Validity: scheme non-empty; for hierarchical schemes, host non-empty too.
+    val has_scheme = result.scheme.len().to_i64() > 0
+    val has_host = result.host.len().to_i64() > 0
+    # Schemes that require a host per WHATWG "special scheme" set.
+    val s = result.scheme
+    val needs_host = s == "http" or s == "https" or s == "ftp" or s == "ws" or s == "wss"
+    if needs_host:
+        result.is_valid = has_scheme and has_host
+    else:
+        result.is_valid = has_scheme
+
+    result
+
+# ============================================================================
+# percent_decode — replace "%XX" with the decoded byte
+# ============================================================================
+
+fn percent_decode(s: String) -> String:
+    val n = s.len().to_i64()
+    var out: String = ""
+    var i: i64 = 0
+    while i < n:
+        val c = s.byte_at(i)
+        if c == 37 and (i + 2) < n:
+            val hi = hex_digit_value(s.byte_at(i + 1))
+            val lo = hex_digit_value(s.byte_at(i + 2))
+            if hi >= 0 and lo >= 0:
+                val byte_val = (hi * 16) + lo
+                out = out.append_byte(byte_val)
+                i = i + 3
+            else:
+                out = out.append_byte(c)
+                i = i + 1
+        else:
+            out = out.append_byte(c)
+            i = i + 1
+    out
+
+# ============================================================================
+# percent_encode — replace bytes not in `allowed` with "%XX"
+# ============================================================================
+
+fn percent_encode(s: String, allowed: [i64]) -> String:
+    val n = s.len().to_i64()
+    val allowed_n = allowed.len().to_i64()
+    var out: String = ""
+    var i: i64 = 0
+    while i < n:
+        val c = s.byte_at(i)
+        var ok: bool = false
+        var k: i64 = 0
+        while k < allowed_n:
+            if allowed[k] == c:
+                ok = true
+                k = allowed_n
+            else:
+                k = k + 1
+        if ok:
+            out = out.append_byte(c)
+        else:
+            out = out + "%"
+            out = out + byte_to_hex(c)
+        i = i + 1
+    out
+
+# ============================================================================
+# query_string_parse — split "a=1&b=2" into percent-decoded key/value pairs
+# ============================================================================
+
+fn query_string_parse(query: String) -> [(String, String)]:
+    var pairs: [(String, String)] = [(String, String)]()
+    val n = query.len().to_i64()
+    if n == 0:
+        return pairs
+    var start: i64 = 0
+    var i: i64 = 0
+    while i <= n:
+        val at_end = i == n
+        var is_sep: bool = at_end
+        if not at_end:
+            if query.byte_at(i) == 38:  # '&'
+                is_sep = true
+        if is_sep:
+            if i > start:
+                val segment = query.slice(start, i)
+                val seg_n = segment.len().to_i64()
+                var eq_idx: i64 = -1
+                var j: i64 = 0
+                while j < seg_n:
+                    if segment.byte_at(j) == 61:  # '='
+                        eq_idx = j
+                        j = seg_n
+                    else:
+                        j = j + 1
+                var k: String = ""
+                var v: String = ""
+                if eq_idx < 0:
+                    k = percent_decode(segment)
+                    v = ""
+                else:
+                    k = percent_decode(segment.slice(0, eq_idx))
+                    v = percent_decode(segment.slice(eq_idx + 1, seg_n))
+                pairs.push((k, v))
+            start = i + 1
+        i = i + 1
+    pairs

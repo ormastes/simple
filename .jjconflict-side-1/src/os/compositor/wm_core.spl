@@ -1,0 +1,135 @@
+# WM Core — Edge detection, z-order, and resize logic
+#
+# Pure functions for the window manager hit-testing and resize pipeline.
+# No compositor state, no FFI — all functions are deterministic and testable.
+
+use common.window_protocol.geometry.{Rect, Point, Size, Px}
+
+# ============================================================================
+# Edge bitmask constants
+# ============================================================================
+
+val EDGE_NONE:   i32 = 0
+val EDGE_LEFT:   i32 = 1
+val EDGE_RIGHT:  i32 = 2
+val EDGE_TOP:    i32 = 4
+val EDGE_BOTTOM: i32 = 8
+
+# ============================================================================
+# detect_resize_edge
+# ============================================================================
+
+fn detect_resize_edge(surface_bounds: Rect, point: Point, edge_width: Px) -> i32:
+    """Return a bitmask of which resize edges (if any) the point lies on.
+
+    Checks whether `point` falls within `edge_width` pixels of any edge of
+    `surface_bounds`.  Points outside the bounds entirely return EDGE_NONE.
+    Corner hits combine two edge bits (e.g. top-left = EDGE_LEFT | EDGE_TOP).
+    """
+    val px  = point.x.to_i32()
+    val py  = point.y.to_i32()
+    val bx  = surface_bounds.origin.x.to_i32()
+    val by  = surface_bounds.origin.y.to_i32()
+    val bw  = surface_bounds.size.width.to_i32()
+    val bh  = surface_bounds.size.height.to_i32()
+    val ew  = edge_width.to_i32()
+
+    val right  = bx + bw
+    val bottom = by + bh
+
+    # Point must be within (or on the boundary of) the surface
+    if px < bx or px > right or py < by or py > bottom:
+        return EDGE_NONE
+
+    var edge: i32 = EDGE_NONE
+
+    if px <= bx + ew:
+        edge = edge | EDGE_LEFT
+    if px >= right - ew:
+        edge = edge | EDGE_RIGHT
+    if py <= by + ew:
+        edge = edge | EDGE_TOP
+    if py >= bottom - ew:
+        edge = edge | EDGE_BOTTOM
+
+    return edge
+
+# ============================================================================
+# raise_to_top
+# ============================================================================
+
+fn raise_to_top<T>(list: [T], idx: i32) -> [T]:
+    """Move element at `idx` to the end of `list` (highest z-order).
+
+    Returns the list unchanged if `idx` is out of range or already last.
+    """
+    val len = list.len()
+    if idx < 0 or idx >= len:
+        return list
+    if idx == len - 1:
+        return list
+
+    var result: [T] = []
+    var i = 0
+    while i < len:
+        if i != idx:
+            result = result + [list[i]]
+        i = i + 1
+    result = result + [list[idx]]
+    return result
+
+# ============================================================================
+# apply_resize
+# ============================================================================
+
+fn apply_resize(bounds: Rect, edge: i32, delta: Point, min_size: Size) -> Rect:
+    """Apply a drag delta to the given edge(s), clamped to min_size.
+
+    LEFT  edge: moves origin.x and adjusts width  (width shrinks as x grows)
+    RIGHT edge: adjusts width only
+    TOP   edge: moves origin.y and adjusts height
+    BOTTOM edge: adjusts height only
+    Corner combinations apply both axes independently.
+    """
+    var x = bounds.origin.x.to_i32()
+    var y = bounds.origin.y.to_i32()
+    var w = bounds.size.width.to_i32()
+    var h = bounds.size.height.to_i32()
+    val dx = delta.x.to_i32()
+    val dy = delta.y.to_i32()
+    val min_w = min_size.width.to_i32()
+    val min_h = min_size.height.to_i32()
+
+    if (edge & EDGE_LEFT) != 0:
+        val new_w = w - dx
+        if new_w < min_w:
+            x = x + w - min_w
+            w = min_w
+        else:
+            x = x + dx
+            w = new_w
+
+    if (edge & EDGE_RIGHT) != 0:
+        val new_w = w + dx
+        if new_w < min_w:
+            w = min_w
+        else:
+            w = new_w
+
+    if (edge & EDGE_TOP) != 0:
+        val new_h = h - dy
+        if new_h < min_h:
+            y = y + h - min_h
+            h = min_h
+        else:
+            y = y + dy
+            h = new_h
+
+    if (edge & EDGE_BOTTOM) != 0:
+        val new_h = h + dy
+        if new_h < min_h:
+            h = min_h
+        else:
+            h = new_h
+
+    return Rect.xywh(x, y, w, h)

@@ -1,0 +1,69 @@
+# Taskbar-Only Shell — SimpleOS Side
+#
+# A slim shell that shows ONLY a taskbar: pinned apps (launcher buttons),
+# running apps (window switcher), and tray items (clock / notifications).
+# No wallpaper, no desktop icons.
+#
+# ShellMode is additive — the existing desktop (src/os/desktop/shell.spl)
+# continues to run in Classic mode by default. To switch, boot code sets
+# SHELL_MODE = ShellMode.Taskbar before entering the shell loop.
+#
+# The host counterpart lives in src/app/ui.web/taskbar_shell.spl (Wave 4)
+# and consumes the same TaskbarModel — the builder here stays widget-DSL
+# only, so the schema is portable.
+
+use common.ui.widget.{WidgetNode}
+use common.ui.builder.{row, column, button, label}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem, empty_taskbar_model}
+
+# ==========================================================================
+# Shell Mode Selector
+# ==========================================================================
+
+enum ShellMode:
+    Classic
+    Taskbar
+
+fn default_shell_mode() -> ShellMode:
+    """Classic preserves the existing desktop; callers opt into Taskbar."""
+    ShellMode.Classic
+
+# ==========================================================================
+# Widget Builder
+# ==========================================================================
+
+fn _pinned_buttons(pinned: [AppRef]) -> [WidgetNode]:
+    var items: [WidgetNode] = []
+    for a in pinned:
+        val b = button("pinned:" + a.app_id, a.display_name, "launch:" + a.app_id)
+        items = items.push(b)
+    items
+
+fn _running_buttons(running: [WindowRef]) -> [WidgetNode]:
+    var items: [WidgetNode] = []
+    for w in running:
+        var caption = w.title
+        if w.minimized:
+            caption = "[-] " + caption
+        val action = "focus:" + w.window_id
+        val b = button("running:" + w.window_id, caption, action)
+        items = items.push(b)
+    items
+
+fn _tray_labels(tray: [TrayItem]) -> [WidgetNode]:
+    var items: [WidgetNode] = []
+    for t in tray:
+        val l = label("tray:" + t.item_id, t.label)
+        items = items.push(l)
+    items
+
+fn build_taskbar_shell_tree(model: TaskbarModel) -> WidgetNode:
+    """Compose a three-section taskbar: pinned | running | tray.
+
+    Returns the root WidgetNode. No wallpaper, no desktop icons — the
+    whole shell is the taskbar.
+    """
+    val pinned = row("taskbar-pinned", _pinned_buttons(model.pinned))
+    val running = row("taskbar-running", _running_buttons(model.running))
+    val tray = row("taskbar-tray", _tray_labels(model.tray))
+    row("taskbar-root", [pinned, running, tray])

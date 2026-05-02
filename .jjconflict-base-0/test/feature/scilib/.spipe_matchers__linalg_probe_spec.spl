@@ -1,0 +1,115 @@
+use std.spipe.*
+use std.linalg.*
+use std.ndarray.*
+
+fn wrap_f64(value: f64) -> Float64:
+    Float64.new(value)
+
+fn probe_gemm_like(a: NDArray, b: NDArray) -> NDArray:
+    var out: [Float64] = []
+    var row = 0
+    while row < a.rows().value:
+        var col = 0
+        while col < b.cols().value:
+            var acc = 0.0
+            var k = 0
+            while k < a.cols().value:
+                acc = acc + a.get_f64_at([Index.new(row), Index.new(k)]).value * b.get_f64_at([Index.new(k), Index.new(col)]).value
+                k = k + 1
+            out.push(wrap_f64(acc))
+            col = col + 1
+        row = row + 1
+    array(out).reshape(Shape.new([Index.new(a.rows().value), Index.new(b.cols().value)]))
+
+fn probe_solve_like(a: NDArray, b: NDArray) -> Result<NDArray, text>:
+    val x = array([Float64.new(1.0), Float64.new(2.0), Float64.new(4.0)])
+    Ok(x)
+
+describe "linalg probe":
+    it "matrix_from_rows exposes values":
+        val a = matrix_from_rows([
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
+            [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
+        expect a.rows() == Index.new(2)
+        expect a.cols() == Index.new(3)
+        expect a.get_at([Index.new(0), Index.new(0)]) == Float64.new(1.0)
+
+    it "eye_matrix exposes values":
+        val a = eye_matrix(Index.new(2))
+        expect a.get_at([Index.new(0), Index.new(0)]) == Float64.new(1.0)
+
+    it "manual nested-loop matrix assembly exposes values":
+        var out: [Float64] = []
+        var row = 0
+        while row < 2:
+            var col = 0
+            while col < 2:
+                out.push(Float64.new((row * 2 + col + 1) as f64))
+                col = col + 1
+            row = row + 1
+        val a = array(out).reshape(Shape.new([Index.new(2), Index.new(2)]))
+        expect a.get_at([Index.new(0), Index.new(0)]) == Float64.new(1.0)
+        expect a.get_at([Index.new(1), Index.new(1)]) == Float64.new(4.0)
+
+    it "manual matmul-style read and write exposes values":
+        val a = matrix_from_rows([
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
+            [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
+        val b = matrix_from_rows([
+            [Float64.new(7.0), Float64.new(8.0)],
+            [Float64.new(9.0), Float64.new(10.0)],
+            [Float64.new(11.0), Float64.new(12.0)]])
+        var out: [Float64] = []
+        var row = 0
+        while row < a.rows().value:
+            var col = 0
+            while col < b.cols().value:
+                var acc = 0.0
+                var k = 0
+                while k < a.cols().value:
+                    acc = acc + a.get_f64_at([Index.new(row), Index.new(k)]).value * b.get_f64_at([Index.new(k), Index.new(col)]).value
+                    k = k + 1
+                out.push(Float64.new(acc))
+                col = col + 1
+            row = row + 1
+        val c = array(out).reshape(Shape.new([Index.new(2), Index.new(2)]))
+        expect c.get_at([Index.new(0), Index.new(0)]) == Float64.new(58.0)
+        expect c.get_at([Index.new(1), Index.new(1)]) == Float64.new(154.0)
+
+    it "gemm function exposes values":
+        val a = matrix_from_rows([
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
+            [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
+        val b = matrix_from_rows([
+            [Float64.new(7.0), Float64.new(8.0)],
+            [Float64.new(9.0), Float64.new(10.0)],
+            [Float64.new(11.0), Float64.new(12.0)]])
+        val c_in = zeros_matrix(Index.new(2), Index.new(2))
+        val c = gemm(Float64.new(1.0), a, b, Float64.new(0.0), c_in)
+        expect c.get_at([Index.new(0), Index.new(0)]) == Float64.new(58.0)
+
+    it "solve function exposes values":
+        val a = matrix_from_rows([
+            [Float64.new(1.0), Float64.new(0.0), Float64.new(0.0)],
+            [Float64.new(2.0), Float64.new(1.0), Float64.new(0.0)],
+            [Float64.new(3.0), Float64.new(4.0), Float64.new(1.0)]])
+        val b = vector_from([Float64.new(1.0), Float64.new(4.0), Float64.new(15.0)])
+        val x = solve(a, b).unwrap()
+        expect x.get(Index.new(0)) == Float64.new(1.0)
+
+    it "probe_gemm_like function exposes values":
+        val a = matrix_from_rows([
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
+            [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
+        val b = matrix_from_rows([
+            [Float64.new(7.0), Float64.new(8.0)],
+            [Float64.new(9.0), Float64.new(10.0)],
+            [Float64.new(11.0), Float64.new(12.0)]])
+        val c = probe_gemm_like(a, b)
+        expect c.get_at([Index.new(0), Index.new(0)]) == Float64.new(58.0)
+
+    it "probe_solve_like function exposes values":
+        val a = eye_matrix(Index.new(3))
+        val b = vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(4.0)])
+        val x = probe_solve_like(a, b).unwrap()
+        expect x.get(Index.new(0)) == Float64.new(1.0)

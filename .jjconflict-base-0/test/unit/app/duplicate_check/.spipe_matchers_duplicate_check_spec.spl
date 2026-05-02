@@ -1,0 +1,118 @@
+use compiler.tools.duplicate_check.config.{default_config}
+use compiler.tools.duplicate_check.detector.{DuplicateBlock, DuplicateGroup}
+use compiler.tools.duplicate_check.formatter.{summarize_duplicate_groups, duplicate_lines_per_block, format_score_hundredths, format_ratio_tenths}
+use compiler.tools.duplicate_check.main.{collect_command_args, parse_args, collect_deprecated_lexical_flags}
+
+fn sample_block(file: text, line_start: i64, line_end: i64, hash_value: i64, code: text) -> DuplicateBlock:
+    DuplicateBlock(
+        file: file,
+        line_start: line_start,
+        line_end: line_end,
+        token_count: 8,
+        hash_value: hash_value,
+        snippet_start_offset: 0,
+        snippet_end_offset: code.len(),
+        code: code
+    )
+
+describe "duplicate_check command argument parsing":
+    it "strips runtime prefixes and duplicate-check command":
+        val args = [
+            "bin/simple",
+            "run",
+            "src/compiler/90.tools/duplicate_check/main.spl",
+            "duplicate-check",
+            "/tmp/dup_scope",
+            "--format",
+            "json"
+        ]
+
+        val cmd_args = collect_command_args(args)
+
+        expect cmd_args.len() == 3
+        expect cmd_args[0] == "/tmp/dup_scope"
+        expect cmd_args[1] == "--format"
+        expect cmd_args[2] == "json"
+
+    it "defaults to semantic analysis and parses semantic flags":
+        val config = parse_args([
+            "/tmp/dup_scope",
+            "--semantic-threshold=0.93",
+            "--semantic-model",
+            "nomic-embed-text",
+            "--format=json"
+        ])
+
+        expect config.use_semantic == true
+        expect config.semantic_threshold > 0.92 == true
+        expect config.semantic_threshold < 0.94 == true
+        expect config.semantic_model == "nomic-embed-text"
+        expect config.output_format == "json"
+
+    it "accepts deprecated lexical flags for compatibility":
+        val args = [
+            "/tmp/dup_scope",
+            "--cosine",
+            "--min-tokens",
+            "30",
+            "--min-lines=5",
+            "--cache-path=/tmp/duplicate-check-cache.sdn",
+            "--jobs",
+            "4"
+        ]
+        val config = parse_args(args)
+        val deprecated = collect_deprecated_lexical_flags(args)
+
+        expect config.use_semantic == true
+        expect config.min_tokens == 30
+        expect config.min_lines == 5
+        expect config.incremental_cache_path == "/tmp/duplicate-check-cache.sdn"
+        expect config.num_workers == 4
+        expect deprecated.len() == 5
+        expect deprecated[0] == "--cosine"
+        expect deprecated[1] == "--min-tokens"
+        expect deprecated[2] == "--min-lines"
+        expect deprecated[3] == "--cache-path"
+        expect deprecated[4] == "--jobs"
+
+describe "duplicate_check formatter shared helpers":
+    it "summarizes duplicate groups with unique file counting":
+        val groups = [
+            DuplicateGroup(
+                blocks: [
+                    sample_block("/tmp/a.spl", 1, 3, 10, "fn shared_a():\n    return 1"),
+                    sample_block("/tmp/b.spl", 4, 6, 10, "fn shared_b():\n    return 1")
+                ],
+                occurrences: 2,
+                total_lines: 6,
+                impact_score: 12
+            ),
+            DuplicateGroup(
+                blocks: [
+                    sample_block("/tmp/b.spl", 10, 12, 21, "fn extra_b():\n    return 2"),
+                    sample_block("/tmp/c.spl", 14, 16, 21, "fn extra_c():\n    return 2")
+                ],
+                occurrences: 2,
+                total_lines: 6,
+                impact_score: 12
+            )
+        ]
+
+        val summary = summarize_duplicate_groups(groups)
+
+        expect summary.total_groups == 2
+        expect summary.total_occurrences == 4
+        expect summary.total_lines == 12
+        expect summary.files_affected == 3
+
+    it "formats shared ratios and scores consistently":
+        expect(duplicate_lines_per_block(DuplicateGroup(
+            blocks: [sample_block("/tmp/a.spl", 1, 3, 10, "fn one():\n    return 1")],
+            occurrences: 0,
+            total_lines: 5,
+            impact_score: 5
+        ))).to_equal(0)
+        expect format_score_hundredths(0.9) == "0.90"
+        expect format_score_hundredths(0.97) == "0.97"
+        expect format_ratio_tenths(2, 3) == "66.6"
+        expect format_ratio_tenths(0, 0) == "0.0"

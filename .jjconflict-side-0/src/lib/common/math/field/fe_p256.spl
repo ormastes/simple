@@ -1,0 +1,618 @@
+#![allow(unnamed_duplicate_typed_args)]
+# FeP256 — Pure-Simple GF(p) for the NIST P-256 prime
+#
+#     p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+#
+# 4 little-endian u64 limbs (l0 = bits 0..63, l3 = bits 192..255). Byte
+# encoding is **big-endian per SEC1 / FIPS 186-4** (different from Curve25519
+# which is little-endian).
+#
+# Implementation note: Simple's interpreter aliases u128/i128 to i64 (verified
+# via probe), so this module avoids wide-int types entirely. All arithmetic
+# uses u64 limbs split into 32-bit halves; carries propagate explicitly. The
+# Solinas-reduction accumulator uses i64 — per-slot magnitude after the FIPS
+# D.2.3 sum stays well under 2^40, with ~24 bits of headroom.
+#
+# CT properties (R-C §4):
+#   * No `if` on secret data — every data-dependent choice is masked via
+#     `fe_cond_select` / `fe_cond_swap` whose masks pass through `rt_black_box`
+#     (B6, commit d42cde3a0f).
+#   * No secret-indexed memory access — every loop has a public iteration
+#     count derived only from limb / byte / bit positions.
+#   * Reduction uses a fixed number of conditional subtractions of `p`; never
+#     a `while result >= p` loop.
+#
+# References:
+#   * FIPS 186-4 D.2.3 (P-256 reduction modulo p)
+#   * BoringSSL `crypto/fipsmodule/ec/p256.c::ecp_nistz256_mod_inverse`
+#   * H. Cohen, "A Course in Computational Algebraic Number Theory" §10.4
+
+extern fn rt_black_box(x: i64) -> i64
+
+# ============================================================================
+# Type
+# ============================================================================
+
+struct FeP256:
+    """Field element in GF(p) for NIST P-256, 4×64-bit little-endian limbs.
+
+    l0: bits 0..63
+    l1: bits 64..127
+    l2: bits 128..191
+    l3: bits 192..255
+    """
+    l0: u64
+    l1: u64
+    l2: u64
+    l3: u64
+
+# ============================================================================
+# Internal: 32-bit-half carry primitives
+# ============================================================================
+#
+# Simple's interpreter doesn't give us real u128, so 64-bit add/sub-with-carry
+# is implemented by splitting each operand into a 32-bit low half and a 32-bit
+# high half, doing the sum/diff with explicit carry/borrow propagation, and
+# repacking. CT: every step is branch-free.
+
+val MASK32: u64 = 0xffffffff
+
+fn _addc(a: u64, b: u64, cin: u64) -> (u64, u64):
+    """Return (sum, cout) for `a + b + cin`. cin must be 0 or 1.
+    CT: branch-free.
+
+    NOTE: every `u64 >> 32` is masked with `& MASK32` to dodge the
+    interpreter signed-shift bug (see
+    `doc/08_tracking/bug/bug_interpreter_u64_shr_arithmetic_2026-04-25.md`).
+    """
+    val a_lo: u64 = a & MASK32
+    val a_hi: u64 = (a >> 32) & MASK32
+    val b_lo: u64 = b & MASK32
+    val b_hi: u64 = (b >> 32) & MASK32
+    val s_lo: u64 = a_lo + b_lo + cin
+    val c_mid: u64 = (s_lo >> 32) & MASK32
+    val s_hi: u64 = a_hi + b_hi + c_mid
+    val cout: u64 = (s_hi >> 32) & MASK32
+    val sum: u64 = ((s_hi & MASK32) << 32) | (s_lo & MASK32)
+    (sum, cout)
+
+fn _subb(a: u64, b: u64, bin: u64) -> (u64, u64):
+    """Return (diff, bout) for `a - b - bin`. bin must be 0 or 1.
+    CT: branch-free. Uses bias trick to avoid signed underflow.
+
+    NOTE: every `u64 >> 32` is masked with `& MASK32` to dodge the
+    interpreter signed-shift bug (see
+    `doc/08_tracking/bug/bug_interpreter_u64_shr_arithmetic_2026-04-25.md`).
+    Without `& MASK32`, `0xffffffffffffffff >> 32` returns `0xffffffffffffffff`
+    instead of `0xffffffff`, which silently inverts the borrow chain.
+    """
+    val a_lo: u64 = a & MASK32
+    val a_hi: u64 = (a >> 32) & MASK32
+    val b_lo: u64 = b & MASK32
+    val b_hi: u64 = (b >> 32) & MASK32
+    # add 2^32 bias to each half-subtraction; borrow = 1 - bit33
+    val s_lo: u64 = (a_lo + (1 << 32)) - b_lo - bin
+    val borrow_lo: u64 = 1 - ((s_lo >> 32) & 1)
+    val s_hi: u64 = (a_hi + (1 << 32)) - b_hi - borrow_lo
+    val borrow_hi: u64 = 1 - ((s_hi >> 32) & 1)
+    val diff: u64 = ((s_hi & MASK32) << 32) | (s_lo & MASK32)
+    (diff, borrow_hi)
+
+# ============================================================================
+# Constants
+# ============================================================================
+#
+# P-256 prime p = 0xffffffff00000001 0000000000000000 00000000ffffffff ffffffffffffffff
+# u64 LE limbs: (0xffffffffffffffff, 0x00000000ffffffff, 0x0, 0xffffffff00000001)
+
+val P_L0: u64 = 0xffffffffffffffff
+val P_L1: u64 = 0x00000000ffffffff
+val P_L2: u64 = 0x0000000000000000
+val P_L3: u64 = 0xffffffff00000001
+
+# ============================================================================
+# Byte-edge ops (canonical encoding)
+# ============================================================================
+
+fn fe_zero() -> FeP256:
+    """Additive identity. CT: trivially data-independent."""
+    FeP256(l0: 0, l1: 0, l2: 0, l3: 0)
+
+fn fe_one() -> FeP256:
+    """Multiplicative identity. CT: trivially data-independent."""
+    FeP256(l0: 1, l1: 0, l2: 0, l3: 0)
+
+fn fe_from_bytes(b: [u8]) -> FeP256:
+    """Decode 32 big-endian SEC1 bytes into 4 little-endian u64 limbs.
+    NOTE: does *not* enforce `b < p`. CT: byte indices are public."""
+    val l3 = _be_load_u64(b, 0)
+    val l2 = _be_load_u64(b, 8)
+    val l1 = _be_load_u64(b, 16)
+    val l0 = _be_load_u64(b, 24)
+    FeP256(l0: l0, l1: l1, l2: l2, l3: l3)
+
+fn fe_to_bytes(a: FeP256) -> [u8]:
+    """Encode as 32 big-endian SEC1 bytes after a canonical reduction.
+    CT: canonicalize is branch-free; byte stores at fixed offsets."""
+    val r = _canonicalize(a)
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        result.push(0x00)
+        i = i + 1
+    _be_store_u64(result, 0, r.l3)
+    _be_store_u64(result, 8, r.l2)
+    _be_store_u64(result, 16, r.l1)
+    _be_store_u64(result, 24, r.l0)
+    result
+
+fn _be_load_u64(b: [u8], offset: u64) -> u64:
+    """Load 8 bytes as big-endian u64. CT: index path public."""
+    var result: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        if (offset + i) < b.len():
+            result = (result << 8) | b[offset + i].to_u64()
+        i = i + 1
+    result
+
+fn _be_store_u64(buf: [u8], offset: u64, value: u64):
+    """Store u64 as 8 big-endian bytes. CT: index path public."""
+    var i: u64 = 0
+    while i < 8:
+        val shift: u64 = (7 - i) * 8
+        if (offset + i) < buf.len():
+            buf[offset + i] = ((value >> shift) & 0xFF).to_u8()
+        i = i + 1
+
+# ============================================================================
+# CT primitives: cond_select, cond_swap, predicates
+# ============================================================================
+
+fn fe_cond_select(a: FeP256, b: FeP256, take_b: u64) -> FeP256:
+    """Return b if take_b == 1, else a. take_b MUST be 0 or 1.
+    CT: branch-free mask form, mask routed through rt_black_box."""
+    val raw_mask: u64 = 0 - take_b
+    val mask: u64 = rt_black_box(raw_mask.to_i64()).to_u64()
+    FeP256(
+        l0: a.l0 ^ (mask & (a.l0 ^ b.l0)),
+        l1: a.l1 ^ (mask & (a.l1 ^ b.l1)),
+        l2: a.l2 ^ (mask & (a.l2 ^ b.l2)),
+        l3: a.l3 ^ (mask & (a.l3 ^ b.l3))
+    )
+
+fn fe_cond_swap(a: FeP256, b: FeP256, swap: u64) -> (FeP256, FeP256):
+    """Swap (a, b) when swap == 1; identity when swap == 0.
+    CT: branch-free mask form via rt_black_box."""
+    val raw_mask: u64 = 0 - swap
+    val mask: u64 = rt_black_box(raw_mask.to_i64()).to_u64()
+    val t0: u64 = mask & (a.l0 ^ b.l0)
+    val t1: u64 = mask & (a.l1 ^ b.l1)
+    val t2: u64 = mask & (a.l2 ^ b.l2)
+    val t3: u64 = mask & (a.l3 ^ b.l3)
+    val a2 = FeP256(l0: a.l0 ^ t0, l1: a.l1 ^ t1, l2: a.l2 ^ t2, l3: a.l3 ^ t3)
+    val b2 = FeP256(l0: b.l0 ^ t0, l1: b.l1 ^ t1, l2: b.l2 ^ t2, l3: b.l3 ^ t3)
+    (a2, b2)
+
+fn fe_eq(a: FeP256, b: FeP256) -> bool:
+    """Constant-time equality. Canonicalizes both then XOR-accumulates limbs
+    routed through rt_black_box. CT: no data-dependent branches."""
+    val ra = _canonicalize(a)
+    val rb = _canonicalize(b)
+    val d0: i64 = (ra.l0.to_i64()) ^ (rb.l0.to_i64())
+    val d1: i64 = (ra.l1.to_i64()) ^ (rb.l1.to_i64())
+    val d2: i64 = (ra.l2.to_i64()) ^ (rb.l2.to_i64())
+    val d3: i64 = (ra.l3.to_i64()) ^ (rb.l3.to_i64())
+    val acc: i64 = d0 | d1 | d2 | d3
+    rt_black_box(acc) == 0
+
+fn fe_is_zero(a: FeP256) -> bool:
+    """Constant-time zero test. Tests both `a == 0` and `a == p` to handle
+    inputs that may be in the [0, 2p) "non-canonical" range without needing
+    a full subtract-p step (which itself depends on cond_select). CT: no
+    data-dependent branches; both XOR-accumulate paths execute always."""
+    # Test against 0
+    val acc0: i64 = (a.l0.to_i64()) | (a.l1.to_i64()) | (a.l2.to_i64()) | (a.l3.to_i64())
+    # Test against p (the other representative of the zero residue class in [0,2p))
+    val acc_p: i64 = (a.l0.to_i64() ^ P_L0.to_i64()) | (a.l1.to_i64() ^ P_L1.to_i64()) | (a.l2.to_i64() ^ P_L2.to_i64()) | (a.l3.to_i64() ^ P_L3.to_i64())
+    # Either one being zero means the value is 0 mod p.
+    val combined: i64 = rt_black_box(acc0) * rt_black_box(acc_p)
+    # combined == 0 iff at least one factor is zero, i.e. a == 0 or a == p.
+    rt_black_box(combined) == 0
+
+# ============================================================================
+# Internal: subtract-p / add-p (mod 2^256) primitives
+# ============================================================================
+
+fn _sub_p_with_borrow(a: FeP256) -> (FeP256, u64):
+    """Compute (a - p) and the final borrow (0 or 1). Branch-free."""
+    val (r0, b0) = _subb(a.l0, P_L0, 0)
+    val (r1, b1) = _subb(a.l1, P_L1, b0)
+    val (r2, b2) = _subb(a.l2, P_L2, b1)
+    val (r3, b3) = _subb(a.l3, P_L3, b2)
+    (FeP256(l0: r0, l1: r1, l2: r2, l3: r3), b3)
+
+fn _add_p_unchecked(a: FeP256) -> FeP256:
+    """Compute (a + p) mod 2^256 (drop carry). CT: branch-free."""
+    val (r0, c0) = _addc(a.l0, P_L0, 0)
+    val (r1, c1) = _addc(a.l1, P_L1, c0)
+    val (r2, c2) = _addc(a.l2, P_L2, c1)
+    val (r3, _c3) = _addc(a.l3, P_L3, c2)
+    FeP256(l0: r0, l1: r1, l2: r2, l3: r3)
+
+fn _canonicalize(a: FeP256) -> FeP256:
+    """Reduce `a` from [0, 2p) into [0, p). CT: one conditional subtract.
+
+    If a >= p, returns a - p; otherwise returns a. Selection is branch-free.
+    Borrow=0 from a-p means a >= p, so we want `sub`. take_b = 1 - borrow.
+    """
+    val (sub, borrow) = _sub_p_with_borrow(a)
+    fe_cond_select(a, sub, 1 - borrow)
+
+# ============================================================================
+# Add / Sub / Neg
+# ============================================================================
+
+fn fe_add(a: FeP256, b: FeP256) -> FeP256:
+    """Field addition: (a + b) mod p. CT: 4 limb adds + fixed correction.
+
+    Result of a+b is in [0, 2p) = [0, 2^257). Compute t = a + b (with 5th-bit
+    carry), then t' = t - p. Pick t' if (carry=1) OR (t >= p i.e. borrow=0).
+    """
+    val (r0, c0) = _addc(a.l0, b.l0, 0)
+    val (r1, c1) = _addc(a.l1, b.l1, c0)
+    val (r2, c2) = _addc(a.l2, b.l2, c1)
+    val (r3, carry) = _addc(a.l3, b.l3, c2)
+    val sum = FeP256(l0: r0, l1: r1, l2: r2, l3: r3)
+    val (sub, borrow) = _sub_p_with_borrow(sum)
+    # take sub when carry=1 (sum overflowed 256 bits) OR borrow=0 (sum >= p)
+    val take_sub: u64 = carry | (1 - borrow)
+    fe_cond_select(sum, sub, take_sub)
+
+fn fe_sub(a: FeP256, b: FeP256) -> FeP256:
+    """Field subtraction: (a - b) mod p. CT: 4 limb subs + fixed correction.
+
+    Compute t = a - b with 4-limb borrow. If borrow=1 (a < b), add p back.
+    """
+    val (r0, b0) = _subb(a.l0, b.l0, 0)
+    val (r1, b1) = _subb(a.l1, b.l1, b0)
+    val (r2, b2) = _subb(a.l2, b.l2, b1)
+    val (r3, borrow) = _subb(a.l3, b.l3, b2)
+    val diff = FeP256(l0: r0, l1: r1, l2: r2, l3: r3)
+    val plus_p = _add_p_unchecked(diff)
+    fe_cond_select(diff, plus_p, borrow)
+
+fn fe_neg(a: FeP256) -> FeP256:
+    """Field negation: (-a) mod p = (p - a) mod p. CT: fe_sub from fe_zero."""
+    fe_sub(fe_zero(), a)
+
+# ============================================================================
+# Multiplication / Squaring + Solinas reduction
+# ============================================================================
+#
+# Strategy: split each u64 limb into two 32-bit halves so we work with 8
+# 32-bit limbs `x[0..7]` (LE; x[0] = bits 0..31). Schoolbook 8x8 -> 16
+# 32-bit-limb product accumulated in u64. Then apply FIPS 186-4 D.2.3 Solinas
+# reduction:
+#
+#   T  = ( c7,  c6,  c5,  c4,  c3,  c2,  c1,  c0)
+#   s1 = (c15, c14, c13, c12, c11,   0,   0,   0)
+#   s2 = (   0, c15, c14, c13, c12,   0,   0,   0)
+#   s3 = (c15, c14,   0,   0,   0, c10,  c9,  c8)
+#   s4 = ( c8, c13, c15, c14, c13, c11, c10,  c9)
+#   s5 = (c10,  c8,   0,   0,   0, c13, c12, c11)
+#   s6 = (c11,  c9,   0,   0, c15, c14, c13, c12)
+#   s7 = (c12,   0, c10,  c9,  c8, c15, c14, c13)
+#   s8 = (c13,   0, c11, c10,  c9,   0, c15, c14)
+#
+#   r = T + 2*s1 + 2*s2 + s3 + s4 - s5 - s6 - s7 - s8 (mod p)
+#
+# Range bound: each c_i < 2^32; per-slot positive contribution is at most
+# (1+2+2+1+1) = 7 limbs => < 7*2^32 < 2^35; per-slot negative at most 4*2^32
+# < 2^34. Signed accumulator per slot fits in i64 with ~24 bits headroom for
+# carry propagation. We add 4*p as a constant offset to push the result into
+# [0, ~9p), then do 8 conditional subtractions of p.
+
+fn _mul_to_c(a: FeP256, b: FeP256) -> [u64]:
+    """Schoolbook 8×8 -> 16 32-bit-limb product. Returns c[0..15] u64 array
+    where c[i] holds bits (32*i .. 32*i+31) of a*b. CT: fixed loop counts."""
+    # Every `>> 32` is masked with `& MASK32` to dodge the interpreter
+    # signed-shift bug (B: bug_interpreter_u64_shr_arithmetic_2026-04-25).
+    var a_arr: [u64] = []
+    a_arr.push(a.l0 & MASK32)
+    a_arr.push((a.l0 >> 32) & MASK32)
+    a_arr.push(a.l1 & MASK32)
+    a_arr.push((a.l1 >> 32) & MASK32)
+    a_arr.push(a.l2 & MASK32)
+    a_arr.push((a.l2 >> 32) & MASK32)
+    a_arr.push(a.l3 & MASK32)
+    a_arr.push((a.l3 >> 32) & MASK32)
+    var b_arr: [u64] = []
+    b_arr.push(b.l0 & MASK32)
+    b_arr.push((b.l0 >> 32) & MASK32)
+    b_arr.push(b.l1 & MASK32)
+    b_arr.push((b.l1 >> 32) & MASK32)
+    b_arr.push(b.l2 & MASK32)
+    b_arr.push((b.l2 >> 32) & MASK32)
+    b_arr.push(b.l3 & MASK32)
+    b_arr.push((b.l3 >> 32) & MASK32)
+    var c: [u64] = []
+    var k: u64 = 0
+    while k < 16:
+        c.push(0)
+        k = k + 1
+    var i: u64 = 0
+    while i < 8:
+        var carry: u64 = 0
+        var j: u64 = 0
+        while j < 8:
+            # Each multiply: 32-bit * 32-bit fits in u64.
+            val prod: u64 = a_arr[i] * b_arr[j]
+            # Sum with c[i+j] + carry. c[i+j] < 2^32, prod < 2^64, carry < 2^33.
+            # Need to add (c[i+j] + prod + carry) but the total may overflow u64.
+            # Split: prod_lo = prod & MASK32, prod_hi = prod >> 32.
+            val prod_lo: u64 = prod & MASK32
+            val prod_hi: u64 = (prod >> 32) & MASK32
+            val carry_lo: u64 = carry & MASK32
+            val carry_hi: u64 = (carry >> 32) & MASK32
+            val sum_lo: u64 = c[i + j] + prod_lo + carry_lo
+            val new_lo: u64 = sum_lo & MASK32
+            val sum_hi: u64 = ((sum_lo >> 32) & MASK32) + prod_hi + carry_hi
+            c[i + j] = new_lo
+            carry = sum_hi
+            j = j + 1
+        # propagate remaining carry to c[i + 8] and beyond
+        var cidx: u64 = i + 8
+        while carry > 0:
+            val sum: u64 = c[cidx] + (carry & MASK32)
+            c[cidx] = sum & MASK32
+            carry = ((carry >> 32) & MASK32) + ((sum >> 32) & MASK32)
+            cidx = cidx + 1
+        i = i + 1
+    c
+
+fn _solinas_reduce(c: [u64]) -> FeP256:
+    """FIPS 186-4 D.2.3 Solinas reduction of 16 32-bit limbs to a 4×64 FeP256.
+
+    i64 per-slot accumulator (s5..s8 are subtracted). Final result is shifted
+    into a non-negative range by adding 4*p as a constant offset, then carry-
+    propagated, then we perform 10 fixed conditional subtractions of p. (5
+    suffice mathematically; 10 = generous safety margin.)
+
+    CT: every step is branch-free (no data-dependent branches).
+    """
+    val c0: i64 = c[0].to_i64()
+    val c1: i64 = c[1].to_i64()
+    val c2: i64 = c[2].to_i64()
+    val c3: i64 = c[3].to_i64()
+    val c4: i64 = c[4].to_i64()
+    val c5: i64 = c[5].to_i64()
+    val c6: i64 = c[6].to_i64()
+    val c7: i64 = c[7].to_i64()
+    val c8: i64 = c[8].to_i64()
+    val c9: i64 = c[9].to_i64()
+    val c10: i64 = c[10].to_i64()
+    val c11: i64 = c[11].to_i64()
+    val c12: i64 = c[12].to_i64()
+    val c13: i64 = c[13].to_i64()
+    val c14: i64 = c[14].to_i64()
+    val c15: i64 = c[15].to_i64()
+
+    # Per FIPS table:
+    # T at slot i: c_i (i in 0..7)
+    # 2*s1 at slot 3..7: 2*c11, 2*c12, 2*c13, 2*c14, 2*c15
+    # 2*s2 at slot 3..6: 2*c12, 2*c13, 2*c14, 2*c15
+    # s3 at slot 0,1,2,6,7: c8, c9, c10, c14, c15
+    # s4 at slot 0..7: c9, c10, c11, c13, c14, c15, c13, c8
+    # -s5 at slot 0,1,2,6,7: c11, c12, c13, c8, c10
+    # -s6 at slot 0,1,2,3,6,7: c12, c13, c14, c15, c9, c11
+    # -s7 at slot 0..5,7: c13, c14, c15, c8, c9, c10, c12
+    # -s8 at slot 0,1,3,4,5,7: c14, c15, c9, c10, c11, c13
+    #
+    # Constant offset 4*p (pushes the result up by 4p, ensures non-negative
+    # before final correction). 4*p in 32-bit limbs (LE):
+    #   p   = (0xffffffff, 0xffffffff, 0xffffffff, 0,          0, 0, 1,         0xffffffff)
+    #   4*p = (0xfffffffc, 0xffffffff, 0xffffffff, 0x00000003, 0, 0, 0x00000004, 0xfffffffc, +3 ninth)
+    #
+    # The carry-out of 3 above the 8th limb represents 3*2^256. We track it
+    # as a virtual r8 = 3 (constant) and fold via
+    #   2^256 ≡ 2^224 - 2^192 - 2^96 + 1 (mod p)
+    # in the carry-fold step below — that adds (+3, 0, 0, -3, 0, 0, -3, +3)
+    # back to the 32-bit limbs after the initial carry chain.
+    val off0: i64 = 0xfffffffc
+    val off1: i64 = 0xffffffff
+    val off2: i64 = 0xffffffff
+    val off3: i64 = 0x00000003
+    val off4: i64 = 0
+    val off5: i64 = 0
+    val off6: i64 = 0x00000004
+    val off7: i64 = 0xfffffffc
+    # Virtual 9th-limb seed: the carry-out of 4*p at bit 256.
+    val r8_seed: i64 = 3
+
+    # Per FIPS 186-4 D.2.3 reduction (cross-checked vs. canonical table):
+    var r0: i64 = c0 + c8 + c9 - c11 - c12 - c13 - c14 + off0
+    var r1: i64 = c1 + c9 + c10 - c12 - c13 - c14 - c15 + off1
+    var r2: i64 = c2 + c10 + c11 - c13 - c14 - c15 + off2
+    var r3: i64 = c3 + 2*c11 + 2*c12 + c13 - c15 - c8 - c9 + off3
+    var r4: i64 = c4 + 2*c12 + 2*c13 + c14 - c9 - c10 + off4
+    var r5: i64 = c5 + 2*c13 + 2*c14 + c15 - c10 - c11 + off5
+    var r6: i64 = c6 + 2*c14 + 2*c15 + c14 + c13 - c8 - c9 + off6
+    var r7: i64 = c7 + 2*c15 + c15 + c8 - c10 - c11 - c12 - c13 + off7
+
+    # Signed carry propagation. Each r_i magnitude bounded ~ 7*2^32 + 4p_i < 2^36,
+    # so each carry << 2^36 / 2^32 = 16 bits — fits trivially.
+    val mask32: i64 = 0xffffffff
+    val k0: i64 = r0 >> 32
+    r1 = r1 + k0
+    r0 = r0 & mask32
+    val k1: i64 = r1 >> 32
+    r2 = r2 + k1
+    r1 = r1 & mask32
+    val k2: i64 = r2 >> 32
+    r3 = r3 + k2
+    r2 = r2 & mask32
+    val k3: i64 = r3 >> 32
+    r4 = r4 + k3
+    r3 = r3 & mask32
+    val k4: i64 = r4 >> 32
+    r5 = r5 + k4
+    r4 = r4 & mask32
+    val k5: i64 = r5 >> 32
+    r6 = r6 + k5
+    r5 = r5 & mask32
+    val k6: i64 = r6 >> 32
+    r7 = r7 + k6
+    r6 = r6 & mask32
+    # r7 may have top bits — fold via 2^256 = 2^224 - 2^192 - 2^96 + 1 mod p.
+    # Add the virtual r8_seed (3, the bit-256 spill of the 4*p offset) into
+    # the fold so the offset's full value is accounted for. Without this,
+    # the fold drops 3*2^256 worth of value and the result is off by ~4p.
+    var top: i64 = (r7 >> 32) + r8_seed
+    r7 = r7 & mask32
+    r0 = r0 + top
+    r3 = r3 - top
+    r6 = r6 - top
+    r7 = r7 + top
+    val q0: i64 = r0 >> 32
+    r1 = r1 + q0
+    r0 = r0 & mask32
+    val q1: i64 = r1 >> 32
+    r2 = r2 + q1
+    r1 = r1 & mask32
+    val q2: i64 = r2 >> 32
+    r3 = r3 + q2
+    r2 = r2 & mask32
+    val q3: i64 = r3 >> 32
+    r4 = r4 + q3
+    r3 = r3 & mask32
+    val q4: i64 = r4 >> 32
+    r5 = r5 + q4
+    r4 = r4 & mask32
+    val q5: i64 = r5 >> 32
+    r6 = r6 + q5
+    r5 = r5 & mask32
+    val q6: i64 = r6 >> 32
+    r7 = r7 + q6
+    r6 = r6 & mask32
+    # Second fold (top can be small after first fold but we keep CT shape)
+    var top2: i64 = r7 >> 32
+    r7 = r7 & mask32
+    r0 = r0 + top2
+    r3 = r3 - top2
+    r6 = r6 - top2
+    r7 = r7 + top2
+    val u0: i64 = r0 >> 32
+    r1 = r1 + u0
+    r0 = r0 & mask32
+    val u1: i64 = r1 >> 32
+    r2 = r2 + u1
+    r1 = r1 & mask32
+    val u2: i64 = r2 >> 32
+    r3 = r3 + u2
+    r2 = r2 & mask32
+    val u3: i64 = r3 >> 32
+    r4 = r4 + u3
+    r3 = r3 & mask32
+    val u4: i64 = r4 >> 32
+    r5 = r5 + u4
+    r4 = r4 & mask32
+    val u5: i64 = r5 >> 32
+    r6 = r6 + u5
+    r5 = r5 & mask32
+    val u6: i64 = r6 >> 32
+    r7 = r7 + u6
+    r6 = r6 & mask32
+    # Third fold (extra safety)
+    var top3: i64 = r7 >> 32
+    r7 = r7 & mask32
+    r0 = r0 + top3
+    r3 = r3 - top3
+    r6 = r6 - top3
+    r7 = r7 + top3
+    val v0: i64 = r0 >> 32
+    r1 = r1 + v0
+    r0 = r0 & mask32
+    val v1: i64 = r1 >> 32
+    r2 = r2 + v1
+    r1 = r1 & mask32
+    val v2: i64 = r2 >> 32
+    r3 = r3 + v2
+    r2 = r2 & mask32
+    val v3: i64 = r3 >> 32
+    r4 = r4 + v3
+    r3 = r3 & mask32
+    val v4: i64 = r4 >> 32
+    r5 = r5 + v4
+    r4 = r4 & mask32
+    val v5: i64 = r5 >> 32
+    r6 = r6 + v5
+    r5 = r5 & mask32
+    val v6: i64 = r6 >> 32
+    r7 = r7 + v6
+    r6 = r6 & mask32
+
+    # Repack non-negative 32-bit limbs into 4×u64
+    val u0_64: u64 = (r0 & mask32).to_u64() | ((r1 & mask32).to_u64() << 32)
+    val u1_64: u64 = (r2 & mask32).to_u64() | ((r3 & mask32).to_u64() << 32)
+    val u2_64: u64 = (r4 & mask32).to_u64() | ((r5 & mask32).to_u64() << 32)
+    val u3_64: u64 = (r6 & mask32).to_u64() | ((r7 & mask32).to_u64() << 32)
+    var fe = FeP256(l0: u0_64, l1: u1_64, l2: u2_64, l3: u3_64)
+    # fe is in roughly [0, 16p]. Do 16 fixed conditional subtractions of p
+    # (>= ceiling of upper bound; CT preserved since count is constant).
+    var i: u64 = 0
+    while i < 16:
+        val (sub, borrow) = _sub_p_with_borrow(fe)
+        fe = fe_cond_select(fe, sub, 1 - borrow)
+        i = i + 1
+    fe
+
+fn fe_mul(a: FeP256, b: FeP256) -> FeP256:
+    """Field multiplication: (a * b) mod p via schoolbook + Solinas reduce.
+    CT: branch-free, fixed loop counts."""
+    val c = _mul_to_c(a, b)
+    _solinas_reduce(c)
+
+fn fe_sq(a: FeP256) -> FeP256:
+    """Field squaring: (a * a) mod p. Same path as fe_mul.
+    CT: branch-free."""
+    fe_mul(a, a)
+
+# ============================================================================
+# Exponentiation / Inversion (Fermat: a^(p-2) mod p)
+# ============================================================================
+
+fn fe_pow(a: FeP256, e: [u8]) -> FeP256:
+    """a^e mod p where e is little-endian bytes. CT: square-and-multiply-
+    always — every bit performs a square AND a multiply, then fe_cond_select
+    picks. Exponent treated as public-but-CT-safe."""
+    var result = fe_one()
+    var i: u64 = e.len()
+    while i > 0:
+        i = i - 1
+        var bit_idx: u64 = 8
+        while bit_idx > 0:
+            bit_idx = bit_idx - 1
+            result = fe_sq(result)
+            val bit: u64 = (e[i].to_u64() >> bit_idx) & 1
+            val maybe = fe_mul(result, a)
+            result = fe_cond_select(result, maybe, bit)
+    result
+
+fn fe_inv(a: FeP256) -> FeP256:
+    """Modular inverse a^(p-2) mod p via Fermat's Little Theorem.
+
+    Exponent p-2 = 0xffffffff00000001 0000000000000000 00000000ffffffff
+                   fffffffffffffffd, encoded as 32 bytes LITTLE-ENDIAN to
+    match fe_pow's convention. CT: square-and-multiply-always."""
+    val e: [u8] = [
+        0xfd.to_u8(), 0xff.to_u8(), 0xff.to_u8(), 0xff.to_u8(),
+        0xff.to_u8(), 0xff.to_u8(), 0xff.to_u8(), 0xff.to_u8(),
+        0xff.to_u8(), 0xff.to_u8(), 0xff.to_u8(), 0xff.to_u8(),
+        0x00.to_u8(), 0x00.to_u8(), 0x00.to_u8(), 0x00.to_u8(),
+        0x00.to_u8(), 0x00.to_u8(), 0x00.to_u8(), 0x00.to_u8(),
+        0x00.to_u8(), 0x00.to_u8(), 0x00.to_u8(), 0x00.to_u8(),
+        0x01.to_u8(), 0x00.to_u8(), 0x00.to_u8(), 0x00.to_u8(),
+        0xff.to_u8(), 0xff.to_u8(), 0xff.to_u8(), 0xff.to_u8()
+    ]
+    fe_pow(a, e)

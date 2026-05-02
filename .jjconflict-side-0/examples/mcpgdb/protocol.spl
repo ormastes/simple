@@ -1,0 +1,150 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# mcpgdb MCP — initialize and tool schemas
+
+use examples.mcpgdb.json_helpers.{LB, RB, SB_L, SB_R, jp, js, jo0, jo1, jo2, jo3, jo4, ja, jsonrpc_result}
+
+val SERVER_NAME = "mcpgdb"
+val SERVER_VERSION = "0.1.0"
+
+var TOOLS_CACHE = ""
+var INIT_CACHE = ""
+
+fn make_string_prop(description: text) -> text:
+    jo2(jp("type", js("string")), jp("description", js(description)))
+
+fn make_int_prop(description: text) -> text:
+    jo2(jp("type", js("integer")), jp("description", js(description)))
+
+fn make_bool_prop(description: text) -> text:
+    jo2(jp("type", js("boolean")), jp("description", js(description)))
+
+fn make_tool_schema(name: text, description: text, props: text, required: text, destructive: bool) -> text:
+    val schema = jo3(jp("type", js("object")), jp("properties", props), jp("required", required))
+    var read_only = "true"
+    var destructive_hint = "false"
+    var idempotent = "true"
+    if destructive:
+        read_only = "false"
+        destructive_hint = "true"
+        idempotent = "false"
+    val annotations = jo4(
+        jp("readOnlyHint", read_only),
+        jp("destructiveHint", destructive_hint),
+        jp("idempotentHint", idempotent),
+        jp("openWorldHint", "false")
+    )
+    LB()
+        + jp("name", js(name))
+        + "," + jp("description", js(description))
+        + "," + jp("inputSchema", schema)
+        + "," + jp("annotations", annotations)
+        + RB()
+
+fn make_session_id_prop() -> text:
+    jp("session_id", make_string_prop("Debug session ID; defaults to current session when omitted"))
+
+fn make_init_response(id: text) -> text:
+    if INIT_CACHE != "":
+        return jsonrpc_result(id, INIT_CACHE)
+    val caps = jo3(
+        jp("tools", jo1(jp("listChanged", "false"))),
+        jp("resources", jo1(jp("listChanged", "false"))),
+        jp("logging", jo0())
+    )
+    val server_info = jo2(jp("name", js(SERVER_NAME)), jp("version", js(SERVER_VERSION)))
+    INIT_CACHE = jo4(
+        jp("protocolVersion", js("2025-06-18")),
+        jp("capabilities", caps),
+        jp("instructions", js("Merged C/C++ debug MCP example with persistent GDB/LLDB sessions, remote OpenOCD/TRACE32 GDB flows, gated raw commands, and clangd workspace tools.")),
+        jp("serverInfo", server_info)
+    )
+    jsonrpc_result(id, INIT_CACHE)
+
+fn make_tools_list(id: text) -> text:
+    if TOOLS_CACHE != "":
+        return jsonrpc_result(id, TOOLS_CACHE)
+    var tools: [text] = []
+
+    tools.push(make_tool_schema("workspace_open", "Set the workspace root used by debug and clangd tools.", jo2(
+        jp("root", make_string_prop("Workspace root; defaults to current working directory")),
+        jp("compile_commands_dir", make_string_prop("Directory containing compile_commands.json"))
+    ), "[]", false))
+    tools.push(make_tool_schema("workspace_status", "Show current workspace and session status.", jo0(), "[]", false))
+    tools.push(make_tool_schema("clangd_open", "Launch clangd for the current workspace.", jo2(
+        jp("root", make_string_prop("Workspace root; defaults to current working directory")),
+        jp("compile_commands_dir", make_string_prop("Directory containing compile_commands.json"))
+    ), "[]", false))
+
+    tools.push(make_tool_schema("debug_session_create", "Create a new debugger session using gdb, lldb, openocd_gdb, or t32_gdb backend.", jo2(
+        jp("backend", make_string_prop("Backend kind: gdb, lldb, openocd_gdb, t32_gdb")),
+        jp("workspace_root", make_string_prop("Workspace root; defaults to current working directory"))
+    ), "[\"backend\"]", false))
+    tools.push(make_tool_schema("debug_session_list", "List active debugger sessions.", jo0(), "[]", false))
+    tools.push(make_tool_schema("debug_session_select", "Select the current debugger session.", jo1(make_session_id_prop()), "[\"session_id\"]", false))
+    tools.push(make_tool_schema("debug_session_close", "Close a debugger session and terminate its backend process.", jo1(make_session_id_prop()), "[\"session_id\"]", true))
+
+    tools.push(make_tool_schema("debug_launch", "Load a program into the current debugger session and run it.", jo3(
+        make_session_id_prop(),
+        jp("program", make_string_prop("Path to executable")),
+        jp("args", make_string_prop("Optional command-line arguments"))
+    ), "[\"program\"]", false))
+    tools.push(make_tool_schema("debug_attach", "Attach to a running process.", jo2(make_session_id_prop(), jp("pid", make_string_prop("PID to attach"))), "[\"pid\"]", false))
+    tools.push(make_tool_schema("debug_connect_remote", "Connect the current debugger session to a remote GDB target.", jo3(
+        make_session_id_prop(),
+        jp("host", make_string_prop("Remote host")),
+        jp("port", make_string_prop("Remote port"))
+    ), "[\"host\",\"port\"]", false))
+    tools.push(make_tool_schema("debug_disconnect", "Disconnect from the current target.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("debug_restart", "Restart program execution in the current session.", jo1(make_session_id_prop()), "[]", false))
+
+    tools.push(make_tool_schema("debug_continue", "Continue execution.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("debug_pause", "Interrupt execution.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("debug_step_in", "Step into the next statement.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("debug_step_over", "Step over the next statement.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("debug_step_out", "Step out of the current frame.", jo1(make_session_id_prop()), "[]", false))
+
+    tools.push(make_tool_schema("breakpoint_set", "Set a breakpoint by file/line or symbol.", jo4(
+        make_session_id_prop(),
+        jp("file", make_string_prop("Source file")),
+        jp("line", make_string_prop("1-based source line")),
+        jp("symbol", make_string_prop("Function or symbol name"))
+    ), "[]", false))
+    tools.push(make_tool_schema("breakpoint_remove", "Remove a breakpoint by debugger breakpoint id.", jo2(make_session_id_prop(), jp("breakpoint_id", make_string_prop("Debugger breakpoint id"))), "[\"breakpoint_id\"]", true))
+    tools.push(make_tool_schema("breakpoint_list", "List breakpoints.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("thread_list", "List threads.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("frame_list", "List frames.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("frame_select", "Select a frame by frame id.", jo2(make_session_id_prop(), jp("frame_id", make_string_prop("Frame id/index"))), "[\"frame_id\"]", false))
+    tools.push(make_tool_schema("variable_list", "List variables in the current frame.", jo1(make_session_id_prop()), "[]", false))
+    tools.push(make_tool_schema("evaluate", "Evaluate an expression in the current frame.", jo2(make_session_id_prop(), jp("expression", make_string_prop("Expression to evaluate"))), "[\"expression\"]", false))
+    tools.push(make_tool_schema("register_read", "Read one register or all registers.", jo2(make_session_id_prop(), jp("name", make_string_prop("Register name; omit for all"))), "[]", false))
+    tools.push(make_tool_schema("register_write", "Write a register value.", jo3(make_session_id_prop(), jp("name", make_string_prop("Register name")), jp("value", make_string_prop("New value"))), "[\"name\",\"value\"]", true))
+    tools.push(make_tool_schema("memory_read", "Read target memory.", jo4(
+        make_session_id_prop(),
+        jp("address", make_string_prop("Address expression")),
+        jp("count", make_string_prop("Element count; default 16")),
+        jp("format", make_string_prop("Display format; default x"))
+    ), "[\"address\"]", false))
+    tools.push(make_tool_schema("memory_write", "Write target memory.", jo3(make_session_id_prop(), jp("address", make_string_prop("Address expression")), jp("value", make_string_prop("New value"))), "[\"address\",\"value\"]", true))
+    tools.push(make_tool_schema("debug_command_run", "Run a gated raw backend command.", jo3(
+        make_session_id_prop(),
+        jp("command", make_string_prop("Debugger command text")),
+        jp("dangerous", make_bool_prop("Set true to allow target mutation commands"))
+    ), "[\"command\"]", false))
+
+    val pos_props = LB()
+        + jp("file", make_string_prop("Source file path"))
+        + "," + jp("line", make_int_prop("0-indexed line"))
+        + "," + jp("character", make_int_prop("0-indexed character offset"))
+        + RB()
+    val pos_req = "[\"file\",\"line\",\"character\"]"
+    tools.push(make_tool_schema("clangd_definition", "Resolve definition location via clangd.", pos_props, pos_req, false))
+    tools.push(make_tool_schema("clangd_references", "Resolve references via clangd.", pos_props, pos_req, false))
+    tools.push(make_tool_schema("clangd_hover", "Get hover details via clangd.", pos_props, pos_req, false))
+    tools.push(make_tool_schema("clangd_completion", "Get code completions via clangd.", pos_props, pos_req, false))
+    tools.push(make_tool_schema("clangd_type_definition", "Resolve type definition via clangd.", pos_props, pos_req, false))
+    tools.push(make_tool_schema("clangd_symbols", "List symbols in a source file via clangd.", jo1(jp("file", make_string_prop("Source file path"))), "[\"file\"]", false))
+    tools.push(make_tool_schema("clangd_diagnostics", "Run clangd --check diagnostics for a source file.", jo1(jp("file", make_string_prop("Source file path"))), "[\"file\"]", false))
+
+    TOOLS_CACHE = jo1(jp("tools", ja(tools)))
+    jsonrpc_result(id, TOOLS_CACHE)

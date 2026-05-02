@@ -1,0 +1,283 @@
+# Capability Types — Entity Dimension
+#
+# Capability-based security types. Inspired by Capsicum + OpenBSD pledge/unveil.
+# Maps to MDSOC visibility (Public/Internal/Private) and bypass grants.
+
+# Common rights bitmask for file, block, storage, mount, and queue caps.
+val CAP_RIGHT_READ: u32 = 1
+val CAP_RIGHT_WRITE: u32 = 2
+val CAP_RIGHT_EXEC: u32 = 4
+val CAP_RIGHT_ADMIN: u32 = 8
+val CAP_RIGHT_MOUNT: u32 = 16
+val CAP_RIGHT_QUEUE_SUBMIT: u32 = 32
+val CAP_RIGHT_MAP: u32 = 64
+val CAP_RIGHT_DATASET_BUILD: u32 = 128
+val CAP_RIGHT_QUEUE_RECV: u32 = 256
+
+# NVMe queue policy constants shared by capability-aware storage services.
+val SIMPLEOS_NVME_ADMIN_QUEUE_ID: u16 = 0
+val SIMPLEOS_NVME_SYSTEM_QUEUE_ID: u16 = 1
+val SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID: u16 = 2
+
+struct CapabilityToken:
+    """Typed capability token with generation counter for revocation."""
+    kind: CapabilityKind
+    generation: u64         # Revocation counter (matches SurfaceHandle pattern)
+    owner: u64              # TaskId of owning process
+
+enum CapabilityKind:
+    """What a capability permits."""
+    # File system
+    FileRead(path_prefix: text)
+    FileWrite(path_prefix: text)
+    FileCreate(path_prefix: text)
+    FileExec(path_prefix: text)
+
+    # Network
+    NetConnect(port: u16)
+    NetListen(port: u16)
+    NetRaw                  # Raw socket (privileged)
+
+    # Process
+    ProcessSpawn
+    ProcessSignal(target: u64)  # Signal specific task
+    ProcessSignalAny            # Signal any task (privileged)
+
+    # Hardware (for userspace drivers)
+    PortIO(base: u16, count: u16)   # x86 I/O port range
+    Mmio(base: u64, size: u64)      # Memory-mapped I/O region
+    Irq(irq_num: u32)              # Handle specific interrupt
+    DeviceEnumerate(class_code: u8, subclass: u8)
+    DeviceGrant(bdf_bus: u8, bdf_device: u8, bdf_func: u8)
+    DeviceBarMap(bdf_bus: u8, bdf_device: u8, bdf_func: u8, bar_index: u8)
+    DeviceDma(bdf_bus: u8, bdf_device: u8, bdf_func: u8, max_bytes: u64)
+    IommuDomain(domain_id: u32)
+
+    # Storage and mount authorities. These are higher-level than raw MMIO/DMA
+    # caps; normal apps should receive these instead of device caps.
+    BlockDevice(path: text, rights: u32)
+    StorageNamespace(controller_id: u32, nsid: u32, rights: u32)
+    StoragePartition(path: text, rights: u32)
+    StorageExtent(object_id: u64, offset_lba: u64, lba_count: u64, rights: u32, generation: u64)
+    Mount(path_prefix: text, rights: u32)
+    IoQueue(queue_id: u16, rights: u32)
+    SharedDataset(object_id: u64, generation: u64, rights: u32)
+    ProcessQueue(queue_id: u64, generation: u64, rights: u32)
+
+    # IPC
+    IpcConnect(port_name: text)
+    IpcListen(port_name: text)
+
+    # System
+    SystemReboot
+    SystemMount
+    SystemTime
+    SystemPrivilege         # Gate for sys_privctl — only SYSTEM tasks may call
+
+struct CapabilitySet:
+    """Set of capabilities held by a task.
+
+    Monotonically shrinkable only (like OpenBSD pledge):
+    - pledge() removes capabilities permanently
+    - unveil() restricts file path prefixes
+    - No capability can ever be added back once removed
+    """
+    caps: [CapabilityToken]
+    is_pledged: bool        # Once pledged, set can only shrink
+
+impl CapabilitySet:
+    static fn full() -> CapabilitySet:
+        """All capabilities (init process only)."""
+        CapabilitySet(caps: [], is_pledged: false)
+
+    fn has(kind: CapabilityKind) -> bool:
+        """Check if this set contains a matching capability."""
+        for cap in self.caps:
+            if capability_kind_allows(cap.kind, kind):
+                return true
+        false
+
+    me pledge(allowed: [CapabilityKind]):
+        """Permanently restrict to only the listed capabilities.
+        Cannot be called twice — irreversible."""
+        if self.is_pledged:
+            return  # Already pledged, cannot expand
+        var new_caps: [CapabilityToken] = []
+        for cap in self.caps:
+            for kind in allowed:
+                if cap.kind == kind:
+                    new_caps.push(cap)
+        self.caps = new_caps
+        self.is_pledged = true
+
+fn capability_kind_allows(held: CapabilityKind, required: CapabilityKind) -> bool:
+    """Return true when `held` authorizes `required`.
+
+    This keeps exact-match behavior for most caps and adds containment for the
+    path, rights, queue, and DMA caps needed by storage/device policy.
+    """
+    if held == required:
+        return true
+
+    match held:
+        case CapabilityKind.FileRead(held_prefix):
+            match required:
+                case CapabilityKind.FileRead(req_prefix): _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix)
+                case _: false
+        case CapabilityKind.FileWrite(held_prefix):
+            match required:
+                case CapabilityKind.FileWrite(req_prefix): _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix)
+                case _: false
+        case CapabilityKind.FileCreate(held_prefix):
+            match required:
+                case CapabilityKind.FileCreate(req_prefix): _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix)
+                case _: false
+        case CapabilityKind.FileExec(held_prefix):
+            match required:
+                case CapabilityKind.FileExec(req_prefix): _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix)
+                case _: false
+        case CapabilityKind.DeviceEnumerate(held_class, held_subclass):
+            match required:
+                case CapabilityKind.DeviceEnumerate(req_class, req_subclass):
+                    (held_class == 0 and held_subclass == 0) or
+                    (held_class == req_class and (held_subclass == 0 or held_subclass == req_subclass))
+                case _: false
+        case CapabilityKind.DeviceDma(held_bus, held_device, held_func, held_max):
+            match required:
+                case CapabilityKind.DeviceDma(req_bus, req_device, req_func, req_max):
+                    held_bus == req_bus and held_device == req_device and held_func == req_func and held_max >= req_max
+                case _: false
+        case CapabilityKind.BlockDevice(held_path, held_rights):
+            match required:
+                case CapabilityKind.BlockDevice(req_path, req_rights):
+                    _path_prefix_allows(held_prefix: held_path, required_path: req_path) and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.StorageNamespace(held_controller, held_nsid, held_rights):
+            match required:
+                case CapabilityKind.StorageNamespace(req_controller, req_nsid, req_rights):
+                    held_controller == req_controller and held_nsid == req_nsid and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.StoragePartition(held_path, held_rights):
+            match required:
+                case CapabilityKind.StoragePartition(req_path, req_rights):
+                    _path_prefix_allows(held_prefix: held_path, required_path: req_path) and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.StorageExtent(held_object, held_offset, held_count, held_rights, held_generation):
+            match required:
+                case CapabilityKind.StorageExtent(req_object, req_offset, req_count, req_rights, req_generation):
+                    held_object == req_object and
+                    held_generation == req_generation and
+                    req_offset >= held_offset and
+                    (req_offset + req_count) <= (held_offset + held_count) and
+                    _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.Mount(held_prefix, held_rights):
+            match required:
+                case CapabilityKind.Mount(req_prefix, req_rights):
+                    _path_prefix_allows(held_prefix: held_prefix, required_path: req_prefix) and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.IoQueue(held_queue, held_rights):
+            match required:
+                case CapabilityKind.IoQueue(req_queue, req_rights):
+                    held_queue == req_queue and _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.SharedDataset(held_object, held_generation, held_rights):
+            match required:
+                case CapabilityKind.SharedDataset(req_object, req_generation, req_rights):
+                    held_object == req_object and
+                    held_generation == req_generation and
+                    _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case CapabilityKind.ProcessQueue(held_queue, held_generation, held_rights):
+            match required:
+                case CapabilityKind.ProcessQueue(req_queue, req_generation, req_rights):
+                    held_queue == req_queue and
+                    held_generation == req_generation and
+                    _rights_allow(held_rights: held_rights, required_rights: req_rights)
+                case _: false
+        case _: false
+
+fn _path_prefix_allows(held_prefix: text, required_path: text) -> bool:
+    if held_prefix == "" or held_prefix == "/":
+        return true
+    if required_path == "":
+        return false
+    if required_path.len() < held_prefix.len():
+        return false
+    required_path[0:held_prefix.len()] == held_prefix
+
+fn _rights_allow(held_rights: u32, required_rights: u32) -> bool:
+    if required_rights == 0:
+        return true
+    (held_rights & required_rights) == required_rights
+
+# ============================================================================
+# G11 — Privilege Mask (per-task kernel privilege table)
+# ============================================================================
+
+# Op codes for sys_privctl
+val PRIVCTL_SET_MASK: u32    = 0
+val PRIVCTL_GET_MASK: u32    = 1
+val PRIVCTL_ADD_PEER: u32    = 2
+val PRIVCTL_REMOVE_PEER: u32 = 3
+
+struct PrivilegeMask:
+    """Per-task kernel privilege record.
+
+    Holds bitmaps for allowed kernel calls and IRQs, an I/O port range,
+    and the set of endpoint IDs this task may send IPC to.
+    """
+    kernel_calls: u64           # Bitmask: bit N set => task may invoke kernel call N
+    irqs: u64                   # Bitmask: bit N set => task may handle IRQ N
+    io_port_base: u16           # Base of allowed I/O port range
+    io_port_len: u16            # Length of allowed I/O port range (0 = none)
+    allowed_peers: [u32]        # Endpoint IDs this task may IPC-send to
+
+fn priv_allows_kernel_call(mask: PrivilegeMask, call_id: u32) -> bool:
+    """Return true if `mask` permits kernel call `call_id` (bit-test)."""
+    if call_id >= 64:
+        return false
+    val bit: u64 = 1
+    # TODO(mdsoc+): >> broken in Cranelift seed; use division as workaround
+    val shifted = bit / _pow2_u64(call_id)
+    (mask.kernel_calls / shifted) % 2 != 0
+
+fn priv_allows_send_to(mask: PrivilegeMask, peer: u32) -> bool:
+    """Return true if `mask` permits sending IPC to `peer` endpoint."""
+    for p in mask.allowed_peers:
+        if p == peer:
+            return true
+    false
+
+fn _pow2_u64(exp: u32) -> u64:
+    """Compute 2^exp for 0 <= exp < 64 (workaround for >> Cranelift bug)."""
+    var result: u64 = 1
+    var i: u32 = 0
+    while i < exp:
+        result = result * 2
+        i = i + 1
+    result
+
+# ============================================================================
+# G12 — Memory Grant (temporary cross-task memory region sharing)
+# ============================================================================
+
+# Grant flags
+val GRANT_R: u32  = 1   # Read access
+val GRANT_W: u32  = 2   # Write access
+val GRANT_RW: u32 = 3   # Read+Write access
+
+struct Grant:
+    """Temporary cross-task memory region share.
+
+    A grantor task creates a Grant to let a grantee task access a virtual
+    address range. Unlike capability transfer, the grant does not move
+    the underlying memory — it is a scoped permission, revocable at any time.
+    """
+    id: u32
+    grantor: u32        # Task ID of the granting task
+    grantee: u32        # Task ID of the receiving task
+    vaddr: u64          # Base virtual address in grantor's address space
+    len: u64            # Length of the region in bytes
+    flags: u32          # GRANT_R / GRANT_W / GRANT_RW
+    valid: bool         # false after cap_revoke()

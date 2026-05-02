@@ -1,0 +1,105 @@
+# Animation keyframe sequencer — steps through keyframes at time offsets.
+#
+# Mirrors gfx::KeyframeModel (cc/animation) and CSS @keyframes.
+# A sequence has an ordered list of (offset, value) pairs with associated
+# easing. Sampling at time t interpolates between surrounding keyframes
+# using the configured easing for the current segment.
+
+use std.skia.feature.animation.interpolate.{
+    EasingKind,
+    CubicBezierEasing,
+    ease_linear,
+    lerp_f64,
+    apply_easing
+}
+
+# ============================================================================
+# Keyframe — a single (offset, value) pair with its outgoing easing.
+# ============================================================================
+
+class Keyframe:
+    offset: f64
+    value: f64
+    easing: EasingKind
+    custom_easing: CubicBezierEasing
+
+fn keyframe_new(offset: f64, value: f64, easing: EasingKind, custom: CubicBezierEasing) -> Keyframe:
+    Keyframe(offset: offset, value: value, easing: easing, custom_easing: custom)
+
+# ============================================================================
+# KeyframeSequence — ordered keyframes over a total duration.
+# ============================================================================
+
+class KeyframeSequence:
+    keyframes: [Keyframe]
+    duration: f64
+
+fn keyframe_sequence_new(duration: f64) -> KeyframeSequence:
+    KeyframeSequence(keyframes: [], duration: duration)
+
+fn clamp_unit_f64(x: f64) -> f64:
+    if x < 0.0:
+        0.0
+    elif x > 1.0:
+        1.0
+    else:
+        x
+
+# ============================================================================
+# KeyframeSequence methods
+# ============================================================================
+
+me KeyframeSequence add_keyframe(kf: Keyframe):
+    me.keyframes.append(kf)
+    # Simple insertion sort by offset (list is small; stable on already-sorted).
+    var i = 1
+    val n = me.keyframes.len()
+    while i < n:
+        var j = i
+        while j > 0:
+            val cur = me.keyframes[j]
+            val prev = me.keyframes[j - 1]
+            if prev.offset > cur.offset:
+                me.keyframes[j] = prev
+                me.keyframes[j - 1] = cur
+                j = j - 1
+            else:
+                j = 0
+        i = i + 1
+
+me KeyframeSequence keyframe_count() -> i64:
+    me.keyframes.len()
+
+me KeyframeSequence clear():
+    me.keyframes = []
+
+me KeyframeSequence sample(t: f64) -> f64:
+    val n = me.keyframes.len()
+    if n == 0:
+        return 0.0
+    # Normalize time to [0, 1] based on duration; duration <= 0 clamps to last.
+    var norm = 0.0
+    if me.duration > 0.0:
+        norm = clamp_unit_f64(t / me.duration)
+    else:
+        norm = 1.0
+    val first = me.keyframes[0]
+    val last = me.keyframes[n - 1]
+    if norm <= first.offset:
+        return first.value
+    if norm >= last.offset:
+        return last.value
+    # Linear scan for surrounding keyframes.
+    var i = 0
+    while i < n - 1:
+        val a = me.keyframes[i]
+        val b = me.keyframes[i + 1]
+        if norm >= a.offset and norm <= b.offset:
+            val span = b.offset - a.offset
+            if span <= 0.0:
+                return a.value
+            val local_t = (norm - a.offset) / span
+            val eased_t = apply_easing(a.easing, local_t, a.custom_easing)
+            return lerp_f64(a.value, b.value, eased_t)
+        i = i + 1
+    last.value

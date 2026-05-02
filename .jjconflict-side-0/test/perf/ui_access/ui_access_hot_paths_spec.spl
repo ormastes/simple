@@ -1,0 +1,131 @@
+# UI Access Hot Paths Perf Smoke
+#
+# Lightweight regression smoke for the canonical UI access protocol hot paths.
+# Exercises snapshot, query, and ensure-style state loops on a multi-surface
+# in-memory session so perf regressions show up without any filesystem or
+# subprocess dependence.
+
+extern fn rt_time_now_unix_micros() -> i64
+
+use std.spec.{describe, it, expect}
+use common.ui.builder.{column, text_widget, button, text_field, textarea, build_tree}
+use common.ui.session.{UISession}
+use common.ui.widget.{UIEvent, UITree}
+use app.ui.test_api.handler.{handle_test_request}
+
+fn slow_it(name: text, block: fn()):
+    it(name, block)
+
+fn _surface_tree(prefix: text, card_count: i64) -> UITree:
+    var root = column("{prefix}_root")
+    root = root.child(text_widget("{prefix}_title", "{prefix} access"))
+    root = root.child(text_field("{prefix}_search", "{prefix} search", "Search"))
+    root = root.child(button("{prefix}_refresh", "Refresh", "refresh"))
+
+    var i = 0
+    while i < card_count:
+        var card = column("{prefix}_card_{i}")
+        card = card.child(text_widget("{prefix}_label_{i}", "Item {i}"))
+        card = card.child(text_field("{prefix}_field_{i}", "Value {i}", "Value"))
+        card = card.child(button("{prefix}_button_{i}", "Go {i}", "go"))
+        card = card.child(textarea("{prefix}_notes_{i}", "Note {i}", "Notes", 2))
+        root = root.child(card)
+        i = i + 1
+
+    build_tree(root)
+
+fn _session_fixture() -> UISession:
+    var session = UISession.new(_surface_tree("main", 10))
+    session.open_surface("popup", _surface_tree("popup", 6))
+    session.open_surface("inspector", _surface_tree("inspector", 4))
+    session.set_active_surface("main")
+    session
+
+fn _bench_request(label: text, warmup: i64, iterations: i64, request: fn()) -> i64:
+    var i = 0
+    while i < warmup:
+        request()
+        i = i + 1
+
+    val start = rt_time_now_unix_micros()
+    i = 0
+    while i < iterations:
+        request()
+        i = i + 1
+    val elapsed = rt_time_now_unix_micros() - start
+    val avg = if iterations == 0: 0 else: elapsed / iterations
+    print "[perf] {label}: {elapsed} us for {iterations} iterations (avg={avg} us/iter)"
+    elapsed
+
+fn _check_budget(label: text, elapsed_us: i64, soft_ms: i64, hard_ms: i64):
+    val elapsed_ms = elapsed_us / 1000
+    if elapsed_ms >= soft_ms:
+        print "[perf] Warning: {label} took {elapsed_ms}ms (target: <{soft_ms}ms)"
+    expect elapsed_ms < hard_ms
+
+describe "ui_access hot paths perf smoke":
+    slow_it "snapshot route stays interactive on a multi-surface in-memory session":
+        var session = _session_fixture()
+        val inject_event = \event:
+            session.dispatch(event)
+
+        val snapshot_request = \:
+            handle_test_request(
+                "/api/test/ui/snapshot",
+                "GET",
+                "",
+                session.current_state(),
+                inject_event,
+                session
+            )
+        val preflight = snapshot_request()
+        expect(preflight.0).to_equal(200)
+        expect(preflight.2).to_contain("\"popup\"")
+
+        val elapsed = _bench_request("ui_access snapshot route", 5, 100, snapshot_request)
+        _check_budget("ui_access snapshot route", elapsed, 100, 2000)
+
+    slow_it "query route stays interactive across kind/text filters":
+        var session = _session_fixture()
+        val inject_event = \event:
+            session.dispatch(event)
+
+        val query_request = \:
+            handle_test_request(
+                "/api/test/ui/query?surface_id=popup&kind=button&text=Go&focused_only=false&limit=16",
+                "GET",
+                "",
+                session.current_state(),
+                inject_event,
+                session
+            )
+        val preflight = query_request()
+        expect(preflight.0).to_equal(200)
+        expect(preflight.2).to_contain("\"match_count\"")
+        expect(preflight.2).to_contain("popup#popup_button_0")
+
+        val elapsed = _bench_request("ui_access query route", 5, 100, query_request)
+        _check_budget("ui_access query route", elapsed, 100, 2000)
+
+    slow_it "ensure-style state loop stays interactive on a canonical button":
+        var session = _session_fixture()
+        val inject_event = \event:
+            session.dispatch(event)
+
+        val ensure_body = "{\"surface_id\":\"main\",\"canonical_id\":\"main#main_button_0\",\"state_key\":\"selected\",\"state_value\":\"true\"}"
+        val ensure_request = \:
+            handle_test_request(
+                "/api/test/ui/state",
+                "POST",
+                ensure_body,
+                session.current_state(),
+                inject_event,
+                session
+            )
+
+        val seed = ensure_request()
+        expect(seed.0).to_equal(200)
+        expect(seed.2).to_contain("\"state_key\":\"selected\"")
+
+        val elapsed = _bench_request("ui_access ensure-style state route", 5, 100, ensure_request)
+        _check_budget("ui_access ensure-style state route", elapsed, 100, 2000)

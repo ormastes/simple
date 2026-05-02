@@ -1,0 +1,72 @@
+use std.spec
+use os.services.vfs.vfs_init.{
+    _clear_vfs_rootfs_for_test,
+    _mount_hosted_rootfs_for_test,
+    g_vfs_read_file_text,
+    g_vfs_read_file_bytes,
+    g_vfs_read_executable_bytes,
+    g_vfs_file_size,
+    g_vfs_file_exists,
+    g_vfs_write_file_text,
+}
+use std.fs_driver.instance.{DriverInstance}
+use std.db.dbfs_driver.{DbFsDriver}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
+use std.fs_driver.types.{MountOptions}
+
+fn _dbfs_root() -> DriverInstance:
+    DriverInstance.DbFs(DbFsDriver.new_hosted())
+
+fn _nvfs_posix_root() -> DriverInstance:
+    var d = NvfsPosixDriver.new("nvfs-posix-root")
+    d.mount(MountOptions.default()).unwrap()
+    DriverInstance.NvfsPosix(d)
+
+describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
+    it "DBFS rootfs can write, read, size, and existence-check through g_vfs_*":
+        _clear_vfs_rootfs_for_test()
+        expect _mount_hosted_rootfs_for_test(_dbfs_root()) == true
+        expect g_vfs_write_file_text("/etc/hostname", "simpleos-dbfs\n") == true
+        expect g_vfs_file_exists("/etc/hostname") == true
+        expect g_vfs_file_size("/etc/hostname").unwrap().to_i64() == 14
+        expect g_vfs_read_file_text("/etc/hostname") == "simpleos-dbfs\n"
+        val bytes = g_vfs_read_file_bytes("/etc/hostname")
+        expect bytes.len() == 14
+        expect bytes[0] == 115u8
+
+    it "NvfsPosix rootfs can write, read, size, and existence-check through g_vfs_*":
+        _clear_vfs_rootfs_for_test()
+        expect _mount_hosted_rootfs_for_test(_nvfs_posix_root()) == true
+        expect g_vfs_write_file_text("/sys/version.txt", "simpleos-nvfs\n") == true
+        expect g_vfs_file_exists("/sys/version.txt") == true
+        expect g_vfs_file_size("/sys/version.txt").unwrap().to_i64() == 14
+        expect g_vfs_read_file_text("/sys/version.txt") == "simpleos-nvfs\n"
+        val bytes = g_vfs_read_file_bytes("/sys/version.txt")
+        expect bytes.len() == 14
+        expect bytes[0] == 115u8
+
+    it "NvfsPosix rootfs rewrite replaces instead of appending":
+        _clear_vfs_rootfs_for_test()
+        expect _mount_hosted_rootfs_for_test(_nvfs_posix_root()) == true
+        expect g_vfs_write_file_text("/sys/apps/hello_world", "first") == true
+        expect g_vfs_write_file_text("/sys/apps/hello_world", "second") == true
+        expect g_vfs_file_size("/sys/apps/hello_world").unwrap().to_i64() == 6
+        expect g_vfs_read_file_text("/sys/apps/hello_world") == "second"
+
+    it "DBFS executable reads fall back to the mounted rootfs":
+        _clear_vfs_rootfs_for_test()
+        expect _mount_hosted_rootfs_for_test(_dbfs_root()) == true
+        expect g_vfs_write_file_text("/home/RUNME.ELF", "ELFAA") == true
+        val bytes = g_vfs_read_executable_bytes("/home/RUNME.ELF")
+        expect bytes.len() == 5
+        expect bytes[0] == 69u8
+        expect bytes[4] == 65u8
+
+    it "NvfsPosix executable reads fall back to the mounted rootfs":
+        _clear_vfs_rootfs_for_test()
+        expect _mount_hosted_rootfs_for_test(_nvfs_posix_root()) == true
+        expect g_vfs_write_file_text("/home/RUNME.ELF", "ELFAA") == true
+        val bytes = g_vfs_read_executable_bytes("/home/RUNME.ELF")
+        expect bytes.len() == 5
+        expect bytes[0] == 69u8
+        expect bytes[4] == 65u8

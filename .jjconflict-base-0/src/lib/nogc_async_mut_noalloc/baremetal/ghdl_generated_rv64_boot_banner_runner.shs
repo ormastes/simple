@@ -1,0 +1,97 @@
+#!/bin/bash
+# GHDL runner for the generated RV64 minimal boot-banner lane.
+#
+# Usage:
+#   ./ghdl_generated_rv64_boot_banner_runner.shs <program.s> [--timeout=30]
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
+LINKER_SCRIPT="$PROJECT_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_fw_jump.ld"
+TIMEOUT=30
+PROGRAM=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --timeout=*) TIMEOUT="${arg#--timeout=}" ;;
+        *) [ -z "$PROGRAM" ] && PROGRAM="$arg" ;;
+    esac
+done
+
+if [ -z "$PROGRAM" ]; then
+    echo "Usage: $0 <program.s> [--timeout=N]"
+    exit 1
+fi
+
+if [ ! -f "$PROGRAM" ]; then
+    echo "Error: Program not found: $PROGRAM"
+    exit 1
+fi
+
+TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv64_boot_banner_XXXXXX)
+trap "rm -rf $TMP_DIR" EXIT
+
+GEN_DIR="$TMP_DIR/generated"
+TEST_BASE="$TMP_DIR/program"
+TEST_ELF="$TEST_BASE.elf"
+FW_BIN="$TEST_BASE.fw.bin"
+PAYLOAD_BIN="$TEST_BASE.payload.bin"
+TEST_PKG="$TMP_DIR/test_program.vhd"
+
+riscv64-linux-gnu-as -march=rv64i_zicsr -mabi=lp64 -o "$TEST_BASE.o" "$PROGRAM"
+riscv64-linux-gnu-ld -m elf64lriscv -T "$LINKER_SCRIPT" --no-relax -o "$TEST_ELF" "$TEST_BASE.o"
+
+bin/simple run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
+RTL_DIR="$GEN_DIR/rv64/rtl"
+riscv64-linux-gnu-objcopy -O binary -j .text.fw "$TEST_ELF" "$FW_BIN"
+riscv64-linux-gnu-objcopy -O binary -j .text.payload "$TEST_ELF" "$PAYLOAD_BIN"
+
+python3 -c "
+fw_data = open('$FW_BIN', 'rb').read()
+payload_data = open('$PAYLOAD_BIN', 'rb').read()
+print('library ieee;')
+print('use ieee.std_logic_1164.all;')
+print('package test_program is')
+print('    type byte_array_t is array (natural range <>) of std_logic_vector(7 downto 0);')
+print('    constant FW_SIZE_BYTES : integer := %d;' % len(fw_data))
+print('    constant FW_BYTES : byte_array_t(0 to %d) := (' % (len(fw_data)-1))
+for i, b in enumerate(fw_data):
+    comma = ',' if i < len(fw_data)-1 else ''
+    print('        x\"%02x\"%s' % (b, comma))
+print('    );')
+print('    constant PAYLOAD_SIZE_BYTES : integer := %d;' % len(payload_data))
+print('    constant PAYLOAD_BYTES : byte_array_t(0 to %d) := (' % (len(payload_data)-1))
+for i, b in enumerate(payload_data):
+    comma = ',' if i < len(payload_data)-1 else ''
+    print('        x\"%02x\"%s' % (b, comma))
+print('    );')
+print('end package test_program;')
+" > "$TEST_PKG"
+
+cd "$TMP_DIR"
+ghdl -a --std=08 \
+    "$GEN_DIR/rv64/rtl/simple_rv64i_core_pkg.vhd" \
+    "$GEN_DIR/rv64/rtl/simple_rv64gc_core.vhd" \
+    "$TEST_PKG" \
+    "$RTL_DIR/tb_generated_rv64_boot_banner.vhd"
+ghdl -e --std=08 tb_generated_rv64_boot_banner
+
+STOP_MS=$((TIMEOUT * 1000))
+OUTPUT=$(timeout "$TIMEOUT" ghdl -r --std=08 tb_generated_rv64_boot_banner --stop-time="${STOP_MS}ms" 2>&1) || EXIT_STATUS=$?
+EXIT_STATUS=${EXIT_STATUS:-0}
+
+echo "$OUTPUT" | grep -E "CYCLES:|PASS_WORD:|A0_LOW32:|A1_LOW32:|A1_HIGH32:|UART_COUNT:|BSS_CLEARED:|PRIV_MODE:|PC_LOW32:|GENERATED_RV64_BOOT_BANNER:" || true
+
+if [ "$EXIT_STATUS" = "124" ]; then
+    echo "[GHDL-GEN-RV64-BOOT-BANNER] TIMEOUT after ${TIMEOUT}s"
+    exit 124
+fi
+
+if echo "$OUTPUT" | grep -q "GENERATED_RV64_BOOT_BANNER: PASS"; then
+    echo "[GHDL-GEN-RV64-BOOT-BANNER] PASS"
+    exit 0
+fi
+
+echo "[GHDL-GEN-RV64-BOOT-BANNER] FAIL"
+exit 1

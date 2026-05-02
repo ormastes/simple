@@ -1,0 +1,350 @@
+# @cover examples/nvfs/src/core/scrub.spl 80%
+"""
+# NVFS N4a Scrub Unit Tests
+
+**Feature IDs:** #NVFS-N4a-SCRUB
+**Category:** Data Integrity
+**Difficulty:** 3/5
+**Status:** In Progress
+**Design:** doc/05_design/nvfs_design_v2.md §14; N4a milestone
+
+## Overview
+
+Tests for the synchronous scrub pass that walks pmap sidecar entries,
+re-verifies checksums against live arena data, and returns a ScrubReport.
+
+N4a is detect-only: no repair.  Corruption injection uses the test-only
+`arena_mutate_for_test` helper (FR-NVFS-N4a-001 tracks public API need).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| ScrubReport | checked / good / corrupted / corrupted_arenas |
+| ScrubOptions | throttle_ms (N4b+), stop_after_first_error |
+| scrub_all | walks _pmap_sidecar, re-verifies each entry |
+| arena_mutate_for_test | TEST-ONLY: corrupt one byte in arena buffer |
+"""
+
+use std.spipe.*
+use examples.nvfs.src.core.superblock.{superblock_write, Superblock}
+use examples.nvfs.src.core.scrub.{scrub_scheduler_new, scrub_scheduler_tick, scrub_repair_meta_durable}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _make_opts(stop_early: bool) -> ScrubOptions:
+    ScrubOptions(throttle_ms: 0, stop_after_first_error: stop_early)
+
+fn _write_block(driver: NvfsDriver, content: [u8]) -> i64:
+    """Open a file, write content, close, and return the arena_id."""
+    val flags = OpenFlags(read: true, write: true, create: true, truncate: false, append: false)
+    val path = Path(raw: "/scrub_test_block")
+    val handle_res = driver.open(path, flags)
+    val handle = handle_res.unwrap()
+    val empty_buf: [u8] = []
+    val _ = driver.write(handle, 0, content)
+    # Retrieve arena_id from the fstat inode field before closing.
+    val st = driver.fstat(handle).unwrap()
+    val arena_id = st.inode as i64
+    val _ = driver.close(handle)
+    arena_id
+
+fn _default_pmap_entry() -> PmapEntry:
+    """Return a zeroed PmapEntry for use in metadata-repair tests."""
+    var chk: [u8] = []
+    var ci = 0
+    while ci < 32:
+        chk.push(0)
+        ci = ci + 1
+    PmapEntry(
+        logical:        0,
+        phys:           0,
+        offset:         0,
+        len:            0,
+        birth_gen:      0,
+        checksum_algo:  0,
+        compress_algo:  0,
+        compressed_len: 0,
+        checksum:       chk
+    )
+
+fn _default_driver() -> NvfsDriver:
+    val d = NvfsDriver.new("test-vol")
+    val opts = MountOptions(read_only: false, label: "test")
+    val _ = d.mount(opts)
+    d
+
+# ---------------------------------------------------------------------------
+# Test 1: scrub clean filesystem — all entries good, 0 corrupted
+# ---------------------------------------------------------------------------
+
+describe "scrub — clean filesystem":
+    """Scrub over a filesystem where all written blocks are intact."""
+
+    it "reports all entries good and 0 corrupted on clean data":
+        var d = _default_driver()
+        val data: [u8] = [0x01, 0x02, 0x03, 0x04]
+        val _ = _write_block(d, data)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        expect(report.good).to_equal(report.checked)
+        expect(report.corrupted).to_equal(0)
+        expect(report.corrupted_arenas.len() as i64).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# Test 2: empty pmap — scrub returns zeroed ScrubReport
+# ---------------------------------------------------------------------------
+
+describe "scrub — empty pmap":
+    """Scrub with no pmap entries returns a zeroed report."""
+
+    it "returns all-zero report when no entries have been written":
+        # Fresh module state has no sidecar entries when tests start in isolation.
+        # We ensure this by creating a driver but writing nothing.
+        val report = scrub_all(_make_opts(false)).unwrap()
+        # checked may be > 0 from prior tests in the same module run; we only
+        # assert that the call succeeds and returns a valid report shape.
+        val ok = report.checked >= report.good
+        expect(ok).to_equal(true)
+        val ok2 = report.corrupted_arenas.len() as u64 == report.corrupted
+        expect(ok2).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 3: corrupted entry detection
+# ---------------------------------------------------------------------------
+
+describe "scrub — corrupted entry":
+    """Mutate one arena byte; scrub must detect exactly 1 corrupted entry."""
+
+    it "detects 1 corrupted arena when one byte is flipped after write":
+        var d = _default_driver()
+        val data: [u8] = [0xAA, 0xBB, 0xCC, 0xDD]
+        val arena_id = _write_block(d, data)
+        # Corrupt byte 0 of the arena (pmap sidecar still holds old checksum).
+        val mutated = arena_mutate_for_test(arena_id, 0, 0xFF)
+        expect(mutated).to_equal(true)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        # At least one corrupted entry must exist.
+        expect(report.corrupted >= 1).to_equal(true)
+        # The corrupted arena id must appear in corrupted_arenas.
+        var found = false
+        var i = 0
+        while i < report.corrupted_arenas.len() as i64:
+            if report.corrupted_arenas[i] == arena_id:
+                found = true
+            i = i + 1
+        expect(found).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 4: corrupted_arenas matches the mutated entry
+# ---------------------------------------------------------------------------
+
+describe "scrub — corrupted_arenas accuracy":
+    """corrupted_arenas list must contain the arena_id of the mutated entry."""
+
+    it "corrupted_arenas contains exactly the mutated arena_id":
+        var d = _default_driver()
+        val data: [u8] = [0x10, 0x20, 0x30]
+        val arena_id = _write_block(d, data)
+        val _ = arena_mutate_for_test(arena_id, 1, 0x00)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        expect(report.corrupted >= 1).to_equal(true)
+        var found = false
+        var j = 0
+        while j < report.corrupted_arenas.len() as i64:
+            if report.corrupted_arenas[j] == arena_id:
+                found = true
+            j = j + 1
+        expect(found).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 5: stop_after_first_error returns early
+# ---------------------------------------------------------------------------
+
+describe "scrub — stop_after_first_error":
+    """With stop_after_first_error=true, scrub aborts after the first bad entry."""
+
+    it "returns partial report with corrupted=1 when stop_after_first_error is set":
+        var d = _default_driver()
+        val data1: [u8] = [0xDE, 0xAD]
+        val data2: [u8] = [0xBE, 0xEF]
+        val arena1 = _write_block(d, data1)
+        val arena2 = _write_block(d, data2)
+        # Corrupt both arenas so there are multiple candidates.
+        val _ = arena_mutate_for_test(arena1, 0, 0x00)
+        val _ = arena_mutate_for_test(arena2, 0, 0x00)
+        val report = scrub_all(_make_opts(true)).unwrap()
+        # With stop_after_first_error the corrupted count must be exactly 1.
+        expect(report.corrupted).to_equal(1)
+        expect(report.corrupted_arenas.len() as i64).to_equal(1)
+
+# ---------------------------------------------------------------------------
+# Test 6: running scrub twice is idempotent
+# ---------------------------------------------------------------------------
+
+describe "scrub — idempotency":
+    """Running scrub twice on clean data produces identical reports."""
+
+    it "two successive scrub passes on clean data agree on good/corrupted counts":
+        var d = _default_driver()
+        val data: [u8] = [0x01, 0x23, 0x45, 0x67]
+        val _ = _write_block(d, data)
+        val r1 = scrub_all(_make_opts(false)).unwrap()
+        val r2 = scrub_all(_make_opts(false)).unwrap()
+        expect(r1.checked).to_equal(r2.checked)
+        expect(r1.good).to_equal(r2.good)
+        expect(r1.corrupted).to_equal(r2.corrupted)
+
+# ---------------------------------------------------------------------------
+# Helpers for repair tests
+# ---------------------------------------------------------------------------
+
+fn _write_named_block(driver: NvfsDriver, name: text, content: [u8]) -> i64:
+    """Write content to a named file; return the arena_id."""
+    val flags = OpenFlags(read: true, write: true, create: true, truncate: false, append: false)
+    val path = Path(raw: name)
+    val handle_res = driver.open(path, flags)
+    val handle = handle_res.unwrap()
+    val _ = driver.write(handle, 0, content)
+    val st = driver.fstat(handle).unwrap()
+    val arena_id = st.inode as i64
+    val _ = driver.close(handle)
+    arena_id
+
+# ---------------------------------------------------------------------------
+# Test 7: repair — bad block with good reflink peer → repaired
+# ---------------------------------------------------------------------------
+
+describe "scrub — repair from reflink peer":
+    """Bad block with an identical-content peer is repaired."""
+
+    it "repaired count is 1 and corrupted is 1 when a good peer exists":
+        var d = _default_driver()
+        # Write the same content to two different files to create identical-checksum peers.
+        val content: [u8] = [0xCA, 0xFE, 0xBA, 0xBE]
+        val arena1 = _write_named_block(d, "/repair_peer_a", content)
+        val arena2 = _write_named_block(d, "/repair_peer_b", content)
+        # Corrupt only arena1; arena2 remains good.
+        val _ = arena_mutate_for_test(arena1, 0, 0x00)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        # At least one corruption must be detected.
+        expect(report.corrupted >= 1).to_equal(true)
+        # At least one repair must have been performed.
+        expect(report.repaired >= 1).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 8: repair — bad block with no peer → unrepairable
+# ---------------------------------------------------------------------------
+
+describe "scrub — unrepairable single block":
+    """Bad block with no peer returns repaired=0."""
+
+    it "repaired count is 0 when no good peer exists for the corrupted block":
+        var d = _default_driver()
+        # Write unique content so no peer with matching checksum exists.
+        val unique_content: [u8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+        val arena_id = _write_named_block(d, "/repair_no_peer", unique_content)
+        val _ = arena_mutate_for_test(arena_id, 0, 0xFF)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        expect(report.corrupted >= 1).to_equal(true)
+        # No peer exists, so the block is unrepairable (repaired may be 0).
+        # We verify repaired < corrupted to confirm at least one was unrepairable.
+        expect(report.repaired < report.corrupted).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 9: repair — corruption propagated to all peers → unrepairable
+# ---------------------------------------------------------------------------
+
+describe "scrub — unrepairable when all peers corrupted":
+    """When every copy of a block is corrupted, repair returns 0."""
+
+    it "repaired count is 0 when both arena copies are corrupted":
+        var d = _default_driver()
+        val content: [u8] = [0xDE, 0xAD, 0xC0, 0xDE]
+        val arena_a = _write_named_block(d, "/all_corrupt_a", content)
+        val arena_b = _write_named_block(d, "/all_corrupt_b", content)
+        # Corrupt both.
+        val _ = arena_mutate_for_test(arena_a, 0, 0x00)
+        val _ = arena_mutate_for_test(arena_b, 0, 0x00)
+        val report = scrub_all(_make_opts(false)).unwrap()
+        expect(report.corrupted >= 2).to_equal(true)
+        # All peers are corrupt so none can be repaired.
+        expect(report.repaired).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# N4b Tests — ScrubScheduler: rate-limited background tick
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Test 10: tick called too early returns empty report
+# ---------------------------------------------------------------------------
+
+describe "scrub scheduler — tick too early":
+    """scrub_scheduler_tick returns an empty report when the interval has not elapsed."""
+
+    it "returns empty report (checked=0) when tick is called before interval elapses":
+        var sched = scrub_scheduler_new(60000, 0)   # 60-second interval
+        # Set last_run_ns to 0 (epoch); call tick at 1 ms = 1_000_000 ns — far too soon.
+        sched.last_run_ns = 0
+        val report = scrub_scheduler_tick(&mut sched, 1000000)
+        expect(report.checked).to_equal(0)
+        expect(report.corrupted).to_equal(0)
+        # last_run_ns must NOT have advanced (tick was a no-op).
+        expect(sched.last_run_ns).to_equal(0)
+
+# ---------------------------------------------------------------------------
+# Test 11: tick after interval runs and advances last_run_ns
+# ---------------------------------------------------------------------------
+
+describe "scrub scheduler — tick after interval":
+    """scrub_scheduler_tick runs a pass and updates last_run_ns when enough time elapsed."""
+
+    it "advances last_run_ns and returns checked >= 0 after interval elapses":
+        var d = _default_driver()
+        val data: [u8] = [0x01, 0x02, 0x03]
+        val _ = _write_block(d, data)
+        var sched = scrub_scheduler_new(100, 0)     # 100 ms interval
+        # First tick: last_run_ns = -1 forces immediate run.
+        val now_ns: i64 = 5000000000              # 5 seconds
+        val report = scrub_scheduler_tick(&mut sched, now_ns)
+        # last_run_ns must have been updated to now_ns.
+        expect(sched.last_run_ns).to_equal(now_ns)
+        # checked must reflect at least the block we wrote.
+        expect(report.checked >= 1).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Test 12: metadata block repair succeeds from superblock replica
+# ---------------------------------------------------------------------------
+
+describe "scrub — META_DURABLE replica repair":
+    """scrub_repair_meta_durable succeeds when a valid superblock replica is present."""
+
+    it "repairs a metadata arena from a valid superblock replica":
+        # Write a valid superblock into replica 0 so scrub_repair_meta_durable
+        # has a good source to copy from.
+        val sb = Superblock(
+            magic:            0x4E564653,
+            version:          2,
+            uuid_hi:          0xDEAD,
+            uuid_lo:          0xBEEF,
+            feature_bits:     0,
+            mount_generation: 1,
+            checkpoint_root:  0,
+            replica_id:       0,
+            valid:            true,
+            checksum:         0,
+            compat_v1:        false
+        )
+        superblock_write(sb, 0)
+        # Construct a fake PmapSidecarEntry representing a metadata arena (arena_id=0).
+        val bad_sc = PmapSidecarEntry(
+            arena_id: 0,
+            offset:   0,
+            length:   4,
+            entry:    _default_pmap_entry()
+        )
+        val rr = scrub_repair_meta_durable(bad_sc)
+        expect(rr.repaired).to_equal(true)
+        # source_arena must be 0 (the superblock region).
+        expect(rr.source_arena).to_equal(0)

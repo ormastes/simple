@@ -1,0 +1,171 @@
+"""
+# RV64 UART — 16550-Compatible UART Model
+
+Simple UART model compatible with the NS16550A interface.
+Supports basic TX/RX with a 16-byte FIFO.
+"""
+
+val UART_FIFO_SIZE: i64 = 16
+
+# Register offsets
+val UART_RBR: i64 = 0  # Receive Buffer Register (read)
+val UART_THR: i64 = 0  # Transmit Holding Register (write)
+val UART_IER: i64 = 1  # Interrupt Enable Register
+val UART_IIR: i64 = 2  # Interrupt Identification Register (read)
+val UART_FCR: i64 = 2  # FIFO Control Register (write)
+val UART_LCR: i64 = 3  # Line Control Register
+val UART_MCR: i64 = 4  # Modem Control Register
+val UART_LSR: i64 = 5  # Line Status Register
+val UART_MSR: i64 = 6  # Modem Status Register
+val UART_SCR: i64 = 7  # Scratch Register
+
+# LSR bits
+val LSR_DATA_READY: i64 = 0x01
+val LSR_THR_EMPTY: i64 = 0x20
+val LSR_TEMT: i64 = 0x40
+
+# IER bits
+val IER_RX_AVAIL: i64 = 0x01
+val IER_THR_EMPTY: i64 = 0x02
+
+class Rv64Uart:
+    rx_fifo: [i64]
+    rx_count: i64
+    tx_fifo: [i64]
+    tx_count: i64
+    ier: i64
+    lcr: i64
+    mcr: i64
+    scr: i64
+    divisor_latch: i64
+    dlab: bool  # Divisor Latch Access Bit (LCR bit 7)
+    irq_pending: bool
+
+    static fn create() -> Rv64Uart:
+        var rx: [i64] = []
+        var tx: [i64] = []
+        var i = 0
+        while i < UART_FIFO_SIZE:
+            rx = rx + [0]
+            tx = tx + [0]
+            i = i + 1
+        Rv64Uart(
+            rx_fifo: rx, rx_count: 0,
+            tx_fifo: tx, tx_count: 0,
+            ier: 0, lcr: 0, mcr: 0, scr: 0,
+            divisor_latch: 1, dlab: false,
+            irq_pending: false
+        )
+
+    fn read_reg(offset: i64) -> i64:
+        """Read a UART register by byte offset."""
+        if offset == UART_RBR:
+            if self.dlab:
+                self.divisor_latch and 0xFF
+            elif self.rx_count > 0:
+                self.rx_fifo[0]
+            else:
+                0
+        elif offset == UART_IER:
+            if self.dlab:
+                (self.divisor_latch >> 8) and 0xFF
+            else:
+                self.ier
+        elif offset == UART_IIR:
+            # Simplified: report no interrupt pending or RX data available
+            if self.irq_pending:
+                if self.rx_count > 0: 0x04  # RX data available
+                else: 0x02  # THR empty
+            else:
+                0x01  # No interrupt pending
+        elif offset == UART_LCR: self.lcr
+        elif offset == UART_MCR: self.mcr
+        elif offset == UART_LSR:
+            var lsr = LSR_THR_EMPTY or LSR_TEMT  # TX always ready
+            if self.rx_count > 0:
+                lsr = lsr or LSR_DATA_READY
+            lsr
+        elif offset == UART_MSR: 0
+        elif offset == UART_SCR: self.scr
+        else: 0
+
+    me write_reg(offset: i64, value: i64):
+        """Write a UART register by byte offset."""
+        val byte = value and 0xFF
+
+        if offset == UART_THR:
+            if self.dlab:
+                self.divisor_latch = (self.divisor_latch and 0xFF00) or byte
+            else:
+                # TX: the byte is "transmitted" (stored in tx_fifo for readback)
+                if self.tx_count < UART_FIFO_SIZE:
+                    self.tx_fifo[self.tx_count] = byte
+                    self.tx_count = self.tx_count + 1
+        elif offset == UART_IER:
+            if self.dlab:
+                self.divisor_latch = (self.divisor_latch and 0xFF) or (byte << 8)
+            else:
+                self.ier = byte
+        elif offset == UART_FCR:
+            # Bit 1: clear RX FIFO, Bit 2: clear TX FIFO
+            if (byte and 0x02) != 0:
+                self.rx_count = 0
+            if (byte and 0x04) != 0:
+                self.tx_count = 0
+        elif offset == UART_LCR:
+            self.lcr = byte
+            self.dlab = (byte and 0x80) != 0
+        elif offset == UART_MCR:
+            self.mcr = byte
+        elif offset == UART_SCR:
+            self.scr = byte
+
+    me push_rx(byte: i64):
+        """Push a byte into the RX FIFO (simulates serial input)."""
+        if self.rx_count < UART_FIFO_SIZE:
+            self.rx_fifo[self.rx_count] = byte and 0xFF
+            self.rx_count = self.rx_count + 1
+            if (self.ier and IER_RX_AVAIL) != 0:
+                self.irq_pending = true
+
+    me pop_rx() -> i64:
+        """Pop a byte from the RX FIFO."""
+        if self.rx_count > 0:
+            val byte = self.rx_fifo[0]
+            # Shift FIFO
+            var i = 0
+            while i < self.rx_count - 1:
+                self.rx_fifo[i] = self.rx_fifo[i + 1]
+                i = i + 1
+            self.rx_count = self.rx_count - 1
+            if self.rx_count == 0:
+                self.irq_pending = false
+            byte
+        else:
+            0
+
+    fn pop_tx() -> i64:
+        """Pop a byte from the TX FIFO (simulates serial output readback)."""
+        if self.tx_count > 0:
+            self.tx_fifo[0]
+        else:
+            0
+
+    me consume_tx() -> i64:
+        """Consume and return one byte from the TX FIFO."""
+        if self.tx_count > 0:
+            val byte = self.tx_fifo[0]
+            var i = 0
+            while i < self.tx_count - 1:
+                self.tx_fifo[i] = self.tx_fifo[i + 1]
+                i = i + 1
+            self.tx_count = self.tx_count - 1
+            byte
+        else:
+            0
+
+    fn has_irq() -> bool:
+        self.irq_pending
+
+    me clear_irq():
+        self.irq_pending = false

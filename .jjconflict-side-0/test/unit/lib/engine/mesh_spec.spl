@@ -1,0 +1,158 @@
+# Mesh and Light Component Tests
+# Tests Vertex3D, MeshData, primitive generators, AABB, and light constructors
+
+use std.spec.{describe, it, expect}
+use std.common.engine.math3d.{Vec3}
+use std.common.engine.color.{EngineColor}
+use std.nogc_sync_mut.engine.component.mesh.{Vertex3D, MeshData, LightData, create_cube, create_plane, create_sphere, compute_aabb, directional_light, point_light, spot_light}
+
+describe "Vertex3D":
+    it "creates with position and normal":
+        val pos = Vec3(x: 1.0, y: 2.0, z: 3.0)
+        val norm = Vec3(x: 0.0, y: 1.0, z: 0.0)
+        val v = Vertex3D.create(pos, norm, 0.5, 0.5)
+        expect(v.position.x).to_equal(1.0)
+        expect(v.position.y).to_equal(2.0)
+        expect(v.position.z).to_equal(3.0)
+        expect(v.normal.y).to_equal(1.0)
+        expect(v.uv_x).to_equal(0.5)
+        expect(v.uv_y).to_equal(0.5)
+
+    it "creates with color":
+        val pos = Vec3(x: 0.0, y: 0.0, z: 0.0)
+        val norm = Vec3(x: 0.0, y: 0.0, z: 1.0)
+        val red = EngineColor(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+        val v = Vertex3D.with_color(pos, norm, 0.0, 0.0, red)
+        expect(v.color.r).to_equal(1.0)
+        expect(v.color.g).to_equal(0.0)
+        expect(v.color.b).to_equal(0.0)
+
+    it "defaults to white color":
+        val pos = Vec3(x: 0.0, y: 0.0, z: 0.0)
+        val norm = Vec3(x: 0.0, y: 1.0, z: 0.0)
+        val v = Vertex3D.create(pos, norm, 0.0, 0.0)
+        expect(v.color.r).to_equal(1.0)
+        expect(v.color.g).to_equal(1.0)
+        expect(v.color.b).to_equal(1.0)
+        expect(v.color.a).to_equal(1.0)
+
+describe "MeshData":
+    it "reports vertex and index counts":
+        val pos = Vec3(x: 0.0, y: 0.0, z: 0.0)
+        val norm = Vec3(x: 0.0, y: 1.0, z: 0.0)
+        val v0 = Vertex3D.create(pos, norm, 0.0, 0.0)
+        val v1 = Vertex3D.create(Vec3(x: 1.0, y: 0.0, z: 0.0), norm, 1.0, 0.0)
+        val v2 = Vertex3D.create(Vec3(x: 0.0, y: 0.0, z: 1.0), norm, 0.0, 1.0)
+        val mesh = MeshData(
+            vertices: [v0, v1, v2],
+            indices: [0, 1, 2],
+            aabb_min: Vec3.zero(),
+            aabb_max: Vec3(x: 1.0, y: 0.0, z: 1.0)
+        )
+        expect(mesh.vertex_count()).to_equal(3)
+        expect(mesh.index_count()).to_equal(3)
+
+describe "create_cube":
+    it "generates correct vertex count":
+        val cube = create_cube(1.0)
+        # Cube: 6 faces * 4 vertices = 24
+        expect(cube.vertex_count()).to_equal(24)
+
+    it "generates correct index count":
+        val cube = create_cube(1.0)
+        # Cube: 6 faces * 2 triangles * 3 indices = 36
+        expect(cube.index_count()).to_equal(36)
+
+    it "has valid AABB for unit cube":
+        val cube = create_cube(2.0)
+        # Half-size should be 1.0 for a size-2 cube
+        expect(cube.aabb_max.x).to_equal(1.0)
+        expect(cube.aabb_min.x).to_equal(-1.0)
+        expect(cube.aabb_max.y).to_equal(1.0)
+        expect(cube.aabb_min.y).to_equal(-1.0)
+
+describe "create_plane":
+    it "generates 4 vertices and 6 indices":
+        val plane = create_plane(2.0, 2.0)
+        expect(plane.vertex_count()).to_equal(4)
+        expect(plane.index_count()).to_equal(6)
+
+    it "has correct AABB":
+        val plane = create_plane(4.0, 2.0)
+        expect(plane.aabb_max.x).to_equal(2.0)
+        expect(plane.aabb_min.x).to_equal(-2.0)
+        expect(plane.aabb_max.z).to_equal(1.0)
+        expect(plane.aabb_min.z).to_equal(-1.0)
+
+describe "create_sphere":
+    it "generates vertices for given segments and rings":
+        val sphere = create_sphere(1.0, 8, 6)
+        # Sphere vertex count: (segments+1) * (rings+1) = 9 * 7 = 63
+        expect(sphere.vertex_count()).to_equal(63)
+        # Sphere index count: segments * rings * 6 = 8 * 6 * 6 = 288
+        expect(sphere.index_count()).to_equal(288)
+
+    it "has positive vertex and index counts":
+        val sphere = create_sphere(1.0, 4, 3)
+        expect(sphere.vertex_count()).to_be_greater_than(0)
+        expect(sphere.index_count()).to_be_greater_than(0)
+
+describe "compute_aabb":
+    it "computes tight bounding box for plane":
+        val plane = create_plane(4.0, 2.0)
+        val aabb = compute_aabb(plane)
+        expect(aabb.aabb_max.x).to_equal(2.0)
+        expect(aabb.aabb_min.x).to_equal(-2.0)
+        expect(aabb.aabb_max.z).to_equal(1.0)
+        expect(aabb.aabb_min.z).to_equal(-1.0)
+
+    it "handles empty mesh":
+        val empty = MeshData(
+            vertices: [],
+            indices: [],
+            aabb_min: Vec3.zero(),
+            aabb_max: Vec3.zero()
+        )
+        val result = compute_aabb(empty)
+        expect(result.aabb_min.x).to_equal(0.0)
+        expect(result.aabb_max.x).to_equal(0.0)
+
+describe "directional_light":
+    it "creates with direction and intensity":
+        val dir = Vec3(x: 0.0, y: -1.0, z: 0.0)
+        val white = EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0)
+        val light = directional_light(dir, white, 2.0)
+        expect(light.light_type).to_equal(0)
+        expect(light.intensity).to_equal(2.0)
+        expect(light.color.r).to_equal(1.0)
+
+    it "normalizes direction":
+        val dir = Vec3(x: 0.0, y: -1.0, z: 0.0)
+        val white = EngineColor.white()
+        val light = directional_light(dir, white, 1.0)
+        expect(light.direction.y).to_equal(-1.0)
+
+describe "point_light":
+    it "creates with range":
+        val white = EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0)
+        val light = point_light(white, 1.5, 10.0)
+        expect(light.light_type).to_equal(1)
+        expect(light.intensity).to_equal(1.5)
+        expect(light.range).to_equal(10.0)
+
+    it "has zero direction":
+        val white = EngineColor.white()
+        val light = point_light(white, 1.0, 5.0)
+        expect(light.direction.x).to_equal(0.0)
+        expect(light.direction.y).to_equal(0.0)
+        expect(light.direction.z).to_equal(0.0)
+
+describe "spot_light":
+    it "creates with cone angles":
+        val dir = Vec3(x: 0.0, y: -1.0, z: 0.0)
+        val white = EngineColor(r: 1.0, g: 1.0, b: 1.0, a: 1.0)
+        val light = spot_light(dir, white, 1.0, 5.0, 0.5, 0.8)
+        expect(light.light_type).to_equal(2)
+        expect(light.inner_cone).to_equal(0.5)
+        expect(light.outer_cone).to_equal(0.8)
+        expect(light.range).to_equal(5.0)

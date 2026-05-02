@@ -1,0 +1,69 @@
+# Search quality warnings — struct, collector, JSON formatter
+#
+# Provides a warning accumulation system for MCP search responses.
+# Warnings tell LLMs about search quality limitations and suggest
+# alternative tools or query reformulations.
+
+use src.util.json_helpers.{js, jp, jo, ja, jb, jf}
+
+# --- Warning struct ---
+
+struct SearchWarning:
+    code: text        # e.g. "SQ-001", "QR-001", "VH-001", "FL-001"
+    severity: text    # "info", "warning", "error"
+    message: text     # Human/LLM readable message
+    action_type: text # "use_tool", "reformulate_query", "fix_vault", "acknowledge"
+    action_tool: text # Tool name (for use_tool actions)
+    action_reason: text # Why this action helps
+
+# --- Module-level warning accumulator ---
+
+var CURRENT_WARNINGS: [SearchWarning] = []
+
+fn clear_warnings():
+    CURRENT_WARNINGS = []
+
+fn add_warning(w: SearchWarning):
+    CURRENT_WARNINGS.push(w)
+
+fn get_warnings() -> [SearchWarning]:
+    CURRENT_WARNINGS
+
+fn has_warnings() -> bool:
+    CURRENT_WARNINGS.len() > 0
+
+# --- JSON formatting ---
+
+fn warning_to_json(w: SearchWarning) -> text:
+    var pairs: [text] = []
+    pairs.push(jp("code", js(w.code)))
+    pairs.push(jp("severity", js(w.severity)))
+    pairs.push(jp("message", js(w.message)))
+    var action_pairs: [text] = []
+    action_pairs.push(jp("type", js(w.action_type)))
+    if w.action_tool != "":
+        action_pairs.push(jp("tool", js(w.action_tool)))
+    action_pairs.push(jp("reason", js(w.action_reason)))
+    pairs.push(jp("suggested_action", jo(action_pairs)))
+    jo(pairs)
+
+fn warnings_to_json(warnings: [SearchWarning]) -> text:
+    var items: [text] = []
+    for w in warnings:
+        items.push(warning_to_json(w))
+    ja(items)
+
+# --- Search quality metadata block ---
+
+fn make_search_quality_json(method: text, confidence: f64, suggestions: [text]) -> text:
+    var pairs: [text] = []
+    pairs.push(jp("method", js(method)))
+    pairs.push(jp("semantic_available", jb(false)))
+    pairs.push(jp("confidence", jf(confidence)))
+    val warnings = get_warnings()
+    pairs.push(jp("warnings", warnings_to_json(warnings)))
+    var sugg_items: [text] = []
+    for s in suggestions:
+        sugg_items.push(js(s))
+    pairs.push(jp("suggestions", ja(sugg_items)))
+    jo(pairs)

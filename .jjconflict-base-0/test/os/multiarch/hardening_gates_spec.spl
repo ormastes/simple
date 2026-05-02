@@ -1,0 +1,148 @@
+# Multi-arch harden: AC-5 + R6 — hardening gates per arch.
+#
+# Asserts: stack canary entropy (no 0xDEADBEEF), W^X, capability checks,
+# bounds-check intrinsic, no @nocheck outside HAL, harden audit clean.
+#
+# Run:
+#   bin/simple test test/os/multiarch/hardening_gates_spec.spl
+#
+# @cover src/os/kernel/arch/hal.spl
+# @cover src/os/libc/simpleos_cxxabi.spl
+# @cover src/app/build/os_harden_audit.spl
+# @cover scripts/audit/arch_loc_report.shs
+
+use std.spec
+use std.io_runtime.{file_exists, file_read}
+
+val CXXABI_PATH:    text = "src/os/libc/simpleos_cxxabi.spl"
+val HARDEN_REPORT:  text = "build/multiarch/harden_audit_report.json"
+
+fn _entropy_path(arch: text) -> text:
+    "src/os/kernel/arch/" + arch + "/entropy.spl"
+
+fn _canary_path(arch: text) -> text:
+    "src/os/kernel/arch/" + arch + "/canary.spl"
+
+fn _arch_canary_log(arch: text) -> text:
+    "build/multiarch/" + arch + "/canary_runtime.json"
+
+describe "AC-5/R6 — stack canary is not 0xDEADBEEFDEADBEEFUL":
+    """Canary must come from HalEntropy at boot, never the hardcoded
+    constant. simpleos_cxxabi.spl is the historic offender."""
+
+    it "simpleos_cxxabi.spl exists":
+        expect(file_exists(CXXABI_PATH)).to_equal(true)
+
+    it "simpleos_cxxabi.spl does NOT contain the hardcoded constant":
+        val body: text = file_read(CXXABI_PATH)
+        expect(body.contains("0xDEADBEEFDEADBEEF")).to_equal(false)
+
+    it "simpleos_cxxabi.spl does NOT contain the legacy DEADBEEF":
+        val body: text = file_read(CXXABI_PATH)
+        expect(body.contains("DEADBEEF")).to_equal(false)
+
+    it "x86_64 canary value differs across two reboots":
+        """Phase 5/7 capture two independent boot canary values into
+        canary_runtime.json. The harness asserts they differ."""
+        val log: text = file_read(_arch_canary_log("x86_64"))
+        expect(log.contains("\"differs_across_reboots\": true")).to_equal(true)
+
+    it "aarch64 canary value differs across two reboots":
+        val log: text = file_read(_arch_canary_log("aarch64"))
+        expect(log.contains("\"differs_across_reboots\": true")).to_equal(true)
+
+    it "riscv64 canary value differs across two reboots":
+        val log: text = file_read(_arch_canary_log("riscv64"))
+        expect(log.contains("\"differs_across_reboots\": true")).to_equal(true)
+
+describe "AC-5/R6 — per-arch entropy source matches HAL design":
+    """Hardening matrix: x86=RDRAND/RDSEED, arm64=RNDR (probe),
+    arm32=CNTVCT+DTB, rv*=SBI sbi_get_random else cycle+time+instret."""
+
+    it "x86_64 entropy.spl uses rdrand or rdseed":
+        val body: text = file_read(_entropy_path("x86_64"))
+        val ok: bool = body.contains("rdrand") or body.contains("rdseed") or body.contains("RDRAND") or body.contains("RDSEED")
+        expect(ok).to_equal(true)
+
+    it "x86_32 entropy.spl uses rdrand (CPUID-gated)":
+        val body: text = file_read(_entropy_path("x86_32"))
+        val ok: bool = body.contains("rdrand") or body.contains("RDRAND")
+        expect(ok).to_equal(true)
+
+    it "arm64 entropy.spl probes RNDR or falls back to CNTVCT":
+        val body: text = file_read(_entropy_path("arm64"))
+        val ok: bool = body.contains("rndr") or body.contains("RNDR") or body.contains("CNTVCT")
+        expect(ok).to_equal(true)
+
+    it "arm32 entropy.spl seeds from CNTVCT + DTB":
+        val body: text = file_read(_entropy_path("arm32"))
+        val ok: bool = body.contains("CNTVCT") or body.contains("dtb") or body.contains("DTB")
+        expect(ok).to_equal(true)
+
+    it "riscv64 entropy.spl uses sbi_get_random or cycle+time+instret":
+        val body: text = file_read(_entropy_path("riscv64"))
+        val ok: bool = body.contains("sbi_get_random") or body.contains("instret") or body.contains("Zkr")
+        expect(ok).to_equal(true)
+
+    it "riscv32 entropy.spl uses sbi_get_random or cycle+time+instret":
+        val body: text = file_read(_entropy_path("riscv32"))
+        val ok: bool = body.contains("sbi_get_random") or body.contains("instret")
+        expect(ok).to_equal(true)
+
+describe "AC-5 — W^X enforcement":
+    """harden_audit_report records: (a) no W|X flag combo at any
+    hal_paging_map call site, (b) NX/UXN/PXN/PMP active per arch,
+    (c) write-to-.text trap traced for x86_64 smoke."""
+
+    it "harden audit report exists":
+        expect(file_exists(HARDEN_REPORT)).to_equal(true)
+
+    it "no W|X mapping anywhere in audited tree":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"wx_violations\": 0")).to_equal(true)
+
+    it "x86_32 PAE NX is active when CONFIG_X86_32_PAE is set":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"x86_32_nx_status\"")).to_equal(true)
+
+    it "kernel write to .text page traps":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"text_write_trap\": true")).to_equal(true)
+
+describe "AC-5 — capability check at every syscall entry":
+    """Audit greps every HalSyscall trampoline for the cap-check call
+    exactly once per Syscall variant."""
+
+    it "harden audit reports cap-check coverage = 100%":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"cap_check_coverage_pct\": 100")).to_equal(true)
+
+    it "no Syscall variant lacks a cap-check":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"syscall_variants_uncovered\": 0")).to_equal(true)
+
+describe "AC-5 — bounds-check intrinsic + @nocheck policy":
+    it "no @nocheck outside arch/ HAL tree":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"nocheck_outside_hal\": 0")).to_equal(true)
+
+    it "no `unsafe` outside arch/ HAL tree":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"unsafe_outside_hal\": 0")).to_equal(true)
+
+    it "compiler emitted @check_bounds in arch-neutral kernel containers":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"check_bounds_emitted\": true")).to_equal(true)
+
+describe "AC-5 — bin/simple build check runs harden audit per-arch":
+    """Phase 5 wires `src/app/build/os_harden_audit.spl` (the build tool)
+    into `bin/simple build check` so each arch lane runs the audit and
+    exits 0. The tool emits `build/multiarch/harden_audit_report.json`."""
+
+    it "harden audit per-arch summary present":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"per_arch_exit_codes\"")).to_equal(true)
+
+    it "every arch lane exit code is 0":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"all_arch_pass\": true")).to_equal(true)

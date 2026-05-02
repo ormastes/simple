@@ -1,0 +1,319 @@
+# Skia Path
+#
+# SkPath — vector path builder matching Skia's SkPath API.
+
+use std.skia.entity.enums.{SkPathFillType, SkPathDirection}
+use std.skia.entity.geometry.{SkPoint, SkRect, SkRRect}
+
+# ============================================================================
+# SkPathVerb — internal segment type
+# ============================================================================
+
+enum SkPathVerb:
+    Move
+    Line
+    Quad
+    Conic
+    Cubic
+    Close
+
+# ============================================================================
+# SkPathPoint — a point in the path point array
+# ============================================================================
+
+class SkPathSegment:
+    verb: SkPathVerb
+    pts: [SkPoint]
+    weight: f64   # conic weight (only used for Conic verb)
+
+# ============================================================================
+# SkPath
+# ============================================================================
+
+class SkPath:
+    fill_type: SkPathFillType
+    segments: [SkPathSegment]
+
+fn sk_path_new() -> SkPath:
+    SkPath(fill_type: SkPathFillType.Winding, segments: [])
+
+impl SkPath:
+    fn is_empty() -> bool:
+        self.segments.len() == 0
+
+    fn count_verbs() -> i64:
+        self.segments.len()
+
+    fn move_to(x: f64, y: f64) -> SkPath:
+        val seg = SkPathSegment(verb: SkPathVerb.Move, pts: [SkPoint(x: x, y: y)], weight: 0.0)
+        val new_segs = [...self.segments, seg]
+        SkPath(fill_type: self.fill_type, segments: new_segs)
+
+    fn line_to(x: f64, y: f64) -> SkPath:
+        val seg = SkPathSegment(verb: SkPathVerb.Line, pts: [SkPoint(x: x, y: y)], weight: 0.0)
+        val new_segs = [...self.segments, seg]
+        SkPath(fill_type: self.fill_type, segments: new_segs)
+
+    fn quad_to(x1: f64, y1: f64, x2: f64, y2: f64) -> SkPath:
+        val pts = [SkPoint(x: x1, y: y1), SkPoint(x: x2, y: y2)]
+        val seg = SkPathSegment(verb: SkPathVerb.Quad, pts: pts, weight: 0.0)
+        val new_segs = [...self.segments, seg]
+        SkPath(fill_type: self.fill_type, segments: new_segs)
+
+    fn cubic_to(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> SkPath:
+        val pts = [SkPoint(x: x1, y: y1), SkPoint(x: x2, y: y2), SkPoint(x: x3, y: y3)]
+        val seg = SkPathSegment(verb: SkPathVerb.Cubic, pts: pts, weight: 0.0)
+        val new_segs = [...self.segments, seg]
+        SkPath(fill_type: self.fill_type, segments: new_segs)
+
+    fn close() -> SkPath:
+        val seg = SkPathSegment(verb: SkPathVerb.Close, pts: [], weight: 0.0)
+        val new_segs = [...self.segments, seg]
+        SkPath(fill_type: self.fill_type, segments: new_segs)
+
+    fn add_rect(rect: SkRect, dir: SkPathDirection) -> SkPath:
+        pass_todo
+
+    fn add_oval(rect: SkRect, dir: SkPathDirection) -> SkPath:
+        pass_todo
+
+    fn add_rrect(rrect: SkRRect, dir: SkPathDirection) -> SkPath:
+        pass_todo
+
+    fn add_circle(cx: f64, cy: f64, r: f64) -> SkPath:
+        pass_todo
+
+    fn with_fill_type(ft: SkPathFillType) -> SkPath:
+        SkPath(fill_type: ft, segments: self.segments)
+
+    fn bounds() -> SkRect:
+        # Scan all segment points for axis-aligned bounding box.
+        # Empty paths return a degenerate (0,0,0,0) rect.
+        var has_any: bool = false
+        var min_x: f64 = 0.0
+        var min_y: f64 = 0.0
+        var max_x: f64 = 0.0
+        var max_y: f64 = 0.0
+        var si: i64 = 0
+        val sc = self.segments.len()
+        while si < sc:
+            val seg = self.segments[si]
+            var pi: i64 = 0
+            val pc = seg.pts.len()
+            while pi < pc:
+                val p = seg.pts[pi]
+                if has_any:
+                    if p.x < min_x:
+                        min_x = p.x
+                    if p.x > max_x:
+                        max_x = p.x
+                    if p.y < min_y:
+                        min_y = p.y
+                    if p.y > max_y:
+                        max_y = p.y
+                else:
+                    min_x = p.x
+                    max_x = p.x
+                    min_y = p.y
+                    max_y = p.y
+                    has_any = true
+                pi = pi + 1
+            si = si + 1
+        if has_any:
+            SkRect(left: min_x, top: min_y, right: max_x, bottom: max_y)
+        else:
+            SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+
+    fn contains(x: f64, y: f64) -> bool:
+        # Point-in-path hit testing via ray casting in the +X direction.
+        # Quadratic / cubic / conic segments are flattened via midpoint
+        # subdivision (depth 4 = 16 chords per curve, adequate for hit tests).
+        # Fill rule honors self.fill_type: Winding / EvenOdd, plus their
+        # inverse variants.
+        val bb = self.bounds()
+        # Early-out on bounding box miss (only meaningful for non-inverse rules).
+        val is_inverse = (self.fill_type == SkPathFillType.InverseWinding) or (self.fill_type == SkPathFillType.InverseEvenOdd)
+        if self.segments.len() == 0:
+            if is_inverse:
+                return true
+            else:
+                return false
+        if not is_inverse:
+            if x < bb.left:
+                return false
+            if x > bb.right:
+                return false
+            if y < bb.top:
+                return false
+            if y > bb.bottom:
+                return false
+
+        # Walk segments, accumulating a winding tally for edges whose
+        # y-span straddles `y` and whose x-at-y is to the right of `x`.
+        var winding: i32 = 0
+        var crossings: i32 = 0
+        var pen_x: f64 = 0.0
+        var pen_y: f64 = 0.0
+        var move_x: f64 = 0.0
+        var move_y: f64 = 0.0
+        var idx: i64 = 0
+        val seg_count = self.segments.len()
+        while idx < seg_count:
+            val seg = self.segments[idx]
+            val verb = seg.verb
+            if verb == SkPathVerb.Move:
+                val pt = seg.pts[0]
+                pen_x = pt.x
+                pen_y = pt.y
+                move_x = pen_x
+                move_y = pen_y
+            else:
+                if verb == SkPathVerb.Line:
+                    val pt = seg.pts[0]
+                    val tx = pt.x
+                    val ty = pt.y
+                    val hit = _sk_path_edge_hit(pen_x, pen_y, tx, ty, x, y)
+                    winding = winding + hit
+                    if hit != 0:
+                        crossings = crossings + 1
+                    pen_x = tx
+                    pen_y = ty
+                else:
+                    if verb == SkPathVerb.Quad:
+                        val cp = seg.pts[0]
+                        val ep = seg.pts[1]
+                        val res = _sk_path_quad_hit(pen_x, pen_y, cp.x, cp.y, ep.x, ep.y, x, y, 4)
+                        winding = winding + res.wind
+                        crossings = crossings + res.cross
+                        pen_x = ep.x
+                        pen_y = ep.y
+                    else:
+                        if verb == SkPathVerb.Cubic:
+                            val c1 = seg.pts[0]
+                            val c2 = seg.pts[1]
+                            val ep = seg.pts[2]
+                            val res = _sk_path_cubic_hit(pen_x, pen_y, c1.x, c1.y, c2.x, c2.y, ep.x, ep.y, x, y, 4)
+                            winding = winding + res.wind
+                            crossings = crossings + res.cross
+                            pen_x = ep.x
+                            pen_y = ep.y
+                        else:
+                            if verb == SkPathVerb.Conic:
+                                # Approximate conic as quad (weight ignored — same
+                                # caveat as rasterize.flatten_path).
+                                val cp = seg.pts[0]
+                                val ep = seg.pts[1]
+                                val res = _sk_path_quad_hit(pen_x, pen_y, cp.x, cp.y, ep.x, ep.y, x, y, 4)
+                                winding = winding + res.wind
+                                crossings = crossings + res.cross
+                                pen_x = ep.x
+                                pen_y = ep.y
+                            else:
+                                if verb == SkPathVerb.Close:
+                                    val hit = _sk_path_edge_hit(pen_x, pen_y, move_x, move_y, x, y)
+                                    winding = winding + hit
+                                    if hit != 0:
+                                        crossings = crossings + 1
+                                    pen_x = move_x
+                                    pen_y = move_y
+                                else:
+                                    pass_do_nothing
+            idx = idx + 1
+
+        # Apply fill rule
+        val ft = self.fill_type
+        if ft == SkPathFillType.Winding:
+            return winding != 0
+        if ft == SkPathFillType.EvenOdd:
+            return (crossings % 2) != 0
+        if ft == SkPathFillType.InverseWinding:
+            return winding == 0
+        if ft == SkPathFillType.InverseEvenOdd:
+            return (crossings % 2) == 0
+        winding != 0
+
+# ============================================================================
+# Internal helpers for SkPath.contains() — ray-cast hit testing.
+# ============================================================================
+
+class _SkHitResult:
+    wind: i32
+    cross: i32
+
+fn _sk_path_edge_hit(ax: f64, ay: f64, bx: f64, by: f64, x: f64, y: f64) -> i32:
+    # Returns +1 / -1 if the directed edge (a -> b) crosses the rightward
+    # ray from (x, y) and the crossing x is strictly greater than x (point
+    # is to the left of the edge). Returns 0 otherwise.
+    #
+    # Half-open span rule (y_top <= y < y_bot) avoids double-counting
+    # shared vertices between consecutive edges.
+    var y_top: f64 = 0.0
+    var y_bot: f64 = 0.0
+    var x_top: f64 = 0.0
+    var x_bot: f64 = 0.0
+    var dir: i32 = 0
+    if ay < by:
+        y_top = ay
+        y_bot = by
+        x_top = ax
+        x_bot = bx
+        dir = 1
+    else:
+        y_top = by
+        y_bot = ay
+        x_top = bx
+        x_bot = ax
+        dir = -1
+    if y_top == y_bot:
+        return 0
+    val in_span = (y_top <= y) and (y < y_bot)
+    if not in_span:
+        return 0
+    val t = (y - y_top) / (y_bot - y_top)
+    val cross_x = x_top + t * (x_bot - x_top)
+    if cross_x > x:
+        return dir
+    return 0
+
+fn _sk_path_quad_hit(ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64, x: f64, y: f64, depth: i32) -> _SkHitResult:
+    # Midpoint subdivision of a quadratic Bezier into line chords, each
+    # tested against the rightward ray from (x, y).
+    if depth <= 0:
+        val h = _sk_path_edge_hit(ax, ay, bx, by, x, y)
+        val c = if h != 0: 1 else: 0
+        _SkHitResult(wind: h, cross: c as i32)
+    else:
+        val mx = (ax + 2.0 * cx + bx) / 4.0
+        val my = (ay + 2.0 * cy + by) / 4.0
+        val lx = (ax + cx) / 2.0
+        val ly = (ay + cy) / 2.0
+        val rx = (cx + bx) / 2.0
+        val ry = (cy + by) / 2.0
+        val nd = depth - 1
+        val left = _sk_path_quad_hit(ax, ay, lx, ly, mx, my, x, y, nd)
+        val right = _sk_path_quad_hit(mx, my, rx, ry, bx, by, x, y, nd)
+        _SkHitResult(wind: left.wind + right.wind, cross: left.cross + right.cross)
+
+fn _sk_path_cubic_hit(ax: f64, ay: f64, c1x: f64, c1y: f64, c2x: f64, c2y: f64, bx: f64, by: f64, x: f64, y: f64, depth: i32) -> _SkHitResult:
+    # Midpoint subdivision of a cubic Bezier into line chords.
+    if depth <= 0:
+        val h = _sk_path_edge_hit(ax, ay, bx, by, x, y)
+        val c = if h != 0: 1 else: 0
+        _SkHitResult(wind: h, cross: c as i32)
+    else:
+        val m1x = (ax + c1x) / 2.0
+        val m1y = (ay + c1y) / 2.0
+        val m2x = (c1x + c2x) / 2.0
+        val m2y = (c1y + c2y) / 2.0
+        val m3x = (c2x + bx) / 2.0
+        val m3y = (c2y + by) / 2.0
+        val n1x = (m1x + m2x) / 2.0
+        val n1y = (m1y + m2y) / 2.0
+        val n2x = (m2x + m3x) / 2.0
+        val n2y = (m2y + m3y) / 2.0
+        val midx = (n1x + n2x) / 2.0
+        val midy = (n1y + n2y) / 2.0
+        val nd = depth - 1
+        val left = _sk_path_cubic_hit(ax, ay, m1x, m1y, n1x, n1y, midx, midy, x, y, nd)
+        val right = _sk_path_cubic_hit(midx, midy, n2x, n2y, m3x, m3y, bx, by, x, y, nd)
+        _SkHitResult(wind: left.wind + right.wind, cross: left.cross + right.cross)

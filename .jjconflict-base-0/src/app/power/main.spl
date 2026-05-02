@@ -1,0 +1,327 @@
+# Power CLI Subcommand
+#
+# Provides hardware power control from the command line:
+#   simple power on <name>       - Power on a target
+#   simple power off <name>      - Power off a target
+#   simple power reset <name>    - Reset a target
+#   simple power state <name>    - Query power state
+#   simple power toggle <name>   - Toggle power (relay/host only)
+#   simple power list            - List configured power targets
+#
+# Loads power configuration from config/t32/t32_terminal.sdn by default.
+#
+# Depends on:
+#   - std.terminal.types (PowerConfig, PowerState, power_state_name)
+#   - std.terminal.power.controller (power_on, power_off, power_toggle, power_reset, power_state, power_supports_toggle)
+#   - std.terminal.credential.config_parser (parse_power_config, find_power_by_name)
+
+use std.terminal.types.{PowerConfig, PowerState, power_state_name, POWER_STATE_UNKNOWN}
+use std.terminal.power.controller.{power_on, power_off, power_toggle, power_reset, power_state, power_supports_toggle}
+use std.terminal.credential.config_parser.{parse_power_config, find_power_by_name}
+
+extern fn rt_cli_get_args() -> [text]
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val DEFAULT_CONFIG_PATH: text = "config/t32/t32_terminal.sdn"
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn main() -> i64:
+    """Power CLI entry point.
+
+    Parses command-line arguments and dispatches to the appropriate
+    power subcommand handler.
+
+    Returns:
+        0 on success, 1 on error
+    """
+    val args = rt_cli_get_args()
+
+    if args.len() < 2:
+        print_power_usage()
+        return 1
+
+    # args[0] = "simple", args[1] = "power", args[2] = subcommand
+    val subcmd = args[1]
+
+    if subcmd == "on":
+        return cmd_power_on(args)
+    if subcmd == "off":
+        return cmd_power_off(args)
+    if subcmd == "reset":
+        return cmd_power_reset(args)
+    if subcmd == "state":
+        return cmd_power_state(args)
+    if subcmd == "toggle":
+        return cmd_power_toggle(args)
+    if subcmd == "list":
+        return cmd_power_list(args)
+
+    print "error: unknown power subcommand '{subcmd}'"
+    print_power_usage()
+    1
+
+# ============================================================================
+# Subcommand: on
+# ============================================================================
+
+fn cmd_power_on(args: [text]) -> i64:
+    """Power on a target by name.
+
+    Usage: simple power on <name>
+
+    Loads power config from SDN, looks up the named entry,
+    and dispatches to the appropriate power backend.
+
+    Args:
+        args: CLI argument list
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    if args.len() < 3:
+        print "usage: simple power on <name>"
+        return 1
+
+    val name = args[2]
+    val config = load_power_config(name)
+    if not config.?:
+        return 1
+
+    print "Powering on '{name}'..."
+    val result = power_on(config)
+    print "State: {result.label}"
+
+    if result.state == POWER_STATE_UNKNOWN:
+        print "warning: power state unknown after power_on"
+        return 1
+    0
+
+# ============================================================================
+# Subcommand: off
+# ============================================================================
+
+fn cmd_power_off(args: [text]) -> i64:
+    """Power off a target by name.
+
+    Usage: simple power off <name>
+
+    Args:
+        args: CLI argument list
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    if args.len() < 3:
+        print "usage: simple power off <name>"
+        return 1
+
+    val name = args[2]
+    val config = load_power_config(name)
+    if not config.?:
+        return 1
+
+    print "Powering off '{name}'..."
+    val result = power_off(config)
+    print "State: {result.label}"
+
+    if result.state == POWER_STATE_UNKNOWN:
+        print "warning: power state unknown after power_off"
+        return 1
+    0
+
+# ============================================================================
+# Subcommand: reset
+# ============================================================================
+
+fn cmd_power_reset(args: [text]) -> i64:
+    """Reset a target by name.
+
+    Usage: simple power reset <name>
+
+    Args:
+        args: CLI argument list
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    if args.len() < 3:
+        print "usage: simple power reset <name>"
+        return 1
+
+    val name = args[2]
+    val config = load_power_config(name)
+    if not config.?:
+        return 1
+
+    print "Resetting '{name}'..."
+    val result = power_reset(config)
+    print "State: {result.label}"
+    0
+
+# ============================================================================
+# Subcommand: state
+# ============================================================================
+
+fn cmd_power_state(args: [text]) -> i64:
+    """Query the power state of a target.
+
+    Usage: simple power state <name>
+
+    Args:
+        args: CLI argument list
+
+    Returns:
+        0 always (state query is informational)
+    """
+    if args.len() < 3:
+        print "usage: simple power state <name>"
+        return 1
+
+    val name = args[2]
+    val config = load_power_config(name)
+    if not config.?:
+        return 1
+
+    val result = power_state(config)
+    print "Power state of '{name}': {result.label}"
+    0
+
+# ============================================================================
+# Subcommand: toggle
+# ============================================================================
+
+fn cmd_power_toggle(args: [text]) -> i64:
+    """Toggle the power state of a target.
+
+    Usage: simple power toggle <name>
+
+    Not all power backends support toggle (T32 is discrete only).
+    Checks capability before attempting the operation.
+
+    Args:
+        args: CLI argument list
+
+    Returns:
+        0 on success, 1 on failure or unsupported
+    """
+    if args.len() < 3:
+        print "usage: simple power toggle <name>"
+        return 1
+
+    val name = args[2]
+    val config = load_power_config(name)
+    if not config.?:
+        return 1
+
+    if not power_supports_toggle(config):
+        print "error: toggle not supported for '{name}' (kind: {config.kind})"
+        print "Use 'power on' or 'power off' instead"
+        return 1
+
+    print "Toggling '{name}'..."
+    val result = power_toggle(config)
+    print "State: {result.label}"
+    0
+
+# ============================================================================
+# Subcommand: list
+# ============================================================================
+
+fn cmd_power_list(args: [text]) -> i64:
+    """List all configured power targets.
+
+    Usage: simple power list
+
+    Parses the SDN config and prints each power entry with its
+    kind and backend information.
+
+    Args:
+        args: CLI argument list (unused beyond validation)
+
+    Returns:
+        0 always
+    """
+    val configs = parse_power_config(DEFAULT_CONFIG_PATH)
+
+    if configs.len() == 0:
+        print "No power targets configured in {DEFAULT_CONFIG_PATH}"
+        return 0
+
+    print "Configured power targets ({configs.len()}):"
+    print "---"
+
+    var i = 0
+    while i < configs.len():
+        val config = configs[i]
+        val info = format_power_info(config)
+        print "  {config.name}  [{config.kind}]  {info}"
+        i = i + 1
+
+    0
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn load_power_config(name: text) -> PowerConfig?:
+    """Load a power config by name from the default SDN config file.
+
+    Args:
+        name: Power target name to look up
+
+    Returns:
+        PowerConfig if found, nil otherwise (prints error on failure)
+    """
+    val configs = parse_power_config(DEFAULT_CONFIG_PATH)
+    val found = find_power_by_name(configs, name)
+
+    if not found.?:
+        print "error: power target '{name}' not found in {DEFAULT_CONFIG_PATH}"
+        return nil
+
+    found
+
+fn format_power_info(config: PowerConfig) -> text:
+    """Format power backend info for display.
+
+    Shows the relevant details for the power kind:
+    - t32: t32_host:t32_port
+    - relay: on/off script paths
+    - host: host:port (MAC)
+
+    Args:
+        config: Power configuration
+
+    Returns:
+        Formatted info string
+    """
+    if config.kind == "t32":
+        return "{config.t32_host}:{config.t32_port}"
+    if config.kind == "relay":
+        return "on={config.on_script} off={config.off_script}"
+    if config.kind == "host":
+        var info = "{config.host}:{config.port}"
+        if config.mac_address != "":
+            info = "{info} (MAC: {config.mac_address})"
+        return info
+    "unknown"
+
+fn print_power_usage():
+    """Print power subcommand usage information."""
+    print "Usage: simple power <subcommand> [args...]"
+    print ""
+    print "Subcommands:"
+    print "  on <name>       Power on a target"
+    print "  off <name>      Power off a target"
+    print "  reset <name>    Reset a target"
+    print "  state <name>    Query power state"
+    print "  toggle <name>   Toggle power (relay/host only)"
+    print "  list            List configured power targets"
+    print ""
+    print "Config: {DEFAULT_CONFIG_PATH}"

@@ -1,0 +1,160 @@
+# DBFS WAL — Write-Ahead Log for DbFsEngine.
+#
+# Append-only log of WalRecord entries, each tagged with a monotonically
+# increasing LSN (Log Sequence Number). The only fsync point is flush_wal()
+# which implements DURABLE_GROUP_COMMIT (one flush per committed txn group).
+#
+# Maps to: AC-3, AC-5, AC-9, D4.
+
+use std.io_runtime
+
+# Record type constants
+val WAL_RECORD_DATA:   i64 = 1
+val WAL_RECORD_META:   i64 = 2
+val WAL_RECORD_COMMIT: i64 = 3
+val WAL_RECORD_ABORT:  i64 = 4
+
+struct Lsn:
+    """Log Sequence Number — monotonically increasing, > 0."""
+    value: i64
+
+    static fn zero() -> Lsn:
+        Lsn(value: 0)
+
+    fn is_zero() -> bool:
+        self.value == 0
+
+struct WalRecord:
+    """Single WAL entry."""
+    txn_id:      i64
+    record_type: i64
+    payload:     text
+
+struct WalEntry:
+    """Internal: record + its LSN."""
+    lsn:    Lsn
+    record: WalRecord
+
+struct RecoveryCursor:
+    """Cursor for WAL replay from a given LSN."""
+    lsn:     i64
+    entries: [WalEntry]
+
+    fn start_lsn() -> i64:
+        """Return the LSN from which recovery replay starts."""
+        self.lsn
+
+    fn collect_committed() -> Result<[WalRecord], text>:
+        """Return all committed records from this cursor's start LSN."""
+        var result: [WalRecord] = []
+        for entry in self.entries:
+            if entry.lsn.value >= self.lsn:
+                result.push(entry.record)
+        Ok(result)
+
+struct DbfsWal:
+    """Write-Ahead Log.
+
+    entries       — all appended records in LSN order.
+    next_lsn      — next LSN to assign (starts at 1).
+    durable_lsn   — highest LSN that has been flushed to durable storage.
+    intent_log_head — LSN from which recovery replay starts.
+    flush_count   — number of flush_wal() calls (used by group-commit tests).
+    """
+    entries:          [WalEntry]
+    next_lsn:         i64
+    durable_lsn:      i64
+    intent_log_head:  i64
+    flush_count:      i64
+
+    static fn new() -> DbfsWal:
+        DbfsWal(
+            entries:         [],
+            next_lsn:        1,
+            durable_lsn:     0,
+            intent_log_head: 0,
+            flush_count:     0
+        )
+
+    # --- Append ---
+
+    me fn append(rec: WalRecord) -> Result<Lsn, text>:
+        """Append a record; return its LSN. LSN is > 0 and strictly increasing."""
+        val lsn = Lsn(value: self.next_lsn)
+        self.next_lsn = self.next_lsn + 1
+        self.entries.push(WalEntry(lsn: lsn, record: rec))
+        Ok(lsn)
+
+    # --- Read ---
+
+    fn read_record(lsn: Lsn) -> Result<WalRecord, text>:
+        """Return the record at the given LSN (readable before flush)."""
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].lsn.value == lsn.value:
+                return Ok(self.entries[i].record)
+            i = i + 1
+        Err("wal: record not found")
+
+    # --- Flush (DURABLE_GROUP_COMMIT) ---
+
+    me fn flush_wal() -> Result<(), text>:
+        """Flush all pending records to durable storage.
+
+        This is the only fsync point (DURABLE_GROUP_COMMIT).
+        Idempotent: flushing an already-flushed WAL is a no-op.
+        """
+        if self.entries.len() > 0:
+            val last_idx = self.entries.len() as i32 - 1
+            val last_lsn = self.entries[last_idx].lsn.value
+            if last_lsn > self.durable_lsn:
+                self.durable_lsn = last_lsn
+        self.flush_count = self.flush_count + 1
+        Ok(())
+
+    fn get_durable_lsn() -> Lsn:
+        """Return the highest LSN durably written."""
+        Lsn(value: self.durable_lsn)
+
+    fn durable_lsn() -> i64:
+        """Return the durable LSN value (convenience accessor for tests)."""
+        self.durable_lsn
+
+    me fn flush() -> Result<(), text>:
+        """Alias for flush_wal() — flush all pending records to durable storage."""
+        self.flush_wal()
+
+    fn intent_log_head() -> i64:
+        """Return the LSN from which recovery replay starts (raw value)."""
+        self.intent_log_head
+
+    fn recovery_cursor() -> RecoveryCursor:
+        """Return a cursor positioned at intent_log_head for WAL replay."""
+        var snapshot: [WalEntry] = []
+        for entry in self.entries:
+            snapshot.push(entry)
+        RecoveryCursor(lsn: self.intent_log_head, entries: snapshot)
+
+    fn get_intent_log_head() -> Lsn:
+        """Return the LSN from which recovery replay starts."""
+        Lsn(value: self.intent_log_head)
+
+    me fn set_intent_log_head(lsn: Lsn):
+        """Set the recovery cursor (called after checkpoint completes)."""
+        self.intent_log_head = lsn.value
+
+    fn get_flush_count() -> i64:
+        """Return number of flush_wal() calls (DURABLE_GROUP_COMMIT counter)."""
+        self.flush_count
+
+    # --- Scan ---
+
+    fn scan_from(from_lsn: Lsn) -> [WalEntry]:
+        """Return all entries with LSN >= from_lsn."""
+        var result: [WalEntry] = []
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            if self.entries[i].lsn.value >= from_lsn.value:
+                result.push(self.entries[i])
+            i = i + 1
+        result

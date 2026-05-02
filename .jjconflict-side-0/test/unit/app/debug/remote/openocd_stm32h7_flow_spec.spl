@@ -1,0 +1,202 @@
+# STM32H7 + OpenOCD Full Flow Tests
+# Tests config → adapter → flash → reset → debug ops for STM32H7 via OpenOCD.
+
+# --- Local simulation of OpenOCD adapter lifecycle ---
+
+class OpenocdSession:
+    target_name: text
+    cfg_path: text
+    gdb_port: i32
+    telnet_port: i32
+    program: text
+    state: text
+    flashed: bool
+    breakpoints: [text]
+    last_monitor_cmd: text
+
+impl OpenocdSession:
+    static fn for_stm32h7(program: text) -> OpenocdSession:
+        OpenocdSession(
+            target_name: "STM32H7",
+            cfg_path: "board/stm32h7x3i_eval.cfg",
+            gdb_port: 3333,
+            telnet_port: 4333,
+            program: program,
+            state: "disconnected",
+            flashed: false,
+            breakpoints: [],
+            last_monitor_cmd: ""
+        )
+
+    me connect() -> Result<text, text>:
+        self.state = "connected"
+        Ok("connected to OpenOCD on gdb:{self.gdb_port} telnet:{self.telnet_port}")
+
+    me flash(elf_path: text) -> Result<text, text>:
+        if self.state != "connected" and self.state != "halted":
+            return Err("must be connected to flash")
+        self.flashed = true
+        self.state = "halted"
+        Ok("program {elf_path} verify reset")
+
+    me reset_halt() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.state = "halted"
+        Ok("reset halt")
+
+    me reset_run() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.state = "running"
+        Ok("reset run")
+
+    me halt() -> Result<text, text>:
+        if self.state != "running":
+            return Err("target not running")
+        self.state = "halted"
+        Ok("halted")
+
+    me resume() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target not halted")
+        self.state = "running"
+        Ok("resumed")
+
+    me single_step() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target not halted")
+        Ok("stepped")
+
+    me set_breakpoint(location: text) -> Result<i32, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.breakpoints = self.breakpoints + [location]
+        Ok(self.breakpoints.len())
+
+    me read_memory(addr: i64, size: i32) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted for memory read")
+        Ok("0x00,0x00,0x00,0x00")
+
+    me read_register(name: text) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted for register read")
+        Ok("0")
+
+    me monitor(cmd: text) -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.last_monitor_cmd = cmd
+        Ok("monitor: {cmd}")
+
+    me disconnect():
+        self.state = "disconnected"
+
+# --- Tests ---
+
+describe "STM32H7 OpenOCD config":
+    it "creates config with correct cfg path":
+        val s = OpenocdSession.for_stm32h7("firmware.elf")
+        expect(s.cfg_path).to_equal("board/stm32h7x3i_eval.cfg")
+
+    it "creates config with GDB port 3333":
+        val s = OpenocdSession.for_stm32h7("firmware.elf")
+        expect(s.gdb_port).to_equal(3333)
+
+    it "creates config with telnet port 4333":
+        val s = OpenocdSession.for_stm32h7("firmware.elf")
+        expect(s.telnet_port).to_equal(4333)
+
+    it "starts disconnected":
+        val s = OpenocdSession.for_stm32h7("firmware.elf")
+        expect(s.state).to_equal("disconnected")
+
+describe "STM32H7 OpenOCD flash flow":
+    it "connect then flash succeeds":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        val result = s.flash("firmware.elf")
+        expect(s.flashed).to_equal(true)
+        expect(s.state).to_equal("halted")
+
+    it "flash without connect fails":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        val result = s.flash("firmware.elf")
+        expect(s.flashed).to_equal(false)
+
+    it "flash then reset_run transitions to running":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.flash("firmware.elf")
+        s.reset_run()
+        expect(s.state).to_equal("running")
+
+describe "STM32H7 OpenOCD reset flow":
+    it "reset_halt from running transitions to halted":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.flash("firmware.elf")
+        s.reset_run()
+        s.reset_halt()
+        expect(s.state).to_equal("halted")
+
+    it "reset_halt when disconnected fails":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        val result = s.reset_halt()
+        expect(s.state).to_equal("disconnected")
+
+describe "STM32H7 OpenOCD debug ops":
+    it "halt from running succeeds":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.flash("firmware.elf")
+        s.reset_run()
+        s.halt()
+        expect(s.state).to_equal("halted")
+
+    it "resume from halted succeeds":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.flash("firmware.elf")
+        s.resume()
+        expect(s.state).to_equal("running")
+
+    it "single step while halted succeeds":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.flash("firmware.elf")
+        s.single_step()
+        expect(s.state).to_equal("halted")
+
+    it "set breakpoint while connected":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.set_breakpoint("main.c:10")
+        expect(s.breakpoints.len()).to_equal(1)
+
+    it "read memory while halted":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.flash("firmware.elf")
+        val mem = s.read_memory(0x08000000, 4)
+        expect(s.state).to_equal("halted")
+
+    it "read register while halted":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.flash("firmware.elf")
+        val reg = s.read_register("r0")
+        expect(s.state).to_equal("halted")
+
+describe "STM32H7 OpenOCD monitor":
+    it "send monitor command":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        s.connect()
+        s.monitor("mdw 0x08000000 4")
+        expect(s.last_monitor_cmd).to_equal("mdw 0x08000000 4")
+
+    it "monitor when disconnected fails":
+        var s = OpenocdSession.for_stm32h7("firmware.elf")
+        val result = s.monitor("reset halt")
+        expect(s.state).to_equal("disconnected")

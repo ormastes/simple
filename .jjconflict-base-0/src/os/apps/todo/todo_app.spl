@@ -1,0 +1,410 @@
+# Todo — Personal Task Manager
+#
+# A tabbed task manager with priorities, categories, completion
+# tracking, and sorting. Tasks are stored in-memory.
+#
+# MDSOC: feature dimension, apps layer
+
+use common.ui.builder.{
+    column, row, panel, button, text_widget, label,
+    statusbar, menubar, build_tree_with_title,
+    with_flex, with_width, tabs, checkbox
+}
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.session.{UISession}
+
+# =========================================================================
+# Priority
+# =========================================================================
+
+enum Priority:
+    """Task priority level."""
+    High
+    Medium
+    Low
+
+# =========================================================================
+# Todo Item
+# =========================================================================
+
+struct TodoItem:
+    """A single task entry."""
+    id: i32
+    title: text
+    priority: Priority
+    category: text
+    done: bool
+
+# =========================================================================
+# Todo App
+# =========================================================================
+
+class TodoApp:
+    """Personal task manager application.
+
+    Manages a list of tasks with priority, category, and
+    completion status. Provides tabbed category filtering,
+    sorting, and keyboard-driven input.
+    """
+    items: [TodoItem]
+    next_id: i32
+    current_tab: text
+    input_text: text
+    input_priority: text
+    sort_by: text
+    status_message: text
+
+impl TodoApp:
+
+    static fn new() -> TodoApp:
+        """Create a task manager with sample tasks."""
+        var app = TodoApp(
+            items: [],
+            next_id: 1,
+            current_tab: "All",
+            input_text: "",
+            input_priority: "Medium",
+            sort_by: "priority",
+            status_message: "Ready"
+        )
+        app.add_task("Buy groceries", Priority.Medium, "Shopping")
+        app.add_task("Finish report", Priority.High, "Work")
+        app.add_task("Call dentist", Priority.Low, "Personal")
+        app.add_task("Code review", Priority.High, "Work")
+        app.add_task("Pick up laundry", Priority.Low, "Personal")
+        app.add_task("Plan weekend trip", Priority.Medium, "Other")
+        app
+
+    # -- Task Management -----------------------------------------------------
+
+    me add_task(title: text, priority: Priority, category: text):
+        """Add a new task to the list."""
+        if title == "":
+            self.status_message = "Cannot add empty task"
+            return
+        val item = TodoItem(
+            id: self.next_id,
+            title: title,
+            priority: priority,
+            category: category,
+            done: false
+        )
+        self.items = self.items.push(item)
+        self.next_id = self.next_id + 1
+        self.status_message = "Added: {title}"
+
+    me toggle_done(id: i32):
+        """Toggle the completion status of a task by id."""
+        var i = 0
+        while i < self.items.len():
+            if self.items[i].id == id:
+                val was_done = self.items[i].done
+                self.items[i].done = not was_done
+                val state = if self.items[i].done: "completed" else: "reopened"
+                self.status_message = "Task {state}: {self.items[i].title}"
+                return
+            i = i + 1
+        self.status_message = "Task not found: {id}"
+
+    me delete_task(id: i32):
+        """Remove a task by id."""
+        var new_items = []
+        var found = false
+        for item in self.items:
+            if item.id == id:
+                found = true
+                self.status_message = "Deleted: {item.title}"
+            else:
+                new_items = new_items.push(item)
+        self.items = new_items
+        if not found:
+            self.status_message = "Task not found: {id}"
+
+    # -- Filtering and Sorting -----------------------------------------------
+
+    me filtered_items() -> [TodoItem]:
+        """Return items matching the current category tab."""
+        if self.current_tab == "All":
+            return self.items
+        var result = []
+        for item in self.items:
+            if item.category == self.current_tab:
+                result = result.push(item)
+        result
+
+    me sorted_items(items: [TodoItem]) -> [TodoItem]:
+        """Sort items by the current sort mode."""
+        # Simple insertion sort -- fine for small task lists
+        var sorted = []
+        for item in items:
+            sorted = sorted.push(item)
+        # Bubble sort for simplicity
+        var n = sorted.len()
+        var i = 0
+        while i < n:
+            var j = 0
+            while j < n - 1 - i:
+                val swap = if self.sort_by == "priority":
+                    _priority_rank(sorted[j].priority) > _priority_rank(sorted[j + 1].priority)
+                else:
+                    # Alphabetical sort
+                    sorted[j].title > sorted[j + 1].title
+                if swap:
+                    val tmp = sorted[j]
+                    sorted[j] = sorted[j + 1]
+                    sorted[j + 1] = tmp
+                j = j + 1
+            i = i + 1
+        sorted
+
+    me completed_count() -> i32:
+        """Count completed tasks."""
+        var count = 0
+        for item in self.items:
+            if item.done:
+                count = count + 1
+        count
+
+    me total_count() -> i32:
+        """Total number of tasks."""
+        self.items.len()
+
+    # -- Input Handling ------------------------------------------------------
+
+    me handle_key(key: text):
+        """Map keyboard input to todo actions."""
+        match key:
+            "Tab":
+                # Cycle through category tabs
+                val tab_order = ["All", "Work", "Personal", "Shopping", "Other"]
+                var idx = 0
+                while idx < tab_order.len():
+                    if tab_order[idx] == self.current_tab:
+                        val next_idx = (idx + 1) % tab_order.len()
+                        self.current_tab = tab_order[next_idx]
+                        self.status_message = "Tab: {self.current_tab}"
+                        return
+                    idx = idx + 1
+                self.current_tab = "All"
+            "Enter":
+                # Add task from input
+                if self.input_text != "":
+                    val priority = _parse_priority(self.input_priority)
+                    val category = if self.current_tab == "All": "Other" else: self.current_tab
+                    self.add_task(self.input_text, priority, category)
+                    self.input_text = ""
+            "Delete":
+                # Delete last visible task
+                val visible = self.filtered_items()
+                if visible.len() > 0:
+                    val last = visible[visible.len() - 1]
+                    self.delete_task(last.id)
+            "p":
+                # Cycle input priority
+                match self.input_priority:
+                    "High" => self.input_priority = "Medium"
+                    "Medium" => self.input_priority = "Low"
+                    "Low" => self.input_priority = "High"
+                    _ => self.input_priority = "Medium"
+                self.status_message = "Priority: {self.input_priority}"
+            "s":
+                # Toggle sort mode
+                if self.sort_by == "priority":
+                    self.sort_by = "alpha"
+                    self.status_message = "Sort: Alphabetical"
+                else:
+                    self.sort_by = "priority"
+                    self.status_message = "Sort: Priority"
+            "Backspace":
+                # Remove last char from input
+                if self.input_text.len() > 0:
+                    self.input_text = self.input_text.slice(0, self.input_text.len() - 1)
+            _ =>
+                # Append printable characters to input
+                if key.len() == 1:
+                    self.input_text = "{self.input_text}{key}"
+
+    me handle_action(action: text):
+        """Dispatch button action strings."""
+        match action:
+            "add_task":
+                if self.input_text != "":
+                    val priority = _parse_priority(self.input_priority)
+                    val category = if self.current_tab == "All": "Other" else: self.current_tab
+                    self.add_task(self.input_text, priority, category)
+                    self.input_text = ""
+                else:
+                    self.status_message = "Enter a task title first"
+            "sort_priority":
+                self.sort_by = "priority"
+                self.status_message = "Sort: Priority"
+            "sort_alpha":
+                self.sort_by = "alpha"
+                self.status_message = "Sort: Alphabetical"
+            "cycle_priority":
+                match self.input_priority:
+                    "High" => self.input_priority = "Medium"
+                    "Medium" => self.input_priority = "Low"
+                    "Low" => self.input_priority = "High"
+                    _ => self.input_priority = "Medium"
+            "clear_done":
+                var kept = []
+                var removed = 0
+                for item in self.items:
+                    if item.done:
+                        removed = removed + 1
+                    else:
+                        kept = kept.push(item)
+                self.items = kept
+                self.status_message = "Cleared {removed} completed task(s)"
+            "tab_All" => self.current_tab = "All"
+            "tab_Work" => self.current_tab = "Work"
+            "tab_Personal" => self.current_tab = "Personal"
+            "tab_Shopping" => self.current_tab = "Shopping"
+            "tab_Other" => self.current_tab = "Other"
+            _ =>
+                # Handle toggle_N and delete_N actions
+                if action.starts_with("toggle_"):
+                    val id_str = action.slice(7, action.len())
+                    val id_num = id_str.parse_i32()
+                    self.toggle_done(id_num)
+                else if action.starts_with("delete_"):
+                    val id_str = action.slice(7, action.len())
+                    val id_num = id_str.parse_i32()
+                    self.delete_task(id_num)
+                else:
+                    self.status_message = "Unknown action: {action}"
+
+    # -- UI Construction -----------------------------------------------------
+
+    me build_ui() -> UISession:
+        """Build the todo manager UI.
+
+        Layout:
+          Menu bar
+          Category tabs: All | Work | Personal | Shopping | Other
+          Input row: text field + priority button + Add button
+          Task list with checkboxes and delete buttons
+          Sort buttons + Clear completed
+          Status bar with completed/total count
+        """
+        val tab_names = ["All", "Work", "Personal", "Shopping", "Other"]
+        val tab_index = _tab_index(self.current_tab)
+        val visible = self.filtered_items()
+        val sorted = self.sorted_items(visible)
+        val done_count = self.completed_count()
+        val total = self.total_count()
+
+        val root = column("todo_root", [
+            # Menu bar
+            menubar("todo_menu", [
+                "Tasks", "Sort", "Help"
+            ]),
+
+            # Category tabs
+            tabs("todo_tabs", tab_names, tab_index),
+
+            # Input row
+            panel("todo_input_panel", "New Task", [
+                row("todo_input_row", [
+                    with_flex(text_widget("todo_input", self.input_text), 1),
+                    button("todo_priority_btn", "[{self.input_priority}]", "cycle_priority"),
+                    button("todo_add_btn", "+ Add", "add_task")
+                ])
+            ]),
+
+            # Task list
+            with_flex(self._build_task_list(sorted), 1),
+
+            # Action row
+            row("todo_action_row", [
+                button("todo_sort_priority", "Sort: Priority", "sort_priority"),
+                button("todo_sort_alpha", "Sort: A-Z", "sort_alpha"),
+                with_flex(label("todo_spacer", ""), 1),
+                button("todo_clear_done", "Clear Completed", "clear_done")
+            ]),
+
+            # Status bar
+            statusbar("todo_status",
+                "{done_count}/{total} completed | {self.current_tab}",
+                "Sort: {self.sort_by}"
+            )
+        ])
+
+        val tree = build_tree_with_title(root, "Todo", "dark")
+        UISession.new(tree)
+
+    # -- Task List Construction ----------------------------------------------
+
+    me _build_task_list(sorted_items: [TodoItem]) -> WidgetNode:
+        """Build the scrollable task list panel."""
+        var task_widgets = []
+
+        if sorted_items.len() == 0:
+            task_widgets = task_widgets.push(
+                label("todo_empty", "  No tasks in this category")
+            )
+        else:
+            var idx = 0
+            while idx < sorted_items.len():
+                val item = sorted_items[idx]
+                val check_label = if item.done: "[x]" else: "[ ]"
+                val priority_tag = _priority_label(item.priority)
+                val title_display = if item.done:
+                    "~{item.title}~"
+                else:
+                    item.title
+                val task_row = row("todo_task_{item.id}", [
+                    button("todo_check_{item.id}", check_label, "toggle_{item.id}"),
+                    label("todo_prio_{item.id}", priority_tag),
+                    with_flex(label("todo_title_{item.id}", title_display), 1),
+                    label("todo_cat_{item.id}", "[{item.category}]"),
+                    button("todo_del_{item.id}", "X", "delete_{item.id}")
+                ])
+                task_widgets = task_widgets.push(task_row)
+                idx = idx + 1
+
+        panel("todo_list_panel", "Tasks ({sorted_items.len()})", task_widgets)
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _priority_rank(p: Priority) -> i32:
+    """Numeric rank for sorting — lower is higher priority."""
+    match p:
+        Priority.High => 0
+        Priority.Medium => 1
+        Priority.Low => 2
+
+fn _priority_label(p: Priority) -> text:
+    """Short display label for a priority."""
+    match p:
+        Priority.High => "[H]"
+        Priority.Medium => "[M]"
+        Priority.Low => "[L]"
+
+fn _priority_to_text(p: Priority) -> text:
+    """Full text name for a priority."""
+    match p:
+        Priority.High => "High"
+        Priority.Medium => "Medium"
+        Priority.Low => "Low"
+
+fn _parse_priority(s: text) -> Priority:
+    """Parse a priority from text."""
+    match s:
+        "High" => Priority.High
+        "Medium" => Priority.Medium
+        "Low" => Priority.Low
+        _ => Priority.Medium
+
+fn _tab_index(tab_name: text) -> i32:
+    """Return the numeric index of a category tab."""
+    match tab_name:
+        "All" => 0
+        "Work" => 1
+        "Personal" => 2
+        "Shopping" => 3
+        "Other" => 4
+        _ => 0

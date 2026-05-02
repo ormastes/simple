@@ -1,0 +1,322 @@
+# awk — Basic POSIX awk: field splitting, pattern/action, BEGIN/END
+# MDSOC: feature dimension, shell layer
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+
+fn tool_awk(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Basic POSIX awk interpreter.
+
+    Supports: -F sep, BEGIN/END blocks, /pattern/ { action }, { action }.
+    Actions: print, print $N, printf fmt, next.
+    Variables: $0, $1..$NF, NR, NF.
+    """
+    if args.len() == 0:
+        write_error(terminal, "awk: usage: awk [-F sep] 'program' [file...]")
+        return 1
+
+    # --- Parse arguments ---
+    var field_sep = " "
+    var program = ""
+    var file_args: [text] = []
+    var i = 0
+    while i < args.len():
+        if args[i] == "-F" and i + 1 < args.len():
+            i = i + 1
+            field_sep = args[i]
+        elif args[i].starts_with("-F") and args[i].len() > 2:
+            field_sep = args[i].slice(2, args[i].len())
+        elif program == "":
+            program = args[i]
+        else:
+            file_args = file_args.push(args[i])
+        i = i + 1
+
+    if program == "":
+        write_error(terminal, "awk: no program given")
+        return 1
+
+    # --- Parse program into blocks ---
+    val begin_src = _extract_block(program, "BEGIN")
+    val end_src   = _extract_block(program, "END")
+    val rules     = _extract_rules(program)
+
+    var nr = 0
+
+    # --- BEGIN block ---
+    if begin_src.len() > 0:
+        _exec_action(begin_src, "", [], nr, 0, field_sep, terminal)
+
+    # --- Process files ---
+    if file_args.len() == 0:
+        # No files: nothing to process
+        pass_dn
+    else:
+        var fi = 0
+        while fi < file_args.len():
+            val path = resolve_path(cwd, file_args[fi])
+            if vfs == nil:
+                write_error(terminal, "awk: no filesystem mounted")
+                return 1
+            val read_result = vfs.read_text(path)
+            if read_result.is_err():
+                write_error(terminal, "awk: {path}: {read_result.unwrap_err()}")
+                fi = fi + 1
+                pass_do_nothing
+            else:
+                val content = read_result.unwrap()
+                val lines = split_lines(content)
+                for line in lines:
+                    if line.len() == 0:
+                        pass_dn
+                    else:
+                        nr = nr + 1
+                        val fields = _split_fields(line, field_sep)
+                        val nf = fields.len()
+                        var matched_next = false
+                        var ri = 0
+                        while ri < rules.len() and not matched_next:
+                            val rule = rules[ri]
+                            val pattern = rule.0
+                            val action  = rule.1
+                            val matches = if pattern == "": true else: line.contains(pattern)
+                            if matches:
+                                val ctrl = _exec_action(action, line, fields, nr, nf, field_sep, terminal)
+                                if ctrl == 1:
+                                    matched_next = true
+                            ri = ri + 1
+            fi = fi + 1
+
+    # --- END block ---
+    if end_src.len() > 0:
+        _exec_action(end_src, "", [], nr, 0, field_sep, terminal)
+
+    return 0
+
+# ---------------------------------------------------------------------------
+# Program parsing helpers
+# ---------------------------------------------------------------------------
+
+fn _extract_block(program: text, keyword: text) -> text:
+    """Extract body of a BEGIN or END block, or empty string if absent."""
+    val needle = "{keyword} {"
+    val needle2 = "{keyword}{"
+    var start = -1
+    # Find keyword occurrence
+    if program.contains(needle):
+        start = _find_after(program, needle)
+    elif program.contains(needle2):
+        start = _find_after(program, needle2)
+    if start < 0:
+        return ""
+    # Find matching closing brace
+    var depth = 1
+    var pos = start
+    var body = ""
+    while pos < program.len() and depth > 0:
+        val ch = program.char_at(pos)
+        if ch == "{":
+            depth = depth + 1
+            if depth > 1:
+                body = "{body}{ch}"
+        elif ch == "}":
+            depth = depth - 1
+            if depth > 0:
+                body = "{body}{ch}"
+        else:
+            body = "{body}{ch}"
+        pos = pos + 1
+    return body.trim()
+
+fn _find_after(program: text, needle: text) -> i32:
+    """Return index immediately after the first occurrence of needle in program, or -1."""
+    var i = 0
+    val plen = program.len()
+    val nlen = needle.len()
+    while i <= plen - nlen:
+        if program.slice(i, i + nlen) == needle:
+            return i + nlen
+        i = i + 1
+    return -1
+
+fn _extract_rules(program: text) -> [(text, text)]:
+    """Extract (pattern, action) pairs, excluding BEGIN/END blocks."""
+    var rules: [(text, text)] = []
+    # Remove BEGIN and END blocks first
+    val cleaned = _remove_block(program, "BEGIN")
+    val cleaned2 = _remove_block(cleaned, "END")
+    # Now parse remaining pattern { action } blocks
+    var pos = 0
+    val plen = cleaned2.len()
+    while pos < plen:
+        val ch = cleaned2.char_at(pos)
+        # Skip whitespace
+        if ch == " " or ch == "\n" or ch == "\t" or ch == "\r":
+            pos = pos + 1
+        elif ch == "{":
+            # Bare action (no pattern)
+            pos = pos + 1
+            val body_pair = _read_brace_body(cleaned2, pos)
+            rules = rules.push(("", body_pair.0.trim()))
+            pos = body_pair.1
+        elif ch == "/":
+            # /pattern/ { action }
+            pos = pos + 1
+            var pattern = ""
+            while pos < plen and cleaned2.char_at(pos) != "/":
+                pattern = "{pattern}{cleaned2.char_at(pos)}"
+                pos = pos + 1
+            pos = pos + 1  # consume closing /
+            # Skip whitespace until '{'
+            while pos < plen and (cleaned2.char_at(pos) == " " or cleaned2.char_at(pos) == "\t"):
+                pos = pos + 1
+            if pos < plen and cleaned2.char_at(pos) == "{":
+                pos = pos + 1
+                val body_pair2 = _read_brace_body(cleaned2, pos)
+                rules = rules.push((pattern, body_pair2.0.trim()))
+                pos = body_pair2.1
+        else:
+            pos = pos + 1
+    return rules
+
+fn _remove_block(program: text, keyword: text) -> text:
+    """Remove a BEGIN or END block from program text."""
+    val needle  = "{keyword} {"
+    val needle2 = "{keyword}{"
+    var start_kw = -1
+    var after_open = -1
+    if program.contains(needle):
+        start_kw   = _find_str(program, needle)
+        after_open = start_kw + needle.len()
+    elif program.contains(needle2):
+        start_kw   = _find_str(program, needle2)
+        after_open = start_kw + needle2.len()
+    if start_kw < 0:
+        return program
+    # Find closing brace
+    var depth = 1
+    var pos = after_open
+    while pos < program.len() and depth > 0:
+        val ch = program.char_at(pos)
+        if ch == "{":
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+        pos = pos + 1
+    val before = program.slice(0, start_kw)
+    val after  = program.slice(pos, program.len())
+    return "{before}{after}"
+
+fn _find_str(s: text, needle: text) -> i32:
+    """Return index of first occurrence of needle in s, or -1."""
+    var i = 0
+    val slen = s.len()
+    val nlen = needle.len()
+    while i <= slen - nlen:
+        if s.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    return -1
+
+fn _read_brace_body(program: text, start: i32) -> (text, i32):
+    """Read text until matching closing brace (depth 1 already consumed).
+
+    Returns (body, position_after_closing_brace).
+    """
+    var body = ""
+    var depth = 1
+    var pos = start
+    val plen = program.len()
+    while pos < plen and depth > 0:
+        val ch = program.char_at(pos)
+        if ch == "{":
+            depth = depth + 1
+            body = "{body}{ch}"
+        elif ch == "}":
+            depth = depth - 1
+            if depth > 0:
+                body = "{body}{ch}"
+        else:
+            body = "{body}{ch}"
+        pos = pos + 1
+    return (body, pos)
+
+# ---------------------------------------------------------------------------
+# Field splitting
+# ---------------------------------------------------------------------------
+
+fn _split_fields(line: text, sep: text) -> [text]:
+    """Split line into fields using sep. Default ' ' means any whitespace run."""
+    if sep == " ":
+        return _split_whitespace(line)
+    var fields: [text] = []
+    var cur = ""
+    for ch in line:
+        if ch == sep:
+            fields = fields.push(cur)
+            cur = ""
+        else:
+            cur = "{cur}{ch}"
+    fields = fields.push(cur)
+    return fields
+
+fn _split_whitespace(line: text) -> [text]:
+    """Split on runs of spaces/tabs."""
+    var fields: [text] = []
+    var cur = ""
+    for ch in line:
+        if ch == " " or ch == "\t":
+            if cur.len() > 0:
+                fields = fields.push(cur)
+                cur = ""
+        else:
+            cur = "{cur}{ch}"
+    if cur.len() > 0:
+        fields = fields.push(cur)
+    return fields
+
+# ---------------------------------------------------------------------------
+# Action execution
+# ---------------------------------------------------------------------------
+
+fn _exec_action(action: text, line: text, fields: [text], nr: i32, nf: i32, sep: text, terminal: Terminal) -> i32:
+    """Execute an action string. Returns 1 if 'next' was encountered, 0 otherwise."""
+    val stmts = split_lines(action)
+    for stmt in stmts:
+        val s = stmt.trim()
+        if s.len() == 0:
+            pass_dn
+        elif s == "next":
+            return 1
+        elif s == "print" or s == "print $0":
+            write_line(terminal, line)
+        elif s.starts_with("print "):
+            val rest = s.slice(6, s.len()).trim()
+            val resolved = _resolve_expr(rest, line, fields, nr, nf)
+            write_line(terminal, resolved)
+        elif s.starts_with("printf "):
+            val rest2 = s.slice(7, s.len()).trim()
+            val resolved2 = _resolve_expr(rest2, line, fields, nr, nf)
+            terminal.write_string(resolved2)
+    return 0
+
+fn _resolve_expr(expr: text, line: text, fields: [text], nr: i32, nf: i32) -> text:
+    """Resolve a simple expression: $N, NR, NF, or literal text."""
+    val trimmed = expr.trim()
+    if trimmed == "$0":
+        return line
+    elif trimmed == "NR":
+        return "{nr}"
+    elif trimmed == "NF":
+        return "{nf}"
+    elif trimmed.starts_with("$"):
+        val idx_str = trimmed.slice(1, trimmed.len())
+        val idx = idx_str.to_i32()
+        if idx > 0 and idx <= fields.len():
+            return fields[idx - 1]
+        return ""
+    else:
+        # Strip surrounding quotes if present
+        if (trimmed.starts_with("\"") and trimmed.ends_with("\"")) and trimmed.len() >= 2:
+            return trimmed.slice(1, trimmed.len() - 1)
+        return trimmed

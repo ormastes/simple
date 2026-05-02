@@ -1,0 +1,79 @@
+//! Garbage Collector FFI
+//!
+//! Uses Boehm-Demers-Weiser GC (bdwgc) as the garbage collector.
+//! This is a conservative, portable GC used by many language runtimes.
+
+use std::alloc::{GlobalAlloc, Layout};
+
+/// Initialize the GC
+#[no_mangle]
+pub extern "C" fn rt_gc_init() {
+    // bdwgc initializes automatically on first allocation
+    // This is a no-op but kept for API compatibility
+}
+
+/// Allocate memory (GC-managed)
+#[no_mangle]
+pub unsafe extern "C" fn rt_gc_malloc(size: usize) -> *mut u8 {
+    if size == 0 {
+        return std::ptr::null_mut();
+    }
+
+    let layout = Layout::from_size_align_unchecked(size, 8);
+    bdwgc_alloc::Allocator.alloc(layout)
+}
+
+/// Allocate atomic memory (no pointers, won't be scanned)
+#[no_mangle]
+pub unsafe extern "C" fn rt_gc_malloc_atomic(size: usize) -> *mut u8 {
+    // For now, use same as regular malloc
+    // bdwgc has atomic allocation but not exposed in bdwgc-alloc crate yet
+    rt_gc_malloc(size)
+}
+
+/// Reallocate memory
+#[no_mangle]
+pub unsafe extern "C" fn rt_gc_realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
+    if ptr.is_null() {
+        return rt_gc_malloc(new_size);
+    }
+    if new_size == 0 {
+        rt_gc_free(ptr);
+        return std::ptr::null_mut();
+    }
+
+    // bdwgc-alloc doesn't have realloc, so allocate new and copy
+    let new_ptr = rt_gc_malloc(new_size);
+    if !new_ptr.is_null() {
+        std::ptr::copy_nonoverlapping(ptr, new_ptr, new_size);
+    }
+    new_ptr
+}
+
+/// Force garbage collection
+#[no_mangle]
+pub extern "C" fn rt_gc_collect() {
+    // bdwgc-alloc doesn't expose explicit collection
+    // Collection happens automatically
+}
+
+/// Free memory (optional with GC, but provided for compatibility)
+#[no_mangle]
+pub unsafe extern "C" fn rt_gc_free(_ptr: *mut u8) {
+    // bdwgc handles deallocation automatically
+    // This is a no-op
+}
+
+/// Get heap size
+#[no_mangle]
+pub extern "C" fn rt_gc_get_heap_size() -> usize {
+    // Not available in bdwgc-alloc
+    0
+}
+
+/// Get free bytes
+#[no_mangle]
+pub extern "C" fn rt_gc_get_free_bytes() -> usize {
+    // Not available in bdwgc-alloc
+    0
+}

@@ -1,0 +1,48 @@
+"""
+# VFS Exec Byte Buffer Spec
+
+Verifies that boot-file bytes returned through the VFS exec path are cloned
+before they are cached or handed to callers.
+"""
+
+use std.spec.{describe, it, expect}
+use os.services.vfs.vfs_init.{_clone_bytes, _vfs_exec_disk_alias}
+use examples.nvfs.src.driver.fs_driver_impl.{NvfsDriver}
+use std.fs_driver.types.{Path, OpenFlags, MountOptions}
+
+describe "vfs_exec_bytes feature spec":
+    """Byte buffers returned to callers must not share mutable array storage."""
+    it "clones FAT32 byte buffers instead of sharing array storage":
+        val source = [0x41u8, 0x42u8, 0x43u8]
+        val cloned = _clone_bytes(source)
+
+        expect(cloned).to_equal([0x41u8, 0x42u8, 0x43u8])
+
+        source.push(0x44u8)
+
+        expect(source).to_equal([0x41u8, 0x42u8, 0x43u8, 0x44u8])
+        expect(cloned).to_equal([0x41u8, 0x42u8, 0x43u8])
+
+    it "maps canonical filesystem app SMF paths to FAT32 8.3 disk files":
+        expect(_vfs_exec_disk_alias("/sys/apps/browser_demo.smf")).to_equal("/SYS/APPS/BROWSMF.SMF")
+        expect(_vfs_exec_disk_alias("/sys/apps/file_manager.smf")).to_equal("/SYS/APPS/FILESMF.SMF")
+        expect(_vfs_exec_disk_alias("/sys/apps/hello_world.smf")).to_equal("/SYS/APPS/HELLOSMF.SMF")
+        expect(_vfs_exec_disk_alias("/sys/apps/shell.smf")).to_equal("/SYS/APPS/SHELLSMF.SMF")
+        expect(_vfs_exec_disk_alias("/sys/apps/editor.smf")).to_equal("/SYS/APPS/EDITORSM.SMF")
+        expect(_vfs_exec_disk_alias("/tmp/notes.txt")).to_equal("/tmp/notes.txt")
+
+    it "keeps NVFS path reads pure Simple through the native driver":
+        var d = NvfsDriver.new("vfs-exec-nvfs")
+        expect(d.mount(MountOptions.default()).is_ok()).to_equal(true)
+        val path = Path(raw: "/SYS/VERSION.TXT")
+        val fh = d.open(path, OpenFlags.read_write().with_create()).unwrap()
+        val payload: [u8] = [0x30u8, 0x2Eu8, 0x31u8, 0x2Eu8, 0x30u8]
+        expect(d.write(fh, 0, payload).unwrap()).to_equal(5)
+        d.close(fh)
+
+        expect(d.stat(path).unwrap().size).to_equal(5u64)
+        val rh = d.open(path, OpenFlags.read_only()).unwrap()
+        var out: [u8] = [0u8, 0u8, 0u8, 0u8, 0u8]
+        expect(d.read(rh, 0, out).unwrap()).to_equal(5)
+        d.close(rh)
+        expect(out).to_equal(payload)

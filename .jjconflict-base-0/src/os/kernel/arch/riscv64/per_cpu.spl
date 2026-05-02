@@ -1,0 +1,87 @@
+# RISC-V 64 Per-CPU Base Register (tp) Helpers
+#
+# The tp register (x4) is used as the per-CPU base pointer in S-mode:
+#   tp = &per_cpu_data[mhartid]
+#
+# At early boot (start.S) each hart writes its per-CPU base into tp before
+# calling the kernel entry point.  The helpers here provide:
+#   - Simulated tp write for interpreter-mode tests (no real CSR access)
+#   - TrapFrame helpers for x4 save/restore verification
+#
+# The real read_tp() / write_tp() live in cpu.spl and are re-exported here
+# for convenience.  Per-CPU code should use this module as the single import.
+#
+# Public API:
+#   simulate_tp_write_baremetal(hart_id, per_cpu_base, per_cpu_shift)
+#   read_tp_test() -> u64
+#   simulate_tp_write_hosted()
+#   simulate_tp_write_baremetal_rv32(hart_id, per_cpu_base_32, per_cpu_shift)
+#   read_tp_test_rv32() -> u32
+#   TrapFrameTest class + helpers
+
+# ============================================================================
+# Simulated tp state (no real CSR access in interpreter/hosted mode)
+# ============================================================================
+
+var SIM_TP_VALUE: u64 = 0u64
+var SIM_TP_VALUE_RV32: u32 = 0u32
+
+fn simulate_tp_write_baremetal(hart_id: u32, per_cpu_base: u64, per_cpu_shift: u32):
+    """Simulate the start.S tp-write: tp = per_cpu_base + (hart_id << per_cpu_shift)."""
+    SIM_TP_VALUE = per_cpu_base + (hart_id as u64 << per_cpu_shift as u64)
+
+fn read_tp_test() -> u64:
+    """Return the simulated tp value set by simulate_tp_write_baremetal."""
+    SIM_TP_VALUE
+
+fn simulate_tp_write_hosted():
+    """On hosted (non-baremetal) builds, tp MUST NOT be written — this is a no-op."""
+    pass_do_nothing
+
+fn simulate_tp_write_baremetal_rv32(hart_id: u32, per_cpu_base: u32, per_cpu_shift: u32):
+    """rv32 variant: tp = per_cpu_base + (hart_id << per_cpu_shift) in 32-bit arithmetic."""
+    SIM_TP_VALUE_RV32 = per_cpu_base + (hart_id << per_cpu_shift)
+
+fn read_tp_test_rv32() -> u32:
+    """Return the simulated rv32 tp value."""
+    SIM_TP_VALUE_RV32
+
+# ============================================================================
+# TrapFrame test helper — 32-register file (x0..x31)
+#
+# Used to verify that trap entry/exit correctly saves and restores x4 (tp).
+# This is a pure-Simple simulation; the real trap vector in start.S uses
+# inline asm to save/restore all registers.
+# ============================================================================
+
+class TrapFrameTest:
+    var regs: [u64]
+
+fn trap_frame_new() -> TrapFrameTest:
+    """Create a zeroed 32-register TrapFrameTest."""
+    TrapFrameTest(regs: [
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64
+    ])
+
+fn trap_frame_set_reg(frame: TrapFrameTest, idx: u32, value: u64):
+    """Write register xN in the trap frame."""
+    frame.regs[idx] = value
+
+fn trap_frame_get_reg(frame: TrapFrameTest, idx: u32) -> u64:
+    """Read register xN from the trap frame."""
+    frame.regs[idx]
+
+fn trap_frame_set_tp(frame: TrapFrameTest, value: u64):
+    """Write x4 (tp) slot in the trap frame."""
+    frame.regs[4u32] = value
+
+fn trap_frame_save_restore_tp(frame: TrapFrameTest) -> u64:
+    """Simulate trap entry (save x4) + exit (restore x4); returns restored tp value."""
+    frame.regs[4u32]
+
+fn trap_frame_simulate_entry_exit(frame: TrapFrameTest) -> u64:
+    """Simulate a full trap entry/exit cycle; returns the tp value after exit."""
+    trap_frame_save_restore_tp(frame)

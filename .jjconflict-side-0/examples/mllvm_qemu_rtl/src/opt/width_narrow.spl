@@ -1,0 +1,378 @@
+#![allow(unnamed_duplicate_typed_args)]
+# IR_TC Width Narrowing Pass
+#
+# Analyzes which bits of each value are actually demanded (read) by consumers.
+# If the upper bits of a wide value are never used, narrows the computation
+# to a smaller width and inserts Trunc/Ext at boundaries.
+#
+# Critical for:
+# - AVR (8-bit): many guest computations can stay i8 instead of being promoted to i32
+# - 8086 (16-bit): AX register operations that never read upper 16 bits of i32
+
+use core.types.{IrTcValue, IrTcTypeKind}
+use core.ops.{IrTcOp, IrTcInst}
+use core.block.{IrTcBlock, IrTcFunction, IrTcModule}
+
+# ============================================================================
+# Demand Mask — tracks which bits of a value are actually read
+# ============================================================================
+
+struct DemandEntry:
+    """Records the demanded bits mask for a value ID."""
+    id: i64
+    mask: i64       # Bitmask of demanded bits (1 = demanded)
+
+impl DemandEntry:
+    static fn new(id: i64, mask: i64) -> DemandEntry:
+        DemandEntry(id: id, mask: mask)
+
+struct DemandMap:
+    """Maps value IDs to their demanded-bits masks."""
+    entries: [DemandEntry]
+
+impl DemandMap:
+    static fn new() -> DemandMap:
+        DemandMap(entries: [])
+
+    me demand(id: i64, mask: i64):
+        """Add demanded bits for a value (OR with existing mask)."""
+        for i in 0..self.entries.len():
+            if self.entries[i].id == id:
+                self.entries[i] = DemandEntry.new(id, self.entries[i].mask | mask)
+                return
+        self.entries.push(DemandEntry.new(id, mask))
+
+    fn get_mask(id: i64) -> i64:
+        """Get demanded bits mask. Returns all-ones if unknown."""
+        for entry in self.entries:
+            if entry.id == id:
+                return entry.mask
+        -1  # All bits demanded by default
+
+    me demand_all(id: i64):
+        """Mark all bits as demanded."""
+        self.demand(id, -1)
+
+# ============================================================================
+# Width Analysis Helpers
+# ============================================================================
+
+fn _full_mask(type_: IrTcTypeKind) -> i64:
+    """Full bitmask for a type's width."""
+    val bits = type_.bit_width()
+    if bits >= 64:
+        return -1
+    if bits == 0:
+        return -1
+    (1 << bits) - 1
+
+fn _minimal_width(mask: i64) -> i64:
+    """Find the minimal bit width that covers all demanded bits.
+
+    Returns 8, 16, 32, or 64 (rounds up to valid IR_TC widths).
+    """
+    if mask == 0:
+        return 8
+    # Find highest set bit
+    var highest = 0
+    var m = mask
+    while m != 0:
+        highest = highest + 1
+        m = m >> 1
+    # Round up to next valid width
+    if highest <= 8:
+        8
+    else if highest <= 16:
+        16
+    else if highest <= 32:
+        32
+    else:
+        64
+
+fn _type_for_width(width: i64) -> IrTcTypeKind:
+    """Get the IrTcTypeKind for a given bit width."""
+    if width <= 8:
+        IrTcTypeKind.I8
+    else if width <= 16:
+        IrTcTypeKind.I16
+    else if width <= 32:
+        IrTcTypeKind.I32
+    else:
+        IrTcTypeKind.I64
+
+fn _can_narrow(type_: IrTcTypeKind) -> bool:
+    """Only integer types can be narrowed."""
+    type_.is_integer()
+
+# ============================================================================
+# Demand Analysis — backward pass to compute demanded bits
+# ============================================================================
+
+fn _analyze_demands(func: IrTcFunction) -> DemandMap:
+    """Backward pass: propagate demanded bits from uses to defs.
+
+    Walk blocks in reverse, instructions in reverse. For each instruction,
+    propagate the demand on its destination back to its operands.
+    """
+    var demands = DemandMap.new()
+
+    # First pass: mark all values used by terminators, side effects, and
+    # return values as fully demanded
+    for block in func.blocks:
+        for inst in block.instructions:
+            _mark_mandatory_demands(inst.kind, demands)
+
+    # Second pass: propagate demands backward through instructions
+    # Iterate multiple times for convergence (simple fixpoint)
+    var iterations = 0
+    while iterations < 3:
+        var block_idx = func.blocks.len() - 1
+        while block_idx >= 0:
+            val block = func.blocks[block_idx]
+            var inst_idx = block.instructions.len() - 1
+            while inst_idx >= 0:
+                val inst = block.instructions[inst_idx]
+                _propagate_demand(inst.kind, demands)
+                inst_idx = inst_idx - 1
+            block_idx = block_idx - 1
+        iterations = iterations + 1
+
+    demands
+
+fn _mark_mandatory_demands(op: IrTcOp, demands: DemandMap):
+    """Mark operands of side-effecting and control-flow ops as fully demanded."""
+    match op:
+        IrTcOp.Store(v, addr, _):
+            demands.demand_all(v.id)
+            demands.demand_all(addr.id)
+        IrTcOp.GuestStore(v, addr, _, _):
+            demands.demand_all(v.id)
+            demands.demand_all(addr.id)
+        IrTcOp.WriteGuestReg(_, v):
+            demands.demand_all(v.id)
+        IrTcOp.BrCond(c, _, _):
+            demands.demand_all(c.id)
+        IrTcOp.Switch(v, _, _):
+            demands.demand_all(v.id)
+        IrTcOp.Ret(v):
+            if val Some(rv) = v:
+                demands.demand_all(rv.id)
+        IrTcOp.Call(_, func, args, _):
+            demands.demand_all(func.id)
+            for arg in args:
+                demands.demand_all(arg.id)
+        IrTcOp.CallHelper(_, _, args):
+            for arg in args:
+                demands.demand_all(arg.id)
+        IrTcOp.SyncGuestPC(v):
+            demands.demand_all(v.id)
+        IrTcOp.LookupGotoTB(pc):
+            demands.demand_all(pc.id)
+        IrTcOp.Load(_, addr, _):
+            demands.demand_all(addr.id)
+        IrTcOp.GuestLoad(_, addr, _, _):
+            demands.demand_all(addr.id)
+        _: pass_do_nothing
+
+fn _propagate_demand(op: IrTcOp, demands: DemandMap):
+    """Propagate demanded bits from destination to operands."""
+    match op:
+        # For arithmetic: demand on dest propagates to operands at same width
+        IrTcOp.Add(dest, a, b):
+            val dm = demands.get_mask(dest.id)
+            demands.demand(a.id, dm)
+            demands.demand(b.id, dm)
+        IrTcOp.Sub(dest, a, b):
+            val dm = demands.get_mask(dest.id)
+            demands.demand(a.id, dm)
+            demands.demand(b.id, dm)
+        IrTcOp.Mul(dest, a, b):
+            # Multiplication can propagate upward, but conservatively
+            # demand all bits of operands if any bit of result is demanded
+            val dm = demands.get_mask(dest.id)
+            demands.demand(a.id, dm)
+            demands.demand(b.id, dm)
+
+        # Bitwise: exact demand propagation
+        IrTcOp.And(dest, a, b):
+            val dm = demands.get_mask(dest.id)
+            demands.demand(a.id, dm)
+            demands.demand(b.id, dm)
+        IrTcOp.Or(dest, a, b):
+            val dm = demands.get_mask(dest.id)
+            demands.demand(a.id, dm)
+            demands.demand(b.id, dm)
+        IrTcOp.Xor(dest, a, b):
+            val dm = demands.get_mask(dest.id)
+            demands.demand(a.id, dm)
+            demands.demand(b.id, dm)
+        IrTcOp.Not(dest, a):
+            val dm = demands.get_mask(dest.id)
+            demands.demand(a.id, dm)
+
+        # Shifts: demand all bits of shift amount, propagate mask to value
+        IrTcOp.Shl(dest, a, b):
+            val dm = demands.get_mask(dest.id)
+            demands.demand(a.id, dm)
+            demands.demand_all(b.id)
+        IrTcOp.Shr(dest, a, b):
+            val dm = demands.get_mask(dest.id)
+            # Logical right shift: upper bits of a are needed
+            demands.demand(a.id, _full_mask(a.type_))
+            demands.demand_all(b.id)
+        IrTcOp.Sar(dest, a, b):
+            demands.demand(a.id, _full_mask(a.type_))
+            demands.demand_all(b.id)
+
+        # Truncation: only demand the lower bits
+        IrTcOp.Trunc(dest, src):
+            val dm = demands.get_mask(dest.id)
+            val trunc_mask = _full_mask(dest.type_)
+            demands.demand(src.id, dm & trunc_mask)
+
+        # Extension: demand at least the source bits
+        IrTcOp.Ext(dest, src, _):
+            val src_mask = _full_mask(src.type_)
+            demands.demand(src.id, src_mask)
+
+        # Comparison: demand all bits of both operands
+        IrTcOp.Cmp(_, _, a, b):
+            demands.demand_all(a.id)
+            demands.demand_all(b.id)
+
+        _: pass_do_nothing
+
+# ============================================================================
+# Width Narrowing Pass
+# ============================================================================
+
+struct WidthNarrowPass:
+    """Width narrowing optimization pass.
+
+    Analyzes demanded bits and narrows computations where upper bits
+    are never read. Inserts Trunc/Ext at boundaries where width changes.
+    Important for 8-bit (AVR) and 16-bit (8086) targets where native
+    operations are narrower than the IR default.
+    """
+    _placeholder: i64
+
+impl WidthNarrowPass:
+    static fn new() -> WidthNarrowPass:
+        WidthNarrowPass(_placeholder: 0)
+
+    fn name() -> text:
+        "width_narrow"
+
+    fn run_on_function(func: IrTcFunction) -> IrTcFunction:
+        """Narrow computation widths based on demand analysis."""
+        val demands = _analyze_demands(func)
+        var new_blocks: [IrTcBlock] = []
+
+        for block in func.blocks:
+            var new_block = IrTcBlock.new(block.id)
+            new_block = IrTcBlock(..new_block, label: block.label)
+
+            for inst in block.instructions:
+                val narrowed = _try_narrow_inst(inst, demands, func)
+                for ni in narrowed:
+                    new_block.append(ni)
+
+            new_blocks.push(new_block)
+
+        IrTcFunction(..func, blocks: new_blocks)
+
+# ============================================================================
+# Instruction narrowing
+# ============================================================================
+
+fn _try_narrow_inst(inst: IrTcInst, demands: DemandMap, func: IrTcFunction) -> [IrTcInst]:
+    """Try to narrow an instruction. May return multiple instructions
+    (original + Trunc/Ext insertions at boundaries).
+    """
+    # Only narrow instructions that produce integer values
+    if val Some(dest) = inst.kind.dest_value():
+        if !_can_narrow(dest.type_):
+            return [inst]
+
+        val demand_mask = demands.get_mask(dest.id)
+        val current_bits = dest.type_.bit_width()
+        val needed_bits = _minimal_width(demand_mask)
+
+        # Only narrow if we can save at least one width step
+        if needed_bits < current_bits:
+            return _narrow_arithmetic(inst, needed_bits, demands)
+
+    [inst]
+
+fn _narrow_arithmetic(inst: IrTcInst, target_bits: i64, demands: DemandMap) -> [IrTcInst]:
+    """Narrow an arithmetic instruction to `target_bits` width.
+
+    Emits:
+    1. Trunc instructions for operands (if they're wider)
+    2. The narrowed instruction
+    3. An Ext instruction back to original width (for consumers that still expect it)
+    """
+    val target_type = _type_for_width(target_bits)
+
+    match inst.kind:
+        IrTcOp.Add(dest, a, b):
+            _emit_narrowed_binop(dest, a, b, target_type, \d, na, nb: IrTcOp.Add(d, na, nb))
+        IrTcOp.Sub(dest, a, b):
+            _emit_narrowed_binop(dest, a, b, target_type, \d, na, nb: IrTcOp.Sub(d, na, nb))
+        IrTcOp.Mul(dest, a, b):
+            _emit_narrowed_binop(dest, a, b, target_type, \d, na, nb: IrTcOp.Mul(d, na, nb))
+        IrTcOp.And(dest, a, b):
+            _emit_narrowed_binop(dest, a, b, target_type, \d, na, nb: IrTcOp.And(d, na, nb))
+        IrTcOp.Or(dest, a, b):
+            _emit_narrowed_binop(dest, a, b, target_type, \d, na, nb: IrTcOp.Or(d, na, nb))
+        IrTcOp.Xor(dest, a, b):
+            _emit_narrowed_binop(dest, a, b, target_type, \d, na, nb: IrTcOp.Xor(d, na, nb))
+        _:
+            # For ops we don't know how to narrow, just keep as-is
+            [inst]
+
+fn _emit_narrowed_binop(
+    dest: IrTcValue,
+    a: IrTcValue,
+    b: IrTcValue,
+    target_type: IrTcTypeKind,
+    make_op: fn(IrTcValue, IrTcValue, IrTcValue) -> IrTcOp
+) -> [IrTcInst]:
+    """Emit a narrowed binary operation with Trunc/Ext boundary instructions.
+
+    Creates:
+      %na = trunc a to target_type
+      %nb = trunc b to target_type
+      %narrow_dest = op %na, %nb
+      %dest = ext %narrow_dest to original_type
+    """
+    var result: [IrTcInst] = []
+
+    # Use negative IDs for temporaries (won't collide with positive SSA IDs)
+    val narrow_a_id = -(dest.id * 100 + 1)
+    val narrow_b_id = -(dest.id * 100 + 2)
+    val narrow_dest_id = -(dest.id * 100 + 3)
+
+    val narrow_a = IrTcValue.new(narrow_a_id, target_type)
+    val narrow_b = IrTcValue.new(narrow_b_id, target_type)
+    val narrow_dest = IrTcValue.new(narrow_dest_id, target_type)
+
+    # Trunc operands if wider than target
+    if a.type_.bit_width() > target_type.bit_width():
+        result.push(IrTcInst.new(IrTcOp.Trunc(narrow_a, a)))
+    else:
+        # If already narrow enough, alias
+        result.push(IrTcInst.new(IrTcOp.Bitcast(narrow_a, a)))
+
+    if b.type_.bit_width() > target_type.bit_width():
+        result.push(IrTcInst.new(IrTcOp.Trunc(narrow_b, b)))
+    else:
+        result.push(IrTcInst.new(IrTcOp.Bitcast(narrow_b, b)))
+
+    # The narrowed operation
+    result.push(IrTcInst.new(make_op(narrow_dest, narrow_a, narrow_b)))
+
+    # Zero-extend back to original width so other users see the right type
+    result.push(IrTcInst.new(IrTcOp.Ext(dest, narrow_dest, false)))
+
+    result

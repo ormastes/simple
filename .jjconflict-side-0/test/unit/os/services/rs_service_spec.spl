@@ -1,0 +1,180 @@
+# @cover src/os/services/rs_service.spl 80%
+"""
+# RsService Specification (G4)
+
+**Feature IDs:** #G4
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Reincarnation Server (RS) — Minix-style capsule supervisor.  Validates
+registration, heartbeat liveness, timeout detection, restart policy,
+budget exhaustion, crash reason codes, and multi-capsule isolation.
+"""
+
+use std.spec
+use os.services.rs_service.{
+    RsService,
+    RS_REASON_NONE,
+    RS_REASON_HEARTBEAT_TIMEOUT,
+    RS_REASON_EXIT_NONZERO,
+    RS_REASON_SIGNAL
+}
+
+describe "RsService initial state":
+    """Verify that a freshly constructed RsService starts empty at tick 0."""
+
+    it "constructs with tick=0":
+        """A new RsService starts at tick 0."""
+        val svc = RsService.new()
+        expect(svc.tick).to_equal(0)
+
+    it "constructs with zero supervised capsules":
+        """rs_count returns 0 before any registration."""
+        val svc = RsService.new()
+        expect(svc.rs_count()).to_equal(0)
+
+describe "RsService registration":
+    """rs_register installs all components and returns distinct entities."""
+
+    it "register increments capsule count to 1":
+        """After one rs_register call, rs_count returns 1."""
+        var svc = RsService.new()
+        val _e = svc.rs_register("pm", "/bin/pm", 10, 30, 3, true)
+        expect(svc.rs_count()).to_equal(1)
+
+    it "two registrations yield distinct entity ids":
+        """rs_register assigns unique entities for different capsules."""
+        var svc = RsService.new()
+        val e1 = svc.rs_register("pm",  "/bin/pm",  10, 30, 3, true)
+        val e2 = svc.rs_register("vfs", "/bin/vfs", 10, 30, 3, true)
+        val ids_differ: bool = e1.id != e2.id
+        expect(ids_differ).to_equal(true)
+
+describe "RsService heartbeat":
+    """Heartbeat keeps capsule alive; missing heartbeat past timeout triggers restart."""
+
+    it "heartbeat keeps capsule alive after one advance":
+        """After rs_advance(1) with a heartbeat each tick, rs_is_alive is true."""
+        var svc = RsService.new()
+        val e = svc.rs_register("pm", "/bin/pm", 10, 5, 3, true)
+        val _hb = svc.rs_heartbeat(e)
+        val _t1 = svc.rs_advance()
+        val _hb2 = svc.rs_heartbeat(e)
+        expect(svc.rs_is_alive(e)).to_equal(true)
+
+    it "heartbeat on unregistered entity returns false":
+        """rs_heartbeat returns false when the entity has no Heartbeat component."""
+        var svc = RsService.new()
+        val bogus = svc.rs_register("pm", "/bin/pm", 10, 5, 3, true)
+        # Advance enough ticks that the capsule times out so we can
+        # observe behavior on an entity that has been registered but
+        # whose component slot is freshly allocated; use a second fresh
+        # service with no registrations to get a truly unknown entity.
+        val svc2 = RsService.new()
+        # bogus entity was allocated from svc, not svc2 — no component in svc2
+        val result = svc2.rs_heartbeat(bogus)
+        expect(result).to_equal(false)
+
+    it "missing heartbeat past timeout makes capsule not alive":
+        """After timeout_ticks advances without a heartbeat, rs_is_alive returns false."""
+        var svc = RsService.new()
+        val e = svc.rs_register("pm", "/bin/pm", 10, 2, 5, true)
+        # Advance 3 ticks without sending heartbeat — elapsed (3) > timeout (2)
+        val _t1 = svc.rs_advance()
+        val _t2 = svc.rs_advance()
+        val _t3 = svc.rs_advance()
+        expect(svc.rs_is_alive(e)).to_equal(false)
+
+    it "missing heartbeat triggers restart: restart_count goes 0 to 1":
+        """After one timeout event, rs_restart_count increases from 0 to 1."""
+        var svc = RsService.new()
+        val e = svc.rs_register("pm", "/bin/pm", 10, 1, 5, true)
+        # Advance 2 ticks without heartbeat — elapsed (2) > timeout (1)
+        val _t1 = svc.rs_advance()
+        val _t2 = svc.rs_advance()
+        expect(svc.rs_restart_count(e)).to_equal(1)
+
+describe "RsService restart policy":
+    """Restart budget enforcement and backoff tracking."""
+
+    it "restart budget exhausted: rs_restart returns false":
+        """Once restarts_so_far >= max_restarts, rs_restart returns false."""
+        var svc = RsService.new()
+        val e = svc.rs_register("pm", "/bin/pm", 10, 99, 2, true)
+        # Manually trigger two restarts via rs_restart
+        val ok1 = svc.rs_restart(e)
+        val ok2 = svc.rs_restart(e)
+        val ok3 = svc.rs_restart(e)
+        expect(ok1).to_equal(true)
+        expect(ok2).to_equal(true)
+        expect(ok3).to_equal(false)
+
+    it "consecutive restarts update last_restart_tick":
+        """Each successful rs_restart records the current tick in last_restart_tick."""
+        var svc = RsService.new()
+        val e = svc.rs_register("driver", "/bin/drv", 10, 99, 5, true)
+        val _t1 = svc.rs_advance()
+        val _ok1 = svc.rs_restart(e)
+        val _t2 = svc.rs_advance()
+        val _ok2 = svc.rs_restart(e)
+        # After 2 restarts, restart count must be 2
+        expect(svc.rs_restart_count(e)).to_equal(2)
+
+    it "rs_restart_count returns 0 for unregistered entity":
+        """An entity unknown to the world returns 0 for rs_restart_count."""
+        var svc = RsService.new()
+        val e = svc.rs_register("pm", "/bin/pm", 10, 5, 3, true)
+        val svc2 = RsService.new()
+        expect(svc2.rs_restart_count(e)).to_equal(0)
+
+describe "RsService crash reason":
+    """LastCrashInfo records the correct reason code after a timeout."""
+
+    it "crash reason is RS_REASON_HEARTBEAT_TIMEOUT after missed heartbeat":
+        """After heartbeat timeout, rs_last_crash_reason returns RS_REASON_HEARTBEAT_TIMEOUT (1)."""
+        var svc = RsService.new()
+        val e = svc.rs_register("vfs", "/bin/vfs", 10, 1, 5, true)
+        val _t1 = svc.rs_advance()
+        val _t2 = svc.rs_advance()
+        expect(svc.rs_last_crash_reason(e)).to_equal(RS_REASON_HEARTBEAT_TIMEOUT)
+
+    it "crash reason is RS_REASON_NONE before any crash":
+        """Before any crash, rs_last_crash_reason returns 0 (RS_REASON_NONE)."""
+        var svc = RsService.new()
+        val e = svc.rs_register("vfs", "/bin/vfs", 10, 100, 5, true)
+        expect(svc.rs_last_crash_reason(e)).to_equal(RS_REASON_NONE)
+
+describe "RsService multi-capsule isolation":
+    """One capsule dying must not affect others."""
+
+    it "one capsule times out while others stay alive":
+        """With two capsules, the one that stops heartbeating dies; the other remains alive."""
+        var svc = RsService.new()
+        val e_pm  = svc.rs_register("pm",  "/bin/pm",  10, 1, 5, true)
+        val e_vfs = svc.rs_register("vfs", "/bin/vfs", 10, 100, 5, true)
+        # e_vfs sends heartbeat; e_pm does not
+        val _hb = svc.rs_heartbeat(e_vfs)
+        val _t1 = svc.rs_advance()
+        val _hb2 = svc.rs_heartbeat(e_vfs)
+        val _t2 = svc.rs_advance()
+        # e_pm elapsed=2 > timeout=1 → dead; e_vfs just heartbeated → alive
+        expect(svc.rs_is_alive(e_pm)).to_equal(false)
+        expect(svc.rs_is_alive(e_vfs)).to_equal(true)
+
+describe "RsService reason constants":
+    """RS_REASON_* constants must have their specified fixed values."""
+
+    it "RS_REASON_NONE is 0":
+        expect(RS_REASON_NONE).to_equal(0)
+
+    it "RS_REASON_HEARTBEAT_TIMEOUT is 1":
+        expect(RS_REASON_HEARTBEAT_TIMEOUT).to_equal(1)
+
+    it "RS_REASON_EXIT_NONZERO is 2":
+        expect(RS_REASON_EXIT_NONZERO).to_equal(2)
+
+    it "RS_REASON_SIGNAL is 3":
+        expect(RS_REASON_SIGNAL).to_equal(3)

@@ -1,0 +1,72 @@
+# Cross-driver acceleration report helpers.
+#
+# The report is intentionally arithmetic-only so storage, network, and display
+# smoke lanes can emit comparable proof without depending on a live QEMU device.
+
+struct DriverAccelerationReport:
+    backend_kind: text
+    isolation_mode: text
+    network_descriptor_compatible: bool
+    buffered_copy_bytes: u64
+    direct_dma_copy_bytes: u64
+    full_frame_flush_bytes: u64
+    dirty_rect_flush_bytes: u64
+    latency_us: u64
+    throughput_bytes_per_sec: u64
+    max_rss_kib: u64
+
+fn buffered_file_copy_bytes(payload_bytes: u64) -> u64:
+    """Buffered file I/O copies payload into a kernel/backend buffer once."""
+    payload_bytes
+
+fn direct_dma_copy_bytes(payload_bytes: u64, aligned: bool, backend_direct: bool) -> u64:
+    """Direct DMA avoids CPU copy only when alignment and backend support hold."""
+    if aligned and backend_direct:
+        return 0
+    payload_bytes
+
+fn full_frame_flush_bytes(width: u32, height: u32, bytes_per_pixel: u32) -> u64:
+    width.to_u64() * height.to_u64() * bytes_per_pixel.to_u64()
+
+fn dirty_rect_flush_bytes(screen_w: u32, screen_h: u32, x: u32, y: u32, w: u32, h: u32, bytes_per_pixel: u32) -> u64:
+    if screen_w == 0 or screen_h == 0 or w == 0 or h == 0:
+        return 0
+    if x >= screen_w or y >= screen_h:
+        return 0
+    var x2 = x.to_u64() + w.to_u64()
+    var y2 = y.to_u64() + h.to_u64()
+    if x2 > screen_w.to_u64():
+        x2 = screen_w.to_u64()
+    if y2 > screen_h.to_u64():
+        y2 = screen_h.to_u64()
+    (x2 - x.to_u64()) * (y2 - y.to_u64()) * bytes_per_pixel.to_u64()
+
+fn build_driver_acceleration_report(
+    backend_kind: text,
+    isolation_mode: text,
+    network_descriptor_compatible: bool,
+    payload_bytes: u64,
+    direct_aligned: bool,
+    backend_direct: bool,
+    screen_w: u32,
+    screen_h: u32,
+    dirty_x: u32,
+    dirty_y: u32,
+    dirty_w: u32,
+    dirty_h: u32,
+    latency_us: u64,
+    throughput_bytes_per_sec: u64,
+    max_rss_kib: u64
+) -> DriverAccelerationReport:
+    DriverAccelerationReport(
+        backend_kind: backend_kind,
+        isolation_mode: isolation_mode,
+        network_descriptor_compatible: network_descriptor_compatible,
+        buffered_copy_bytes: buffered_file_copy_bytes(payload_bytes),
+        direct_dma_copy_bytes: direct_dma_copy_bytes(payload_bytes, direct_aligned, backend_direct),
+        full_frame_flush_bytes: full_frame_flush_bytes(screen_w, screen_h, 4),
+        dirty_rect_flush_bytes: dirty_rect_flush_bytes(screen_w, screen_h, dirty_x, dirty_y, dirty_w, dirty_h, 4),
+        latency_us: latency_us,
+        throughput_bytes_per_sec: throughput_bytes_per_sec,
+        max_rss_kib: max_rss_kib
+    )

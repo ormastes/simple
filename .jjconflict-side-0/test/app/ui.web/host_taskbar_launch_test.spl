@@ -1,0 +1,144 @@
+## Spec for Wave 4 host-side taskbar helper:
+##   src/app/ui.web/taskbar_shell.spl — snapshot_windows + build_taskbar_model
+##
+## Verifies:
+##   * snapshot_windows projects each UiWindowSurfaceBinding into a
+##     kind-aware WindowSnapshot.
+##   * bind_with_kind flows surface_kind all the way through.
+##   * build_taskbar_model combines registry + pinned + tray into a
+##     TaskbarModel matching the shared schema.
+##
+## The "launch" branch of wm_bridge.spl is validated via its own session
+## wiring tests in a later wave — this spec stays runtime-free so it
+## passes in the existing test harness.
+##
+## Run:
+##   bin/simple test test/app/ui.web/host_taskbar_launch_test.spl
+
+use std.spec
+use common.ui.window_surface_registry.{UI_SURFACE_KIND_LEGACY, UI_SURFACE_KIND_SIMPLE_WEB, new_ui_window_surface_registry}
+use common.ui.taskbar_model.{AppRef, TrayItem, TaskbarLaunchError}
+use app.ui.web.taskbar_shell.{
+    WindowSnapshot, snapshot_windows, build_taskbar_model,
+    build_taskbar_model_with_minimized, taskbar_model_to_json,
+    taskbar_model_to_json_with_launch_errors
+}
+
+fn _registry_with_two():
+    val reg = new_ui_window_surface_registry()
+    reg.bind_with_kind("s1", "1", 100 as u64, "terminal", "Term 1", UI_SURFACE_KIND_LEGACY)
+    reg.bind_with_kind("s2", "2", 200 as u64, "browser", "Web 1", UI_SURFACE_KIND_SIMPLE_WEB)
+    reg
+
+describe "taskbar_shell.snapshot_windows":
+    """Registry bindings project into kind-aware snapshots."""
+
+    it "is empty for an empty registry":
+        val reg = new_ui_window_surface_registry()
+        val snaps = snapshot_windows(reg)
+        expect(snaps.len()).to_equal(0)
+
+    it "yields one snapshot per binding":
+        val reg = _registry_with_two()
+        val snaps = snapshot_windows(reg)
+        expect(snaps.len()).to_equal(2)
+
+    it "carries surface_kind through":
+        val reg = _registry_with_two()
+        val snaps = snapshot_windows(reg)
+        # snaps are in insertion order; check both kinds are represented.
+        var saw_legacy = false
+        var saw_simple_web = false
+        for s in snaps:
+            if s.surface_kind == UI_SURFACE_KIND_LEGACY:
+                saw_legacy = true
+            if s.surface_kind == UI_SURFACE_KIND_SIMPLE_WEB:
+                saw_simple_web = true
+        expect(saw_legacy).to_equal(true)
+        expect(saw_simple_web).to_equal(true)
+
+    it "preserves app_id and title":
+        val reg = _registry_with_two()
+        val snaps = snapshot_windows(reg)
+        var saw_terminal = false
+        for s in snaps:
+            if s.app_id == "terminal" and s.title == "Term 1":
+                saw_terminal = true
+        expect(saw_terminal).to_equal(true)
+
+describe "taskbar_shell.build_taskbar_model":
+    """Combines registry + pinned + tray into the shared schema."""
+
+    it "returns an empty model for empty inputs":
+        val reg = new_ui_window_surface_registry()
+        val m = build_taskbar_model(reg, [], [])
+        expect(m.pinned.len()).to_equal(0)
+        expect(m.running.len()).to_equal(0)
+        expect(m.tray.len()).to_equal(0)
+
+    it "materialises one WindowRef per registry binding":
+        val reg = _registry_with_two()
+        val m = build_taskbar_model(reg, [], [])
+        expect(m.running.len()).to_equal(2)
+        var saw_window_id = false
+        for w in m.running:
+            if w.window_id == "s1" or w.window_id == "s2":
+                saw_window_id = true
+        expect(saw_window_id).to_equal(true)
+
+    it "passes pinned apps through verbatim":
+        val reg = new_ui_window_surface_registry()
+        val pinned = [
+            AppRef(app_id: "term", display_name: "Terminal", icon: "t"),
+            AppRef(app_id: "edit", display_name: "Editor",   icon: "e")
+        ]
+        val m = build_taskbar_model(reg, pinned, [])
+        expect(m.pinned.len()).to_equal(2)
+
+    it "passes tray items through verbatim":
+        val reg = new_ui_window_surface_registry()
+        val tray = [TrayItem(item_id: "clk", label: "12:00", icon: "clk")]
+        val m = build_taskbar_model(reg, [], tray)
+        expect(m.tray.len()).to_equal(1)
+
+    it "marks minimized entries from surface ids":
+        val reg = _registry_with_two()
+        val m = build_taskbar_model_with_minimized(reg, [], [], ["2"])
+        var saw_minimized = false
+        for w in m.running:
+            if w.window_id == "s2" and w.minimized:
+                saw_minimized = true
+        expect(saw_minimized).to_equal(true)
+
+    it "serializes the model as JSON":
+        val reg = _registry_with_two()
+        val m = build_taskbar_model_with_minimized(reg, [], [], ["2"])
+        val json = taskbar_model_to_json(m)
+        expect(json.contains("\"running\"")).to_equal(true)
+        expect(json.contains("\"window_id\":\"s2\"")).to_equal(true)
+        expect(json.contains("\"minimized\":true")).to_equal(true)
+        expect(json.contains("\"launch_errors\":[]")).to_equal(true)
+
+    it "serializes launch errors when provided":
+        val reg = new_ui_window_surface_registry()
+        val m = build_taskbar_model(reg, [], [])
+        val json = taskbar_model_to_json_with_launch_errors(
+            m,
+            [TaskbarLaunchError(app_id: "bad\"app", message: "No native\nadapter")]
+        )
+        expect(json.contains("\"launch_errors\"")).to_equal(true)
+        expect(json.contains("bad\\\"app")).to_equal(true)
+        expect(json.contains("No native\\nadapter")).to_equal(true)
+
+    it "escapes JSON string fields":
+        val reg = new_ui_window_surface_registry()
+        reg.bind_with_kind("w\"1", "surface\\1", 100 as u64, "app\nid", "Title \"One\"", UI_SURFACE_KIND_SIMPLE_WEB)
+        val pinned = [AppRef(app_id: "pin\\app", display_name: "Pinned \"App\"", icon: "p")]
+        val tray = [TrayItem(item_id: "tray\n1", label: "Line\nBreak", icon: "i")]
+        val m = build_taskbar_model(reg, pinned, tray)
+        val json = taskbar_model_to_json(m)
+        expect(json.contains("w\\\"1")).to_equal(true)
+        expect(json.contains("app\\nid")).to_equal(true)
+        expect(json.contains("Title \\\"One\\\"")).to_equal(true)
+        expect(json.contains("Pinned \\\"App\\\"")).to_equal(true)
+        expect(json.contains("Line\\nBreak")).to_equal(true)

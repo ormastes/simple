@@ -1,0 +1,94 @@
+# std.game2d.render.image — typed Image handle (Wave B)
+#
+# `Image` is a thin shim over the engine-side `Sprite` (which already carries
+# texture_id + src_rect + tint). Game2D users always go through `Image`,
+# never the engine's `Sprite` directly.
+#
+# Null-image policy (GAME-RENDER-001):
+#   The `is_null()` predicate flags an "absent" image (e.g., a handle that
+#   was never resolved through the AssetTable). `Canvas.draw(null_image, …)`
+#   panics with `GAME-RENDER-001: draw on null Image` — see canvas.spl.
+
+use std.common.engine.ids.{TextureId}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.engine.sprite.sprite.{Sprite}
+
+# RenderError — game2d/render diagnostic family GAME-RENDER-NNN
+class RenderError:
+    code: text
+    msg: text
+
+    static fn null_image() -> RenderError:
+        # GAME-RENDER-001: draw on null Image.
+        RenderError(
+            code: "GAME-RENDER-001",
+            msg: "draw on null Image"
+        )
+
+    static fn load_failed(path: text) -> RenderError:
+        RenderError(
+            code: "GAME-RENDER-002",
+            msg: "Image::new failed to load: {path}"
+        )
+
+
+class Image:
+    sprite: Sprite
+    width: i64
+    height: i64
+    null_flag: bool
+
+    static fn new(path: text) -> Result<Image, RenderError>:
+        """Create a new Image. Wave-B stub: returns a typed handle whose
+        sprite uses TextureId.invalid() — the loader/backend wires real
+        pixels later via AssetTable. The handle is *not* null (null only
+        denotes 'never constructed'); calling Canvas.draw with it is safe
+        and emits a DrawSprite that the headless backend renders as a
+        bounding box.
+        """
+        if path.len() == 0:
+            return Err(RenderError.load_failed(path))
+        val tex = TextureId.invalid()
+        val rect = Rect2(x: 0.0, y: 0.0, width: 0.0, height: 0.0)
+        val sprite = Sprite.create(tex, rect)
+        Ok(Image(
+            sprite: sprite,
+            width: 0,
+            height: 0,
+            null_flag: false
+        ))
+
+    static fn null() -> Image:
+        """The 'null Image' singleton used to drive GAME-RENDER-001 in
+        Canvas.draw. Tests only — production code should never hand a
+        null Image to Canvas.
+        """
+        val tex = TextureId.invalid()
+        val rect = Rect2(x: 0.0, y: 0.0, width: 0.0, height: 0.0)
+        val sprite = Sprite.create(tex, rect)
+        Image(
+            sprite: sprite,
+            width: 0,
+            height: 0,
+            null_flag: true
+        )
+
+    static fn from_sprite(sprite: Sprite, w: i64, h: i64) -> Image:
+        Image(
+            sprite: sprite,
+            width: w,
+            height: h,
+            null_flag: false
+        )
+
+    fn is_null() -> bool:
+        self.null_flag
+
+    fn dst_rect(pos: Vec2) -> Rect2:
+        Rect2(
+            x: pos.x,
+            y: pos.y,
+            width: self.width * 1.0,
+            height: self.height * 1.0
+        )

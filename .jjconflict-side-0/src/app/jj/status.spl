@@ -1,0 +1,140 @@
+# JJ Status - Structured status output
+#
+# Wraps `jj status` and parses output into structured data.
+# Usage: use app.jj.status.{jj_status, StatusResult, FileChange}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# A single file change entry from jj status
+struct FileChange:
+    status: text      # "M" modified, "A" added, "D" deleted, "R" renamed, "C" copied
+    path: text        # File path
+
+    fn display() -> text:
+        "{self.status} {self.path}"
+
+# Structured result from jj status
+struct StatusResult:
+    working_copy: text           # Working copy change ID
+    parent: text                 # Parent change ID
+    changes: [FileChange]        # List of file changes
+    file_count: i64              # Total number of tracked files
+    raw_output: text             # Raw jj status output
+    exit_code: i64               # Exit code from jj
+
+    fn has_changes() -> bool:
+        self.changes.len() > 0
+
+    fn modified_count() -> i64:
+        var count = 0
+        for c in self.changes:
+            if c.status == "M":
+                count = count + 1
+        count
+
+    fn added_count() -> i64:
+        var count = 0
+        for c in self.changes:
+            if c.status == "A":
+                count = count + 1
+        count
+
+    fn deleted_count() -> i64:
+        var count = 0
+        for c in self.changes:
+            if c.status == "D":
+                count = count + 1
+        count
+
+    fn display() -> text:
+        var lines: [text] = []
+        lines.push("Working copy: {self.working_copy}")
+        lines.push("Parent: {self.parent}")
+        if self.changes.len() == 0:
+            lines.push("No changes (clean)")
+        else:
+            lines.push("Changes ({self.changes.len()} files):")
+            for c in self.changes:
+                lines.push("  {c.display()}")
+        lines.join("\n")
+
+fn parse_status_line(line: text) -> FileChange:
+    """Parse a single status line like 'M src/foo.spl' into a FileChange"""
+    val trimmed = line.trim()
+    if trimmed.len() < 3:
+        return FileChange(status: "?", path: trimmed)
+    val status = trimmed[0:1]
+    val path = trimmed[2:].trim()
+    FileChange(status: status, path: path)
+
+fn jj_status() -> StatusResult:
+    """Run jj status and return structured result"""
+    val (stdout, stderr, code) = rt_process_run("jj", ["--no-pager", "--color", "never", "status"])
+
+    if code != 0:
+        return StatusResult(
+            working_copy: "",
+            parent: "",
+            changes: [],
+            file_count: 0,
+            raw_output: stderr,
+            exit_code: code
+        )
+
+    var changes: [FileChange] = []
+    var working_copy = ""
+    var parent = ""
+
+    val lines = stdout.split("\n")
+    var in_changes = false
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            in_changes = false
+        elif trimmed.starts_with("Working copy"):
+            # Extract working copy info
+            val parts = trimmed.split(" ")
+            if parts.len() >= 3:
+                working_copy = parts[parts.len() - 1]
+        elif trimmed.starts_with("Parent commit"):
+            val parts = trimmed.split(" ")
+            if parts.len() >= 3:
+                parent = parts[parts.len() - 1]
+        elif trimmed.starts_with("Working copy changes:"):
+            in_changes = true
+        elif in_changes:
+            val change = parse_status_line(trimmed)
+            if change.path != "":
+                changes.push(change)
+
+    # Get file count via jj file list
+    val (file_stdout, _file_stderr, file_code) = rt_process_run("jj", ["--no-pager", "--color", "never", "file", "list"])
+    var file_count = 0
+    if file_code == 0 and file_stdout != "":
+        val file_lines = file_stdout.split("\n")
+        for fl in file_lines:
+            if fl.trim() != "":
+                file_count = file_count + 1
+
+    StatusResult(
+        working_copy: working_copy,
+        parent: parent,
+        changes: changes,
+        file_count: file_count,
+        raw_output: stdout,
+        exit_code: code
+    )
+
+fn run_status(args: [text]) -> i64:
+    """CLI entry point for jj status"""
+    val result = jj_status()
+
+    if result.exit_code != 0:
+        print "Error running jj status:"
+        print result.raw_output
+        return result.exit_code
+
+    print result.display()
+    print ""
+    print "Tracked files: {result.file_count}"
+    0

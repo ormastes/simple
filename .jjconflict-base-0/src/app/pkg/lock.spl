@@ -1,0 +1,236 @@
+# Package Manager - Lock File (package.lock.sdn)
+#
+# Records exact git commits for reproducible builds.
+# Generated on `pkg install`, read on subsequent installs.
+
+use std.sdn.{parse, SdnValue}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+# A single lock file entry
+struct LockEntry:
+    name: text
+    version: text
+    source_type: text           # "git", "path", or "registry"
+    git_url: text
+    git_commit: text
+    path: text
+
+impl LockEntry:
+    fn to_text() -> text:
+        if self.source_type == "git":
+            "{self.name} ({self.version}, git#{self.git_commit})"
+        elif self.source_type == "path":
+            "{self.name} ({self.version}, path: {self.path})"
+        else:
+            "{self.name} ({self.version})"
+
+
+# Lock file containing all resolved entries
+struct LockFile:
+    version: i64
+    entries: [LockEntry]
+
+impl LockFile:
+    static fn empty() -> LockFile:
+        LockFile(version: 1, entries: [])
+
+    fn find_entry(name: text) -> LockEntry?:
+        for entry in self.entries:
+            if entry.name == name:
+                return Some(entry)
+        nil
+
+    fn has_entry(name: text) -> bool:
+        self.find_entry(name).?
+
+
+# Parse lock file from source text
+fn parse_lock(source: text) -> Result<LockFile, text>:
+    val result = parse(source)
+    match result:
+        case Err(e):
+            return Err("Failed to parse lock file: {e.message()}")
+        case Ok(root):
+            var version = 1
+            var entries: [LockEntry] = []
+
+            val ver = root.get("version")
+            if ver.?:
+                match ver.unwrap():
+                    case SdnValue.Int(i): version = i
+                    case _: pass
+
+            val pkgs = root.get("packages")
+            if pkgs.?:
+                match pkgs.unwrap():
+                    case SdnValue.Array(arr):
+                        for item in arr:
+                            val entry = parse_lock_entry(item)
+                            if entry.?:
+                                entries.push(entry.unwrap())
+                    case SdnValue.Dict(d):
+                        for (name, v) in d:
+                            val entry = parse_lock_entry_from_dict(name, v)
+                            entries.push(entry)
+                    case _:
+                        pass
+
+            Ok(LockFile(version: version, entries: entries))
+
+
+# Parse a single lock entry from an SDN dict value
+fn parse_lock_entry(value: SdnValue) -> LockEntry?:
+    match value:
+        case SdnValue.Dict(d):
+            var name = ""
+            var version = "0.0.0"
+            var source_type = "registry"
+            var git_url = ""
+            var git_commit = ""
+            var path = ""
+
+            val n = d.get("name")
+            if n.?:
+                match n.unwrap():
+                    case SdnValue.String(s): name = s
+                    case _: pass
+
+            val v = d.get("version")
+            if v.?:
+                match v.unwrap():
+                    case SdnValue.String(s): version = s
+                    case _: pass
+
+            val st = d.get("source")
+            if st.?:
+                match st.unwrap():
+                    case SdnValue.String(s):
+                        if s.starts_with("git"):
+                            source_type = "git"
+                            # Parse git+url#commit format
+                            var url_str = s
+                            if url_str.starts_with("git+"):
+                                url_str = url_str[4:]
+                            val hash_idx = url_str.index_of("#")
+                            if hash_idx >= 0:
+                                git_url = url_str[0:hash_idx]
+                                git_commit = url_str[hash_idx + 1:]
+                            else:
+                                git_url = url_str
+                        elif s.starts_with("path"):
+                            source_type = "path"
+                            if s.starts_with("path+"):
+                                path = s[5:]
+                            else:
+                                path = s
+                        else:
+                            source_type = "registry"
+                    case _: pass
+
+            if name == "":
+                return nil
+
+            Some(LockEntry(
+                name: name,
+                version: version,
+                source_type: source_type,
+                git_url: git_url,
+                git_commit: git_commit,
+                path: path
+            ))
+        case _:
+            nil
+
+
+# Parse lock entry from dict key/value pair
+fn parse_lock_entry_from_dict(name: text, value: SdnValue) -> LockEntry:
+    var version = "0.0.0"
+    var source_type = "registry"
+    var git_url = ""
+    var git_commit = ""
+    var path = ""
+
+    match value:
+        case SdnValue.Dict(d):
+            val v = d.get("version")
+            if v.?:
+                match v.unwrap():
+                    case SdnValue.String(s): version = s
+                    case _: pass
+
+            val g = d.get("git_url")
+            if g.?:
+                match g.unwrap():
+                    case SdnValue.String(s):
+                        git_url = s
+                        source_type = "git"
+                    case _: pass
+
+            val c = d.get("git_commit")
+            if c.?:
+                match c.unwrap():
+                    case SdnValue.String(s): git_commit = s
+                    case _: pass
+
+            val p = d.get("path")
+            if p.?:
+                match p.unwrap():
+                    case SdnValue.String(s):
+                        path = s
+                        source_type = "path"
+                    case _: pass
+        case SdnValue.String(s):
+            version = s
+        case _:
+            pass
+
+    LockEntry(
+        name: name,
+        version: version,
+        source_type: source_type,
+        git_url: git_url,
+        git_commit: git_commit,
+        path: path
+    )
+
+
+# Parse lock file from file path
+fn parse_lock_file(path: text) -> LockFile?:
+    if not rt_file_exists(path):
+        return nil
+    val source = rt_file_read_text(path)
+    if source == "" or source == nil:
+        return nil
+    val result = parse_lock(source)
+    match result:
+        case Ok(lock): Some(lock)
+        case Err(_): nil
+
+
+# Generate lock file content
+fn generate_lock_content(entries: [LockEntry]) -> text:
+    var lines: [text] = []
+    lines.push("# package.lock.sdn - Auto-generated, do not edit manually")
+    lines.push("version: 1")
+    lines.push("")
+    lines.push("packages:")
+    for entry in entries:
+        lines.push("    {entry.name}:")
+        lines.push("        version: {entry.version}")
+        if entry.source_type == "git":
+            lines.push("        source: \"git+{entry.git_url}#{entry.git_commit}\"")
+        elif entry.source_type == "path":
+            lines.push("        source: \"path+{entry.path}\"")
+        else:
+            lines.push("        source: registry")
+        lines.push("")
+    lines.join("\n")
+
+
+# Write lock file to disk
+fn write_lock_file(path: text, entries: [LockEntry]) -> bool:
+    val content = generate_lock_content(entries)
+    rt_file_write_text(path, content)

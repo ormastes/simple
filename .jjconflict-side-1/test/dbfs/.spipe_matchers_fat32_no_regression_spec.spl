@@ -1,0 +1,116 @@
+# Maps to: AC-7, AC-9
+# Run: bin/simple test test/dbfs/fat32_no_regression_spec.spl
+
+"""
+FAT32 Hosted Seam Specification
+
+Verifies the currently implemented FAT32 mount-table surface:
+  - a FAT32 driver can still be mounted alongside other filesystems
+  - root stat/opendir/open continue to return stable shim values
+  - hosted reads stay non-crashing even though real file traversal is not wired here
+"""
+
+use std.spipe.*
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.types.{OpenFlags, MountOptions}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable}
+use std.db.dbfs_driver.{DbFsDriver}
+use test.dbfs.hosted_fs_no_regression_shared.{
+    assert_mount_root_is_dir,
+    assert_mount_root_slash_is_dir,
+    assert_readdir_on_root_is_stable,
+    assert_open_returns_handle,
+    assert_read_returns_empty_or_better
+}
+
+class MockFat32BlockDevice:
+    sector: [u8]
+
+impl MockFat32BlockDevice:
+    static fn new() -> MockFat32BlockDevice:
+        var bytes: [u8] = []
+        var i = 0
+        while i < 512:
+            bytes.push(0)
+            i = i + 1
+        bytes[11] = 0x00
+        bytes[12] = 0x02
+        bytes[13] = 0x01
+        bytes[14] = 0x20
+        bytes[15] = 0x00
+        bytes[16] = 0x02
+        bytes[32] = 0x00
+        bytes[33] = 0x10
+        bytes[34] = 0x00
+        bytes[35] = 0x00
+        bytes[36] = 0xF0
+        bytes[37] = 0x03
+        bytes[44] = 0x02
+        bytes[45] = 0x00
+        bytes[46] = 0x00
+        bytes[47] = 0x00
+        bytes[510] = 0x55
+        bytes[511] = 0xAA
+        MockFat32BlockDevice(sector: bytes)
+
+impl BlockDevice for MockFat32BlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        var i = 0
+        while i < self.sector.len() and i < buffer.len():
+            if lba == 0:
+                buffer[i] = self.sector[i]
+            else:
+                buffer[i] = 0
+            i = i + 1
+        Result.Ok(true)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        512
+
+fn make_fat32_driver() -> FsFat32Driver:
+    FsFat32Driver.new("Fat32Driver", MockFat32BlockDevice.new())
+
+fn make_fat32_mounted() -> MountTable:
+    val mt = MountTable.new()
+    val fat32 = make_fat32_driver()
+    mt.mount("/boot", DriverInstance.Fat32(fat32), MountOptions.read_only()).unwrap()
+    mt
+
+describe "FAT32 hosted seam — mount and stat":
+    it "FAT32 volume mounts without error":
+        val mt = make_fat32_mounted()
+        assert_mount_root_is_dir(mt, "/boot")
+
+    it "stat on FAT32 root returns is_dir=true":
+        val mt = make_fat32_mounted()
+        assert_mount_root_slash_is_dir(mt, "/boot")
+
+describe "FAT32 hosted seam — readdir and open":
+    it "readdir on FAT32 root returns a stable empty-or-better listing":
+        val mt = make_fat32_mounted()
+        assert_readdir_on_root_is_stable(mt, "/boot")
+
+    it "open on a FAT32 path returns a valid shim handle":
+        val mt = make_fat32_mounted()
+        assert_open_returns_handle(mt, "/boot/README.TXT")
+
+    it "read on the hosted FAT32 shim returns empty content rather than erroring":
+        val mt = make_fat32_mounted()
+        assert_read_returns_empty_or_better(mt, "/boot/README.TXT")
+
+describe "FAT32 hosted seam — DBFS co-existence":
+    it "FAT32 and DBFS can both be mounted simultaneously":
+        val mt = MountTable.new()
+        val fat32 = make_fat32_driver()
+        mt.mount("/boot", DriverInstance.Fat32(fat32), MountOptions.read_only()).unwrap()
+        val dbfs = DbFsDriver.new_hosted()
+        mt.mount("/data", DriverInstance.DbFs(dbfs), MountOptions.default()).unwrap()
+        val boot_driver = mt.resolve_driver("/boot").unwrap()
+        val data_driver = mt.resolve_driver("/data/file.txt").unwrap()
+        expect boot_driver.driver_name() == "Fat32Driver"
+        expect data_driver.driver_name() == "DbFsDriver"

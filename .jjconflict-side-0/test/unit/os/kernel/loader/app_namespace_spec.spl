@@ -1,0 +1,60 @@
+use std.spec
+use os.kernel.loader.app_namespace.{
+    app_namespace_create,
+    app_namespace_default,
+    app_namespace_library_candidates,
+    app_namespace_resolve_path,
+    app_namespace_with_cwd
+}
+
+describe "SimpleOS app namespace contract":
+    it "exposes the default process filesystem paths":
+        val ns = app_namespace_default()
+        expect(ns.root).to_equal("/")
+        expect(ns.cwd).to_equal("/")
+        expect(ns.mount_view).to_equal(["/bin", "/usr/bin", "/sys/apps", "/lib", "/usr/lib", "/tmp", "/home", "/svc"])
+        expect(ns.cap_dirs).to_equal(["/svc"])
+        expect(ns.library_paths).to_equal(["/lib", "/usr/lib", "/usr/lib/simple"])
+
+    it "resolves relative paths from each process cwd":
+        val base = app_namespace_default()
+        val home_ns = app_namespace_with_cwd(base, "/home/alice")
+        val tmp_ns = app_namespace_with_cwd(base, "/tmp")
+
+        expect(home_ns != nil).to_equal(true)
+        expect(tmp_ns != nil).to_equal(true)
+        expect(app_namespace_resolve_path(home_ns.unwrap(), "notes.txt")).to_equal(Some("/home/alice/notes.txt"))
+        expect(app_namespace_resolve_path(tmp_ns.unwrap(), "notes.txt")).to_equal(Some("/tmp/notes.txt"))
+
+    it "prevents dot-dot from escaping the process root":
+        val ns = app_namespace_default()
+        expect(app_namespace_resolve_path(ns, "../../bin/sh")).to_equal(nil)
+        expect(app_namespace_resolve_path(ns, "/tmp/../../bin/sh")).to_equal(nil)
+        expect(app_namespace_resolve_path(ns, "/tmp/../bin/sh")).to_equal(Some("/bin/sh"))
+
+    it "keeps resolved paths under a non-default root":
+        val ns = app_namespace_create("/sys/apps/browser_demo", "/home/app", ["/home", "/lib"], ["/svc"], ["/lib"])
+        expect(ns != nil).to_equal(true)
+        expect(app_namespace_resolve_path(ns.unwrap(), "state.db")).to_equal(Some("/sys/apps/browser_demo/home/app/state.db"))
+        expect(app_namespace_resolve_path(ns.unwrap(), "../../../escape")).to_equal(nil)
+
+    it "orders library lookup by process paths before explicit manifest paths":
+        val ns = app_namespace_default()
+        val candidates = app_namespace_library_candidates(ns, "libui.smf", ["/sys/apps/browser_demo/lib/libui.smf", "local/libextra.smf"])
+
+        expect(candidates).to_equal([
+            "/lib/libui.smf",
+            "/usr/lib/libui.smf",
+            "/usr/lib/simple/libui.smf",
+            "/sys/apps/browser_demo/lib/libui.smf",
+            "/local/libextra.smf"
+        ])
+
+    it "resolves explicit absolute library names before manifest extras":
+        val ns = app_namespace_default()
+        val candidates = app_namespace_library_candidates(ns, "/sys/apps/browser_demo/lib/libui.smf", ["/usr/lib/libfallback.smf"])
+
+        expect(candidates).to_equal([
+            "/sys/apps/browser_demo/lib/libui.smf",
+            "/usr/lib/libfallback.smf"
+        ])

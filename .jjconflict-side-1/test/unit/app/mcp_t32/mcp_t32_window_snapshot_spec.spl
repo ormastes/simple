@@ -1,0 +1,736 @@
+# MCP T32 Window Snapshot/Diff spec — tests snapshot store, structured diff, table diff,
+# text fallback, mode selection, TTL eviction (REQ-F2-001..F2-008)
+
+# --- Inlined helper utilities (reused hash pattern from state_diff_spec) ---
+
+fn ws_find_char(s: text, ch: text) -> i64:
+    var i = 0
+    for c in s:
+        if c == ch:
+            return i
+        i = i + 1
+    -1
+
+fn ws_substr(s: text, start: i64, end: i64) -> text:
+    var buf: [text] = []
+    var i = 0
+    for ch in s:
+        if i >= start and i < end:
+            buf.push(ch)
+        i = i + 1
+    buf.join("")
+
+fn ws_djb2_hash(content: text) -> i64:
+    var hash: i64 = 5381
+    var i = 0
+    while i < content.len():
+        hash = hash * 33 + content[i].bytes()[0]
+        i = i + 1
+    hash
+
+fn ws_simple_hash(content: text) -> text:
+    str(ws_djb2_hash(content))
+
+fn ws_timestamp_now() -> i64:
+    # Simulated timestamp for testing (seconds since epoch)
+    1711353600  # 2026-03-25T12:00:00Z
+
+# --- Inlined snapshot types (REQ-F2-001) ---
+
+class T32WindowSnapshot:
+    key: text          # "session_id/core/window_name"
+    title: text
+    content: text
+    hash: text
+    timestamp: i64
+
+class T32DiffEntry:
+    label: text
+    old_value: text
+    new_value: text
+    kind: text         # "changed", "added", "removed"
+
+class T32TableCell:
+    row: i64
+    col: i64
+    old_value: text
+    new_value: text
+
+class T32TableDiffResult:
+    changed: bool
+    cells: [T32TableCell]
+    rows_added: i64
+    rows_removed: i64
+
+class T32TextDiffResult:
+    changed: bool
+    summary: text
+    changed_lines: i64
+    truncated: bool
+
+class T32SnapshotResult:
+    window: text
+    changed: bool
+    change_count: i64
+    content: text
+    window_diff: [T32DiffEntry]
+    mode: text
+
+# --- Inlined snapshot store (REQ-F2-002, REQ-F2-007) ---
+
+class T32SnapshotStore:
+    keys: [text]
+    hashes: [text]
+    contents: [text]
+    titles: [text]
+    timestamps: [i64]
+    max_capacity: i64
+    ttl_seconds: i64
+
+fn snapshot_store_new(max_cap: i64, ttl: i64) -> T32SnapshotStore:
+    T32SnapshotStore(
+        keys: [],
+        hashes: [],
+        contents: [],
+        titles: [],
+        timestamps: [],
+        max_capacity: max_cap,
+        ttl_seconds: ttl
+    )
+
+fn snapshot_store_default() -> T32SnapshotStore:
+    snapshot_store_new(200, 300)
+
+fn ss_find_index(store: T32SnapshotStore, key: text) -> i64:
+    var i = 0
+    while i < store.keys.len():
+        if store.keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn ss_store(store: T32SnapshotStore, key: text, title: text, content: text, ts: i64) -> T32SnapshotStore:
+    val hash = ws_simple_hash(content)
+    val idx = ss_find_index(store, key)
+
+    var new_keys = store.keys
+    var new_hashes = store.hashes
+    var new_contents = store.contents
+    var new_titles = store.titles
+    var new_timestamps = store.timestamps
+
+    if idx >= 0:
+        # Update existing
+        new_hashes[idx] = hash
+        new_contents[idx] = content
+        new_titles[idx] = title
+        new_timestamps[idx] = ts
+    else:
+        # Evict oldest if at capacity
+        if new_keys.len() >= store.max_capacity:
+            var oldest_idx = 0
+            var oldest_ts = new_timestamps[0]
+            var j = 1
+            while j < new_timestamps.len():
+                if new_timestamps[j] < oldest_ts:
+                    oldest_ts = new_timestamps[j]
+                    oldest_idx = j
+                j = j + 1
+            # Remove oldest by rebuilding arrays
+            var rk: [text] = []
+            var rh: [text] = []
+            var rc: [text] = []
+            var rt: [text] = []
+            var rs: [i64] = []
+            var ri = 0
+            while ri < new_keys.len():
+                if ri != oldest_idx:
+                    rk.push(new_keys[ri])
+                    rh.push(new_hashes[ri])
+                    rc.push(new_contents[ri])
+                    rt.push(new_titles[ri])
+                    rs.push(new_timestamps[ri])
+                ri = ri + 1
+            new_keys = rk
+            new_hashes = rh
+            new_contents = rc
+            new_titles = rt
+            new_timestamps = rs
+
+        new_keys.push(key)
+        new_hashes.push(hash)
+        new_contents.push(content)
+        new_titles.push(title)
+        new_timestamps.push(ts)
+
+    T32SnapshotStore(
+        keys: new_keys,
+        hashes: new_hashes,
+        contents: new_contents,
+        titles: new_titles,
+        timestamps: new_timestamps,
+        max_capacity: store.max_capacity,
+        ttl_seconds: store.ttl_seconds
+    )
+
+fn ss_get(store: T32SnapshotStore, key: text) -> text:
+    val idx = ss_find_index(store, key)
+    if idx < 0:
+        return ""
+    store.contents[idx]
+
+fn ss_get_hash(store: T32SnapshotStore, key: text) -> text:
+    val idx = ss_find_index(store, key)
+    if idx < 0:
+        return ""
+    store.hashes[idx]
+
+fn ss_get_timestamp(store: T32SnapshotStore, key: text) -> i64:
+    val idx = ss_find_index(store, key)
+    if idx < 0:
+        return 0
+    store.timestamps[idx]
+
+fn ss_has(store: T32SnapshotStore, key: text) -> bool:
+    ss_find_index(store, key) >= 0
+
+fn ss_size(store: T32SnapshotStore) -> i64:
+    store.keys.len()
+
+fn ss_is_expired(store: T32SnapshotStore, key: text, current_ts: i64) -> bool:
+    val idx = ss_find_index(store, key)
+    if idx < 0:
+        return true
+    val elapsed = current_ts - store.timestamps[idx]
+    elapsed > store.ttl_seconds
+
+fn ss_cleanup_expired(store: T32SnapshotStore, current_ts: i64) -> T32SnapshotStore:
+    var rk: [text] = []
+    var rh: [text] = []
+    var rc: [text] = []
+    var rt: [text] = []
+    var rs: [i64] = []
+    var i = 0
+    while i < store.keys.len():
+        val elapsed = current_ts - store.timestamps[i]
+        if elapsed <= store.ttl_seconds:
+            rk.push(store.keys[i])
+            rh.push(store.hashes[i])
+            rc.push(store.contents[i])
+            rt.push(store.titles[i])
+            rs.push(store.timestamps[i])
+        i = i + 1
+    T32SnapshotStore(
+        keys: rk,
+        hashes: rh,
+        contents: rc,
+        titles: rt,
+        timestamps: rs,
+        max_capacity: store.max_capacity,
+        ttl_seconds: store.ttl_seconds
+    )
+
+# --- Structured row diff (REQ-F2-003 layer 1) ---
+
+class T32LabeledRow:
+    label: text
+    value: text
+
+fn parse_labeled_rows(content: text) -> [T32LabeledRow]:
+    var rows: [T32LabeledRow] = []
+    for line in content.split("\n"):
+        if line.len() == 0:
+            continue
+        val sp = ws_find_char(line, " ")
+        if sp > 0:
+            val lbl = ws_substr(line, 0, sp)
+            val v = ws_substr(line, sp + 1, line.len())
+            rows.push(T32LabeledRow(label: lbl, value: v))
+    rows
+
+fn diff_labeled_rows(before_content: text, after_content: text) -> [T32DiffEntry]:
+    val before_rows = parse_labeled_rows(before_content)
+    val after_rows = parse_labeled_rows(after_content)
+    var diffs: [T32DiffEntry] = []
+
+    # Check changed and removed
+    for br in before_rows:
+        var found = false
+        for ar in after_rows:
+            if ar.label == br.label:
+                found = true
+                if ar.value != br.value:
+                    diffs.push(T32DiffEntry(label: br.label, old_value: br.value, new_value: ar.value, kind: "changed"))
+        if not found:
+            diffs.push(T32DiffEntry(label: br.label, old_value: br.value, new_value: "", kind: "removed"))
+
+    # Check added
+    for ar in after_rows:
+        var found = false
+        for br in before_rows:
+            if br.label == ar.label:
+                found = true
+        if not found:
+            diffs.push(T32DiffEntry(label: ar.label, old_value: "", new_value: ar.value, kind: "added"))
+
+    diffs
+
+# --- Table diff (REQ-F2-003 layer 2) ---
+
+fn parse_table_rows(content: text) -> [[text]]:
+    var rows: [[text]] = []
+    for line in content.split("\n"):
+        if line.len() == 0:
+            continue
+        val cells = line.split("|")
+        rows.push(cells)
+    rows
+
+fn diff_tables(before_content: text, after_content: text) -> T32TableDiffResult:
+    val before_rows = parse_table_rows(before_content)
+    val after_rows = parse_table_rows(after_content)
+    var cells: [T32TableCell] = []
+    var rows_added: i64 = 0
+    var rows_removed: i64 = 0
+
+    val min_rows = if before_rows.len() < after_rows.len(): before_rows.len() else: after_rows.len()
+
+    # Compare common rows
+    var r = 0
+    while r < min_rows:
+        val br = before_rows[r]
+        val ar = after_rows[r]
+        val min_cols = if br.len() < ar.len(): br.len() else: ar.len()
+        var c = 0
+        while c < min_cols:
+            if br[c] != ar[c]:
+                cells.push(T32TableCell(row: r, col: c, old_value: br[c], new_value: ar[c]))
+            c = c + 1
+        # Extra cols in after
+        while c < ar.len():
+            cells.push(T32TableCell(row: r, col: c, old_value: "", new_value: ar[c]))
+            c = c + 1
+        r = r + 1
+
+    if after_rows.len() > before_rows.len():
+        rows_added = after_rows.len() - before_rows.len()
+    if before_rows.len() > after_rows.len():
+        rows_removed = before_rows.len() - after_rows.len()
+
+    val has_changes = cells.len() > 0 or rows_added > 0 or rows_removed > 0
+    T32TableDiffResult(changed: has_changes, cells: cells, rows_added: rows_added, rows_removed: rows_removed)
+
+# --- Text diff fallback (REQ-F2-003 layer 3) ---
+
+fn diff_text_fallback(before: text, after: text, token_budget: i64) -> T32TextDiffResult:
+    if before == after:
+        return T32TextDiffResult(changed: false, summary: "no changes", changed_lines: 0, truncated: false)
+
+    val before_lines = before.split("\n")
+    val after_lines = after.split("\n")
+    var changed_count: i64 = 0
+
+    val max_lines = if before_lines.len() > after_lines.len(): before_lines.len() else: after_lines.len()
+    var i = 0
+    while i < max_lines:
+        val bl = if i < before_lines.len(): before_lines[i] else: ""
+        val al = if i < after_lines.len(): after_lines[i] else: ""
+        if bl != al:
+            changed_count = changed_count + 1
+        i = i + 1
+
+    # Check token budget (approximate: 4 chars per token)
+    val approx_tokens = after.len() / 4
+    val is_truncated = approx_tokens > token_budget
+
+    val summary_text = "{changed_count} line(s) changed"
+    T32TextDiffResult(changed: true, summary: summary_text, changed_lines: changed_count, truncated: is_truncated)
+
+# --- Mode selection logic (REQ-F2-004, REQ-F2-005) ---
+
+fn window_capture_with_mode(store: T32SnapshotStore, key: text, title: text, content: text, mode: text, ts: i64) -> T32SnapshotResult:
+    val prev_hash = ss_get_hash(store, key)
+    val prev_content = ss_get(store, key)
+    val new_hash = ws_simple_hash(content)
+    val is_first = prev_hash == ""
+    val is_expired = if not is_first: ss_is_expired(store, key, ts) else: false
+
+    # First capture or expired: treat as full
+    if is_first or is_expired:
+        if mode == "summary":
+            return T32SnapshotResult(window: key, changed: true, change_count: 0, content: "first capture: {title}", window_diff: [], mode: "summary")
+        return T32SnapshotResult(window: key, changed: true, change_count: 0, content: content, window_diff: [], mode: mode)
+
+    # No change
+    if prev_hash == new_hash:
+        if mode == "summary":
+            return T32SnapshotResult(window: key, changed: false, change_count: 0, content: "no changes", window_diff: [], mode: "summary")
+        if mode == "full":
+            return T32SnapshotResult(window: key, changed: false, change_count: 0, content: content, window_diff: [], mode: "full")
+        return T32SnapshotResult(window: key, changed: false, change_count: 0, content: "", window_diff: [], mode: "diff")
+
+    # Changed
+    if mode == "full":
+        return T32SnapshotResult(window: key, changed: true, change_count: 1, content: content, window_diff: [], mode: "full")
+
+    if mode == "summary":
+        return T32SnapshotResult(window: key, changed: true, change_count: 1, content: "changed: {title}", window_diff: [], mode: "summary")
+
+    # mode == "diff": compute structured diff
+    val diffs = diff_labeled_rows(prev_content, content)
+    T32SnapshotResult(window: key, changed: true, change_count: diffs.len(), content: "", window_diff: diffs, mode: "diff")
+
+
+# =============================================================================
+# TESTS
+# =============================================================================
+
+describe "T32 MCP Window Snapshot/Diff":
+
+    # =========================================================================
+    # Group 1: Snapshot Store (10 tests)
+    # =========================================================================
+
+    context "snapshot store":
+        it "stores snapshot for new window":
+            var store = snapshot_store_default()
+            store = ss_store(store, "sess1/core0/register", "Registers", "PC 0x08001234\nSP 0x20001000", 1000)
+            expect(ss_has(store, "sess1/core0/register")).to_equal(true)
+            expect(ss_size(store)).to_equal(1)
+
+        it "retrieves content by key":
+            var store = snapshot_store_default()
+            store = ss_store(store, "sess1/core0/register", "Registers", "PC 0x08001234", 1000)
+            val content = ss_get(store, "sess1/core0/register")
+            expect(content).to_equal("PC 0x08001234")
+
+        it "returns empty for unknown key":
+            val store = snapshot_store_default()
+            val content = ss_get(store, "nonexistent/key")
+            expect(content).to_equal("")
+
+        it "returns empty hash for unknown key":
+            val store = snapshot_store_default()
+            val hash = ss_get_hash(store, "nonexistent/key")
+            expect(hash).to_equal("")
+
+        it "updates existing snapshot and changes hash":
+            var store = snapshot_store_default()
+            store = ss_store(store, "sess1/core0/register", "Registers", "PC 0x08001234", 1000)
+            val hash1 = ss_get_hash(store, "sess1/core0/register")
+            store = ss_store(store, "sess1/core0/register", "Registers", "PC 0x08001238", 2000)
+            val hash2 = ss_get_hash(store, "sess1/core0/register")
+            expect(hash1 == hash2).to_equal(false)
+            expect(ss_size(store)).to_equal(1)
+
+        it "hash is consistent for same content":
+            val h1 = ws_simple_hash("PC 0x08001234\nSP 0x20001000")
+            val h2 = ws_simple_hash("PC 0x08001234\nSP 0x20001000")
+            expect(h1).to_equal(h2)
+
+        it "hash differs for different content":
+            val h1 = ws_simple_hash("PC 0x08001234")
+            val h2 = ws_simple_hash("PC 0x08001238")
+            expect(h1 == h2).to_equal(false)
+
+        it "djb2 hash produces nonzero for nonempty content":
+            val h = ws_djb2_hash("hello")
+            expect(h > 0).to_equal(true)
+
+        it "respects max capacity of 3":
+            var store = snapshot_store_new(3, 300)
+            store = ss_store(store, "k1", "t1", "c1", 100)
+            store = ss_store(store, "k2", "t2", "c2", 200)
+            store = ss_store(store, "k3", "t3", "c3", 300)
+            expect(ss_size(store)).to_equal(3)
+            store = ss_store(store, "k4", "t4", "c4", 400)
+            expect(ss_size(store)).to_equal(3)
+            # Oldest (k1 at ts=100) should be evicted
+            expect(ss_has(store, "k1")).to_equal(false)
+            expect(ss_has(store, "k4")).to_equal(true)
+
+        it "evicts oldest on capacity overflow preserving newest":
+            var store = snapshot_store_new(2, 300)
+            store = ss_store(store, "a", "ta", "ca", 10)
+            store = ss_store(store, "b", "tb", "cb", 20)
+            store = ss_store(store, "c", "tc", "cc", 30)
+            expect(ss_size(store)).to_equal(2)
+            expect(ss_has(store, "a")).to_equal(false)
+            expect(ss_has(store, "b")).to_equal(true)
+            expect(ss_has(store, "c")).to_equal(true)
+
+    # =========================================================================
+    # Group 2: Structured Row Diff (9 tests)
+    # =========================================================================
+
+    context "structured row diff":
+        it "identical rows produce empty diff":
+            val before = "PC 0x08001234\nSP 0x20001000\nLR 0x08000100"
+            val after = "PC 0x08001234\nSP 0x20001000\nLR 0x08000100"
+            val diffs = diff_labeled_rows(before, after)
+            expect(diffs.len()).to_equal(0)
+
+        it "single label value change detected":
+            val before = "PC 0x08001234\nSP 0x20001000"
+            val after = "PC 0x08001238\nSP 0x20001000"
+            val diffs = diff_labeled_rows(before, after)
+            expect(diffs.len()).to_equal(1)
+            expect(diffs[0].label).to_equal("PC")
+            expect(diffs[0].kind).to_equal("changed")
+
+        it "multiple changed labels detected":
+            val before = "PC 0x08001234\nSP 0x20001000\nLR 0x08000100"
+            val after = "PC 0x08001238\nSP 0x20002000\nLR 0x08000100"
+            val diffs = diff_labeled_rows(before, after)
+            expect(diffs.len()).to_equal(2)
+
+        it "new label added detected":
+            val before = "PC 0x08001234"
+            val after = "PC 0x08001234\nFP 0x20003000"
+            val diffs = diff_labeled_rows(before, after)
+            expect(diffs.len()).to_equal(1)
+            expect(diffs[0].label).to_equal("FP")
+            expect(diffs[0].kind).to_equal("added")
+
+        it "removed label detected":
+            val before = "PC 0x08001234\nSP 0x20001000"
+            val after = "PC 0x08001234"
+            val diffs = diff_labeled_rows(before, after)
+            expect(diffs.len()).to_equal(1)
+            expect(diffs[0].label).to_equal("SP")
+            expect(diffs[0].kind).to_equal("removed")
+
+        it "diff entry has correct old and new values":
+            val before = "PC 0x08001234\nSP 0x20001000"
+            val after = "PC 0x08001238\nSP 0x20001000"
+            val diffs = diff_labeled_rows(before, after)
+            expect(diffs[0].old_value).to_equal("0x08001234")
+            expect(diffs[0].new_value).to_equal("0x08001238")
+
+        it "empty before state is full capture":
+            val before = ""
+            val after = "PC 0x08001234\nSP 0x20001000"
+            val diffs = diff_labeled_rows(before, after)
+            expect(diffs.len()).to_equal(2)
+            expect(diffs[0].kind).to_equal("added")
+            expect(diffs[1].kind).to_equal("added")
+
+        it "change_count matches actual changes":
+            val before = "PC 0x08001234\nSP 0x20001000\nLR 0x08000100\nR0 0x00000001"
+            val after = "PC 0x08001238\nSP 0x20001000\nLR 0x08000200\nR0 0x00000001"
+            val diffs = diff_labeled_rows(before, after)
+            expect(diffs.len()).to_equal(2)
+
+        it "removed entry has empty new_value":
+            val before = "PC 0x08001234\nSP 0x20001000"
+            val after = "PC 0x08001234"
+            val diffs = diff_labeled_rows(before, after)
+            val removed = diffs[0]
+            expect(removed.old_value).to_equal("0x20001000")
+            expect(removed.new_value).to_equal("")
+
+    # =========================================================================
+    # Group 3: Table Diff (7 tests)
+    # =========================================================================
+
+    context "table diff":
+        it "identical tables produce empty diff":
+            val before = "addr|value|symbol\n0x1000|0xDEAD|main\n0x1004|0xBEEF|loop"
+            val after = "addr|value|symbol\n0x1000|0xDEAD|main\n0x1004|0xBEEF|loop"
+            val result = diff_tables(before, after)
+            expect(result.changed).to_equal(false)
+            expect(result.cells.len()).to_equal(0)
+
+        it "changed cell detected with row and col context":
+            val before = "addr|value\n0x1000|0xDEAD\n0x1004|0xBEEF"
+            val after = "addr|value\n0x1000|0xDEAD\n0x1004|0xCAFE"
+            val result = diff_tables(before, after)
+            expect(result.changed).to_equal(true)
+            expect(result.cells.len()).to_equal(1)
+            expect(result.cells[0].row).to_equal(2)
+            expect(result.cells[0].col).to_equal(1)
+            expect(result.cells[0].old_value).to_equal("0xBEEF")
+            expect(result.cells[0].new_value).to_equal("0xCAFE")
+
+        it "row added detected":
+            val before = "addr|value\n0x1000|0xDEAD"
+            val after = "addr|value\n0x1000|0xDEAD\n0x1004|0xBEEF"
+            val result = diff_tables(before, after)
+            expect(result.changed).to_equal(true)
+            expect(result.rows_added).to_equal(1)
+
+        it "row removed detected":
+            val before = "addr|value\n0x1000|0xDEAD\n0x1004|0xBEEF"
+            val after = "addr|value\n0x1000|0xDEAD"
+            val result = diff_tables(before, after)
+            expect(result.changed).to_equal(true)
+            expect(result.rows_removed).to_equal(1)
+
+        it "mixed changes with add modify and remove":
+            val before = "h1|h2\nA|1\nB|2\nC|3"
+            val after = "h1|h2\nA|1\nB|9\nD|4\nE|5"
+            val result = diff_tables(before, after)
+            expect(result.changed).to_equal(true)
+            # B row: col1 changed 2->9, C row vs D row: both cols differ
+            expect(result.cells.len()).to_be_greater_than(0)
+            expect(result.rows_added).to_equal(1)
+
+        it "empty table to populated is first capture":
+            val before = ""
+            val after = "addr|value\n0x1000|0xDEAD\n0x1004|0xBEEF"
+            val result = diff_tables(before, after)
+            expect(result.changed).to_equal(true)
+            expect(result.rows_added).to_be_greater_than(0)
+
+        it "multiple cell changes across rows":
+            val before = "a|b|c\n1|2|3\n4|5|6"
+            val after = "a|b|c\n1|X|3\n4|5|Y"
+            val result = diff_tables(before, after)
+            expect(result.cells.len()).to_equal(2)
+
+    # =========================================================================
+    # Group 4: Text Diff Fallback (5 tests)
+    # =========================================================================
+
+    context "text diff fallback":
+        it "identical text returns changed false":
+            val before = "line1\nline2\nline3"
+            val after = "line1\nline2\nline3"
+            val result = diff_text_fallback(before, after, 8000)
+            expect(result.changed).to_equal(false)
+            expect(result.summary).to_equal("no changes")
+
+        it "single line change detected":
+            val before = "PC 0x08001234\nSP 0x20001000"
+            val after = "PC 0x08001238\nSP 0x20001000"
+            val result = diff_text_fallback(before, after, 8000)
+            expect(result.changed).to_equal(true)
+            expect(result.changed_lines).to_equal(1)
+
+        it "multi-line change with context":
+            val before = "line1\nline2\nline3\nline4"
+            val after = "line1\nchanged2\nline3\nchanged4"
+            val result = diff_text_fallback(before, after, 8000)
+            expect(result.changed).to_equal(true)
+            expect(result.changed_lines).to_equal(2)
+
+        it "large diff truncated to token budget":
+            # Build a string that exceeds budget when divided by 4
+            var large_content = ""
+            var i = 0
+            while i < 500:
+                large_content = large_content + "AAAA BBBB CCCC DDDD EEEE FFFF GGGG HHHH\n"
+                i = i + 1
+            val result = diff_text_fallback("short", large_content, 100)
+            expect(result.changed).to_equal(true)
+            expect(result.truncated).to_equal(true)
+
+        it "small diff not truncated":
+            val result = diff_text_fallback("a", "b", 8000)
+            expect(result.changed).to_equal(true)
+            expect(result.truncated).to_equal(false)
+
+    # =========================================================================
+    # Group 5: Mode Selection (8 tests)
+    # =========================================================================
+
+    context "mode selection":
+        it "mode summary returns one-line status for change":
+            var store = snapshot_store_default()
+            store = ss_store(store, "s/c/reg", "Registers", "PC 0x1234", 1000)
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x5678", "summary", 1050)
+            expect(result.mode).to_equal("summary")
+            expect(result.changed).to_equal(true)
+            expect(result.content).to_contain("changed")
+
+        it "mode diff returns structured diff":
+            var store = snapshot_store_default()
+            store = ss_store(store, "s/c/reg", "Registers", "PC 0x1234\nSP 0x2000", 1000)
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x5678\nSP 0x2000", "diff", 1050)
+            expect(result.mode).to_equal("diff")
+            expect(result.changed).to_equal(true)
+            expect(result.change_count).to_be_greater_than(0)
+
+        it "mode full returns complete content":
+            var store = snapshot_store_default()
+            store = ss_store(store, "s/c/reg", "Registers", "PC 0x1234", 1000)
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x5678", "full", 1050)
+            expect(result.mode).to_equal("full")
+            expect(result.content).to_equal("PC 0x5678")
+
+        it "mode diff with no changes returns changed false":
+            var store = snapshot_store_default()
+            store = ss_store(store, "s/c/reg", "Registers", "PC 0x1234", 1000)
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x1234", "diff", 1050)
+            expect(result.changed).to_equal(false)
+
+        it "first capture in diff mode returns full content":
+            val store = snapshot_store_default()
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x1234", "diff", 1000)
+            expect(result.changed).to_equal(true)
+            expect(result.content).to_equal("PC 0x1234")
+
+        it "first capture in summary mode returns first capture label":
+            val store = snapshot_store_default()
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x1234", "summary", 1000)
+            expect(result.content).to_contain("first capture")
+
+        it "first capture in full mode returns full content":
+            val store = snapshot_store_default()
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x1234\nSP 0x2000", "full", 1000)
+            expect(result.changed).to_equal(true)
+            expect(result.content).to_contain("PC 0x1234")
+
+        it "mode full with no changes still returns content":
+            var store = snapshot_store_default()
+            store = ss_store(store, "s/c/reg", "Registers", "PC 0x1234", 1000)
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x1234", "full", 1050)
+            expect(result.changed).to_equal(false)
+            expect(result.content).to_equal("PC 0x1234")
+
+    # =========================================================================
+    # Group 6: TTL and Eviction (6 tests)
+    # =========================================================================
+
+    context "TTL and eviction":
+        it "snapshot within TTL is not expired":
+            var store = snapshot_store_new(200, 300)
+            store = ss_store(store, "s/c/reg", "Registers", "PC 0x1234", 1000)
+            expect(ss_is_expired(store, "s/c/reg", 1100)).to_equal(false)
+
+        it "expired snapshot is detected":
+            var store = snapshot_store_new(200, 300)
+            store = ss_store(store, "s/c/reg", "Registers", "PC 0x1234", 1000)
+            expect(ss_is_expired(store, "s/c/reg", 1400)).to_equal(true)
+
+        it "expired snapshot treated as first capture in diff mode":
+            var store = snapshot_store_new(200, 60)
+            store = ss_store(store, "s/c/reg", "Registers", "PC 0x1234", 1000)
+            # Capture at ts=1100 with TTL=60: 1100-1000=100 > 60 -> expired
+            val result = window_capture_with_mode(store, "s/c/reg", "Registers", "PC 0x5678", "diff", 1100)
+            expect(result.changed).to_equal(true)
+            # First capture returns full content, not diff
+            expect(result.content).to_equal("PC 0x5678")
+
+        it "cleanup removes expired entries":
+            var store = snapshot_store_new(200, 100)
+            store = ss_store(store, "k1", "t1", "c1", 1000)
+            store = ss_store(store, "k2", "t2", "c2", 1050)
+            store = ss_store(store, "k3", "t3", "c3", 1200)
+            # At ts=1150: k1 expired (150>100), k2 expired (100 not > 100, boundary), k3 alive
+            store = ss_cleanup_expired(store, 1150)
+            expect(ss_has(store, "k1")).to_equal(false)
+            expect(ss_has(store, "k3")).to_equal(true)
+
+        it "TTL configurable per store":
+            var short_ttl = snapshot_store_new(200, 10)
+            short_ttl = ss_store(short_ttl, "k1", "t1", "c1", 1000)
+            var long_ttl = snapshot_store_new(200, 1000)
+            long_ttl = ss_store(long_ttl, "k1", "t1", "c1", 1000)
+            # At ts=1050: short TTL expired, long TTL alive
+            expect(ss_is_expired(short_ttl, "k1", 1050)).to_equal(true)
+            expect(ss_is_expired(long_ttl, "k1", 1050)).to_equal(false)
+
+        it "nonexistent key is treated as expired":
+            val store = snapshot_store_default()
+            expect(ss_is_expired(store, "nonexistent", 9999)).to_equal(true)

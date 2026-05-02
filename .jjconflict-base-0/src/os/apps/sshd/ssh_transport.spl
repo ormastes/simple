@@ -1,0 +1,561 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SSH Transport Layer — RFC 4253
+#
+# Version exchange, algorithm negotiation, and key exchange init.
+# Handles KEXINIT messages and algorithm selection.
+
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_bool, ssh_put_byte, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_bytes_to_text, SshTextResult, SshStringResult}
+use os.kernel.log.klog_api.{log_info, log_raw_println}
+
+extern fn rt_string_to_byte_array(s: text) -> [u8]
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SSH_VERSION_STRING: text = "SSH-2.0-SimpleOS_1.0"
+
+# SSH message type codes (RFC 4253)
+val SSH_MSG_DISCONNECT: u8 = 1
+val SSH_MSG_IGNORE: u8 = 2
+val SSH_MSG_UNIMPLEMENTED: u8 = 3
+val SSH_MSG_DEBUG: u8 = 4
+val SSH_MSG_SERVICE_REQUEST: u8 = 5
+val SSH_MSG_SERVICE_ACCEPT: u8 = 6
+val SSH_MSG_EXT_INFO: u8 = 7
+val SSH_MSG_KEXINIT: u8 = 20
+val SSH_MSG_NEWKEYS: u8 = 21
+
+# Disconnect reason codes (RFC 4253 section 11.1)
+val SSH_DISCONNECT_HOST_NOT_ALLOWED: u32 = 1
+val SSH_DISCONNECT_PROTOCOL_ERROR: u32 = 2
+val SSH_DISCONNECT_KEY_EXCHANGE_FAILED: u32 = 3
+val SSH_DISCONNECT_MAC_ERROR: u32 = 5
+val SSH_DISCONNECT_SERVICE_NOT_AVAILABLE: u32 = 7
+val SSH_DISCONNECT_NO_MORE_AUTH_METHODS: u32 = 14
+
+# ============================================================================
+# Algorithm Names
+# ============================================================================
+
+val KEX_ALGORITHM: text = "curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com"
+val HOST_KEY_ALGORITHM: text = "ssh-ed25519,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256"
+val CIPHER_ALGORITHM: text = "aes256-gcm@openssh.com"
+val MAC_ALGORITHM: text = "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,none"
+val COMPRESS_ALGORITHM: text = "none"
+
+fn _u8_at(data: [u8], idx: u64) -> u8:
+    data[idx]
+
+fn _push_raw_string(buf: [u8], data: [u8]):
+    ssh_put_u32(buf, data.len().to_u32())
+    var i: u64 = 0
+    while i < data.len():
+        buf.push(_u8_at(data, i))
+        i = i + 1
+
+fn _disconnect_description_bytes(description: text) -> [u8]:
+    if description == "invalid version string":
+        return [0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x20, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6F, 0x6E, 0x20, 0x73, 0x74, 0x72, 0x69, 0x6E, 0x67]
+    if description == "no KEXINIT received":
+        return [0x6E, 0x6F, 0x20, 0x4B, 0x45, 0x58, 0x49, 0x4E, 0x49, 0x54, 0x20, 0x72, 0x65, 0x63, 0x65, 0x69, 0x76, 0x65, 0x64]
+    if description == "unexpected pre-kex control message":
+        return [0x75, 0x6E, 0x65, 0x78, 0x70, 0x65, 0x63, 0x74, 0x65, 0x64, 0x20, 0x70, 0x72, 0x65, 0x2D, 0x6B, 0x65, 0x78, 0x20, 0x63, 0x6F, 0x6E, 0x74, 0x72, 0x6F, 0x6C, 0x20, 0x6D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65]
+    if description == "bad KEXINIT":
+        return [0x62, 0x61, 0x64, 0x20, 0x4B, 0x45, 0x58, 0x49, 0x4E, 0x49, 0x54]
+    if description == "algorithm negotiation failed":
+        return [0x61, 0x6C, 0x67, 0x6F, 0x72, 0x69, 0x74, 0x68, 0x6D, 0x20, 0x6E, 0x65, 0x67, 0x6F, 0x74, 0x69, 0x61, 0x74, 0x69, 0x6F, 0x6E, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x65, 0x64]
+    if description == "no KEX_ECDH_INIT":
+        return [0x6E, 0x6F, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
+    if description == "invalid KEX_ECDH_INIT":
+        return [0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
+    if description == "bad KEX_ECDH_INIT":
+        return [0x62, 0x61, 0x64, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
+    if description == "empty KEX_ECDH_INIT":
+        return [0x65, 0x6D, 0x70, 0x74, 0x79, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
+    if description == "strict KEX_ECDH_INIT":
+        return [0x73, 0x74, 0x72, 0x69, 0x63, 0x74, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
+    if description == "wrong-type KEX_ECDH_INIT":
+        return [0x77, 0x72, 0x6F, 0x6E, 0x67, 0x2D, 0x74, 0x79, 0x70, 0x65, 0x20, 0x4B, 0x45, 0x58, 0x5F, 0x45, 0x43, 0x44, 0x48, 0x5F, 0x49, 0x4E, 0x49, 0x54]
+    if description == "emp":
+        return [0x65, 0x6D, 0x70]
+    if description == "stk":
+        return [0x73, 0x74, 0x6B]
+    if description == "t00":
+        return [0x74, 0x30, 0x30]
+    if description == "t20":
+        return [0x74, 0x32, 0x30]
+    if description == "t21":
+        return [0x74, 0x32, 0x31]
+    if description == "t30":
+        return [0x74, 0x33, 0x30]
+    if description == "tox":
+        return [0x74, 0x6F, 0x78]
+    if description == "server X25519 public failed":
+        return [0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x20, 0x58, 0x32, 0x35, 0x35, 0x31, 0x39, 0x20, 0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x65, 0x64]
+    if description == "server X25519 shared failed":
+        return [0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x20, 0x58, 0x32, 0x35, 0x35, 0x31, 0x39, 0x20, 0x73, 0x68, 0x61, 0x72, 0x65, 0x64, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x65, 0x64]
+    if description == "host key signing failed":
+        return [0x68, 0x6F, 0x73, 0x74, 0x20, 0x6B, 0x65, 0x79, 0x20, 0x73, 0x69, 0x67, 0x6E, 0x69, 0x6E, 0x67, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x65, 0x64]
+    if description == "invalid NEWKEYS":
+        return [0x69, 0x6E, 0x76, 0x61, 0x6C, 0x69, 0x64, 0x20, 0x4E, 0x45, 0x57, 0x4B, 0x45, 0x59, 0x53]
+    if description == "unsupported cipher negotiation":
+        return [0x75, 0x6E, 0x73, 0x75, 0x70, 0x70, 0x6F, 0x72, 0x74, 0x65, 0x64, 0x20, 0x63, 0x69, 0x70, 0x68, 0x65, 0x72, 0x20, 0x6E, 0x65, 0x67, 0x6F, 0x74, 0x69, 0x61, 0x74, 0x69, 0x6F, 0x6E]
+    if description == "no service request":
+        return [0x6E, 0x6F, 0x20, 0x73, 0x65, 0x72, 0x76, 0x69, 0x63, 0x65, 0x20, 0x72, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74]
+    if description == "too many authentication failures":
+        return [0x74, 0x6F, 0x6F, 0x20, 0x6D, 0x61, 0x6E, 0x79, 0x20, 0x61, 0x75, 0x74, 0x68, 0x65, 0x6E, 0x74, 0x69, 0x63, 0x61, 0x74, 0x69, 0x6F, 0x6E, 0x20, 0x66, 0x61, 0x69, 0x6C, 0x75, 0x72, 0x65, 0x73]
+    []
+
+# ============================================================================
+# Types
+# ============================================================================
+
+struct SshKexInit:
+    """Key exchange initialization message (RFC 4253 section 7.1)."""
+    cookie: [u8]                        # 16 random bytes
+    kex_algorithms: text                # comma-separated
+    server_host_key_algorithms: text
+    encryption_client_to_server: text
+    encryption_server_to_client: text
+    mac_client_to_server: text
+    mac_server_to_client: text
+    compression_client_to_server: text
+    compression_server_to_client: text
+    first_kex_packet_follows: bool
+
+struct SshAlgorithms:
+    """Negotiated algorithm set."""
+    kex: text
+    host_key: text
+    cipher_c2s: text
+    cipher_s2c: text
+    mac_c2s: text
+    mac_s2c: text
+    compress_c2s: text
+    compress_s2c: text
+
+# ============================================================================
+# Version Exchange
+# ============================================================================
+
+fn ssh_build_version_string() -> [u8]:
+    """Build version identification string with CR LF terminator.
+
+    Uses pre-built byte array to avoid .to_bytes() which may be stubbed on baremetal.
+    String: "SSH-2.0-SimpleOS_1.0\\r\\n"
+    """
+    var buf: [u8] = []
+    # S  S  H  -  2  .  0  -
+    buf.push(0x53)
+    buf.push(0x53)
+    buf.push(0x48)
+    buf.push(0x2D)
+    buf.push(0x32)
+    buf.push(0x2E)
+    buf.push(0x30)
+    buf.push(0x2D)
+    # S  i  m  p  l  e  O  S
+    buf.push(0x53)
+    buf.push(0x69)
+    buf.push(0x6D)
+    buf.push(0x70)
+    buf.push(0x6C)
+    buf.push(0x65)
+    buf.push(0x4F)
+    buf.push(0x53)
+    # _  1  .  0
+    buf.push(0x5F)
+    buf.push(0x31)
+    buf.push(0x2E)
+    buf.push(0x30)
+    # \r \n
+    buf.push(0x0D)
+    buf.push(0x0A)
+    buf
+
+fn ssh_parse_version_string(data: [u8]) -> Result<text, text>:
+    """Parse a version string from raw bytes. Strips trailing CR LF.
+
+    Validates the "SSH-2.0-" prefix per RFC 4253 section 4.2.
+    """
+    # Find the CR LF terminator
+    var end: u64 = 0
+    while end + 1 < data.len():
+        if _u8_at(data, end) == 0x0D and _u8_at(data, end + 1) == 0x0A:
+            # Found CRLF at position end — extract version string
+            var version_bytes: [u8] = []
+            var i: u64 = 0
+            while i < end:
+                version_bytes.push(_u8_at(data, i))
+                i = i + 1
+            var version: text = ssh_ascii_bytes_to_text(version_bytes)
+            if not version.starts_with("SSH-2.0-"):
+                return Err("unsupported SSH version: {version}")
+            return Ok(version)
+        end = end + 1
+
+    Err("no CRLF terminator in version string")
+
+# ============================================================================
+# KEXINIT Messages
+# ============================================================================
+
+fn ssh_build_kexinit() -> [u8]:
+    """Build our SSH_MSG_KEXINIT payload.
+
+    Advertises our supported algorithms:
+      KEX:       curve25519-sha256,ext-info-s,kex-strict-s-v00@openssh.com
+      Host key:  ssh-ed25519,rsa-sha2-256,rsa-sha2-512,ecdsa-sha2-nistp256
+      Cipher:    aes256-gcm@openssh.com,aes128-gcm@openssh.com
+      MAC:       none (implicit in GCM)
+      Compress:  none
+    """
+    var buf: [u8] = []
+
+    # Message type
+    buf.push(SSH_MSG_KEXINIT)
+
+    # 16-byte cookie (zeros — random_bytes may FAULT on baremetal)
+    var i: u64 = 0
+    while i < 16:
+        buf.push(0)
+        i = i + 1
+
+    # Algorithm name-lists (SSH string encoding: length + text)
+    ssh_put_text(buf, KEX_ALGORITHM)                  # kex_algorithms
+    ssh_put_text(buf, HOST_KEY_ALGORITHM)              # server_host_key_algorithms
+    ssh_put_text(buf, CIPHER_ALGORITHM)                # encryption_client_to_server
+    ssh_put_text(buf, CIPHER_ALGORITHM)                # encryption_server_to_client
+    ssh_put_text(buf, MAC_ALGORITHM)                   # mac_client_to_server
+    ssh_put_text(buf, MAC_ALGORITHM)                   # mac_server_to_client
+    ssh_put_text(buf, COMPRESS_ALGORITHM)              # compression_client_to_server
+    ssh_put_text(buf, COMPRESS_ALGORITHM)              # compression_server_to_client
+    ssh_put_text(buf, "")                              # languages_client_to_server
+    ssh_put_text(buf, "")                              # languages_server_to_client
+
+    # first_kex_packet_follows
+    ssh_put_bool(buf, false)
+
+    # reserved (uint32 = 0)
+    ssh_put_u32(buf, 0)
+
+    buf
+
+fn ssh_parse_kexinit(data: [u8]) -> Result<SshKexInit, text>:
+    """Parse SSH_MSG_KEXINIT payload.
+
+    data[0] should be SSH_MSG_KEXINIT (20).
+    """
+    if data.len() < 17:
+        return Err("KEXINIT too short")
+    if _u8_at(data, 0) != SSH_MSG_KEXINIT:
+        return Err("not a KEXINIT message")
+
+    # Cookie: bytes 1..16
+    var cookie: [u8] = []
+    var i: u64 = 0
+    while i < 16:
+        cookie.push(_u8_at(data, 1 + i))
+        i = i + 1
+
+    # Parse 10 name-list strings
+    var off: u64 = 17
+
+    var kex_algorithms: text = ""
+    var r_kex = ssh_get_text(data, off)
+    if r_kex.is_ok():
+        var kex_pair = r_kex.unwrap()
+        kex_algorithms = kex_pair.value
+        off = kex_pair.next_offset
+    else:
+        return Err("KEXINIT: bad kex_algorithms")
+
+    var host_key_algorithms: text = ""
+    var r_host = ssh_get_text(data, off)
+    if r_host.is_ok():
+        var host_pair = r_host.unwrap()
+        host_key_algorithms = host_pair.value
+        off = host_pair.next_offset
+    else:
+        return Err("KEXINIT: bad host_key_algorithms")
+
+    var enc_c2s: text = ""
+    var r_enc_c2s = ssh_get_text(data, off)
+    if r_enc_c2s.is_ok():
+        var enc_pair = r_enc_c2s.unwrap()
+        enc_c2s = enc_pair.value
+        off = enc_pair.next_offset
+    else:
+        return Err("KEXINIT: bad enc_c2s")
+
+    var enc_s2c: text = ""
+    var r_enc_s2c = ssh_get_text(data, off)
+    if r_enc_s2c.is_ok():
+        var enc_pair2 = r_enc_s2c.unwrap()
+        enc_s2c = enc_pair2.value
+        off = enc_pair2.next_offset
+    else:
+        return Err("KEXINIT: bad enc_s2c")
+
+    var mac_c2s: text = ""
+    var r_mac_c2s = ssh_get_text(data, off)
+    if r_mac_c2s.is_ok():
+        var mac_pair = r_mac_c2s.unwrap()
+        mac_c2s = mac_pair.value
+        off = mac_pair.next_offset
+    else:
+        return Err("KEXINIT: bad mac_c2s")
+
+    var mac_s2c: text = ""
+    var r_mac_s2c = ssh_get_text(data, off)
+    if r_mac_s2c.is_ok():
+        var mac_pair2 = r_mac_s2c.unwrap()
+        mac_s2c = mac_pair2.value
+        off = mac_pair2.next_offset
+    else:
+        return Err("KEXINIT: bad mac_s2c")
+
+    var comp_c2s: text = ""
+    var r_comp_c2s = ssh_get_text(data, off)
+    if r_comp_c2s.is_ok():
+        var comp_pair = r_comp_c2s.unwrap()
+        comp_c2s = comp_pair.value
+        off = comp_pair.next_offset
+    else:
+        return Err("KEXINIT: bad comp_c2s")
+
+    var comp_s2c: text = ""
+    var r_comp_s2c = ssh_get_text(data, off)
+    if r_comp_s2c.is_ok():
+        var comp_pair2 = r_comp_s2c.unwrap()
+        comp_s2c = comp_pair2.value
+        off = comp_pair2.next_offset
+    else:
+        return Err("KEXINIT: bad comp_s2c")
+
+    # Skip languages (2 strings)
+    var r_lang1 = ssh_get_text(data, off)
+    if r_lang1.is_ok():
+        var lang1_pair = r_lang1.unwrap()
+        off = lang1_pair.next_offset
+    else:
+        return Err("KEXINIT: bad lang1")
+
+    var r_lang2 = ssh_get_text(data, off)
+    if r_lang2.is_ok():
+        var lang2_pair = r_lang2.unwrap()
+        off = lang2_pair.next_offset
+    else:
+        return Err("KEXINIT: bad lang2")
+
+    # first_kex_packet_follows (1 byte bool)
+    if off >= data.len():
+        return Err("KEXINIT: missing first_kex_packet_follows")
+    var first_follows = _u8_at(data, off) != 0
+    off = off + 1
+
+    # reserved uint32 must be present, zero, and final
+    if off + 4 > data.len():
+        return Err("KEXINIT: truncated reserved")
+    var reserved = ssh_get_u32(data, off)
+    if reserved != 0:
+        return Err("KEXINIT: non-zero reserved")
+    off = off + 4
+    if off != data.len():
+        return Err("KEXINIT: trailing bytes after reserved")
+
+    Ok(SshKexInit(
+        cookie: cookie,
+        kex_algorithms: kex_algorithms,
+        server_host_key_algorithms: host_key_algorithms,
+        encryption_client_to_server: enc_c2s,
+        encryption_server_to_client: enc_s2c,
+        mac_client_to_server: mac_c2s,
+        mac_server_to_client: mac_s2c,
+        compression_client_to_server: comp_c2s,
+        compression_server_to_client: comp_s2c,
+        first_kex_packet_follows: first_follows
+    ))
+
+# ============================================================================
+# Algorithm Negotiation
+# ============================================================================
+
+fn _list_contains(list: text, candidate: text) -> bool:
+    if candidate == "":
+        return false
+    for raw in list.split(","):
+        val item = raw.trim()
+        if item == candidate:
+            return true
+    false
+
+fn _first_match(client_list: text, server_list: text) -> text:
+    """Find the first algorithm in client_list that also appears in server_list."""
+    for raw in server_list.split(","):
+        val candidate = raw.trim()
+        if _list_contains(client_list, candidate):
+            return candidate
+    ""
+
+fn _preferred_host_key_match(client_list: text, server_list: text) -> text:
+    if _list_contains(client_list, "ssh-ed25519-cert-v01@openssh.com") and _list_contains(server_list, "ssh-ed25519-cert-v01@openssh.com"):
+        return "ssh-ed25519-cert-v01@openssh.com"
+    if _list_contains(client_list, "ssh-ed25519") and _list_contains(server_list, "ssh-ed25519"):
+        return "ssh-ed25519"
+    if _list_contains(client_list, "rsa-sha2-512-cert-v01@openssh.com") and _list_contains(server_list, "rsa-sha2-512-cert-v01@openssh.com"):
+        return "rsa-sha2-512-cert-v01@openssh.com"
+    if _list_contains(client_list, "rsa-sha2-256-cert-v01@openssh.com") and _list_contains(server_list, "rsa-sha2-256-cert-v01@openssh.com"):
+        return "rsa-sha2-256-cert-v01@openssh.com"
+    if _list_contains(client_list, "ecdsa-sha2-nistp256") and _list_contains(server_list, "ecdsa-sha2-nistp256"):
+        return "ecdsa-sha2-nistp256"
+    if _list_contains(client_list, "rsa-sha2-512") and _list_contains(server_list, "rsa-sha2-512"):
+        return "rsa-sha2-512"
+    if _list_contains(client_list, "rsa-sha2-256") and _list_contains(server_list, "rsa-sha2-256"):
+        return "rsa-sha2-256"
+    ""
+
+fn _is_aes_gcm(cipher: text) -> bool:
+    cipher == "aes256-gcm@openssh.com" or cipher == "aes128-gcm@openssh.com"
+
+fn _is_aes256_ctr(cipher: text) -> bool:
+    cipher == "aes256-ctr"
+
+fn _is_supported_etm(mac: text) -> bool:
+    mac == "hmac-sha2-256-etm@openssh.com" or mac == "hmac-sha2-512-etm@openssh.com"
+
+fn ssh_kex_uses_strict_kex(client_kex_algorithms: text, server_kex_algorithms: text) -> bool:
+    _list_contains(client_kex_algorithms, "kex-strict-c-v00@openssh.com") and
+        _list_contains(server_kex_algorithms, "kex-strict-s-v00@openssh.com")
+
+fn ssh_negotiate_algorithms(client: SshKexInit, server: SshKexInit) -> Result<SshAlgorithms, text>:
+    """Choose algorithms from intersection of client and server proposals.
+
+    Returns the first matching algorithm for each category, following
+    client preference order per RFC 4253 section 7.1.
+    """
+    var kex = ""
+    if _list_contains(client.kex_algorithms, "curve25519-sha256") and _list_contains(server.kex_algorithms, "curve25519-sha256"):
+        kex = "curve25519-sha256"
+    if kex == "":
+        return Err("no matching kex algorithm")
+
+    val host_key = _preferred_host_key_match(client.server_host_key_algorithms, server.server_host_key_algorithms)
+    if host_key == "":
+        return Err("no matching host key algorithm")
+
+    var cipher_c2s = ""
+    if _list_contains(client.encryption_client_to_server, "aes256-gcm@openssh.com") and _list_contains(server.encryption_client_to_server, "aes256-gcm@openssh.com"):
+        cipher_c2s = "aes256-gcm@openssh.com"
+    elif _list_contains(client.encryption_client_to_server, "aes128-gcm@openssh.com") and _list_contains(server.encryption_client_to_server, "aes128-gcm@openssh.com"):
+        cipher_c2s = "aes128-gcm@openssh.com"
+    elif _list_contains(client.encryption_client_to_server, "aes256-ctr") and _list_contains(server.encryption_client_to_server, "aes256-ctr"):
+        cipher_c2s = "aes256-ctr"
+    if cipher_c2s == "":
+        return Err("no matching cipher (c2s)")
+
+    var cipher_s2c = ""
+    if _list_contains(client.encryption_server_to_client, "aes256-gcm@openssh.com") and _list_contains(server.encryption_server_to_client, "aes256-gcm@openssh.com"):
+        cipher_s2c = "aes256-gcm@openssh.com"
+    elif _list_contains(client.encryption_server_to_client, "aes128-gcm@openssh.com") and _list_contains(server.encryption_server_to_client, "aes128-gcm@openssh.com"):
+        cipher_s2c = "aes128-gcm@openssh.com"
+    elif _list_contains(client.encryption_server_to_client, "aes256-ctr") and _list_contains(server.encryption_server_to_client, "aes256-ctr"):
+        cipher_s2c = "aes256-ctr"
+    if cipher_s2c == "":
+        return Err("no matching cipher (s2c)")
+
+    var mac_c2s = ""
+    if _is_aes_gcm(cipher_c2s):
+        mac_c2s = "none"
+    elif _list_contains(client.mac_client_to_server, "hmac-sha2-256-etm@openssh.com") and _list_contains(server.mac_client_to_server, "hmac-sha2-256-etm@openssh.com"):
+        mac_c2s = "hmac-sha2-256-etm@openssh.com"
+    elif _list_contains(client.mac_client_to_server, "hmac-sha2-512-etm@openssh.com") and _list_contains(server.mac_client_to_server, "hmac-sha2-512-etm@openssh.com"):
+        mac_c2s = "hmac-sha2-512-etm@openssh.com"
+    if mac_c2s == "":
+        return Err("no matching mac (c2s)")
+    if _is_aes256_ctr(cipher_c2s) and not _is_supported_etm(mac_c2s):
+        return Err("aes256-ctr requires OpenSSH ETM MAC (c2s)")
+
+    var mac_s2c = ""
+    if _is_aes_gcm(cipher_s2c):
+        mac_s2c = "none"
+    elif _list_contains(client.mac_server_to_client, "hmac-sha2-256-etm@openssh.com") and _list_contains(server.mac_server_to_client, "hmac-sha2-256-etm@openssh.com"):
+        mac_s2c = "hmac-sha2-256-etm@openssh.com"
+    elif _list_contains(client.mac_server_to_client, "hmac-sha2-512-etm@openssh.com") and _list_contains(server.mac_server_to_client, "hmac-sha2-512-etm@openssh.com"):
+        mac_s2c = "hmac-sha2-512-etm@openssh.com"
+    if mac_s2c == "":
+        return Err("no matching mac (s2c)")
+    if _is_aes256_ctr(cipher_s2c) and not _is_supported_etm(mac_s2c):
+        return Err("aes256-ctr requires OpenSSH ETM MAC (s2c)")
+
+    var comp_c2s = ""
+    if _list_contains(client.compression_client_to_server, "none") and _list_contains(server.compression_client_to_server, "none"):
+        comp_c2s = "none"
+    if comp_c2s == "":
+        return Err("no matching compression (c2s)")
+
+    var comp_s2c = ""
+    if _list_contains(client.compression_server_to_client, "none") and _list_contains(server.compression_server_to_client, "none"):
+        comp_s2c = "none"
+    if comp_s2c == "":
+        return Err("no matching compression (s2c)")
+
+    Ok(SshAlgorithms(
+        kex: kex,
+        host_key: host_key,
+        cipher_c2s: cipher_c2s,
+        cipher_s2c: cipher_s2c,
+        mac_c2s: mac_c2s,
+        mac_s2c: mac_s2c,
+        compress_c2s: comp_c2s,
+        compress_s2c: comp_s2c
+    ))
+
+# ============================================================================
+# Service Messages
+# ============================================================================
+
+fn ssh_build_service_accept(service: text) -> [u8]:
+    """Build SSH_MSG_SERVICE_ACCEPT payload."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_SERVICE_ACCEPT)
+    _push_raw_string(buf, rt_string_to_byte_array(service))
+    buf
+
+fn ssh_build_ext_info_server_sig_algs(server_sig_algs: text) -> [u8]:
+    """Build SSH_MSG_EXT_INFO with only the server-sig-algs extension."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_EXT_INFO)
+    ssh_put_u32(buf, 1)
+    _push_raw_string(buf, [
+        0x73, 0x65, 0x72, 0x76, 0x65, 0x72, 0x2D, 0x73,
+        0x69, 0x67, 0x2D, 0x61, 0x6C, 0x67, 0x73
+    ])
+    _push_raw_string(buf, rt_string_to_byte_array(server_sig_algs))
+    buf
+
+fn ssh_parse_service_request(data: [u8]) -> Result<text, text>:
+    """Parse SSH_MSG_SERVICE_REQUEST. Returns service name.
+    NOTE: Uses var locals to work around baremetal Cranelift codegen bug.
+    """
+    if data.len() < 2:
+        return Err("SERVICE_REQUEST too short")
+    if _u8_at(data, 0) != SSH_MSG_SERVICE_REQUEST:
+        return Err("not a SERVICE_REQUEST")
+
+    var r = ssh_get_text(data, 1)
+    if r.is_ok():
+        var r_pair = r.unwrap()
+        var svc_name: text = r_pair.value
+        Ok(svc_name)
+    else:
+        Err("SERVICE_REQUEST: bad service name")
+
+fn ssh_build_disconnect(reason: u32, description: text) -> [u8]:
+    """Build SSH_MSG_DISCONNECT payload."""
+    var buf: [u8] = []
+    buf.push(SSH_MSG_DISCONNECT)
+    ssh_put_u32(buf, reason)
+    _push_raw_string(buf, _disconnect_description_bytes(description))
+    ssh_put_u32(buf, 0)     # language tag
+    buf

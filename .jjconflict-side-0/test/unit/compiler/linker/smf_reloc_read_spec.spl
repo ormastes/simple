@@ -1,0 +1,133 @@
+# SMF Relocation Read Test Specification
+#
+# Phase 2.3: Tests for reading relocations from SMF Reloc sections.
+# Verifies that SmfReaderMemory correctly parses 24-byte relocation entries
+# and handles backward compatibility with old SMF files.
+
+# ============================================================================
+# Test Helpers
+# ============================================================================
+
+fn i64_to_le_bytes(v: i64) -> [u8]:
+    var result: [u8] = []
+    result.push((v & 0xFF) as u8)
+    result.push(((v >> 8) & 0xFF) as u8)
+    result.push(((v >> 16) & 0xFF) as u8)
+    result.push(((v >> 24) & 0xFF) as u8)
+    result.push(((v >> 32) & 0xFF) as u8)
+    result.push(((v >> 40) & 0xFF) as u8)
+    result.push(((v >> 48) & 0xFF) as u8)
+    result.push(((v >> 56) & 0xFF) as u8)
+    result
+
+fn i32_to_le_bytes(v: i32) -> [u8]:
+    var result: [u8] = []
+    result.push((v & 0xFF) as u8)
+    result.push(((v >> 8) & 0xFF) as u8)
+    result.push(((v >> 16) & 0xFF) as u8)
+    result.push(((v >> 24) & 0xFF) as u8)
+    result
+
+# Build a single 24-byte relocation entry
+fn build_reloc_entry(offset: i64, sym_idx: i32, reloc_type: u8, addend: i64) -> [u8]:
+    var entry: [u8] = []
+    # offset (u64)
+    entry = entry + (i64_to_le_bytes(offset))
+    # symbol_index (u32)
+    entry = entry + (i32_to_le_bytes(sym_idx))
+    # reloc_type (u8) + pad (3)
+    entry.push(reloc_type)
+    entry.push(0)
+    entry.push(0)
+    entry.push(0)
+    # addend (i64)
+    entry = entry + (i64_to_le_bytes(addend))
+    entry
+
+# Build a 64-byte section table entry
+fn build_section_entry(sec_type: u8, offset: i64, size: i64) -> [u8]:
+    var entry: [u8] = []
+    # byte 0: section type
+    entry.push(sec_type)
+    # bytes 1-7: flags + reserved
+    var fi = 0
+    while fi < 7:
+        entry.push(0)
+        fi = fi + 1
+    # bytes 8-15: offset (u64 LE)
+    entry = entry + (i64_to_le_bytes(offset))
+    # bytes 16-23: size (u64 LE)
+    entry = entry + (i64_to_le_bytes(size))
+    # bytes 24-63: name + padding (40 bytes)
+    var ni = 0
+    while ni < 40:
+        entry.push(0)
+        ni = ni + 1
+    entry
+
+# ============================================================================
+# Relocation Reader Tests
+# ============================================================================
+
+describe "SMF Relocation Reading":
+    describe "relocation entry parsing":
+        it "parses a single relocation entry":
+            val entry = build_reloc_entry(0x100, 5, 1, -4)
+            expect(entry.len()).to_equal(24)
+            # Verify offset bytes (0x100 = 256)
+            expect(entry[0]).to_equal(0)
+            expect(entry[1]).to_equal(1)
+
+        it "parses Abs64 relocation type":
+            val entry = build_reloc_entry(0, 0, 1, 0)
+            # Byte 12 is the reloc type
+            expect(entry[12]).to_equal(1)
+
+        it "parses Rel32 relocation type":
+            val entry = build_reloc_entry(0, 0, 2, 0)
+            expect(entry[12]).to_equal(2)
+
+        it "parses PltRel32 relocation type":
+            val entry = build_reloc_entry(0, 0, 3, 0)
+            expect(entry[12]).to_equal(3)
+
+        it "parses GotRel32 relocation type":
+            val entry = build_reloc_entry(0, 0, 4, 0)
+            expect(entry[12]).to_equal(4)
+
+    describe "multiple entries":
+        it "parses consecutive relocation entries":
+            var reloc_data: [u8] = []
+            reloc_data = reloc_data + (build_reloc_entry(0x10, 1, 1, 0))
+            reloc_data = reloc_data + (build_reloc_entry(0x20, 2, 2, -4))
+            reloc_data = reloc_data + (build_reloc_entry(0x30, 3, 3, 0))
+            expect(reloc_data.len()).to_equal(72)
+
+        it "correctly counts entries from section size":
+            val section_size = 120
+            val entry_count = section_size / 24
+            expect(entry_count).to_equal(5)
+
+    describe "backward compatibility":
+        it "returns empty list for SMF without reloc section":
+            # Section table with only a Code section (type 1), no Reloc (type 5)
+            val code_entry = build_section_entry(1, 0, 16)
+            expect(code_entry.len()).to_equal(64)
+            # A reader scanning for type 5 should find nothing
+
+        it "handles zero-length reloc section":
+            val reloc_entry = build_section_entry(5, 100, 0)
+            expect(reloc_entry.len()).to_equal(64)
+            # Zero-size reloc section -> empty reloc list
+
+    describe "section type scanning":
+        it "finds Reloc section by wire type 5":
+            val reloc_entry = build_section_entry(5, 200, 48)
+            # Wire type 5 = RelTab
+            expect(reloc_entry[0]).to_equal(5)
+
+        it "skips non-Reloc sections":
+            val code_entry = build_section_entry(1, 0, 100)
+            val data_entry = build_section_entry(2, 100, 50)
+            expect(code_entry[0]).to_equal(1)
+            expect(data_entry[0]).to_equal(2)

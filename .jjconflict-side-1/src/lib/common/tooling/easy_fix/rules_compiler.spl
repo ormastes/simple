@@ -1,0 +1,116 @@
+#![allow(unnamed_duplicate_typed_args)]
+@allow(unnamed_duplicate_typed_args)
+# EasyFix Rules - Compiler-Related Rules
+#
+# Rules that integrate with compiler diagnostics:
+#   E:typo_suggestion            — Fix misspelled identifiers (Levenshtein)
+#   E:type_mismatch_coercion     — Insert type coercion (.to_string() etc.)
+
+use std.common.tooling.easy_fix.types.{EasyFix, FixConfidence, Replacement}
+use std.text.{levenshtein_distance}
+
+# ============================================================================
+# Rule 7: typo_suggestion (Levenshtein distance)
+# Detects likely misspelled identifiers and suggests corrections.
+# Confidence: Likely
+# ============================================================================
+
+fn levenshtein(a: String, b: String) -> Int:
+    levenshtein_distance(a, b)
+
+fn check_typo_suggestion(source: String, file: String, known_names: [String]) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    var lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Look for lines with "undefined" or "not found" error patterns
+        # This rule is primarily used with compiler error output, but we can also
+        # scan for identifiers that are close to known names
+        # For text-scanning mode: check val/var assignments with unknown identifiers
+
+        byte_offset = byte_offset + line.len() + 1
+
+    # This rule is primarily for compiler diagnostics integration.
+    # The text-scanning version is a no-op; the Rust version hooks into name resolution.
+    fixes
+
+fn suggest_typo_fix(file: String, line_num: Int, col: Int, byte_start: Int, byte_end: Int, misspelled: String, known_names: [String]) -> Option<EasyFix>:
+    var best_name = ""
+    var best_dist = 3  # Max distance threshold
+
+    for name in known_names:
+        val dist = levenshtein(misspelled, name)
+        if dist > 0 and dist < best_dist:
+            best_dist = dist
+            best_name = name
+
+    if best_name.len() > 0:
+        var fix = EasyFix.create(
+            id: "E:typo_suggestion:{line_num}",
+            description: "did you mean `{best_name}`?",
+            confidence: FixConfidence.Likely
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: byte_start,
+            end: byte_end,
+            line: line_num,
+            column: col,
+            new_text: best_name
+        ))
+        return Some(fix)
+
+    nil
+
+# ============================================================================
+# Rule 9: type_mismatch_coercion
+# Detects type mismatches where a simple coercion can fix the issue.
+# Confidence: Likely
+# ============================================================================
+
+fn check_type_mismatch_coercion(source: String, file: String) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    # This rule works primarily with compiler type-check errors.
+    # The text-scanning version is a no-op; the Rust version hooks into type checker.
+    fixes
+
+fn suggest_type_coercion_fix(file: String, line_num: Int, col: Int, byte_end: Int, expected_type: String, actual_type: String) -> Option<EasyFix>:
+    # Common coercions
+    var coercion = ""
+
+    if expected_type == "String" and actual_type == "Int":
+        coercion = ".to_string()"
+    if expected_type == "String" and actual_type == "Float":
+        coercion = ".to_string()"
+    if expected_type == "String" and actual_type == "Bool":
+        coercion = ".to_string()"
+    if expected_type == "Int" and actual_type == "Float":
+        coercion = ".to_int()"
+    if expected_type == "Float" and actual_type == "Int":
+        coercion = ".to_float()"
+    if expected_type == "Bool" and actual_type == "Int":
+        coercion = " != 0"
+
+    if coercion.len() > 0:
+        var fix = EasyFix.create(
+            id: "E:type_mismatch_coercion:{line_num}",
+            description: "insert `{coercion}` to convert {actual_type} to {expected_type}",
+            confidence: FixConfidence.Likely
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: byte_end,
+            end: byte_end,
+            line: line_num,
+            column: col,
+            new_text: coercion
+        ))
+        return Some(fix)
+
+    nil
+

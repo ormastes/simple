@@ -1,0 +1,135 @@
+# Atomic Database Operations
+#
+# Provides thread-safe, atomic read-modify-write operations for SDN database files.
+# Mirrors the Rust unified_db.rs logic for consistent behavior.
+
+use simple_sdn.*
+
+# Public exports
+
+# FFI for file operations
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_atomic_write(path: text, content: text) -> bool
+extern fn rt_file_lock(path: text, timeout_secs: i64) -> text
+extern fn rt_file_unlock(lock_path: text) -> bool
+
+# Lock guard for RAII-style locking
+struct FileLock:
+    lock_path: text
+    released: bool
+
+impl FileLock:
+    # Acquire a file lock with timeout
+    #
+    # Creates a lock file at `path.lock` and waits up to timeout_secs.
+    # Returns FileLock on success, None on timeout.
+    static fn acquire(path: text, timeout_secs: i64) -> Option<FileLock>:
+        val lock_path = rt_file_lock(path, timeout_secs)
+        if lock_path == "":
+            nil
+        else:
+            Some(FileLock(lock_path: lock_path, released: false))
+
+    # Release the lock manually (also happens on drop)
+    me release():
+        if not self.released:
+            rt_file_unlock(self.lock_path)
+            self.released = true
+
+# Atomic read-modify-write operation with file locking
+#
+# Usage:
+#   val result = atomic_update_file("db.sdn", \content:
+#       # Modify content here
+#       content + "new line\n"
+#   )
+fn atomic_update_file(
+    path: text,
+    updater: fn(text) -> text
+) -> Result<(), text>:
+    # Acquire lock with 10 second timeout
+    val lock_opt = FileLock.acquire(path, 10)
+    if not lock_opt.?:
+        return Err("Failed to acquire lock for: " + path)
+
+    var lock = lock_opt.unwrap()
+
+    # Read existing content (empty if file doesn't exist)
+    var content = ""
+    if rt_file_exists(path):
+        content = rt_file_read_text(path)
+
+    # Apply update function
+    val new_content = updater(content)
+
+    # Atomically write back
+    val success = rt_file_atomic_write(path, new_content)
+    if not success:
+        lock.release()
+        return Err("Failed to write file: " + path)
+
+    lock.release()
+    Ok(())
+
+# Atomic read with file locking
+#
+# Ensures consistent reads by acquiring a lock during read.
+fn atomic_read_file(path: text) -> Result<text, text>:
+    # Acquire lock
+    val lock_opt = FileLock.acquire(path, 10)
+    if not lock_opt.?:
+        return Err("Failed to acquire lock for: " + path)
+
+    var lock = lock_opt.unwrap()
+
+    if not rt_file_exists(path):
+        lock.release()
+        return Ok("")
+
+    val content = rt_file_read_text(path)
+    lock.release()
+    Ok(content)
+
+# Atomic write with file locking
+#
+# Combines locking with atomic write for maximum safety.
+fn atomic_write_file_locked(path: text, content: text) -> Result<(), text>:
+    # Acquire lock
+    val lock_opt = FileLock.acquire(path, 10)
+    if not lock_opt.?:
+        return Err("Failed to acquire lock for: " + path)
+
+    var lock = lock_opt.unwrap()
+
+    val success = rt_file_atomic_write(path, content)
+    if not success:
+        lock.release()
+        return Err("Failed to write file: " + path)
+
+    lock.release()
+    Ok(())
+
+# ===== Public Locking API for Test Compatibility =====
+
+fn acquire_lock(path: text, timeout_secs: i64) -> Result<FileLock, text>:
+    match FileLock.acquire(path, timeout_secs):
+        Some(lock) : Ok(lock)
+        None : Err("Failed to acquire lock: timeout after {timeout_secs}s")
+
+fn release_lock(path: text) -> bool:
+    val lock_path = path + ".lock"
+    rt_file_unlock(lock_path)
+
+fn cleanup_lock_files() -> bool:
+    val patterns = ["*.lock", "doc/**/*.lock", "tmp/**/*.lock"]
+    for pattern in patterns:
+        val files = rt_dir_glob(pattern)
+        for file in files:
+            rt_file_remove(file)
+    true
+
+# ===== External FFI for Lock Cleanup =====
+
+extern fn rt_dir_glob(pattern: text) -> [text]
+extern fn rt_file_remove(path: text) -> bool

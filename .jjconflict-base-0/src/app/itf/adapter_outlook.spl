@@ -1,0 +1,430 @@
+# ITF CLI — Microsoft Graph mail adapter (Outlook backend)
+#
+# Talks to https://graph.microsoft.com/v1.0/users/{shared_mailbox_upn}/...
+# (NOT /me/... — client-credentials has no signed-in user).
+#
+# Outlook REST v2.0 (outlook.office.com/api/v2.0) was fully decommissioned;
+# this adapter targets Microsoft Graph v1.0 only.
+#
+# Auth: Bearer JWT minted by std.nogc_sync_mut.oauth2 (client credentials).
+#       Application permissions Mail.Read + Mail.ReadWrite, scoped to a single
+#       shared mailbox via Exchange Online ApplicationAccessPolicy.
+#
+# Pagination: follow @odata.nextLink verbatim (it is an absolute URL — do
+#             NOT prepend base_url).
+# Filtering:  $filter and $search are mutually exclusive; this adapter
+#             prefers $filter when both are supplied and ignores $search.
+# Throttling: respect Retry-After on HTTP 429; exponential backoff with
+#             max 3 retries.
+
+use std.nogc_sync_mut.http_client.{
+    create_request,
+    request_add_header,
+    request_set_body,
+    response_get_status_code,
+    response_get_body,
+    response_get_header,
+    http_get,
+    http_post,
+    http_delete,
+}
+use std.nogc_sync_mut.http_client.types.{
+    METHOD_GET,
+    METHOD_POST,
+    METHOD_PATCH,
+    url_encode,
+}
+use std.nogc_sync_mut.ffi.system.{sleep_secs}
+use std.nogc_sync_mut.oauth2.{oauth2_get_token, oauth2_parse_retry_after}
+use std.common.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize, json_get_type}
+
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val OUTLOOK_GRAPH_BASE: text = "https://graph.microsoft.com/v1.0"
+val OUTLOOK_DEFAULT_TOP: i64 = 50
+val OUTLOOK_MAX_RETRIES: i64 = 3
+val OUTLOOK_DEFAULT_SCOPE: text = "https://graph.microsoft.com/.default"
+val OUTLOOK_DEFAULT_SELECT_MESSAGES: text = "id,subject,from,receivedDateTime,bodyPreview,hasAttachments"
+
+
+# ============================================================================
+# Data structures
+# ============================================================================
+
+class OutlookFolder:
+    """A single mail folder under /users/{upn}/mailFolders."""
+    id: text
+    display_name: text
+    parent_folder_id: text
+    total_item_count: i64
+    unread_item_count: i64
+
+
+class OutlookMessage:
+    """A summarized Graph mail message."""
+    id: text
+    subject: text
+    from_address: text
+    from_name: text
+    received: text
+    body_preview: text
+    has_attachments: bool
+
+
+class OutlookClient:
+    """Bearer-authenticated Microsoft Graph client.
+
+    `access_token` is the cached OAuth2 access token. `mailbox_upn` is the
+    shared-mailbox UPN that all endpoints are addressed under.
+    """
+    access_token: text
+    mailbox_upn: text
+    base_url: text
+
+
+# ============================================================================
+# Client construction
+# ============================================================================
+
+fn outlook_client_from_token(access_token: text, mailbox_upn: text) -> OutlookClient:
+    """Build a client when the caller already has a token (e.g. from a cache)."""
+    OutlookClient(
+        access_token: access_token,
+        mailbox_upn: mailbox_upn,
+        base_url: OUTLOOK_GRAPH_BASE,
+    )
+
+
+fn outlook_client_acquire(tenant_id: text, client_id: text, secret_env_var: text, mailbox_upn: text, cache_path: text) -> (bool, OutlookClient):
+    """Acquire a client by minting (or reusing a cached) Bearer token.
+
+    Returns (success, client). On failure the OutlookClient is empty and
+    must not be used.
+    """
+    val (ok, tok) = oauth2_get_token(tenant_id, client_id, secret_env_var, OUTLOOK_DEFAULT_SCOPE, cache_path)
+    if not ok:
+        return (false, OutlookClient(access_token: "", mailbox_upn: mailbox_upn, base_url: OUTLOOK_GRAPH_BASE))
+    (true, outlook_client_from_token(tok, mailbox_upn))
+
+
+# ============================================================================
+# Internal HTTP helpers
+# ============================================================================
+
+fn _outlook_user_path(client: OutlookClient, suffix: text) -> text:
+    """Build /users/{upn}{suffix} under the Graph base URL."""
+    "{client.base_url}/users/{url_encode(client.mailbox_upn)}{suffix}"
+
+
+fn _outlook_attach_auth(req: (text, text, list, text), client: OutlookClient) -> (text, text, list, text):
+    """Add Authorization, Accept, and Content-Type headers."""
+    var r = req
+    r = request_add_header(r, "Authorization", "Bearer {client.access_token}")
+    r = request_add_header(r, "Accept", "application/json")
+    r = request_add_header(r, "Content-Type", "application/json")
+    r
+
+
+# Throttle handling and retry loop are scaffolded below. The codebase's
+# http_client currently lacks an execute/send path (the http_* constructors
+# return a request tuple, mirrored here for parity with adapter_confluence);
+# until that wiring lands, _outlook_throttle_decision is a one-shot that
+# returns the response tuple as-is. The 429 + Retry-After + exponential
+# backoff policy is captured in _outlook_compute_backoff so it is ready
+# to drop into the loop once http_client gains a real send.
+fn _outlook_compute_backoff(attempt: i64, retry_after_header: text) -> i64:
+    """Decide how many seconds to sleep before retry `attempt` (zero-based).
+
+    Honours `Retry-After` when present (RFC 7231 seconds form); otherwise
+    uses exponential backoff: 2, 4, 8 seconds capped by OUTLOOK_MAX_RETRIES.
+    """
+    val from_header = oauth2_parse_retry_after(retry_after_header)
+    if from_header > 0:
+        return from_header
+    var seconds: i64 = 1
+    var i: i64 = 0
+    while i <= attempt:
+        seconds = seconds * 2
+        i = i + 1
+    seconds
+
+
+fn _outlook_throttle_should_retry(status: i64, attempt: i64) -> bool:
+    """Whether a request that returned `status` should be retried (gated by
+    OUTLOOK_MAX_RETRIES)."""
+    status == 429 and attempt < OUTLOOK_MAX_RETRIES
+
+
+fn _outlook_send(req: (text, text, list, text)) -> (i64, text, list, text):
+    """Send a request once. Retry/backoff is a follow-up that depends on
+    http_client gaining an execute path; see _outlook_compute_backoff and
+    _outlook_throttle_should_retry for the policy that will drive it."""
+    val _ = sleep_secs  # keep import live until the retry loop is wired
+    req
+
+
+fn _outlook_get(client: OutlookClient, url: text) -> (i64, text):
+    """GET an absolute URL, returning (status, body)."""
+    var req = http_get(url)
+    req = _outlook_attach_auth(req, client)
+    val resp = _outlook_send(req)
+    (response_get_status_code(resp), response_get_body(resp))
+
+
+fn _outlook_post(client: OutlookClient, url: text, payload: text) -> (i64, text):
+    """POST an absolute URL with a JSON payload."""
+    var req = http_post(url, payload)
+    req = _outlook_attach_auth(req, client)
+    val resp = _outlook_send(req)
+    (response_get_status_code(resp), response_get_body(resp))
+
+
+fn _outlook_patch(client: OutlookClient, url: text, payload: text) -> (i64, text):
+    """PATCH an absolute URL. http_client has no http_patch helper, so we
+    construct the request manually with METHOD_PATCH."""
+    var req = create_request(METHOD_PATCH, url)
+    req = request_set_body(req, payload)
+    req = _outlook_attach_auth(req, client)
+    val resp = _outlook_send(req)
+    (response_get_status_code(resp), response_get_body(resp))
+
+
+# ============================================================================
+# JSON parsing helpers
+# ============================================================================
+
+fn _ojson_str(obj: any, key: text) -> text:
+    if obj == nil:
+        return ""
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return ""
+    val s = json_serialize(v)
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _ojson_int(obj: any, key: text) -> i64:
+    if obj == nil:
+        return 0
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return 0
+    val s = json_serialize(v)
+    var n: i64 = 0
+    var any = false
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+            any = true
+        else if any:
+            return n
+    if any: n else: 0
+
+
+fn _ojson_bool(obj: any, key: text) -> bool:
+    if obj == nil:
+        return false
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return false
+    json_serialize(v).trim() == "true"
+
+
+fn _parse_folder(obj: any) -> OutlookFolder:
+    OutlookFolder(
+        id: _ojson_str(obj, "id"),
+        display_name: _ojson_str(obj, "displayName"),
+        parent_folder_id: _ojson_str(obj, "parentFolderId"),
+        total_item_count: _ojson_int(obj, "totalItemCount"),
+        unread_item_count: _ojson_int(obj, "unreadItemCount"),
+    )
+
+
+fn _parse_message(obj: any) -> OutlookMessage:
+    var from_addr = ""
+    var from_name = ""
+    val from_obj = json_object_get(obj, "from")
+    if from_obj != nil:
+        val email_addr = json_object_get(from_obj, "emailAddress")
+        if email_addr != nil:
+            from_addr = _ojson_str(email_addr, "address")
+            from_name = _ojson_str(email_addr, "name")
+    OutlookMessage(
+        id: _ojson_str(obj, "id"),
+        subject: _ojson_str(obj, "subject"),
+        from_address: from_addr,
+        from_name: from_name,
+        received: _ojson_str(obj, "receivedDateTime"),
+        body_preview: _ojson_str(obj, "bodyPreview"),
+        has_attachments: _ojson_bool(obj, "hasAttachments"),
+    )
+
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn outlook_list_folders(client: OutlookClient) -> (bool, [OutlookFolder], text):
+    """List mail folders under /users/{upn}/mailFolders, following pagination.
+
+    Returns (success, folders, raw_json_first_page). The raw JSON returned
+    is the first page only — pagination is collapsed into the folders list.
+    """
+    var url = _outlook_user_path(client, "/mailFolders?$top={OUTLOOK_DEFAULT_TOP}")
+    var folders: [OutlookFolder] = []
+    var first_body = ""
+
+    while url != "":
+        val (status, body) = _outlook_get(client, url)
+        if first_body == "":
+            first_body = body
+        if status < 200 or status >= 300:
+            return (false, folders, body)
+        val parsed = json_parse(body)
+        if parsed == nil:
+            return (false, folders, "invalid JSON response")
+        val arr = json_object_get(parsed, "value")
+        if arr != nil:
+            val n = json_array_length(arr)
+            var i = 0
+            while i < n:
+                folders = folders + [_parse_folder(json_array_get(arr, i))]
+                i = i + 1
+        # @odata.nextLink is an absolute URL — use as-is.
+        val next = json_object_get(parsed, "@odata.nextLink")
+        if next != nil:
+            url = json_serialize(next)
+            if url.starts_with("\"") and url.ends_with("\"") and url.len() >= 2:
+                url = url[1:url.len() - 1]
+        else:
+            url = ""
+
+    (true, folders, first_body)
+
+
+fn outlook_list_messages(client: OutlookClient, folder_id: text, filter: text, top: i64) -> (bool, [OutlookMessage], text):
+    """List messages in a folder.
+
+    `filter` is a Graph $filter expression; when non-empty it is applied
+    via $filter. `$search` is intentionally NOT supported here — Graph
+    rejects requests that combine $filter and $search, and the rest of
+    this CLI uses property filters.
+
+    `top` defaults to 50 when <= 0. Pagination follows @odata.nextLink.
+    """
+    val effective_top = if top <= 0: OUTLOOK_DEFAULT_TOP else: top
+    val select = url_encode(OUTLOOK_DEFAULT_SELECT_MESSAGES)
+    var path = "/mailFolders/{url_encode(folder_id)}/messages?$top={effective_top}&$select={select}"
+    if filter != "":
+        path = path + "&$filter={url_encode(filter)}"
+    var url = _outlook_user_path(client, path)
+
+    var messages: [OutlookMessage] = []
+    var first_body = ""
+
+    while url != "":
+        val (status, body) = _outlook_get(client, url)
+        if first_body == "":
+            first_body = body
+        if status < 200 or status >= 300:
+            return (false, messages, body)
+        val parsed = json_parse(body)
+        if parsed == nil:
+            return (false, messages, "invalid JSON response")
+        val arr = json_object_get(parsed, "value")
+        if arr != nil:
+            val n = json_array_length(arr)
+            var i = 0
+            while i < n:
+                messages = messages + [_parse_message(json_array_get(arr, i))]
+                i = i + 1
+        val next = json_object_get(parsed, "@odata.nextLink")
+        if next != nil:
+            url = json_serialize(next)
+            if url.starts_with("\"") and url.ends_with("\"") and url.len() >= 2:
+                url = url[1:url.len() - 1]
+        else:
+            url = ""
+
+    (true, messages, first_body)
+
+
+fn outlook_get_message(client: OutlookClient, msg_id: text, expand_attachments: bool) -> (bool, OutlookMessage, text):
+    """Get a single message, optionally expanding attachments inline.
+
+    Endpoint: GET /users/{upn}/messages/{id}[?$expand=attachments].
+    """
+    var path = "/messages/{url_encode(msg_id)}"
+    if expand_attachments:
+        path = path + "?$expand=attachments"
+    val url = _outlook_user_path(client, path)
+    val (status, body) = _outlook_get(client, url)
+
+    val empty = OutlookMessage(
+        id: "", subject: "", from_address: "", from_name: "",
+        received: "", body_preview: "", has_attachments: false,
+    )
+
+    if status < 200 or status >= 300:
+        return (false, empty, body)
+
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+
+    (true, _parse_message(parsed), body)
+
+
+fn outlook_mark_read(client: OutlookClient, msg_id: text, is_read: bool) -> (bool, text):
+    """PATCH /users/{upn}/messages/{id} with {"isRead": <bool>}."""
+    val url = _outlook_user_path(client, "/messages/{url_encode(msg_id)}")
+    val payload = if is_read: "{\"isRead\": true}" else: "{\"isRead\": false}"
+    val (status, body) = _outlook_patch(client, url, payload)
+    (status >= 200 and status < 300, body)
+
+
+fn outlook_move_message(client: OutlookClient, msg_id: text, dest_folder_id: text) -> (bool, text):
+    """POST /users/{upn}/messages/{id}/move with {"destinationId": "..."}.
+
+    Graph creates a copy in the destination and removes the original. The
+    response body contains the new message; we return it as raw JSON.
+    """
+    val url = _outlook_user_path(client, "/messages/{url_encode(msg_id)}/move")
+    val payload = "\{\"destinationId\": \"{_json_escape(dest_folder_id)}\"\}"
+    val (status, body) = _outlook_post(client, url, payload)
+    (status >= 200 and status < 300, body)
+
+
+fn outlook_get_attachment_value(client: OutlookClient, msg_id: text, att_id: text) -> (bool, text, text):
+    """Stream raw attachment content via /attachments/{id}/$value.
+
+    Returns (success, body_text, content_type). NOTE: the underlying
+    http_client's response_get_body is text-typed in this codebase, so
+    binary attachments are returned as the raw response text. Callers
+    that need bytes must base64-decode (preferred) by requesting the
+    JSON form `/attachments/{id}` and reading the `contentBytes` field
+    instead.
+    """
+    val url = _outlook_user_path(client, "/messages/{url_encode(msg_id)}/attachments/{url_encode(att_id)}/$value")
+    var req = http_get(url)
+    req = _outlook_attach_auth(req, client)
+    val resp = _outlook_send(req)
+    val status = response_get_status_code(resp)
+    val body = response_get_body(resp)
+    val ctype = response_get_header(resp, "Content-Type")
+    if status < 200 or status >= 300:
+        return (false, "", ctype)
+    (true, body, ctype)
+
+
+# ============================================================================
+# Internal: JSON string escape for inline payloads.
+# ============================================================================
+
+fn _json_escape(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")

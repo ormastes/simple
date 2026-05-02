@@ -1,0 +1,41 @@
+"""
+# Domain Block HIR Lowering Unit Spec
+
+Verifies that top-level domain blocks survive the pure Simple frontend and
+arrive in HIR metadata without stealing ordinary identifier usage.
+"""
+
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+describe "domain block HIR lowering":
+    it "captures schema and style blocks at module scope":
+        val log = make_logger()
+        val source = "schema{Building: id Uuid}\nstyle{Button.primary: padding 8px}"
+        val module = parse_full_frontend(source, "domain_blocks", "domain_blocks", log)
+
+        expect(module.domain_blocks.len()).to_equal(2)
+        expect(module.domain_blocks[0].kind).to_equal("schema")
+        expect(module.domain_blocks[0].payload).to_equal("Building: id Uuid")
+        expect(module.domain_blocks[0].context).to_equal("module")
+        expect(module.domain_blocks[1].kind).to_equal("style")
+        expect(module.domain_blocks[1].payload).to_equal("Button.primary: padding 8px")
+
+        val hir = HirLowering.with_filename("domain_blocks").lower_module(module)
+        expect(hir.domain_blocks.len()).to_equal(2)
+        expect(hir.domain_blocks[0].kind).to_equal("schema")
+        expect(hir.domain_blocks[0].payload).to_equal("Building: id Uuid")
+        expect(hir.domain_blocks[1].kind).to_equal("style")
+        expect(hir.domain_blocks[1].payload).to_equal("Button.primary: padding 8px")
+
+    it "does not treat ordinary schema identifiers as domain blocks":
+        val log = make_logger()
+        val source = "val schema = 1"
+        val module = parse_full_frontend(source, "schema_ident", "schema_ident", log)
+
+        expect(module.domain_blocks.len()).to_equal(0)
+        expect(module.constants.has("schema")).to_equal(true)

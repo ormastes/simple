@@ -1,0 +1,65 @@
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn delete_if_exists(path: text):
+    if rt_file_exists(path):
+        rt_file_delete(path)
+
+fn le_u64(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) |
+    ((bytes[offset + 1] as i64) << 8) |
+    ((bytes[offset + 2] as i64) << 16) |
+    ((bytes[offset + 3] as i64) << 24) |
+    ((bytes[offset + 4] as i64) << 32) |
+    ((bytes[offset + 5] as i64) << 40) |
+    ((bytes[offset + 6] as i64) << 48) |
+    ((bytes[offset + 7] as i64) << 56)
+
+fn contains_ascii(bytes: [u8], needle: [u8]) -> bool:
+    if needle.len() == 0 or bytes.len() < needle.len():
+        return false
+    var i: i64 = 0
+    while i <= bytes.len() - needle.len():
+        var matched = true
+        var j: i64 = 0
+        while j < needle.len():
+            if bytes[i + j] != needle[j]:
+                matched = false
+            j = j + 1
+        if matched:
+            return true
+        i = i + 1
+    false
+
+describe "dynamic driver LSM packaging":
+    it "bin/simple compile --driver-mode=dynamic writes LSMF with SMF and DRVS bytes":
+        val src = "/tmp/simple_dynamic_driver_lsm_packaging.spl"
+        val out = "/tmp/simple_dynamic_driver_lsm_packaging.lsm"
+        delete_if_exists(out)
+        expect(rt_file_write_text(src, "@driver(class = 2, vendor = 0x1B36, device = [0x000E], version = \"1.0\")\nfn driver_init():\n    return 0\n")).to_equal(true)
+
+        val (stdout, stderr, code) = rt_process_run("bin/simple", ["compile", "--driver-mode=dynamic", src, "-o", out])
+        expect(code).to_equal(0)
+        expect(rt_file_exists(out)).to_equal(true)
+
+        val archive = rt_file_read_bytes(out) ?? []
+        expect(archive[0]).to_equal(76)
+        expect(archive[1]).to_equal(83)
+        expect(archive[2]).to_equal(77)
+        expect(archive[3]).to_equal(70)
+
+        val smf_offset = le_u64(archive, 128 + 64)
+        expect(archive[smf_offset]).to_equal(83)
+        expect(archive[smf_offset + 1]).to_equal(77)
+        expect(archive[smf_offset + 2]).to_equal(70)
+        expect(archive[smf_offset + 3]).to_equal(0)
+        expect(contains_ascii(archive, [46, 100, 114, 118, 95, 109, 97, 110, 105, 102, 101, 115, 116])).to_equal(true)
+        expect(contains_ascii(archive, [83, 86, 82, 68])).to_equal(true)
+
+        delete_if_exists(src)
+        delete_if_exists(out)

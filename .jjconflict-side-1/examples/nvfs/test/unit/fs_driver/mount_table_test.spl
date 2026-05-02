@@ -1,0 +1,137 @@
+# @cover src/lib/nogc_sync_mut/fs_driver/mount_table.spl 80%
+"""
+# NVFS MountTable Unit Tests
+
+**Feature IDs:** #NVFS-FS-DRIVER-MOUNT
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** In Progress
+**Design:** doc/05_design/nvfs_design.md §5.4
+
+## Overview
+
+Tests for MountTable:
+  - new() is empty; lookup("/") returns None
+  - mount + lookup returns Some
+  - mounting same path twice returns error
+  - unmount then lookup returns None
+  - unmount of never-mounted path returns error
+  - resolve() uses indexed char-copy without slice()
+"""
+
+use std.spipe.*
+use std.fs_driver.mount_table.*
+use std.fs_driver.instance.*
+use std.fs_driver.types.{Path, MountOptions}
+use std.fs_driver.ramfs.{RamFsDriver}
+
+
+# ============================================================================
+# Empty table
+# ============================================================================
+
+describe "MountTable — empty table":
+    """
+    ## Empty invariants
+
+    A newly created MountTable must have no entries.
+    """
+
+    it "new() table: lookup('/') returns None":
+        val mt = MountTable.new()
+        val result = mt.lookup("/")
+        expect(result.is_none()).to_equal(true)
+
+
+# ============================================================================
+# Mount and lookup
+# ============================================================================
+
+describe "MountTable — mount and lookup":
+    """
+    ## Mount + lookup round-trip
+
+    After mounting a driver at a path, lookup must return Some.
+    """
+
+    it "mount then lookup returns Some":
+        var mt = MountTable.new()
+        val driver = DriverInstance.RamFs(RamFsDriver.new("test"))
+        val ok = mt.mount(Path(raw: "/"), driver, MountOptions.default())
+        expect(ok.is_ok()).to_equal(true)
+        val found = mt.lookup("/")
+        expect(found.is_some()).to_equal(true)
+
+    it "mount increments entry count to 1":
+        var mt = MountTable.new()
+        val driver = DriverInstance.RamFs(RamFsDriver.new("data"))
+        mt.mount(Path(raw: "/data"), driver, MountOptions.default())
+        val found = mt.lookup(Path(raw: "/data/file.txt"))
+        expect(found.is_some()).to_equal(true)
+
+    it "mount twice at same path returns error":
+        var mt = MountTable.new()
+        val d1 = DriverInstance.RamFs(RamFsDriver.new("a"))
+        val d2 = DriverInstance.RamFs(RamFsDriver.new("b"))
+        mt.mount(Path(raw: "/mnt"), d1, MountOptions.default())
+        val result = mt.mount(Path(raw: "/mnt"), d2, MountOptions.default())
+        expect(result.is_err()).to_equal(true)
+
+
+# ============================================================================
+# Unmount
+# ============================================================================
+
+describe "MountTable — unmount":
+    """
+    ## Unmount contract
+
+    After unmounting, lookup must return None. Unmounting unknown path is error.
+    """
+
+    it "unmount then lookup returns None":
+        var mt = MountTable.new()
+        val driver = DriverInstance.RamFs(RamFsDriver.new("tmp"))
+        mt.mount(Path(raw: "/tmp"), driver, MountOptions.default())
+        mt.unmount(Path(raw: "/tmp"))
+        val found = mt.lookup(Path(raw: "/tmp"))
+        expect(found.is_none()).to_equal(true)
+
+    it "unmount of never-mounted path returns error":
+        var mt = MountTable.new()
+        val result = mt.unmount(Path(raw: "/nonexistent"))
+        expect(result.is_err()).to_equal(true)
+
+
+# ============================================================================
+# resolve() — FR-STORAGE-0004
+# ============================================================================
+
+describe "MountTable — resolve":
+    """
+    ## resolve() contract
+
+    FR-STORAGE-0004: resolve() must strip mount prefixes without slice().
+    """
+
+    it "resolve longest-prefix match returns mount id and relative suffix":
+        var mt = MountTable.new()
+        val root = DriverInstance.RamFs(RamFsDriver.new("root"))
+        val data = DriverInstance.RamFs(RamFsDriver.new("data"))
+        mt.mount(Path(raw: "/"), root, MountOptions.default())
+        val mid = mt.mount(Path(raw: "/data"), data, MountOptions.default())
+        val result = mt.resolve(Path(raw: "/data/foo/bar.txt"))
+        expect(result.is_ok()).to_equal(true)
+        val resolved = result.unwrap()
+        expect(resolved.0.id).to_equal(mid.unwrap().id)
+        expect(resolved.1.raw).to_equal("/foo/bar.txt")
+
+    it "resolve root mount returns the full absolute suffix":
+        var mt = MountTable.new()
+        val root = DriverInstance.RamFs(RamFsDriver.new("root"))
+        val mid = mt.mount(Path(raw: "/"), root, MountOptions.default())
+        val result = mt.resolve(Path(raw: "/foo/bar.txt"))
+        expect(result.is_ok()).to_equal(true)
+        val resolved = result.unwrap()
+        expect(resolved.0.id).to_equal(mid.unwrap().id)
+        expect(resolved.1.raw).to_equal("foo/bar.txt")

@@ -1,0 +1,117 @@
+#![allow(unnamed_duplicate_typed_args)]
+# comm — Compare two sorted files line by line
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error, split_lines}
+
+fn tool_comm(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Compare two sorted files line by line.
+
+    Flags: -1 suppress lines only in file1
+           -2 suppress lines only in file2
+           -3 suppress lines common to both files
+    Output columns:
+      col 1 (no indent):  lines only in file1
+      col 2 (1 tab):      lines only in file2
+      col 3 (2 tabs):     lines in both files
+    Usage: comm [-1] [-2] [-3] FILE1 FILE2
+    """
+    var suppress1 = false
+    var suppress2 = false
+    var suppress3 = false
+    var file_paths: [text] = []
+    var i = 0
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "-1":
+            suppress1 = true
+        elif arg == "-2":
+            suppress2 = true
+        elif arg == "-3":
+            suppress3 = true
+        elif not arg.starts_with("-"):
+            file_paths = file_paths.push(arg)
+        i = i + 1
+
+    if file_paths.len() < 2:
+        write_error(terminal, "comm: missing operand")
+        write_error(terminal, "Usage: comm [-1] [-2] [-3] FILE1 FILE2")
+        return 1
+    if vfs == nil:
+        write_error(terminal, "comm: no filesystem mounted")
+        return 1
+
+    val path1 = resolve_path(cwd, file_paths[0])
+    val path2 = resolve_path(cwd, file_paths[1])
+
+    val result1 = vfs.read_text(path1)
+    if result1.is_err():
+        write_error(terminal, "comm: {path1}: {result1.unwrap_err()}")
+        return 1
+
+    val result2 = vfs.read_text(path2)
+    if result2.is_err():
+        write_error(terminal, "comm: {path2}: {result2.unwrap_err()}")
+        return 1
+
+    val lines1 = split_lines(result1.unwrap())
+    val lines2 = split_lines(result2.unwrap())
+
+    # Two-pointer merge on sorted files
+    var i1 = 0
+    var i2 = 0
+
+    while i1 < lines1.len() and i2 < lines2.len():
+        val l1 = lines1[i1]
+        val l2 = lines2[i2]
+        if l1 == l2:
+            # Common line — column 3
+            if not suppress3:
+                write_line(terminal, "\t\t{l1}")
+            i1 = i1 + 1
+            i2 = i2 + 1
+        elif _line_less(l1, l2):
+            # Only in file1 — column 1
+            if not suppress1:
+                write_line(terminal, "{l1}")
+            i1 = i1 + 1
+        else:
+            # Only in file2 — column 2
+            if not suppress2:
+                write_line(terminal, "\t{l2}")
+            i2 = i2 + 1
+
+    # Remaining lines in file1 only
+    while i1 < lines1.len():
+        val l1 = lines1[i1]
+        if not suppress1:
+            write_line(terminal, "{l1}")
+        i1 = i1 + 1
+
+    # Remaining lines in file2 only
+    while i2 < lines2.len():
+        val l2 = lines2[i2]
+        if not suppress2:
+            write_line(terminal, "\t{l2}")
+        i2 = i2 + 1
+
+    return 0
+
+fn _line_less(a: text, b: text) -> bool:
+    """Lexicographic less-than comparison for two strings."""
+    val len_a = a.len()
+    val len_b = b.len()
+    val min_len = if len_a < len_b: len_a else: len_b
+    var k = 0
+    while k < min_len:
+        val ca = a.char_at(k).to_i32()
+        val cb = b.char_at(k).to_i32()
+        if ca < cb:
+            return true
+        if ca > cb:
+            return false
+        k = k + 1
+    return len_a < len_b

@@ -1,0 +1,45 @@
+"""
+# QEMU RV32 Baremetal Transport Smoke
+#
+# This is not the primary RV32 shared-workload proof. Stable workload execution
+# lives in the ELF/shared-workload lane, low-level GDB memory transport is
+# covered by remote_baremetal_runtime_spec.spl, and the recovered raw injected
+# execution lane lives in qemu_rv32_raw_injected_regression_spec.spl.
+"""
+
+use app.io.file_ops.{file_read}
+use std.io_runtime.{shell}
+
+extern fn rt_file_exists(path: text) -> bool
+
+fn qemu_rv32_available() -> bool:
+    val qemu = shell("command -v qemu-system-riscv32 >/dev/null 2>&1")
+    val clang = shell("command -v clang >/dev/null 2>&1")
+    val gdb = shell("command -v gdb >/dev/null 2>&1")
+    qemu.exit_code == 0 and clang.exit_code == 0 and gdb.exit_code == 0
+
+fn has_target_aware_riscv_gdb() -> bool:
+    val home = shell("echo $HOME").stdout.trim()
+    val rv32_usr = rt_file_exists("/usr/bin/riscv32-unknown-elf-gdb")
+    val rv32_local = rt_file_exists("/usr/local/bin/riscv32-unknown-elf-gdb")
+    val rv64_usr = rt_file_exists("/usr/bin/riscv64-unknown-elf-gdb")
+    val rv64_local = rt_file_exists("/usr/local/bin/riscv64-unknown-elf-gdb")
+    val multi_usr = rt_file_exists("/usr/bin/gdb-multiarch")
+    val multi_local = rt_file_exists("/usr/local/bin/gdb-multiarch")
+    val multi_home = if home.len() > 0: rt_file_exists("{home}/.local/bin/gdb-multiarch") else: false
+    rv32_usr or rv32_local or rv64_usr or rv64_local or multi_usr or multi_local or multi_home
+
+fn shared_workload_source() -> text:
+    file_read("test/fixtures/remote_jit/baremetal_lib_workload_main.spl")
+
+describe "QEMU RV32 Baremetal Transport Smoke":
+    slow_it "keeps the RV32 transport prerequisites and shared workload fixture available":
+        if not qemu_rv32_available():
+            print "[skip] QEMU RV32 tools not available"
+        else:
+            val source = shared_workload_source()
+            expect(source.trim().len()).to_be_greater_than(0)
+            if has_target_aware_riscv_gdb():
+                print "[note] low-level GDB transport is covered by test/feature/app/remote_baremetal/remote_baremetal_runtime_spec.spl"
+            else:
+                print "[skip] target-aware RISC-V GDB unavailable"

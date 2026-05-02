@@ -1,0 +1,576 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Fe25519 — Pure-Simple GF(2^255 - 19) field arithmetic
+#
+# 5 limbs of ~51 bits each (u64), wide products in u128. Pseudo-Mersenne reduction
+# (one multiply by 19 in `_fe_carry_wide`).
+#
+# Sourced from `src/os/crypto/curve25519.spl` (the survivor backend per R-C's
+# field_design.md §1). Code shape is preserved verbatim so that the existing
+# RFC 7748 X25519 KAT continues to pass when callers re-target this module.
+#
+# Reference: RFC 7748 (Elliptic Curves for Security)
+# Reference: D. J. Bernstein, "Curve25519: new Diffie-Hellman speed records"
+
+extern fn rt_black_box(x: i64) -> i64
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# p = 2^255 - 19
+# In limb form (51-bit limbs): p = (2^51 - 19, 2^51 - 1, 2^51 - 1, 2^51 - 1, 2^51 - 1)
+val P_LIMB_MASK: u64 = 0x7FFFFFFFFFFFF   # 2^51 - 1 = mask for 51 bits
+
+# ============================================================================
+# Field Element: GF(2^255 - 19)
+# ============================================================================
+
+struct Fe25519:
+    """Field element in GF(2^255-19), represented as 5 limbs of ~51 bits.
+
+    l0 holds bits 0..50
+    l1 holds bits 51..101
+    l2 holds bits 102..152
+    l3 holds bits 153..203
+    l4 holds bits 204..254
+    """
+    l0: u64
+    l1: u64
+    l2: u64
+    l3: u64
+    l4: u64
+
+# ============================================================================
+# Field Element Constructors
+# ============================================================================
+
+fn fe_zero() -> Fe25519:
+    """Return the zero element."""
+    Fe25519(l0: 0, l1: 0, l2: 0, l3: 0, l4: 0)
+
+fn fe_one() -> Fe25519:
+    """Return the multiplicative identity."""
+    Fe25519(l0: 1, l1: 0, l2: 0, l3: 0, l4: 0)
+
+# ============================================================================
+# Field Arithmetic
+# ============================================================================
+
+fn fe_add(a: Fe25519, b: Fe25519) -> Fe25519:
+    """Add two field elements. Result may be > p; callers reduce as needed."""
+    Fe25519(
+        l0: a.l0 + b.l0,
+        l1: a.l1 + b.l1,
+        l2: a.l2 + b.l2,
+        l3: a.l3 + b.l3,
+        l4: a.l4 + b.l4
+    )
+
+fn fe_sub(a: Fe25519, b: Fe25519) -> Fe25519:
+    """Subtract two field elements.
+
+    To avoid underflow, we add 2*p before subtracting.
+    2*p limbs: (2^52 - 38, 2^52 - 2, 2^52 - 2, 2^52 - 2, 2^52 - 2)
+    """
+    Fe25519(
+        l0: (a.l0 + 0xFFFFFFFFFFFDA) - b.l0,
+        l1: (a.l1 + 0xFFFFFFFFFFFFE) - b.l1,
+        l2: (a.l2 + 0xFFFFFFFFFFFFE) - b.l2,
+        l3: (a.l3 + 0xFFFFFFFFFFFFE) - b.l3,
+        l4: (a.l4 + 0xFFFFFFFFFFFFE) - b.l4
+    )
+
+fn fe_neg(a: Fe25519) -> Fe25519:
+    """Additive inverse: (-a) mod p, via fe_sub(zero, a)."""
+    fe_sub(fe_zero(), a)
+
+fn _fe_carry(t: Fe25519) -> Fe25519:
+    """Carry propagation to keep limbs in ~51-bit range."""
+    var l0 = t.l0
+    var l1 = t.l1
+    var l2 = t.l2
+    var l3 = t.l3
+    var l4 = t.l4
+
+    var c: u64 = l0 >> 51
+    l0 = l0 & P_LIMB_MASK
+    l1 = l1 + c
+
+    c = l1 >> 51
+    l1 = l1 & P_LIMB_MASK
+    l2 = l2 + c
+
+    c = l2 >> 51
+    l2 = l2 & P_LIMB_MASK
+    l3 = l3 + c
+
+    c = l3 >> 51
+    l3 = l3 & P_LIMB_MASK
+    l4 = l4 + c
+
+    c = l4 >> 51
+    l4 = l4 & P_LIMB_MASK
+    l0 = l0 + c * 19    # Reduction: 2^255 = 19 mod p
+
+    Fe25519(l0: l0, l1: l1, l2: l2, l3: l3, l4: l4)
+
+fn _fe_carry_wide(l0: u128, l1: u128, l2: u128, l3: u128, l4: u128) -> Fe25519:
+    """Carry propagation for wide intermediates.
+
+    The interpreter checks integer overflow, so the 51x51 limb products must be
+    accumulated in a wider type before we fold them back into 51-bit limbs.
+    """
+    val mask: u128 = P_LIMB_MASK
+
+    var c: u128 = l0 >> 51
+    var n0 = l0 & mask
+    var n1 = l1 + c
+
+    c = n1 >> 51
+    n1 = n1 & mask
+    var n2 = l2 + c
+
+    c = n2 >> 51
+    n2 = n2 & mask
+    var n3 = l3 + c
+
+    c = n3 >> 51
+    n3 = n3 & mask
+    var n4 = l4 + c
+
+    c = n4 >> 51
+    n4 = n4 & mask
+    n0 = n0 + c * 19
+
+    c = n0 >> 51
+    n0 = n0 & mask
+    n1 = n1 + c
+
+    Fe25519(
+        l0: n0.to_u64(),
+        l1: n1.to_u64(),
+        l2: n2.to_u64(),
+        l3: n3.to_u64(),
+        l4: n4.to_u64()
+    )
+
+fn fe_mul(a: Fe25519, b: Fe25519) -> Fe25519:
+    """Multiply two field elements using schoolbook multiplication with reduction.
+
+    Each limb is at most ~51 bits, so 51x51 products do not fit in u64. The
+    interpreter traps on checked overflow, so we accumulate the schoolbook terms
+    in u128 and then fold the result back into 51-bit limbs.
+
+    For limbs a_i * b_j where i+j >= 5, we multiply the contribution by 19
+    (because that term represents 2^(51*(i+j)) which wraps around as 19 * 2^(51*(i+j-5))).
+    """
+    val a0: u128 = a.l0
+    val a1: u128 = a.l1
+    val a2: u128 = a.l2
+    val a3: u128 = a.l3
+    val a4: u128 = a.l4
+
+    val b0: u128 = b.l0
+    val b1: u128 = b.l1
+    val b2: u128 = b.l2
+    val b3: u128 = b.l3
+    val b4: u128 = b.l4
+
+    val b1_19: u128 = b1 * 19
+    val b2_19: u128 = b2 * 19
+    val b3_19: u128 = b3 * 19
+    val b4_19: u128 = b4 * 19
+
+    # Accumulate into 5 limbs using u128 so the interpreter never sees an
+    # overflowing 51x51 multiply.
+    val p00: u128 = a0 * b0
+    val p14: u128 = a1 * b4_19
+    val p23: u128 = a2 * b3_19
+    val p32: u128 = a3 * b2_19
+    val p41: u128 = a4 * b1_19
+    val t0: u128 = p00 + p14 + p23 + p32 + p41
+
+    val p01: u128 = a0 * b1
+    val p10: u128 = a1 * b0
+    val p24: u128 = a2 * b4_19
+    val p33: u128 = a3 * b3_19
+    val p42: u128 = a4 * b2_19
+    val t1: u128 = p01 + p10 + p24 + p33 + p42
+
+    val p02: u128 = a0 * b2
+    val p11: u128 = a1 * b1
+    val p20: u128 = a2 * b0
+    val p34: u128 = a3 * b4_19
+    val p43: u128 = a4 * b3_19
+    val t2: u128 = p02 + p11 + p20 + p34 + p43
+
+    val p03: u128 = a0 * b3
+    val p12: u128 = a1 * b2
+    val p21: u128 = a2 * b1
+    val p30: u128 = a3 * b0
+    val p44: u128 = a4 * b4_19
+    val t3: u128 = p03 + p12 + p21 + p30 + p44
+
+    val p04: u128 = a0 * b4
+    val p13: u128 = a1 * b3
+    val p22: u128 = a2 * b2
+    val p31: u128 = a3 * b1
+    val p40: u128 = a4 * b0
+    val t4: u128 = p04 + p13 + p22 + p31 + p40
+
+    _fe_carry_wide(t0, t1, t2, t3, t4)
+
+fn fe_sq(a: Fe25519) -> Fe25519:
+    """Square a field element (optimized: uses symmetry of a*a).
+
+    a^2 = sum of a_i * a_j for all i,j. For i != j the term appears twice.
+    """
+    val a0: u128 = a.l0
+    val a1: u128 = a.l1
+    val a2: u128 = a.l2
+    val a3: u128 = a.l3
+    val a4: u128 = a.l4
+
+    # Double cross-terms
+    val a0_2: u128 = a0 * 2
+    val a1_2: u128 = a1 * 2
+    val a2_2: u128 = a2 * 2
+    val a3_2: u128 = a3 * 2
+
+    # Pre-multiply by 19 for reduction
+    val a1_38: u128 = a1 * 38
+    val a2_38: u128 = a2 * 38
+    val a3_38: u128 = a3 * 38
+    val a4_19: u128 = a4 * 19
+
+    val sq00: u128 = a0 * a0
+    val sq14: u128 = a1_38 * a4
+    val sq23: u128 = a2_38 * a3
+    val t0: u128 = sq00 + sq14 + sq23
+
+    val sq01: u128 = a0_2 * a1
+    val sq24: u128 = a2_38 * a4
+    val sq33: u128 = (a3 * a3) * 19
+    val t1: u128 = sq01 + sq24 + sq33
+
+    val sq02: u128 = a0_2 * a2
+    val sq11: u128 = a1 * a1
+    val sq34: u128 = a3_38 * a4
+    val t2: u128 = sq02 + sq11 + sq34
+
+    val sq03: u128 = a0_2 * a3
+    val sq12: u128 = a1_2 * a2
+    val sq44: u128 = a4_19 * a4
+    val t3: u128 = sq03 + sq12 + sq44
+
+    val sq04: u128 = a0_2 * a4
+    val sq13: u128 = a1_2 * a3
+    val sq22: u128 = a2 * a2
+    val t4: u128 = sq04 + sq13 + sq22
+
+    _fe_carry_wide(t0, t1, t2, t3, t4)
+
+# ============================================================================
+# Full Reduction mod p
+# ============================================================================
+
+fn fe_reduce(a: Fe25519) -> Fe25519:
+    """Fully reduce a field element to canonical [0, p) range.
+
+    After carrying, we may still have a value in [p, 2p). Subtract p if needed.
+    """
+    var t = _fe_carry(a)
+
+    # One more carry pass to ensure limbs are tight
+    t = _fe_carry(t)
+
+    # Check if t >= p by trying t - p
+    # p = (2^51 - 19, 2^51 - 1, 2^51 - 1, 2^51 - 1, 2^51 - 1)
+    # If after subtracting p, all limbs are >= 0, then t >= p.
+    # We compute t - p and check the borrow.
+    var l0 = t.l0
+    var l1 = t.l1
+    var l2 = t.l2
+    var l3 = t.l3
+    var l4 = t.l4
+
+    # Subtract p conditionally: first add 19 to l0, check if >= 2^51
+    var c: u64 = (l0 + 19) >> 51
+    c = (l1 + c) >> 51
+    c = (l2 + c) >> 51
+    c = (l3 + c) >> 51
+    c = (l4 + c) >> 51
+    # c is 1 if t >= p, 0 otherwise
+
+    # If t >= p, subtract p (which means add 19 and mask)
+    l0 = l0 + 19 * c
+    c = l0 >> 51
+    l0 = l0 & P_LIMB_MASK
+    l1 = l1 + c
+    c = l1 >> 51
+    l1 = l1 & P_LIMB_MASK
+    l2 = l2 + c
+    c = l2 >> 51
+    l2 = l2 & P_LIMB_MASK
+    l3 = l3 + c
+    c = l3 >> 51
+    l3 = l3 & P_LIMB_MASK
+    l4 = l4 + c
+    l4 = l4 & P_LIMB_MASK
+
+    Fe25519(l0: l0, l1: l1, l2: l2, l3: l3, l4: l4)
+
+# ============================================================================
+# Encoding / Decoding
+# ============================================================================
+
+fn fe_from_bytes(b: [u8]) -> Fe25519:
+    """Decode a 32-byte little-endian encoding into a field element.
+
+    Loads 256 bits, then masks bit 255 (high bit of last byte).
+    Splits into 5 limbs of 51 bits.
+    """
+    val l0 = _load_le_u64(b, 0) & P_LIMB_MASK
+    val l1 = (_load_le_u64(b, 6) >> 3) & P_LIMB_MASK
+    val l2 = (_load_le_u64(b, 12) >> 6) & P_LIMB_MASK
+    val l3 = (_load_le_u64(b, 19) >> 1) & P_LIMB_MASK
+    val l4 = (_load_le_u64(b, 24) >> 12) & P_LIMB_MASK
+
+    Fe25519(l0: l0, l1: l1, l2: l2, l3: l3, l4: l4)
+
+fn _load_le_u64(b: [u8], offset: u64) -> u64:
+    """Load up to 8 bytes from b[offset..] as a little-endian u64."""
+    var result: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        if (offset + i) < b.len():
+            result = result | (b[offset + i].to_u64() << (i * 8))
+        i = i + 1
+    result
+
+fn fe_to_bytes(a: Fe25519) -> [u8]:
+    """Encode a field element as 32 bytes, little-endian.
+
+    First fully reduces, then packs limbs into bytes.
+    """
+    val t = fe_reduce(a)
+
+    # Combine limbs into a 256-bit value and serialize
+    # h = l0 + l1*2^51 + l2*2^102 + l3*2^153 + l4*2^204
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        result.push(0x00)
+        i = i + 1
+
+    # Pack bits from 5 limbs into 32 bytes
+    _store_limb(result, t.l0, 0, 0)        # bits 0..50 starting at byte 0, bit 0
+    _store_limb(result, t.l1, 6, 3)        # bits 51..101 starting at byte 6, bit 3
+    _store_limb(result, t.l2, 12, 6)       # bits 102..152 starting at byte 12, bit 6
+    _store_limb(result, t.l3, 19, 1)       # bits 153..203 starting at byte 19, bit 1
+    _store_limb(result, t.l4, 24, 12)      # bits 204..254 starting at byte 24, bit 12
+
+    result
+
+fn _store_limb(buf: [u8], limb: u64, byte_offset: u64, bit_offset: u64):
+    """Store a 51-bit limb into buf at the given byte/bit offset (OR-ing in)."""
+    val shifted = limb << bit_offset
+    var i: u64 = 0
+    while i < 8:
+        if (byte_offset + i) < 32:
+            val byte_val = ((shifted >> (i * 8)) & 0xFF).to_u8()
+            buf[byte_offset + i] = buf[byte_offset + i] | byte_val
+        i = i + 1
+
+# ============================================================================
+# Field Inversion via Fermat's Little Theorem
+# ============================================================================
+
+fn fe_invert(z: Fe25519) -> Fe25519:
+    """Compute z^(-1) = z^(p-2) mod p, where p = 2^255 - 19.
+
+    p-2 = 2^255 - 21
+
+    Uses an addition chain to compute z^(2^255 - 21) efficiently.
+    This follows the same chain as the reference implementation.
+    """
+    # z^2
+    var z2 = fe_sq(z)
+
+    # z^(2^2) = z^4
+    var t = fe_sq(z2)
+    # z^(2^3) = z^8
+    t = fe_sq(t)
+
+    # z^9 = z^8 * z
+    var z9 = fe_mul(t, z)
+    # z^11 = z^9 * z^2
+    var z11 = fe_mul(z9, z2)
+
+    # z^(2^1 * 11) = z^22
+    t = fe_sq(z11)
+    # z^(2^5 - 2^0) = z^31 = z^22 * z^9
+    var z_2_5_0 = fe_mul(t, z9)
+
+    # z^(2^10 - 2^0)
+    t = fe_sq(z_2_5_0)
+    var i: u64 = 1
+    while i < 5:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_10_0 = fe_mul(t, z_2_5_0)
+
+    # z^(2^20 - 2^0)
+    t = fe_sq(z_2_10_0)
+    i = 1
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_20_0 = fe_mul(t, z_2_10_0)
+
+    # z^(2^40 - 2^0)
+    t = fe_sq(z_2_20_0)
+    i = 1
+    while i < 20:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_20_0)
+
+    # z^(2^50 - 2^0)
+    i = 0
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_50_0 = fe_mul(t, z_2_10_0)
+
+    # z^(2^100 - 2^0)
+    t = fe_sq(z_2_50_0)
+    i = 1
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_100_0 = fe_mul(t, z_2_50_0)
+
+    # z^(2^200 - 2^0)
+    t = fe_sq(z_2_100_0)
+    i = 1
+    while i < 100:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_100_0)
+
+    # z^(2^250 - 2^0)
+    i = 0
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_50_0)
+
+    # z^(2^255 - 2^5)
+    t = fe_sq(t)
+    t = fe_sq(t)
+    t = fe_sq(t)
+    t = fe_sq(t)
+    t = fe_sq(t)
+
+    # z^(2^255 - 21) = z^(p-2)
+    fe_mul(t, z11)
+
+# Trait-aligned alias.
+fn fe_inv(a: Fe25519) -> Fe25519:
+    """Modular inverse a^(p-2). See `fe_invert` for the addition-chain body."""
+    fe_invert(a)
+
+# ============================================================================
+# Generic exponentiation (square-and-multiply-always, CT)
+# ============================================================================
+
+fn fe_pow(a: Fe25519, e: [u8]) -> Fe25519:
+    """Compute a^e mod p where the exponent is given as little-endian bytes.
+
+    Uses square-and-multiply-always: every bit performs both a square and a
+    multiplication, then `fe_cond_select` picks the result. The exponent is
+    treated as public-but-CT-safe (B6 / R-C §4 row `fe_pow`).
+    """
+    var result = fe_one()
+    var i: u64 = e.len()
+    while i > 0:
+        i = i - 1
+        var bit_idx: u64 = 8
+        while bit_idx > 0:
+            bit_idx = bit_idx - 1
+            result = fe_sq(result)
+            val bit: u64 = (e[i].to_u64() >> bit_idx) & 1
+            val maybe = fe_mul(result, a)
+            result = fe_cond_select(result, maybe, bit)
+    result
+
+# ============================================================================
+# Constant-time equality / zero / select
+# ============================================================================
+
+fn fe_eq(a: Fe25519, b: Fe25519) -> bool:
+    """Constant-time equality. Reduces both operands, XOR-accumulates the
+    32-byte canonical encodings, then routes the accumulator through
+    `rt_black_box` so the optimizer cannot rebuild a data-dependent branch
+    (B6, commit d42cde3a0f).
+    """
+    val ba = fe_to_bytes(a)
+    val bb = fe_to_bytes(b)
+    var acc: i64 = 0
+    var i: u64 = 0
+    while i < 32:
+        acc = acc | (ba[i].to_i64() ^ bb[i].to_i64())
+        i = i + 1
+    rt_black_box(acc) == 0
+
+fn fe_is_zero(a: Fe25519) -> bool:
+    """Constant-time zero test. Reduce, OR-accumulate the 32-byte encoding,
+    and route through `rt_black_box`."""
+    val ba = fe_to_bytes(a)
+    var acc: i64 = 0
+    var i: u64 = 0
+    while i < 32:
+        acc = acc | ba[i].to_i64()
+        i = i + 1
+    rt_black_box(acc) == 0
+
+fn fe_cond_select(a: Fe25519, b: Fe25519, take_b: u64) -> Fe25519:
+    """If `take_b` is 1, return b; if 0, return a. Constant-time mask form.
+
+    The mask is routed through `rt_black_box` so Cranelift cannot lower this
+    into a data-dependent branch (R-C §4 / B6).
+    """
+    val raw_mask: u64 = 0 - take_b   # 0xFFFF... if take_b=1, 0 if take_b=0
+    val mask: u64 = rt_black_box(raw_mask.to_i64()).to_u64()
+    Fe25519(
+        l0: a.l0 ^ (mask & (a.l0 ^ b.l0)),
+        l1: a.l1 ^ (mask & (a.l1 ^ b.l1)),
+        l2: a.l2 ^ (mask & (a.l2 ^ b.l2)),
+        l3: a.l3 ^ (mask & (a.l3 ^ b.l3)),
+        l4: a.l4 ^ (mask & (a.l4 ^ b.l4))
+    )
+
+fn fe_cond_swap(a: Fe25519, b: Fe25519, swap: u64) -> (Fe25519, Fe25519):
+    """If `swap` is 1, return (b, a); if 0, return (a, b). Constant-time.
+
+    Mask form. The mask is routed through `rt_black_box` to defeat optimizer
+    branch reconstruction (R-C §4 / B6).
+    """
+    val raw_mask: u64 = 0 - swap
+    val mask: u64 = rt_black_box(raw_mask.to_i64()).to_u64()
+    val new_a = Fe25519(
+        l0: a.l0 ^ (mask & (a.l0 ^ b.l0)),
+        l1: a.l1 ^ (mask & (a.l1 ^ b.l1)),
+        l2: a.l2 ^ (mask & (a.l2 ^ b.l2)),
+        l3: a.l3 ^ (mask & (a.l3 ^ b.l3)),
+        l4: a.l4 ^ (mask & (a.l4 ^ b.l4))
+    )
+    val new_b = Fe25519(
+        l0: b.l0 ^ (mask & (a.l0 ^ b.l0)),
+        l1: b.l1 ^ (mask & (a.l1 ^ b.l1)),
+        l2: b.l2 ^ (mask & (a.l2 ^ b.l2)),
+        l3: b.l3 ^ (mask & (a.l3 ^ b.l3)),
+        l4: b.l4 ^ (mask & (a.l4 ^ b.l4))
+    )
+    (new_a, new_b)
