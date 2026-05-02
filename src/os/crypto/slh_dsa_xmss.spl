@@ -1,0 +1,158 @@
+# SLH-DSA — XMSS Subtree (FIPS 205 §6)
+#
+# Implements one fixed-height XMSS subtree of SLH-DSA-SHA2-128s. Each
+# subtree authenticates 2^h' WOTS+ public keys via a Merkle tree using the
+# H tweakable hash from slh_dsa_wots. SLH-DSA-128s composes d=7 such
+# subtrees of height h'=9 into the hypertree implemented in
+# slh_dsa_hypertree.spl.
+#
+# All three primitives (xmss_node / xmss_sign / xmss_pkFromSig) take h'
+# as an explicit parameter so the spec can exercise them at reduced
+# heights (h'=2, h'=3, ...) when the full SHA2-128s parameter set's
+# 2^h' WOTS+ leaf evaluations would exceed interpreter-mode time
+# budgets. The public API in slh_dsa.spl freezes h' = 9 per FIPS 205
+# §11 Table 2.
+#
+# Reference: NIST FIPS 205 — Stateless Hash-Based Digital Signature
+#   Standard, August 2024.
+
+mod os.crypto.slh_dsa_xmss
+
+use os.crypto.slh_dsa_wots.{
+    adrs_copy, adrs_set_type, adrs_set_keypair_address,
+    adrs_set_tree_height, adrs_set_tree_index,
+    adrs_type_wots_hash, adrs_type_tree,
+    slh_H_128s,
+    wots_pk_gen_128s, wots_sign_128s, wots_pk_from_sig_128s,
+}
+
+fn _slh_n_128s() -> u64:
+    16u64
+
+# ============================================================================
+# xmss_node (FIPS 205 Algorithm 9)
+# ============================================================================
+#
+# xmss_node(SK.seed, i, z, PK.seed, ADRS):
+#   if z = 0: return wots_pk_gen(SK.seed, PK.seed, ADRS|TYPE=WOTS_HASH, kp=i)
+#   else:     L = xmss_node(SK.seed, 2i,   z-1, PK.seed, ADRS)
+#             R = xmss_node(SK.seed, 2i+1, z-1, PK.seed, ADRS)
+#             return H(PK.seed, ADRS|TYPE=TREE, height=z, idx=i, L, R)
+
+fn xmss_node(sk_seed: [u8], i: i64, z: i64, pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+    if z == 0:
+        var adrs_w = adrs_copy(adrs_in)
+        adrs_w = adrs_set_type(adrs_w, adrs_type_wots_hash())
+        adrs_w = adrs_set_keypair_address(adrs_w, i)
+        wots_pk_gen_128s(sk_seed, pk_seed, adrs_w)
+    else:
+        val left  = xmss_node(sk_seed, 2 * i,     z - 1, pk_seed, adrs_in)
+        val right = xmss_node(sk_seed, 2 * i + 1, z - 1, pk_seed, adrs_in)
+        var adrs_t = adrs_copy(adrs_in)
+        adrs_t = adrs_set_type(adrs_t, adrs_type_tree())
+        adrs_t = adrs_set_tree_height(adrs_t, z)
+        adrs_t = adrs_set_tree_index(adrs_t, i)
+        slh_H_128s(pk_seed, adrs_t, left, right)
+
+# ============================================================================
+# xmss_sign (FIPS 205 Algorithm 10)
+# ============================================================================
+#
+# Returns sig_xmss = wots_sig (len*n bytes) || auth_path (h_prime*n bytes).
+# Authentication path is collected bottom-up: at each level k in 0..h_prime,
+# pick the sibling of the sub-index path bit.
+
+fn xmss_sign(message_n_bytes: [u8], sk_seed: [u8], idx: i64,
+             h_prime: i64, pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+    # Compute auth path siblings.
+    var auth: [u8] = [0u8; 0]
+    var k = 0
+    while k < h_prime:
+        val sibling_idx = (idx >> k) ^ 1  # flip bit k of (idx >> k)
+        # Per FIPS 205 §6 the sibling at level k of the path is at index
+        # (floor(idx / 2^k) ^ 1).
+        val node = xmss_node(sk_seed, sibling_idx, k, pk_seed, adrs_in)
+        var j: u64 = 0u64
+        while j < _slh_n_128s():
+            auth.push(node[j])
+            j = j + 1
+        k = k + 1
+
+    # WOTS+ signature for the leaf at position idx.
+    var adrs_w = adrs_copy(adrs_in)
+    adrs_w = adrs_set_type(adrs_w, adrs_type_wots_hash())
+    adrs_w = adrs_set_keypair_address(adrs_w, idx)
+    val wots_sig = wots_sign_128s(message_n_bytes, sk_seed, pk_seed, adrs_w)
+
+    # Concatenate wots_sig || auth_path.
+    var out: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < wots_sig.len():
+        out.push(wots_sig[i])
+        i = i + 1
+    var j: u64 = 0u64
+    while j < auth.len():
+        out.push(auth[j])
+        j = j + 1
+    out
+
+# ============================================================================
+# xmss_pkFromSig (FIPS 205 Algorithm 11)
+# ============================================================================
+#
+# Recovers the XMSS subtree root from sig_xmss and the leaf message.
+# Procedure:
+#   1. Recover leaf WOTS+ public key via wots_pkFromSig.
+#   2. Walk up h_prime levels, pairing the running node with each
+#      auth-path sibling and applying H with TYPE=TREE.
+
+fn xmss_pk_from_sig(idx: i64, sig_xmss: [u8], message_n_bytes: [u8],
+                    h_prime: i64, pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+    val n = _slh_n_128s()
+    val len = 35
+    val wots_sig_bytes = (len.to_u64()) * n  # 35 * 16 = 560
+
+    # Slice WOTS+ signature out of sig_xmss.
+    var wots_sig: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < wots_sig_bytes:
+        wots_sig.push(sig_xmss[i])
+        i = i + 1
+
+    # Recover WOTS+ leaf public key.
+    var adrs_w = adrs_copy(adrs_in)
+    adrs_w = adrs_set_type(adrs_w, adrs_type_wots_hash())
+    adrs_w = adrs_set_keypair_address(adrs_w, idx)
+    var node = wots_pk_from_sig_128s(message_n_bytes, wots_sig, pk_seed, adrs_w)
+
+    # Walk up the auth path.
+    var adrs_t = adrs_copy(adrs_in)
+    adrs_t = adrs_set_type(adrs_t, adrs_type_tree())
+    var k = 0
+    while k < h_prime:
+        # Slice sibling node from sig_xmss.
+        val off: u64 = wots_sig_bytes + (k.to_u64()) * n
+        var sibling: [u8] = [0u8; 0]
+        var s: u64 = 0u64
+        while s < n:
+            sibling.push(sig_xmss[off + s])
+            s = s + 1
+        # Determine left/right based on bit k of idx.
+        adrs_t = adrs_set_tree_height(adrs_t, k + 1)
+        if ((idx >> k) & 1) == 0:
+            adrs_t = adrs_set_tree_index(adrs_t, idx >> (k + 1))
+            node = slh_H_128s(pk_seed, adrs_t, node, sibling)
+        else:
+            adrs_t = adrs_set_tree_index(adrs_t, idx >> (k + 1))
+            node = slh_H_128s(pk_seed, adrs_t, sibling, node)
+        k = k + 1
+    node
+
+# ============================================================================
+# Convenience: total XMSS signature length in bytes
+# ============================================================================
+#
+#   xmss_sig_len(h_prime) = (35 + h_prime) * 16   (SHA2-128s)
+
+fn xmss_sig_len_128s(h_prime: i64) -> i64:
+    (35 + h_prime) * 16
