@@ -1,7 +1,15 @@
 # Interpreter `Value::UInt` missing method dispatch — breaks every `u8.to_u32()`/`.to_i64()`/`.to_u64()` site
 
 Date: 2026-05-01 (filed during W6 zstd non-RLE seq-tables lane)
-Status: **OPEN — blocks every Zstd, Huffman, FSE, range-coder, and TLS spec that touches `u8` payload bytes via `.to_u32()` / `.to_i64()` / `.to_u64()`.**
+Status: **FIXED 2026-05-01 — root cause: W5-I migration to `Value::UInt { value, width }` updated literals/casts/ops/value_bridge but missed BOTH method-dispatch sites (`interpreter_method/mod.rs:382` primary dispatcher AND `interpreter_helpers/method_dispatch.rs:338` chained-call dispatcher); added `Value::UInt` arms in both that feed the unsigned bit-pattern through `cast_int_to_numeric` as `i64` (same trick as `value_bridge.rs:288`).**
+
+Note: the original bug report localized only `interpreter_helpers/method_dispatch.rs`. The actual primary-path failure surface includes `interpreter_method/mod.rs` (the `evaluate_method_call` dispatcher that calls `primitives::handle_int_methods`); the error string `method 'to_i64' not found on type 'u8' (receiver value: 21)` originates from `mod.rs:1037`, not the chained-dispatch line at `method_dispatch.rs:507`. Both arms were added; sort/sum reducers in `method_dispatch.rs` were also patched to handle `Value::UInt` items so future array reductions on `[u8]` work.
+
+Verified post-fix:
+- `test/unit/lib/common/zstd_fse_weights_spec.spl` — 1/6 → **6/6 PASS**
+- `test/unit/lib/common/zstd_bits_spec.spl` — 1/4 → **4/4 PASS**
+- `test/unit/lib/common/zstd_compressed_block_spec.spl` — 0/7 → 3/7 PASS (4 remaining failures are non-UInt: "expected ... to contain ..." matcher messages, separate impl-side gap)
+- `test/unit/compiler/interpreter/u32_wrap_arith_spec.spl` — 14/14 still PASS (no W5-I regression)
 
 ## Symptom
 
