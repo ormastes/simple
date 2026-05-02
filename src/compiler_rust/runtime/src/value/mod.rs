@@ -906,10 +906,11 @@ pub use numeric_kernels::{
     rt_numeric_mul_f64, rt_numeric_sum_f32, rt_numeric_sum_f64,
 };
 
-// Re-export Phase 1 SIMD int bitwise / shift FFI symbols.
+// Re-export Phase 1 SIMD int bitwise / shift / arithmetic FFI symbols.
 pub use simd_int_ops::{
-    rt_simd_and_i32x4, rt_simd_and_i32x8, rt_simd_or_i32x4, rt_simd_or_i32x8, rt_simd_shl_i32x4, rt_simd_shl_i32x8,
-    rt_simd_shr_i32x4, rt_simd_shr_i32x8, rt_simd_xor_i32x4, rt_simd_xor_i32x8,
+    rt_simd_add_i32x4, rt_simd_add_i32x8, rt_simd_and_i32x4, rt_simd_and_i32x8, rt_simd_mul_i32x4, rt_simd_mul_i32x8,
+    rt_simd_or_i32x4, rt_simd_or_i32x8, rt_simd_shl_i32x4, rt_simd_shl_i32x8, rt_simd_shr_i32x4, rt_simd_shr_i32x8,
+    rt_simd_sub_i32x4, rt_simd_sub_i32x8, rt_simd_xor_i32x4, rt_simd_xor_i32x8,
 };
 
 // Re-export regex FFI functions
