@@ -1,0 +1,140 @@
+#!/bin/sh
+# QEMU SIMD Runner — SVE2 (AArch64) and RVV (RISC-V 64) vector extension wrapper
+#
+# Usage:
+#   sh scripts/qemu_simd_runner.shs --target sve2 --check
+#   sh scripts/qemu_simd_runner.shs --target rvv --check
+#   sh scripts/qemu_simd_runner.shs --target sve2 --bin build/test/simd_test
+#   sh scripts/qemu_simd_runner.shs --target rvv --bin build/test/simd_test --vlen 256
+#
+# --check   probe whether QEMU 9.0+ supports the requested CPU profile
+#           exit 0=ok, 1=qemu missing, 2=cpu profile unsupported
+# --bin     run binary inside QEMU; exit code mirrors target binary
+# --vlen    vector length in bits (default: 128)
+#
+# Pattern: scripts/qemu_riscv64.shs
+
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+TARGET=""
+CHECK=0
+BIN_PATH=""
+VLEN=128
+
+usage() {
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+die() {
+    printf '%s\n' "$1" >&2
+    exit "${2:-1}"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --target)
+            shift
+            TARGET="$1"
+            ;;
+        --target=*)
+            TARGET="${1#--target=}"
+            ;;
+        --check)
+            CHECK=1
+            ;;
+        --bin)
+            shift
+            BIN_PATH="$1"
+            ;;
+        --bin=*)
+            BIN_PATH="${1#--bin=}"
+            ;;
+        --vlen)
+            shift
+            VLEN="$1"
+            ;;
+        --vlen=*)
+            VLEN="${1#--vlen=}"
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            die "Unknown argument: $1"
+            ;;
+    esac
+    shift
+done
+
+if [ -z "$TARGET" ]; then
+    die "Error: --target {sve2|rvv} is required"
+fi
+
+case "$TARGET" in
+    sve2)
+        QEMU_BIN="qemu-system-aarch64"
+        CPU_PROFILE="max,sve2=on,sve-default-vector-length=$VLEN"
+        ARCH_LABEL="aarch64"
+        ;;
+    rvv)
+        QEMU_BIN="qemu-system-riscv64"
+        CPU_PROFILE="rv64gcv,vlen=$VLEN"
+        ARCH_LABEL="riscv64"
+        ;;
+    *)
+        die "Unknown target '$TARGET': must be sve2 or rvv"
+        ;;
+esac
+
+# Resolve qemu binary
+QEMU_PATH=""
+if command -v "$QEMU_BIN" >/dev/null 2>&1; then
+    QEMU_PATH="$(command -v "$QEMU_BIN")"
+fi
+
+if [ $CHECK -eq 1 ]; then
+    if [ -z "$QEMU_PATH" ]; then
+        printf 'MISSING: %s not found in PATH\n' "$QEMU_BIN" >&2
+        exit 1
+    fi
+    QEMU_VER="$("$QEMU_PATH" --version 2>&1 | head -1 || true)"
+    # Probe cpu profile by starting with -machine none and immediately exiting
+    PROBE_OUT="$("$QEMU_PATH" -machine none -cpu "$CPU_PROFILE" -nographic -kernel /dev/null 2>&1 || true)"
+    if printf '%s' "$PROBE_OUT" | grep -qi 'invalid\|unknown\|unsupported\|no such'; then
+        printf 'UNSUPPORTED: %s cpu profile "%s" rejected\n' "$QEMU_BIN" "$CPU_PROFILE" >&2
+        exit 2
+    fi
+    printf '%s %s -cpu %s -L %s\n' "$QEMU_BIN" "$QEMU_VER" "$CPU_PROFILE" "$VLEN"
+    exit 0
+fi
+
+if [ -n "$BIN_PATH" ]; then
+    if [ ! -f "$BIN_PATH" ]; then
+        die "Binary not found: $BIN_PATH"
+    fi
+    if [ -z "$QEMU_PATH" ]; then
+        die "Error: $QEMU_BIN not found in PATH" 1
+    fi
+
+    case "$TARGET" in
+        sve2)
+            exec "$QEMU_PATH" \
+                -machine virt \
+                -cpu "$CPU_PROFILE" \
+                -nographic \
+                -kernel "$BIN_PATH"
+            ;;
+        rvv)
+            exec "$QEMU_PATH" \
+                -machine virt \
+                -cpu "$CPU_PROFILE" \
+                -nographic \
+                -kernel "$BIN_PATH"
+            ;;
+    esac
+fi
+
+die "Error: specify --check or --bin <path>"
