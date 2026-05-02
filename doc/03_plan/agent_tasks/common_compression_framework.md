@@ -4,17 +4,35 @@ This task split assumes multiple spawned workers operating in parallel while pre
 
 ## Current Status (2026-05-01)
 
-Latest verify report (`doc/09_report/verify_common_compression_framework.md`) is STATUS=FAIL with 7 hard failures and 3 warnings. The 7 hard failures are:
+Latest verify report (`doc/09_report/verify_common_compression_framework.md`) is STATUS=FAIL with **5 hard failures and 5 warnings** (down from 7/3 after Wave 1: F flipped lzma2:330 FAIL→WARN, N flipped zstd:1265 FAIL→WARN; M kept zstd:704 FAIL but added test-seam + Kraft bug-doc cross-reference).
 
-- `src/lib/common/compress/mod.spl:49` — façade still rejects Zstd encode levels other than `3`, dictionaries for all codecs, and `checksum=false` for XZ/LZMA2 encode.
-- `src/lib/common/compress/zstd.spl:324` — compressed-block decode still rejects non-RLE sequence tables.
-- `src/lib/common/compress/zstd.spl:704` — verification still cannot claim support for the missing FSE-compressed Huffman-weight path.
-- `src/lib/common/compress/zstd.spl:1265` — dictionary-backed Zstd frames remain explicitly unsupported on decode.
-- `src/lib/common/compress/lzma2.spl:330` — range-coded compressed LZMA2 chunks remain explicitly unsupported on decode.
-- `doc/02_requirements/feature/common_compression_framework.md:30` — REQ-030 still overstates forced-tier parity closure relative to the focused verified surface.
-- `doc/02_requirements/nfr/common_compression_framework.md:11` — NFR-011 still overstates end-to-end verification closure; repository `verify` cannot honestly report PASS for the original full-scope claims.
+### Wave 1 outcomes (2026-05-01)
 
-Independent FR `static_file_compression_cache_integration_2026-05-01` IN PROGRESS (separate sstack agent).
+- **F (LZMA2 decode) — LANDED partial**: pure-Simple LZMA range coder + LZMA2 chunk decoder interoperate with host `xz -z --check=crc32` at default LCLPPB=3/0/2 (props 0x5D); 22/22 specs PASS in `test/unit/lib/common/lzma2_range_coded_spec.spl` and `xz_lzma2_spec.spl`. Other LCLPPB tuples explicitly rejected via `UnsupportedFeature`. Closure tracked in FR `doc/08_tracking/feature_request/lzma2_full_lclppb_2026-05-01.md`. Side note: F caught a `0u32 - (x>>31)` interpreter wrap edge case while implementing the range coder; worked around in the lzma2 hot path, **no bug doc filed yet** — Wave 2 should chase or file.
+- **M (Zstd FSE Huffman-weight) — TEST SEAM LANDED, KRAFT BUG FILED**: `_zstd_parse_fse_compressed_weights` is wired and dispatched; `test/unit/lib/common/zstd_fse_weights_spec.spl` (5 cases, PASS 2026-05-01) pins the typed-error surface. Decoder mis-decodes every real-world host-zstd FSE Huffman tree (Kraft completion fails on 5/5 fixtures); bug `doc/08_tracking/bug/bug_zstd_fse_huffman_weight_kraft_2026-05-01.md` filed (multi-day, OPEN). zstd:704 stays FAIL until the Kraft completion path is fixed.
+- **N (Zstd dictionary frame parser) — LANDED partial**: pure-Simple decode parses RFC 8478 §6 dictionary blobs (magic `0xEC30A437`, Dictionary_ID match, HUF + FSE_Offsets/Match_Lengths/Literals_Lengths entropy tables, 3 recommended offsets, content as LZ77 prefix) and seeds per-frame decoder state. `test/unit/lib/common/zstd_dictionary_spec.spl` (8 cases, PASS 2026-05-01) covers parser positives, malformed-magic / id-mismatch / truncated-after-HUF / truncated-recommended-offsets / zero-rep-offset rejections, plus a Raw_Block frame round-trip referencing a dictionary by id. **End-to-end Compressed_Block decode that consumes the dictionary's seeded entropy tables is DEFERRED** because real-world dict HUF sections use the FSE-compressed weight path blocked by M's Kraft bug; spec uses the direct-weight path (header_byte ≥ 128) to side-step it.
+- **C (StaticCompressionCache) — LANDED**: `static_file_compression_cache_integration_2026-05-01` wired into `nogc_async_mut/http_server` static_file path; FR closed.
+
+### Outstanding FAIL/WARN surface (5/5)
+
+- **FAIL** `src/lib/common/compress/mod.spl:49` — façade still rejects Zstd encode levels other than `3`, dictionaries for all codecs, and `checksum=false` for XZ/LZMA2 encode.
+- **FAIL** `src/lib/common/compress/zstd.spl:324` — compressed-block decode still rejects non-RLE sequence tables.
+- **FAIL** `src/lib/common/compress/zstd.spl:704` — FSE-compressed Huffman-weight decode mis-decodes real-world fixtures (M's Kraft bug, OPEN multi-day).
+- **FAIL** `doc/02_requirements/feature/common_compression_framework.md:30` — REQ-030 still overstates forced-tier parity closure.
+- **FAIL** `doc/02_requirements/nfr/common_compression_framework.md:11` — NFR-011 still overstates end-to-end verification closure.
+- **WARN** `src/lib/common/compress/zstd.spl:1265` — dictionary parser landed; end-to-end dict-driven Compressed_Block decode deferred behind M's Kraft bug.
+- **WARN** `src/lib/common/compress/lzma2.spl:330` — LCLPPB=3/0/2 only; full-LCLPPB closure tracked in FR.
+- **WARN** `src/lib/common/compress/zstd.spl:1` — implementation is large/multi-responsibility (maintenance risk, not a defect).
+- **WARN** `doc/01_research/local/common_compression_framework.md:1` — research artifacts describe original full-scope target, not current state.
+- **WARN** `test/unit/lib/common/zstd_frame_variants_spec.spl:1` — repeated runs stalled after first 4 passing cases; lane cannot claim a clean current PASS.
+
+### Outstanding work
+
+- Zstd encoder levels `!=3`, dictionaries for all codecs, `checksum=false` XZ/LZMA2 (façade option enforcement at mod.spl:49).
+- FSE Huffman-weight Kraft completion (M's bug — multi-day, blocks zstd:704 FAIL flip + N's end-to-end dict spec).
+- Non-RLE sequence-table compressed-block decode (zstd.spl:324).
+- Full-LCLPPB LZMA2 (FR).
+- REQ-030 / NFR-011 doc closure once the codec gaps above land.
 
 ## Shared constraints for every worker
 
