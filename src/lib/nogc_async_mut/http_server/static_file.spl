@@ -26,12 +26,17 @@ use std.http_server.response.{
     build_file_response, build_not_found, build_error, build_html
 }
 use std.http_server.error.{HttpServerError}
+use std.http_server.compression.{compress_response_body, supported_encodings}
+use std.nogc_sync_mut.http.accept_encoding.{negotiate_encoding}
 
 # File system FFI
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_is_dir(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_read_text(path: text) -> text
+
+# text -> [u8] bridge for the compression dispatcher.
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # ============================================================================
 # Static Compression Cache
@@ -240,24 +245,46 @@ class StaticFileHandler:
     Resolves request paths against the root, validates for
     directory traversal attacks, and returns file responses
     with appropriate MIME types.
+
+    For small (<= 64 KiB) compressible files, the handler consults a
+    `StaticCompressionCache` to avoid re-compressing on every request.
+    Compression is skipped for the sendfile branch (> 64 KiB) because
+    the kernel does that I/O zero-copy and we never see the bytes.
     """
     root: text
     index_file: text
+    cache: StaticCompressionCache
 
     static fn new(root: text, index_file: text) -> StaticFileHandler:
-        """Create a static file handler.
+        """Create a static file handler with a default-sized compression cache.
 
         Args:
             root: Base directory for file serving
             index_file: Default file for directory requests (e.g., "index.html")
         """
-        StaticFileHandler(root: root, index_file: index_file)
+        StaticFileHandler(
+            root: root,
+            index_file: index_file,
+            cache: StaticCompressionCache.new(
+                STATIC_CACHE_DEFAULT_CAPACITY,
+                STATIC_CACHE_DEFAULT_MAX_BYTES
+            )
+        )
+
+    static fn with_cache(root: text, index_file: text, cache: StaticCompressionCache) -> StaticFileHandler:
+        """Create a static file handler with a caller-supplied cache.
+
+        Used by tests to inject a cache and assert hit/miss behavior, and
+        by deployments that want to share one cache across many handlers
+        or tune capacity / max_bytes.
+        """
+        StaticFileHandler(root: root, index_file: index_file, cache: cache)
 
     fn handle(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
         """Serve a static file for the given request.
 
         Args:
-            request: HTTP request (uses path)
+            request: HTTP request (uses path, headers)
             location: Matched location config (uses root, pattern)
 
         Returns:
@@ -291,11 +318,12 @@ class StaticFileHandler:
         val size = rt_file_size(actual_path)
         val mime = mime_from_extension(actual_path)
 
-        # For small files, read into memory
-        # For large files, use sendfile (body_file)
+        # For small files, read into memory and try compression cache.
+        # For large files, use sendfile (body_file) — cannot be cached.
         if size <= 65536:
             val content = rt_file_read_text(actual_path)
-            build_html_or_typed(content, mime)
+            val accept = _get_header_ci(request.headers, "accept-encoding")
+            serve_compressed_or_plain(content, mime, actual_path, accept, self.cache)
         else:
             build_file_response(actual_path, mime, size)
 
@@ -342,7 +370,7 @@ fn is_safe_path(resolved: text, root: text) -> bool:
     resolved.starts_with(root)
 
 fn build_html_or_typed(content: text, mime: text) -> HttpResponseData:
-    """Build a response with the correct content type."""
+    """Build a plain (uncompressed) response with the correct content type."""
     HttpResponseData(
         status: 200,
         reason: "OK",
@@ -351,8 +379,104 @@ fn build_html_or_typed(content: text, mime: text) -> HttpResponseData:
             ("Server", "SimpleServer")
         ],
         body: content,
+        body_bytes: [],
         body_file: "",
         body_offset: 0,
         body_length: 0,
         chunked: false
     )
+
+fn build_compressed_response(compressed: [u8], mime: text, encoding: text) -> HttpResponseData:
+    """Build a 200 response carrying already-compressed bytes.
+
+    Sets `Content-Encoding` to the codec name and `Vary: Accept-Encoding`
+    so downstream caches don't serve the compressed body to clients that
+    didn't advertise that codec.
+    """
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("Content-Type", mime),
+            ("Content-Encoding", encoding),
+            ("Vary", "Accept-Encoding"),
+            ("Server", "SimpleServer")
+        ],
+        body: "",
+        body_bytes: compressed,
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn _get_header_ci(headers: [(text, text)], name_lower: text) -> text:
+    """Case-insensitive header lookup. Returns the value, or "" if absent.
+
+    `name_lower` MUST already be lowercase — we lowercase the header name
+    on each comparison.
+    """
+    for h in headers:
+        if h.0.lower() == name_lower:
+            return h.1
+    ""
+
+fn is_mime_compressible(mime: text) -> bool:
+    """True if the given MIME type is worth running through a compressor.
+
+    Matches `mime_from_extension`'s suffixed forms (e.g.
+    `"text/html; charset=utf-8"`). Image/audio/video/font/archive types
+    return false because they're already compressed.
+    """
+    val lower = mime.lower()
+    if lower.starts_with("text/"):
+        return true
+    if lower.starts_with("application/javascript"):
+        return true
+    if lower.starts_with("application/json"):
+        return true
+    if lower.starts_with("application/xml"):
+        return true
+    if lower.starts_with("application/wasm"):
+        return true
+    if lower.starts_with("image/svg+xml"):
+        return true
+    false
+
+fn serve_compressed_or_plain(
+    content: text,
+    mime: text,
+    actual_path: text,
+    accept_header: text,
+    cache: StaticCompressionCache
+) -> HttpResponseData:
+    """Pick a Content-Encoding and serve cached/freshly-compressed bytes.
+
+    Falls back to a plain `build_html_or_typed` response when:
+      - the client did not advertise a supported encoding,
+      - the MIME type is not compression-eligible,
+      - or the chosen codec returned `Err` (codec not yet wired).
+
+    On a cache miss for an eligible response, compresses once and stores
+    the bytes for subsequent hits.
+    """
+    if accept_header.len() == 0:
+        return build_html_or_typed(content, mime)
+    if not is_mime_compressible(mime):
+        return build_html_or_typed(content, mime)
+    val chosen = negotiate_encoding(accept_header, supported_encodings())
+    if chosen.len() == 0:
+        return build_html_or_typed(content, mime)
+    # Cache hit?
+    val hit = cache.get(actual_path, chosen)
+    if hit != nil:
+        val cached = hit ?? []
+        return build_compressed_response(cached, mime, chosen)
+    # Miss: compress, cache on success, fall back to plain on Err.
+    val raw = rt_text_to_bytes(content)
+    val res = compress_response_body(raw, chosen)
+    if res.is_err():
+        return build_html_or_typed(content, mime)
+    val compressed = res.unwrap()
+    cache.put(actual_path, chosen, compressed)
+    build_compressed_response(compressed, mime, chosen)

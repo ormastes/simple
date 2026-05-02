@@ -80,3 +80,31 @@ Green after these fixes:
 2. Add exact `openssl s_client -tls1_3`, `openssl s_server -tls1_3`, and `curl --tlsv1.3` coverage on top of the now-green default hosted gates.
 3. Finish M4 by validating the HTTPS startup path end-to-end with browser/`wss://` smokes and deciding whether the existing rustls-backed `TlsWebServer` remains the production server backend.
 4. Defer M5 PQ and M6 HTTP/2 until M3 and M4 are green.
+
+## Status Update (2026-05-01)
+
+KAT vector specs landed since 2026-04-26:
+
+- SHA-256 + SHA-512 NIST FIPS 180-4 reference vectors.
+- AES-256-GCM NIST CAVS RFC vectors.
+- ChaCha20-Poly1305 RFC 8439 reference + known-answer vectors.
+- HMAC-SHA-256 + HMAC-SHA-512 RFC 4231 vectors.
+- Curve25519 RFC 7748 reference vectors.
+- RSA-SHA-256 PKCS#1 v1.5 round-trip.
+- ECDSA-P256-SHA-256 (14 vectors, paths B+C+D).
+- Poly1305 RFC 8439 §2.5.2 + §A.3 standalone vectors.
+- AES-CTR NIST SP 800-38A reference vectors.
+- HKDF RFC 5869 (Extract+Expand) for SHA-256 and SHA-512.
+
+Open blockers:
+
+- bug `aes128_gcm_stub_2026-05-01.md` — 4 externs (`rt_aes_sbox`, `rt_aes_rcon`, `rt_aes128_encrypt_block_into`, `rt_tls13_aes128_gcm_encrypt`) are unregistered; AES-128-GCM NIST KAT cannot run in interpreter (separate sstack agent fixing this).
+- bug `crypto/Ed25519 RFC 8032 §7.1 byte-mismatch` (per recent commit doc).
+- bug `jwt/HS256 round-trip failure` (RFC byte-match passes, sign+verify fails).
+
+Open feature requests:
+
+- FR `pqc/hybrid KEX design (X25519MLKEM768 + sntrup761x25519)` — design filed.
+- FR `simd_int_intrinsics_for_crypto_2026-05-01` Phase 1 IN PROGRESS — will unblock vectorized ChaCha20+SHA in pure Simple.
+
+TLS 1.3 / M3 narrow-surface gaps (still): no ECDSA TLS-side verification, EncryptedExtensions stub, no HelloRetryRequest, only `TLS_AES_128_GCM_SHA256` cipher suite advertised.
