@@ -14,10 +14,18 @@
   - Symbol allowlist: `src/compiler_rust/common/src/runtime_symbols.rs`.
   - Spec: `test/unit/lib/nogc_sync_mut/simd_int_ops_spec.spl` (14 examples, 0 failures
     in interpreter mode).
-  - Note: pre-existing `rt_simd_{add,sub,mul}_i32x{4,8}` extern declarations remain
-    unwired (no runtime kernels, no dispatch arms) — they're documented but unused.
-    Phase 1 did not touch them; same plumbing can be applied later if a caller
-    appears.
+  - **Update 2026-05-01 (add/sub/mul backfill):** the pre-existing
+    `rt_simd_{add,sub,mul}_i32x{4,8}` extern declarations are now wired
+    end-to-end. Runtime kernels added in
+    `src/compiler_rust/runtime/src/value/simd_int_ops.rs` (SSE2 `_mm_add_epi32`
+    / `_mm_sub_epi32` for x4 add/sub; SSE4.1 `_mm_mullo_epi32` for x4 mul with
+    wrapping-scalar fallback on plain SSE2; AVX2 `_mm256_{add,sub,mullo}_epi32`
+    for x8; NEON `v{add,sub,mul}q_s32`). 6 dispatch arms + 6 wrapper fns
+    added in interpreter_extern. Spec:
+    `test/unit/lib/nogc_sync_mut/simd_int_arith_dispatch_spec.spl`.
+    T1's chacha20 SIMD path can now use `simd_add_i32x4` directly (the
+    `_vadd` simplification noted in the ChaCha20 update above is unblocked
+    as a follow-up; chacha20.spl was not modified in this backfill pass).
   - Note: `src/compiler_rust/compiler/src/codegen/runtime_ffi.rs` has no `rt_simd_*`
     entries and was NOT updated for Phase 1; compiled-mode FFI marshalling for
     Vec4i/Vec8i is a follow-up. Interpreter mode is fully functional.
