@@ -31,6 +31,7 @@ use os.tls13.cert_verify.{
     CertVerifyResult, CertChainResult
 }
 use os.crypto.curve25519.{x25519}
+use os.crypto.ecdh_p256.{p256_keypair_pub}
 use os.crypto.random.{random_bytes}
 use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
@@ -587,17 +588,29 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
 
     # HRR detection. The current connect flow advertises X25519 in CH1 only
     # (no P-256 ephemeral generated up front), so the only valid HRR pick
-    # the server can make is GROUP_SECP256R1. The full ECDHE shared-secret
-    # derivation against P-256 is deferred to a future commit (see
-    # `doc/08_tracking/crypto_recovery_status.md` M3 — "HRR connect-flow
-    # integration LANDED 2026-05-01"). When that lands, the
-    # `Failed("HRR P-256 ECDHE deferred")` branch below becomes the live
-    # second handshake leg.
+    # the server can make is GROUP_SECP256R1. fd_mode short-circuits because
+    # the rt_tls13_build_client_hello_record runtime path doesn't know
+    # about HRR — that's a separate runtime change.
+    if fd_mode and is_hello_retry_request(sh):
+        return Tls13ConnectResult.Failed(reason: "HRR not supported in fd_mode runtime path")
     if (not fd_mode) and is_hello_retry_request(sh):
         seen_hrr = true
         # CH1 hash for the §4.4.1 synthetic message_hash. The transcript at
         # this point already contains exactly the CH1 handshake bytes.
         val ch1_hash: [u8] = transcript_hash(transcript)
+        # Fresh P-256 ephemeral so CH2's key_share extension is wire-valid
+        # if the server picked GROUP_SECP256R1. The 32-byte scalar is the
+        # same fixed-bootstrap pattern used for X25519 above (Step 1) until
+        # `random_bytes` is wired into the connect path; constant-time
+        # P-256 hardening must precede any production exposure (see
+        # `doc/08_tracking/crypto_recovery_status.md`).
+        val p256_scalar: [u8] = [
+            0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+            0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+            0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+            0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50
+        ]
+        val new_p256_pub: [u8] = p256_keypair_pub(p256_scalar)
         val flow = process_hrr_after_serverhello(
             sh_hs_bytes,
             sh_body_bytes,
@@ -606,8 +619,7 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
             ch1_hash,
             pub_key,           # new_x25519_pub — unchanged (X25519 path is
                                # rejected here as same-group anyway)
-            [],                # new_p256_pub — empty until ephemeral keypair
-                               # generation is wired into Step 1
+            new_p256_pub,
             hostname,
             false,             # seen_hrr — first HRR
             true,              # ch1_offered_x25519 — CH1 used build_client_hello_bytes
