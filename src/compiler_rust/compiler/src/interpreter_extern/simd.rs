@@ -7,15 +7,17 @@ use crate::error::CompileError;
 use crate::value::Value;
 use crate::value_bridge::{runtime_to_value, value_to_runtime};
 use simple_runtime::value::aes::{
-    aes128_encrypt_one_block, aes128_gcm_encrypt_bytes, aes256_encrypt_one_block, aes256_gcm_encrypt_bytes,
-    decrypt_block_with_expanded_bytes, encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon,
-    rt_aes_sbox as ffi_aes_sbox,
+    aes128_encrypt_one_block, aes128_gcm_decrypt_bytes, aes128_gcm_encrypt_bytes, aes256_encrypt_one_block,
+    aes256_gcm_decrypt_bytes, aes256_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
+    encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon, rt_aes_sbox as ffi_aes_sbox,
+    AesGcmDecryptOutcome,
 };
 use simple_runtime::value::simd::{
     rt_simd_detect_profile as ffi_detect_profile, rt_simd_has_avx as ffi_has_avx, rt_simd_has_avx2 as ffi_has_avx2,
     rt_simd_has_neon as ffi_has_neon, rt_simd_has_rvv as ffi_has_rvv, rt_simd_has_sse as ffi_has_sse,
     rt_simd_profile_name as ffi_profile_name,
 };
+use simple_runtime::value::simd_byte_ops::add_u8x16 as ffi_add_u8x16;
 use simple_runtime::value::simd_int_ops::{
     add_i32x4 as ffi_add_i32x4, add_i32x8 as ffi_add_i32x8, and_i32x4 as ffi_and_i32x4, and_i32x8 as ffi_and_i32x8,
     mul_i32x4 as ffi_mul_i32x4, mul_i32x8 as ffi_mul_i32x8, or_i32x4 as ffi_or_i32x4, or_i32x8 as ffi_or_i32x8,
@@ -275,6 +277,65 @@ pub fn rt_tls13_aes256_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError
     ))
 }
 
+// rt_tls13_aes128_gcm_decrypt(key, nonce, ciphertext, aad, tag) -> [u8]
+// AES-128-GCM AEAD decrypt fast-path. Sidesteps the interpreter Arc-clone
+// out-param issue (see history: T21 / aes128_gcm_decrypt_string_to_int).
+//
+// Status-prefixed encoding (sidesteps "[]" ambiguity for empty plaintext):
+//   []          = invalid input (caller falls back to pure-Simple path)
+//   [0x00]      = tag mismatch / authentication failure
+//   [0x01, ...] = success; the trailing bytes are the recovered plaintext
+//                 (which may itself be empty for TC1-style empty PT)
+pub fn rt_tls13_aes128_gcm_decrypt(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_tls13_aes128_gcm_decrypt expects 5 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_tls13_aes128_gcm_decrypt", &args[0])?;
+    let nonce = expect_byte_array("rt_tls13_aes128_gcm_decrypt", &args[1])?;
+    let ciphertext = expect_byte_array("rt_tls13_aes128_gcm_decrypt", &args[2])?;
+    let aad = expect_byte_array("rt_tls13_aes128_gcm_decrypt", &args[3])?;
+    let tag = expect_byte_array("rt_tls13_aes128_gcm_decrypt", &args[4])?;
+    let mut out: Vec<u8>;
+    match aes128_gcm_decrypt_bytes(&key, &nonce, &ciphertext, &aad, &tag) {
+        AesGcmDecryptOutcome::InvalidInput => out = Vec::new(),
+        AesGcmDecryptOutcome::TagMismatch => out = vec![0x00],
+        AesGcmDecryptOutcome::Plaintext(pt) => {
+            out = Vec::with_capacity(1 + pt.len());
+            out.push(0x01);
+            out.extend_from_slice(&pt);
+        }
+    }
+    Ok(Value::array(out.into_iter().map(|b| Value::Int(b as i64)).collect()))
+}
+
+// rt_tls13_aes256_gcm_decrypt(key (32B), nonce (12B), ciphertext, aad, tag (16B)) -> [u8]
+// Same status-prefixed encoding as rt_tls13_aes128_gcm_decrypt above.
+pub fn rt_tls13_aes256_gcm_decrypt(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "rt_tls13_aes256_gcm_decrypt expects 5 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_tls13_aes256_gcm_decrypt", &args[0])?;
+    let nonce = expect_byte_array("rt_tls13_aes256_gcm_decrypt", &args[1])?;
+    let ciphertext = expect_byte_array("rt_tls13_aes256_gcm_decrypt", &args[2])?;
+    let aad = expect_byte_array("rt_tls13_aes256_gcm_decrypt", &args[3])?;
+    let tag = expect_byte_array("rt_tls13_aes256_gcm_decrypt", &args[4])?;
+    let mut out: Vec<u8>;
+    match aes256_gcm_decrypt_bytes(&key, &nonce, &ciphertext, &aad, &tag) {
+        AesGcmDecryptOutcome::InvalidInput => out = Vec::new(),
+        AesGcmDecryptOutcome::TagMismatch => out = vec![0x00],
+        AesGcmDecryptOutcome::Plaintext(pt) => {
+            out = Vec::with_capacity(1 + pt.len());
+            out.push(0x01);
+            out.extend_from_slice(&pt);
+        }
+    }
+    Ok(Value::array(out.into_iter().map(|b| Value::Int(b as i64)).collect()))
+}
+
 // ============================================================================
 // Phase 1 SIMD int bitwise / shift externs (i32x4 + i32x8).
 //
@@ -488,4 +549,86 @@ pub fn rt_simd_shl_i32x8(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_simd_shr_i32x8(args: &[Value]) -> Result<Value, CompileError> {
     shift_i32x8("rt_simd_shr_i32x8", args, ffi_shr_i32x8)
+}
+
+// ============================================================================
+// Phase 2 SEED — Vec16u8 byte-wise SIMD ops.
+//
+// Vec16u8 is a Simple record `struct Vec16u8 { u0..u7, u8_, u9..u15: u8 }`.
+// Field name `u8_` (not `u8`) avoids the `u8` type-keyword clash. In
+// interpreter mode the value arrives as `Value::Object { class, fields }`
+// with each lane stored as `Value::Int` in 0..=255.
+// ============================================================================
+
+fn require_u8_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<u8, CompileError> {
+    match fields.get(field) {
+        Some(Value::Int(n)) => {
+            if (0..=255).contains(n) {
+                Ok(*n as u8)
+            } else {
+                Err(CompileError::runtime(format!(
+                    "{name}: field {field} must be in 0..=255, got {n}"
+                )))
+            }
+        }
+        Some(other) => Err(CompileError::runtime(format!(
+            "{name}: field {field} must be an integer, got {:?}",
+            other
+        ))),
+        None => Err(CompileError::runtime(format!(
+            "{name}: missing field {field}"
+        ))),
+    }
+}
+
+const VEC16U8_FIELDS: [&str; 16] = [
+    "u0", "u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8_", "u9", "u10", "u11", "u12", "u13", "u14", "u15",
+];
+
+fn unpack_vec16u8(name: &str, value: &Value) -> Result<[u8; 16], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec16u8" {
+                return Err(CompileError::runtime(format!(
+                    "{name}: expected Vec16u8, got {class}"
+                )));
+            }
+            let mut lanes = [0_u8; 16];
+            for (i, fname) in VEC16U8_FIELDS.iter().enumerate() {
+                lanes[i] = require_u8_field(name, fields, fname)?;
+            }
+            Ok(lanes)
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec16u8 Object, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn pack_vec16u8(lanes: [u8; 16]) -> Value {
+    let mut fields = HashMap::with_capacity(16);
+    for (i, fname) in VEC16U8_FIELDS.iter().enumerate() {
+        fields.insert(fname.to_string(), Value::Int(lanes[i] as i64));
+    }
+    Value::Object {
+        class: "Vec16u8".to_string(),
+        fields: Arc::new(fields),
+    }
+}
+
+fn binop_u8x16<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([u8; 16], [u8; 16]) -> [u8; 16],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec16u8(name, &args[0])?;
+    let b = unpack_vec16u8(name, &args[1])?;
+    Ok(pack_vec16u8(op(a, b)))
+}
+
+pub fn rt_simd_add_u8x16(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u8x16("rt_simd_add_u8x16", args, ffi_add_u8x16)
 }

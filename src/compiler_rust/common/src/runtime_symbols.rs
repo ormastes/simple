@@ -495,6 +495,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simd_or_i32x8",
     "rt_simd_shl_i32x8",
     "rt_simd_shr_i32x8",
+    // Phase 2 seed — Vec16u8 byte ops.
+    "rt_simd_add_u8x16",
     "rt_numeric_active_simd_tier",
     "rt_numeric_add_f32",
     "rt_numeric_mul_f32",

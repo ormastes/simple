@@ -63,6 +63,7 @@ pub mod serial;
 pub mod ratatui_tui;
 pub mod screenshot_ffi;
 pub mod simd;
+pub mod simd_byte_ops;
 pub mod simd_int_ops;
 mod sync;
 pub mod tags;
@@ -82,8 +83,9 @@ pub use heap::{HeapHeader, HeapObjectType};
 pub use collections::{RuntimeArray, RuntimeString, RuntimeTuple};
 pub use dict::RuntimeDict;
 pub use aes::{
-    rt_aes128_encrypt_block_into, rt_aes_decrypt_block_with_expanded, rt_aes_encrypt_block_with_expanded,
-    rt_aes_rcon, rt_aes_sbox, rt_tls13_aes128_gcm_encrypt,
+    rt_aes128_encrypt_block_into, rt_aes256_encrypt_block_into, rt_aes_decrypt_block_with_expanded,
+    rt_aes_encrypt_block_with_expanded, rt_aes_rcon, rt_aes_sbox, rt_tls13_aes128_gcm_decrypt,
+    rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt, rt_tls13_aes256_gcm_encrypt,
 };
 
 // Re-export object types
@@ -912,6 +914,9 @@ pub use simd_int_ops::{
     rt_simd_or_i32x4, rt_simd_or_i32x8, rt_simd_shl_i32x4, rt_simd_shl_i32x8, rt_simd_shr_i32x4, rt_simd_shr_i32x8,
     rt_simd_sub_i32x4, rt_simd_sub_i32x8, rt_simd_xor_i32x4, rt_simd_xor_i32x8,
 };
+
+// Re-export Phase 2 (seed) SIMD byte FFI symbol.
+pub use simd_byte_ops::rt_simd_add_u8x16;
 
 // Re-export regex FFI functions
 pub use ffi::regex::{

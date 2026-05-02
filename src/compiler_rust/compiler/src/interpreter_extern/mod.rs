@@ -816,8 +816,10 @@ pub(crate) fn call_extern_function(
         "rt_aes_rcon" => simd::rt_aes_rcon(&evaluated),
         "rt_aes128_encrypt_block_into" => simd::rt_aes128_encrypt_block_into(&evaluated),
         "rt_tls13_aes128_gcm_encrypt" => simd::rt_tls13_aes128_gcm_encrypt(&evaluated),
+        "rt_tls13_aes128_gcm_decrypt" => simd::rt_tls13_aes128_gcm_decrypt(&evaluated),
         "rt_aes256_encrypt_block_into" => simd::rt_aes256_encrypt_block_into(&evaluated),
         "rt_tls13_aes256_gcm_encrypt" => simd::rt_tls13_aes256_gcm_encrypt(&evaluated),
+        "rt_tls13_aes256_gcm_decrypt" => simd::rt_tls13_aes256_gcm_decrypt(&evaluated),
         "rt_utf8_count_codepoints" => simd::rt_utf8_count_codepoints(&evaluated),
         "rt_utf8_validate" => simd::rt_utf8_validate(&evaluated),
         "rt_utf8_find_invalid" => simd::rt_utf8_find_invalid(&evaluated),
@@ -843,6 +845,11 @@ pub(crate) fn call_extern_function(
         "rt_simd_or_i32x8" => simd::rt_simd_or_i32x8(&evaluated),
         "rt_simd_shl_i32x8" => simd::rt_simd_shl_i32x8(&evaluated),
         "rt_simd_shr_i32x8" => simd::rt_simd_shr_i32x8(&evaluated),
+
+        // ====================================================================
+        // SIMD Byte (u8x16) Intrinsics — Phase 2 seed
+        // ====================================================================
+        "rt_simd_add_u8x16" => simd::rt_simd_add_u8x16(&evaluated),
 
         // ====================================================================
         // Diagram FFI Functions (12 functions)
