@@ -1,7 +1,24 @@
 # Feature: extend SIMD surface with int bitwise / rotate / shuffle ops for crypto
 
+- **Phase 1 status: LANDED 2026-05-02** — 10 ops (xor/and/or/shl/shr × i32x4 + i32x8).
+  - Pure-Simple wrappers + externs: `src/lib/nogc_sync_mut/simd.spl`
+  - Runtime kernels: `src/compiler_rust/runtime/src/value/simd_int_ops.rs`
+    (SSE2 / AVX2 / NEON intrinsics + scalar fallback; shift count masked to 0..=31).
+  - Interpreter-extern dispatch + Vec4i/Vec8i marshalling:
+    `src/compiler_rust/compiler/src/interpreter_extern/simd.rs` and
+    `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`.
+  - Symbol allowlist: `src/compiler_rust/common/src/runtime_symbols.rs`.
+  - Spec: `test/unit/lib/nogc_sync_mut/simd_int_ops_spec.spl` (14 examples, 0 failures
+    in interpreter mode).
+  - Note: pre-existing `rt_simd_{add,sub,mul}_i32x{4,8}` extern declarations remain
+    unwired (no runtime kernels, no dispatch arms) — they're documented but unused.
+    Phase 1 did not touch them; same plumbing can be applied later if a caller
+    appears.
+  - Note: `src/compiler_rust/compiler/src/codegen/runtime_ffi.rs` has no `rt_simd_*`
+    entries and was NOT updated for Phase 1; compiled-mode FFI marshalling for
+    Vec4i/Vec8i is a follow-up. Interpreter mode is fully functional.
 - **Date:** 2026-05-01
-- **Status:** Proposed
+- **Status:** Proposed (Phase 1 landed; Phases 2–4 pending)
 - **Module:** `src/lib/nogc_sync_mut/simd.spl` + compiler HIR/codegen
 - **Driver:** Phase 4 of the HTTPS/HTTP2 compression+cipher pass
   (`/home/ormastes/.claude/plans/see-next-and-impl-ethereal-scott.md`)
