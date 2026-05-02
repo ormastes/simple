@@ -1,0 +1,144 @@
+# @cover src/lib/nogc_sync_mut/simd/mask.spl 80%
+"""
+# Mask<V> Unit Tests — Trait Surface (D5 kickoff)
+
+**Feature IDs:** #SIMD-MASK
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** In Progress
+**Design:** doc/04_architecture/simd_unified_architecture_detail.md §1.4 §5
+
+## Overview
+
+Unit tests for `Mask<V>` construction, logical operations, query predicates,
+and the `mask_select` blend operation. Corresponds to D5 trait-surface kickoff
+test IDs M-01 through M-06.
+
+All tests run in interpreter mode. Expected result before D4 lands:
+0 passing (import resolution fails). After D4 lands: 6/6 passing.
+"""
+
+use std.spipe.*
+use std.simd.{FixedVec, Mask}
+
+
+# ============================================================================
+# Helper functions — avoid var-rebind in it blocks (feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn make_f32x4_low() -> FixedVec<f32, 4>:
+    # [1.0, 2.0, 3.0, 4.0]
+    return FixedVec<f32, 4>::from_array([1.0, 2.0, 3.0, 4.0])
+
+fn make_f32x4_high() -> FixedVec<f32, 4>:
+    # [10.0, 1.0, 10.0, 1.0] — alternating so cmp_lt gives alternating mask
+    return FixedVec<f32, 4>::from_array([10.0, 1.0, 10.0, 1.0])
+
+fn make_f32x4_true_vals() -> FixedVec<f32, 4>:
+    return FixedVec<f32, 4>::from_array([100.0, 200.0, 300.0, 400.0])
+
+fn make_f32x4_false_vals() -> FixedVec<f32, 4>:
+    return FixedVec<f32, 4>::from_array([0.0, 0.0, 0.0, 0.0])
+
+
+# ============================================================================
+# Mask<V> Construction and Operations
+# ============================================================================
+
+describe "Mask construction and operations":
+    """
+    ## Mask<FixedVec<f32,4>> — D5 trait-surface unit tests M-01..M-06
+
+    Tests cover all_ones / all_zeros, count_ones, none, from_cmp,
+    logical ops, mask_select blend, and the type-distinctness of
+    Mask<FixedVec<f32,4>> vs Mask<FixedVec<i32,4>>.
+    """
+
+    # M-01: all_ones() gives count_ones() == 4 for a 4-lane mask
+    it "M-01: all_ones has count_ones equal to lane count 4":
+        val m = Mask<FixedVec<f32, 4>>::all_ones()
+        val n = m.count_ones()
+        expect(n).to_equal(4)
+
+    # M-02: all_zeros() gives count_ones() == 0 and none() == true
+    it "M-02: all_zeros has count_ones zero and none returns true":
+        val m = Mask<FixedVec<f32, 4>>::all_zeros()
+        val n = m.count_ones()
+        expect(n).to_equal(0)
+        val is_none = m.none()
+        expect(is_none).to_equal(true)
+
+    # M-03: from_cmp with cmp_lt matches manual per-lane comparison
+    # va = [1,2,3,4], vb = [10,1,10,1]
+    # va < vb → [true, false, true, false] → count_ones == 2
+    it "M-03: from_cmp with cmp_lt matches per-lane manual comparison":
+        val va = make_f32x4_low()
+        val vb = make_f32x4_high()
+        val cmp_result = va.cmp_lt(vb)
+        val m = Mask<FixedVec<f32, 4>>::from_cmp(cmp_result)
+        val n = m.count_ones()
+        # lanes 0 and 2: 1.0 < 10.0 and 3.0 < 10.0 → 2 active lanes
+        expect(n).to_equal(2)
+
+    # M-04: and / or / xor / not element-wise correctness
+    # Use all_ones and all_zeros for deterministic truth-table checks
+    it "M-04: and or xor not logical ops are element-wise correct":
+        val ones  = Mask<FixedVec<f32, 4>>::all_ones()
+        val zeros = Mask<FixedVec<f32, 4>>::all_zeros()
+
+        # ones AND zeros = zeros
+        val and_result = ones.and(zeros)
+        expect(and_result.count_ones()).to_equal(0)
+
+        # ones OR zeros = ones
+        val or_result = ones.or(zeros)
+        expect(or_result.count_ones()).to_equal(4)
+
+        # ones XOR ones = zeros
+        val xor_result = ones.xor(ones)
+        expect(xor_result.count_ones()).to_equal(0)
+
+        # NOT ones = zeros
+        val not_result = ones.not()
+        expect(not_result.count_ones()).to_equal(0)
+
+        # NOT zeros = ones
+        val not_zeros = zeros.not()
+        expect(not_zeros.count_ones()).to_equal(4)
+
+    # M-05: mask_select(mask, t, f) returns t[i] where mask[i]==1 else f[i]
+    # mask = all_ones → result == t
+    # mask = all_zeros → result == f
+    it "M-05: mask_select returns t lanes where mask is 1 and f lanes where mask is 0":
+        val t_vals = make_f32x4_true_vals()
+        val f_vals = make_f32x4_false_vals()
+
+        # All-ones mask: result must equal t_vals entirely
+        val ones = Mask<FixedVec<f32, 4>>::all_ones()
+        val sel_ones = FixedVec<f32, 4>::mask_select(ones, t_vals, f_vals)
+        val arr_ones = sel_ones.to_array()
+        expect(arr_ones[0]).to_equal(100.0)
+        expect(arr_ones[3]).to_equal(400.0)
+
+        # All-zeros mask: result must equal f_vals entirely
+        val zeros = Mask<FixedVec<f32, 4>>::all_zeros()
+        val sel_zeros = FixedVec<f32, 4>::mask_select(zeros, t_vals, f_vals)
+        val arr_zeros = sel_zeros.to_array()
+        expect(arr_zeros[0]).to_equal(0.0)
+        expect(arr_zeros[3]).to_equal(0.0)
+
+    # M-06: Mask<FixedVec<f32,4>> and Mask<FixedVec<i32,4>> are distinct types.
+    # Per C2 §1.4: different element widths mean different backend mask layouts.
+    # This spec is expected to FAIL at type-check when D3 enforces the type
+    # distinction. Assigning a Mask<f32x4> to a Mask<i32x4> variable should
+    # produce a type-mismatch diagnostic. No runtime expect() — the error is
+    # a type-check failure, not a runtime value.
+    #
+    # Expected: type-check error (type mismatch) from D3's simd_check.spl
+    it "M-06: Mask<FixedVec<f32,4>> and Mask<FixedVec<i32,4>> are distinct types at type-check":
+        val mf = Mask<FixedVec<f32, 4>>::all_ones()
+        # Attempting to assign a f32 mask to an i32 mask variable should fail type-check.
+        # If this compiles and runs, D3 has NOT enforced the type distinction.
+        val _mi: Mask<FixedVec<i32, 4>> = mf
+        # If we reach this assertion, the type system failed to reject the assignment.
+        expect(false).to_equal(true)

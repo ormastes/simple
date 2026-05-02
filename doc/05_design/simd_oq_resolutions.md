@@ -427,42 +427,172 @@ This prevents implementors from attempting to add mma.sync to WarpVec during M5/
 
 ---
 
-## OQ-1..OQ-5 (deferred to D1)
+## OQ-1..OQ-5 Overview (deferred to D1)
 
-These OQs are spec-verification gates that require fetching primary ISA sources (Intel SDM,
-ARM ARM, RVV spec inst-table.adoc, PTX ISA Reference) and cross-checking them against the
-encoding constants in C3b §14's verification table. They cannot be decided by reasoning
-alone — they require reading the normative spec text and comparing byte values. D1's
-deliverable `doc/05_design/simd_spec_verification_2026-05-02.md` is the resolution
-artifact. Cross-reference D1's status table here when D1 lands.
+These five OQs are spec-verification gates. They require fetching primary ISA source
+documents (Intel SDM, ARM ARM, RVV spec inst-table.adoc, PTX ISA Reference) and
+cross-checking them against the encoding constants recorded in C3b §14's verification
+status table. They cannot be resolved by design reasoning alone — a human or automated
+agent must read the normative spec text and compare byte-level values. This document
+records the resolution protocol for each; the actual pass/fail verdict belongs to D1's
+deliverable `doc/05_design/simd_spec_verification_2026-05-02.md`.
 
-**OQ-1 (V-01/V-06/V-03 — EVEX byte verification, blocks M1 entry):**
-C3b §14 shows `62 F2 75 C9 A8 C2` as the EVEX VFMADD213PS encoding, status UNVERIFIED.
-D1 must verify P0/P1/P2/P3 fields (V-01), the exact byte string (V-06), and k0 z-bit
-behavior (V-03) against Intel SDM Vol 2A §2.6.1 Table 2-36 and Vol 2B VFMADD213PS entry.
-No AVX-512 golden file may be committed until D1 confirms these three items.
+When D1 lands, the cross-reference procedure is: open D1's status table, find each
+V-XX item, confirm status is VERIFIED or CORRECTED, and update the relevant phase gate
+table in this document. No phase may proceed past its gate until D1's status column reads
+VERIFIED or CORRECTED (not UNVERIFIED or PENDING).
 
-**OQ-2 (V-25 — NEON FCMGT operand reversal, blocks M1 entry):**
-C3b §14 notes `vclt Vd, Vn, Vm` maps to `FCMGT Vm, Vn` with reversed operands. G-11's
-polarity depends on this being correct. D1 must verify against ARM ARM §C7.2.x FCMGT entry.
-If operands are wrong, G-11 polarity must be corrected before NEON golden comparisons land.
+---
 
-**OQ-3 (V-13/V-15/V-16 — RVV encoding table, blocks M4 entry):**
-Three RVV encoding constants are unverified in C3b §14: vlmul fractional encoding table
-(V-13), vfadd funct6=000000 (V-15), vfmacc funct6=011000 (V-16). D1 must verify these
-against RVV spec §3.4.2 Table 4 and riscv-v-spec inst-table.adoc. M4 golden files are
-blocked until D1 confirms or corrects all three.
+## OQ-1 (blocks M1 entry) — V-01/V-06/V-03 EVEX byte verification
 
-**OQ-4 (V-08 — SVE2 Z-register encoding, blocks M3 exit):**
-Instruction encoding bytes for the ~14 C3a §5.4 SVE2 helpers are unverified. D1 must fetch
-ARMv9 ARM §C7 SVE instruction encodings before M3 golden files are written.
+### Context
 
-**OQ-5 (V-23 — PTX shfl.sync syntax, blocks M5 exit):**
-PTX `shfl.sync` exact syntax (mask operand position, `.b32` suffix) is unverified.
-D1 must verify against PTX ISA Reference §9.7.6. M5 PTX golden files are blocked pending
-D1's confirmation. Note: C3b §14 golden S-35 is already status ERRATA-GUARDED for the
-`0xffffffff` all-lanes mask; D1 should also confirm that mask value is correct for
-`reduce_sum` (C1 §6-G guard).
+AVX-512 instructions use a 4-byte EVEX prefix (P0=0x62, P1, P2, P3) that encodes register
+extension bits, the opmask register (k0–k7), the zeroing/merging flag (z), and the embedded
+broadcast/rounding/suppress-all-exceptions bits. Getting any of these fields wrong produces
+silently incorrect machine code that is only detectable by running the generated binary on
+hardware or via a disassembler diff.
+
+C3b §14 records three EVEX verification items as UNVERIFIED:
+
+- **V-01**: EVEX P0/P1/P2/P3 field positions — the exact bit-field layout for R, X, B, R'
+  extension bits and the W bit in P1.
+- **V-06**: The VFMADD213PS example byte sequence `62 F2 75 C9 A8 C2` — this is the
+  encoding D2 recorded as a cross-check target but has not verified against Intel SDM.
+- **V-03**: k0 z-bit behavior in EVEX P2 — specifically whether k0 means "no masking" and
+  whether setting the z bit with k0 raises #UD (invalid opcode exception).
+
+The guard G-01 (k0 hard-reserve) is already in place, but the correctness of EVEX prefix
+field layout underpins every AVX-512 emit helper in `x86_64_avx512.spl`.
+
+### Resolution Protocol for D1
+
+D1 must:
+1. Fetch Intel SDM Volume 2A §2.6.1 Table 2-36 (EVEX prefix byte layout).
+2. Fetch Intel SDM Volume 2B VFMADD213PS instruction entry (encoding table row).
+3. Verify byte string `62 F2 75 C9 A8 C2` matches the SDM's encoding for
+   `VFMADD213PS zmm1{k1}{z}, zmm2, zmm3/m512/m32bcst` with the register operands
+   that the C3b §14 test case uses.
+4. Confirm the z-bit + k0 interaction (k0 = no masking; z+k0 = #UD per Intel SDM).
+5. Record status VERIFIED or CORRECTED in D1's table for V-01, V-06, V-03.
+
+**M1 entry is blocked until D1's V-01, V-06, and V-03 are all VERIFIED or CORRECTED.**
+
+---
+
+## OQ-2 (blocks M1 entry) — V-25 NEON FCMGT operand reversal
+
+### Context
+
+ARM NEON's less-than comparison has a counter-intuitive encoding: the mnemonic
+`VCLT Vd, Vn, Vm` (Vd = Vn < Vm) is an alias that assembles to `FCMGT Vm, Vn` —
+note that the A and B operands are swapped relative to the mnemonic order. The emitter
+guard G-11 relies on this operand reversal being correct: if G-11 has the operands
+in the wrong order, every `<` comparison on `FixedVec<f32,4>` and `FixedVec<f32,2>`
+on ARM NEON targets produces inverted results (treating `<` as `>`), which is a silent
+correctness bug with no diagnostic.
+
+C3b §14 records V-25 as UNVERIFIED specifically because the emitter code was written from
+C3b's own notes, not from a direct read of the ARM ARM §C7.2.x FCMGT entry.
+
+### Resolution Protocol for D1
+
+D1 must:
+1. Fetch ARM Architecture Reference Manual ARMv8-A (ARM ARM) §C7.2.x FCMGT entry.
+2. Confirm that `FCMGT Vd, Vn, Vm` encodes "Vd = Vn > Vm" (i.e., greater-than form).
+3. Confirm that `VCLT Vd, Vn, Vm` (alias, less-than) does indeed encode as `FCMGT Vm, Vn`
+   with the operand swap.
+4. If swap confirmed: G-11 is correct, status VERIFIED.
+5. If swap is wrong (i.e., VCLT does NOT reverse operands): G-11 must be corrected —
+   D1 must record the correct form and flag M1 as requiring a G-11 fix before golden files.
+
+**M1 entry is blocked until D1 records V-25 as VERIFIED or CORRECTED.**
+
+---
+
+## OQ-3 (blocks M4 entry) — V-13/V-15/V-16 RVV encoding verification
+
+### Context
+
+RVV 1.0 instructions use a fixed 32-bit instruction format with funct6/funct3/opcode
+fields. Three values in C3b §14 are recorded as UNVERIFIED:
+
+- **V-13**: The `vlmul` fractional encoding table — RVV §3.4.2 Table 4 defines LMUL values
+  as 3-bit fields (LMUL=1 → 000, LMUL=2 → 001, ..., LMUL=1/8 → 101, etc.). The compiler's
+  vtype encoding depends on this table being correct; any error corrupts the SEW/LMUL
+  configuration for every vector instruction in a loop body.
+- **V-15**: `vfadd.vv` funct6 field = 000000. If wrong, the emitted instruction is a
+  different opcode entirely (RVV reuses the same funct3/opcode for many vector FP ops,
+  differentiating only by funct6).
+- **V-16**: `vfmacc.vv` funct6 = 011000. Same risk as V-15.
+
+### Resolution Protocol for D1
+
+D1 must:
+1. Fetch the RISC-V V Extension spec (ratified 1.0) §3.4.2 Table 4 for vlmul encoding.
+2. Fetch riscv-v-spec inst-table.adoc (the machine-readable instruction encoding table).
+3. Confirm `vlmul` fractional encoding bits for LMUL=1/8, 1/4, 1/2, 1, 2, 4, 8.
+4. Confirm `vfadd.vv` funct6 = 000000 (binary), funct3 = 001 (FP VV), opcode = 1010111.
+5. Confirm `vfmacc.vv` funct6 = 011000, funct3 = 001, opcode = 1010111.
+6. Record VERIFIED or CORRECTED for V-13, V-15, V-16.
+
+**M4 entry is blocked until D1 records V-13, V-15, and V-16 as VERIFIED or CORRECTED.**
+
+---
+
+## OQ-4 (blocks M3 exit) — V-08 SVE2 Z-register encoding
+
+### Context
+
+SVE2 (Scalable Vector Extension 2) introduces 32 scalable Z-registers (Z0–Z31) and 16
+predicate P-registers (P0–P15). The instruction encoding for SVE2 uses the ARMv9 ARM
+§C7 encoding space, which is distinct from the NEON (AdvSIMD) encodings. C3a §5.4
+enumerates approximately 14 SVE2 emit helpers that are needed for the M3 backend. The
+encoding bytes for these helpers are recorded in C3b as UNVERIFIED because the C3a/C3b
+author derived them from secondary sources rather than the primary ARMv9 ARM §C7 tables.
+
+Incorrect Z-register encoding fields would produce wrong instruction encodings for
+SVE2 arithmetic, predicated moves, and scatter/gather operations — all critical to M3.
+
+### Resolution Protocol for D1
+
+D1 must:
+1. Fetch ARMv9 Architecture Reference Manual §C7 SVE instruction encodings.
+2. Cross-check each of the ~14 C3a §5.4 helpers against the ARMv9 ARM encoding table.
+3. Record VERIFIED or CORRECTED for V-08 (the umbrella item for SVE2 encoding).
+4. If any helper encoding is wrong, provide the corrected byte fields and flag the
+   affected helper names from C3a §5.4.
+
+**M3 golden files must not be committed until D1 records V-08 as VERIFIED or CORRECTED.**
+
+---
+
+## OQ-5 (blocks M5 exit) — V-23 PTX shfl.sync syntax
+
+### Context
+
+PTX `shfl.sync` is the warp-level shuffle instruction used in the `reduce_sum` golden
+(C3b golden S-35). The exact syntax has several potential error surfaces:
+- Operand order: `shfl.sync.bfly.b32 dest, src, offset, mask_and_clamp, membermask`
+- The `.b32` type suffix (is it required, and is BF32 the only valid type for this form?)
+- The `membermask` position (last operand vs. first)
+- The `0xffffffff` all-lanes mask value (C1 §6-G notes this is required for correctness
+  but does not verify the PTX syntax itself)
+
+C3b §14 records V-23 as UNVERIFIED. Golden S-35 is flagged ERRATA-GUARDED for the mask
+value but not yet VERIFIED for the full syntax.
+
+### Resolution Protocol for D1
+
+D1 must:
+1. Fetch PTX ISA Reference §9.7.6 (shfl.sync instruction entry).
+2. Confirm the full syntax form used in golden S-35.
+3. Confirm that `membermask = 0xffffffff` is correct for an all-lanes reduce.
+4. Confirm `.b32` is required (not optional) for the shuffle offset operand.
+5. Record VERIFIED or CORRECTED for V-23.
+
+**M5 PTX golden files must not be committed until D1 records V-23 as VERIFIED or CORRECTED.**
 
 ---
 

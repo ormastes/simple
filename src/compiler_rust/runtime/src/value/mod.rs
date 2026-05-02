@@ -66,6 +66,7 @@ pub mod screenshot_ffi;
 pub mod simd;
 pub mod simd_aes_ops;
 pub mod simd_byte_ops;
+pub mod simd_clmul_ops;
 pub mod simd_int_ops;
 mod sync;
 pub mod tags;
@@ -922,6 +923,9 @@ pub use simd_byte_ops::rt_simd_add_u8x16;
 
 // Re-export Phase 2 SIMD AES round FFI symbols.
 pub use simd_aes_ops::{rt_simd_aes_round_last_u8x16, rt_simd_aes_round_u8x16};
+
+// Re-export Phase 3 SIMD u64x2 + PCLMUL FFI symbols.
+pub use simd_clmul_ops::{rt_simd_clmul_hi_u64, rt_simd_clmul_lo_u64, rt_simd_xor_u64x2};
 
 // Re-export regex FFI functions
 pub use ffi::regex::{

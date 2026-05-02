@@ -1,0 +1,174 @@
+# @cover src/lib/nogc_sync_mut/simd/fixed.spl 80%
+"""
+# FixedVec<T,N> Unit Tests — Trait Surface (D5 kickoff)
+
+**Feature IDs:** #SIMD-FIXEDVEC
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** In Progress
+**Design:** doc/04_architecture/simd_unified_architecture_detail.md
+**Plan:** doc/05_design/simd_rollout_plan_v2.md
+
+## Overview
+
+Unit tests for `FixedVec<T,N>` construction, arithmetic, reductions,
+lane access, shift semantics, and lane-count validation. Corresponds to
+D5 trait-surface kickoff test IDs F-01 through F-10.
+
+All tests run in interpreter mode. Expected result before D4 lands:
+0 passing (import resolution fails). After D4 lands: 10/10 passing.
+"""
+
+use std.spipe.*
+use std.simd.{FixedVec, Vector}
+
+
+# ============================================================================
+# Helper functions — avoid var-rebind inside it blocks (feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn make_f32x4_1234() -> FixedVec<f32, 4>:
+    return FixedVec<f32, 4>::from_array([1.0, 2.0, 3.0, 4.0])
+
+fn make_f32x4_add_rhs() -> FixedVec<f32, 4>:
+    return FixedVec<f32, 4>::from_array([10.0, 20.0, 30.0, 40.0])
+
+fn make_f32x4_mul_rhs() -> FixedVec<f32, 4>:
+    return FixedVec<f32, 4>::from_array([2.0, 3.0, 4.0, 5.0])
+
+fn make_f32x4_3141() -> FixedVec<f32, 4>:
+    return FixedVec<f32, 4>::from_array([3.0, 1.0, 4.0, 1.0])
+
+fn make_i32x4_neg() -> FixedVec<i32, 4>:
+    # -8 in two's complement; shr_logical fills 0s, shr_arith fills sign bit
+    return FixedVec<i32, 4>::from_array([-8, -8, -8, -8])
+
+fn make_i32x4_pos() -> FixedVec<i32, 4>:
+    return FixedVec<i32, 4>::from_array([16, 16, 16, 16])
+
+
+# ============================================================================
+# FixedVec Construction & Basic Ops
+# ============================================================================
+
+describe "FixedVec construction and basic ops":
+    """
+    ## FixedVec<T,N> — D5 trait-surface unit tests F-01..F-10
+
+    Tests cover splat, from_array/to_array round-trip, element-wise add/mul/fma,
+    reductions, lane access, lane-count validation, and shift semantics.
+    """
+
+    # F-01: splat(0.0) produces a 4-lane zero vector
+    it "F-01: splat(0.0) produces all-zero 4-lane f32 vector":
+        val v = FixedVec<f32, 4>::splat(0.0)
+        val arr = v.to_array()
+        expect(arr[0]).to_equal(0.0)
+        expect(arr[1]).to_equal(0.0)
+        expect(arr[2]).to_equal(0.0)
+        expect(arr[3]).to_equal(0.0)
+
+    # F-02: from_array([1,2,3,4]) round-trips through to_array()
+    it "F-02: from_array to_array round-trip preserves all lane values":
+        val v = make_f32x4_1234()
+        val arr = v.to_array()
+        expect(arr[0]).to_equal(1.0)
+        expect(arr[1]).to_equal(2.0)
+        expect(arr[2]).to_equal(3.0)
+        expect(arr[3]).to_equal(4.0)
+
+    # F-03: add is element-wise: [1,2,3,4] + [10,20,30,40] = [11,22,33,44]
+    it "F-03: add is element-wise for f32x4":
+        val va = make_f32x4_1234()
+        val vb = make_f32x4_add_rhs()
+        val result = va.add(vb)
+        val arr = result.to_array()
+        expect(arr[0]).to_equal(11.0)
+        expect(arr[1]).to_equal(22.0)
+        expect(arr[2]).to_equal(33.0)
+        expect(arr[3]).to_equal(44.0)
+
+    # F-04: mul is element-wise: [1,2,3,4] * [2,3,4,5] = [2,6,12,20]
+    it "F-04: mul is element-wise for f32x4":
+        val va = make_f32x4_1234()
+        val vb = make_f32x4_mul_rhs()
+        val result = va.mul(vb)
+        val arr = result.to_array()
+        expect(arr[0]).to_equal(2.0)
+        expect(arr[1]).to_equal(6.0)
+        expect(arr[2]).to_equal(12.0)
+        expect(arr[3]).to_equal(20.0)
+
+    # F-05: fma(b, c) = self*b + c element-wise
+    # [1,2,3,4].fma([2,3,4,5], [10,20,30,40]) = [1*2+10, 2*3+20, 3*4+30, 4*5+40]
+    #                                           = [12, 26, 42, 60]
+    it "F-05: fma computes self*b+c element-wise for f32x4":
+        val va = make_f32x4_1234()
+        val vb = make_f32x4_mul_rhs()
+        val vc = make_f32x4_add_rhs()
+        val result = va.fma(vb, vc)
+        val arr = result.to_array()
+        expect(arr[0]).to_equal(12.0)
+        expect(arr[1]).to_equal(26.0)
+        expect(arr[2]).to_equal(42.0)
+        expect(arr[3]).to_equal(60.0)
+
+    # F-06: reduce_sum of [1,2,3,4] = 10.0
+    it "F-06: reduce_sum of [1.0 2.0 3.0 4.0] equals 10.0":
+        val v = make_f32x4_1234()
+        val s = v.reduce_sum()
+        expect(s).to_equal(10.0)
+
+    # F-07: reduce_max of [3,1,4,1] = 4.0
+    # NaN note: per C1 §9 and IEEE 754, FMAXNM propagates NaN; this test uses
+    # finite values only. NaN-propagation behavior is target-defined.
+    it "F-07: reduce_max of [3.0 1.0 4.0 1.0] equals 4.0 (finite values)":
+        val v = make_f32x4_3141()
+        val m = v.reduce_max()
+        expect(m).to_equal(4.0)
+
+    # F-08: lane(i) and set_lane(i, v) round-trip for two lanes
+    it "F-08: lane and set_lane access and replace individual lanes":
+        val v = make_f32x4_1234()
+        # Read lane 1 (should be 2.0)
+        val lane1 = v.lane(1)
+        expect(lane1).to_equal(2.0)
+        # Replace lane 2 with 99.0 and read back
+        val v2 = v.set_lane(2, 99.0)
+        val lane2 = v2.lane(2)
+        expect(lane2).to_equal(99.0)
+        # Other lanes untouched
+        val lane0 = v2.lane(0)
+        expect(lane0).to_equal(1.0)
+
+    # F-09: FixedVec<f32, 3> (non-power-of-two N) should fail at type-check
+    # with E_SIMD_BAD_LANES per C2 §1.0 and §2.
+    # This spec is expected to FAIL TO LOAD (parse/type-check error) until D3
+    # lands the SIMD type-checker (simd_check.spl). It documents that N=3 is
+    # explicitly rejected. No runtime expect() call — the error is a compile-time
+    # diagnostic, not a runtime value.
+    #
+    # Expected: E_SIMD_BAD_LANES emitted at type-check phase
+    # DO NOT wrap in a try block — let it fail loudly.
+    it "F-09: FixedVec<f32, 3> non-power-of-two lane count is rejected at type-check":
+        # E_SIMD_BAD_LANES: N=3 is not a power-of-two; type-check must reject this.
+        # This it-block body is unreachable once D3 lands the diagnostic.
+        # If this block executes, D3 has NOT yet enforced the lane-count constraint.
+        val _v = FixedVec<f32, 3>::splat(0.0)
+        # If we reach this line, the type-checker failed to reject N=3.
+        # The assertion below will fail intentionally to surface the regression.
+        expect(false).to_equal(true)
+
+    # F-10: shr_logical and shr_arith differ on negative i32
+    # -8 >> 1: shr_logical = 0x7FFFFFFC (top bit zero-filled) >= 0
+    #          shr_arith   = -4         (sign-extended)        < 0
+    it "F-10: shr_logical and shr_arith differ on negative i32 values":
+        val vneg = make_i32x4_neg()
+        val logical = vneg.shr_logical(1)
+        val arith   = vneg.shr_arith(1)
+        # shr_logical result is non-negative (high bit cleared)
+        val lg0 = logical.lane(0)
+        expect(lg0).to_be_greater_than(0)
+        # shr_arith result preserves sign (remains negative)
+        val ar0 = arith.lane(0)
+        expect(ar0).to_equal(-4)

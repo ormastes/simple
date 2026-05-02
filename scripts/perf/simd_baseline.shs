@@ -1,0 +1,169 @@
+#!/bin/sh
+# SIMD Perf Baseline Harness — compile and time SIMD kernels, emit CSV rows
+#
+# Usage:
+#   sh scripts/perf/simd_baseline.shs --kernel saxpy --target x86_64-unknown-linux \
+#       --t f32 --n 256 [--iters 1000000] [--out build/perf/simd_baseline.csv]
+#
+# --kernel  {saxpy|dot|reduce}  kernel variant to benchmark
+# --target  compiler triple (e.g. x86_64-unknown-linux, aarch64-unknown-linux, riscv64gc-unknown-elf)
+# --t       element type {f32|f64|i32|i64}
+# --n       lane count (SIMD width in elements)
+# --iters   inner-loop iteration count (default: 1000000)
+# --out     CSV output path (default: build/perf/simd_baseline.csv)
+#
+# CSV columns: target,kernel,T,N,iters,gflops,gbps_load,gbps_store,host_uname
+# Non-host targets are routed through scripts/qemu_simd_runner.shs --bin <bin>
+#
+# Pattern: scripts/qemu_riscv64.shs (CLI parsing); used by Wave-E perf gate
+
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+if [ -n "${SIMPLE_BINARY:-}" ]; then
+    SIMPLE_BIN="$SIMPLE_BINARY"
+elif [ -x "$REPO_ROOT/src/compiler_rust/target/debug/simple" ]; then
+    SIMPLE_BIN="$REPO_ROOT/src/compiler_rust/target/debug/simple"
+elif [ -x "$REPO_ROOT/src/compiler_rust/target/bootstrap/simple" ]; then
+    SIMPLE_BIN="$REPO_ROOT/src/compiler_rust/target/bootstrap/simple"
+elif [ -x "$REPO_ROOT/src/compiler_rust/target/release/simple" ]; then
+    SIMPLE_BIN="$REPO_ROOT/src/compiler_rust/target/release/simple"
+else
+    SIMPLE_BIN="$REPO_ROOT/bin/simple"
+fi
+
+KERNEL=""
+TARGET=""
+TYPE=""
+N_LANES=""
+ITERS=1000000
+OUT="$REPO_ROOT/build/perf/simd_baseline.csv"
+
+usage() {
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+die() {
+    printf '%s\n' "$1" >&2
+    exit "${2:-1}"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --kernel)   shift; KERNEL="$1" ;;
+        --kernel=*) KERNEL="${1#--kernel=}" ;;
+        --target)   shift; TARGET="$1" ;;
+        --target=*) TARGET="${1#--target=}" ;;
+        --t)        shift; TYPE="$1" ;;
+        --t=*)      TYPE="${1#--t=}" ;;
+        --n)        shift; N_LANES="$1" ;;
+        --n=*)      N_LANES="${1#--n=}" ;;
+        --iters)    shift; ITERS="$1" ;;
+        --iters=*)  ITERS="${1#--iters=}" ;;
+        --out)      shift; OUT="$1" ;;
+        --out=*)    OUT="${1#--out=}" ;;
+        --help|-h)  usage; exit 0 ;;
+        *)          die "Unknown argument: $1" ;;
+    esac
+    shift
+done
+
+[ -z "$KERNEL" ] && die "Error: --kernel {saxpy|dot|reduce} is required"
+[ -z "$TARGET" ] && die "Error: --target <triple> is required"
+[ -z "$TYPE"   ] && die "Error: --t {f32|f64|i32|i64} is required"
+[ -z "$N_LANES" ] && die "Error: --n <lanes> is required"
+
+case "$KERNEL" in
+    saxpy|dot|reduce) ;;
+    *) die "Unknown kernel '$KERNEL': must be saxpy, dot, or reduce" ;;
+esac
+
+case "$TYPE" in
+    f32|f64|i32|i64) ;;
+    *) die "Unknown type '$TYPE': must be f32, f64, i32, or i64" ;;
+esac
+
+# Kernel source paths
+KERNEL_SRC="$REPO_ROOT/src/lib/gc_async_mut/simd/kernels/${KERNEL}_${TYPE}.spl"
+BUILD_DIR="$REPO_ROOT/build/perf"
+mkdir -p "$BUILD_DIR"
+BIN_OUT="$BUILD_DIR/simd_${KERNEL}_${TYPE}_n${N_LANES}"
+
+# Compile kernel
+printf 'Compiling kernel %s<%s> n=%s for %s ...\n' "$KERNEL" "$TYPE" "$N_LANES" "$TARGET"
+"$SIMPLE_BIN" build --target "$TARGET" \
+    --define SIMD_N="$N_LANES" \
+    --define SIMD_ITERS="$ITERS" \
+    --out "$BIN_OUT" \
+    "$KERNEL_SRC" 2>&1
+
+# Detect host triple
+HOST_TRIPLE="$(uname -m)-unknown-$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+# Determine if we need QEMU routing
+USE_QEMU=0
+case "$TARGET" in
+    *aarch64*sve2*)  USE_QEMU=1; QEMU_TARGET="sve2" ;;
+    *aarch64*)
+        if [ "$(uname -m)" != "aarch64" ]; then
+            USE_QEMU=1; QEMU_TARGET="sve2"
+        fi
+        ;;
+    *riscv64*)       USE_QEMU=1; QEMU_TARGET="rvv" ;;
+    *)               USE_QEMU=0 ;;
+esac
+
+# Time execution
+T_START="$(date +%s%N 2>/dev/null || date +%s)"
+
+if [ $USE_QEMU -eq 1 ]; then
+    sh "$REPO_ROOT/scripts/qemu_simd_runner.shs" \
+        --target "$QEMU_TARGET" \
+        --bin "$BIN_OUT"
+else
+    "$BIN_OUT"
+fi
+EXIT_CODE=$?
+
+T_END="$(date +%s%N 2>/dev/null || date +%s)"
+
+if [ "$EXIT_CODE" -ne 0 ]; then
+    die "Kernel exited with code $EXIT_CODE" "$EXIT_CODE"
+fi
+
+# Compute elapsed (nanoseconds if available, else seconds)
+ELAPSED_NS=$(( T_END - T_START ))
+
+# Rough GFlop/s estimate: ops = 2*N*iters for saxpy/dot; N*iters for reduce
+case "$KERNEL" in
+    saxpy|dot) OPS=$(( 2 * N_LANES * ITERS )) ;;
+    reduce)    OPS=$(( N_LANES * ITERS )) ;;
+esac
+
+# GFlop/s = ops / elapsed_ns (since 1 GFlop = 1e9 flops, and elapsed is in ns = 1e9/s)
+GFLOPS="$(printf '%s %s' "$OPS" "$ELAPSED_NS" | awk '{printf "%.4f", $1 / $2}')"
+
+# Bandwidth estimates (load: N elements in, store: 1 element out per iter)
+ELEM_BYTES=4
+case "$TYPE" in f64|i64) ELEM_BYTES=8 ;; esac
+LOAD_BYTES=$(( N_LANES * ITERS * ELEM_BYTES ))
+STORE_BYTES=$(( ITERS * ELEM_BYTES ))
+GBPS_LOAD="$(printf '%s %s' "$LOAD_BYTES" "$ELAPSED_NS" | awk '{printf "%.4f", $1 / $2}')"
+GBPS_STORE="$(printf '%s %s' "$STORE_BYTES" "$ELAPSED_NS" | awk '{printf "%.4f", $1 / $2}')"
+
+HOST_UNAME="$(uname -srm)"
+
+# Write CSV header on first call
+if [ ! -f "$OUT" ]; then
+    printf 'target,kernel,T,N,iters,gflops,gbps_load,gbps_store,host_uname\n' > "$OUT"
+fi
+
+# Append result row
+printf '%s,%s,%s,%s,%s,%s,%s,%s,"%s"\n' \
+    "$TARGET" "$KERNEL" "$TYPE" "$N_LANES" "$ITERS" \
+    "$GFLOPS" "$GBPS_LOAD" "$GBPS_STORE" "$HOST_UNAME" >> "$OUT"
+
+printf 'Result appended to %s\n' "$OUT"
+printf '  target=%s kernel=%s T=%s N=%s iters=%s gflops=%s\n' \
+    "$TARGET" "$KERNEL" "$TYPE" "$N_LANES" "$ITERS" "$GFLOPS"
