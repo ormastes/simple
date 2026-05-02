@@ -1,0 +1,361 @@
+# src/compiler/70.backend/backend/native/x86_64_avx512.spl
+#
+# AVX-512 strict-emit backend (scaffold; M1 fills the implementations)
+#
+# Pattern: src/compiler/70.backend/backend/native/arm_neon.spl
+# Reference: doc/04_architecture/simd_backend_strict_emit_detail_part1.md §3 (EVEX encoding)
+#            doc/04_architecture/simd_backend_strict_emit_detail_part2.md §8.2 (k-reg alloc)
+#
+# ERRATA NOTE: simd_backend_strict_emit_detail_part1.md §3 contains ERR-001 (P0/P1 swap bug).
+# See simd_strict_emit_errata.md for the corrected byte layout before implementing EVEX in M1.
+#
+# AVX-512 uses EVEX prefix encoding (4-byte prefix replacing VEX):
+#   Byte 0: 0x62  (mandatory EVEX escape)
+#   Byte 1 / P0:  ~R | ~X | ~B | ~R' | 0 | mm[2:0]
+#   Byte 2 / P1:  W | ~vvvv[3:0] | 1 | pp[1:0]
+#   Byte 3 / P2:  z | L'L | b | ~V' | aaa
+#
+# ZMM registers (512-bit): ZMM0-ZMM31
+# k-mask registers: k0-k7  (k0 reserved as all-ones; k1-k7 allocatable — see §8.2)
+#
+# MachOpcode families added by D3 (SimdZmm*):
+#   SimdZmmAddF32x16, SimdZmmMulF32x16, SimdZmmFmaF32x16,
+#   SimdZmmMaskAdd, SimdZmmLoad, SimdZmmStore,
+#   SimdZmmGather, SimdZmmScatter,
+#   SimdZmmKand, SimdZmmKor, SimdZmmKxor, SimdZmmKnot,
+#   SimdZmmPerm, SimdZmmShuffle
+
+use compiler.backend.native.mach_inst.{MachReg, MachRegKind, physical_reg, reg_id, Operand, OperandKind, MachInst, MachBlock, MachFunction, MachModule}
+use compiler.backend.native.mach_inst.{X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3, X86_XMM4, X86_XMM5, X86_XMM6, X86_XMM7}
+use compiler.backend.native.mach_inst.{X86_XMM8, X86_XMM9, X86_XMM10, X86_XMM11, X86_XMM12, X86_XMM13, X86_XMM14, X86_XMM15}
+use compiler.backend.native.mach_inst.{X86_YMM0, X86_YMM1, X86_YMM2, X86_YMM3, X86_YMM4, X86_YMM5, X86_YMM6, X86_YMM7}
+use compiler.backend.native.mach_inst.{X86_YMM8, X86_YMM9, X86_YMM10, X86_YMM11, X86_YMM12, X86_YMM13, X86_YMM14, X86_YMM15}
+
+# ============================================================================
+# AVX-512 ZMM Register IDs
+# ZMM registers extend YMM; IDs are assigned by M1 in mach_inst when ZMM
+# constants are added. Scaffold uses placeholder i64 values matching the
+# expected offset (YMM base 32..47 → ZMM expected at 48..79 or similar).
+# M1 will replace these with the real mach_inst exports.
+# ============================================================================
+
+# ZMM0-ZMM15 (lower bank; extend the YMM 16-31 base used by x86_64_simd.spl)
+# Placeholder IDs: 48..63 — M1 must reconcile with mach_inst.spl constants
+val X86_ZMM0  = 48
+val X86_ZMM1  = 49
+val X86_ZMM2  = 50
+val X86_ZMM3  = 51
+val X86_ZMM4  = 52
+val X86_ZMM5  = 53
+val X86_ZMM6  = 54
+val X86_ZMM7  = 55
+val X86_ZMM8  = 56
+val X86_ZMM9  = 57
+val X86_ZMM10 = 58
+val X86_ZMM11 = 59
+val X86_ZMM12 = 60
+val X86_ZMM13 = 61
+val X86_ZMM14 = 62
+val X86_ZMM15 = 63
+
+# ZMM16-ZMM31 (upper bank; AVX-512 only)
+val X86_ZMM16 = 64
+val X86_ZMM17 = 65
+val X86_ZMM18 = 66
+val X86_ZMM19 = 67
+val X86_ZMM20 = 68
+val X86_ZMM21 = 69
+val X86_ZMM22 = 70
+val X86_ZMM23 = 71
+val X86_ZMM24 = 72
+val X86_ZMM25 = 73
+val X86_ZMM26 = 74
+val X86_ZMM27 = 75
+val X86_ZMM28 = 76
+val X86_ZMM29 = 77
+val X86_ZMM30 = 78
+val X86_ZMM31 = 79
+
+# Allocatable ZMM registers (all 32; M1 may restrict for calling convention)
+val X86_ZMM_ALLOCATABLE = [
+    X86_ZMM0, X86_ZMM1, X86_ZMM2, X86_ZMM3,
+    X86_ZMM4, X86_ZMM5, X86_ZMM6, X86_ZMM7,
+    X86_ZMM8, X86_ZMM9, X86_ZMM10, X86_ZMM11,
+    X86_ZMM12, X86_ZMM13, X86_ZMM14, X86_ZMM15,
+    X86_ZMM16, X86_ZMM17, X86_ZMM18, X86_ZMM19,
+    X86_ZMM20, X86_ZMM21, X86_ZMM22, X86_ZMM23,
+    X86_ZMM24, X86_ZMM25, X86_ZMM26, X86_ZMM27,
+    X86_ZMM28, X86_ZMM29, X86_ZMM30, X86_ZMM31
+]
+
+# ============================================================================
+# k-mask Register IDs
+# k0 is architecturally all-ones and MUST NOT be allocated (G-01 per §8.2).
+# k1..k7 are allocatable mask registers.
+# ============================================================================
+
+# Placeholder IDs for k-registers: 80..87
+val X86_K0 = 80  # RESERVED — all-ones; never allocate (G-01 §8.2)
+val X86_K1 = 81
+val X86_K2 = 82
+val X86_K3 = 83
+val X86_K4 = 84
+val X86_K5 = 85
+val X86_K6 = 86
+val X86_K7 = 87
+
+# k1..k7 are the only allocatable mask registers (k0 excluded — see G-01)
+val X86_K_ALLOCATABLE = [X86_K1, X86_K2, X86_K3, X86_K4, X86_K5, X86_K6, X86_K7]
+
+# ============================================================================
+# k-register Allocation Guard
+# k0 reservation: per simd_backend_strict_emit_detail_part2.md §8.2 and G-01
+# in simd_strict_emit_errata.md. Allocator must never return k0.
+# ============================================================================
+
+fn avx512_kreg_name(id: i64) -> text:
+    """Convert k-register ID to name string for diagnostics."""
+    if id == X86_K0:
+        "k0"
+    else if id == X86_K1:
+        "k1"
+    else if id == X86_K2:
+        "k2"
+    else if id == X86_K3:
+        "k3"
+    else if id == X86_K4:
+        "k4"
+    else if id == X86_K5:
+        "k5"
+    else if id == X86_K6:
+        "k6"
+    else if id == X86_K7:
+        "k7"
+    else:
+        "k?"
+
+fn avx512_kreg_is_allocatable(id: i64) -> bool:
+    """
+    Guard: returns true only for k1..k7.
+    k0 is architecturally reserved as all-ones and must never be assigned
+    to a virtual register (G-01 per simd_backend_strict_emit_detail_part2.md §8.2).
+    M1 linear-scan allocator must call this before issuing any kreg.
+    """
+    id >= X86_K1 and id <= X86_K7
+
+# Scaffold allocator: always returns k1 as the first allocatable kreg.
+# M1 implements proper linear-scan over k1..k7.
+# Precondition: caller must not pass k0 (assertion in M1 full impl).
+fn avx512_alloc_kreg_scaffold() -> i64:
+    """
+    Scaffold k-register allocator. Returns k1 unconditionally.
+    M1 fills: linear-scan over X86_K_ALLOCATABLE (k1..k7).
+    NEVER returns k0 — k0 is reserved as all-ones (G-01 §8.2).
+    """
+    X86_K1
+
+# ============================================================================
+# Register Encoding Helpers (scaffold stubs — M1 fills bodies)
+# ============================================================================
+
+fn zmm_to_index(zmm_id: i64) -> i64:
+    """Convert ZMM register ID to 5-bit index (0-31) for EVEX encoding."""
+    # M1 fills: reconcile with final mach_inst ZMM ID layout
+    if zmm_id >= X86_ZMM0 and zmm_id <= X86_ZMM31:
+        zmm_id - X86_ZMM0
+    else:
+        0
+
+fn kreg_to_index(k_id: i64) -> i64:
+    """Convert k-register ID to 3-bit aaa field (0-7) for EVEX P2."""
+    # k0 index=0 (reserved); k1=1..k7=7
+    if k_id >= X86_K0 and k_id <= X86_K7:
+        k_id - X86_K0
+    else:
+        0
+
+# ============================================================================
+# EVEX Prefix Encoding (scaffold — M1 implements per §3 with ERR-001 fix)
+# DO NOT implement byte construction here; E3 errata (ERR-001 P0/P1 swap)
+# must be resolved first. See simd_strict_emit_errata.md before touching this.
+# ============================================================================
+
+fn evex_encode_3op_zmm_scaffold(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool, opcode: i64) -> [i64]:
+    """
+    Scaffold placeholder for EVEX 3-operand ZMM encoding.
+    Signature: VADDPS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
+    M1 fills body per simd_backend_strict_emit_detail_part1.md §3 (after ERR-001 fix).
+    Returns empty byte array so callers that check length will fail loudly.
+    """
+    # @allow unimplemented_placeholder
+    # M1 fills: EVEX [0x62, P0, P1, P2, opcode, ModRM] — see §3
+    []
+
+# ============================================================================
+# AVX-512 Arithmetic Instructions (scaffold; M1 fills per SimdZmm* MachOpcodes)
+# ============================================================================
+
+fn encode_avx512_add_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool) -> [i64]:
+    """
+    Scaffold: VADDPS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
+    MachOpcode: SimdZmmAddF32x16
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3; needs ERR-001 fix first.
+    """
+    # @allow unimplemented_placeholder
+    evex_encode_3op_zmm_scaffold(dest, src1, src2, kmask, z, 0x58)
+
+fn encode_avx512_mul_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool) -> [i64]:
+    """
+    Scaffold: VMULPS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
+    MachOpcode: SimdZmmMulF32x16
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    """
+    # @allow unimplemented_placeholder
+    evex_encode_3op_zmm_scaffold(dest, src1, src2, kmask, z, 0x59)
+
+fn encode_avx512_fma_f32x16(dest: i64, src1: i64, src2: i64, src3: i64, kmask: i64, z: bool) -> [i64]:
+    """
+    Scaffold: VFMADD213PS zmm_dest{kmask}{z}, zmm_src1, zmm_src2 (accumulate into dest)
+    MachOpcode: SimdZmmFmaF32x16
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3 (FMA form 213).
+    """
+    # @allow unimplemented_placeholder
+    # FMA uses 3 source registers; scaffold passes src3 as src2 slot for arity
+    evex_encode_3op_zmm_scaffold(dest, src1, src2, kmask, z, 0xA8)
+
+fn encode_avx512_mask_op_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool, base_opcode: i64) -> [i64]:
+    """
+    Scaffold: generic masked SIMD op on ZMM registers.
+    MachOpcode: SimdZmmMaskAdd (and other SimdZmmMask* variants)
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    """
+    # @allow unimplemented_placeholder
+    evex_encode_3op_zmm_scaffold(dest, src1, src2, kmask, z, base_opcode)
+
+# ============================================================================
+# AVX-512 Load / Store Instructions (scaffold)
+# ============================================================================
+
+fn encode_avx512_load_zmm(dest: i64, base_reg: i64, offset: i64, kmask: i64, z: bool) -> [i64]:
+    """
+    Scaffold: VMOVAPS zmm_dest{kmask}{z}, [base_reg + offset]
+    MachOpcode: SimdZmmLoad
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3 (EVEX load with disp8*64).
+    """
+    # @allow unimplemented_placeholder
+    []
+
+fn encode_avx512_store_zmm(src: i64, base_reg: i64, offset: i64, kmask: i64) -> [i64]:
+    """
+    Scaffold: VMOVAPS [base_reg + offset]{kmask}, zmm_src
+    MachOpcode: SimdZmmStore
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    Note: store uses kmask for merge-masking; z-bit not applicable.
+    """
+    # @allow unimplemented_placeholder
+    []
+
+# ============================================================================
+# AVX-512 Gather / Scatter Instructions (scaffold)
+# ============================================================================
+
+fn encode_avx512_gather_f32x16(dest: i64, base_reg: i64, idx_zmm: i64, scale: i64, kmask: i64) -> [i64]:
+    """
+    Scaffold: VGATHERDPS zmm_dest{kmask}, [base_reg + zmm_idx * scale]
+    MachOpcode: SimdZmmGather
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3 (VSIB addressing).
+    PRECONDITION: kmask != k0 (G-01 §8.2; k0 guard required).
+    """
+    # @allow unimplemented_placeholder
+    []
+
+fn encode_avx512_scatter_f32x16(base_reg: i64, idx_zmm: i64, scale: i64, src: i64, kmask: i64) -> [i64]:
+    """
+    Scaffold: VSCATTERDPS [base_reg + zmm_idx * scale]{kmask}, zmm_src
+    MachOpcode: SimdZmmScatter
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3 (VSIB + write mask).
+    PRECONDITION: kmask != k0 (G-01 §8.2; k0 guard required).
+    """
+    # @allow unimplemented_placeholder
+    []
+
+# ============================================================================
+# AVX-512 Mask (k-register) Operations (scaffold)
+# ============================================================================
+
+fn encode_avx512_kand(dest_k: i64, src1_k: i64, src2_k: i64) -> [i64]:
+    """
+    Scaffold: KANDW k_dest, k_src1, k_src2  (16-bit mask AND)
+    MachOpcode: SimdZmmKand
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    VEX-encoded (not EVEX): VEX.L1.0F.W0 41 /r
+    """
+    # @allow unimplemented_placeholder
+    []
+
+fn encode_avx512_kor(dest_k: i64, src1_k: i64, src2_k: i64) -> [i64]:
+    """
+    Scaffold: KORW k_dest, k_src1, k_src2  (16-bit mask OR)
+    MachOpcode: SimdZmmKor
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    VEX-encoded: VEX.L1.0F.W0 45 /r
+    """
+    # @allow unimplemented_placeholder
+    []
+
+fn encode_avx512_kxor(dest_k: i64, src1_k: i64, src2_k: i64) -> [i64]:
+    """
+    Scaffold: KXORW k_dest, k_src1, k_src2  (16-bit mask XOR)
+    MachOpcode: SimdZmmKxor
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    VEX-encoded: VEX.L1.0F.W0 47 /r
+    """
+    # @allow unimplemented_placeholder
+    []
+
+fn encode_avx512_knot(dest_k: i64, src_k: i64) -> [i64]:
+    """
+    Scaffold: KNOTW k_dest, k_src  (16-bit mask NOT)
+    MachOpcode: SimdZmmKnot
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    VEX-encoded: VEX.L0.0F.W0 44 /r
+    """
+    # @allow unimplemented_placeholder
+    []
+
+# ============================================================================
+# AVX-512 Permute / Shuffle Instructions (scaffold)
+# ============================================================================
+
+fn encode_avx512_perm_f32x16(dest: i64, src: i64, ctrl: i64, kmask: i64, z: bool) -> [i64]:
+    """
+    Scaffold: VPERMPS zmm_dest{kmask}{z}, zmm_ctrl, zmm_src
+    MachOpcode: SimdZmmPerm
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    EVEX.512.66.0F38.W0 16 /r
+    """
+    # @allow unimplemented_placeholder
+    []
+
+fn encode_avx512_shuffle_f32x16(dest: i64, src1: i64, src2: i64, imm: i64, kmask: i64, z: bool) -> [i64]:
+    """
+    Scaffold: VSHUFF32x4 zmm_dest{kmask}{z}, zmm_src1, zmm_src2, imm8
+    MachOpcode: SimdZmmShuffle
+    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    EVEX.512.66.0F3A.W0 23 /r ib
+    """
+    # @allow unimplemented_placeholder
+    []
+
+# ============================================================================
+# Diagnostic Helper
+# ============================================================================
+
+fn avx512_zmm_reg_name(id: i64) -> text:
+    """Convert ZMM register ID to name string for diagnostics and ICE messages."""
+    val idx = zmm_to_index(id)
+    "zmm{idx}"
+
+# ============================================================================
+# Exports
+# ============================================================================
