@@ -1,0 +1,196 @@
+# Sprite Helpers — SpriteData and AnimatedSpriteData construction and animation
+#
+# Builder-style helpers for sprite components and frame animation logic.
+#
+# Usage:
+#   val sprite = SpriteData.create(tex_id, src_rect).with_tint(EngineColor.red())
+#   val anim = AnimatedSpriteData.create(tex_id, 32, 32, 8, 4)
+#   val updated = update_animated_sprite(anim, 0.016)
+#   val rect = updated.current_frame_rect()
+
+use std.common.engine.ids.{TextureId}
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.units.{Speed, Seconds}
+use std.nogc_sync_mut.engine.component.registry.{SpriteData, AnimatedSpriteData}
+
+# ============================================================================
+# SpriteData helpers
+# ============================================================================
+
+impl SpriteData:
+    static fn create(texture_id: TextureId, src_rect: Rect2) -> SpriteData:
+        """Create a sprite with default settings.
+
+        Defaults: pivot at center (0.5, 0.5), no flip, white tint.
+        """
+        SpriteData(
+            texture_id: texture_id,
+            src_rect: src_rect,
+            pivot: Vec2(x: 0.5, y: 0.5),
+            flip_x: false,
+            flip_y: false,
+            tint: EngineColor.white()
+        )
+
+    fn with_pivot(pivot: Vec2) -> SpriteData:
+        """Return a copy with the given pivot point."""
+        SpriteData(
+            texture_id: self.texture_id,
+            src_rect: self.src_rect,
+            pivot: pivot,
+            flip_x: self.flip_x,
+            flip_y: self.flip_y,
+            tint: self.tint
+        )
+
+    fn with_flip(flip_x: bool, flip_y: bool) -> SpriteData:
+        """Return a copy with the given flip flags."""
+        SpriteData(
+            texture_id: self.texture_id,
+            src_rect: self.src_rect,
+            pivot: self.pivot,
+            flip_x: flip_x,
+            flip_y: flip_y,
+            tint: self.tint
+        )
+
+    fn with_tint(tint: EngineColor) -> SpriteData:
+        """Return a copy with the given tint color."""
+        SpriteData(
+            texture_id: self.texture_id,
+            src_rect: self.src_rect,
+            pivot: self.pivot,
+            flip_x: self.flip_x,
+            flip_y: self.flip_y,
+            tint: tint
+        )
+
+# ============================================================================
+# AnimatedSpriteData helpers
+# ============================================================================
+
+impl AnimatedSpriteData:
+    static fn create(texture_id: TextureId, frame_w: i64, frame_h: i64, cols: i64, rows: i64) -> AnimatedSpriteData:
+        """Create an animated sprite from a sprite sheet grid.
+
+        Defaults: all frames in order, 10 fps, looping, playing.
+        """
+        val total = cols * rows
+        var frames: [i64] = []
+        var i = 0
+        while i < total:
+            frames.push(i)
+            i = i + 1
+        AnimatedSpriteData(
+            texture_id: texture_id,
+            frame_width: frame_w,
+            frame_height: frame_h,
+            columns: cols,
+            rows: rows,
+            frames: frames,
+            speed: Speed(value: 10.0),
+            current_time: Seconds(value: 0.0),
+            is_looping: true,
+            is_playing: true
+        )
+
+    fn current_frame_index() -> i64:
+        """Compute the current frame index from current_time and speed.
+
+        Maps elapsed time to a frame in the frames array.
+        """
+        val total = self.frames.len()
+        if total == 0:
+            return 0
+        if self.speed.value <= 0.0:
+            return self.frames[0]
+        val frame_num = self.current_time.value * self.speed.value
+        var idx = frame_num
+        if self.is_looping:
+            idx = idx % total
+        else:
+            if idx >= total:
+                idx = total - 1
+        self.frames[idx]
+
+    fn frame_rect(index: i64) -> Rect2:
+        """Compute the source rectangle for a frame index in the sprite sheet grid.
+
+        Frame index maps to (col, row) in the grid, then to pixel coordinates.
+        """
+        val col = index % self.columns
+        val row = index / self.columns
+        val fx = col * self.frame_width
+        val fy = row * self.frame_height
+        Rect2(x: fx * 1.0, y: fy * 1.0, width: self.frame_width * 1.0, height: self.frame_height * 1.0)
+
+    fn current_frame_rect() -> Rect2:
+        """Compute the source rectangle for the current animation frame."""
+        val idx = self.current_frame_index()
+        self.frame_rect(idx)
+
+    fn total_frames() -> i64:
+        """Number of frames in the animation sequence."""
+        self.frames.len()
+
+# ============================================================================
+# Animation update (free function)
+# ============================================================================
+
+fn update_animated_sprite(data: AnimatedSpriteData, dt: Seconds) -> AnimatedSpriteData:
+    """Advance animation time by dt seconds. Returns updated copy.
+
+    If not playing, returns unchanged.
+    If looping, wraps time around total duration.
+    If not looping, clamps at end.
+    """
+    if not data.is_playing:
+        return data
+
+    val total = data.frames.len()
+    if total == 0:
+        return data
+
+    val new_time = data.current_time.value + dt.value
+
+    if data.speed.value <= 0.0:
+        return AnimatedSpriteData(
+            texture_id: data.texture_id,
+            frame_width: data.frame_width,
+            frame_height: data.frame_height,
+            columns: data.columns,
+            rows: data.rows,
+            frames: data.frames,
+            speed: data.speed,
+            current_time: Seconds(value: new_time),
+            is_looping: data.is_looping,
+            is_playing: data.is_playing
+        )
+
+    val duration = total * 1.0 / data.speed.value
+    var final_time = new_time
+
+    if data.is_looping:
+        if duration > 0.0:
+            while final_time >= duration:
+                final_time = final_time - duration
+            while final_time < 0.0:
+                final_time = final_time + duration
+    else:
+        if final_time >= duration:
+            final_time = duration - 0.0001
+
+    AnimatedSpriteData(
+        texture_id: data.texture_id,
+        frame_width: data.frame_width,
+        frame_height: data.frame_height,
+        columns: data.columns,
+        rows: data.rows,
+        frames: data.frames,
+        speed: data.speed,
+        current_time: Seconds(value: final_time),
+        is_looping: data.is_looping,
+        is_playing: data.is_playing
+    )

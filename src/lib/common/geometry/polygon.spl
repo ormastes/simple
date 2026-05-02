@@ -1,0 +1,200 @@
+# Polygon Operations
+#
+# A polygon is represented as a list of points: [(x1, y1), (x2, y2), ...]
+
+import "std/math" as math
+import "std/geometry/types" as types
+import "std/geometry/point" as point
+import "std/geometry/line" as line
+
+# Calculate the signed area of a polygon (positive if counterclockwise)
+fn polygon_signed_area(points: [(f64, f64)]) -> f64:
+    val len = points.length()
+    if len < 3:
+        0.0
+    else:
+        var area = 0.0
+        var i = 0
+        while i < len:
+            val p1 = points[i]
+            val p2 = points[(i + 1) % len]
+            area = area + (p1.0 * p2.1 - p2.0 * p1.1)
+            i = i + 1
+        area / 2.0
+
+# Calculate the area of a polygon
+fn polygon_area(points: [(f64, f64)]) -> f64:
+    math.abs(polygon_signed_area(points))
+
+# Calculate the perimeter of a polygon
+fn polygon_perimeter(points: [(f64, f64)]) -> f64:
+    val len = points.length()
+    if len < 2:
+        0.0
+    else:
+        var perim = 0.0
+        var i = 0
+        while i < len:
+            val p1 = points[i]
+            val p2 = points[(i + 1) % len]
+            perim = perim + point.point_distance(p1, p2)
+            i = i + 1
+        perim
+
+# Calculate the centroid of a polygon
+fn polygon_centroid(points: [(f64, f64)]) -> (f64, f64):
+    val len = points.length()
+    if len == 0:
+        (0.0, 0.0)
+    else:
+        var sum_x = 0.0
+        var sum_y = 0.0
+        var i = 0
+        while i < len:
+            val p = points[i]
+            sum_x = sum_x + p.0
+            sum_y = sum_y + p.1
+            i = i + 1
+        (sum_x / len as f64, sum_y / len as f64)
+
+# Check if a polygon contains a point (ray casting algorithm)
+fn polygon_contains_point(points: [(f64, f64)], p: (f64, f64)) -> bool:
+    val len = points.length()
+    if len < 3:
+        false
+    else:
+        var inside = false
+        var i = 0
+        while i < len:
+            val p1 = points[i]
+            val p2 = points[(i + 1) % len]
+
+            val y_check = (p1.1 > p.1) != (p2.1 > p.1)
+            if y_check:
+                val x_intersect = (p2.0 - p1.0) * (p.1 - p1.1) / (p2.1 - p1.1) + p1.0
+                if p.0 < x_intersect:
+                    inside = not inside
+
+            i = i + 1
+        inside
+
+# Check if a polygon is convex
+fn polygon_is_convex(points: [(f64, f64)]) -> bool:
+    val len = points.length()
+    if len < 3:
+        false
+    else:
+        var sign = 0.0
+        var i = 0
+        var is_convex = true
+        while i < len and is_convex:
+            val p1 = points[i]
+            val p2 = points[(i + 1) % len]
+            val p3 = points[(i + 2) % len]
+
+            val v1 = point.vector_from_points(p1, p2)
+            val v2 = point.vector_from_points(p2, p3)
+            val cross = point.vector_cross(v1, v2)
+
+            if math.abs(cross) > types.EPSILON:
+                if sign == 0.0:
+                    sign = cross
+                else:
+                    if sign * cross < 0.0:
+                        is_convex = false
+
+            i = i + 1
+        is_convex
+
+# Compute the convex hull using Graham scan
+# Returns points in counterclockwise order
+fn polygon_convex_hull(points: [(f64, f64)]) -> [(f64, f64)]:
+    val len = points.length()
+    if len < 3:
+        points
+    else:
+        # Find the point with lowest y-coordinate (and leftmost if tied)
+        var lowest_idx = 0
+        var i = 1
+        while i < len:
+            val curr = points[i]
+            val lowest = points[lowest_idx]
+            if curr.1 < lowest.1 or (curr.1 == lowest.1 and curr.0 < lowest.0):
+                lowest_idx = i
+            i = i + 1
+
+        val pivot = points[lowest_idx]
+
+        # Sort points by polar angle with respect to pivot
+        var sorted_points = []
+        i = 0
+        while i < len:
+            if i != lowest_idx:
+                sorted_points = sorted_points + [points[i]]
+            i = i + 1
+
+        # Simple bubble sort by angle (good enough for small datasets)
+        var n = sorted_points.length()
+        var swapped = true
+        while swapped:
+            swapped = false
+            i = 0
+            while i < n - 1:
+                val p1 = sorted_points[i]
+                val p2 = sorted_points[i + 1]
+                val v1 = point.vector_from_points(pivot, p1)
+                val v2 = point.vector_from_points(pivot, p2)
+                val cross = point.vector_cross(v1, v2)
+
+                if cross < 0.0:
+                    sorted_points = sorted_points[0..i] + [p2] + [p1] + sorted_points[i + 2..n]
+                    swapped = true
+
+                i = i + 1
+
+        # Build convex hull
+        var hull = [pivot]
+        i = 0
+        while i < sorted_points.length():
+            val p = sorted_points[i]
+
+            # Remove points that make clockwise turn
+            var hull_len = hull.length()
+            while hull_len >= 2:
+                val p1 = hull[hull_len - 2]
+                val p2 = hull[hull_len - 1]
+                val v1 = point.vector_from_points(p1, p2)
+                val v2 = point.vector_from_points(p2, p)
+                val cross = point.vector_cross(v1, v2)
+
+                if cross <= 0.0:
+                    hull = hull[0..hull_len - 1]
+                    hull_len = hull.length()
+                else:
+                    hull_len = 0  # Break the loop
+
+            hull = hull + [p]
+            i = i + 1
+
+        hull
+
+# Calculate the signed area of a simple polygon (positive if counterclockwise)
+fn polygon_signed_area_simple(points: [(f64, f64)]) -> f64:
+    polygon_signed_area(points)
+
+# Calculate distance between a point and a polygon (minimum distance to any edge)
+fn polygon_distance_to_point(points: [(f64, f64)], p: (f64, f64)) -> f64:
+    val len = points.length()
+    if len < 2:
+        0.0
+    else:
+        var min_dist = line.line_segment_distance_to_point((points[0], points[1]), p)
+        var i = 1
+        while i < len:
+            val p1 = points[i]
+            val p2 = points[(i + 1) % len]
+            val seg = (p1, p2)
+            val dist = line.line_segment_distance_to_point(seg, p)
+            min_dist = math.min(min_dist, dist)
+            i = i + 1
+        min_dist

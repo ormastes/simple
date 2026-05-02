@@ -1,0 +1,58 @@
+"""
+# RV64 Linux RTL Pipeline System Specification
+
+Executable trace for the historical RV64 Linux platform contract that now feeds the dual-arch generated Linux truth model.
+"""
+
+import std.spec
+
+use hardware.riscv_common.pkg.riscv_linux_pkg.{RiscvTargetAbi, RiscvPlatformProfile, Rv64LinuxBootArtifacts}
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvFpgaLane, RiscvReadinessStatus, create_default_riscv_fpga_linux_manifest}
+use compiler.backend.{CodegenTarget, riscv_linux_target_contract}
+
+describe "REQ-RV64-LINUX-RTL-001..005: historical RV64 platform contract within the dual-arch model":
+    it "defines one RV64 QEMU virt Linux contract used by the shared dual-arch pipeline":
+        val profile = RiscvPlatformProfile.qemu_virt_rv64()
+        expect profile.name == "qemu_virt_rv64"
+        expect profile.linux.abi == RiscvTargetAbi.LP64D
+        expect profile.hartid_register == "a0"
+        expect profile.dtb_register == "a1"
+        expect profile.satp_mode_off == true
+
+    it "requires firmware, kernel, rootfs, and dtb for RV64 Linux boot claims":
+        val artifacts = Rv64LinuxBootArtifacts.empty()
+        val errors = artifacts.validate_for(RiscvPlatformProfile.qemu_virt_rv64().linux)
+        expect (errors).contains("kernel_image is required")
+        expect (errors).contains("initrd_rootfs is required")
+        expect (errors).contains("dtb is required")
+        expect (errors).contains("OpenSBI or U-Boot firmware is required")
+
+    it "keeps generated and external RV64 Linux proof lanes distinct in repo manifests":
+        val lane = RiscvFpgaLane.rv64_default()
+        val manifest = create_default_riscv_fpga_linux_manifest()
+        expect lane.proof_lane().to_text() == "generated_rv64_linux"
+        expect lane.proof_lane_summary() == "generated_rv64_linux shell=none"
+        expect (manifest.readiness_summary()).contains("generated_rv64_linux")
+
+    it "defines rtl-linux-validated as a generated Linux boot claim state":
+        val lane = RiscvFpgaLane(
+            xlen: RiscvFpgaLane.rv64_default().xlen,
+            top_module: RiscvFpgaLane.rv64_default().top_module,
+            rtl_dir: RiscvFpgaLane.rv64_default().rtl_dir,
+            rtl_sim_backend: RiscvFpgaLane.rv64_default().rtl_sim_backend,
+            bootrom_path: RiscvFpgaLane.rv64_default().bootrom_path,
+            readiness: RiscvReadinessStatus.RtlLinuxValidated,
+            linux_profile: RiscvFpgaLane.rv64_default().linux_profile,
+            platform_profile: RiscvFpgaLane.rv64_default().platform_profile,
+            scope_note: RiscvFpgaLane.rv64_default().scope_note,
+            linux: RiscvFpgaLane.rv64_default().linux
+        )
+        expect lane.readiness_is_boot_validated() == true
+        expect (lane.expected_boot_markers()).contains("Linux version")
+
+describe "REQ-RV64-LINUX-RTL-006..010: compiler backend trace":
+    it "defines explicit RV64 Linux compiler metadata":
+        val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
+        expect contract.triple() == "riscv64-unknown-linux-gnu"
+        expect contract.abi.to_text() == "lp64d"
+        expect contract.march == "rv64gc"

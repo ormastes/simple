@@ -1,0 +1,112 @@
+# @cover src/os/services/procfs_service.spl 80%
+"""
+# ProcfsService Specification (G7)
+
+**Feature IDs:** #G7
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Process filesystem capsule backed by ECS. Validates initial state,
+PM endpoint mounting, node registration, path lookup (hit and miss),
+node count, and the canonical /proc path constant.
+"""
+
+use std.spec
+use os.services.procfs_service.{ProcfsService, PROC_FILE, PROC_DIR}
+
+describe "ProcfsService initial state":
+    """
+    ## Initial State
+
+    A freshly constructed ProcfsService must have zero registered nodes,
+    a zeroed PM endpoint, and the canonical /proc path.
+    """
+
+    it "constructs with zero registered nodes":
+        """Verify the node count starts at 0 on a fresh service."""
+        val svc = ProcfsService.new()
+        expect(svc.procfs_node_count()).to_equal(0)
+
+    it "PROC_FILE constant equals 0":
+        """File node kind constant must be 0."""
+        expect(PROC_FILE).to_equal(0)
+
+    it "PROC_DIR constant equals 1":
+        """Directory node kind constant must be 1."""
+        expect(PROC_DIR).to_equal(1)
+
+    it "procfs_list_pids_path returns /proc":
+        """The canonical procfs root path must be '/proc'."""
+        val svc = ProcfsService.new()
+        expect(svc.procfs_list_pids_path()).to_equal("/proc")
+
+describe "ProcfsService procfs_mount":
+    """
+    ## PM Endpoint Mount
+
+    Validates that mounting a PM endpoint is stored on the service
+    and that it does not affect the node count.
+    """
+
+    it "mount stores pm_endpoint on service":
+        """After procfs_mount the service pm_endpoint must equal the argument."""
+        var svc = ProcfsService.new()
+        svc.procfs_mount(7777)
+        expect(svc.pm_endpoint).to_equal(7777)
+
+    it "mount does not create any ECS nodes":
+        """procfs_mount must not register any entities (count stays 0)."""
+        var svc = ProcfsService.new()
+        svc.procfs_mount(8888)
+        expect(svc.procfs_node_count()).to_equal(0)
+
+describe "ProcfsService procfs_node_register":
+    """
+    ## Node Registration
+
+    Validates that registering nodes increments the count and
+    returns live entities.
+    """
+
+    it "register increments node count":
+        """After registering one node the count must be 1."""
+        var svc = ProcfsService.new()
+        val _e = svc.procfs_node_register("/proc/1", 1, PROC_DIR)
+        expect(svc.procfs_node_count()).to_equal(1)
+
+    it "register returns entity with positive id":
+        """procfs_node_register must return an entity with id > 0."""
+        var svc = ProcfsService.new()
+        val e = svc.procfs_node_register("/proc/1/status", 1, PROC_FILE)
+        expect(e.id).to_be_greater_than(0)
+
+describe "ProcfsService procfs_node_lookup":
+    """
+    ## Node Lookup
+
+    Validates that registered nodes are found by path and missing
+    paths return -ENOENT (-2).
+    """
+
+    it "lookup registered node returns its source pid":
+        """procfs_node_lookup must return the pid used at registration."""
+        var svc = ProcfsService.new()
+        val _e = svc.procfs_node_register("/proc/42/cmdline", 42, PROC_FILE)
+        val pid = svc.procfs_node_lookup("/proc/42/cmdline")
+        expect(pid).to_equal(42)
+
+    it "lookup missing path returns -2":
+        """procfs_node_lookup must return -ENOENT (-2) for unknown paths."""
+        val svc = ProcfsService.new()
+        val pid = svc.procfs_node_lookup("/proc/9999/status")
+        expect(pid).to_equal(-2)
+
+    it "lookup different path does not match registered node":
+        """Lookup of a different path than registered must return -ENOENT."""
+        var svc = ProcfsService.new()
+        val _e = svc.procfs_node_register("/proc/1/maps", 1, PROC_FILE)
+        val pid = svc.procfs_node_lookup("/proc/1/status")
+        expect(pid).to_equal(-2)

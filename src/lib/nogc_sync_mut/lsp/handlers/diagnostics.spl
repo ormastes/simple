@@ -1,0 +1,324 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Diagnostics Handler
+# Provides error diagnostics from tree-sitter parse errors, compiler check, and verification.
+# Merges syntax errors (tree-sitter), compiler diagnostics (subprocess), and verification diagnostics.
+
+import lsp.protocol as protocol
+import lsp.transport as transport
+use compiler.treesitter.{TreeSitter, OutlineModule, ParseError}
+# LIMITATION: Awaiting tree-sitter satellite FFI
+import lsp.handlers.verification as verification
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+# Find all ERROR nodes in the tree
+fn find_error_nodes(tree: Tree) -> [Node]:
+    var errors: [Node] = []
+
+    # Helper function to traverse tree recursively
+    fn traverse(node_id: NodeId):
+        match tree.arena.get(node_id):
+            case nil:
+                return
+            case Some(node):
+                # Check if this node is an error
+                if node.kind == "ERROR" or node.has_error:
+                    errors.push(node)
+
+                # Traverse children
+                for child_id in node.children:
+                    traverse(child_id)
+
+    # Start traversal from root
+    traverse(tree.root_node)
+
+    errors
+
+# Convert tree-sitter node to LSP diagnostic
+fn node_to_diagnostic(node: Node) -> Dict:
+    # Create range
+    val range = {
+        "start": {
+            "line": node.span.start_line,
+            "character": node.span.start_column
+        },
+        "end": {
+            "line": node.span.end_line,
+            "character": node.span.end_column
+        }
+    }
+
+    # Determine message based on node context
+    val message = if node.text.len() > 0:
+        "Syntax error near '{node.text}'"
+    else:
+        "Syntax error"
+
+    # Create diagnostic
+    {
+        "range": range,
+        "severity": protocol.DiagnosticSeverity.Error,
+        "source": "simple-treesitter",
+        "message": message
+    }
+
+# Generate diagnostics from parse tree
+fn generate_diagnostics(tree: Tree) -> [Dict]:
+    val error_nodes = find_error_nodes(tree)
+    var diagnostics: [Dict] = []
+
+    for error_node in error_nodes:
+        val diagnostic = node_to_diagnostic(error_node)
+        diagnostics.push(diagnostic)
+
+    diagnostics
+
+# Run compiler check via subprocess and collect structured diagnostics
+fn collect_compiler_diagnostics(file_path: String) -> [Dict]:
+    var diagnostics: [Dict] = []
+    val bin = _find_simple_binary()
+    val cmd = "timeout 60 " + bin + " src/app/cli/query.spl check " + file_path + " --format=json"
+    var stdout = ""
+    var stderr = ""
+    var code: i64 = 0
+    (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + cmd])
+    if stdout.trim() == "":
+        return diagnostics
+    val lines = stdout.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("{"):
+            val diag = _parse_compiler_json_diagnostic(trimmed)
+            match diag:
+                Some(d): diagnostics.push(d)
+                nil: pass_do_nothing
+        else:
+            val diag = _parse_compiler_text_diagnostic(trimmed)
+            match diag:
+                Some(d): diagnostics.push(d)
+                nil: pass_do_nothing
+    diagnostics
+
+fn _find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        if rt_file_exists("src/compiler_rust/target/release/simple.exe"):
+            return "src/compiler_rust/target/release/simple.exe"
+        if rt_file_exists("src/compiler_rust/target/bootstrap/simple.exe"):
+            return "src/compiler_rust/target/bootstrap/simple.exe"
+        if rt_file_exists("bin/simple.exe"):
+            return "bin/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+# Parse structured JSON diagnostic from compiler output
+fn _parse_compiler_json_diagnostic(line: String) -> Option<Dict>:
+    # Minimal JSON field extraction (no full JSON parser available here)
+    val msg = _json_field(line, "message")
+    if msg == "":
+        return nil
+    val sev_str = _json_field(line, "severity")
+    val code_str = _json_field(line, "code")
+    val source_str = _json_field(line, "source")
+    val line_str = _json_field(line, "line")
+    val col_str = _json_field(line, "col")
+    val tags_str = _json_field(line, "tags")
+    val related_file = _json_field(line, "relatedFile")
+    val related_msg = _json_field(line, "relatedMessage")
+    var diag_line = 0
+    var diag_col = 0
+    if line_str != "":
+        val ln = int(line_str)
+        if ln > 0:
+            diag_line = ln - 1
+    if col_str != "":
+        val cn = int(col_str)
+        if cn > 0:
+            diag_col = cn - 1
+    var severity = protocol.DiagnosticSeverity.Error
+    if sev_str == "warning" or sev_str == "2":
+        severity = protocol.DiagnosticSeverity.Warning
+    elif sev_str == "information" or sev_str == "info" or sev_str == "3":
+        severity = protocol.DiagnosticSeverity.Information
+    elif sev_str == "hint" or sev_str == "4":
+        severity = protocol.DiagnosticSeverity.Hint
+    var diag = {
+        "range": {
+            "start": {"line": diag_line, "character": diag_col},
+            "end": {"line": diag_line, "character": diag_col + 1}
+        },
+        "severity": severity,
+        "message": msg,
+        "source": if source_str != "": source_str else: "simple"
+    }
+    if code_str != "":
+        diag["code"] = code_str
+    # Parse tags: Unnecessary=1, Deprecated=2
+    var tag_list: [Int] = []
+    if tags_str != "":
+        if tags_str.contains("Unnecessary") or tags_str.contains("unnecessary"):
+            tag_list.push(1)
+        if tags_str.contains("Deprecated") or tags_str.contains("deprecated"):
+            tag_list.push(2)
+    if tag_list.len() > 0:
+        diag["tags"] = tag_list
+    # Related information
+    if related_file != "" and related_msg != "":
+        val related_info = [{
+            "location": {
+                "uri": "file://" + related_file,
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 0}
+                }
+            },
+            "message": related_msg
+        }]
+        diag["relatedInformation"] = related_info
+    Some(diag)
+
+# Parse plain text diagnostic (file:line:col: severity: message)
+fn _parse_compiler_text_diagnostic(line: String) -> Option<Dict>:
+    var diag_line = 0
+    var diag_col = 0
+    var diag_msg = line
+    var severity = protocol.DiagnosticSeverity.Error
+    val colon_idx = line.index_of(":")
+    match colon_idx:
+        Some(ci):
+            val after = line.substring(ci + 1)
+            val second_colon = after.index_of(":")
+            match second_colon:
+                Some(ci2):
+                    val line_str = after.substring(0, ci2).trim()
+                    val line_num = int(line_str)
+                    if line_num > 0:
+                        diag_line = line_num - 1
+                        val after2 = after.substring(ci2 + 1)
+                        val third_colon = after2.index_of(":")
+                        match third_colon:
+                            Some(ci3):
+                                val col_str = after2.substring(0, ci3).trim()
+                                val col_num = int(col_str)
+                                if col_num > 0:
+                                    diag_col = col_num - 1
+                                diag_msg = after2.substring(ci3 + 1).trim()
+                            nil:
+                                diag_msg = after2.trim()
+                nil:
+                    val _x = 0
+        nil:
+            val _x = 0
+    if diag_msg.starts_with("warning"):
+        severity = protocol.DiagnosticSeverity.Warning
+        diag_msg = diag_msg.replace("warning:", "").trim()
+    elif diag_msg.starts_with("error"):
+        severity = protocol.DiagnosticSeverity.Error
+        diag_msg = diag_msg.replace("error:", "").trim()
+    Some({
+        "range": {
+            "start": {"line": diag_line, "character": diag_col},
+            "end": {"line": diag_line, "character": diag_col + 1}
+        },
+        "severity": severity,
+        "source": "simple",
+        "message": diag_msg
+    })
+
+# Simple JSON field extraction helper
+fn _json_field(json: String, key: String) -> String:
+    val search = "\"" + key + "\":"
+    val idx_result = json.index_of(search)
+    match idx_result:
+        Some(idx):
+            val start = idx + search.len()
+            val after = json.substring(start).trim()
+            if after.starts_with("\""):
+                val after_quote = after.substring(1)
+                val end_result = after_quote.index_of("\"")
+                match end_result:
+                    Some(ei): return after_quote.substring(0, ei)
+                    nil: return ""
+            else:
+                var parts: [String] = []
+                for ch in after:
+                    if ch == "," or ch == "}" or ch == "]" or ch == " " or ch == "\n":
+                        break
+                    parts.push(ch)
+                return parts.join("")
+        nil:
+            return ""
+
+# Check if a diagnostic is a duplicate (same line, same message prefix)
+fn _is_duplicate(existing: [Dict], new_diag: Dict) -> Bool:
+    val new_line = new_diag["range"]["start"]["line"]
+    val new_msg = new_diag["message"]
+    for d in existing:
+        val d_line = d["range"]["start"]["line"]
+        if d_line == new_line:
+            val d_msg = d["message"]
+            # Skip if same message or one contains the other
+            if d_msg == new_msg:
+                return true
+    false
+
+# Handle diagnostics for a document — merges tree-sitter, compiler, and verification
+fn handle_diagnostics(uri: String, tree: Tree) -> Result<Nil, String>:
+    # 1. Generate syntax diagnostics from tree-sitter
+    var diagnostics = generate_diagnostics(tree)
+
+    # 2. Add compiler check diagnostics via subprocess
+    val file_path = if uri.starts_with("file://"):
+        uri.substring(7)
+    else:
+        uri
+    val compiler_diags = collect_compiler_diagnostics(file_path)
+    for cdiag in compiler_diags:
+        if not _is_duplicate(diagnostics, cdiag):
+            diagnostics.push(cdiag)
+
+    # 3. Add verification diagnostics
+    match verification.handle_verification_diagnostics(tree, uri):
+        case Ok(verify_diags):
+            for diag in verify_diags:
+                diagnostics.push(diag)
+        case Err(e):
+            transport.log_debug("Verification diagnostics error: {e}")
+
+    transport.log_debug("Found {diagnostics.len()} diagnostics for {uri}")
+
+    # Send publishDiagnostics notification
+    val params = {
+        "uri": uri,
+        "diagnostics": diagnostics
+    }
+
+    transport.write_notification("textDocument/publishDiagnostics", params)?
+
+    Ok(nil)

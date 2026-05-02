@@ -1,1 +1,0 @@
-../skills/system_test/SKILL.md

@@ -1,0 +1,90 @@
+# Multi-arch harden: AC-3 supporting (R5) — NVFS 32-bit layout stability.
+#
+# Decision (Phase 3, §7.2): keep on-disk format 64-bit-fixed. Cross-arch
+# parity is verified by writing an image on x86_64 and reading byte-equal
+# on rv32imac. 32-bit kernel must reject extents >4GiB with
+# NvfsError.PointerTooLarge.
+#
+# Run:
+#   bin/simple test test/os/multiarch/nvfs_32bit_layout_spec.spl
+#
+# @cover src/os/kernel/fs/nvfs/superblock.spl
+# @cover src/os/kernel/fs/nvfs/extent.spl
+# @cover doc/04_architecture/simpleos_multiarch_hal.md
+
+use std.spec
+use std.io_runtime.{file_exists, file_read, file_read_bytes}
+
+val PARITY_REPORT:    text = "build/multiarch/nvfs_parity_report.json"
+val OVERFLOW_REPORT:  text = "build/multiarch/nvfs_overflow_report.json"
+val SUPERBLOCK_X86:   text = "build/multiarch/nvfs_superblock_x86_64.bin"
+val SUPERBLOCK_RV32:  text = "build/multiarch/nvfs_superblock_riscv32.bin"
+
+describe "AC-3/R5 — NVFS superblock byte-equal across archs":
+    """Phase 5 dumps the superblock from a freshly-formatted image on
+    x86_64 and on rv32imac; bytes must match exactly."""
+
+    it "x86_64 superblock dump exists":
+        expect(file_exists(SUPERBLOCK_X86)).to_equal(true)
+
+    it "riscv32 superblock dump exists":
+        expect(file_exists(SUPERBLOCK_RV32)).to_equal(true)
+
+    it "parity report exists":
+        expect(file_exists(PARITY_REPORT)).to_equal(true)
+
+    it "parity report flags byte-equal = true":
+        val r: text = file_read(PARITY_REPORT)
+        expect(r.contains("\"byte_equal\": true")).to_equal(true)
+
+    it "parity report records both file SHA-256 hashes":
+        val r: text = file_read(PARITY_REPORT)
+        expect(r.contains("\"x86_64_sha256\"")).to_equal(true)
+        expect(r.contains("\"riscv32_sha256\"")).to_equal(true)
+
+    it "parity report shows identical SHA-256":
+        val r: text = file_read(PARITY_REPORT)
+        expect(r.contains("\"sha256_match\": true")).to_equal(true)
+
+describe "AC-3/R5 — superblock layout is fixed-width 64-bit":
+    """Read the raw bytes and assert the first 4 bytes are the magic
+    plus the next 8 bytes are the 64-bit volume size little-endian."""
+
+    it "superblock bytes are non-empty":
+        val bytes: [u8] = file_read_bytes(SUPERBLOCK_X86)
+        expect(bytes.length() > 0).to_equal(true)
+
+    it "superblock bytes length is the locked fixed size":
+        """Phase 3 §7.2 locked superblock length. The exact value is
+        embedded in the report; assert match."""
+        val r: text = file_read(PARITY_REPORT)
+        expect(r.contains("\"superblock_size_locked\": true")).to_equal(true)
+
+describe "AC-3/R5 — 32-bit kernel rejects extents > 4 GiB":
+    """rv32imac/i686/armv7 kernel must return NvfsError.PointerTooLarge
+    via Result.Err when an on-disk extent overflows usize."""
+
+    it "overflow report exists":
+        expect(file_exists(OVERFLOW_REPORT)).to_equal(true)
+
+    it "riscv32 path returns PointerTooLarge for >4GiB extent":
+        val r: text = file_read(OVERFLOW_REPORT)
+        expect(r.contains("\"riscv32_pointer_too_large\": true")).to_equal(true)
+
+    it "i686 path returns PointerTooLarge for >4GiB extent":
+        val r: text = file_read(OVERFLOW_REPORT)
+        expect(r.contains("\"i686_pointer_too_large\": true")).to_equal(true)
+
+    it "armv7 path returns PointerTooLarge for >4GiB extent":
+        val r: text = file_read(OVERFLOW_REPORT)
+        expect(r.contains("\"armv7_pointer_too_large\": true")).to_equal(true)
+
+    it "64-bit archs accept >4GiB extents":
+        val r: text = file_read(OVERFLOW_REPORT)
+        expect(r.contains("\"x86_64_large_extent_ok\": true")).to_equal(true)
+        expect(r.contains("\"aarch64_large_extent_ok\": true")).to_equal(true)
+        expect(r.contains("\"riscv64_large_extent_ok\": true")).to_equal(true)
+
+    it "Result.Err path is taken — no panic":
+        val r: text = file_read(OVERFLOW_REPORT)
+        expect(r.contains("\"panicked\": false")).to_equal(true)

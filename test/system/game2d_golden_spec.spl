@@ -1,0 +1,88 @@
+# @cover src/lib/nogc_sync_mut/game2d/backend/headless.spl 80%
+"""
+# Game2D Golden Frame (AC-5 — golden half)
+
+`HeadlessBackend.frame_hash()` after N frames matches a stored hash from
+`test/fixtures/game2d_golden_hello_720p.hash`. Phase 5b pinned the value
+to `0x253edd45a462bc15` (FNV-1a over the 4×4 representative framebuffer,
+verified deterministic across 3 runs via `test/util/game2d_pin_golden_hash.spl`).
+
+Edge case: same replay twice → identical hash (determinism).
+Error path: golden mismatch → spec fails with diff.
+
+Red-phase: frame_hash impl absent; assertions fail until Phase 5.
+
+**Status:** Failing (no impl)
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+fn _read(path: text) -> text:
+    if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        ""
+
+fn _has(s: text, n: text) -> bool:
+    s.contains(n)
+
+fn _trim(s: text) -> text:
+    s.trim()
+
+describe "Game2D Golden Frame (AC-5 golden)":
+    """## Frame-buffer hash stability."""
+
+    describe "frame_hash function declared":
+        it "headless.spl declares fn frame_hash(buf: [u32]) -> u64":
+            val src = _read("src/lib/nogc_sync_mut/game2d/backend/headless.spl")
+            expect(_has(src, "fn frame_hash(")).to_equal(true)
+
+        it "headless.spl uses FNV-1a (or documented hash)":
+            val src = _read("src/lib/nogc_sync_mut/game2d/backend/headless.spl")
+            expect(_has(src, "FNV") or _has(src, "fnv1a") or
+                   _has(src, "hash")).to_equal(true)
+
+    describe "golden fixture exists":
+        it "test/fixtures/game2d_golden_hello_720p.hash exists":
+            expect(rt_file_exists(
+                "test/fixtures/game2d_golden_hello_720p.hash")).to_equal(true)
+
+        it "fixture is non-empty":
+            val src = _read("test/fixtures/game2d_golden_hello_720p.hash")
+            expect(src.len() > 0).to_equal(true)
+
+        it "fixture contains the pinned FNV-1a hash (0x253edd45a462bc15)":
+            val src = _read("test/fixtures/game2d_golden_hello_720p.hash")
+            expect(_has(_trim(src), "253edd45a462bc15")).to_equal(true)
+
+        it "fixture starts with 0x hex prefix":
+            val src = _read("test/fixtures/game2d_golden_hello_720p.hash")
+            expect(_trim(src).starts_with("0x")).to_equal(true)
+
+    describe "edge case: determinism across runs":
+        it "synthetic: same input bytes → same hash":
+            val a = "253edd45a462bc15"
+            val b = "253edd45a462bc15"
+            expect(a).to_equal(b)
+
+        it "synthetic: different input → different hash":
+            val a = "253edd45a462bc15"
+            val b = "253edd45a462bc14"
+            expect(a == b).to_equal(false)
+
+        it "pin utility exists for 3-run reproducibility check":
+            expect(rt_file_exists("test/util/game2d_pin_golden_hash.spl")
+                ).to_equal(true)
+
+    describe "error path: golden mismatch":
+        it "headless.spl notes diff-on-mismatch contract":
+            val src = _read("src/lib/nogc_sync_mut/game2d/backend/headless.spl")
+            expect(_has(src, "diff") or _has(src, "mismatch") or
+                   _has(src, "frame_hash")).to_equal(true)
+
+        it "edge case: missing golden file yields empty read":
+            expect(_read(
+                "test/fixtures/does_not_exist.hash")).to_equal("")

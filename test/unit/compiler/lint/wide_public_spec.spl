@@ -1,0 +1,228 @@
+"""
+# Wide Public Lint Specification
+
+**Feature IDs:** #LINT-W0404
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests the W0404 lint that detects modules exporting too many public symbols.
+The default threshold is 30.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| W0404 | Module exports more than threshold symbols |
+| DEFAULT_PUBLIC_THRESHOLD | 30 — configurable per-call |
+| File filtering | __init__.spl and mod.spl are skipped |
+"""
+
+use compiler.core.ast.{
+    ast_reset, decl_export_names, decl_fn, module_add_decl, module_get_decls,
+    DECL_FN, DECL_EXPORT
+}
+use compiler.core.ast_expr.{expr_int_lit}
+use compiler.core.ast_stmt.{stmt_expr_stmt}
+use compiler.semantics.lint.wide_public.{
+    DEFAULT_PUBLIC_THRESHOLD, WidePublicWarning,
+    check_wide_public, check_wide_public_with_threshold, check_wide_public_file
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_export(names: [text]) -> i64:
+    """Create an export declaration with given names."""
+    decl_export_names(names, 0)
+
+fn make_dummy_fn(name: text) -> i64:
+    """Create a minimal function declaration."""
+    val e = expr_int_lit(0, 0)
+    val s = stmt_expr_stmt(e, 0)
+    decl_fn(name, [], [], 0, [s], 0, [], 0)
+
+fn gen_names(prefix: text, count: i64) -> [text]:
+    """Generate a list of names like prefix_0, prefix_1, ..."""
+    var names: [text] = []
+    for i in 0..count:
+        names.push("{prefix}_{i}")
+    names
+
+# ============================================================================
+# Test Group 1: Default Threshold
+# ============================================================================
+
+describe "W0404 — Wide Public Lint — Default Threshold":
+    """
+    ## Default Threshold
+
+    Verify that DEFAULT_PUBLIC_THRESHOLD is 30.
+    """
+
+    it "DEFAULT_PUBLIC_THRESHOLD is 30":
+        expect(DEFAULT_PUBLIC_THRESHOLD).to_equal(30)
+
+# ============================================================================
+# Test Group 2: Under Threshold
+# ============================================================================
+
+describe "W0404 — Under threshold":
+    """
+    ## Under Threshold
+
+    Modules with exports at or below the threshold should not trigger warnings.
+    """
+
+    context "when module exports fewer than threshold symbols":
+        it "emits no warnings":
+            ast_reset()
+            val ex = make_export(gen_names("fn", 10))
+            val ws = check_wide_public([ex])
+            expect(ws.len()).to_equal(0)
+
+    context "when module exports exactly threshold symbols":
+        it "emits no warnings":
+            ast_reset()
+            val ex = make_export(gen_names("fn", 30))
+            val ws = check_wide_public([ex])
+            expect(ws.len()).to_equal(0)
+
+    context "when module has no exports":
+        it "emits no warnings":
+            ast_reset()
+            val d = make_dummy_fn("internal_fn")
+            val ws = check_wide_public([d])
+            expect(ws.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 3: Over Threshold
+# ============================================================================
+
+describe "W0404 — Over threshold":
+    """
+    ## Over Threshold
+
+    Modules with exports exceeding the threshold should trigger W0404.
+    """
+
+    context "when module exports more than default threshold":
+        it "emits W0404 warning":
+            ast_reset()
+            val ex = make_export(gen_names("sym", 31))
+            val ws = check_wide_public([ex])
+            expect(ws.len()).to_equal(1)
+            expect(ws[0].code).to_equal("W0404")
+            expect(ws[0].export_count).to_equal(31)
+            expect(ws[0].threshold).to_equal(30)
+
+    context "when exports spread across multiple export decls":
+        it "counts total unique names":
+            ast_reset()
+            val ex1 = make_export(gen_names("a", 20))
+            val ex2 = make_export(gen_names("b", 15))
+            val ws = check_wide_public([ex1, ex2])
+            expect(ws.len()).to_equal(1)
+            expect(ws[0].export_count).to_equal(35)
+
+    context "when duplicate names across exports":
+        it "counts unique names only":
+            ast_reset()
+            val names1 = ["foo", "bar", "baz"]
+            val names2 = ["foo", "qux"]
+            val ex1 = make_export(names1)
+            val ex2 = make_export(names2)
+            val ws = check_wide_public_with_threshold([ex1, ex2], 3)
+            expect(ws.len()).to_equal(1)
+            expect(ws[0].export_count).to_equal(4)
+
+# ============================================================================
+# Test Group 4: Custom Threshold
+# ============================================================================
+
+describe "W0404 — Custom threshold":
+    """
+    ## Custom Threshold
+
+    The threshold is configurable via check_wide_public_with_threshold.
+    """
+
+    context "when custom threshold is lower":
+        it "flags smaller modules":
+            ast_reset()
+            val ex = make_export(gen_names("sym", 5))
+            val ws = check_wide_public_with_threshold([ex], 4)
+            expect(ws.len()).to_equal(1)
+            expect(ws[0].threshold).to_equal(4)
+
+    context "when custom threshold is higher":
+        it "allows larger modules":
+            ast_reset()
+            val ex = make_export(gen_names("sym", 50))
+            val ws = check_wide_public_with_threshold([ex], 100)
+            expect(ws.len()).to_equal(0)
+
+# ============================================================================
+# Test Group 5: File-based Filtering
+# ============================================================================
+
+describe "W0404 — File-based filtering":
+    """
+    ## File Filtering
+
+    Re-export modules (__init__.spl, mod.spl) should be skipped.
+    """
+
+    context "when file is __init__.spl":
+        it "skips the check":
+            ast_reset()
+            val ex = make_export(gen_names("sym", 50))
+            val ws = check_wide_public_file([ex], "src/lib/common/__init__.spl")
+            expect(ws.len()).to_equal(0)
+
+    context "when file is mod.spl":
+        it "skips the check":
+            ast_reset()
+            val ex = make_export(gen_names("sym", 50))
+            val ws = check_wide_public_file([ex], "src/lib/net/tcp/mod.spl")
+            expect(ws.len()).to_equal(0)
+
+    context "when file is a regular module":
+        it "applies the check":
+            ast_reset()
+            val ex = make_export(gen_names("sym", 31))
+            val ws = check_wide_public_file([ex], "src/lib/net/tcp/connection.spl")
+            expect(ws.len()).to_equal(1)
+            expect(ws[0].code).to_equal("W0404")
+
+# ============================================================================
+# Test Group 6: Warning Format
+# ============================================================================
+
+describe "W0404 — Warning format":
+    """
+    ## Warning Format
+
+    Verify the warning struct has expected fields.
+    """
+
+    it "warning has correct severity":
+        ast_reset()
+        val ex = make_export(gen_names("sym", 31))
+        val ws = check_wide_public([ex])
+        expect(ws[0].severity).to_equal("WARNING")
+
+    it "fmt includes counts":
+        ast_reset()
+        val ex = make_export(gen_names("sym", 31))
+        val ws = check_wide_public([ex])
+        val msg = ws[0].fmt()
+        expect(msg).to_contain("31 symbols")
+        expect(msg).to_contain("threshold 30")

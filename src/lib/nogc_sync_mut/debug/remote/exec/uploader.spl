@@ -1,0 +1,80 @@
+# Code Uploader
+#
+# Uploads compiled machine code to the target's RAM via the debug protocol.
+# Chunks large uploads to avoid protocol packet overflow.
+# Verifies upload by reading back and comparing.
+#
+# Feature ID: #RJE-003
+
+use std.nogc_sync_mut.debug.remote.exec.types.{CodeInfo}
+use std.nogc_sync_mut.jit.jit_util.{hex_byte}
+
+class CodeUploader:
+    """Uploads machine code bytes to target RAM in chunks."""
+
+    static fn upload(
+        name: text,
+        bytes: [i32],
+        addr: i64,
+        write_fn: fn(i64, [i32]) -> Result<text, text>,
+        read_fn: fn(i64, i64) -> Result<[i32], text>
+    ) -> Result<CodeInfo, text>:
+        """Upload bytes to target at addr, verify, return CodeInfo."""
+        val total = bytes.len()
+        if total == 0:
+            return Err("empty code buffer")
+
+        # Upload in chunks
+        var offset = 0
+        while offset < total:
+            val chunk_size = min_i64(upload_chunk_size_limit(), total - offset)
+            val chunk = bytes[offset:offset + chunk_size]
+            val chunk_addr = addr + offset
+            val result = write_fn(chunk_addr, chunk)
+            if result.is_err():
+                return Err("upload failed at offset {offset}: {result.err().unwrap()}")
+            offset = offset + chunk_size
+
+        # Verify upload
+        val verify_result = verify_upload(addr, bytes, read_fn)
+        if verify_result.is_err():
+            return Err(verify_result.err().unwrap())
+
+        Ok(CodeInfo(name: name, addr: addr, size: total, entry_point: addr))
+
+    static fn verify(
+        addr: i64,
+        expected: [i32],
+        read_fn: fn(i64, i64) -> Result<[i32], text>
+    ) -> Result<text, text>:
+        """Read back uploaded bytes and compare."""
+        val total = expected.len()
+        var offset = 0
+        while offset < total:
+            val chunk_size = min_i64(upload_chunk_size_limit(), total - offset)
+            val read_result = read_fn(addr + offset, chunk_size)
+            if read_result.is_err():
+                return Err("verify read failed at offset {offset}: {read_result.err().unwrap()}")
+            val actual = read_result.ok.unwrap()
+            if actual.len() < chunk_size:
+                return Err("verify: read too short at offset {offset}: got {actual.len()}, expected {chunk_size}")
+            var i = 0
+            while i < chunk_size:
+                if actual[i] != expected[offset + i]:
+                    return Err("verify mismatch at byte {offset + i}: expected 0x{hex_byte(expected[offset + i])}, got 0x{hex_byte(actual[i])}")
+                i = i + 1
+            offset = offset + chunk_size
+        Ok("verified {total} bytes")
+
+fn verify_upload(
+    addr: i64,
+    expected: [i32],
+    read_fn: fn(i64, i64) -> Result<[i32], text>
+) -> Result<text, text>:
+    CodeUploader.verify(addr, expected, read_fn)
+
+fn upload_chunk_size_limit() -> i64:
+    1024
+
+fn min_i64(a: i64, b: i64) -> i64:
+    if a < b: a else: b

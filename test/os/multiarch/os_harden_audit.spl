@@ -1,0 +1,80 @@
+# Unified hardening audit SPEC referenced by AC-5.
+#
+# This file is the TEST SPEC. The audit BUILD TOOL lives at
+# `src/app/build/os_harden_audit.spl` (created in Wave 5) and emits
+# `build/multiarch/harden_audit_report.json`. This spec asserts the
+# tool ran and the report is clean.
+#
+# Run:
+#   bin/simple test test/os/multiarch/os_harden_audit.spl
+#
+# Phase 5 wires the build tool into `bin/simple build check` so each arch
+# lane runs it. Today this spec RED-asserts on file-existence and grep
+# results that Phase 5 must satisfy.
+#
+# Audit gates (per architecture §5.2):
+#   1. No `0xDEADBEEF` constant anywhere in `src/os/libc/simpleos_cxxabi.spl`.
+#   2. No `@nocheck` / `unsafe` outside `src/os/kernel/arch/` HAL tree.
+#   3. No `import os.kernel.arch.x86_64` (or any specific arch) in
+#      arch-neutral kernel code.
+#   4. Cap-check coverage on every Syscall variant (audit report).
+#   5. No `W|X` flag combo at any `hal_paging_map` call site.
+#
+# @cover src/app/build/os_harden_audit.spl
+# @cover src/os/kernel/arch/hal.spl
+# @cover src/os/libc/simpleos_cxxabi.spl
+# @cover scripts/audit/arch_loc_report.shs
+
+use std.spec
+use std.io_runtime.{file_exists, file_read}
+
+val CXXABI_PATH:   text = "src/os/libc/simpleos_cxxabi.spl"
+val HARDEN_REPORT: text = "build/multiarch/harden_audit_report.json"
+
+describe "harden audit — gate 1: no 0xDEADBEEF constant":
+    it "simpleos_cxxabi.spl exists":
+        expect(file_exists(CXXABI_PATH)).to_equal(true)
+
+    it "simpleos_cxxabi.spl has no 0xDEADBEEF literal":
+        val body: text = file_read(CXXABI_PATH)
+        expect(body.contains("0xDEADBEEF")).to_equal(false)
+
+    it "simpleos_cxxabi.spl has no DEADBEEF substring":
+        val body: text = file_read(CXXABI_PATH)
+        expect(body.contains("DEADBEEF")).to_equal(false)
+
+describe "harden audit — gate 2: no @nocheck / unsafe outside HAL":
+    it "harden audit report exists":
+        expect(file_exists(HARDEN_REPORT)).to_equal(true)
+
+    it "report shows zero @nocheck outside HAL":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"nocheck_outside_hal\": 0")).to_equal(true)
+
+    it "report shows zero unsafe outside HAL":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"unsafe_outside_hal\": 0")).to_equal(true)
+
+describe "harden audit — gate 3: no direct arch imports outside arch/":
+    it "report shows zero direct arch imports":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"direct_arch_imports_outside_arch\": 0")).to_equal(true)
+
+describe "harden audit — gate 4: cap-check on every Syscall variant":
+    it "report shows 100% cap-check coverage":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"cap_check_coverage_pct\": 100")).to_equal(true)
+
+    it "report shows zero uncovered Syscall variants":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"syscall_variants_uncovered\": 0")).to_equal(true)
+
+describe "harden audit — gate 5: no W|X mapping in hal_paging_map calls":
+    it "report shows zero W|X violations":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"wx_violations\": 0")).to_equal(true)
+
+describe "harden audit — every arch lane exits 0":
+    it "report shows all_arch_pass = true":
+        val r: text = file_read(HARDEN_REPORT)
+        expect(r.contains("\"all_arch_pass\": true")).to_equal(true)

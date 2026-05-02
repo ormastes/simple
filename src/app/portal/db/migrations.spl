@@ -1,0 +1,122 @@
+"""
+# Portal Database Migrations
+
+Defines the schema for the Simple Language Portal:
+- users: user accounts
+- packages: published packages
+- package_versions: version history per package
+- api_tokens: API authentication tokens
+- download_stats: per-version download counters
+"""
+
+use std.database.sql.connection.{Database}
+use std.database.sql.migration.{Migration, MigrationRunner}
+use std.database.sql.types.{DbError}
+
+fn run_portal_migrations(db: Database) -> Result<i64, text>:
+    """Run all portal database migrations.
+
+    Args:
+        db: Open database connection
+
+    Returns:
+        Ok(count) of newly applied migrations
+    """
+    var runner = MigrationRunner.new(db)
+
+    # Migration 001: Users table
+    runner = runner.add(Migration(
+        id: "001_create_users",
+        description: "Create users table for portal accounts",
+        up_sql: "CREATE TABLE IF NOT EXISTS users (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "username TEXT NOT NULL UNIQUE, " +
+            "email TEXT NOT NULL UNIQUE, " +
+            "password_hash TEXT NOT NULL, " +
+            "display_name TEXT NOT NULL DEFAULT '', " +
+            "bio TEXT NOT NULL DEFAULT '', " +
+            "role TEXT NOT NULL DEFAULT 'user', " +
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')), " +
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now'))" +
+            ")",
+        down_sql: "DROP TABLE IF EXISTS users"
+    ))
+
+    # Migration 002: Packages table
+    runner = runner.add(Migration(
+        id: "002_create_packages",
+        description: "Create packages table for published packages",
+        up_sql: "CREATE TABLE IF NOT EXISTS packages (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "name TEXT NOT NULL UNIQUE, " +
+            "description TEXT NOT NULL DEFAULT '', " +
+            "latest_version TEXT NOT NULL DEFAULT '0.0.0', " +
+            "owner_id INTEGER NOT NULL, " +
+            "homepage TEXT NOT NULL DEFAULT '', " +
+            "repository TEXT NOT NULL DEFAULT '', " +
+            "license TEXT NOT NULL DEFAULT '', " +
+            "downloads INTEGER NOT NULL DEFAULT 0, " +
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')), " +
+            "updated_at TEXT NOT NULL DEFAULT (datetime('now')), " +
+            "FOREIGN KEY (owner_id) REFERENCES users(id)" +
+            ")",
+        down_sql: "DROP TABLE IF EXISTS packages"
+    ))
+
+    # Migration 003: Package versions table
+    runner = runner.add(Migration(
+        id: "003_create_package_versions",
+        description: "Create package_versions table for version history",
+        up_sql: "CREATE TABLE IF NOT EXISTS package_versions (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "package_id INTEGER NOT NULL, " +
+            "version TEXT NOT NULL, " +
+            "checksum TEXT NOT NULL DEFAULT '', " +
+            "size_bytes INTEGER NOT NULL DEFAULT 0, " +
+            "yanked INTEGER NOT NULL DEFAULT 0, " +
+            "readme TEXT NOT NULL DEFAULT '', " +
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')), " +
+            "FOREIGN KEY (package_id) REFERENCES packages(id), " +
+            "UNIQUE(package_id, version)" +
+            ")",
+        down_sql: "DROP TABLE IF EXISTS package_versions"
+    ))
+
+    # Migration 004: API tokens table
+    runner = runner.add(Migration(
+        id: "004_create_api_tokens",
+        description: "Create api_tokens table for API authentication",
+        up_sql: "CREATE TABLE IF NOT EXISTS api_tokens (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "user_id INTEGER NOT NULL, " +
+            "name TEXT NOT NULL, " +
+            "token_hash TEXT NOT NULL UNIQUE, " +
+            "scopes TEXT NOT NULL DEFAULT 'read', " +
+            "last_used_at TEXT, " +
+            "expires_at TEXT, " +
+            "created_at TEXT NOT NULL DEFAULT (datetime('now')), " +
+            "FOREIGN KEY (user_id) REFERENCES users(id)" +
+            ")",
+        down_sql: "DROP TABLE IF EXISTS api_tokens"
+    ))
+
+    # Migration 005: Download stats table
+    runner = runner.add(Migration(
+        id: "005_create_download_stats",
+        description: "Create download_stats table for tracking downloads",
+        up_sql: "CREATE TABLE IF NOT EXISTS download_stats (" +
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+            "package_id INTEGER NOT NULL, " +
+            "version TEXT NOT NULL, " +
+            "date TEXT NOT NULL, " +
+            "count INTEGER NOT NULL DEFAULT 0, " +
+            "FOREIGN KEY (package_id) REFERENCES packages(id), " +
+            "UNIQUE(package_id, version, date)" +
+            ")",
+        down_sql: "DROP TABLE IF EXISTS download_stats"
+    ))
+
+    val result = runner.run()
+    match result:
+        Ok(count): Ok(count)
+        Err(e): Err("Migration failed")

@@ -1,0 +1,126 @@
+"""
+# Spec Plan — `common_compression_framework`
+
+This planning spec replaces the subset contract with the full pure-Simple target.
+The implementation work must convert the scenarios below into executable `describe` / `it`
+coverage with real assertions in compiled mode.
+
+Describe REQ-001 through REQ-008A: façade and API semantics
+  Scenario REQ-001/REQ-002/REQ-006/REQ-007: `std.common.compress` round-trips LZ4, Zstd, and XZ/LZMA2 through the shared façade
+    Given supported payload classes for each codec
+    When callers use `compress_bytes` and `decompress_bytes`
+    Then original payload bytes are restored and codec auto-detect or explicit hint behavior matches the request
+
+  Scenario REQ-003/REQ-004: option fields affect real behavior rather than placeholders
+    Given callers vary `level`, `checksum`, `content_size`, `block_mode`, `dictionary_bytes`, and `dictionary_id`
+    When encoding is requested
+    Then supported codecs emit and validate the corresponding framed behavior and unsupported combinations fail explicitly
+
+  Scenario REQ-006A/REQ-008A/REQ-012: checked encode entrypoints preserve typed option failures
+    Given invalid or unsupported option combinations
+    When callers use `try_compress_bytes` or `encoder_finish_checked`
+    Then the API returns typed `CompressionError.UnsupportedFeature` or other specific failures instead of silently normalizing the request
+
+  Scenario REQ-006/REQ-006A/REQ-008/REQ-008A: fail-fast and checked streaming APIs stay aligned
+    Given the same buffered input is encoded via single-shot and streaming entrypoints
+    When checked and fail-fast wrappers are compared
+    Then success outputs match byte-for-byte and failure behavior differs only in typed-result versus unwrap semantics
+
+Describe REQ-009: full LZ4 coverage
+  Scenario REQ-009A: raw LZ4 block decode requires an explicit codec hint
+    Given a raw LZ4 block without frame magic
+    When the caller passes `CompressionCodec.lz4`
+    Then decode succeeds and auto-detect alone does not misclassify it
+
+  Scenario REQ-009B: framed LZ4 supports multi-block payloads and frame flags
+    Given LZ4 frames carrying block checksum, content checksum, and content size
+    When the shared decoder and encoder process them
+    Then payload bytes, checksums, and size metadata are preserved and verified
+
+  Scenario REQ-009C: host interoperability holds for emitted and ingested frames
+    Given host-generated standard LZ4 frames and Simple-generated frames
+    When both directions are decoded by the opposite implementation
+    Then payload bytes match exactly
+
+  Scenario REQ-009D: LZ4 corruption fails closed with typed errors
+    Given bad headers, malformed tokens, bad lengths, checksum mismatches, and truncation
+    When decoding runs
+    Then `CompressionError` reports a typed failure instead of partial or normalized output
+
+Describe REQ-010: full Zstd coverage
+  Scenario REQ-010A: normal host-generated frame variants decode successfully
+    Given Zstd frames covering frame-header variants, window/content-size combinations, raw blocks, RLE blocks, compressed blocks, repeated FSE tables, compressed Huffman weights, treeless literals, and 4-stream literals
+    When `common.compress` decodes them
+    Then the original payload is restored and frame constraints are validated
+
+  Scenario REQ-010B: the pure-Simple encoder emits interoperable standard frames
+    Given small, medium, large, repetitive, incompressible, and mixed payloads
+    When the Simple encoder emits Zstd frames
+    Then host `zstd` decodes them successfully and content checksum/content size fields validate
+
+  Scenario REQ-010C: framed dictionary support honors both dictionary bytes and dictionary id
+    Given matching and mismatching `dictionary_bytes` plus `dictionary_id` combinations
+    When encoding and decoding dictionary-backed frames
+    Then matching inputs round-trip and invalid dictionary metadata fails explicitly
+
+  Scenario REQ-010D: multi-block, multi-frame, corruption, and truncation paths fail truthfully
+    Given concatenated or repeated Zstd frame content plus malformed entropy tables, bad checksums, impossible sizes, and truncated inputs
+    When decoding runs
+    Then results are either successful full restoration or the correct typed failure category
+
+Describe REQ-011: full XZ/LZMA2 coverage
+  Scenario REQ-011A: LZMA2 compressed chunks decode successfully inside `.xz`
+    Given host-generated and Simple-generated `.xz` streams using the LZMA2-only filter chain
+    When decoding runs
+    Then compressed chunks, not only uncompressed passthrough chunks, restore the original payload
+
+  Scenario REQ-011B: `.xz` container validation covers block, index, footer, CRC, and concatenation behavior
+    Given multi-block streams, concatenated streams, and valid CRC-protected metadata
+    When the shared decoder processes the stream
+    Then all blocks are restored in order and integrity checks are enforced
+
+  Scenario REQ-011C: the pure-Simple encoder emits canonical `.xz` streams for host decode
+    Given representative payload classes
+    When the Simple encoder emits `.xz`
+    Then host `xz` decodes the output and the payload bytes match exactly
+
+  Scenario REQ-011D: unsupported filter chains and malformed tails fail explicitly
+    Given non-LZMA2 filter chains, bad index/footer tails, bad CRCs, and truncation
+    When decoding runs
+    Then the API reports `UnsupportedFeature`, `InvalidHeader`, `ChecksumMismatch`, `TruncatedInput`, or `CorruptStream` as appropriate
+
+Describe REQ-013: kernel adapter parity
+  Scenario REQ-013A: kernel Zstd adapter matches shared decoder output
+    Given valid Zstd frames from the common fixture matrix
+    When both the kernel adapter and `common.compress` decode them
+    Then returned payload bytes are identical
+
+  Scenario REQ-013B: kernel adapter preserves its legacy error contract while delegating to `common.compress`
+    Given invalid Zstd inputs covering every relevant typed compression failure
+    When the kernel adapter is called
+    Then it translates the shared `CompressionError` result into the expected `Result<[u8], text>` failure text deterministically
+
+Describe REQ-014: shared-helper and forced-tier parity
+  Scenario REQ-014A: scalar, AVX2, and NEON helper paths produce identical checksum and copy results
+    Given shared helper inputs for CRC32, XXH32, match extension, literal copy, and overlap-safe match copy
+    When each forced tier is called directly
+    Then helper outputs match the scalar oracle exactly
+
+  Scenario REQ-014B: codec behavior remains byte-for-byte identical across forced tiers
+    Given the same representative payloads and codec options
+    When encode and decode operations are forced through scalar, AVX2, and NEON helper seams
+    Then compressed outputs and restored payloads remain identical across tiers
+
+Describe corruption matrices across REQ-005/REQ-009/REQ-010/REQ-011/REQ-012
+  Scenario CORR-001: bad header and magic handling
+  Scenario CORR-002: truncated block, frame, index, and footer tails
+  Scenario CORR-003: checksum corruption for LZ4, Zstd, and XZ structures
+  Scenario CORR-004: malformed LZ4 token and length state
+  Scenario CORR-005: malformed Zstd entropy tables and invalid dictionary metadata
+  Scenario CORR-006: unsupported XZ filter chain metadata
+  Scenario CORR-007: size-limit and impossible content-size failures
+
+Implementation note
+  The finished executable spec should group these scenarios into `describe` blocks per requirement family,
+  use deterministic fixtures, and assert typed success and failure results without subset-only caveats.
+"""

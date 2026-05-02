@@ -1,0 +1,232 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# HTML5 Tree Builder — tree construction algorithm for building the DOM.
+#
+# Compliance level: Implements the core insertion modes from WHATWG HTML5
+# specification section 13.2.6 (Tree construction). Covers the primary
+# document lifecycle modes: Initial, BeforeHtml, BeforeHead, InHead,
+# AfterHead, InBody, Text, AfterBody. InBody handles the most common
+# HTML elements including headings, paragraphs, lists, tables, forms,
+# inline elements, void elements, and raw text elements (script/style).
+#
+# All 22 insertion modes are implemented. The adoption agency algorithm
+# and full active formatting element reconstruction are simplified
+# (inline elements use scope-based closing instead of the full algorithm).
+#
+# Implementation is split across multiple files by insertion-mode group:
+#   html_tree_builder_initial.spl   — Initial, BeforeHtml, BeforeHead, InHead, AfterHead
+#                                     + core tree creation/insertion/scope helpers
+#   html_tree_builder_in_body.spl   — InBody + InBody helpers + _is_special_element
+#   html_tree_builder_in_table.spl  — InTable family (InTable..InCell)
+#                                     + table-context helpers + node-access helpers
+#   html_tree_builder_after_body.spl — InSelect, InTemplate, InFrameset, After* modes
+#   html_tree_builder_text.spl      — Text, AfterBody, InHeadNoscript
+#
+# Depends on:
+#   examples/browser/entity/dom/node_types.spl       (DomNode, Element, NodeKind)
+#   examples/browser/entity/dom/attribute_types.spl   (Attr)
+#   examples/browser/feature/parser/html_tokenizer.spl (HtmlTokenizer, HtmlToken)
+#   examples/browser/shared/error.spl                 (BrowserResult, parse_error)
+#   examples/browser/shared/logging.spl               (Logger)
+
+use examples.browser.entity.dom.node_types
+use examples.browser.entity.dom.attribute_types
+use examples.browser.feature.parser.html_tokenizer
+use examples.browser.shared.error
+use examples.browser.shared.logging
+use examples.browser.feature.parser.html_tree_builder_initial
+use examples.browser.feature.parser.html_tree_builder_in_body
+use examples.browser.feature.parser.html_tree_builder_in_table
+use examples.browser.feature.parser.html_tree_builder_after_body
+use examples.browser.feature.parser.html_tree_builder_text
+
+# ---------------------------------------------------------------------------
+# InsertionMode — the tree construction insertion modes
+# ---------------------------------------------------------------------------
+
+enum InsertionMode:
+    Initial
+    BeforeHtml
+    BeforeHead
+    InHead
+    InHeadNoscript
+    AfterHead
+    InBody
+    Text
+    InTable
+    InTableText
+    InCaption
+    InColumnGroup
+    InTableBody
+    InRow
+    InCell
+    InSelect
+    InSelectInTable
+    InTemplate
+    AfterBody
+    InFrameset
+    AfterFrameset
+    AfterAfterBody
+    AfterAfterFrameset
+
+# ---------------------------------------------------------------------------
+# Scope element lists used by the has_in_scope family of checks.
+# These are the elements that define scope boundaries in the HTML5 spec.
+# ---------------------------------------------------------------------------
+
+val SCOPE_ELEMENTS: [text] = [
+    "applet", "caption", "html", "table", "td", "th",
+    "marquee", "object", "template"
+]
+
+val BUTTON_SCOPE_ELEMENTS: [text] = [
+    "applet", "caption", "html", "table", "td", "th",
+    "marquee", "object", "template", "button"
+]
+
+val TABLE_SCOPE_ELEMENTS: [text] = [
+    "html", "table", "template"
+]
+
+# Elements with optional end tags that get implied end tags
+val IMPLIED_END_TAG_ELEMENTS: [text] = [
+    "dd", "dt", "li", "optgroup", "option", "p",
+    "rb", "rp", "rt", "rtc"
+]
+
+# Void elements that cannot have children
+val VOID_ELEMENTS: [text] = [
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr"
+]
+
+# Raw text elements whose content is not parsed as HTML
+val RAW_TEXT_ELEMENTS: [text] = [
+    "script", "style"
+]
+
+# Heading elements
+val HEADING_ELEMENTS: [text] = [
+    "h1", "h2", "h3", "h4", "h5", "h6"
+]
+
+# ---------------------------------------------------------------------------
+# TreeBuilder — the tree construction class
+# ---------------------------------------------------------------------------
+
+class TreeBuilder:
+    tokenizer: HtmlTokenizer
+    insertion_mode: InsertionMode
+    open_elements: [i64]
+    active_formatting: [i64]
+    head_element: i64
+    body_element: i64
+    document_node: i64
+    nodes: [DomNode]
+    elements: [Element]
+    next_node_id: i64
+    foster_parenting: bool
+    frameset_ok: bool
+    scripting: bool
+    original_insertion_mode: InsertionMode
+    template_modes: [InsertionMode]
+    pending_table_text: text
+    pending_table_text_mode: InsertionMode
+    logger: Logger
+
+    static fn new(tokenizer: HtmlTokenizer, logger: Logger) -> TreeBuilder:
+        TreeBuilder(
+            tokenizer: tokenizer,
+            insertion_mode: InsertionMode.Initial,
+            open_elements: [i64](),
+            active_formatting: [i64](),
+            head_element: -1,
+            body_element: -1,
+            document_node: -1,
+            nodes: [DomNode](),
+            elements: [Element](),
+            next_node_id: 0,
+            foster_parenting: false,
+            frameset_ok: true,
+            scripting: false,
+            original_insertion_mode: InsertionMode.Initial,
+            template_modes: [InsertionMode](),
+            pending_table_text: "",
+            pending_table_text_mode: InsertionMode.Initial,
+            logger: logger
+        )
+
+    # ===================================================================
+    # Main parse loop
+    # ===================================================================
+
+    me parse() -> Result<i64, BrowserError>:
+        # Create the document node
+        self.document_node = self.create_node(NodeKind.Document, "#document")
+        self.logger.info("Starting HTML parse, document node={self.document_node}")
+
+        var done = false
+        while not done:
+            val token = self.tokenizer.next_token()
+            match token:
+                HtmlToken.Eof:
+                    done = true
+                _:
+                    self.process_token(token)
+
+        self.logger.info("Parse complete, {self.nodes.len()} nodes created")
+        Ok(self.document_node)
+
+    # ===================================================================
+    # Token dispatch to current insertion mode
+    # ===================================================================
+
+    me process_token(token: HtmlToken):
+        match self.insertion_mode:
+            InsertionMode.Initial:
+                self.process_initial(token)
+            InsertionMode.BeforeHtml:
+                self.process_before_html(token)
+            InsertionMode.BeforeHead:
+                self.process_before_head(token)
+            InsertionMode.InHead:
+                self.process_in_head(token)
+            InsertionMode.InHeadNoscript:
+                self.process_in_head_noscript(token)
+            InsertionMode.AfterHead:
+                self.process_after_head(token)
+            InsertionMode.InBody:
+                self.process_in_body(token)
+            InsertionMode.Text:
+                self.process_text(token)
+            InsertionMode.InTable:
+                self.process_in_table(token)
+            InsertionMode.InTableText:
+                self.process_in_table_text(token)
+            InsertionMode.InCaption:
+                self.process_in_caption(token)
+            InsertionMode.InColumnGroup:
+                self.process_in_column_group(token)
+            InsertionMode.InTableBody:
+                self.process_in_table_body(token)
+            InsertionMode.InRow:
+                self.process_in_row(token)
+            InsertionMode.InCell:
+                self.process_in_cell(token)
+            InsertionMode.InSelect:
+                self.process_in_select(token)
+            InsertionMode.InSelectInTable:
+                self.process_in_select_in_table(token)
+            InsertionMode.InTemplate:
+                self.process_in_template(token)
+            InsertionMode.AfterBody:
+                self.process_after_body(token)
+            InsertionMode.InFrameset:
+                self.process_in_frameset(token)
+            InsertionMode.AfterFrameset:
+                self.process_after_frameset(token)
+            InsertionMode.AfterAfterBody:
+                self.process_after_after_body(token)
+            InsertionMode.AfterAfterFrameset:
+                self.process_after_after_frameset(token)

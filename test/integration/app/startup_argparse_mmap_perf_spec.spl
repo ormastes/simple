@@ -1,0 +1,157 @@
+use app.io.{shell}
+use cli
+use std.nogc_sync_mut.io.file_ops.{file_mmap_read_text}
+use std.spipe.*
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+fn simple_binary_path() -> text:
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    if rt_file_exists("./bin/simple"):
+        return "./bin/simple"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    return ""
+
+fn unix_micros() -> i64:
+    rt_time_now_unix_micros()
+
+fn delete_if_exists(path: text):
+    if rt_file_exists(path):
+        _ = rt_file_delete(path)
+
+fn cleanup_tmpdir(tmpdir: text):
+    _ = shell("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+
+fn repeated_text(chunk: text, repeats: i64) -> text:
+    var out = ""
+    for _i in 0..repeats:
+        out = out + chunk
+    out
+
+fn write_cli_perf_script(path: text) -> bool:
+    val source =
+        "use std.cli.cli_util (get_cli_args)\n" +
+        "use std.cli.cli_parser.{cli_spec, cli_spec_program, cli_spec_flag, cli_spec_option, cli_spec_positional, parse_cli_args, parsed_flag, parsed_option, parsed_positional}\n" +
+        "\n" +
+        "fn main():\n" +
+        "    val args = get_cli_args()\n" +
+        "    val spec0 = cli_spec()\n" +
+        "    val spec1 = cli_spec_program(spec0, \"startup-perf\", \"Startup perf smoke\")\n" +
+        "    val spec2 = cli_spec_flag(spec1, \"gc_log\", \"g\", \"Enable GC logging\")\n" +
+        "    val spec3 = cli_spec_option(spec2, \"backend\", \"b\", \"Backend selection\", \"auto\", [])\n" +
+        "    val spec4 = cli_spec_option(spec3, \"timeout\", \"\", \"Timeout seconds\", \"0\", [])\n" +
+        "    val spec5 = cli_spec_positional(spec4, \"command\", \"Command\", true)\n" +
+        "    val spec6 = cli_spec_positional(spec5, \"file\", \"Input file\", true)\n" +
+        "    val parsed = parse_cli_args(spec6, args)\n" +
+        "    val gc_log = if parsed_flag(parsed, \"gc_log\"): \"true\" else: \"false\"\n" +
+        "    val backend = parsed_option(parsed, \"backend\")\n" +
+        "    val timeout = parsed_option(parsed, \"timeout\")\n" +
+        "    val command = parsed_positional(parsed, 0)\n" +
+        "    val file_path = parsed_positional(parsed, 1)\n" +
+        "    print gc_log + \"|\" + backend + \"|\" + timeout + \"|\" + command + \"|\" + file_path\n"
+    rt_file_write_text(path, source)
+
+fn run_cli_perf_once(script_path: text, fixture_path: text) -> (text, text, i64, i64):
+    val simple_bin = simple_binary_path()
+    if simple_bin == "":
+        return ("", "simple binary not found", 127, 0)
+    val args = [
+        "run",
+        script_path,
+        "-g",
+        "--backend=llvm-lib",
+        "--timeout", "7",
+        "build",
+        fixture_path
+    ]
+    val start = unix_micros()
+    val (stdout, stderr, code) = rt_process_run(simple_bin, args)
+    val elapsed = unix_micros() - start
+    (stdout, stderr, code, elapsed)
+
+describe "startup arg parsing and mmap perf smoke":
+    it "keeps declarative cli startup parsing responsive":
+        val tmpdir = shell("mktemp -d").stdout.trim()
+        if tmpdir == "":
+            fail("failed to create temporary directory")
+
+        val script_path = "{tmpdir}/main.spl"
+        val fixture_path = "{tmpdir}/input.spl"
+
+        delete_if_exists(script_path)
+        delete_if_exists(fixture_path)
+        expect(write_cli_perf_script(script_path)).to_equal(true)
+        expect(rt_file_write_text(fixture_path, "fn main(): print \\\"fixture\\\"\\n")).to_equal(true)
+
+        val warm = run_cli_perf_once(script_path, fixture_path)
+        if warm.2 != 0:
+            cleanup_tmpdir(tmpdir)
+            fail("warmup failed: {warm.0}{warm.1}")
+
+        var total_elapsed = 0i64
+        var run_count = 0i64
+        val expected = "true|llvm-lib|7|build|{fixture_path}"
+
+        for _i in 0..3:
+            val run = run_cli_perf_once(script_path, fixture_path)
+            if run.2 != 0:
+                cleanup_tmpdir(tmpdir)
+                fail("cli perf run failed: {run.0}{run.1}")
+            expect(run.0.contains(expected)).to_equal(true)
+            total_elapsed = total_elapsed + run.3
+            run_count = run_count + 1
+
+        cleanup_tmpdir(tmpdir)
+
+        val avg_elapsed_ms = (total_elapsed / run_count) / 1000
+        expect(avg_elapsed_ms).to_be_less_than(400)
+
+    it "keeps file-backed mmap loading responsive":
+        val tmpdir = shell("mktemp -d").stdout.trim()
+        if tmpdir == "":
+            fail("failed to create temporary directory")
+
+        val fixture_path = "{tmpdir}/mmap_perf_fixture.txt"
+        delete_if_exists(fixture_path)
+
+        val chunk = "simple-mmap-perf-fixture|0123456789abcdef\n"
+        val payload = repeated_text(chunk, 4096)
+        expect(rt_file_write_text(fixture_path, payload)).to_equal(true)
+
+        var total_elapsed = 0i64
+        var iteration_count = 0i64
+
+        for _i in 0..32:
+            val start = unix_micros()
+            val content = file_mmap_read_text(fixture_path)
+            if content == "":
+                cleanup_tmpdir(tmpdir)
+                fail("file_mmap_read_text failed for {fixture_path}")
+
+            expect(content).to_equal(payload)
+
+            total_elapsed = total_elapsed + (unix_micros() - start)
+            iteration_count = iteration_count + 1
+
+        cleanup_tmpdir(tmpdir)
+
+        val avg_elapsed_ms = (total_elapsed / iteration_count) / 1000
+        expect(avg_elapsed_ms).to_be_less_than(50)

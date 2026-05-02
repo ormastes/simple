@@ -1,0 +1,634 @@
+# HIR Type System
+#
+# High-level Intermediate Representation types for Simple language.
+# Typed expression tree between AST (CST) and MIR.
+#
+# Key differences from AST:
+# - Types attached to every expression node (TypeId)
+# - Variables referenced by index, not name (Local(index))
+# - Fields accessed by index, not name (field_index)
+# - Method dispatch mode explicitly marked (Static/Dynamic)
+#
+# This enables:
+# - O(1) variable lookup in interpreter (vs HashMap)
+# - Shared lowering between interpreter and compiler
+# - Type-aware evaluation and optimization
+
+# =============================================================================
+# Type Identifiers
+# =============================================================================
+
+# Type identifier - index into type registry
+struct TypeId:
+    id: u32
+
+impl TypeId:
+    # Primitive type factory functions
+    static fn void_ty() -> TypeId:
+        TypeId(id: 0)
+
+    static fn bool_ty() -> TypeId:
+        TypeId(id: 1)
+
+    static fn i8_ty() -> TypeId:
+        TypeId(id: 2)
+
+    static fn i16_ty() -> TypeId:
+        TypeId(id: 3)
+
+    static fn i32_ty() -> TypeId:
+        TypeId(id: 4)
+
+    static fn i64_ty() -> TypeId:
+        TypeId(id: 5)
+
+    static fn u8_ty() -> TypeId:
+        TypeId(id: 6)
+
+    static fn u16_ty() -> TypeId:
+        TypeId(id: 7)
+
+    static fn u32_ty() -> TypeId:
+        TypeId(id: 8)
+
+    static fn u64_ty() -> TypeId:
+        TypeId(id: 9)
+
+    static fn f32_ty() -> TypeId:
+        TypeId(id: 10)
+
+    static fn f64_ty() -> TypeId:
+        TypeId(id: 11)
+
+    static fn string_ty() -> TypeId:
+        TypeId(id: 12)
+
+    static fn nil_ty() -> TypeId:
+        TypeId(id: 13)
+
+    # Check if this is void type
+    fn is_void() -> bool:
+        self.id == 0
+
+    # Check if this is a boolean type
+    fn is_bool() -> bool:
+        self.id == 1
+
+    # Check if this is an integer type
+    fn is_integer() -> bool:
+        self.id >= 2 and self.id <= 9
+
+    # Check if this is a signed integer
+    fn is_signed_integer() -> bool:
+        self.id >= 2 and self.id <= 5
+
+    # Check if this is an unsigned integer
+    fn is_unsigned_integer() -> bool:
+        self.id >= 6 and self.id <= 9
+
+    # Check if this is a float type
+    fn is_float() -> bool:
+        self.id == 10 or self.id == 11
+
+    # Check if this is a numeric type (int or float)
+    fn is_numeric() -> bool:
+        self.is_integer() or self.is_float()
+
+    # Check if this is a string type
+    fn is_string() -> bool:
+        self.id == 12
+
+    # Check if this is nil type
+    fn is_nil() -> bool:
+        self.id == 13
+
+    # Check if this is a primitive type
+    fn is_primitive() -> bool:
+        self.id <= 13
+
+    # Get string name for type
+    fn name() -> text:
+        match self.id:
+            0 -> "void"
+            1 -> "bool"
+            2 -> "i8"
+            3 -> "i16"
+            4 -> "i32"
+            5 -> "i64"
+            6 -> "u8"
+            7 -> "u16"
+            8 -> "u32"
+            9 -> "u64"
+            10 -> "f32"
+            11 -> "f64"
+            12 -> "text"
+            13 -> "nil"
+            _ -> "type_{self.id}"
+
+
+# =============================================================================
+# Operators
+# =============================================================================
+
+# Binary operators
+enum BinOp:
+    # Arithmetic
+    Add
+    Sub
+    Mul
+    Div
+    Mod
+    Pow
+    FloorDiv
+    # Comparison
+    Eq
+    NotEq
+    Lt
+    Gt
+    LtEq
+    GtEq
+    # Logical
+    And
+    Or
+    # Bitwise
+    BitAnd
+    BitOr
+    BitXor
+    ShiftLeft
+    ShiftRight
+    # Special
+    MatMul
+    In
+    Is
+
+impl BinOp:
+    # Get string representation
+    fn to_string() -> text:
+        match self:
+            BinOp.Add -> "+"
+            BinOp.Sub -> "-"
+            BinOp.Mul -> "*"
+            BinOp.Div -> "/"
+            BinOp.Mod -> "%"
+            BinOp.Pow -> "**"
+            BinOp.FloorDiv -> "//"
+            BinOp.Eq -> "=="
+            BinOp.NotEq -> "!="
+            BinOp.Lt -> "<"
+            BinOp.Gt -> ">"
+            BinOp.LtEq -> "<="
+            BinOp.GtEq -> ">="
+            BinOp.And -> "and"
+            BinOp.Or -> "or"
+            BinOp.BitAnd -> "&"
+            BinOp.BitOr -> "|"
+            BinOp.BitXor -> "^"
+            BinOp.ShiftLeft -> "<<"
+            BinOp.ShiftRight -> ">>"
+            BinOp.MatMul -> "@"
+            BinOp.In -> "in"
+            BinOp.Is -> "is"
+
+    # Check if this is an arithmetic operator
+    fn is_arithmetic() -> bool:
+        match self:
+            BinOp.Add | BinOp.Sub | BinOp.Mul | BinOp.Div | BinOp.Mod | BinOp.Pow | BinOp.FloorDiv -> true
+            _ -> false
+
+    # Check if this is a comparison operator
+    fn is_comparison() -> bool:
+        match self:
+            BinOp.Eq | BinOp.NotEq | BinOp.Lt | BinOp.Gt | BinOp.LtEq | BinOp.GtEq -> true
+            _ -> false
+
+    # Check if this is a logical operator
+    fn is_logical() -> bool:
+        match self:
+            BinOp.And | BinOp.Or -> true
+            _ -> false
+
+    # Check if this is a bitwise operator
+    fn is_bitwise() -> bool:
+        match self:
+            BinOp.BitAnd | BinOp.BitOr | BinOp.BitXor | BinOp.ShiftLeft | BinOp.ShiftRight -> true
+            _ -> false
+
+    # Check if this operator returns boolean
+    fn returns_bool() -> bool:
+        self.is_comparison() or self.is_logical()
+
+
+# Unary operators
+enum UnaryOp:
+    # Negation (-)
+    Neg
+    # Logical not
+    Not
+    # Bitwise not (~)
+    BitNot
+
+impl UnaryOp:
+    # Get string representation
+    fn to_string() -> text:
+        match self:
+            UnaryOp.Neg -> "-"
+            UnaryOp.Not -> "not"
+            UnaryOp.BitNot -> "~"
+
+    # Check if this is numeric negation
+    fn is_neg() -> bool:
+        match self:
+            UnaryOp.Neg -> true
+            _ -> false
+
+    # Check if this is logical not
+    fn is_not() -> bool:
+        match self:
+            UnaryOp.Not -> true
+            _ -> false
+
+
+# =============================================================================
+# Dispatch and Capture Modes
+# =============================================================================
+
+# Method dispatch mode
+enum DispatchMode:
+    # Static dispatch (known at compile time)
+    Static
+    # Dynamic dispatch (vtable lookup)
+    Dynamic
+
+impl DispatchMode:
+    fn to_string() -> text:
+        match self:
+            DispatchMode.Static -> "static"
+            DispatchMode.Dynamic -> "dynamic"
+
+    fn is_static() -> bool:
+        match self:
+            DispatchMode.Static -> true
+            _ -> false
+
+    fn is_dynamic() -> bool:
+        match self:
+            DispatchMode.Dynamic -> true
+            _ -> false
+
+
+# How a variable is captured by a closure
+enum CaptureMode:
+    # Capture by value (copy)
+    ByValue
+    # Capture by reference (borrow)
+    ByRef
+    # Capture by mutable reference
+    ByMutRef
+
+impl CaptureMode:
+    fn to_string() -> text:
+        match self:
+            CaptureMode.ByValue -> "by_value"
+            CaptureMode.ByRef -> "by_ref"
+            CaptureMode.ByMutRef -> "by_mut_ref"
+
+    fn is_by_value() -> bool:
+        match self:
+            CaptureMode.ByValue -> true
+            _ -> false
+
+    fn is_reference() -> bool:
+        match self:
+            CaptureMode.ByRef | CaptureMode.ByMutRef -> true
+            _ -> false
+
+    fn is_mutable() -> bool:
+        match self:
+            CaptureMode.ByMutRef -> true
+            _ -> false
+
+
+# =============================================================================
+# Local Variable
+# =============================================================================
+
+# Local variable metadata
+struct LocalVar:
+    name: text
+    ty: TypeId
+    is_mutable: bool
+    index: u32
+
+impl LocalVar:
+    # Create new local variable
+    static fn new(name: text, ty: TypeId, is_mutable: bool, index: u32) -> LocalVar:
+        LocalVar(name: name, ty: ty, is_mutable: is_mutable, index: index)
+
+    # Create immutable local
+    static fn immutable(name: text, ty: TypeId, index: u32) -> LocalVar:
+        LocalVar(name: name, ty: ty, is_mutable: false, index: index)
+
+    # Create mutable local
+    static fn mutable_var(name: text, ty: TypeId, index: u32) -> LocalVar:
+        LocalVar(name: name, ty: ty, is_mutable: true, index: index)
+
+
+# Captured variable in closure
+struct CapturedVar:
+    local_index: u32
+    capture_mode: CaptureMode
+
+impl CapturedVar:
+    static fn new(local_index: u32, mode: CaptureMode) -> CapturedVar:
+        CapturedVar(local_index: local_index, capture_mode: mode)
+
+    static fn by_value(local_index: u32) -> CapturedVar:
+        CapturedVar(local_index: local_index, capture_mode: CaptureMode.ByValue)
+
+    static fn by_ref(local_index: u32) -> CapturedVar:
+        CapturedVar(local_index: local_index, capture_mode: CaptureMode.ByRef)
+
+
+# =============================================================================
+# HIR Expression Kind (simplified - no recursive types)
+# =============================================================================
+
+# Expression kind tag
+enum HirExprKind:
+    # Literals
+    Integer
+    Float
+    Bool
+    String
+    Nil
+    # Variables
+    Local
+    Global
+    # Operations
+    Binary
+    Unary
+    # Calls
+    Call
+    MethodCall
+    # Access
+    FieldAccess
+    Index
+    # Collections
+    Array
+    Tuple
+    Dict
+    StructInit
+    # Control flow
+    If
+    Match
+    # Lambda
+    Lambda
+    # References
+    Ref
+    Deref
+    Cast
+    # Async
+    Await
+    Yield
+    # Block
+    Block
+
+impl HirExprKind:
+    # Check if this is a literal kind
+    fn is_literal() -> bool:
+        match self:
+            HirExprKind.Integer | HirExprKind.Float | HirExprKind.Bool | HirExprKind.String | HirExprKind.Nil -> true
+            _ -> false
+
+    # Check if this is a variable kind
+    fn is_variable() -> bool:
+        match self:
+            HirExprKind.Local | HirExprKind.Global -> true
+            _ -> false
+
+    # Check if this is a control flow kind
+    fn is_control_flow() -> bool:
+        match self:
+            HirExprKind.If | HirExprKind.Match -> true
+            _ -> false
+
+
+# =============================================================================
+# HIR Statement Kind
+# =============================================================================
+
+# Statement kind tag
+enum HirStmtKind:
+    Let
+    Assign
+    Return
+    Expr
+    If
+    While
+    For
+    Loop
+    Break
+    Continue
+    Assert
+
+impl HirStmtKind:
+    # Check if this is a let statement
+    fn is_let() -> bool:
+        match self:
+            HirStmtKind.Let -> true
+            _ -> false
+
+    # Check if this is a return statement
+    fn is_return() -> bool:
+        match self:
+            HirStmtKind.Return -> true
+            _ -> false
+
+    # Check if this is a control flow statement
+    fn is_control_flow() -> bool:
+        match self:
+            HirStmtKind.If | HirStmtKind.While | HirStmtKind.For | HirStmtKind.Loop -> true
+            _ -> false
+
+    # Check if this is a loop control statement
+    fn is_loop_control() -> bool:
+        match self:
+            HirStmtKind.Break | HirStmtKind.Continue -> true
+            _ -> false
+
+
+# =============================================================================
+# HIR Pattern Kind
+# =============================================================================
+
+# Pattern kind for matching
+enum HirPatternKind:
+    # Wildcard (_)
+    Wildcard
+    # Literal value
+    Literal
+    # Variable binding
+    Binding
+    # Tuple pattern
+    Tuple
+    # Struct pattern
+    Struct
+    # Enum variant pattern
+    Variant
+    # Or pattern (a | b)
+    Or
+
+impl HirPatternKind:
+    fn is_wildcard() -> bool:
+        match self:
+            HirPatternKind.Wildcard -> true
+            _ -> false
+
+    fn is_binding() -> bool:
+        match self:
+            HirPatternKind.Binding -> true
+            _ -> false
+
+    fn is_literal() -> bool:
+        match self:
+            HirPatternKind.Literal -> true
+            _ -> false
+
+
+# =============================================================================
+# HIR Literal (for patterns)
+# =============================================================================
+
+# Literal value for patterns
+enum HirLiteral:
+    Int(i64)
+    Float(f64)
+    Bool(bool)
+    String(text)
+    Nil
+
+impl HirLiteral:
+    fn type_name() -> text:
+        match self:
+            HirLiteral.Int(_) -> "int"
+            HirLiteral.Float(_) -> "float"
+            HirLiteral.Bool(_) -> "bool"
+            HirLiteral.String(_) -> "string"
+            HirLiteral.Nil -> "nil"
+
+    fn is_nil() -> bool:
+        match self:
+            HirLiteral.Nil -> true
+            _ -> false
+
+    fn is_number() -> bool:
+        match self:
+            HirLiteral.Int(_) | HirLiteral.Float(_) -> true
+            _ -> false
+
+    fn to_bool() -> bool:
+        match self:
+            HirLiteral.Bool(b) -> b
+            HirLiteral.Nil -> false
+            HirLiteral.Int(0) -> false
+            HirLiteral.String("") -> false
+            _ -> true
+
+
+# =============================================================================
+# HIR Expression Node (struct-based for tree structure)
+# =============================================================================
+
+# HIR Expression node - uses struct with kind tag
+# The actual tree structure will be built with indices into an arena
+struct HirExprNode:
+    kind: HirExprKind
+    ty: TypeId
+    # Payload depends on kind - stored separately in arena
+
+impl HirExprNode:
+    static fn integer(ty: TypeId) -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Integer, ty: ty)
+
+    static fn float(ty: TypeId) -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Float, ty: ty)
+
+    static fn bool_node() -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Bool, ty: TypeId.bool_ty())
+
+    static fn string_node() -> HirExprNode:
+        HirExprNode(kind: HirExprKind.String, ty: TypeId.string_ty())
+
+    static fn nil_node() -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Nil, ty: TypeId.nil_ty())
+
+    static fn local(ty: TypeId) -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Local, ty: ty)
+
+    static fn global(ty: TypeId) -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Global, ty: ty)
+
+    static fn binary(ty: TypeId) -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Binary, ty: ty)
+
+    static fn unary(ty: TypeId) -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Unary, ty: ty)
+
+    static fn call(ty: TypeId) -> HirExprNode:
+        HirExprNode(kind: HirExprKind.Call, ty: ty)
+
+    fn is_literal() -> bool:
+        self.kind.is_literal()
+
+    fn is_variable() -> bool:
+        self.kind.is_variable()
+
+    fn get_type() -> TypeId:
+        self.ty
+
+
+# =============================================================================
+# HIR Statement Node
+# =============================================================================
+
+# HIR Statement node
+struct HirStmtNode:
+    kind: HirStmtKind
+    # Payload depends on kind - stored separately
+
+impl HirStmtNode:
+    static fn let_stmt() -> HirStmtNode:
+        HirStmtNode(kind: HirStmtKind.Let)
+
+    static fn assign_stmt() -> HirStmtNode:
+        HirStmtNode(kind: HirStmtKind.Assign)
+
+    static fn return_stmt() -> HirStmtNode:
+        HirStmtNode(kind: HirStmtKind.Return)
+
+    static fn expr_stmt() -> HirStmtNode:
+        HirStmtNode(kind: HirStmtKind.Expr)
+
+    static fn if_stmt() -> HirStmtNode:
+        HirStmtNode(kind: HirStmtKind.If)
+
+    static fn while_stmt() -> HirStmtNode:
+        HirStmtNode(kind: HirStmtKind.While)
+
+    static fn break_stmt() -> HirStmtNode:
+        HirStmtNode(kind: HirStmtKind.Break)
+
+    static fn continue_stmt() -> HirStmtNode:
+        HirStmtNode(kind: HirStmtKind.Continue)
+
+    fn is_let() -> bool:
+        self.kind.is_let()
+
+    fn is_return() -> bool:
+        self.kind.is_return()
+
+    fn is_control_flow() -> bool:
+        self.kind.is_control_flow()
+
+    fn is_loop_control() -> bool:
+        self.kind.is_loop_control()

@@ -1,0 +1,80 @@
+# Test API Mount — route matcher + dispatch + HTTP encoder
+#
+# Guards the shared seam that lets host WM (async_server.spl), TUI web
+# (tui_web/server.spl), standalone Simple apps (ui.standalone.bootstrap),
+# and the SimpleOS compositor bridge (COMP_TEST_API_REQ) all speak the
+# same /api/test/* verbs without re-implementing the glue.
+
+use std.spec.{describe, it, expect}
+use common.ui.builder.{column, text_widget, build_tree}
+use common.ui.session.{UISession}
+use common.ui.widget.{UIEvent}
+use app.ui.test_api.mount.{TEST_API_PREFIX, test_api_matches, dispatch_test_api, format_http_response, dispatch_and_format}
+
+fn _trivial_session() -> UISession:
+    val root = column("root").child(text_widget("greeting", "hello"))
+    val tree = build_tree(root)
+    return UISession.new(tree)
+
+describe "test_api_mount":
+    it "exposes the canonical route prefix":
+        expect(TEST_API_PREFIX).to_equal("/api/test/")
+
+    it "test_api_matches returns true only for /api/test/ paths":
+        expect(test_api_matches("/api/test/ready")).to_equal(true)
+        expect(test_api_matches("/api/test/ui/snapshot")).to_equal(true)
+        expect(test_api_matches("/api/state")).to_equal(false)
+        expect(test_api_matches("/")).to_equal(false)
+        expect(test_api_matches("")).to_equal(false)
+
+    it "dispatch_test_api returns the ready probe against any session":
+        val session = _trivial_session()
+        val result = dispatch_test_api(
+            "/api/test/ready",
+            "GET",
+            "",
+            session,
+            \event: pass_dn
+        )
+        expect(result.0).to_equal(200)
+        expect(result.1).to_equal("application/json")
+        expect(result.2).to_contain("\"ready\":true")
+        expect(result.2).to_contain("\"protocol_version\":1")
+
+    it "dispatch_test_api surfaces a multi-mode UI snapshot":
+        val session = _trivial_session()
+        val result = dispatch_test_api(
+            "/api/test/ui/snapshot",
+            "GET",
+            "",
+            session,
+            \event: pass_dn
+        )
+        expect(result.0).to_equal(200)
+        expect(result.2).to_contain("\"protocol_version\":1")
+
+    it "format_http_response emits a well-formed HTTP/1.1 response":
+        val response = format_http_response(200, "application/json", "{\"ok\":true}")
+        expect(response).to_start_with("HTTP/1.1 200 OK")
+        expect(response).to_contain("Content-Type: application/json")
+        expect(response).to_contain("X-UI-Protocol-Version: 1")
+        expect(response).to_contain("Content-Length: 11")
+        expect(response).to_end_with("{\"ok\":true}")
+
+    it "format_http_response maps known error statuses":
+        val not_found = format_http_response(404, "text/plain", "nope")
+        expect(not_found).to_start_with("HTTP/1.1 404 Not Found")
+        val bad = format_http_response(400, "application/json", "{}")
+        expect(bad).to_start_with("HTTP/1.1 400 Bad Request")
+
+    it "dispatch_and_format combines dispatch + encode in one call":
+        val session = _trivial_session()
+        val encoded = dispatch_and_format(
+            "/api/test/ready",
+            "GET",
+            "",
+            session,
+            \event: pass_dn
+        )
+        expect(encoded).to_start_with("HTTP/1.1 200 OK")
+        expect(encoded).to_contain("\"ready\":true")

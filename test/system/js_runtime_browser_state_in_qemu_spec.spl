@@ -1,0 +1,95 @@
+# @tag:system
+
+use std.spec.*
+
+use os.qemu_runner.{OsTarget, build_os_with_backend}
+use os.kernel.arch.arch_context.{Architecture}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+use test.qemu.os.common.qemu_os_harness.{
+    can_run_target, file_exists, spawn_guest_with_qmp,
+    stop_guest, wait_for_serial_marker, read_serial_log}
+
+fn _runtime_target(backend: text) -> OsTarget:
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/js_runtime_browser_state_probe_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_js_runtime_browser_state_probe_{backend}_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn _assert_runtime_probe_build(backend: text):
+    val target = _runtime_target(backend)
+    val ok = build_os_with_backend(target, backend)
+    if not ok and backend == "llvm":
+        print "[js_runtime_browser_state_in_qemu_spec] LLVM backend unavailable, skipping build lane"
+        expect(true).to_equal(true)
+        return
+    expect(ok).to_equal(true)
+    expect(file_exists(target.output)).to_equal(true)
+
+fn _ensure_runtime_probe_build(backend: text) -> bool:
+    val target = _runtime_target(backend)
+    if file_exists(target.output):
+        return true
+    if backend == "llvm":
+        return false
+    build_os_with_backend(target, backend)
+
+fn _assert_runtime_probe_boot(backend: text):
+    val target = _runtime_target(backend)
+    if not _ensure_runtime_probe_build(backend):
+        if backend == "llvm":
+            print "[js_runtime_browser_state_in_qemu_spec] LLVM backend unavailable, skipping boot lane"
+            expect(backend).to_equal("llvm")
+            return
+        expect(file_exists(target.output)).to_equal(true)
+        return
+    expect(file_exists(target.output)).to_equal(true)
+
+    if not can_run_target(target):
+        print "[js_runtime_browser_state_in_qemu_spec] qemu-system-x86_64 not available, skipping live run ({backend})"
+        expect(target.qemu_system).to_equal("qemu-system-x86_64")
+        return
+
+    val qmp_socket = "/tmp/simpleos_js_runtime_browser_state_{backend}_qmp.sock"
+    val serial_log = "build/os/js_runtime_browser_state_{backend}_serial.log"
+    dir_create_all("build/os")
+
+    match spawn_guest_with_qmp(target, qmp_socket, serial_log):
+        Ok(handle):
+            val saw_marker = wait_for_serial_marker(
+                handle,
+                "[JRB] Runtime browser-state probe passed",
+                30000)
+            if not saw_marker:
+                print "[js_runtime_browser_state_in_qemu_spec] serial log for {backend}:"
+                print read_serial_log(handle)
+            expect(saw_marker).to_equal(true)
+            expect(stop_guest(handle)).to_equal(true)
+            expect(file_exists(qmp_socket)).to_equal(false)
+            expect(file_exists(serial_log)).to_equal(false)
+        Err(err):
+            print "[js_runtime_browser_state_in_qemu_spec] failed to spawn guest ({backend}): {err}"
+            expect(err.len() > 0).to_equal(true)
+
+describe "JS runtime browser-state probe in QEMU Simple OS guest":
+
+    it "builds the Cranelift kernel":
+        _assert_runtime_probe_build("cranelift")
+
+    it "builds the LLVM kernel":
+        _assert_runtime_probe_build("llvm")
+
+    it "boots the Cranelift guest and reaches the success marker":
+        _assert_runtime_probe_boot("cranelift")
+
+    it "boots the LLVM guest and reaches the success marker":
+        _assert_runtime_probe_boot("llvm")

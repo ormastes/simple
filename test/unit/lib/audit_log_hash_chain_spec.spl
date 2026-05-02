@@ -1,0 +1,198 @@
+"""
+log-lib-drivers Phase 4 spec — audit-log tamper-evident hash chain.
+
+Covers AC-5 (audit-log uses tamper-evident framing — sequence + hash
+chain) and AC-6e (audit-log tamper-evident behavior).
+
+Status: RED PHASE. Phase 5 has not implemented audit_chain.spl yet.
+
+Phase 3 contract (locked, §E):
+  AuditEntry NEW fields (additive):
+    seq:         u64       (monotonic, 1-based; genesis seq=1)
+    prev_hash:   [u8; 32]  (genesis = [0u8; 32])
+    entry_hash:  [u8; 32]  (sha256 of canonical input)
+
+  Canonical hash input (deterministic, must match verifier):
+    hash_input = u64_be(seq)
+              || u64_be(timestamp_ms)
+              || u8(severity_rank)
+              || event_json_bytes
+              || prev_hash
+    entry_hash = sha256(hash_input)
+
+  audit_chain_init(file_path, fsync_each)
+    - Genesis: next_seq = 1, last_hash = [0u8; 32]
+    - Recovery: read LAST line only (O(1)); set last_hash, next_seq.
+
+  audit_chain_append(entry, config) — fills seq/prev_hash/entry_hash.
+  audit_chain_verify(file_path) -> Result<u64, AuditError>
+    - Err(ChainBreakAt(seq)) on tamper / hash mismatch.
+    - AuditError variants: Io(text), BadJson(u64), ChainBreakAt(u64),
+                            SeqGapAt(u64), HashMismatchAt(u64).
+
+  Severity ordering preserved — `meets_severity` callers must continue
+  to compile and behave identically.
+"""
+
+use std.spec
+use std.security.audit_chain.{
+    audit_chain_init, audit_chain_append, audit_chain_verify,
+    AuditError
+}
+use std.security.audit_log.{
+    AuditEntry, AuditConfig, SecurityEvent, SecuritySeverity,
+    severity_for_event, meets_severity
+}
+use std.io_runtime  # NOTE: never `app.io` — see project memory.
+
+# Helper paths for tests (Phase 5 wires these into a tmp dir).
+val TMP_AUDIT_PATH: text = "/tmp/sstack_audit_chain_test.log"
+
+describe "audit chain — genesis & append (AC-5, AC-6e)":
+
+    it "AC-5: genesis entry has seq=1 and prev_hash=[0u8;32]":
+        # Fresh file → genesis state.
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
+        audit_chain_init(TMP_AUDIT_PATH, false)
+        val cfg = AuditConfig(
+            enabled: true,
+            min_severity: SecuritySeverity.Info,
+            log_to_stdout: false,
+            log_file: TMP_AUDIT_PATH,
+            mask_secrets: false
+        )
+        val entry = AuditEntry.new(
+            event: SecurityEvent.AuthSuccess(user: "alice", peer: "127.0.0.1"),
+            correlation_id: "corr-1",
+            module_path: "test"
+        )
+        audit_chain_append(entry, cfg)
+        # Verify the produced file: 1 valid entry.
+        val result = audit_chain_verify(TMP_AUDIT_PATH)
+        expect(result).to_equal(1)
+
+    it "AC-5: three appended entries verify clean":
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
+        audit_chain_init(TMP_AUDIT_PATH, false)
+        val cfg = AuditConfig(
+            enabled: true,
+            min_severity: SecuritySeverity.Info,
+            log_to_stdout: false,
+            log_file: TMP_AUDIT_PATH,
+            mask_secrets: false
+        )
+        var i = 0
+        while i < 3:
+            val e = AuditEntry.new(
+                event: SecurityEvent.AuthSuccess(user: "u", peer: "p"),
+                correlation_id: "corr",
+                module_path: "test"
+            )
+            audit_chain_append(e, cfg)
+            i = i + 1
+        expect(audit_chain_verify(TMP_AUDIT_PATH)).to_equal(3)
+
+    it "AC-5: each entry_hash equals sha256(seq_be||ts_be||sev||json||prev_hash)":
+        # Phase 5 exposes audit_chain_recompute_hash(entry) for testing.
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
+        audit_chain_init(TMP_AUDIT_PATH, false)
+        val cfg = AuditConfig(
+            enabled: true,
+            min_severity: SecuritySeverity.Info,
+            log_to_stdout: false,
+            log_file: TMP_AUDIT_PATH,
+            mask_secrets: false
+        )
+        val e = AuditEntry.new(
+            event: SecurityEvent.AuthSuccess(user: "u", peer: "p"),
+            correlation_id: "c",
+            module_path: "m"
+        )
+        audit_chain_append(e, cfg)
+        # After append, e.seq, e.prev_hash, e.entry_hash are populated.
+        expect(e.seq).to_equal(1)
+        # prev_hash must be the genesis zero hash.
+        expect(audit_chain_is_zero_hash(e.prev_hash)).to_equal(true)
+        # entry_hash recomputes deterministically.
+        val recomputed = audit_chain_recompute_hash(e)
+        expect(audit_chain_hashes_equal(e.entry_hash, recomputed)).to_equal(true)
+
+
+describe "audit chain — tamper detection (AC-5, AC-6e)":
+
+    it "AC-6e: flipping a byte in middle entry returns Err(ChainBreakAt(2))":
+        # Append 3 entries, then corrupt entry #2 (1-based seq).
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
+        audit_chain_init(TMP_AUDIT_PATH, false)
+        val cfg = AuditConfig(
+            enabled: true,
+            min_severity: SecuritySeverity.Info,
+            log_to_stdout: false,
+            log_file: TMP_AUDIT_PATH,
+            mask_secrets: false
+        )
+        var i = 0
+        while i < 3:
+            val e = AuditEntry.new(
+                event: SecurityEvent.AuthSuccess(user: "u", peer: "p"),
+                correlation_id: "c",
+                module_path: "m"
+            )
+            audit_chain_append(e, cfg)
+            i = i + 1
+        # Tamper: flip a byte in line 2 (the middle entry).
+        # Phase 5 helper: audit_chain_test_tamper_byte(path, line_index_1based, byte_offset_in_line).
+        audit_chain_test_tamper_byte(TMP_AUDIT_PATH, 2, 10)
+        # Verify must report ChainBreakAt(2) — Phase-3 §E names: positional, not record syntax.
+        val result = audit_chain_verify(TMP_AUDIT_PATH)
+        expect(audit_chain_error_is_chain_break_at(result, 2)).to_equal(true)
+
+
+describe "audit chain — recovery (AC-5)":
+
+    it "AC-5: opening existing chain reads only last line for prev_hash":
+        # Pre-seed the file with 2 entries.
+        std.io_runtime.remove_file_if_exists(TMP_AUDIT_PATH)
+        audit_chain_init(TMP_AUDIT_PATH, false)
+        val cfg = AuditConfig(
+            enabled: true,
+            min_severity: SecuritySeverity.Info,
+            log_to_stdout: false,
+            log_file: TMP_AUDIT_PATH,
+            mask_secrets: false
+        )
+        var i = 0
+        while i < 2:
+            val e = AuditEntry.new(
+                event: SecurityEvent.AuthSuccess(user: "u", peer: "p"),
+                correlation_id: "c",
+                module_path: "m"
+            )
+            audit_chain_append(e, cfg)
+            i = i + 1
+        # Re-init: should pick up next_seq=3 from last-line scan, NOT replay all.
+        audit_chain_init(TMP_AUDIT_PATH, false)
+        val e3 = AuditEntry.new(
+            event: SecurityEvent.AuthSuccess(user: "u", peer: "p"),
+            correlation_id: "c",
+            module_path: "m"
+        )
+        audit_chain_append(e3, cfg)
+        expect(e3.seq).to_equal(3)
+        # Full chain still verifies after recovery+append.
+        expect(audit_chain_verify(TMP_AUDIT_PATH)).to_equal(3)
+
+
+describe "audit chain — back-compat with severity (AC-5)":
+
+    it "AC-5: meets_severity ordering preserved (Info < Warning < Critical)":
+        # Phase-3 contract: existing severity ranks are unchanged.
+        expect(meets_severity(SecuritySeverity.Info, SecuritySeverity.Info)).to_equal(true)
+        expect(meets_severity(SecuritySeverity.Warning, SecuritySeverity.Info)).to_equal(true)
+        expect(meets_severity(SecuritySeverity.Critical, SecuritySeverity.Warning)).to_equal(true)
+        expect(meets_severity(SecuritySeverity.Info, SecuritySeverity.Warning)).to_equal(false)
+        expect(meets_severity(SecuritySeverity.Info, SecuritySeverity.Critical)).to_equal(false)
+
+    it "AC-5: severity_for_event mapping unchanged":
+        val s = severity_for_event(SecurityEvent.CsrfViolation(peer: "127.0.0.1", path: "/admin"))
+        expect(s).to_equal(SecuritySeverity.Critical)

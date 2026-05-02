@@ -1,1 +1,0 @@
-../skills/simple-ui/SKILL.md

@@ -1,0 +1,170 @@
+"""
+# SQL Database Connection Specification
+
+**Feature IDs:** #DB-003
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for the Database connection facade: opening in-memory databases,
+executing DDL/DML, querying rows, and lifecycle management (close).
+All tests use Database.memory() for isolation.
+"""
+
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.connection.{Database}
+
+# ============================================================================
+# Database — connection and query facade
+# ============================================================================
+
+describe "Database":
+    """
+    ## Database Connection Lifecycle
+
+    Database wraps a SQLite connection with typed queries, statement caching,
+    and transaction support.
+    """
+
+    context "opening":
+        it "opens an in-memory database successfully":
+            val db_result = Database.memory()
+            expect(db_result.is_ok()).to_equal(true)
+
+    context "exec":
+        it "creates a table with exec":
+            var db = Database.memory()?
+            val result = db.exec("CREATE TABLE t1 (id INTEGER PRIMARY KEY, name TEXT)", [])
+            expect(result.is_ok()).to_equal(true)
+
+        it "inserts data with exec":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t2 (id INTEGER PRIMARY KEY, val TEXT)", [])?
+            val result = db.exec("INSERT INTO t2 (id, val) VALUES (1, 'hello')", [])
+            expect(result.is_ok()).to_equal(true)
+
+        it "inserts with typed parameters":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t3 (id INTEGER, name TEXT)", [])?
+            val params = [DbValue.Integer(value: 1), DbValue.Text(value: "Alice")]
+            val result = db.exec("INSERT INTO t3 (id, name) VALUES (?, ?)", params)
+            expect(result.is_ok()).to_equal(true)
+
+    context "query":
+        it "returns rows from a query":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t4 (id INTEGER PRIMARY KEY, name TEXT)", [])?
+            db.exec("INSERT INTO t4 (id, name) VALUES (1, 'Alice')", [])?
+            db.exec("INSERT INTO t4 (id, name) VALUES (2, 'Bob')", [])?
+
+            val rows_result = db.query("SELECT id, name FROM t4 ORDER BY id", [])
+            expect(rows_result.is_ok()).to_equal(true)
+            val rows = rows_result?
+            expect(rows.len()).to_equal(2)
+
+        it "returns empty list for no matches":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t5 (id INTEGER)", [])?
+
+            val rows = db.query("SELECT * FROM t5", [])?
+            expect(rows.len()).to_equal(0)
+
+        it "queries with typed parameters":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t6 (id INTEGER, name TEXT)", [])?
+            db.exec("INSERT INTO t6 VALUES (1, 'Alice')", [])?
+            db.exec("INSERT INTO t6 VALUES (2, 'Bob')", [])?
+
+            val params = [DbValue.Integer(value: 2)]
+            val rows = db.query("SELECT name FROM t6 WHERE id = ?", params)?
+            expect(rows.len()).to_equal(1)
+
+    context "query_one":
+        it "returns single row":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t7 (id INTEGER PRIMARY KEY, val TEXT)", [])?
+            db.exec("INSERT INTO t7 VALUES (1, 'only')", [])?
+
+            val result = db.query_one("SELECT val FROM t7 WHERE id = 1", [])
+            expect(result.is_ok()).to_equal(true)
+            val row_opt = result?
+            expect(row_opt.?).to_equal(true)
+
+        it "returns nil when no rows match":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t8 (id INTEGER)", [])?
+
+            val row_opt = db.query_one("SELECT * FROM t8 WHERE id = 999", [])?
+            expect(row_opt.?).to_equal(false)
+
+    context "query_value":
+        it "returns single scalar value":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t9 (id INTEGER, val TEXT)", [])?
+            db.exec("INSERT INTO t9 VALUES (1, 'scalar')", [])?
+
+            val result = db.query_value("SELECT val FROM t9 WHERE id = 1", [])
+            expect(result.is_ok()).to_equal(true)
+            val val_opt = result?
+            expect(val_opt.?).to_equal(true)
+
+        it "returns nil for empty result":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t10 (id INTEGER)", [])?
+
+            val val_opt = db.query_value("SELECT id FROM t10", [])?
+            expect(val_opt.?).to_equal(false)
+
+    context "table_exists":
+        it "returns true for existing table":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t11 (id INTEGER)", [])?
+            expect(db.table_exists("t11")).to_equal(true)
+
+        it "returns false for non-existing table":
+            val db = Database.memory()?
+            expect(db.table_exists("no_such_table")).to_equal(false)
+
+    context "close":
+        it "closes successfully":
+            var db = Database.memory()?
+            val result = db.close()
+            expect(result.is_ok()).to_equal(true)
+
+        it "returns error when exec after close":
+            var db = Database.memory()?
+            db.close()?
+            val result = db.exec("SELECT 1", [])
+            expect(result.is_err()).to_equal(true)
+
+        it "returns error when query after close":
+            var db = Database.memory()?
+            db.close()?
+            val result = db.query("SELECT 1", [])
+            expect(result.is_err()).to_equal(true)
+
+        it "returns error when closing twice":
+            var db = Database.memory()?
+            db.close()?
+            val result = db.close()
+            expect(result.is_err()).to_equal(true)
+
+    context "exec_sql convenience":
+        it "executes SQL without parameters":
+            var db = Database.memory()?
+            val result = db.exec_sql("CREATE TABLE t12 (id INTEGER)")
+            expect(result.is_ok()).to_equal(true)
+
+    context "last_insert_rowid":
+        it "returns the last inserted row id":
+            var db = Database.memory()?
+            db.exec("CREATE TABLE t13 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)", [])?
+            db.exec("INSERT INTO t13 (name) VALUES ('first')", [])?
+            val rowid = db.last_insert_rowid()
+            expect(rowid).to_be_greater_than(0)

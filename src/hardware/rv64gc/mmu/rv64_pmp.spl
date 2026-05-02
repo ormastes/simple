@@ -1,0 +1,142 @@
+"""
+# RV64 Physical Memory Protection (PMP)
+
+16 PMP regions with TOR/NAPOT/NA4 address matching.
+"""
+
+use hardware.rv64gc.pkg.rv64_types_pkg.{AccessType, PrivilegeMode}
+
+# PMP address matching modes (encoded in pmpcfg bits [4:3])
+val PMP_OFF: i64 = 0
+val PMP_TOR: i64 = 1
+val PMP_NA4: i64 = 2
+val PMP_NAPOT: i64 = 3
+
+# PMP permission bits (in pmpcfg)
+val PMP_R: i64 = 0x01
+val PMP_W: i64 = 0x02
+val PMP_X: i64 = 0x04
+val PMP_L: i64 = 0x80  # Lock bit
+
+val PMP_NUM_REGIONS: i64 = 16
+
+class Rv64Pmp:
+    cfg: [i64]       # Per-region config bytes (8 bits each)
+    addr: [i64]      # Per-region address registers
+
+    static fn create() -> Rv64Pmp:
+        var cfgs: [i64] = []
+        var addrs: [i64] = []
+        var i = 0
+        while i < PMP_NUM_REGIONS:
+            cfgs = cfgs + [0]
+            addrs = addrs + [0]
+            i = i + 1
+        Rv64Pmp(cfg: cfgs, addr: addrs)
+
+    fn _get_cfg(index: i64) -> i64:
+        """Get the 8-bit config for a PMP region."""
+        self.cfg[index] and 0xFF
+
+    fn _match_mode(cfg_byte: i64) -> i64:
+        """Extract address matching mode from config."""
+        (cfg_byte >> 3) and 0x3
+
+    fn _napot_range(addr_reg: i64) -> i64:
+        """Compute NAPOT range size from address register."""
+        # Find trailing ones to determine range
+        var a = addr_reg
+        var count = 0
+        while (a and 1) == 1:
+            count = count + 1
+            a = a >> 1
+        1 << (count + 3)  # Minimum is 8 bytes (NA4 = 4 bytes)
+
+    fn _napot_base(addr_reg: i64) -> i64:
+        """Compute NAPOT base address from address register."""
+        var a = addr_reg
+        var count = 0
+        while (a and 1) == 1:
+            count = count + 1
+            a = a >> 1
+        (a << (count + 3))
+
+    fn check_access(addr: i64, size: i64, access: AccessType, priv_mode: PrivilegeMode) -> bool:
+        """Check if an access is permitted by PMP.
+        Returns true if access is allowed.
+        M-mode bypasses PMP unless a locked region matches and denies."""
+        val is_machine = match priv_mode:
+            PrivilegeMode.Machine: true
+            _: false
+
+        var prev_addr: i64 = 0
+        var i = 0
+        var matched = false
+        var allowed = false
+
+        while i < PMP_NUM_REGIONS and (matched == false):
+            val cfg_byte = self._get_cfg(i)
+            val mode = self._match_mode(cfg_byte)
+            val pmp_addr = self.addr[i] << 2  # PMP addr is shifted left by 2
+
+            if mode == PMP_TOR:
+                val base = prev_addr
+                val top = pmp_addr
+                if addr >= base and (addr + size) <= top:
+                    matched = true
+                    val perm_bit = match access:
+                        AccessType.Read_: PMP_R
+                        AccessType.Write_: PMP_W
+                        AccessType.Execute: PMP_X
+                    if is_machine and (cfg_byte and PMP_L) == 0:
+                        allowed = true  # M-mode, not locked
+                    else:
+                        allowed = (cfg_byte and perm_bit) != 0
+
+            elif mode == PMP_NA4:
+                val base = pmp_addr
+                if addr >= base and (addr + size) <= (base + 4):
+                    matched = true
+                    val perm_bit = match access:
+                        AccessType.Read_: PMP_R
+                        AccessType.Write_: PMP_W
+                        AccessType.Execute: PMP_X
+                    if is_machine and (cfg_byte and PMP_L) == 0:
+                        allowed = true
+                    else:
+                        allowed = (cfg_byte and perm_bit) != 0
+
+            elif mode == PMP_NAPOT:
+                val range_size = self._napot_range(self.addr[i])
+                val base = self._napot_base(self.addr[i])
+                if addr >= base and (addr + size) <= (base + range_size):
+                    matched = true
+                    val perm_bit = match access:
+                        AccessType.Read_: PMP_R
+                        AccessType.Write_: PMP_W
+                        AccessType.Execute: PMP_X
+                    if is_machine and (cfg_byte and PMP_L) == 0:
+                        allowed = true
+                    else:
+                        allowed = (cfg_byte and perm_bit) != 0
+
+            prev_addr = pmp_addr
+            i = i + 1
+
+        if matched:
+            allowed
+        elif is_machine:
+            true  # M-mode with no matching region: allow
+        else:
+            false  # S/U mode with no matching region: deny
+
+    me set_cfg(index: i64, value: i64):
+        """Set PMP region config byte."""
+        # Locked regions cannot be modified
+        if (self.cfg[index] and PMP_L) == 0:
+            self.cfg[index] = value and 0xFF
+
+    me set_addr(index: i64, value: i64):
+        """Set PMP region address register."""
+        if (self.cfg[index] and PMP_L) == 0:
+            self.addr[index] = value

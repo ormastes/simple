@@ -1,0 +1,164 @@
+# @cover src/os/compositor/qemu_capture.spl 85%
+# @tag: rendering, qemu, capture, ppm
+#
+# QEMU Capture PPM Specification
+#
+# Verifies the modified QEMU capture path after PPM-primary strategy
+# (D-3, D-5): in-process capture returns valid pixels, VM capture
+# switches to PPM format, and PPM decode integration for VM screenshots.
+#
+# This spec focuses on PPM-related changes and the CaptureResult
+# structure consistency. For basic capture tests, see qemu_capture_spec.spl.
+
+use std.spec.{describe, context, it, expect}
+use os.compositor.qemu_capture.{
+    capture_qemu_inprocess, capture_qemu_vm}
+use os.compositor.electron_capture.{CaptureResult, capture_error}
+use os.compositor.wm_scene.{WmSceneSpec, standard_wm_scene}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val W: i32 = 800
+val H: i32 = 600
+
+# ============================================================================
+# Test Group 1: In-Process Capture with PPM Pipeline
+# ============================================================================
+
+describe "QemuCapture PPM — in-process capture":
+    """
+    ## In-Process Capture
+
+    capture_qemu_inprocess renders the scene on BrowserCompositorBackend
+    and returns raw ARGB [u32] pixels directly. No PPM decode needed
+    for this path — pixels come straight from the software renderer.
+    """
+
+    context "valid scene rendering":
+
+        it "AC-3: in-process capture returns success for standard scene":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_qemu_inprocess(scene)
+            expect(result.success).to_equal(true)
+
+        it "AC-3: in-process capture pixel buffer is non-empty":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_qemu_inprocess(scene)
+            expect(result.pixels.len()).to_be_greater_than(0)
+
+        it "AC-3: in-process capture pixel count equals width * height":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_qemu_inprocess(scene)
+            val expected = W * H
+            expect(result.pixels.len().to_i32()).to_equal(expected)
+
+        it "AC-3: in-process capture has correct dimensions":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_qemu_inprocess(scene)
+            expect(result.width).to_equal(W)
+            expect(result.height).to_equal(H)
+
+        it "AC-3: in-process capture backend_name is the shared compositor backend":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_qemu_inprocess(scene)
+            expect(result.backend_name).to_equal("browser_compositor")
+
+    context "pixel content validity":
+
+        it "AC-3: rendered pixels contain non-zero values (scene has content)":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_qemu_inprocess(scene)
+            var has_nonzero = false
+            for px in result.pixels:
+                if px != 0:
+                    has_nonzero = true
+            expect(has_nonzero).to_equal(true)
+
+        it "AC-3: rendered pixels have valid alpha channel (0xFF for opaque)":
+            val scene = standard_wm_scene(W, H)
+            val result = capture_qemu_inprocess(scene)
+            if result.pixels.len() > 0:
+                # Check first pixel has alpha
+                val alpha = (result.pixels[0] >> 24) & 0xFF
+                expect(alpha).to_be_greater_than(0)
+            else:
+                expect(result.pixels.len()).to_be_greater_than(0)
+
+# ============================================================================
+# Test Group 2: VM Capture PPM Format (D-5)
+# ============================================================================
+
+describe "QemuCapture PPM — VM capture format":
+    """
+    ## VM Capture with PPM (D-5)
+
+    After D-5, capture_qemu_vm requests PPM format from QMP screendump
+    instead of PNG. The captured .ppm file is decoded by decode_ppm_to_argb.
+    """
+
+    context "invalid socket (graceful error)":
+
+        it "AC-3: VM capture with nonexistent socket returns failure":
+            val result = capture_qemu_vm("/nonexistent/qmp.sock", "/tmp/test_ppm.ppm")
+            expect(result.success).to_equal(false)
+
+        it "AC-3: VM capture failure has descriptive error message":
+            val result = capture_qemu_vm("/nonexistent/qmp.sock", "/tmp/test_ppm.ppm")
+            val has_msg = result.error.len() > 0
+            expect(has_msg).to_equal(true)
+
+        it "AC-3: VM capture failure returns qemu_vm backend name":
+            val result = capture_qemu_vm("/nonexistent/qmp.sock", "/tmp/test_ppm.ppm")
+            expect(result.backend_name).to_equal("qemu_vm")
+
+        it "AC-3: VM capture failure returns empty pixel buffer":
+            val result = capture_qemu_vm("/nonexistent/qmp.sock", "/tmp/test_ppm.ppm")
+            expect(result.pixels.len().to_i32()).to_equal(0)
+
+# ============================================================================
+# Test Group 3: CaptureResult Consistency Between Paths
+# ============================================================================
+
+describe "QemuCapture PPM — result consistency":
+    """
+    ## CaptureResult Uniformity
+
+    Both in-process and VM capture paths return the same CaptureResult
+    structure with comparable semantics, regardless of the underlying
+    image format (raw pixels vs PPM file).
+    """
+
+    context "field presence on both paths":
+
+        it "AC-3: both paths produce CaptureResult with width field":
+            val scene = standard_wm_scene(W, H)
+            val inprocess = capture_qemu_inprocess(scene)
+            val vm = capture_qemu_vm("/nonexistent/qmp.sock", "/tmp/test.ppm")
+            val both_have_width = inprocess.width >= 0 and vm.width >= 0
+            expect(both_have_width).to_equal(true)
+
+        it "AC-3: both paths produce CaptureResult with height field":
+            val scene = standard_wm_scene(W, H)
+            val inprocess = capture_qemu_inprocess(scene)
+            val vm = capture_qemu_vm("/nonexistent/qmp.sock", "/tmp/test.ppm")
+            val both_have_height = inprocess.height >= 0 and vm.height >= 0
+            expect(both_have_height).to_equal(true)
+
+        it "AC-3: both paths produce CaptureResult with success field":
+            val scene = standard_wm_scene(W, H)
+            val inprocess = capture_qemu_inprocess(scene)
+            val vm = capture_qemu_vm("/nonexistent/qmp.sock", "/tmp/test.ppm")
+            # inprocess should succeed, vm should fail (no socket)
+            expect(inprocess.success).to_equal(true)
+            expect(vm.success).to_equal(false)
+
+        it "AC-3: in-process success has empty error; VM failure has non-empty error":
+            val scene = standard_wm_scene(W, H)
+            val inprocess = capture_qemu_inprocess(scene)
+            val vm = capture_qemu_vm("/nonexistent/qmp.sock", "/tmp/test.ppm")
+            val inprocess_no_error = inprocess.error.len() == 0
+            val vm_has_error = vm.error.len() > 0
+            expect(inprocess_no_error).to_equal(true)
+            expect(vm_has_error).to_equal(true)

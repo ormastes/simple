@@ -1,1 +1,0 @@
-../skills/minio.md
