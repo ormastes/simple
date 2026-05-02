@@ -1298,16 +1298,159 @@ fn zstd_decompress_frame_for_tier(input: [u8], tier: CompressionSimdTier) -> Res
 fn zstd_decompress_frame_with_dictionary_for_tier(input: [u8], dictionary_bytes: [u8], dictionary_id: i64, tier: CompressionSimdTier) -> Result<[u8], CompressionError>:
     _zstd_decompress_frame_for_tier_with_dictionary(input, tier, Some(dictionary_bytes), Some(dictionary_id))
 
-fn _zstd_frame_dictionary_prefix(frame_header: ZstdFrameHeader, dictionary_bytes: [u8]?, dictionary_id: i64?) -> Result<[u8], CompressionError>:
+val ZSTD_DICT_MAGIC: u32 = 0xEC30A437u32
+
+# RFC 8478 §6 dictionary-state bundle. Used to seed the per-frame decoder when
+# a dictionary is referenced by the frame header.
+struct ZstdDictionaryState:
+    huffman: ZstdHufTableState?
+    sequence_history: ZstdSequenceTableHistory
+    repeat_offsets: ZstdRepeatOffsets
+    content_prefix: [u8]
+
+# Produces the no-dictionary defaults: empty prefix, no Huffman seed, default
+# (predefined) FSE sequence-table history, and the RFC's default repeat
+# offsets (1, 4, 8).
+fn _zstd_default_dictionary_state() -> Result<ZstdDictionaryState, CompressionError>:
+    val history_res = _zstd_default_sequence_table_history()
+    if history_res.is_err():
+        return Err(history_res.unwrap_err())
+    Ok(ZstdDictionaryState(
+        huffman: nil,
+        sequence_history: history_res.unwrap(),
+        repeat_offsets: ZstdRepeatOffsets(rep1: 1, rep2: 4, rep3: 8),
+        content_prefix: []
+    ))
+
+# Parses an RFC 8478 §6 dictionary blob. The dictionary is laid out as:
+#   Magic_Number (4 bytes, 0xEC30A437 little-endian)
+#   Dictionary_ID (4 bytes little-endian, must match expected_id)
+#   Huffman_Table_Description (literals huffman tree)
+#   FSE table for offsets
+#   FSE table for match lengths
+#   FSE table for literals lengths
+#   3 x u32 little-endian recommended repeat offsets (Repeated_Offset1..3)
+#   Content (raw bytes used as the LZ77 window prefix)
+fn _zstd_parse_dictionary(dictionary_bytes: [u8], expected_id: i64) -> Result<ZstdDictionaryState, CompressionError>:
+    if dictionary_bytes.len() < 8:
+        return Err(CompressionError.TruncatedInput("zstd dictionary header"))
+    val magic_res = read_u32_le(dictionary_bytes, 0)
+    if magic_res.is_err():
+        return Err(magic_res.unwrap_err())
+    if magic_res.unwrap() != ZSTD_DICT_MAGIC:
+        return Err(CompressionError.InvalidHeader("zstd dictionary magic"))
+    val id_res = read_u32_le(dictionary_bytes, 4)
+    if id_res.is_err():
+        return Err(id_res.unwrap_err())
+    val actual_id = id_res.unwrap().to_i64()
+    if actual_id != expected_id:
+        return Err(CompressionError.CorruptStream("zstd dictionary id mismatch"))
+    var pos = 8
+    val end = dictionary_bytes.len()
+
+    # Huffman_Table_Description -- reuse the same direct/FSE dispatch the
+    # literals section uses. Direct-weights mode (header_byte >= 128) avoids
+    # the FSE Huffman-weight Kraft bug tracked under
+    # doc/08_tracking/bug/bug_zstd_fse_huffman_weight_kraft_2026-05-01.md.
+    val weights_res = _zstd_parse_direct_weights(dictionary_bytes, pos, end)
+    if weights_res.is_err():
+        return Err(weights_res.unwrap_err())
+    val (weights, huf_used) = weights_res.unwrap()
+    val huf_state_res = _zstd_huf_build_table_from_weights(weights)
+    if huf_state_res.is_err():
+        return Err(huf_state_res.unwrap_err())
+    pos = pos + huf_used
+
+    # Per RFC 8478 §6 the dictionary stores entropy tables in the order
+    # Offsets, Match_Lengths, Literals_Lengths -- the inverse of the order
+    # Compressed_Block uses. Each is a normalized-counts FSE table description.
+    if pos >= end:
+        return Err(CompressionError.TruncatedInput("zstd dictionary FSE offsets table"))
+    val of_counts_res = zstd_fse_parse_normalized_counts(dictionary_bytes, pos, end, ZSTD_OF_MAX_TABLE_LOG, 31)
+    if of_counts_res.is_err():
+        return Err(of_counts_res.unwrap_err())
+    val of_counts = of_counts_res.unwrap()
+    val of_table_res = zstd_fse_build_decode_table(of_counts.table_log, of_counts.counts)
+    if of_table_res.is_err():
+        return Err(of_table_res.unwrap_err())
+    pos = pos + of_counts.bytes_used
+
+    if pos >= end:
+        return Err(CompressionError.TruncatedInput("zstd dictionary FSE match-lengths table"))
+    val ml_counts_res = zstd_fse_parse_normalized_counts(dictionary_bytes, pos, end, ZSTD_ML_MAX_TABLE_LOG, 52)
+    if ml_counts_res.is_err():
+        return Err(ml_counts_res.unwrap_err())
+    val ml_counts = ml_counts_res.unwrap()
+    val ml_table_res = zstd_fse_build_decode_table(ml_counts.table_log, ml_counts.counts)
+    if ml_table_res.is_err():
+        return Err(ml_table_res.unwrap_err())
+    pos = pos + ml_counts.bytes_used
+
+    if pos >= end:
+        return Err(CompressionError.TruncatedInput("zstd dictionary FSE literal-lengths table"))
+    val ll_counts_res = zstd_fse_parse_normalized_counts(dictionary_bytes, pos, end, ZSTD_LL_MAX_TABLE_LOG, 35)
+    if ll_counts_res.is_err():
+        return Err(ll_counts_res.unwrap_err())
+    val ll_counts = ll_counts_res.unwrap()
+    val ll_table_res = zstd_fse_build_decode_table(ll_counts.table_log, ll_counts.counts)
+    if ll_table_res.is_err():
+        return Err(ll_table_res.unwrap_err())
+    pos = pos + ll_counts.bytes_used
+
+    if pos + 12 > end:
+        return Err(CompressionError.TruncatedInput("zstd dictionary recommended offsets"))
+    val rep1_res = read_u32_le(dictionary_bytes, pos)
+    if rep1_res.is_err():
+        return Err(rep1_res.unwrap_err())
+    val rep2_res = read_u32_le(dictionary_bytes, pos + 4)
+    if rep2_res.is_err():
+        return Err(rep2_res.unwrap_err())
+    val rep3_res = read_u32_le(dictionary_bytes, pos + 8)
+    if rep3_res.is_err():
+        return Err(rep3_res.unwrap_err())
+    val rep1 = rep1_res.unwrap().to_i64()
+    val rep2 = rep2_res.unwrap().to_i64()
+    val rep3 = rep3_res.unwrap().to_i64()
+    if rep1 <= 0 or rep2 <= 0 or rep3 <= 0:
+        return Err(CompressionError.CorruptStream("zstd dictionary recommended offset must be positive"))
+    pos = pos + 12
+
+    var content: [u8] = []
+    var i = pos
+    while i < end:
+        content.push(dictionary_bytes[i])
+        i = i + 1
+
+    Ok(ZstdDictionaryState(
+        huffman: Some(huf_state_res.unwrap()),
+        sequence_history: ZstdSequenceTableHistory(
+            literal_lengths: ll_table_res.unwrap(),
+            offsets: of_table_res.unwrap(),
+            match_lengths: ml_table_res.unwrap()
+        ),
+        repeat_offsets: ZstdRepeatOffsets(rep1: rep1, rep2: rep2, rep3: rep3),
+        content_prefix: content
+    ))
+
+# Public test seam for direct unit tests of the dictionary parser. Mirrors the
+# private `_zstd_parse_dictionary` behaviour without exposing implementation
+# helpers.
+fn zstd_parse_dictionary_for_test(dictionary_bytes: [u8], expected_id: i64) -> Result<ZstdDictionaryState, CompressionError>:
+    _zstd_parse_dictionary(dictionary_bytes, expected_id)
+
+# Resolves the dictionary state to use for a given frame, returning sensible
+# defaults when no dictionary is referenced.
+fn _zstd_frame_dictionary_state(frame_header: ZstdFrameHeader, dictionary_bytes: [u8]?, dictionary_id: i64?) -> Result<ZstdDictionaryState, CompressionError>:
     if frame_header.dictionary_id == nil:
-        return Ok([])
+        return _zstd_default_dictionary_state()
     if dictionary_bytes == nil or dictionary_id == nil:
         return Err(CompressionError.UnsupportedFeature("zstd dictionary-backed frames require explicit dictionary bytes and dictionary_id"))
     val expected = frame_header.dictionary_id ?? 0
-    val actual = dictionary_id ?? 0
-    if expected != actual:
+    val provided = dictionary_id ?? 0
+    if expected != provided:
         return Err(CompressionError.CorruptStream("zstd dictionary id mismatch"))
-    Ok(dictionary_bytes ?? [])
+    val dict_bytes = dictionary_bytes ?? []
+    _zstd_parse_dictionary(dict_bytes, expected)
 
 fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: CompressionSimdTier, dictionary_bytes: [u8]?, dictionary_id: i64?) -> Result<[u8], CompressionError>:
     var out: [u8] = []
@@ -1317,19 +1460,16 @@ fn _zstd_decompress_frame_for_tier_with_dictionary(input: [u8], tier: Compressio
         if header_res.is_err():
             return Err(header_res.unwrap_err())
         val frame_header = header_res.unwrap()
-        val dictionary_prefix_res = _zstd_frame_dictionary_prefix(frame_header, dictionary_bytes, dictionary_id)
-        if dictionary_prefix_res.is_err():
-            return Err(dictionary_prefix_res.unwrap_err())
-        val dictionary_prefix = dictionary_prefix_res.unwrap()
+        val dictionary_state_res = _zstd_frame_dictionary_state(frame_header, dictionary_bytes, dictionary_id)
+        if dictionary_state_res.is_err():
+            return Err(dictionary_state_res.unwrap_err())
+        val dictionary_state = dictionary_state_res.unwrap()
         pos = pos + frame_header.bytes_used
-        val frame_prefix_len = dictionary_prefix.len()
-        var frame_out = dictionary_prefix
-        var repeat_offsets = ZstdRepeatOffsets(rep1: 1, rep2: 4, rep3: 8)
-        val table_history_res = _zstd_default_sequence_table_history()
-        if table_history_res.is_err():
-            return Err(table_history_res.unwrap_err())
-        var sequence_table_history = table_history_res.unwrap()
-        var huffman_table_state: ZstdHufTableState? = nil
+        val frame_prefix_len = dictionary_state.content_prefix.len()
+        var frame_out = dictionary_state.content_prefix
+        var repeat_offsets = dictionary_state.repeat_offsets
+        var sequence_table_history = dictionary_state.sequence_history
+        var huffman_table_state: ZstdHufTableState? = dictionary_state.huffman
         var done = false
         while not done:
             if pos + 3 > input.len():
