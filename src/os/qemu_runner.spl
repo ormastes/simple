@@ -10,13 +10,13 @@ use os.kernel.arch.arch_context.{Architecture}
 use os.packages.os_packages.{os_version}
 use os.port.simpleos_multiplatform_build.{
     SimpleOsLaneContract,
+    SimpleOsLaneKind,
     simpleos_platform_default_entry,
     simpleos_platform_disk_image_output,
     simpleos_platform_linker_script,
     simpleos_platform_native_target,
     simpleos_platform_qemu_acceptance_lane,
     simpleos_platform_qemu_acceptance_required_markers,
-    simpleos_platform_qemu_acceptance_timeout_ms,
     simpleos_platform_qemu_cpu,
     simpleos_platform_qemu_machine,
     simpleos_platform_qemu_smoke_lane,
@@ -240,17 +240,15 @@ fn get_qemu_target(arch: Architecture) -> OsTarget:
     Other architectures keep their existing direct boot targets unless the
     caller requests a named scenario.
     """
-    match arch:
-        Architecture.Arm64:
-            get_arm64_fs_exec_target()
-        Architecture.Arm32:
-            get_arm32_fs_exec_target()
-        Architecture.Riscv64:
-            get_riscv64_hosted_target()
-        Architecture.Riscv32:
-            get_riscv32_fs_exec_target()
-        _:
-            get_target(arch)
+    val platform_name = match arch:
+        Architecture.Arm64: "arm64"
+        Architecture.Arm32: "arm32"
+        Architecture.Riscv64: "riscv64"
+        Architecture.Riscv32: "riscv32"
+        _: ""
+    if platform_name != "":
+        return _lane_to_target(platform_name, simpleos_platform_qemu_acceptance_lane(platform_name))
+    get_target(arch)
 
 # ===========================================================================
 # Target Enumeration & Name Parsing
@@ -1132,9 +1130,13 @@ class QemuScenario:
 
 pub fn scenario_lane_kind(scenario: QemuScenario) -> SimpleOsLaneKind:
     """Classify a QEMU scenario into the shared lane model."""
+    if _is_arm_fs_exec_scenario(scenario):
+        return simpleos_platform_qemu_acceptance_lane(_arm_fs_exec_platform_name(scenario.arch)).lane_kind
     if scenario.name == "riscv64-hosted":
-        return SimpleOsLaneKind.HostedCompileSmoke
-    if _is_arm_fs_exec_scenario(scenario) or _is_riscv_fs_exec_scenario(scenario) or scenario.name == "x64-nvme-fat32":
+        return simpleos_platform_qemu_acceptance_lane("riscv64").lane_kind
+    if _is_riscv_fs_exec_scenario(scenario):
+        return SimpleOsLaneKind.FsExec
+    if scenario.name == "x64-nvme-fat32":
         return SimpleOsLaneKind.FsExec
     if scenario.name == "x64-desktop-disk" or scenario.name == "x64-desktop-uefi" or scenario.name == "x64-ssh":
         return SimpleOsLaneKind.HostedCompileSmoke
@@ -1164,6 +1166,67 @@ fn _scenario_from_target(name: text, target: OsTarget, description: text) -> Qem
         gui_mode: target.gui_mode,
         description: description
     )
+
+fn _arm_fs_exec_platform_name(arch: Architecture) -> text:
+    if arch == Architecture.Arm64:
+        return "arm64"
+    "arm32"
+
+fn _riscv_fs_exec_platform_name(arch: Architecture) -> text:
+    if arch == Architecture.Riscv64:
+        return "riscv64"
+    "riscv32"
+
+fn _arm_fs_exec_scenario(arch: Architecture, description: text) -> QemuScenario:
+    _acceptance_lane_scenario(_arm_fs_exec_platform_name(arch), description)
+
+fn _arm_fs_exec_scenario_name(arch: Architecture) -> text:
+    _arm_fs_exec_platform_name(arch) + "-virtio-fat32-smf"
+
+fn _riscv_fs_exec_scenario_name(arch: Architecture) -> text:
+    _riscv_fs_exec_platform_name(arch) + "-virtio-fat32-smf"
+
+fn _riscv_fs_exec_target(arch: Architecture) -> OsTarget:
+    if arch == Architecture.Riscv64:
+        return get_riscv64_fs_exec_target()
+    get_riscv32_fs_exec_target()
+
+fn _riscv_fs_exec_scenario(arch: Architecture, description: text) -> QemuScenario:
+    _scenario_from_target(_riscv_fs_exec_scenario_name(arch), _riscv_fs_exec_target(arch), description)
+
+fn _desktop_disk_scenario_target(name: text) -> OsTarget?:
+    if name == "x64-ssh":
+        return get_ssh_live_target()
+    if name == "x64-desktop-test" or name == "x64-desktop-disk" or name == "x64-desktop-uefi":
+        return get_desktop_browser_target()
+    if name == "x64-wm-simple-web-check":
+        return get_wm_simple_web_check_target()
+    nil
+
+fn _desktop_scenario_timeout_ms(name: text) -> u64?:
+    if name == "x64-desktop-uefi":
+        return 180000
+    if name == "x64-desktop-test" or name == "x64-ssh" or name == "x64-desktop-disk" or name == "x64-wm-simple-web-check":
+        return 120000
+    nil
+
+fn _ensure_desktop_scenario_media(name: text) -> bool?:
+    if name == "x64-nvme-fat32":
+        return ensure_fs_test_disk_image()
+    if name == "x64-ssh" or name == "x64-desktop-disk":
+        return ensure_desktop_disk_image()
+    if name != "x64-desktop-uefi":
+        return nil
+    if ovmf_code_path() == "":
+        print "[ensure_scenario_media] OVMF firmware not found; set SIMPLEOS_OVMF_CODE to an x86_64 OVMF_CODE.fd path"
+        return false
+    if desktop_uefi_bootloader_path() == "":
+        print "[ensure_scenario_media] UEFI desktop bootloader not found; set SIMPLEOS_UEFI_BOOTLOADER to EFI/BOOT/BOOTX64.EFI"
+        return false
+    if not rt_file_exists(desktop_uefi_disk_image_path()):
+        print "[ensure_scenario_media] UEFI desktop disk image missing; call ensure_desktop_uefi_boot_image(kernel_path) first"
+        return false
+    true
 
 fn scenario_rv64_base() -> QemuScenario:
     """RV64 baseline — OpenSBI + virt, serial only."""
@@ -1352,23 +1415,19 @@ fn scenario_x64_nvme_fat32() -> QemuScenario:
 
 fn scenario_arm64_virtio_fat32_smf() -> QemuScenario:
     """ARM64 QEMU virt with VirtIO block FAT32 media carrying /sys/apps/hello_world.smf."""
-    _acceptance_lane_scenario("arm64", "ARM64 virt boot with VirtIO-BLK FAT32 SMF executable media")
+    _arm_fs_exec_scenario(Architecture.Arm64, "ARM64 virt boot with VirtIO-BLK FAT32 SMF executable media")
 
 fn scenario_arm32_virtio_fat32_smf() -> QemuScenario:
     """ARM32 QEMU virt with VirtIO block FAT32 media carrying /sys/apps/hello_world.smf."""
-    _acceptance_lane_scenario("arm32", "ARM32 virt boot with VirtIO-BLK FAT32 SMF executable media")
+    _arm_fs_exec_scenario(Architecture.Arm32, "ARM32 virt boot with VirtIO-BLK FAT32 SMF executable media")
 
 fn scenario_riscv64_virtio_fat32_smf() -> QemuScenario:
     """RV64 QEMU virt with VirtIO block FAT32 media carrying SMF CLI and WM GUI fixtures."""
-    _scenario_from_target(
-        "riscv64-virtio-fat32-smf",
-        get_riscv64_fs_exec_target(),
-        "RV64 virt boot with VirtIO-BLK FAT32 SMF smoke media"
-    )
+    _riscv_fs_exec_scenario(Architecture.Riscv64, "RV64 virt boot with VirtIO-BLK FAT32 SMF smoke media")
 
 fn scenario_riscv32_virtio_fat32_smf() -> QemuScenario:
     """RV32 QEMU virt with VirtIO block FAT32 media carrying SMF CLI and WM GUI fixtures."""
-    _acceptance_lane_scenario("riscv32", "RV32 virt boot with VirtIO-BLK FAT32 SMF CLI and WM GUI media")
+    _acceptance_lane_scenario(_riscv_fs_exec_platform_name(Architecture.Riscv32), "RV32 virt boot with VirtIO-BLK FAT32 SMF CLI and WM GUI media")
 
 fn scenario_riscv64_hosted() -> QemuScenario:
     """RV64 hosted-preflight lane with disk + net + host-forwarded SSH/HTTP probes."""
@@ -1556,14 +1615,10 @@ fn get_scenario(name: text) -> QemuScenario?:
     nil
 
 fn _arm_fs_exec_scenario_name(arch: Architecture) -> text:
-    if arch == Architecture.Arm64:
-        return "arm64-virtio-fat32-smf"
-    "arm32-virtio-fat32-smf"
+    _arm_fs_exec_platform_name(arch) + "-virtio-fat32-smf"
 
 fn _riscv_fs_exec_scenario_name(arch: Architecture) -> text:
-    if arch == Architecture.Riscv64:
-        return "riscv64-virtio-fat32-smf"
-    "riscv32-virtio-fat32-smf"
+    _riscv_fs_exec_platform_name(arch) + "-virtio-fat32-smf"
 
 fn _is_arm_fs_exec_scenario_name(name: text) -> bool:
     name == "arm64-virtio-fat32-smf" or name == "arm32-virtio-fat32-smf"
@@ -1582,21 +1637,13 @@ fn scenario_target(scenario: QemuScenario) -> OsTarget:
     if scenario.name == "x64-nvme-fat32":
         return get_fs_test_target()
     if _is_arm_fs_exec_scenario(scenario):
-        return if scenario.arch == Architecture.Arm64: get_arm64_fs_exec_target() else: get_arm32_fs_exec_target()
+        return _lane_to_target(_arm_fs_exec_platform_name(scenario.arch), simpleos_platform_qemu_acceptance_lane(_arm_fs_exec_platform_name(scenario.arch)))
     if scenario.name == "riscv64-hosted":
         return get_riscv64_hosted_target()
     if _is_riscv_fs_exec_scenario(scenario):
-        return if scenario.arch == Architecture.Riscv64: get_riscv64_fs_exec_target() else: get_riscv32_fs_exec_target()
-    if scenario.name == "x64-ssh":
-        return get_ssh_live_target()
-    if scenario.name == "x64-desktop-test":
-        return get_desktop_browser_target()
-    if scenario.name == "x64-desktop-disk":
-        return get_desktop_browser_target()
-    if scenario.name == "x64-desktop-uefi":
-        return get_desktop_browser_target()
-    if scenario.name == "x64-wm-simple-web-check":
-        return get_wm_simple_web_check_target()
+        return _riscv_fs_exec_target(scenario.arch)
+    if val desktop_target = _desktop_disk_scenario_target(scenario.name):
+        return desktop_target
     get_target(scenario.arch)
 
 fn get_arm64_fs_exec_target() -> OsTarget:
@@ -2372,10 +2419,8 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     print "[test] serial output:\n{serial_output}"
     val accepted = if scenario.name == "x64-desktop-uefi":
         desktop_uefi_serial_accepts_completion(serial_output)
-    else if _is_arm_fs_exec_scenario(scenario):
-        arm_fs_exec_serial_accepts_completion(scenario, serial_output)
-    else if scenario.name == "riscv64-hosted":
-        riscv64_hosted_serial_accepts_completion(serial_output)
+    else if _catalog_lane_for_scenario(scenario) != nil:
+        _scenario_serial_accepts_completion(scenario, serial_output)
     else:
         serial_output.contains("TEST PASSED")
     val success = accepted and (exit_code == 0 or exit_code == 1)
@@ -2383,17 +2428,16 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         if scenario.name == "x64-desktop-uefi":
             print "[test] FAILED: scenario {scenario.name} did not satisfy desktop driver completion markers"
             print_desktop_uefi_missing_markers(serial_output)
-        else if _is_arm_fs_exec_scenario(scenario):
-            print "[test] FAILED: scenario {scenario.name} did not satisfy ARM fs-exec completion markers"
-            print_arm_fs_exec_missing_markers(scenario, serial_output)
-        else if scenario.name == "riscv64-hosted":
-            print "[test] FAILED: scenario {scenario.name} did not satisfy RISC-V hosted completion markers"
-            print_riscv64_hosted_missing_markers(serial_output)
+        else if _catalog_lane_for_scenario(scenario) != nil:
+            print "[test] FAILED: scenario {scenario.name} did not satisfy catalog lane completion markers"
+            _print_scenario_missing_markers(scenario, serial_output)
         else:
             print "[test] FAILED: scenario {scenario.name} did not report TEST PASSED"
     success
 
 fn arm_fs_exec_required_marker_fragments(scenario: QemuScenario) -> [text]:
+    if val lane = _catalog_lane_for_scenario(scenario):
+        return lane.required_serial_markers
     val platform_name = if scenario.arch == Architecture.Arm64: "arm64" else: "arm32"
     simpleos_platform_qemu_acceptance_required_markers(platform_name)
 
@@ -2409,7 +2453,25 @@ fn print_arm_fs_exec_missing_markers(scenario: QemuScenario, serial_output: text
             print "[test] missing marker fragment: {marker}"
 
 fn riscv64_hosted_required_marker_fragments() -> [text]:
+    if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
+        return lane.required_serial_markers
     simpleos_platform_qemu_acceptance_required_markers("riscv64")
+
+fn _scenario_required_marker_fragments(scenario: QemuScenario) -> [text]:
+    if val lane = _catalog_lane_for_scenario(scenario):
+        return lane.required_serial_markers
+    []
+
+fn _scenario_serial_accepts_completion(scenario: QemuScenario, serial_output: text) -> bool:
+    for marker in _scenario_required_marker_fragments(scenario):
+        if not serial_output.contains(marker):
+            return false
+    true
+
+fn _print_scenario_missing_markers(scenario: QemuScenario, serial_output: text):
+    for marker in _scenario_required_marker_fragments(scenario):
+        if not serial_output.contains(marker):
+            print "[test] missing marker fragment: {marker}"
 
 fn riscv64_hosted_serial_accepts_completion(serial_output: text) -> bool:
     for marker in riscv64_hosted_required_marker_fragments():
@@ -2501,47 +2563,21 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
     """Return a realistic smoke-test timeout for a named QEMU scenario."""
     if scenario.name == "x64-nvme-fat32":
         return 60000
-    if _is_arm_fs_exec_scenario(scenario):
-        return simpleos_platform_qemu_acceptance_timeout_ms(if scenario.arch == Architecture.Arm64: "arm64" else: "arm32") as u64
-    if scenario.name == "riscv64-hosted":
-        return simpleos_platform_qemu_acceptance_timeout_ms("riscv64") as u64
-    if _is_riscv_fs_exec_scenario(scenario):
-        return 60000
-    if scenario.name == "x64-desktop-test":
-        return 120000
-    if scenario.name == "x64-ssh":
-        return 120000
-    if scenario.name == "x64-desktop-disk":
-        return 120000
-    if scenario.name == "x64-desktop-uefi":
-        return 180000
-    if scenario.name == "x64-wm-simple-web-check":
-        return 120000
+    if val lane = _catalog_lane_for_scenario(scenario):
+        return lane.timeout_ms as u64
+    if val timeout_ms = _desktop_scenario_timeout_ms(scenario.name):
+        return timeout_ms
     10000
 
 fn ensure_scenario_media(scenario: QemuScenario) -> bool:
     """Materialize required host-side disk media for scenarios that attach storage."""
-    if scenario.name == "x64-nvme-fat32":
-        return ensure_fs_test_disk_image()
-    if scenario.name == "x64-ssh":
-        return ensure_desktop_disk_image()
-    if scenario.name == "x64-desktop-disk":
-        return ensure_desktop_disk_image()
-    if scenario.name == "x64-desktop-uefi":
-        if ovmf_code_path() == "":
-            print "[ensure_scenario_media] OVMF firmware not found; set SIMPLEOS_OVMF_CODE to an x86_64 OVMF_CODE.fd path"
-            return false
-        if desktop_uefi_bootloader_path() == "":
-            print "[ensure_scenario_media] UEFI desktop bootloader not found; set SIMPLEOS_UEFI_BOOTLOADER to EFI/BOOT/BOOTX64.EFI"
-            return false
-        if not rt_file_exists(desktop_uefi_disk_image_path()):
-            print "[ensure_scenario_media] UEFI desktop disk image missing; call ensure_desktop_uefi_boot_image(kernel_path) first"
-            return false
-        return true
-    if _is_arm_fs_exec_scenario(scenario):
-        return ensure_arm_fs_exec_disk_image(scenario.arch)
-    if _is_riscv_fs_exec_scenario(scenario) or scenario.name == "riscv64-hosted":
-        return ensure_riscv_fs_exec_disk_image(scenario.arch)
+    if val ready = _ensure_desktop_scenario_media(scenario.name):
+        return ready
+    if val platform_name = _catalog_lane_platform_name_for_scenario(scenario):
+        if platform_name == "arm64" or platform_name == "arm32":
+            return ensure_arm_fs_exec_disk_image(scenario.arch)
+        if platform_name == "riscv64" or platform_name == "riscv32":
+            return ensure_riscv_fs_exec_disk_image(scenario.arch)
     true
 
 fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32):
