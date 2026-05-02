@@ -4,7 +4,47 @@
 **Module:** `src/os/crypto/ecdh_p256.spl`
 **Severity:** P0 before any caller exposes the ephemeral private key
 through the TLS 1.3 `handshake_secret` schedule.
-**Status:** OPEN
+**Status: FIXED 2026-05-01 — replaced naive double-and-add with always-add-and-select on secret-scalar path** (FR change #1; items #2/#3 still tracked below).
+
+## Resolution Summary (change #1, 2026-05-01)
+
+The branchful `if (byte & mask) != 0u8: acc = _jac_add_mixed(acc, ax, ay)`
+inner loop in `_scalar_mul_affine` is replaced with an always-add-and-select
+form. A new `p256_point_cselect(p0, p1, choose_p1) -> JacP256` helper
+mirrors the XOR-mask discipline of `ed_point_cselect` (from W5-A's
+`ed25519.spl` CT fix) and `fe_cond_select` (from `fe_p256.spl`):
+
+```
+out = a ^ ((0 - choose_p1) & (a ^ b))
+```
+
+The 256-bit MSB-first inner loop now ALWAYS executes both `_jac_double` and
+`_jac_add_mixed`, then constant-time-selects between the doubled-only
+accumulator and the doubled-then-added candidate. No data-dependent branch
+on a scalar bit. Wall-time is ~2× the previous form but independent of the
+scalar's Hamming weight.
+
+The structural CT property is enforced by
+`test/unit/lib/crypto/p256_ct_property_spec.spl` (mirrors
+`ed25519_ct_property_spec.spl`): regex-asserts the new
+`_scalar_mul_affine` body contains no `if (byte ...)` / `if scalar[...]`
+fingerprints AND that it does mention `p256_point_cselect`.
+
+**Items #2 (`_jac_add_mixed` `fe_eq` / `p.inf` short-circuit) and #3
+(`_jac_double`/`_to_affine` `p.inf` short-circuit) remain OPEN.** They
+are intermediate-point branches, not scalar-bit branches; not exposed
+through the scalar's Hamming weight on the typical secret-scalar
+trajectory. They should still land before broad ECDHE handshake-secret
+exposure; tracked for follow-up under the same FR.
+
+**Runtime byte-exact verification of the CT spec's functional tests is
+currently blocked** on an independent interpreter regression filed at
+`doc/08_tracking/bug/interpreter_uint_method_dispatch_2026-05-01.md`
+(`Value::UInt` missing method dispatch — breaks every `arr[u64_var]`
+indexing site against `[u8]`). The structural CT check (the hard
+guarantee per the FR's Required Changes #4) PASSes today.
+
+
 
 ## Context
 
