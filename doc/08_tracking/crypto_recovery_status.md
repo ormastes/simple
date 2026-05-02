@@ -78,6 +78,25 @@ Green after these fixes:
 
 **HRR connect-flow integration LANDED 2026-05-01** — closes I-Wave1's deferred AC. M3 milestone advances. `tls13_connect_io_with_config` now detects HRR via `is_hello_retry_request(sh)` after `parse_server_hello`, calls the new pure helper `process_hrr_after_serverhello` (in `src/os/tls13/handshake13.spl`) which enforces RFC 8446 §4.1.4 rejections (only one HRR per handshake; HRR must change group; selected_group must be one the client advertised) and produces the §4.4.1 transcript seed `synthetic_message_hash || HRR-handshake-bytes`. CH2 is routed to `build_client_hello2_bytes_with_p256` for `GROUP_SECP256R1` and `build_client_hello2_bytes` for `GROUP_X25519` (latter currently unreachable from live connect because CH1 advertises X25519 → same-group rejection; retained for future). Deferred per AC-7: full P-256 ECDHE shared-secret derivation + key_schedule integration after CH2 send — connect returns `Failed("HRR P-256 ECDHE deferred — see crypto_recovery_status.md M3")` until that lands. Spec coverage: 9/9 PASS in `test/unit/os/tls13/hrr_connect_flow_spec.spl` (interpreter mode).
 
+## Wave 6 (2026-05-01) — P-256 ECDHE → handshake_secret integration
+
+**P-256 ECDHE → handshake_secret integration LANDED 2026-05-01 — closes W5-A AC-7.** The HRR-after-CH2 connect-flow no longer returns `Failed("HRR P-256 ECDHE deferred ...")`. On the `GROUP_SECP256R1` branch in `src/os/tls13/tls13.spl` (commit `41a14b193e`, bundled into a parallel-agent wip-checkpoint per `.claude/memory/feedback_wip_snapshot_half_ship.md`), the client now:
+
+1. Sends CH2 with the fresh P-256 ephemeral.
+2. Replaces the transcript with the §4.4.1 seed (`synthetic_message_hash || HRR-handshake-bytes || CH2`) and receives SH2.
+3. Validates SH2 cipher_suite is 0x1301 (`TLS_AES_128_GCM_SHA256`); SHA-384 (0x1302) is a follow-up.
+4. Parses SH2's key_share extension via the new `_serverhello_p256_pub` helper (RFC 8446 §4.2.8.2 + RFC 8422 §5.4: 65-byte uncompressed `04 || X || Y`). `ServerHello13` gained a `p256_pub: [u8]` field alongside `x25519_pub`.
+5. Computes `p256_ecdh_shared_x(client_priv, server_p256_pub)` → 32-byte shared X.
+6. Calls `tls13_compute_handshake_secrets(p256_shared, transcript)` to derive `handshake_secret` + client/server handshake-traffic secrets.
+7. Calls `tls13_traffic_keys` for both directions (16-byte AES-128 key + 12-byte IV per direction).
+
+Deferred (AC-5, surfaced as a new typed `Failed` reason `"HRR P-256 handshake-secret derived; Finished MAC verify deferred — see crypto_recovery_status.md Wave 6"`): server Finished MAC verify, client Finished, application traffic secrets / app traffic keys.
+
+**Constant-time threshold note.** Wave 6 is the first caller that exposes the P-256 ephemeral private key through the handshake_secret schedule. The CT scalar-mult hardening landed in parallel (`5b1abf1ea6 fix(p256): constant-time scalar multiplication on secret path`) closes change #1 of `doc/08_tracking/feature_request/p256_scalar_mult_constant_time_2026-05-01.md`. Items #2/#3 (`_jac_add_mixed` equal-points / `_jac_double` inf branches) remain tracked under that FR and SHOULD land before broad ECDHE exposure.
+
+**Spec coverage:**
+- `test/unit/os/tls13/p256_ecdhe_handshake_secret_spec.spl`: AC-1 + AC-2 = 5/5 PASS (P-256 keypair shape + ECDHE shared-X symmetry `client*server == server*client`). AC-3 + AC-4 (handshake_secret + traffic_keys round-trip) are blocked by two parallel-agent regressions documented in `doc/08_tracking/bug/p256_keypair_pub_fn_arg_u64_index_regression_2026-05-01.md`: (a) `semantic: cannot index array with type \`u64\`` when a fn-return `[u8]` reaches `p256_keypair_pub`, (b) `rt_tls13_hkdf_extract_into` extern declared but not wired in the runtime. Inline-scalar workaround in AC-1+AC-2 keeps coverage real (no skip / no weakened assertions per `feedback_no_coverups.md`).
+
 ## Next Execution Order
 
 1. Repair the TLS M3 live gaps on the existing `src/os/tls13` stack, starting with hosted mTLS and the env-gated QEMU live failures.
