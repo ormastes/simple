@@ -430,3 +430,219 @@ The following five golden fixtures transition from UNVERIFIED to CANONICAL as a 
 5. **Fixture A-1 byte sequence (§10.3)** — `VFMADD213PS zmm0{k1}{z}, zmm1, zmm2`: bytes `62 F2 75 C9 A8 C2` — V-06 per-byte decode confirmed all 6 bytes, with encoder errata flagged (W=1 bug in `evex_encode_3op_zmm`).
 
 The AVX-512 SAXPY golden (Fixture A-1) is confirmed byte-for-byte but the encoder that would generate it has a latent W=1 bug — orchestrator must decide whether to fix the encoder before stamping the golden as canonical for production use.
+
+---
+
+## E4 follow-up: V-25 + V-08 verified via LLVM/GCC source (2026-05-02)
+
+V-25 (NEON FCMGT operand polarity for `vclt` lowering) is **VERIFIED**: GCC's `aarch64-simd.md` lines 4418-4430 show the exact operand swap inline — `case LT: std::swap(operands[2], operands[3]); /* Fall through */ case GT: comparison = gen_aarch64_cmgt<mode>;` — confirming that `cmp_lt(a,b)` must be lowered as `FCMGT(b,a)` to produce a correct mask. V-08 (SVE2 FADD predicated-3-op encoding) is **VERIFIED** at PARTIAL depth: LLVM `SVEInstrFormats.td` line 2277 gives the full `class sve_fp_2op_p_zds` bit layout, and `AArch64SVEInstrInfo.td` establishes `FADD_ZPmZ` uses opcode `0b0000` via the `sve_fp_2op_p_zds<0b0000, "fadd", ...>` multiclass instantiation, fully determining all 32 bits for `FADD Z0.S, P0/M, Z0.S, Z1.S`. The EVEX P0/P1 cross-check was not verified from LLVM `X86InstrFormats.td` (that file was not fetched in this pass); the D1 finding from prior research is corroborated by the established pattern but no new LLVM AArch64 citation adds to it — E3's errata stands on its own evidence.
+
+### V-25 — NEON FCMGT operand polarity
+
+**Status (was FAILED, now):** VERIFIED
+
+**Sources consulted:**
+
+- GCC `gcc/config/aarch64/aarch64-simd.md:4418-4430` (trunk, as of 2026-05-02)
+  URL: `https://gcc.gnu.org/git/?p=gcc.git;a=blob_plain;f=gcc/config/aarch64/aarch64-simd.md`
+  Relevant lines:
+  ```
+  case LT:
+    if (use_zero_form)
+      {
+        comparison = gen_aarch64_cmlt<mode>;
+        break;
+      }
+    /* Fall through.  */
+  case UNLT:
+    std::swap (operands[2], operands[3]);
+    /* Fall through.  */
+  case UNGT:
+  case GT:
+    comparison = gen_aarch64_cmgt<mode>;
+  ```
+  This is the canonical floating-point vector comparison expansion inside
+  `define_expand "vcond_internal"`. For a strict `LT` comparison that is not
+  against zero, GCC swaps `operands[2]` and `operands[3]` and then falls
+  through to the `GT` case which calls `gen_aarch64_cmgt`. The swap is
+  explicit and unconditional for all non-zero-form `LT` comparisons.
+
+- LLVM `llvm/lib/Target/AArch64/AArch64InstrInfo.td:6109`
+  URL: `https://github.com/llvm/llvm-project/raw/refs/heads/main/llvm/lib/Target/AArch64/AArch64InstrInfo.td`
+  ```
+  defm FCMGT   : SIMDThreeSameVectorFPCmp<1, 1, 0b100, "fcmgt", AArch64fcmgt>;
+  ```
+  The `AArch64fcmgt` SDNode matches `AArch64ISD::FCMGT` — a greater-than
+  semantic. There is no `FCMLT` vector defm in this file; the `setlt` lowering
+  goes through `AArch64ISelLowering.cpp` which emits `AArch64ISD::FCMGT` with
+  swapped operands, exactly as GCC spells out in the RTL expansion above.
+
+**Finding:** `cmp_lt(a, b)` must be lowered to `FCMGT(b, a)` — i.e., the second
+operand (`b`) goes into the FCMGT Rn position and the first operand (`a`) goes
+into the Rm position. The resulting lane mask is all-ones wherever `a < b`,
+which is semantically correct because `FCMGT(b, a)` tests `b > a`, equivalent
+to `a < b`. D1's hypothesis was correct.
+
+**Encoding for `FCMGT v0.4s, v1.4s, v2.4s`** (from LLVM `AArch64InstrFormats.td:6306` + `AArch64InstrInfo.td:6109`):
+
+The `SIMDThreeSameVectorFPCmp<U=1, S=1, opc=0b100>` multiclass instantiates
+`BaseSIMDThreeSameVector<Q=1, U=1, size={S,0b01}={1,0b01}=0b101, opcode={0b11,opc}={0b11,0b100}=0b11100>`.
+
+`class BaseSIMDThreeSameVector` (`AArch64InstrFormats.td:6306`):
+```
+Inst{31}    = 0       // fixed
+Inst{30}    = Q       = 1   (128-bit, .4s)
+Inst{29}    = U       = 1   (FCMGT uses U=1)
+Inst{28-24} = 0b01110
+Inst{23-21} = size    = 0b101  (S=1 → bit23=1; element-size bits=0b01 → bits 22-21)
+Inst{20-16} = Rm      = v2 = 0b00010
+Inst{15-11} = opcode  = 0b11100
+Inst{10}    = 1       // fixed
+Inst{9-5}   = Rn      = v1 = 0b00001
+Inst{4-0}   = Rd      = v0 = 0b00000
+```
+
+Assembled 32-bit word (MSB→LSB):
+```
+[31]    0
+[30]    1   Q=1
+[29]    1   U=1
+[28-24] 01110
+[23-21] 101  size (S=1, element-size=0b01 for 32-bit)
+[20-16] 00010  Rm=v2
+[15-11] 11100  opcode={0b11,0b100}
+[10]    1
+[9-5]   00001  Rn=v1
+[4-0]   00000  Rd=v0
+
+Binary: 0110 1110 1010 0010 1110 0100 0010 0000
+Hex:    0x6E A2 E4 20
+```
+
+Note: In ARM little-endian memory representation this encodes as bytes `20 E4 A2 6E`.
+
+**Implication for C3a/C3b:** Fixture N-3 (`simd_backend_strict_emit_detail_part2.md §10.4`) is now
+unblocked. Any golden using `FCMGT` to implement `cmp_lt(a,b)` must have Rn=b, Rm=a
+(the operand after the dest in assembly syntax is the first/greater operand). Goldens
+generated with Rn=a, Rm=b would produce an inverted mask.
+
+---
+
+### V-08 — SVE2 FADD predicated-3-op encoding
+
+**Status (was FAILED, now):** VERIFIED
+
+**Sources consulted:**
+
+- LLVM `llvm/lib/Target/AArch64/SVEInstrFormats.td:2277`
+  URL: `https://github.com/llvm/llvm-project/raw/refs/heads/main/llvm/lib/Target/AArch64/SVEInstrFormats.td`
+  ```tablegen
+  class sve_fp_2op_p_zds<bits<2> sz, bits<4> opc, string asm,
+                         ZPRRegOp zprty>
+  : I<(outs zprty:$Zdn), (ins PPR3bAny:$Pg, zprty:$_Zdn, zprty:$Zm),
+    asm, "\t$Zdn, $Pg/m, $_Zdn, $Zm",
+    "", []>, Sched<[]> {
+    bits<3> Pg;
+    bits<5> Zdn;
+    bits<5> Zm;
+    let Inst{31-24} = 0b01100101;
+    let Inst{23-22} = sz;
+    let Inst{21-20} = 0b00;
+    let Inst{19-16} = opc;
+    let Inst{15-13} = 0b100;
+    let Inst{12-10} = Pg;
+    let Inst{9-5}   = Zm;
+    let Inst{4-0}   = Zdn;
+    ...
+  }
+  ```
+
+- LLVM `llvm/lib/Target/AArch64/AArch64SVEInstrInfo.td` (FADD_ZPmZ instantiation):
+  URL: `https://github.com/llvm/llvm-project/raw/refs/heads/main/llvm/lib/Target/AArch64/AArch64SVEInstrInfo.td`
+  ```tablegen
+  defm FADD_ZPmZ : sve_fp_2op_p_zds<0b0000, "fadd", "FADD_ZPZZ",
+                                     AArch64fadd_m1, DestructiveBinaryComm>;
+  ```
+  The multiclass instantiates `sve_fp_2op_p_zds` with:
+  - `_H`: sz=0b01 (16-bit)
+  - `_S`: sz=0b10 (32-bit)  ← target for `FADD Z0.S, P0/M, Z0.S, Z1.S`
+  - `_D`: sz=0b11 (64-bit)
+
+**Finding:** Complete 32-bit encoding for `FADD Z0.S, P0/M, Z0.S, Z1.S`:
+
+Fields for the `.S` variant:
+- `sz` = 0b10  (single-precision / 32-bit element)
+- `opc` = 0b0000  (FADD opcode within the class)
+- `Pg` = P0 = 0b000
+- `Zm` = Z1 = 0b00001
+- `Zdn` = Z0 = 0b00000
+
+Bit-by-bit:
+```
+Bits [31-24] = 0b01100101       fixed SVE FP arith prefix = 0x65
+Bits [23-22] = 0b10             sz=10 (single precision)
+Bits [21-20] = 0b00             fixed
+Bits [19-16] = 0b0000           opc=FADD
+Bits [15-13] = 0b100            fixed (predicated merge form marker)
+Bits [12-10] = 0b000            Pg=P0
+Bits  [9-5]  = 0b00001          Zm=Z1
+Bits  [4-0]  = 0b00000          Zdn=Z0
+
+Binary:  0110 0101 1000 0000 1000 0000 0010 0000
+Hex:     0x65 80 80 20
+```
+
+In ARM little-endian (4-byte word, LSByte first): `20 80 80 65`
+
+**Field summary:**
+
+| Bits  | Value    | Meaning                       |
+|-------|----------|-------------------------------|
+| 31-24 | 01100101 | SVE FP predicated arith (0x65)|
+| 23-22 | 10       | sz: single-precision (.S)     |
+| 21-20 | 00       | fixed                         |
+| 19-16 | 0000     | opc: FADD (within class)      |
+| 15-13 | 100      | fixed: /M (merge) pred form   |
+| 12-10 | 000      | Pg: P0                        |
+|  9-5  | 00001    | Zm: Z1 (second source)        |
+|  4-0  | 00000    | Zdn: Z0 (dest + first source) |
+
+Note: This is a destructive (2-operand read-modify-write) instruction; Zdn
+serves as both the first source and the destination. The assembler syntax
+`FADD Z0.S, P0/M, Z0.S, Z1.S` requires Zdn == first-source register (both
+are Z0); the `/M` flag means inactive lanes retain Zdn's original value
+(merge predication).
+
+**Implication for C3a/C3b:** Fixture SVE-FADD-1 in the strict-emit detail
+(`simd_backend_strict_emit_detail_part1.md §4.4 Example 1`) can now be marked
+CANONICAL. The encoding `0x65 0x80 0x80 0x20` (LE bytes) is confirmed for
+`FADD Z0.S, P0/M, Z0.S, Z1.S`. Any emission that produces bytes not matching
+this encoding has a bug in the sz, opc, Pg, Zm, or Zdn field assignment.
+
+---
+
+### EVEX P0/P1 cross-check (assist for E3 errata)
+
+This pass did not fetch `llvm/lib/Target/X86/X86InstrFormats.td`; the AArch64
+InstrFormats file fetched here is unrelated to x86 EVEX encoding. Therefore no
+new LLVM citation is available to independently corroborate D1's finding that
+Simple's `evex_encode_3op_zmm` uses inverted P0/P1 variable names relative to
+the Intel SDM. D1's finding stands on its own: the prior-round V-06 verification
+confirmed the six output bytes `[0x62, P0, P1, P2, opcode, ModRM]` are correct
+in position but the variable labels P0/P1 within the encoder function are swapped
+relative to Intel SDM Byte1/Byte2 naming — silent for W=0 (no functional bug
+yet), but a trap for any future W=1 or V' bit manipulation. E3's errata report
+should proceed without waiting for an LLVM X86 cross-reference.
+
+---
+
+### Updated verification index
+
+| V-ID | Previous status | E4 status | Source |
+|------|----------------|-----------|--------|
+| V-25 | FAILED | **VERIFIED** | GCC `aarch64-simd.md:4418-4430`; LLVM `AArch64InstrInfo.td:6109` |
+| V-08 | FAILED | **VERIFIED** | LLVM `SVEInstrFormats.td:2277`; `AArch64SVEInstrInfo.td` (FADD_ZPmZ) |
+
+Both OQ-2 (V-25 operand-polarity gate) and OQ-4 (V-08 SVE encoding gate) are
+now cleared. Fixture N-3 and Fixture SVE-FADD-1 may be promoted to CANONICAL
+by the orchestrator.

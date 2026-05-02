@@ -9,13 +9,49 @@ HANDOFF_RUNNER="$REPO_ROOT/src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generat
 REAL_DTB_RUNNER="$REPO_ROOT/src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv32_boot_info_real_dtb_runner.shs"
 HANDOFF_SMOKE="$REPO_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv32_linux_handoff_smoke.s"
 REAL_DTB_SMOKE="$REPO_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv32_boot_info_real_dtb_smoke.s"
+LOG_DIR="${RTL_LINUX_LOG_DIR:-$REPO_ROOT/build/rtl_linux/generated_rv32}"
+RUNNER_LOG="$LOG_DIR/generated_rv32_linux_runner.log"
+UART_LOG="$LOG_DIR/generated_rv32_linux_uart.log"
+TIMEOUT_SEC="${RTL_LINUX_TIMEOUT_SEC:-120}"
 CHECK_TOOLS=0
 SKIP_PROOFS=0
+PAYLOAD_ELF="${GENERATED_RV32_LINUX_PAYLOAD_ELF:-$LOG_DIR/generated_rv32_linux_acceptance.elf}"
+
+can_run_simple_bin() {
+    candidate="$1"
+    [ -n "$candidate" ] || return 1
+    [ -x "$candidate" ] || return 1
+    timeout 5 "$candidate" --help >/dev/null 2>&1
+    code=$?
+    [ "$code" -ne 124 ] && [ "$code" -ne 126 ] && [ "$code" -ne 127 ]
+}
+
+pick_simple_bin() {
+    for candidate in \
+        "${SIMPLE_BINARY:-}" \
+        "$REPO_ROOT/src/compiler_rust/target/debug/simple" \
+        "$REPO_ROOT/src/compiler_rust/target/bootstrap/simple" \
+        "$REPO_ROOT/src/compiler_rust/target/release/simple" \
+        "$REPO_ROOT/bin/simple"
+    do
+        if can_run_simple_bin "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+SIMPLE_BIN="$(pick_simple_bin)" || {
+    echo "FAIL: no runnable Simple compiler found; set SIMPLE_BINARY to a working host runtime" >&2
+    exit 1
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --check-tools) CHECK_TOOLS=1 ;;
         --skip-proofs) SKIP_PROOFS=1 ;;
+        --timeout=*) TIMEOUT_SEC="${1#--timeout=}" ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -39,6 +75,20 @@ check_tools() {
     echo "PASS: generated RV32 RTL Linux tools present"
 }
 
+prepare_payload() {
+    mkdir -p "$LOG_DIR"
+    "$SIMPLE_BIN" native-build \
+        --verbose \
+        --backend llvm \
+        --timeout 120 \
+        --entry-closure \
+        --source "$REPO_ROOT/examples/simple_os/arch/riscv32" \
+        --entry "$REPO_ROOT/examples/simple_os/arch/riscv32/ghdl_linux_acceptance_entry.spl" \
+        --target riscv32-unknown-none \
+        -o "$PAYLOAD_ELF" \
+        --linker-script "$REPO_ROOT/examples/simple_os/arch/riscv32/linker.ld"
+}
+
 run_proof() {
     label="$1"
     runner="$2"
@@ -52,7 +102,24 @@ run_proofs() {
     run_proof "real_dtb" "$REAL_DTB_RUNNER" "$REAL_DTB_SMOKE"
 }
 
+run_generated_linux() {
+    echo "[$LANE_ID] running generated RV32 GHDL payload acceptance lane; log=$RUNNER_LOG uart=$UART_LOG"
+    bash "$REAL_DTB_RUNNER" \
+        --payload-elf "$PAYLOAD_ELF" \
+        --expect-marker "OpenSBI" \
+        --expect-marker "Linux version" \
+        --expect-marker "OF: fdt" \
+        --expect-marker "Freeing unused kernel memory" \
+        --expect-marker "init started" \
+        --allow-timeout-success \
+        --timeout="$TIMEOUT_SEC" \
+        --log-path "$RUNNER_LOG" \
+        --uart-log-path "$UART_LOG"
+    echo "PASS: $LANE_ID repo-native generated Linux acceptance lane passed"
+}
+
 check_tools
 [ "$CHECK_TOOLS" -eq 1 ] && exit 0
+prepare_payload
 [ "$SKIP_PROOFS" -eq 1 ] || run_proofs
-echo "PASS: $LANE_ID generated Linux acceptance gates passed"
+run_generated_linux

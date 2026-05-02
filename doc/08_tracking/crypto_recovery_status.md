@@ -294,3 +294,48 @@ Verification (`test/unit/os/tls13/`, interpreter mode per
 This closes the W6-C / W7-B byte-exact-handshake-secret blocker.
 Stage 4 full-CLI compile failure is owned by other in-flight tracks and
 is independent of TLS 1.3.
+
+## Wave 10 (2026-05-02) — M5 PQ Signatures: ML-DSA-65 seed
+
+- **ML-DSA-65 (FIPS 204) seeded** by Wave 10 W10-A as the post-quantum
+  signature counterpart to W9-A's ML-KEM-768 (FIPS 203).  Files:
+  `src/os/crypto/ml_dsa_ntt.spl` (413 lines — Algorithms 35-40 + NTT with
+  q=8380417, ζ=1753 BitRev8 — distinct from ML-KEM's q=3329 / ζ=17 /
+  BitRev7), `src/os/crypto/ml_dsa_sample.spl` (518 lines — local
+  SHAKE-128/256 XOFs over the public `keccak_f1600` permutation since
+  `std.crypto.sha3` ships only fixed SHA-3; ExpandA / ExpandS / ExpandMask
+  / SampleInBall / SimpleBitPack / pkEncode), and
+  `src/os/crypto/ml_dsa.spl` (KeyGen + Sign + Verify wrapper).
+- **Spec coverage**: `test/unit/lib/crypto/ml_dsa_65_spec.spl`
+  18/18 PASS in interpreter mode (66s) covering NTT round-trip, zetas
+  table validation (NTT([1, 0, …, 0]) == [1; 256]), NTT pointwise
+  multiplication vs direct convolution including the X^255 * X = -1
+  negacyclic boundary, Power2Round / Decompose round-trips, MakeHint /
+  UseHint property, BitPack 4-bit and 10-bit round-trip with size
+  formulas, SHAKE-128("") and SHAKE-256("") byte-exact NIST FIPS 202 KAT,
+  SampleInBall produces exactly τ=49 nonzero coefficients in {-1, 0, +1},
+  KeyGen pk = 1952B and sk = 4032B (FIPS 204 §B Table for ML-DSA-65).
+- **Side-channel discipline (per `feedback_no_coverups.md`)**: per-coefficient
+  norm checks walk every coefficient with OR-accumulation (no early-out on
+  first overflow); outer rejection-loop iteration count is intentionally
+  variable (FIPS 204 §3.6 security analysis treats it as non-side-channel —
+  κ never reused with a different message).  Verify's `c_tilde` comparison
+  is byte-OR XOR.
+- **End-to-end Sign+Verify DEFERRED** — Sign produces a 3293-byte signature
+  but Verify currently rejects it.  Bug filed at
+  `doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md` with
+  hint pack/unpack ordering and `make_hint_poly` polarity on negative-z
+  inputs as the leading hypotheses.  Per `feedback_no_coverups.md` we did
+  NOT weaken the spec to "verify returns a bool"; algebraic invariants
+  cover the ring + NTT + sampling + encoding contract; Wave 11+ closes the
+  end-to-end gate.
+- **Performance** (interpreter mode, no native externs): ExpandA 12.6s,
+  KeyGen 17.7s, Sign ~60s per attempt × ~1 attempt, Verify ~5s.  No FR
+  filed yet — perf is in line with the FIPS 204 reference impl ratio
+  given Simple's interpreter overhead and what Wave 11+ work needs is
+  correctness, not speed.
+- **NOT in scope for W10-A** (deferred to Wave 11+): ML-DSA-44, ML-DSA-87,
+  deterministic-variant choice (default randomized per FIPS 204 §3.6),
+  context-string parameter, pre-hash variants.
+- **Ready for hybrid TLS 1.3 sigalg wiring next wave** (`ml_dsa_65 +
+  ed25519` per draft RFC) once the Sign/Verify pipeline bug is resolved.

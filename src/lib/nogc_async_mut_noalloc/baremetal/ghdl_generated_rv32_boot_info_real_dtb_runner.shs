@@ -1,0 +1,244 @@
+#!/bin/bash
+# GHDL runner for the generated RV32 boot-info real-DTB lane.
+#
+# Proof mode:
+#   ./ghdl_generated_rv32_boot_info_real_dtb_runner.shs <program.s|program.elf> [--timeout=30]
+#
+# Marker mode:
+#   ./ghdl_generated_rv32_boot_info_real_dtb_runner.shs \
+#       --payload-elf <payload.elf>|--payload-bin <payload.bin> \
+#       [--expect-marker "OpenSBI"] [--expect-marker "Linux version"] \
+#       [--log-path path/to/runner.log] [--uart-log-path path/to/uart.log] \
+#       [--allow-timeout-success] [--timeout=120]
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
+TIMEOUT=30
+PROGRAM=""
+PAYLOAD=""
+PAYLOAD_KIND=""
+EXPECT_VALUE=""
+EXPECT_MARKERS=""
+LOG_PATH=""
+UART_LOG_PATH=""
+ALLOW_TIMEOUT_SUCCESS=0
+
+for arg in "$@"; do
+    if [ -n "$EXPECT_VALUE" ]; then
+        case "$EXPECT_VALUE" in
+            payload-elf)
+                PAYLOAD="$arg"
+                PAYLOAD_KIND="elf"
+                ;;
+            payload-bin)
+                PAYLOAD="$arg"
+                PAYLOAD_KIND="bin"
+                ;;
+            expect-marker)
+                if [ -n "$EXPECT_MARKERS" ]; then
+                    EXPECT_MARKERS="${EXPECT_MARKERS}
+$arg"
+                else
+                    EXPECT_MARKERS="$arg"
+                fi
+                ;;
+            log-path) LOG_PATH="$arg" ;;
+            uart-log-path) UART_LOG_PATH="$arg" ;;
+        esac
+        EXPECT_VALUE=""
+        continue
+    fi
+    case "$arg" in
+        --timeout=*) TIMEOUT="${arg#--timeout=}" ;;
+        --payload-elf) EXPECT_VALUE="payload-elf" ;;
+        --payload-elf=*)
+            PAYLOAD="${arg#--payload-elf=}"
+            PAYLOAD_KIND="elf"
+            ;;
+        --payload-bin) EXPECT_VALUE="payload-bin" ;;
+        --payload-bin=*)
+            PAYLOAD="${arg#--payload-bin=}"
+            PAYLOAD_KIND="bin"
+            ;;
+        --expect-marker) EXPECT_VALUE="expect-marker" ;;
+        --expect-marker=*)
+            if [ -n "$EXPECT_MARKERS" ]; then
+                EXPECT_MARKERS="${EXPECT_MARKERS}
+${arg#--expect-marker=}"
+            else
+                EXPECT_MARKERS="${arg#--expect-marker=}"
+            fi
+            ;;
+        --log-path) EXPECT_VALUE="log-path" ;;
+        --log-path=*) LOG_PATH="${arg#--log-path=}" ;;
+        --uart-log-path) EXPECT_VALUE="uart-log-path" ;;
+        --uart-log-path=*) UART_LOG_PATH="${arg#--uart-log-path=}" ;;
+        --allow-timeout-success) ALLOW_TIMEOUT_SUCCESS=1 ;;
+        *)
+            if [ -z "$PROGRAM" ] && [ -z "$PAYLOAD" ]; then
+                PROGRAM="$arg"
+            else
+                echo "Unexpected extra argument: $arg"
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+if [ -n "$EXPECT_VALUE" ]; then
+    echo "Error: Missing value for --$EXPECT_VALUE"
+    exit 1
+fi
+
+if [ -z "$PROGRAM" ] && [ -z "$PAYLOAD" ]; then
+    echo "Usage: $0 <program.s|program.elf> [--timeout=N]"
+    echo "   or: $0 --payload-elf <payload.elf>|--payload-bin <payload.bin> [--expect-marker ...]"
+    exit 1
+fi
+
+if [ -n "$PAYLOAD" ] && [ ! -f "$PAYLOAD" ]; then
+    echo "Error: Payload not found: $PAYLOAD"
+    exit 1
+fi
+
+if [ -n "$PROGRAM" ] && [ ! -f "$PROGRAM" ]; then
+    echo "Error: Program not found: $PROGRAM"
+    exit 1
+fi
+
+TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv32_boot_info_real_dtb_XXXXXX)
+trap "rm -rf $TMP_DIR" EXIT
+
+GEN_DIR="$TMP_DIR/generated"
+TEST_BASE="$TMP_DIR/program"
+TEST_ELF="$TEST_BASE.elf"
+TEST_BIN="$TEST_BASE.bin"
+TEST_PKG="$TMP_DIR/test_program.vhd"
+
+if [ -n "$PAYLOAD" ]; then
+    if [ "$PAYLOAD_KIND" = "elf" ]; then
+        riscv64-linux-gnu-objcopy -O binary "$PAYLOAD" "$TEST_BIN"
+    else
+        cp "$PAYLOAD" "$TEST_BIN"
+    fi
+else
+    EXT="${PROGRAM##*.}"
+    if [ "$EXT" = "s" ]; then
+        riscv64-linux-gnu-as -march=rv32i_zicsr -mabi=ilp32 -o "$TEST_BASE.o" "$PROGRAM"
+        riscv64-linux-gnu-ld -m elf32lriscv -Ttext=0x80000000 --no-relax -o "$TEST_ELF" "$TEST_BASE.o"
+    elif [ "$EXT" = "elf" ]; then
+        cp "$PROGRAM" "$TEST_ELF"
+    else
+        echo "Unsupported program type: $EXT"
+        exit 1
+    fi
+    riscv64-linux-gnu-objcopy -O binary "$TEST_ELF" "$TEST_BIN"
+fi
+
+bin/simple run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
+RTL_DIR="$GEN_DIR/rv32/rtl"
+
+python3 -c "
+import struct
+data = open('$TEST_BIN', 'rb').read()
+while len(data) % 4 != 0: data += b'\x00'
+words = [struct.unpack('<I', data[i:i+4])[0] for i in range(0, len(data), 4)]
+print('library ieee;')
+print('use ieee.std_logic_1164.all;')
+print('package test_program is')
+print('    type word_array_t is array (natural range <>) of std_logic_vector(31 downto 0);')
+print('    constant PROGRAM_SIZE : integer := %d;' % len(words))
+print('    constant PROGRAM_DATA : word_array_t(0 to %d) := (' % (len(words)-1))
+for i, w in enumerate(words):
+    comma = ',' if i < len(words)-1 else ''
+    print('        x\"%08x\"%s' % (w, comma))
+print('    );')
+print('end package test_program;')
+" > "$TEST_PKG"
+
+cd "$TMP_DIR"
+ghdl -a --std=08 \
+    "$RTL_DIR/simple_rv32i_core_pkg.vhd" \
+    "$RTL_DIR/simple_rv32gc_core.vhd" \
+    "$TEST_PKG" \
+    "$RTL_DIR/tb_generated_rv32_boot_info_real_dtb.vhd"
+ghdl -e --std=08 tb_generated_rv32_boot_info_real_dtb
+
+STOP_MS=$((TIMEOUT * 1000))
+RAW_OUTPUT_PATH="$TMP_DIR/ghdl_generated_rv32_boot_info_real_dtb.log"
+if [ -n "$LOG_PATH" ]; then
+    mkdir -p "$(dirname "$LOG_PATH")"
+    RAW_OUTPUT_PATH="$LOG_PATH"
+fi
+/bin/sh -c "timeout \"$TIMEOUT\" ghdl -r --std=08 tb_generated_rv32_boot_info_real_dtb --stop-time=\"${STOP_MS}ms\"" >"$RAW_OUTPUT_PATH" 2>&1 || EXIT_STATUS=$?
+EXIT_STATUS=${EXIT_STATUS:-0}
+OUTPUT=$(cat "$RAW_OUTPUT_PATH")
+
+echo "$OUTPUT" | grep -E "CYCLES:|PASS_WORD:|A0_LOW32:|A1_LOW32:|DTB_VALID_LOW32:|SATP_LOW32:|DTB_PROBE_SEEN:|UART_BYTES_LOW32:|FINAL_PC_HEX32:|HALT_SEEN:|TRAP_SEEN:|GENERATED_RV32_BOOT_INFO_REAL_DTB:" || true
+
+UART_TEXT=$(printf '%s\n' "$OUTPUT" | python3 -c '
+import re
+import sys
+out = []
+for line in sys.stdin:
+    match = re.search(r"UART_CHAR_HEX8:\s*([0-9A-Fa-f]{2})", line)
+    if match:
+        out.append(chr(int(match.group(1), 16)))
+sys.stdout.write("".join(out))
+')
+
+if [ -n "$UART_LOG_PATH" ]; then
+    mkdir -p "$(dirname "$UART_LOG_PATH")"
+    printf '%s' "$UART_TEXT" >"$UART_LOG_PATH"
+fi
+
+MARKER_CHECK_RC=0
+if [ -n "$EXPECT_MARKERS" ]; then
+    while IFS= read -r marker; do
+        [ -n "$marker" ] || continue
+        if printf '%s' "$UART_TEXT" | grep -F -q "$marker"; then
+            echo "MARKER_OK: $marker"
+        else
+            echo "MARKER_MISSING: $marker"
+            MARKER_CHECK_RC=1
+        fi
+    done <<EOF
+$EXPECT_MARKERS
+EOF
+fi
+
+ABI_CHECK_RC=0
+for expected in "A0_LOW32: 0" "A1_LOW32: -2013265920" "DTB_VALID_LOW32: 1" "SATP_LOW32: 0"; do
+    if ! printf '%s' "$OUTPUT" | grep -F -q "$expected"; then
+        echo "ABI_MISSING: $expected"
+        ABI_CHECK_RC=1
+    fi
+done
+if ! printf '%s' "$OUTPUT" | grep -F -q "DTB_PROBE_SEEN: 1"; then
+    echo "ABI_MISSING: DTB_PROBE_SEEN: 1"
+    ABI_CHECK_RC=1
+fi
+
+if [ "$EXIT_STATUS" = "124" ]; then
+    if [ "$ALLOW_TIMEOUT_SUCCESS" = "1" ] && [ "$MARKER_CHECK_RC" -eq 0 ] && [ "$ABI_CHECK_RC" -eq 0 ] && [ -n "$EXPECT_MARKERS" ]; then
+        echo "[GHDL-GEN-RV32-BOOT-INFO-REAL-DTB] PASS (timeout after markers)"
+        exit 0
+    fi
+    echo "[GHDL-GEN-RV32-BOOT-INFO-REAL-DTB] TIMEOUT after ${TIMEOUT}s"
+    exit 124
+fi
+
+if [ -n "$EXPECT_MARKERS" ] && [ "$MARKER_CHECK_RC" -eq 0 ] && [ "$ABI_CHECK_RC" -eq 0 ]; then
+    echo "[GHDL-GEN-RV32-BOOT-INFO-REAL-DTB] PASS (marker mode)"
+    exit 0
+fi
+
+if echo "$OUTPUT" | grep -q "GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS"; then
+    echo "[GHDL-GEN-RV32-BOOT-INFO-REAL-DTB] PASS"
+    exit 0
+fi
+
+echo "[GHDL-GEN-RV32-BOOT-INFO-REAL-DTB] FAIL"
+exit 1

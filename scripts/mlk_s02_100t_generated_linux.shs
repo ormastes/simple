@@ -10,7 +10,8 @@ BOOT_PRODUCTS_MANIFEST=""
 UART_PORT="${MLK_UART_PORT:-/dev/ttyUSB0}"
 UART_BAUD="${MLK_UART_BAUD:-115200}"
 UART_TIMEOUT="${MLK_UART_TIMEOUT_SEC:-120}"
-BOOT_LOADER_CMD="${MLK_BOOT_LOADER_CMD:-}"
+BOOT_STAGE_ROOT="${MLK_BOOT_STAGE_ROOT:-$REPO_ROOT/build/fpga/mlk_s02_100t/boot_sources}"
+BOOT_DELIVERY_CMD="${MLK_BOOT_DELIVERY_CMD:-${MLK_BOOT_LOADER_CMD:-}}"
 PROGRAM_CMD="${MLK_PROGRAM_CMD:-}"
 VENDOR_XDC="${MLK_VENDOR_XDC:-$REPO_ROOT/third_party/board_vendor/mlk_s02_100t/constraints/mlk_s02_100t.xdc}"
 ARCH_MODE="both"
@@ -30,7 +31,9 @@ while [ $# -gt 0 ]; do
         --uart-timeout=*) UART_TIMEOUT="${1#--uart-timeout=}" ;;
         --cold-boots=*) COLD_BOOTS="${1#--cold-boots=}" ;;
         --vendor-xdc=*) VENDOR_XDC="${1#--vendor-xdc=}" ;;
-        --boot-loader-cmd=*) BOOT_LOADER_CMD="${1#--boot-loader-cmd=}" ;;
+        --boot-stage-root=*) BOOT_STAGE_ROOT="${1#--boot-stage-root=}" ;;
+        --boot-delivery-cmd=*) BOOT_DELIVERY_CMD="${1#--boot-delivery-cmd=}" ;;
+        --boot-loader-cmd=*) BOOT_DELIVERY_CMD="${1#--boot-loader-cmd=}" ;;
         --program-cmd=*) PROGRAM_CMD="${1#--program-cmd=}" ;;
         --skip-ghdl) SKIP_GHDL=1 ;;
         --skip-synth) SKIP_SYNTH=1 ;;
@@ -68,6 +71,33 @@ uart_log_path_for() {
     echo "$PRODUCT_ROOT/$product_id/logs/uart.log"
 }
 
+product_dir_for() {
+    product_id="$(product_id_for "$1")"
+    echo "$PRODUCT_ROOT/$product_id"
+}
+
+boot_stage_dir_for() {
+    echo "$BOOT_STAGE_ROOT/$1"
+}
+
+staged_opensbi_path_for() {
+    echo "$(product_dir_for "$1")/boot/opensbi/fw_jump.bin"
+}
+
+staged_kernel_path_for() {
+    echo "$(product_dir_for "$1")/boot/Image"
+}
+
+staged_dtb_path_for() {
+    product_id="$(product_id_for "$1")"
+    echo "$(product_dir_for "$1")/boot/$product_id.dtb"
+}
+
+staged_initramfs_path_for() {
+    product_id="$(product_id_for "$1")"
+    echo "$(product_dir_for "$1")/boot/$product_id.cpio"
+}
+
 boot_products_manifest_path() {
     echo "$BUNDLE_ROOT/board_linux_boot_products.sdn"
 }
@@ -77,6 +107,23 @@ ensure_bundle() {
     "$REPO_ROOT/bin/simple" run "$REPO_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" -- --board=mlk_s02_100t "$BUNDLE_ROOT" >/dev/null
     BOOT_PRODUCTS_MANIFEST="$(boot_products_manifest_path)"
     [ -f "$BOOT_PRODUCTS_MANIFEST" ] || { echo "FAIL: missing boot products manifest $BOOT_PRODUCTS_MANIFEST" >&2; exit 1; }
+}
+
+copy_boot_artifact() {
+    src="$1"
+    dst="$2"
+    [ -f "$src" ] || { echo "FAIL: missing boot source artifact $src" >&2; exit 1; }
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst"
+}
+
+stage_boot_artifacts() {
+    arch="$1"
+    stage_dir="$(boot_stage_dir_for "$arch")"
+    copy_boot_artifact "$stage_dir/opensbi/fw_jump.bin" "$(staged_opensbi_path_for "$arch")"
+    copy_boot_artifact "$stage_dir/Image" "$(staged_kernel_path_for "$arch")"
+    copy_boot_artifact "$stage_dir/$(product_id_for "$arch").dtb" "$(staged_dtb_path_for "$arch")"
+    copy_boot_artifact "$stage_dir/$(product_id_for "$arch").cpio" "$(staged_initramfs_path_for "$arch")"
 }
 
 run_ghdl_gate() {
@@ -106,6 +153,22 @@ assert_ready_xdc() {
         echo "Provide a verified vendor/user constraint file via --vendor-xdc or MLK_VENDOR_XDC before synth." >&2
         exit 1
     fi
+}
+
+assert_staged_boot_artifacts() {
+    arch="$1"
+    [ -f "$(staged_opensbi_path_for "$arch")" ] || { echo "FAIL: staged OpenSBI artifact missing for $arch" >&2; exit 1; }
+    [ -f "$(staged_kernel_path_for "$arch")" ] || { echo "FAIL: staged kernel Image missing for $arch" >&2; exit 1; }
+    [ -f "$(staged_dtb_path_for "$arch")" ] || { echo "FAIL: staged DTB missing for $arch" >&2; exit 1; }
+    [ -f "$(staged_initramfs_path_for "$arch")" ] || { echo "FAIL: staged initramfs missing for $arch" >&2; exit 1; }
+}
+
+preflight_product() {
+    arch="$1"
+    xdc_path="$(resolve_xdc)"
+    assert_ready_xdc "$xdc_path"
+    assert_staged_boot_artifacts "$arch"
+    [ -n "$BOOT_DELIVERY_CMD" ] || { echo "FAIL: boot delivery command not configured; pass --boot-delivery-cmd or set MLK_BOOT_DELIVERY_CMD" >&2; exit 1; }
 }
 
 synth_product() {
@@ -144,11 +207,15 @@ verify_uart() {
         --cold-boots=1 \
         --product-id="$product_id" \
         --boot-products-manifest="$BOOT_PRODUCTS_MANIFEST" \
-        "--boot-loader-cmd=$BOOT_LOADER_CMD"
+        "--boot-loader-cmd=$BOOT_DELIVERY_CMD"
 }
 
 ensure_bundle
 for arch in $(selected_arches); do
+    stage_boot_artifacts "$arch"
+    if [ "$SKIP_SYNTH" -ne 1 ] || [ "$SKIP_PROGRAM" -ne 1 ] || [ "$SKIP_UART" -ne 1 ]; then
+        preflight_product "$arch"
+    fi
     if [ "$SKIP_GHDL" -ne 1 ]; then
         run_ghdl_gate "$arch"
     fi
