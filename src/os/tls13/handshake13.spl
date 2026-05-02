@@ -11,6 +11,7 @@ val TLS13_ASCII_PRINTABLE: text = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJK
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 fn _tls_hs_debug(msg: text):
     val _unused = msg.len()
@@ -41,11 +42,14 @@ val HS_FINISHED: u8             = 20
 # Extension Types
 # ============================================================================
 
-val EXT_SNI: u16               = 0
-val EXT_SUPPORTED_GROUPS: u16  = 10
-val EXT_SIG_ALGS: u16          = 13
-val EXT_SUPPORTED_VERSIONS: u16 = 43
-val EXT_KEY_SHARE: u16         = 51
+val EXT_SNI: u16                    = 0
+val EXT_MAX_FRAGMENT_LENGTH: u16    = 1
+val EXT_SUPPORTED_GROUPS: u16       = 10
+val EXT_SIG_ALGS: u16               = 13
+val EXT_ALPN: u16                   = 16
+val EXT_SUPPORTED_VERSIONS: u16     = 43
+val EXT_EARLY_DATA: u16             = 42
+val EXT_KEY_SHARE: u16              = 51
 
 # ============================================================================
 # Cipher Suites and Groups
@@ -79,6 +83,27 @@ class CertificateRequest13:
     """Decoded TLS 1.3 CertificateRequest subset used by the client."""
     request_context: [u8]
     sig_algs: [u16]
+
+class EncryptedExtensions13:
+    """Decoded TLS 1.3 EncryptedExtensions message (RFC 8446 §4.3.1).
+
+    Fields are populated only when the corresponding extension is present:
+      - server_name_acknowledged: true if EXT_SNI(0) was seen with empty data
+        (RFC 6066 server's SNI ack MUST be empty).
+      - max_fragment_length: 0 if absent; otherwise the single byte the server
+        echoed (RFC 6066 §4 enum 1..4 mapping to 2^9 .. 2^12).
+      - selected_alpn: empty text if absent; otherwise the single ProtocolName
+        the server selected from the client's offered list (RFC 7301 §3.1).
+      - supported_groups: informational per RFC 8446 §4.2.7.
+    """
+    server_name_acknowledged: bool
+    max_fragment_length: u8
+    selected_alpn: text
+    supported_groups: [u16]
+
+enum EncryptedExtensionsResult:
+    Ok(value: EncryptedExtensions13)
+    Err(reason: text)
 
 # ============================================================================
 # Private Byte Helpers
@@ -405,20 +430,156 @@ fn parse_server_hello(data: [u8]) -> ServerHello13:
         x25519_pub: _serverhello_x25519_pub(data))
 
 # ============================================================================
-# Public: Parse EncryptedExtensions
+# Public: Parse EncryptedExtensions (RFC 8446 §4.3.1)
 # ============================================================================
+# Returns EncryptedExtensionsResult.{Ok(EncryptedExtensions13)|Err(text)}.
+# Wiring into tls13_connect_io_with_config (per-connection ALPN/MFL state)
+# is a follow-up; this parser is callable by handshake-state code today.
 
-fn parse_encrypted_extensions(body: [u8]) -> bool:
-    """Parse EncryptedExtensions body.
+fn _ee_seen_contains(seen: [u16], t: u16) -> bool:
+    var i: u64 = 0
+    while i < seen.len():
+        if seen[i] == t:
+            return true
+        i = i + 1
+    false
 
-    Phase 1: contents are ignored; always returns true to signal success.
+fn _ee_parse_alpn(ext_data: [u8]) -> EncryptedExtensionsResult:
+    """Parse RFC 7301 ProtocolNameList { ProtocolName protocol_name_list<2..2^16-1>; }.
+
+    Server MUST select exactly one ProtocolName (RFC 7301 §3.2).
+    """
+    if ext_data.len() < 3:
+        return EncryptedExtensionsResult.Err(reason: "decode_error: alpn truncated")
+    val list_len = _u16_be(ext_data, 0).to_u64()
+    if list_len + 2 != ext_data.len():
+        return EncryptedExtensionsResult.Err(reason: "decode_error: alpn list length mismatch")
+    if list_len < 2:
+        return EncryptedExtensionsResult.Err(reason: "illegal_parameter: alpn list too short")
+    val name_len = _u8_at(ext_data, 2).to_u64()
+    if name_len < 1:
+        return EncryptedExtensionsResult.Err(reason: "illegal_parameter: alpn empty ProtocolName")
+    if 1 + name_len != list_len:
+        # More than one ProtocolName, or trailing garbage — server MUST select exactly one.
+        return EncryptedExtensionsResult.Err(reason: "illegal_parameter: alpn must contain exactly one ProtocolName")
+    if 3 + name_len > ext_data.len():
+        return EncryptedExtensionsResult.Err(reason: "decode_error: alpn name truncated")
+    var name_bytes: [u8] = _byte_buf(name_len)
+    var i: u64 = 0
+    while i < name_len:
+        name_bytes = _push_byte(name_bytes, _u8_at(ext_data, 3 + i).to_u64().to_i64())
+        i = i + 1
+    EncryptedExtensionsResult.Ok(value: EncryptedExtensions13(
+        server_name_acknowledged: false,
+        max_fragment_length: 0u8,
+        selected_alpn: rt_bytes_to_text(name_bytes),
+        supported_groups: []))
+
+fn parse_encrypted_extensions(body: [u8]) -> EncryptedExtensionsResult:
+    """Parse a TLS 1.3 EncryptedExtensions message body (RFC 8446 §4.3.1).
+
+    Wire format:
+        struct { Extension extensions<0..2^16-1>; } EncryptedExtensions;
+        struct { ExtensionType type; opaque data<0..2^16-1>; } Extension;
+
+    Recognized extensions:
+      - server_name (0): RFC 6066 — server's SNI ack MUST be empty.
+      - max_fragment_length (1): RFC 6066 — extension_data is exactly 1 byte.
+      - supported_groups (10): RFC 8446 §4.2.7 — informational; recorded.
+      - application_layer_protocol_negotiation (16): RFC 7301 — single name.
+      - early_data (42): RFC 8446 §4.2.10 — empty in EE = server accepts 0-RTT.
+        We do not implement 0-RTT yet, so reject as unsupported_extension.
+
+    Unknown extensions are ignored per RFC 8446 §4.2 ("Unknown extensions
+    MUST be ignored by the receiver").  Duplicate extension_type entries are
+    rejected with illegal_parameter per RFC 8446 §4.2.
 
     Args:
-        body: EncryptedExtensions body bytes.
+        body: EncryptedExtensions body bytes (after the 4-byte handshake header).
 
-    Returns: true.
+    Returns:
+        EncryptedExtensionsResult.Ok(EncryptedExtensions13) on success.
+        EncryptedExtensionsResult.Err(text) on malformed/illegal input.
     """
-    true
+    if body.len() < 2:
+        return EncryptedExtensionsResult.Err(reason: "decode_error: EE body too short for extensions length")
+    val outer_len = _u16_be(body, 0).to_u64()
+    # The outer length MUST equal body.len() - 2 exactly per RFC 8446 §4.3.1.
+    if outer_len + 2 != body.len():
+        return EncryptedExtensionsResult.Err(reason: "decode_error: EE outer length does not span body")
+
+    var server_name_ack: bool = false
+    var mfl: u8 = 0u8
+    var alpn: text = ""
+    var groups: [u16] = []
+    var seen: [u16] = []
+
+    var offset: u64 = 2
+    val end: u64 = body.len()
+
+    while offset < end:
+        if offset + 4 > end:
+            return EncryptedExtensionsResult.Err(reason: "decode_error: EE extension header truncated")
+        val ext_type = _u16_be(body, offset)
+        val ext_len = _u16_be(body, offset + 2).to_u64()
+        val data_start = offset + 4
+        if data_start + ext_len > end:
+            return EncryptedExtensionsResult.Err(reason: "decode_error: EE extension data truncated")
+
+        if _ee_seen_contains(seen, ext_type):
+            return EncryptedExtensionsResult.Err(reason: "illegal_parameter: duplicate extension")
+        seen.push(ext_type)
+
+        # Slice extension_data
+        var ext_data: [u8] = _byte_buf(ext_len)
+        var k: u64 = 0
+        while k < ext_len:
+            ext_data = _push_byte(ext_data, _u8_at(body, data_start + k).to_u64().to_i64())
+            k = k + 1
+
+        if ext_type == EXT_SNI:
+            # RFC 6066: server's SNI ack MUST be empty.
+            if ext_data.len() != 0:
+                return EncryptedExtensionsResult.Err(reason: "illegal_parameter: server_name in EE must be empty")
+            server_name_ack = true
+        elif ext_type == EXT_MAX_FRAGMENT_LENGTH:
+            # RFC 6066 §4: extension_data is exactly one MaxFragmentLength enum byte.
+            if ext_data.len() != 1:
+                return EncryptedExtensionsResult.Err(reason: "illegal_parameter: max_fragment_length must be 1 byte")
+            mfl = _u8_at(ext_data, 0)
+        elif ext_type == EXT_SUPPORTED_GROUPS:
+            # RFC 8446 §4.2.7: NamedGroupList named_group_list<2..2^16-1>.
+            if ext_data.len() < 4:
+                return EncryptedExtensionsResult.Err(reason: "decode_error: supported_groups truncated")
+            val sg_list_len = _u16_be(ext_data, 0).to_u64()
+            if sg_list_len + 2 != ext_data.len() or (sg_list_len % 2) != 0:
+                return EncryptedExtensionsResult.Err(reason: "decode_error: supported_groups list length")
+            var gi: u64 = 0
+            while gi < sg_list_len:
+                groups.push(_u16_be(ext_data, 2 + gi))
+                gi = gi + 2
+        elif ext_type == EXT_ALPN:
+            val alpn_res = _ee_parse_alpn(ext_data)
+            if val EncryptedExtensionsResult.Err(reason) = alpn_res:
+                return EncryptedExtensionsResult.Err(reason: reason)
+            if val EncryptedExtensionsResult.Ok(value) = alpn_res:
+                alpn = value.selected_alpn
+        elif ext_type == EXT_EARLY_DATA:
+            # RFC 8446 §4.2.10: empty in EE means server accepts 0-RTT.
+            # We do not implement 0-RTT; reject unconditionally so callers
+            # don't silently believe early data was negotiated.
+            return EncryptedExtensionsResult.Err(reason: "unsupported_extension: early_data not implemented")
+        else:
+            # RFC 8446 §4.2: unknown extensions MUST be ignored.
+            pass_dn
+
+        offset = data_start + ext_len
+
+    EncryptedExtensionsResult.Ok(value: EncryptedExtensions13(
+        server_name_acknowledged: server_name_ack,
+        max_fragment_length: mfl,
+        selected_alpn: alpn,
+        supported_groups: groups))
 
 # ============================================================================
 # Public: Parse Certificate Body
