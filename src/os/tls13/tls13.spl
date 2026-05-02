@@ -21,6 +21,8 @@ use os.tls13.handshake13.{
     build_client_hello_bytes, parse_server_hello, parse_handshake_header,
     parse_certificate_body, parse_certificate_chain_body, parse_certificate_request, parse_certificate_verify, parse_finished_body,
     build_finished_bytes, build_certificate_bytes, build_certificate_verify_bytes,
+    is_hello_retry_request, process_hrr_after_serverhello,
+    HrrFlowResult, HrrFlowOk, GROUP_X25519, GROUP_SECP256R1,
     ServerHello13, ParsedHandshake, CertVerifyFields, CertificateRequest13
 }
 use os.tls13.cert_verify.{
@@ -566,33 +568,97 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
     _tls_debug("after transcript_add clienthello")
 
     # ------------------------------------------------------------------
-    # Step 3: Read and parse ServerHello
+    # Step 3: Read and parse ServerHello (with HelloRetryRequest handling
+    # per RFC 8446 §4.1.4 + §4.4.1)
     # ------------------------------------------------------------------
-    val sh_raw = _io_recv_record(io)
+    var seen_hrr: bool = false
+    var sh_raw: [u8] = _io_recv_record(io)
     if sh_raw.len() < 5:
         return Tls13ConnectResult.Failed(reason: "ServerHello: short read")
 
-    # Extract the handshake-layer bytes (the record payload)
-    val sh_pay_len_i = rt_tls13_record_payload_len(sh_raw)
+    var sh_pay_len_i = rt_tls13_record_payload_len(sh_raw)
     if sh_pay_len_i <= 0:
         return Tls13ConnectResult.Failed(reason: "ServerHello: invalid record length")
-    val sh_pay_len = sh_pay_len_i.to_u64()
-    _tls_debug("before sh slice pay_len={sh_pay_len} raw_len={sh_raw.len()}")
-    val sh_hs_bytes = _copy_range(sh_raw, 5, sh_pay_len)
-    _tls_debug("after sh slice hs_len={sh_hs_bytes.len()}")
+    var sh_pay_len = sh_pay_len_i.to_u64()
+    var sh_hs_bytes: [u8] = _copy_range(sh_raw, 5, sh_pay_len)
+    var sh_parsed = parse_handshake_header(sh_hs_bytes)
+    var sh_body_bytes: [u8] = _copy_range(sh_hs_bytes, 4, sh_pay_len - 4)
+    var sh: ServerHello13 = parse_server_hello(sh_body_bytes)
 
-    # parse_handshake_header parses type(1) + length(3) → body
-    _tls_debug("before parse_handshake_header")
-    val sh_parsed = parse_handshake_header(sh_hs_bytes)
-    _tls_debug("after parse_handshake_header type={sh_parsed.msg_type} body_len={sh_parsed.body.len()}")
-    val sh_body_bytes = _copy_range(sh_hs_bytes, 4, sh_pay_len - 4)
-    val sh = parse_server_hello(sh_body_bytes)
+    # HRR detection. The current connect flow advertises X25519 in CH1 only
+    # (no P-256 ephemeral generated up front), so the only valid HRR pick
+    # the server can make is GROUP_SECP256R1. The full ECDHE shared-secret
+    # derivation against P-256 is deferred to a future commit (see
+    # `doc/08_tracking/crypto_recovery_status.md` M3 — "HRR connect-flow
+    # integration LANDED 2026-05-01"). When that lands, the
+    # `Failed("HRR P-256 ECDHE deferred")` branch below becomes the live
+    # second handshake leg.
+    if (not fd_mode) and is_hello_retry_request(sh):
+        seen_hrr = true
+        # CH1 hash for the §4.4.1 synthetic message_hash. The transcript at
+        # this point already contains exactly the CH1 handshake bytes.
+        val ch1_hash: [u8] = transcript_hash(transcript)
+        val flow = process_hrr_after_serverhello(
+            sh_hs_bytes,
+            sh_body_bytes,
+            ch_random,
+            pub_key,
+            ch1_hash,
+            pub_key,           # new_x25519_pub — unchanged (X25519 path is
+                               # rejected here as same-group anyway)
+            [],                # new_p256_pub — empty until ephemeral keypair
+                               # generation is wired into Step 1
+            hostname,
+            false,             # seen_hrr — first HRR
+            true,              # ch1_offered_x25519 — CH1 used build_client_hello_bytes
+            false,             # ch1_offered_p256 — CH1 has no P-256 share yet
+        )
+        if val HrrFlowResult.Reject(reason) = flow:
+            return Tls13ConnectResult.Failed(reason: reason)
+        if val HrrFlowResult.Ok(value) = flow:
+            # AC-7: full P-256 ECDHE + key_schedule integration deferred.
+            # We send CH2 to exercise the wire, then surface a typed
+            # error so callers can see the deferral. The transcript is
+            # already replaced in `value.transcript_seed` for when the
+            # deferral lifts.
+            if value.selected_group == GROUP_SECP256R1:
+                # Send CH2 with the (empty) P-256 share so wire-level
+                # transcripts in interop tests still see the second leg.
+                val ch2_record = _build_plaintext_record(0x16, value.client_hello2_bytes)
+                if not _io_send(io, ch2_record):
+                    return Tls13ConnectResult.Failed(reason: "ClientHello2 send failed")
+                return Tls13ConnectResult.Failed(reason: "HRR P-256 ECDHE deferred — see crypto_recovery_status.md M3")
+            # GROUP_X25519 path is unreachable from live connect today
+            # (CH1 already offers X25519 → rejected as same-group above).
+            # Retained so that, when CH1 starts advertising P-256-only
+            # variants, the X25519 fallback is here.
+            val ch2_record = _build_plaintext_record(0x16, value.client_hello2_bytes)
+            if not _io_send(io, ch2_record):
+                return Tls13ConnectResult.Failed(reason: "ClientHello2 send failed")
+            transcript = transcript_new()
+            transcript = transcript_add(transcript, value.transcript_seed)
+            transcript = transcript_add(transcript, value.client_hello2_bytes)
+            sh_raw = _io_recv_record(io)
+            if sh_raw.len() < 5:
+                return Tls13ConnectResult.Failed(reason: "ServerHello2: short read")
+            sh_pay_len_i = rt_tls13_record_payload_len(sh_raw)
+            if sh_pay_len_i <= 0:
+                return Tls13ConnectResult.Failed(reason: "ServerHello2: invalid record length")
+            sh_pay_len = sh_pay_len_i.to_u64()
+            sh_hs_bytes = _copy_range(sh_raw, 5, sh_pay_len)
+            sh_parsed = parse_handshake_header(sh_hs_bytes)
+            sh_body_bytes = _copy_range(sh_hs_bytes, 4, sh_pay_len - 4)
+            sh = parse_server_hello(sh_body_bytes)
+            # §4.1.4: a second HRR is illegal.
+            if is_hello_retry_request(sh):
+                return Tls13ConnectResult.Failed(reason: "unexpected_message: second HRR in connection")
+
     val server_x25519_pub = if fd_mode {
         _clone_bytes(rt_tls13_record_serverhello_x25519_pub(sh_raw))
     } else {
         sh.x25519_pub
     }
-    _tls_debug("after parse_server_hello cipher={sh.cipher_suite} key_len={server_x25519_pub.len()}")
+    _tls_debug("after parse_server_hello cipher={sh.cipher_suite} key_len={server_x25519_pub.len()} hrr={seen_hrr}")
     if fd_mode:
         _debug_bytes32("server_x25519_pub", server_x25519_pub)
 
