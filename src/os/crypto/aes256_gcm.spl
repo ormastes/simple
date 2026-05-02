@@ -357,17 +357,24 @@ fn _inc32(counter: [u8]) -> [u8]:
     result
 
 fn gctr256(key: [u8], icb: [u8], input: [u8]) -> [u8]:
-    """AES-256-CTR: encrypts each block by XORing with AES_K(counter)."""
+    """AES-256-CTR: encrypts each block by XORing with AES_K(counter).
+
+    Performance: the 240-byte AES-256 key schedule is expanded ONCE and
+    reused for every block via `_aes256_encrypt_block_with_schedule`,
+    amortizing the (60-word) key-expansion cost across the full input
+    length. Previously each block re-ran `aes256_key_expansion(key)`.
+    """
     if input.len() == 0:
         return []
 
+    val schedule = aes256_key_expansion(key)
     var output: [u8] = rt_array_new_with_cap(input.len().to_i64())
     var cb = icb
     val num_full_blocks = input.len() / 16
 
     var i: u64 = 0
     while i < num_full_blocks:
-        val enc_cb = aes256_encrypt_block(cb, key)
+        val enc_cb = _aes256_encrypt_block_with_schedule(cb, schedule)
         val offset = i * 16
         var j: u64 = 0
         while j < 16:
@@ -378,7 +385,7 @@ fn gctr256(key: [u8], icb: [u8], input: [u8]) -> [u8]:
 
     val remaining = input.len() % 16
     if remaining > 0:
-        val enc_cb = aes256_encrypt_block(cb, key)
+        val enc_cb = _aes256_encrypt_block_with_schedule(cb, schedule)
         val offset = num_full_blocks * 16
         var j: u64 = 0
         while j < remaining:
