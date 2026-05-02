@@ -74,6 +74,8 @@ Green after these fixes:
 - `test/system/os_tls_system_spec.spl`
 - Hosted Simple client probe is now green under `simple run`, not just the OpenSSL fixture validation half of the spec.
 
+**HRR support landed 2026-05-01** — see `src/os/tls13/handshake13.spl` and `test/unit/os/tls13/hello_retry_request_spec.spl`.
+
 ## Next Execution Order
 
 1. Repair the TLS M3 live gaps on the existing `src/os/tls13` stack, starting with hosted mTLS and the env-gated QEMU live failures.
