@@ -15,7 +15,7 @@
 
 use os.qemu_runner.{get_target, get_all_targets, arch_from_name,
     build_os, run_os, run_os_debug_gui, test_os, test_all_architectures, arch_display_name,
-    get_scenario, build_scenario, run_scenario, test_scenario}
+    get_scenario, build_scenario, run_scenario, test_scenario, test_board}
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 
@@ -66,6 +66,24 @@ fn parse_scenario_arg(args: [text]) -> text:
             val value = args[i + 1]
             if value.starts_with("-"):
                 return "__missing_scenario__"
+            return value
+        i = i + 1
+    ""
+
+fn parse_board_arg(args: [text]) -> text:
+    """Extract --board=<name> or --board <name> from args."""
+    for arg in args:
+        if arg.starts_with("--board="):
+            val value = arg[8:]
+            return if value == "": "__missing_board__" else: value
+    var i = 0
+    while i < args.len():
+        if args[i] == "--board":
+            if i + 1 >= args.len():
+                return "__missing_board__"
+            val value = args[i + 1]
+            if value.starts_with("-"):
+                return "__missing_board__"
             return value
         i = i + 1
     ""
@@ -134,6 +152,7 @@ fn print_os_help():
     print "  --target=<name>    Alias for --arch"
     print "  --all              Test all architectures (with 'test' command)"
     print "  --scenario=<name>  Named QEMU scenario (for run/test/build)"
+    print "  --board=<name>     Representative board test lane (currently: riscv64)"
     print "  --debug-gui        Keep GUI targets windowed while exposing serial logs"
     print "  --log=<on|off>     Compile normal OS logging in or out (default: on)"
     print ""
@@ -173,6 +192,11 @@ fn _arch_arg_error(arch_name: text) -> text:
 fn _scenario_arg_error(scenario_name: text) -> text:
     if scenario_name == "__missing_scenario__":
         return "Error: --scenario requires a value"
+    ""
+
+fn _board_arg_error(board_name: text) -> text:
+    if board_name == "__missing_board__":
+        return "Error: --board requires a value"
     ""
 
 # ===========================================================================
@@ -293,6 +317,20 @@ fn handle_os_test(args: [text]) -> i64:
         _restore_os_log_mode(old_log_mode)
         if ok: 0 else: 1
     else:
+        val board_name = parse_board_arg(args)
+        val board_error = _board_arg_error(board_name)
+        if board_error != "":
+            _restore_os_log_mode(old_log_mode)
+            print board_error
+            return 1
+        if board_name != "":
+            val ok = if board_name == "riscv64": test_board("riscv64") else: false
+            _restore_os_log_mode(old_log_mode)
+            if board_name != "riscv64":
+                print "Error: unknown or unsupported board '{board_name}'"
+                print "Supported board test lanes: riscv64"
+                return 1
+            return if ok: 0 else: 1
         val scenario_name = parse_scenario_arg(args)
         val scenario_error = _scenario_arg_error(scenario_name)
         if scenario_error != "":

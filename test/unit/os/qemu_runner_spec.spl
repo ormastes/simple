@@ -14,7 +14,7 @@ use os.qemu_runner.{
     desktop_release_installer_iso_path, native_build_prerequisite_hint, ovmf_code_path,
     os_native_build_args, os_native_build_sources, os_native_build_env_prefix,
     desktop_uefi_disk_image_tool_app_validation_command, build_os_with_backend,
-    board_bundle_command, ensure_board_bundle,
+    board_bundle_command, ensure_board_bundle, board_lane_test_command, test_board_lane,
     desktop_uefi_required_marker_fragments, riscv64_hosted_required_marker_fragments,
     arm_fs_exec_required_marker_fragments,
     scenario_lane_kind,
@@ -58,12 +58,17 @@ fn write_shell_shim(path: text, content: text) -> bool:
 
 fn restore_board_bundle_tooling(root: text) -> bool:
     val script_backup = root + "/backup/scripts/make_os_disk.shs"
+    val runner_backup = root + "/backup/scripts/mlk_s02_100t_generated_linux.shs"
     val simple_backup = root + "/backup/bin/simple"
     var ok = true
     val _ = shell_exit_code("rm -f \"scripts/make_os_disk.shs\"")
+    val _ = shell_exit_code("rm -f \"scripts/mlk_s02_100t_generated_linux.shs\"")
     val _ = shell_exit_code("rm -f \"bin/simple\"")
     if rt_file_exists(script_backup):
         if not shell_ok("mv \"" + script_backup + "\" \"scripts/make_os_disk.shs\""):
+            ok = false
+    if rt_file_exists(runner_backup):
+        if not shell_ok("mv \"" + runner_backup + "\" \"scripts/mlk_s02_100t_generated_linux.shs\""):
             ok = false
     if rt_file_exists(simple_backup):
         if not shell_ok("mv \"" + simple_backup + "\" \"bin/simple\""):
@@ -78,8 +83,12 @@ fn install_board_bundle_tooling_shims(root: text) -> bool:
         return false
     if not shell_ok("mv \"scripts/make_os_disk.shs\" \"" + root + "/backup/scripts/make_os_disk.shs\""):
         return false
+    if not shell_ok("mv \"scripts/mlk_s02_100t_generated_linux.shs\" \"" + root + "/backup/scripts/mlk_s02_100t_generated_linux.shs\""):
+        val _ = shell_exit_code("mv \"" + root + "/backup/scripts/make_os_disk.shs\" \"scripts/make_os_disk.shs\"")
+        return false
     if not shell_ok("mv \"bin/simple\" \"" + root + "/backup/bin/simple\""):
         val _ = shell_exit_code("mv \"" + root + "/backup/scripts/make_os_disk.shs\" \"scripts/make_os_disk.shs\"")
+        val _ = shell_exit_code("mv \"" + root + "/backup/scripts/mlk_s02_100t_generated_linux.shs\" \"scripts/mlk_s02_100t_generated_linux.shs\"")
         return false
     val disk_shim = "#!/bin/sh\n" +
         "mkdir -p \"$(dirname \"$2\")\"\n" +
@@ -90,6 +99,22 @@ fn install_board_bundle_tooling_shims(root: text) -> bool:
         "mkdir -p \"$5\"\n" +
         "printf 'fake-board-bundle:riscv64\\n' > \"$5/board_linux_boot_products.sdn\"\n"
     if not write_shell_shim("bin/simple", simple_shim):
+        return false
+    val runner_shim = "#!/bin/sh\n" +
+        "bundle_root=\"\"\n" +
+        "product_root=\"\"\n" +
+        "for arg in \"$@\"; do\n" +
+        "  case \"$arg\" in\n" +
+        "    --bundle-root=*) bundle_root=\"${arg#--bundle-root=}\" ;;\n" +
+        "    --product-root=*) product_root=\"${arg#--product-root=}\" ;;\n" +
+        "  esac\n" +
+        "done\n" +
+        "[ -n \"$bundle_root\" ] || exit 2\n" +
+        "[ -n \"$product_root\" ] || exit 2\n" +
+        "mkdir -p \"$bundle_root\" \"$product_root\"\n" +
+        "printf 'fake-board-run:riscv64\\n' > \"$product_root/run.log\"\n" +
+        "[ -f \"$bundle_root/board_linux_boot_products.sdn\" ] || exit 3\n"
+    if not write_shell_shim("scripts/mlk_s02_100t_generated_linux.shs", runner_shim):
         return false
     true
 
@@ -864,6 +889,40 @@ describe "Qemu runner board bundle smoke":
         expect(rt_file_exists(x64_output)).to_equal(true)
         expect(rt_file_exists(arm64_output)).to_equal(true)
         expect(rt_file_exists(riscv64_output + "/board_linux_boot_products.sdn")).to_equal(true)
+
+describe "Qemu runner board execution smoke":
+    it "runs the representative riscv64 board lane through the generated-linux wrapper":
+        val root = "build/test-qemu-board-lane-smoke"
+        val kernel_path = root + "/kernel.elf"
+        val riscv64_output = root + "/riscv64-board"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        expect(rt_file_write_text(kernel_path, "kernel")).to_equal(true)
+
+        val cmd = board_lane_test_command("riscv64", riscv64_output)
+        expect(cmd).to_equal([
+            "/bin/sh",
+            "scripts/mlk_s02_100t_generated_linux.shs",
+            "--arch=rv64",
+            "--bundle-root=" + riscv64_output,
+            "--product-root=" + riscv64_output + "/products"
+        ])
+        expect(board_lane_test_command("x86_64", root).len()).to_equal(0)
+        expect(board_lane_test_command("arm64", root).len()).to_equal(0)
+
+        val setup_ok = install_board_bundle_tooling_shims(root)
+        var riscv64_ok = false
+        var x64_ok = true
+        if setup_ok:
+            riscv64_ok = test_board_lane("riscv64", kernel_path, riscv64_output)
+            x64_ok = test_board_lane("x86_64", kernel_path, root + "/x64-board.img")
+        val restore_ok = restore_board_bundle_tooling(root)
+
+        expect(setup_ok).to_equal(true)
+        expect(restore_ok).to_equal(true)
+        expect(riscv64_ok).to_equal(true)
+        expect(x64_ok).to_equal(false)
+        expect(rt_file_exists(riscv64_output + "/board_linux_boot_products.sdn")).to_equal(true)
+        expect(rt_file_exists(riscv64_output + "/products/run.log")).to_equal(true)
 
 describe "Qemu runner desktop UEFI tool app validator":
     it "builds raw-image fallback checks for the migrated tool apps and CLI catalog":

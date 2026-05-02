@@ -2025,6 +2025,27 @@ fn _board_bundle_expected_artifact(platform_name: text, output_path: text) -> te
         return output_path + "/board_linux_boot_products.sdn"
     output_path
 
+fn _board_bundle_output_path(platform_name: text) -> text:
+    if platform_name == "x86_64":
+        return desktop_uefi_disk_image_path()
+    if platform_name == "arm64":
+        return simpleos_platform_disk_image_output("arm64")
+    if platform_name == "riscv64":
+        return "build/os/board-riscv64-mlk_s02_100t"
+    ""
+
+pub fn board_lane_test_command(platform_name: text, output_path: text) -> [text]:
+    """Build the host-side command for a representative board execution lane."""
+    if platform_name == "riscv64":
+        return [
+            "/bin/sh",
+            "scripts/mlk_s02_100t_generated_linux.shs",
+            "--arch=rv64",
+            "--bundle-root={output_path}",
+            "--product-root={output_path}/products"
+        ]
+    []
+
 pub fn ensure_board_bundle(platform_name: text, kernel_path: text, output_path: text) -> bool:
     """Materialize the representative board bundle for a first-class platform."""
     if simpleos_platform_board_lane(platform_name) == nil:
@@ -2057,6 +2078,55 @@ pub fn ensure_board_bundle(platform_name: text, kernel_path: text, output_path: 
         print "[ensure_board_bundle] expected artifact missing: {expected}"
         return false
     true
+
+pub fn test_board_lane(platform_name: text, kernel_path: text, output_path: text) -> bool:
+    """Run the representative board compile-smoke lane for a first-class platform."""
+    if simpleos_platform_board_lane(platform_name) == nil:
+        print "[test_board_lane] no representative board lane declared for {platform_name}"
+        return false
+    val cmd = board_lane_test_command(platform_name, output_path)
+    if cmd.len() == 0:
+        print "[test_board_lane] board execution lane not implemented for {platform_name}"
+        return false
+    if not ensure_board_bundle(platform_name, kernel_path, output_path):
+        return false
+    val exec_cmd = cmd[0]
+    var exec_args: [text] = []
+    var i: i64 = 1
+    while i < cmd.len() as i64:
+        exec_args.push(cmd[i as i32])
+        i = i + 1
+    val timeout_ms = 900000
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(exec_cmd, exec_args, timeout_ms)
+    if stdout != "":
+        print "[test_board_lane] stdout:\n{stdout}"
+    if stderr != "":
+        print "[test_board_lane] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[test_board_lane] command exited {exit_code}"
+        return false
+    val expected = _board_bundle_expected_artifact(platform_name, output_path)
+    if not rt_file_exists(expected):
+        print "[test_board_lane] expected artifact missing after board run: {expected}"
+        return false
+    true
+
+pub fn test_board(platform_name: text) -> bool:
+    """Build and run the representative board compile-smoke lane for a platform."""
+    if val lane = simpleos_platform_board_lane(platform_name):
+        val output_path = _board_bundle_output_path(platform_name)
+        if output_path == "":
+            print "[test_board] no bundle output path configured for {platform_name}"
+            return false
+        if board_lane_test_command(platform_name, output_path).len() == 0:
+            print "[test_board] board execution lane not implemented for {platform_name}"
+            return false
+        val target = _lane_to_target(platform_name, lane)
+        if not build_os(target):
+            return false
+        return test_board_lane(platform_name, target.output, output_path)
+    print "[test_board] no representative board lane declared for {platform_name}"
+    false
 
 fn ensure_fs_test_disk_image() -> bool:
     """Ensure the FAT32 fixture image used by x64-nvme-fat32 exists.
