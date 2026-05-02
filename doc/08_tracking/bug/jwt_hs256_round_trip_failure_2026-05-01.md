@@ -1,11 +1,11 @@
 # Bug: JWT HS256 sign-then-verify round-trip fails despite RFC 7515 A.1 byte-match passing
 
-**Status: REQ-JWT-005 (round-trip) FIXED 2026-05-01.** Real root cause was the `text.from_char_code(n)` idiom in `base64url_decode` (and three sibling sites in cert/pem and http/utilities), not a match/Result interpreter bug. See `interpreter_match_ok_arm_text_type_lookup_2026-05-01.md` for full diagnosis. Fixed by rewriting the four call sites to `n.chr()`. REQ-JWT-006 still fails for an unrelated pre-existing interpreter limitation (helper-fn return-from-match in spec it-block context returns wrong value); standalone reproducer works correctly.
+**Status: FULLY FIXED 2026-05-01.** Real root cause was the `text.from_char_code(n)` idiom in `base64url_decode` (and three sibling sites in cert/pem and http/utilities), not a match/Result interpreter bug. See `interpreter_match_ok_arm_text_type_lookup_2026-05-01.md` for full diagnosis. Fixed by rewriting the four call sites to `n.chr()` in commit `4daecc081b`. **Both REQ-JWT-005 and REQ-JWT-006 PASS post-fix** — the earlier hypothesis that REQ-JWT-006 was a separate "helper-fn return-from-match" interpreter limitation was incorrect; it was the same `text.from_char_code` bug surfacing in a different code path. Verified 2026-05-01 by Agent A: fresh cache-busted run of `bin/simple test test/unit/lib/common/jwt_spec.spl` reports 12/12 PASSED including REQ-JWT-006, and the discriminator spec `test/unit/lib/common/helper_fn_match_return_repro_spec.spl` covers D1/D2/D4/D6/D8/D9 (cross-module Result<bool, text> match shape identical to `_hs256_verify_ok`) — all pass.
 
 - **Date filed:** 2026-05-01
-- **Status:** REQ-JWT-005 FIXED 2026-05-01; REQ-JWT-006 unrelated pre-existing issue (separate)
+- **Status:** FULLY FIXED 2026-05-01 (both REQ-JWT-005 and REQ-JWT-006)
 - **Module:** ~~interpreter~~ → `src/lib/common/jwt/encode.spl` (caller-side fix). JWT sources were correct; the broken idiom was inside `base64_decode` from line 97/103/109.
-- **Found by:** Agent AA's JWT spec — `test/unit/lib/common/jwt_spec.spl` — uncommitted
+- **Found by:** Agent AA's JWT spec — `test/unit/lib/common/jwt_spec.spl` (now committed at `8420964ee6`)
 
 ## Symptom
 
@@ -136,7 +136,7 @@ Suspected interpreter sites:
 ### What this changes for `test/unit/lib/common/jwt_spec.spl`
 
 - The spec is **diagnostically correct** — REQ-JWT-005 and REQ-JWT-006 surface a real bug, just not the one named in the test. Do not modify the spec to mask the failure.
-- The spec cannot land 12/12 green until the interpreter bug is fixed. Per "NEVER skip failing tests without approval," the spec is being held until then. Do not add `skip()`. Do not change `jwt_verify_hs256`'s return type to `bool` or `(bool, text)` to dodge the interpreter bug — that's the monkey-patch the project rules forbid.
+- ~~The spec cannot land 12/12 green until the interpreter bug is fixed.~~ **Resolved 2026-05-01:** the same `text.from_char_code → n.chr()` fix in `4daecc081b` covers REQ-JWT-006 as well. Spec lands 12/12 green. The earlier "REQ-JWT-006 is a separate pre-existing helper-fn return-from-match interpreter limitation" hypothesis (filed below in this doc and in `interpreter_match_ok_arm_text_type_lookup_2026-05-01.md` Future-work section) is **INVALID** — see `test/unit/lib/common/helper_fn_match_return_repro_spec.spl` for the discriminator matrix proving the limitation does not exist.
 
 ## Cross-references
 

@@ -48,7 +48,7 @@ Each `text.from_char_code(N)` was rewritten to `N.chr()`, which is the supported
 ### Future work (not part of this fix)
 
 - Either implement primitive-type-name static-method dispatch in the interpreter and codegen, or have the parser/lint reject `<primitive_type>.<ident>(...)` so authors don't get a misleading "variable not found" error. Tracked as a follow-up; no in-tree caller remains as of this commit.
-- The `_hs256_verify_ok` helper return-from-match in REQ-JWT-006 surfaces a separate pre-existing interpreter limitation (helper returns from spec it-block context returning wrong value); not caused by this fix and not in scope. Standalone reproducer (`/tmp/jwt_diag/helper_test.spl`) returns the correct value.
+- ~~The `_hs256_verify_ok` helper return-from-match in REQ-JWT-006 surfaces a separate pre-existing interpreter limitation (helper returns from spec it-block context returning wrong value); not caused by this fix and not in scope.~~ **INVALID 2026-05-01.** Re-verified post-`4daecc081b`: REQ-JWT-006 passes, the standalone helper returns the correct value (`/tmp/jwt_diag/helper_test.spl` prints `correct_key_ok=true` / `wrong_key_ok=false`), and a fresh discriminator matrix (D1/D2/D4/D6/D8/D9) at `test/unit/lib/common/helper_fn_match_return_repro_spec.spl` exercises every shape of helper-fn return-from-match in spec it-block context — including D9, the exact cross-module Result<bool, text> match shape used by `_hs256_verify_ok` against `jwt_verify_hs256`. All 6 discriminators PASS. The hypothesised limitation does not exist. The earlier symptom was the same `text.from_char_code` issue this fix addresses; Q just didn't re-run the spec after the fix.
 
 ## Original framing (preserved for reference)
 
