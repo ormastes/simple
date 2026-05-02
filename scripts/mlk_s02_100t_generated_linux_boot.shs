@@ -8,7 +8,9 @@ UART_BAUD="${MLK_UART_BAUD:-115200}"
 UART_LOG=""
 TIMEOUT_SEC="${MLK_UART_TIMEOUT_SEC:-120}"
 COLD_BOOTS=1
-MARKERS="OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started"
+MARKERS=""
+BOOT_PRODUCTS_MANIFEST=""
+PRODUCT_ID=""
 BOOT_LOADER_CMD=""
 
 while [ $# -gt 0 ]; do
@@ -19,6 +21,8 @@ while [ $# -gt 0 ]; do
         --timeout=*) TIMEOUT_SEC="${1#--timeout=}" ;;
         --cold-boots=*) COLD_BOOTS="${1#--cold-boots=}" ;;
         --markers=*) MARKERS="${1#--markers=}" ;;
+        --boot-products-manifest=*) BOOT_PRODUCTS_MANIFEST="${1#--boot-products-manifest=}" ;;
+        --product-id=*) PRODUCT_ID="${1#--product-id=}" ;;
         --boot-loader-cmd=*) BOOT_LOADER_CMD="${1#--boot-loader-cmd=}" ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
@@ -27,6 +31,43 @@ done
 
 [ -n "$UART_LOG" ] || { echo "missing --uart-log" >&2; exit 2; }
 mkdir -p "$(dirname "$UART_LOG")"
+
+markers_from_manifest() {
+    manifest_path="$1"
+    product_id="$2"
+    [ -f "$manifest_path" ] || { echo "missing --boot-products-manifest file: $manifest_path" >&2; exit 2; }
+    awk -v product_id="$product_id" '
+        $0 == "[[product]]" {
+            in_product = 1
+            matched = 0
+            next
+        }
+        in_product && $0 ~ /^product_id = "/ {
+            id = $0
+            sub(/^product_id = "/, "", id)
+            sub(/"$/, "", id)
+            matched = (id == product_id)
+            next
+        }
+        in_product && matched && $0 ~ /^expected_markers = "/ {
+            markers = $0
+            sub(/^expected_markers = "/, "", markers)
+            sub(/"$/, "", markers)
+            print markers
+            exit
+        }
+    ' "$manifest_path"
+}
+
+resolve_markers() {
+    if [ -n "$MARKERS" ]; then
+        return 0
+    fi
+    if [ -n "$BOOT_PRODUCTS_MANIFEST" ] && [ -n "$PRODUCT_ID" ]; then
+        MARKERS="$(markers_from_manifest "$BOOT_PRODUCTS_MANIFEST" "$PRODUCT_ID")"
+    fi
+    [ -n "$MARKERS" ] || { echo "missing UART markers; pass --markers or both --boot-products-manifest and --product-id" >&2; exit 2; }
+}
 
 configure_uart() {
     stty -F "$UART_PORT" "$UART_BAUD" cs8 -cstopb -parenb -ixon -ixoff -icanon -echo min 1 time 0
@@ -44,6 +85,8 @@ check_markers() {
     IFS="$old_ifs"
     return 0
 }
+
+resolve_markers
 
 attempt=1
 while [ "$attempt" -le "$COLD_BOOTS" ]; do

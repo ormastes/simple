@@ -16,8 +16,8 @@ use os.port.simpleos_multiplatform_build.{
     simpleos_platform_linker_script,
     simpleos_platform_native_target,
     simpleos_platform_qemu_acceptance_lane,
-    simpleos_platform_qemu_acceptance_required_markers,
     simpleos_platform_qemu_cpu,
+    simpleos_platform_qemu_lane,
     simpleos_platform_qemu_machine,
     simpleos_platform_qemu_smoke_lane,
     simpleos_platform_qemu_system,
@@ -1131,10 +1131,16 @@ class QemuScenario:
 pub fn scenario_lane_kind(scenario: QemuScenario) -> SimpleOsLaneKind:
     """Classify a QEMU scenario into the shared lane model."""
     if _is_arm_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_arm_fs_exec_platform_name(scenario.arch), scenario.name):
+            return lane.lane_kind
         return simpleos_platform_qemu_acceptance_lane(_arm_fs_exec_platform_name(scenario.arch)).lane_kind
     if scenario.name == "riscv64-hosted":
+        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
+            return lane.lane_kind
         return simpleos_platform_qemu_acceptance_lane("riscv64").lane_kind
     if _is_riscv_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
+            return lane.lane_kind
         return SimpleOsLaneKind.FsExec
     if scenario.name == "x64-nvme-fat32":
         return SimpleOsLaneKind.FsExec
@@ -1179,12 +1185,6 @@ fn _riscv_fs_exec_platform_name(arch: Architecture) -> text:
 
 fn _arm_fs_exec_scenario(arch: Architecture, description: text) -> QemuScenario:
     _acceptance_lane_scenario(_arm_fs_exec_platform_name(arch), description)
-
-fn _arm_fs_exec_scenario_name(arch: Architecture) -> text:
-    _arm_fs_exec_platform_name(arch) + "-virtio-fat32-smf"
-
-fn _riscv_fs_exec_scenario_name(arch: Architecture) -> text:
-    _riscv_fs_exec_platform_name(arch) + "-virtio-fat32-smf"
 
 fn _riscv_fs_exec_target(arch: Architecture) -> OsTarget:
     if arch == Architecture.Riscv64:
@@ -1632,15 +1632,35 @@ fn _is_riscv_fs_exec_scenario_name(name: text) -> bool:
 fn _is_riscv_fs_exec_scenario(scenario: QemuScenario) -> bool:
     _is_riscv_fs_exec_scenario_name(scenario.name)
 
+fn _catalog_platform_name_for_scenario(scenario: QemuScenario) -> text:
+    match scenario.arch:
+        Architecture.Arm64: "arm64"
+        Architecture.Arm32: "arm32"
+        Architecture.Riscv64: "riscv64"
+        Architecture.Riscv32: "riscv32"
+        _: ""
+
+fn _catalog_lane_for_scenario(scenario: QemuScenario) -> SimpleOsLaneContract?:
+    val platform_name = _catalog_platform_name_for_scenario(scenario)
+    if platform_name != "":
+        return simpleos_platform_qemu_lane(platform_name, scenario.name)
+    nil
+
 fn scenario_target(scenario: QemuScenario) -> OsTarget:
     """Resolve which kernel target should be built for a named scenario."""
     if scenario.name == "x64-nvme-fat32":
         return get_fs_test_target()
     if _is_arm_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_arm_fs_exec_platform_name(scenario.arch), scenario.name):
+            return _lane_to_target(_arm_fs_exec_platform_name(scenario.arch), lane)
         return _lane_to_target(_arm_fs_exec_platform_name(scenario.arch), simpleos_platform_qemu_acceptance_lane(_arm_fs_exec_platform_name(scenario.arch)))
     if scenario.name == "riscv64-hosted":
+        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
+            return _lane_to_target("riscv64", lane)
         return get_riscv64_hosted_target()
     if _is_riscv_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
+            return _lane_to_target(_riscv_fs_exec_platform_name(scenario.arch), lane)
         return _riscv_fs_exec_target(scenario.arch)
     if val desktop_target = _desktop_disk_scenario_target(scenario.name):
         return desktop_target
@@ -2058,49 +2078,25 @@ fn ensure_fs_test_disk_image() -> bool:
 
 fn ensure_arm_fs_exec_disk_image(arch: Architecture) -> bool:
     """Ensure the ARM FAT32 image has the SMF executable acceptance fixture."""
-    val img_path = arm_fs_exec_disk_image_path(arch)
-    if rt_file_exists(img_path) and _arm_fs_exec_disk_image_has_required_smf(img_path, arch):
-        return true
-    val arch_label = arch_display_name(arch)
-    print "[ensure_arm_fs_exec_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs for {arch_label}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(
-        "/bin/sh", ["scripts/make_os_disk.shs", "64", img_path, "", arch_label], 60000)
-    if stdout != "":
-        print "[ensure_arm_fs_exec_disk_image] stdout:\n{stdout}"
-    if stderr != "":
-        print "[ensure_arm_fs_exec_disk_image] stderr:\n{stderr}"
-    if exit_code != 0:
-        print "[ensure_arm_fs_exec_disk_image] make_os_disk.shs exited {exit_code}"
-        return false
-    if not rt_file_exists(img_path):
-        return false
-    if not _arm_fs_exec_disk_image_has_required_smf(img_path, arch):
-        print "[ensure_arm_fs_exec_disk_image] image exists but ARM SMF markers are missing"
-        return false
-    true
+    _ensure_catalog_fs_exec_disk_image(
+        "ensure_arm_fs_exec_disk_image",
+        "ARM SMF markers are missing",
+        arm_fs_exec_disk_image_path(arch),
+        arch_display_name(arch),
+        _arm_fs_exec_platform_name(arch),
+        arch
+    )
 
 fn ensure_riscv_fs_exec_disk_image(arch: Architecture) -> bool:
     """Ensure the RISC-V FAT32 image has SMF CLI and WM GUI acceptance fixtures."""
-    val img_path = riscv_fs_exec_disk_image_path(arch)
-    if rt_file_exists(img_path) and _riscv_fs_exec_disk_image_has_required_smf(img_path, arch):
-        return true
-    val arch_label = arch_display_name(arch)
-    print "[ensure_riscv_fs_exec_disk_image] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs for {arch_label}"
-    val (stdout, stderr, exit_code) = rt_process_run_timeout(
-        "/bin/sh", ["scripts/make_os_disk.shs", "64", img_path, "", arch_label], 60000)
-    if stdout != "":
-        print "[ensure_riscv_fs_exec_disk_image] stdout:\n{stdout}"
-    if stderr != "":
-        print "[ensure_riscv_fs_exec_disk_image] stderr:\n{stderr}"
-    if exit_code != 0:
-        print "[ensure_riscv_fs_exec_disk_image] make_os_disk.shs exited {exit_code}"
-        return false
-    if not rt_file_exists(img_path):
-        return false
-    if not _riscv_fs_exec_disk_image_has_required_smf(img_path, arch):
-        print "[ensure_riscv_fs_exec_disk_image] image exists but RISC-V SMF markers are missing"
-        return false
-    true
+    _ensure_catalog_fs_exec_disk_image(
+        "ensure_riscv_fs_exec_disk_image",
+        "RISC-V SMF markers are missing",
+        riscv_fs_exec_disk_image_path(arch),
+        arch_display_name(arch),
+        _riscv_fs_exec_platform_name(arch),
+        arch
+    )
 
 fn _fs_test_disk_image_has_required_fixtures(img_path: text) -> bool:
     val cmd =
@@ -2115,107 +2111,183 @@ fn _fs_test_disk_image_has_required_fixtures(img_path: text) -> bool:
     val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
     exit_code == 0
 
-fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
-    val marker = if arch == Architecture.Arm64: "SIMPLEOS_ARM64_HELLO_ELF" else: "SIMPLEOS_ARM32_HELLO_ELF"
-    val lane = if arch == Architecture.Arm64: "arm64-virtio-fat32-smf" else: "arm32-virtio-fat32-smf"
+fn _ensure_catalog_fs_exec_disk_image(
+    log_prefix: text,
+    missing_message: text,
+    img_path: text,
+    arch_label: text,
+    platform_name: text,
+    arch: Architecture
+) -> bool:
+    if rt_file_exists(img_path) and _catalog_fs_exec_disk_image_has_required_smf(img_path, platform_name, arch):
+        return true
+    print "[{log_prefix}] {img_path} missing or incomplete, invoking scripts/make_os_disk.shs for {arch_label}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh", ["scripts/make_os_disk.shs", "64", img_path, "", arch_label], 60000)
+    if stdout != "":
+        print "[{log_prefix}] stdout:\n{stdout}"
+    if stderr != "":
+        print "[{log_prefix}] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[{log_prefix}] make_os_disk.shs exited {exit_code}"
+        return false
+    if not rt_file_exists(img_path):
+        return false
+    if not _catalog_fs_exec_disk_image_has_required_smf(img_path, platform_name, arch):
+        print "[{log_prefix}] image exists but {missing_message}"
+        return false
+    true
+
+fn _catalog_fs_exec_disk_image_has_required_smf(img_path: text, platform_name: text, arch: Architecture) -> bool:
+    if platform_name == "arm64" or platform_name == "arm32":
+        return _arm_fs_exec_disk_image_has_required_smf(img_path, arch)
+    _riscv_fs_exec_disk_image_has_required_smf(img_path, arch)
+
+fn _staged_tool_app_smf_name(app_name: text) -> text:
+    if app_name == "simple_compiler":
+        return "SCOMPSMF"
+    if app_name == "simple_loader":
+        return "SLOADSMF"
+    if app_name == "simple_interpreter":
+        return "SINTSMF"
+    if app_name == "llvm":
+        return "LLVMSMF"
+    if app_name == "clang":
+        return "CLANGSMF"
+    if app_name == "rust":
+        return "RUSTSMF"
+    if app_name == "hello_world":
+        return "HELLOSMF"
+    if app_name == "simple_browser":
+        return "BROWSMF"
+    ""
+
+fn _native_tool_version_path(app_name: text) -> text:
+    if app_name == "llvm":
+        return "/SYS/LLVMVER.TXT"
+    if app_name == "clang":
+        return "/SYS/CLANGVER.TXT"
+    if app_name == "rust":
+        return "/SYS/RUSTVER.TXT"
+    ""
+
+fn _native_tool_version_pattern(app_name: text) -> text:
+    if app_name == "llvm":
+        return "standalone app"
+    if app_name == "clang":
+        return "clang version"
+    if app_name == "rust":
+        return "standalone app"
+    ""
+
+fn _native_tool_pipeline_path(app_name: text) -> text:
+    if app_name == "llvm":
+        return "/usr/share/simpleos/toolchain/llvm/pipeline.step"
+    if app_name == "clang":
+        return "/usr/share/simpleos/toolchain/clang/pipeline.step"
+    if app_name == "rust":
+        return "/usr/share/simpleos/toolchain/rust/pipeline.step"
+    ""
+
+fn _native_tool_pipeline_pattern(app_name: text) -> text:
+    if app_name == "llvm":
+        return "pipeline=compile-pipeline-step"
+    if app_name == "clang":
+        return "pipeline=compile-pipeline-step"
+    if app_name == "rust":
+        return "pipeline=build-pipeline-step"
+    ""
+
+fn _catalog_lane_disk_image_has_required_staged_apps(img_path: text, lane: SimpleOsLaneContract) -> bool:
+    var mtype_checks: [text] = []
+    var grep_checks: [text] = []
+    var has_native_tool = false
+    for app in lane.staged_apps:
+        val smf_name = _staged_tool_app_smf_name(app.app_name)
+        if smf_name != "":
+            mtype_checks.push("mtype -i \"{img_path}\" ::/SYS/APPS/{smf_name}.SMF 2>/dev/null | strings | grep -q '{app.app_path}'")
+            mtype_checks.push("mtype -i \"{img_path}\" ::/SYS/APPS/{smf_name}.SMF 2>/dev/null | grep -a -q 'SMF'")
+            grep_checks.push("grep -a -q '{smf_name}' \"{img_path}\"")
+        grep_checks.push("grep -a -q '{app.app_path}' \"{img_path}\"")
+        if app.native_launch_mode != "":
+            has_native_tool = true
+            mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'entry_app={app.app_path}'")
+            mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'lane={lane.name}'")
+            mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'mode={app.native_launch_mode}'")
+            mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'status={app.native_launch_status}'")
+            grep_checks.push("grep -a -q 'entry_app={app.app_path}' \"{img_path}\"")
+            grep_checks.push("grep -a -q 'lane={lane.name}' \"{img_path}\"")
+            grep_checks.push("grep -a -q 'mode={app.native_launch_mode}' \"{img_path}\"")
+            grep_checks.push("grep -a -q 'status={app.native_launch_status}' \"{img_path}\"")
+            val version_path = _native_tool_version_path(app.app_name)
+            val version_pattern = _native_tool_version_pattern(app.app_name)
+            if version_path != "" and version_pattern != "":
+                mtype_checks.push("mtype -i \"{img_path}\" ::{version_path} 2>/dev/null | grep -q '{version_pattern}'")
+                grep_checks.push("grep -a -q '{version_pattern}' \"{img_path}\"")
+            val pipeline_path = _native_tool_pipeline_path(app.app_name)
+            val pipeline_pattern = _native_tool_pipeline_pattern(app.app_name)
+            if pipeline_path != "" and pipeline_pattern != "":
+                mtype_checks.push("mtype -i \"{img_path}\" ::{pipeline_path} 2>/dev/null | grep -q '{pipeline_pattern}'")
+                mtype_checks.push("mtype -i \"{img_path}\" ::{app.manifest_path} 2>/dev/null | grep -q 'proof_pipeline={pipeline_path}'")
+                grep_checks.push("grep -a -q '{pipeline_path}' \"{img_path}\"")
+            grep_checks.push("grep -a -q '{app.app_path} status={app.native_launch_status}' \"{img_path}\"")
+    if has_native_tool:
+        mtype_checks.push("mtype -i \"{img_path}\" ::/SYS/TOOLSET.SDN 2>/dev/null | grep -q 'lane = \"{lane.name}\"'")
+        grep_checks.push("grep -a -q 'lane = \"{lane.name}\"' \"{img_path}\"")
+    if mtype_checks.len() == 0 and grep_checks.len() == 0:
+        return true
+    val mtype_cmd = if mtype_checks.len() == 0: "true" else: mtype_checks.join(" && ")
+    val grep_cmd = if grep_checks.len() == 0: "true" else: grep_checks.join(" && ")
     val cmd =
         "if command -v mtype >/dev/null 2>&1; then " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q '{marker}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/SCOMPSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/simple_compiler' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/SINTSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/simple_interpreter' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/SLOADSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/simple_loader' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/LLVMSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/llvm' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/CLANGSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/clang' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/RUSTSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/rust' && " +
-        "mtype -i \"{img_path}\" ::/SYS/LLVMVER.TXT 2>/dev/null | grep -q 'standalone app' && " +
-        "mtype -i \"{img_path}\" ::/SYS/CLANGVER.TXT 2>/dev/null | grep -q 'clang version' && " +
-        "mtype -i \"{img_path}\" ::/SYS/RUSTVER.TXT 2>/dev/null | grep -q 'standalone app' && " +
-        "mtype -i \"{img_path}\" ::/SYS/LLVMMAN.TXT 2>/dev/null | grep -q 'entry_app=/sys/apps/llvm' && " +
-        "mtype -i \"{img_path}\" ::/SYS/LLVMMAN.TXT 2>/dev/null | grep -q 'lane={lane}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/CLANGMAN.TXT 2>/dev/null | grep -q 'entry_app=/sys/apps/clang' && " +
-        "mtype -i \"{img_path}\" ::/SYS/CLANGMAN.TXT 2>/dev/null | grep -q 'lane={lane}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/RUSTMAN.TXT 2>/dev/null | grep -q 'entry_app=/sys/apps/rust' && " +
-        "mtype -i \"{img_path}\" ::/SYS/RUSTMAN.TXT 2>/dev/null | grep -q 'lane={lane}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/TOOLSET.SDN 2>/dev/null | grep -q 'lane = \"{lane}\"' && " +
-        "mtype -i \"{img_path}\" ::/SYS/TOOLSET.SDN 2>/dev/null | grep -q '/sys/apps/clang status=standalone-required' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SMF'; " +
+        mtype_cmd + "; " +
         "else " +
-        "grep -a -q '{marker}' \"{img_path}\" && " +
-        "grep -a -q 'SCOMPSMF' \"{img_path}\" && " +
-        "grep -a -q 'SINTSMF' \"{img_path}\" && " +
-        "grep -a -q 'SLOADSMF' \"{img_path}\" && " +
-        "grep -a -q 'LLVMSMF' \"{img_path}\" && " +
-        "grep -a -q 'CLANGSMF' \"{img_path}\" && " +
-        "grep -a -q 'RUSTSMF' \"{img_path}\" && " +
-        "grep -a -q 'SimpleOS LLVM standalone app v1' \"{img_path}\" && " +
-        "grep -a -q 'clang version 20.0.0' \"{img_path}\" && " +
-        "grep -a -q 'SimpleOS Rust standalone app v1' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/simple_compiler' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/simple_interpreter' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/simple_loader' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/llvm' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/clang' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/rust' \"{img_path}\" && " +
-        "grep -a -q 'entry_app=/sys/apps/llvm' \"{img_path}\" && " +
-        "grep -a -q 'lane={lane}' \"{img_path}\" && " +
-        "grep -a -q 'entry_app=/sys/apps/clang' \"{img_path}\" && " +
-        "grep -a -q 'entry_app=/sys/apps/rust' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/clang status=standalone-required' \"{img_path}\" && " +
-        "grep -a -q 'SMF' \"{img_path}\"; " +
+        grep_cmd + "; " +
         "fi"
     val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
     exit_code == 0
 
+fn _arm_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
+    val marker = if arch == Architecture.Arm64: "SIMPLEOS_ARM64_HELLO_ELF" else: "SIMPLEOS_ARM32_HELLO_ELF"
+    val platform_name = _arm_fs_exec_platform_name(arch)
+    val lane_name = _arm_fs_exec_scenario_name(arch)
+    val lane = simpleos_platform_qemu_lane(platform_name, lane_name)
+    if val resolved_lane = lane:
+        val cmd =
+            "if command -v mtype >/dev/null 2>&1; then " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q '{marker}' && " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SMF'; " +
+            "else " +
+            "grep -a -q '{marker}' \"{img_path}\" && " +
+            "grep -a -q 'HELLOSMF' \"{img_path}\" && " +
+            "grep -a -q 'SMF' \"{img_path}\"; " +
+            "fi"
+        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+        return exit_code == 0 and _catalog_lane_disk_image_has_required_staged_apps(img_path, resolved_lane)
+    false
+
 fn _riscv_fs_exec_disk_image_has_required_smf(img_path: text, arch: Architecture) -> bool:
     val hello_marker = if arch == Architecture.Riscv64: "SIMPLEOS_RISCV64_HELLO_ELF" else: "SIMPLEOS_RISCV32_HELLO_ELF"
     val gui_marker = if arch == Architecture.Riscv64: "SIMPLEOS_RISCV64_GUI_ELF" else: "SIMPLEOS_RISCV32_GUI_ELF"
-    val lane = if arch == Architecture.Riscv64: "riscv64-hosted" else: "riscv32-virtio-fat32-smf"
-    val cmd =
-        "if command -v mtype >/dev/null 2>&1; then " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q '{hello_marker}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/BROWSMF.SMF 2>/dev/null | grep -a -q '{gui_marker}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/LLVMSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/llvm' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/CLANGSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/clang' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/RUSTSMF.SMF 2>/dev/null | strings | grep -q '/sys/apps/rust' && " +
-        "mtype -i \"{img_path}\" ::/SYS/LLVMVER.TXT 2>/dev/null | grep -q 'standalone app' && " +
-        "mtype -i \"{img_path}\" ::/SYS/CLANGVER.TXT 2>/dev/null | grep -q 'clang version' && " +
-        "mtype -i \"{img_path}\" ::/SYS/RUSTVER.TXT 2>/dev/null | grep -q 'standalone app' && " +
-        "mtype -i \"{img_path}\" ::/SYS/LLVMMAN.TXT 2>/dev/null | grep -q 'entry_app=/sys/apps/llvm' && " +
-        "mtype -i \"{img_path}\" ::/SYS/LLVMMAN.TXT 2>/dev/null | grep -q 'lane={lane}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/CLANGMAN.TXT 2>/dev/null | grep -q 'entry_app=/sys/apps/clang' && " +
-        "mtype -i \"{img_path}\" ::/SYS/CLANGMAN.TXT 2>/dev/null | grep -q 'lane={lane}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/RUSTMAN.TXT 2>/dev/null | grep -q 'entry_app=/sys/apps/rust' && " +
-        "mtype -i \"{img_path}\" ::/SYS/RUSTMAN.TXT 2>/dev/null | grep -q 'lane={lane}' && " +
-        "mtype -i \"{img_path}\" ::/SYS/TOOLSET.SDN 2>/dev/null | grep -q 'lane = \"{lane}\"' && " +
-        "mtype -i \"{img_path}\" ::/SYS/TOOLSET.SDN 2>/dev/null | grep -q '/sys/apps/clang status=standalone-required' && " +
-        "mtype -i \"{img_path}\" ::/usr/share/simpleos/toolchain/llvm/pipeline.step 2>/dev/null | grep -q 'pipeline=compile-pipeline-step' && " +
-        "mtype -i \"{img_path}\" ::/usr/share/simpleos/toolchain/clang/pipeline.step 2>/dev/null | grep -q 'pipeline=compile-pipeline-step' && " +
-        "mtype -i \"{img_path}\" ::/usr/share/simpleos/toolchain/rust/pipeline.step 2>/dev/null | grep -q 'pipeline=build-pipeline-step' && " +
-        "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SMF'; " +
-        "else " +
-        "grep -a -q '{hello_marker}' \"{img_path}\" && " +
-        "grep -a -q '{gui_marker}' \"{img_path}\" && " +
-        "grep -a -q 'LLVMSMF' \"{img_path}\" && " +
-        "grep -a -q 'CLANGSMF' \"{img_path}\" && " +
-        "grep -a -q 'RUSTSMF' \"{img_path}\" && " +
-        "grep -a -q 'SimpleOS LLVM standalone app v1' \"{img_path}\" && " +
-        "grep -a -q 'clang version 20.0.0' \"{img_path}\" && " +
-        "grep -a -q 'SimpleOS Rust standalone app v1' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/llvm' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/clang' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/rust' \"{img_path}\" && " +
-        "grep -a -q 'entry_app=/sys/apps/llvm' \"{img_path}\" && " +
-        "grep -a -q 'lane={lane}' \"{img_path}\" && " +
-        "grep -a -q 'entry_app=/sys/apps/clang' \"{img_path}\" && " +
-        "grep -a -q 'entry_app=/sys/apps/rust' \"{img_path}\" && " +
-        "grep -a -q '/sys/apps/clang status=standalone-required' \"{img_path}\" && " +
-        "grep -a -q '/usr/share/simpleos/toolchain/llvm/pipeline.step' \"{img_path}\" && " +
-        "grep -a -q '/usr/share/simpleos/toolchain/clang/pipeline.step' \"{img_path}\" && " +
-        "grep -a -q '/usr/share/simpleos/toolchain/rust/pipeline.step' \"{img_path}\" && " +
-        "grep -a -q 'SMF' \"{img_path}\"; " +
-        "fi"
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
-    exit_code == 0
+    val platform_name = _riscv_fs_exec_platform_name(arch)
+    val lane_name = if arch == Architecture.Riscv64: "riscv64-hosted" else: _riscv_fs_exec_scenario_name(arch)
+    val lane = simpleos_platform_qemu_lane(platform_name, lane_name)
+    if val resolved_lane = lane:
+        val cmd =
+            "if command -v mtype >/dev/null 2>&1; then " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q '{hello_marker}' && " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/BROWSMF.SMF 2>/dev/null | grep -a -q '{gui_marker}' && " +
+            "mtype -i \"{img_path}\" ::/SYS/APPS/HELLOSMF.SMF 2>/dev/null | grep -a -q 'SMF'; " +
+            "else " +
+            "grep -a -q '{hello_marker}' \"{img_path}\" && " +
+            "grep -a -q '{gui_marker}' \"{img_path}\" && " +
+            "grep -a -q 'HELLOSMF' \"{img_path}\" && " +
+            "grep -a -q 'BROWSMF' \"{img_path}\" && " +
+            "grep -a -q 'SMF' \"{img_path}\"; " +
+            "fi"
+        val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", cmd], 5000)
+        return exit_code == 0 and _catalog_lane_disk_image_has_required_staged_apps(img_path, resolved_lane)
+    false
 
 fn ensure_arm_fs_exec_kernel_binary(scenario: QemuScenario, target: OsTarget) -> bool:
     if not _is_arm_fs_exec_scenario(scenario):
@@ -2419,7 +2491,7 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     print "[test] serial output:\n{serial_output}"
     val accepted = if scenario.name == "x64-desktop-uefi":
         desktop_uefi_serial_accepts_completion(serial_output)
-    else if _catalog_lane_for_scenario(scenario) != nil:
+    else if _is_arm_fs_exec_scenario(scenario) or _is_riscv_fs_exec_scenario(scenario) or scenario.name == "riscv64-hosted":
         _scenario_serial_accepts_completion(scenario, serial_output)
     else:
         serial_output.contains("TEST PASSED")
@@ -2428,7 +2500,7 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         if scenario.name == "x64-desktop-uefi":
             print "[test] FAILED: scenario {scenario.name} did not satisfy desktop driver completion markers"
             print_desktop_uefi_missing_markers(serial_output)
-        else if _catalog_lane_for_scenario(scenario) != nil:
+        else if _is_arm_fs_exec_scenario(scenario) or _is_riscv_fs_exec_scenario(scenario) or scenario.name == "riscv64-hosted":
             print "[test] FAILED: scenario {scenario.name} did not satisfy catalog lane completion markers"
             _print_scenario_missing_markers(scenario, serial_output)
         else:
@@ -2438,8 +2510,7 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
 fn arm_fs_exec_required_marker_fragments(scenario: QemuScenario) -> [text]:
     if val lane = _catalog_lane_for_scenario(scenario):
         return lane.required_serial_markers
-    val platform_name = if scenario.arch == Architecture.Arm64: "arm64" else: "arm32"
-    simpleos_platform_qemu_acceptance_required_markers(platform_name)
+    []
 
 fn arm_fs_exec_serial_accepts_completion(scenario: QemuScenario, serial_output: text) -> bool:
     for marker in arm_fs_exec_required_marker_fragments(scenario):
@@ -2455,11 +2526,16 @@ fn print_arm_fs_exec_missing_markers(scenario: QemuScenario, serial_output: text
 fn riscv64_hosted_required_marker_fragments() -> [text]:
     if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
         return lane.required_serial_markers
-    simpleos_platform_qemu_acceptance_required_markers("riscv64")
+    []
 
 fn _scenario_required_marker_fragments(scenario: QemuScenario) -> [text]:
-    if val lane = _catalog_lane_for_scenario(scenario):
-        return lane.required_serial_markers
+    if _is_arm_fs_exec_scenario(scenario):
+        return arm_fs_exec_required_marker_fragments(scenario)
+    if scenario.name == "riscv64-hosted":
+        return riscv64_hosted_required_marker_fragments()
+    if _is_riscv_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
+            return lane.required_serial_markers
     []
 
 fn _scenario_serial_accepts_completion(scenario: QemuScenario, serial_output: text) -> bool:
@@ -2563,8 +2639,18 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
     """Return a realistic smoke-test timeout for a named QEMU scenario."""
     if scenario.name == "x64-nvme-fat32":
         return 60000
-    if val lane = _catalog_lane_for_scenario(scenario):
-        return lane.timeout_ms as u64
+    if _is_arm_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_arm_fs_exec_platform_name(scenario.arch), scenario.name):
+            return lane.timeout_ms as u64
+        return 60000
+    if scenario.name == "riscv64-hosted":
+        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
+            return lane.timeout_ms as u64
+        return 120000
+    if _is_riscv_fs_exec_scenario(scenario):
+        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
+            return lane.timeout_ms as u64
+        return 60000
     if val timeout_ms = _desktop_scenario_timeout_ms(scenario.name):
         return timeout_ms
     10000
@@ -2573,11 +2659,10 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
     """Materialize required host-side disk media for scenarios that attach storage."""
     if val ready = _ensure_desktop_scenario_media(scenario.name):
         return ready
-    if val platform_name = _catalog_lane_platform_name_for_scenario(scenario):
-        if platform_name == "arm64" or platform_name == "arm32":
-            return ensure_arm_fs_exec_disk_image(scenario.arch)
-        if platform_name == "riscv64" or platform_name == "riscv32":
-            return ensure_riscv_fs_exec_disk_image(scenario.arch)
+    if _is_arm_fs_exec_scenario(scenario):
+        return ensure_arm_fs_exec_disk_image(scenario.arch)
+    if _is_riscv_fs_exec_scenario(scenario) or scenario.name == "riscv64-hosted":
+        return ensure_riscv_fs_exec_disk_image(scenario.arch)
     true
 
 fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32):

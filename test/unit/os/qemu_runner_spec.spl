@@ -17,11 +17,13 @@ use os.qemu_runner.{
     board_bundle_command, ensure_board_bundle,
     desktop_uefi_required_marker_fragments, riscv64_hosted_required_marker_fragments,
     arm_fs_exec_required_marker_fragments,
+    scenario_lane_kind,
     _simpleos_log_config_source,
     OsTarget,
     qemu_run_options_debug_gui
 }
 use os.kernel.arch.arch_context.{Architecture}
+use os.port.simpleos_multiplatform_build.{SimpleOsLaneKind, simpleos_platform_qemu_lane}
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -172,6 +174,30 @@ describe "Qemu runner serial routing":
         expect(markers.contains("[desktop-e2e] process-backed:ok app=hello_world pid=")).to_equal(false)
         expect(markers.contains("[desktop-e2e] process-backed:ok app=simple_interpreter pid=")).to_equal(false)
         expect(markers.contains("[desktop-e2e] process-backed:ok app=llvm pid=")).to_equal(false)
+        val lane = simpleos_platform_qemu_lane("arm64", "arm64-virtio-fat32-smf")
+        if val resolved_lane = lane:
+            expect(markers).to_equal(resolved_lane.required_serial_markers)
+        else:
+            fail("missing arm64 acceptance lane")
+
+    it "keeps ARM and RV64 marker helper surfaces aligned with catalog lanes":
+        val arm64_lane = simpleos_platform_qemu_lane("arm64", "arm64-virtio-fat32-smf")
+        if val lane = arm64_lane:
+            expect(arm_fs_exec_required_marker_fragments(scenario_arm64_virtio_fat32_smf())).to_equal(lane.required_serial_markers)
+        else:
+            fail("missing arm64 virtio lane")
+
+        val arm32_lane = simpleos_platform_qemu_lane("arm32", "arm32-virtio-fat32-smf")
+        if val lane = arm32_lane:
+            expect(arm_fs_exec_required_marker_fragments(scenario_arm32_virtio_fat32_smf())).to_equal(lane.required_serial_markers)
+        else:
+            fail("missing arm32 virtio lane")
+
+        val rv64_hosted_lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted")
+        if val lane = rv64_hosted_lane:
+            expect(riscv64_hosted_required_marker_fragments()).to_equal(lane.required_serial_markers)
+        else:
+            fail("missing riscv64 hosted lane")
 
     it "routes default RISC-V QEMU targets to fs-backed acceptance lanes":
         val rv64 = get_qemu_target(Architecture.Riscv64)
@@ -189,6 +215,14 @@ describe "Qemu runner serial routing":
         expect(arm64.qemu_extra).to_contain("file=build/os/fat32-arm64.img,if=none,id=armdisk,format=raw")
         expect(arm64.qemu_extra).to_contain("-semihosting-config")
         expect(scenario_test_timeout_ms(arm64)).to_equal(60000)
+        expect(scenario_lane_kind(arm64)).to_equal(SimpleOsLaneKind.FsExec)
+
+        val arm64_lane = simpleos_platform_qemu_lane("arm64", "arm64-virtio-fat32-smf")
+        if val lane = arm64_lane:
+            expect(arm64.memory).to_equal(lane.qemu_memory)
+            expect(arm64.qemu_extra).to_equal(lane.qemu_extra)
+        else:
+            fail("missing arm64 virtio lane")
 
         val arm32 = scenario_arm32_virtio_fat32_smf()
         expect(arm32.name).to_equal("arm32-virtio-fat32-smf")
@@ -196,6 +230,15 @@ describe "Qemu runner serial routing":
         expect(arm32.qemu_extra).to_contain("virtio-blk-device,drive=armdisk")
         expect(arm32.qemu_extra).to_contain("file=build/os/fat32-arm32.img,if=none,id=armdisk,format=raw")
         expect(arm32.qemu_extra).to_contain("-semihosting-config")
+        expect(scenario_test_timeout_ms(arm32)).to_equal(60000)
+        expect(scenario_lane_kind(arm32)).to_equal(SimpleOsLaneKind.FsExec)
+
+        val arm32_lane = simpleos_platform_qemu_lane("arm32", "arm32-virtio-fat32-smf")
+        if val lane = arm32_lane:
+            expect(arm32.memory).to_equal(lane.qemu_memory)
+            expect(arm32.qemu_extra).to_equal(lane.qemu_extra)
+        else:
+            fail("missing arm32 virtio lane")
 
     it "builds QEMU commands with ARM loader and VirtIO block disks":
         val arm64 = scenario_arm64_virtio_fat32_smf()
@@ -209,6 +252,26 @@ describe "Qemu runner serial routing":
         val target = scenario_target(arm64)
         expect(target.entry).to_equal("examples/simple_os/arch/arm64/fs_exec_entry.spl")
         expect(target.linker_script).to_equal("examples/simple_os/arch/arm64/fs_exec_linker.ld")
+        expect(target.output).to_equal("build/os/simpleos_arm64_fs_exec.elf")
+
+        val arm64_lane = simpleos_platform_qemu_lane("arm64", "arm64-virtio-fat32-smf")
+        if val lane = arm64_lane:
+            expect(target.entry).to_equal(lane.entry)
+            expect(target.linker_script).to_equal(lane.linker_script)
+            expect(target.output).to_equal(lane.output)
+            expect(arm_fs_exec_disk_image_path(Architecture.Arm64)).to_equal(lane.media_path_hint)
+        else:
+            fail("missing arm64 virtio lane")
+
+        val arm32_target = scenario_target(scenario_arm32_virtio_fat32_smf())
+        val arm32_lane = simpleos_platform_qemu_lane("arm32", "arm32-virtio-fat32-smf")
+        if val lane = arm32_lane:
+            expect(arm32_target.entry).to_equal(lane.entry)
+            expect(arm32_target.linker_script).to_equal(lane.linker_script)
+            expect(arm32_target.output).to_equal(lane.output)
+            expect(arm_fs_exec_disk_image_path(Architecture.Arm32)).to_equal(lane.media_path_hint)
+        else:
+            fail("missing arm32 virtio lane")
 
     it "looks up ARM SMF scenarios by name":
         expect(scenario_name_or_missing("arm64-virtio-fat32-smf")).to_equal("arm64-virtio-fat32-smf")
@@ -223,6 +286,14 @@ describe "Qemu runner serial routing":
         expect(rv64.qemu_extra).to_contain("virtio-blk-device,drive=rvdisk")
         expect(rv64.qemu_extra).to_contain("file=build/os/fat32-riscv64.img,if=none,id=rvdisk,format=raw")
         expect(scenario_test_timeout_ms(rv64)).to_equal(60000)
+        expect(scenario_lane_kind(rv64)).to_equal(SimpleOsLaneKind.FsExec)
+
+        val rv64_lane = simpleos_platform_qemu_lane("riscv64", "riscv64-virtio-fat32-smf")
+        if val lane = rv64_lane:
+            expect(rv64.memory).to_equal(lane.qemu_memory)
+            expect(rv64.qemu_extra).to_equal(lane.qemu_extra)
+        else:
+            fail("missing riscv64 virtio lane")
 
         val rv32 = scenario_riscv32_virtio_fat32_smf()
         expect(rv32.name).to_equal("riscv32-virtio-fat32-smf")
@@ -249,6 +320,30 @@ describe "Qemu runner serial routing":
         expect(cmd32).to_contain("virtio-blk-device,drive=rvdisk")
         val target32 = scenario_target(rv32)
         expect(target32.entry).to_equal("examples/simple_os/arch/riscv32/smoke_entry.spl")
+        expect(target32.output).to_equal("build/os/simpleos_riscv32_smf_fs.elf")
+
+    it "keeps RV64 media-backed scenario targets aligned with catalog lanes":
+        val rv64 = scenario_riscv64_virtio_fat32_smf()
+        val rv64_target = scenario_target(rv64)
+        val rv64_lane = simpleos_platform_qemu_lane("riscv64", "riscv64-virtio-fat32-smf")
+        if val lane = rv64_lane:
+            expect(rv64_target.entry).to_equal(lane.entry)
+            expect(rv64_target.linker_script).to_equal(lane.linker_script)
+            expect(rv64_target.output).to_equal(lane.output)
+            expect(riscv_fs_exec_disk_image_path(Architecture.Riscv64)).to_equal(lane.media_path_hint)
+        else:
+            fail("missing riscv64 virtio lane")
+
+        val hosted = scenario_riscv64_hosted()
+        val hosted_target = scenario_target(hosted)
+        val hosted_lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted")
+        if val lane = hosted_lane:
+            expect(hosted_target.entry).to_equal(lane.entry)
+            expect(hosted_target.linker_script).to_equal(lane.linker_script)
+            expect(hosted_target.output).to_equal(lane.output)
+            expect(riscv_fs_exec_disk_image_path(Architecture.Riscv64)).to_equal(lane.media_path_hint)
+        else:
+            fail("missing riscv64 hosted lane")
 
     it "scopes RISC-V SMF native builds to arch-local sources":
         val rv64_target = scenario_target(scenario_riscv64_virtio_fat32_smf())
@@ -292,6 +387,14 @@ describe "Qemu runner serial routing":
         expect(hosted.qemu_extra).to_contain("virtio-net-pci,netdev=n0,disable-legacy=on")
         expect(scenario_name_or_missing("riscv64-hosted")).to_equal("riscv64-hosted")
         expect(scenario_test_timeout_ms(hosted)).to_equal(120000)
+        expect(scenario_lane_kind(hosted)).to_equal(SimpleOsLaneKind.HostedCompileSmoke)
+
+        val hosted_lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted")
+        if val lane = hosted_lane:
+            expect(hosted.memory).to_equal(lane.qemu_memory)
+            expect(hosted.qemu_extra).to_equal(lane.qemu_extra)
+        else:
+            fail("missing riscv64 hosted lane")
 
         val hosted_cmd = build_scenario_command(hosted, "build/os/simpleos_riscv64_hosted.elf")
         expect(hosted_cmd[0]).to_equal("qemu-system-riscv64")
@@ -722,6 +825,11 @@ describe "Qemu runner desktop UEFI tool app validator":
         expect(markers).to_contain("[desktop-e2e] process-backed:ok app=clang pid=")
         expect(markers).to_contain("[desktop-e2e] native-toolchain-launch:ok app=clang lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
         expect(markers).to_contain("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust")
+        val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted")
+        if val resolved_lane = lane:
+            expect(markers).to_equal(resolved_lane.required_serial_markers)
+        else:
+            fail("missing riscv64 hosted lane")
 
     it "accepts the raw-image fallback when mdir and mtype are unavailable but the CLI catalog marker is present":
         val root = "build/test-qemu-tool-app-validator"

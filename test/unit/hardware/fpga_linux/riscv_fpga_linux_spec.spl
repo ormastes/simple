@@ -9,7 +9,7 @@ use std.spec.*
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_read_text(path: text) -> text
 
-use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, create_default_riscv_fpga_linux_manifest_with_experimental_rv32_linux, generate_default_riscv_fpga_rtl_bundle, generate_default_riscv_fpga_rtl_bundle_with_experimental_rv32_linux, read_generated_riscv_fpga_rtl_file}
+use hardware.fpga_linux.riscv_fpga_linux.{RiscvReadinessStatus, XilinxBoardProfile, RiscvFpgaLane, create_default_riscv_fpga_linux_manifest, generate_default_riscv_fpga_rtl_bundle, read_generated_riscv_fpga_rtl_file}
 use hardware.riscv_common.pkg.riscv_generated_core_pkg.RiscvProofLane
 
 fn shell(command: text) -> i64:
@@ -43,12 +43,11 @@ describe "RISC-V FPGA Linux lanes":
         expect(rv64.xlen.linux_policy()).to_equal("repo-native-rv64-linux")
         expect(rv64.proof_acceptance_markers()).to_contain("Linux version")
 
-    it "keeps the legacy compatibility manifest alias aligned with the default manifest":
+    it "keeps the default manifest dual-arch by construction":
         val manifest = create_default_riscv_fpga_linux_manifest()
-        val compat_manifest = create_default_riscv_fpga_linux_manifest_with_experimental_rv32_linux()
         expect(manifest.lanes.len()).to_equal(2)
-        expect(compat_manifest.lanes.len()).to_equal(2)
-        expect(compat_manifest.readiness_summary()).to_equal(manifest.readiness_summary())
+        expect(manifest.readiness_summary()).to_contain("rv32:contract:qemu_virt_rv32")
+        expect(manifest.readiness_summary()).to_contain("rv64:contract:qemu_virt_rv64")
 
 describe "RISC-V FPGA Linux manifest":
     it "emits authoritative RV32 and RV64 Linux metadata plus per-product boot outputs":
@@ -124,7 +123,16 @@ describe "RISC-V FPGA Linux RTL generation":
         expect(rv32_sidecar).to_contain("\"acceptanceMarkers\": [\"OpenSBI\", \"Linux version\", \"OF: fdt\", \"Freeing unused kernel memory\", \"init started\"]")
         expect(rv32_sidecar).to_contain("\"reportMarkers\": [\"PASS_WORD:\", \"A0_LOW32:\", \"A1_LOW32:\", \"UART_BYTES_LOW32:\", \"DTB_PROBE_SEEN:\", \"FINAL_PC_HEX32:\", \"HALT_SEEN:\", \"TRAP_SEEN:\"]")
         expect(rv32_sidecar).to_contain("\"runnerSuccessMarkers\": {\"tb_generated_rv32_linux_handoff.vhd\":\"GENERATED_RV32_LINUX_HANDOFF: PASS\", \"tb_generated_rv32_boot_info_real_dtb.vhd\":\"GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS\"}")
+        expect(rv32_handoff_tb).to_contain("entity tb_generated_rv32_linux_handoff is")
+        expect(rv32_handoff_tb).to_contain("use work.simple_rv32gc_core_pkg.all;")
+        expect(rv32_handoff_tb).to_contain("u_cpu : entity work.simple_rv32gc_core")
+        expect(rv32_handoff_tb).to_contain("constant BOOT_A1    : std_logic_vector(31 downto 0) := x\"88000000\";")
         expect(rv32_handoff_tb).to_contain("GENERATED_RV32_LINUX_HANDOFF: PASS")
+        expect(rv32_real_dtb_tb).to_contain("entity tb_generated_rv32_boot_info_real_dtb is")
+        expect(rv32_real_dtb_tb).to_contain("use work.simple_rv32gc_core_pkg.all;")
+        expect(rv32_real_dtb_tb).to_contain("u_cpu : entity work.simple_rv32gc_core")
+        expect(rv32_real_dtb_tb).to_contain("constant DTB_BASE_ADDR  : std_logic_vector(31 downto 0) := x\"88000000\";")
+        expect(rv32_real_dtb_tb).to_contain("report \"DTB_PROBE_SEEN: 1\";")
         expect(rv32_real_dtb_tb).to_contain("GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS")
         expect(rv32_mailbox_tb).to_equal("")
         expect(rv64_source).to_contain("proof_lane: generated_rv64_linux")
@@ -165,15 +173,6 @@ describe "RISC-V FPGA Linux RTL generation":
         expect(readme).to_contain("per-arch boot products manifest: `board_linux_boot_products.sdn`")
         expect(readme).to_contain("Within each lane, `authoritative_rtl_root` is marked `simple-compiler-generated` and is the pure-Simple RTL contract.")
         expect(readme).to_contain("Generated-core runners must compile RTL only from the emitted bundle directories `rv32/rtl` and `rv64/rtl`.")
-
-    it "keeps the legacy compatibility alias on the same RV32 bundle root":
-        expect(shell("rm -rf '/tmp/simple_rv_linux_fpga_rtl_compat'")).to_equal(0)
-        val result = generate_default_riscv_fpga_rtl_bundle_with_experimental_rv32_linux("/tmp/simple_rv_linux_fpga_rtl_compat")
-        expect(result.is_ok()).to_equal(true)
-        val manifest_text = read_generated_riscv_fpga_rtl_file("/tmp/simple_rv_linux_fpga_rtl_compat/riscv_fpga_rtl_manifest.sdn")
-        val has_legacy_root = manifest_text.contains("rv32_linux/rtl")
-        expect(manifest_text).to_contain("authoritative_rtl_root = \"/tmp/simple_rv_linux_fpga_rtl_compat/rv32/rtl\"")
-        expect(has_legacy_root).to_equal(false)
 
 describe "Generated runner provenance":
     it "keeps the generated RV32 and RV64 Linux runners on emitted bundle roots only":

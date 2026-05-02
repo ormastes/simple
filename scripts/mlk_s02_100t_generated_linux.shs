@@ -6,6 +6,7 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE_ROOT="${MLK_BUNDLE_ROOT:-$REPO_ROOT/build/fpga/mlk_s02_100t/generated_linux_bundle}"
 PRODUCT_ROOT="${MLK_PRODUCT_ROOT:-$REPO_ROOT/build/fpga/mlk_s02_100t/products}"
+BOOT_PRODUCTS_MANIFEST=""
 UART_PORT="${MLK_UART_PORT:-/dev/ttyUSB0}"
 UART_BAUD="${MLK_UART_BAUD:-115200}"
 UART_TIMEOUT="${MLK_UART_TIMEOUT_SEC:-120}"
@@ -67,9 +68,15 @@ uart_log_path_for() {
     echo "$PRODUCT_ROOT/$product_id/logs/uart.log"
 }
 
+boot_products_manifest_path() {
+    echo "$BUNDLE_ROOT/board_linux_boot_products.sdn"
+}
+
 ensure_bundle() {
     mkdir -p "$BUNDLE_ROOT"
     "$REPO_ROOT/bin/simple" run "$REPO_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" -- --board=mlk_s02_100t "$BUNDLE_ROOT" >/dev/null
+    BOOT_PRODUCTS_MANIFEST="$(boot_products_manifest_path)"
+    [ -f "$BOOT_PRODUCTS_MANIFEST" ] || { echo "FAIL: missing boot products manifest $BOOT_PRODUCTS_MANIFEST" >&2; exit 1; }
 }
 
 run_ghdl_gate() {
@@ -114,13 +121,15 @@ program_product() {
 
 verify_uart() {
     arch="$1"
+    product_id="$(product_id_for "$arch")"
     sh "$REPO_ROOT/scripts/mlk_s02_100t_generated_linux_boot.shs" \
         --uart-port="$UART_PORT" \
         --uart-baud="$UART_BAUD" \
         --uart-log="$(uart_log_path_for "$arch")" \
         --timeout="$UART_TIMEOUT" \
         --cold-boots=1 \
-        --markers="OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started" \
+        --product-id="$product_id" \
+        --boot-products-manifest="$BOOT_PRODUCTS_MANIFEST" \
         "--boot-loader-cmd=$BOOT_LOADER_CMD"
 }
 
