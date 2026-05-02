@@ -685,8 +685,85 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "expect" => {
-            // Return the value as-is so .to(matcher) can match against it
-            // The .to() method in interpreter_method/mod.rs handles the assertion result
+            // Two call forms reach this handler:
+            //   (1) `expect(value).to_equal(other)` — caller chains `.to_equal(...)`
+            //       through interpreter_method/mod.rs, which sets BDD_EXPECT_FAILED
+            //       on mismatch.  Here we just need to return `value` so the chain
+            //       sees it as the receiver.
+            //   (2) `expect <expr>` / `expect a == b` — the test_runner matcher
+            //       preprocessor (`rewrite_method_expect_line`) folds method-form
+            //       calls into this infix shape.  No `.to_*()` chain follows, so
+            //       this handler is the ONLY place that can record assertion
+            //       failure.  Previously the value was returned unchecked, which
+            //       silently false-greened every infix-form assertion in
+            //       interpreter mode (`bin/simple test`).  See
+            //       feedback_compile_mode_false_greens.md (2026-05-02 update)
+            //       and bug_test_runner_load_only_false_green_2026-05-02.md.
+            //
+            // To distinguish the two, inspect args[0].value: when it is a
+            // comparison `Expr::Binary` we evaluate both sides and record a
+            // matcher-style failure message; for any other expression we fall
+            // back to a Bool(false) check on the evaluated value.  In both
+            // cases the resulting evaluated value is still returned so a
+            // downstream `.to(matcher)` chain (form (1)) keeps working.
+            if args.is_empty() {
+                return Ok(Some(Value::Bool(false)));
+            }
+            let arg_expr = &args[0].value;
+            // Comparison-form: `expect a == b`, `expect a != b`, `expect a > b`, …
+            if let Expr::Binary { op, left, right } = arg_expr {
+                let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                let right_val =
+                    evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                let (matched, op_word) = match op {
+                    BinOp::Eq => (left_val == right_val, "equal"),
+                    BinOp::NotEq => (left_val != right_val, "not equal"),
+                    // Ordered comparisons (<, <=, >, >=): defer to the
+                    // standard binary-expr evaluator and check truthiness on
+                    // the resulting Bool — this avoids re-implementing
+                    // ordering semantics for every Value variant.
+                    _ => {
+                        let op_sym = match op {
+                            BinOp::Lt => "<",
+                            BinOp::LtEq => "<=",
+                            BinOp::Gt => ">",
+                            BinOp::GtEq => ">=",
+                            _ => "?",
+                        };
+                        let value = evaluate_expr(
+                            arg_expr, env, functions, classes, enums, impl_methods,
+                        )?;
+                        if !value.truthy() {
+                            BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                            BDD_FAILURE_MSG.with(|cell| {
+                                *cell.borrow_mut() = Some(format!(
+                                    "expected {} {} {} to hold",
+                                    left_val.to_display_string(),
+                                    op_sym,
+                                    right_val.to_display_string(),
+                                ));
+                            });
+                        }
+                        return Ok(Some(value));
+                    }
+                };
+                if !matched {
+                    BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                    BDD_FAILURE_MSG.with(|cell| {
+                        *cell.borrow_mut() = Some(format!(
+                            "expected {} to {} {}",
+                            left_val.to_display_string(),
+                            op_word,
+                            right_val.to_display_string(),
+                        ));
+                    });
+                }
+                return Ok(Some(Value::Bool(matched)));
+            }
+            // General `expect <expr>` / method-form receiver path.  Only mark
+            // a failure when the value is literal Bool(false): non-Bool values
+            // are typically the receiver of a `.to_*()` matcher chain that
+            // does its own assertion in interpreter_method/mod.rs.
             let value = eval_arg(
                 args,
                 0,
@@ -697,7 +774,12 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
-            // Return the value for .to(matcher) to match against
+            if matches!(&value, Value::Bool(false)) {
+                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+                BDD_FAILURE_MSG.with(|cell| {
+                    *cell.borrow_mut() = Some("expected truthy value, got false".to_string());
+                });
+            }
             Ok(Some(value))
         }
         "shared_examples" => {
