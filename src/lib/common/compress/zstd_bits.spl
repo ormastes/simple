@@ -200,3 +200,90 @@ fn zstd_msb_bits_read(state: ZstdMsbBackwardBits, count: i64) -> Result<(i64, Zs
     )
     val padded = consumed_real < count
     Ok((value, advanced_state, padded))
+
+# MSB-first forward bit writer used by the FSE encoder. Bits are accumulated
+# in a 64-bit reservoir and flushed to bytes in little-endian order whenever
+# the reservoir reaches >= 8 bits. The final stream is terminated by writing
+# a single `1` marker bit immediately after the last data bit (RFC 8478
+# §4.1.1 / Annex A "padding"); the bit reader recovers the bit count by
+# locating the high-bit of the last byte.
+struct ZstdBitWriter:
+    bytes: [u8]
+    reservoir: u64
+    bits_in_reservoir: i64
+
+fn zstd_bit_writer_new() -> ZstdBitWriter:
+    ZstdBitWriter(bytes: [], reservoir: 0u64, bits_in_reservoir: 0)
+
+fn _zstd_bit_writer_flush_full_bytes(state: ZstdBitWriter) -> ZstdBitWriter:
+    var next = state
+    while next.bits_in_reservoir >= 8:
+        next.bytes.push((next.reservoir & 0xFFu64).to_u8())
+        next.reservoir = next.reservoir >> 8u64
+        next.bits_in_reservoir = next.bits_in_reservoir - 8
+    next
+
+# Append `count` low bits of `value` to the stream. The low bit of `value`
+# becomes the first bit emitted (LSB-first within each value, but the byte
+# stream produced is consumed by the backward bit reader which reverses the
+# byte order, so within each byte the high bit corresponds to the most
+# recently written bit — matching `ZstdBackwardBits` semantics used by the
+# Huffman literal stream). For the FSE state stream, callers must instead
+# use `zstd_bit_writer_append_msb` so the matching MSB-first reader sees
+# state bits in the right order.
+fn zstd_bit_writer_append_lsb(state: ZstdBitWriter, value: u64, count: i64) -> Result<ZstdBitWriter, CompressionError>:
+    if count < 0:
+        return Err(CompressionError.CorruptStream("zstd bit writer negative count"))
+    if count == 0:
+        return Ok(state)
+    if count > 32:
+        return Err(CompressionError.UnsupportedFeature("zstd bit writer wider than 32 bits"))
+    var next = state
+    val mask = _zstd_low_bits_mask(count)
+    next.reservoir = next.reservoir | ((value & mask) << next.bits_in_reservoir.to_u64())
+    next.bits_in_reservoir = next.bits_in_reservoir + count
+    Ok(_zstd_bit_writer_flush_full_bytes(next))
+
+# Append `count` low bits of `value` MSB-first to a stream consumed by the
+# `ZstdMsbBackwardBits` reader. The bit reader walks bytes end -> start and
+# within each byte reads bit 7 then 6 ... 0; the writer therefore must place
+# the most-significant data bit *first* in the byte that will be read first
+# (i.e. the last byte written before the terminator) and run downward.
+# Implementation: reverse the bit order of `value` over `count` bits and
+# call the LSB-first append; the backward reader then sees the original
+# ordering.
+fn zstd_bit_writer_append_msb(state: ZstdBitWriter, value: u64, count: i64) -> Result<ZstdBitWriter, CompressionError>:
+    if count < 0:
+        return Err(CompressionError.CorruptStream("zstd bit writer negative count"))
+    if count == 0:
+        return Ok(state)
+    if count > 32:
+        return Err(CompressionError.UnsupportedFeature("zstd bit writer wider than 32 bits"))
+    var reversed: u64 = 0u64
+    var src = value
+    var i = 0
+    while i < count:
+        reversed = (reversed << 1u64) | (src & 1u64)
+        src = src >> 1u64
+        i = i + 1
+    zstd_bit_writer_append_lsb(state, reversed, count)
+
+# Finalise the stream: append a `1` bit marker and pad to the next byte
+# boundary with zeroes. The matching reader (`zstd_bits_init` /
+# `zstd_msb_bits_init`) locates the marker via `_zstd_highbit_index` of the
+# trailing byte, so a non-zero trailing byte is mandatory.
+fn zstd_bit_writer_finish(state: ZstdBitWriter) -> Result<[u8], CompressionError>:
+    var next = state
+    next.reservoir = next.reservoir | (1u64 << next.bits_in_reservoir.to_u64())
+    next.bits_in_reservoir = next.bits_in_reservoir + 1
+    var flushed = _zstd_bit_writer_flush_full_bytes(next)
+    if flushed.bits_in_reservoir > 0:
+        flushed.bytes.push((flushed.reservoir & 0xFFu64).to_u8())
+        flushed.reservoir = 0u64
+        flushed.bits_in_reservoir = 0
+    if flushed.bytes.len() == 0:
+        return Err(CompressionError.CorruptStream("zstd bit writer produced empty stream"))
+    Ok(flushed.bytes)
+
+fn zstd_bit_writer_bits_used(state: ZstdBitWriter) -> i64:
+    state.bytes.len() * 8 + state.bits_in_reservoir
