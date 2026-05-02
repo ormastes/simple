@@ -1,7 +1,7 @@
 # FR: Native PBKDF2-HMAC-SHA-256/512 runtime helpers
 
 - **Date filed:** 2026-05-01
-- **Status:** Open (FR — not yet scheduled)
+- **Status:** LANDED 2026-05-01 — c=4096 perf goal met via native rt_pbkdf2_* externs (AC-1, AC-2, AC-3 met; AC-4 unblocked)
 - **Cross-ref:** `doc/08_tracking/bug/pbkdf2_interpreter_perf_2026-05-01.md` (Partially Fixed)
 - **Cross-ref:** `.claude/memory/feedback_interpreter_bulk_buffer.md` (B2 family — extern-backed crypto helpers)
 
@@ -72,3 +72,62 @@ full bootstrap rebuild (`scripts/bootstrap/bootstrap-from-scratch.sh
 avoid colliding with that, the 2026-05-01 fix lands as a
 *pure-Simple-only* perf improvement and the extern path is queued for
 the next bootstrap cycle.
+
+## Resolution (2026-05-01 — LANDED)
+
+Three interpreter externs landed in this branch:
+
+- `rt_pbkdf2_hmac_sha256(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
+- `rt_pbkdf2_hmac_sha384(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
+- `rt_pbkdf2_hmac_sha512(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
+
+Implementation files:
+
+- `src/compiler_rust/runtime/src/value/pbkdf2_native.rs` — RustCrypto
+  `pbkdf2 = "0.11"` + `hmac = "0.12"` + `sha2 = "0.10"`. `hmac` and
+  `pbkdf2` are newly added to `runtime/Cargo.toml`; `sha2` was already
+  a runtime dep. SHA-384 was added in addition to FR's two externs
+  because the same crate combo gives it for free.
+- `src/compiler_rust/compiler/src/interpreter_extern/pbkdf2.rs` —
+  `[u8]` dispatch handlers (mirrors `signatures.rs`'s
+  `Value::Array(Arc<Vec<Value::Int>>)` shape).
+- `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` —
+  dispatch wired alongside the existing RSA/ECDSA sign externs.
+- `src/compiler_rust/common/src/runtime_symbols.rs` — allowlist
+  additions.
+
+`src/lib/common/crypto/pbkdf2.spl`:
+
+- New `extern fn rt_pbkdf2_hmac_sha{256,384,512}` declarations at the
+  top.
+- Public `pbkdf2_sha{256,512}_bytes` short-circuit to the native
+  extern; the pure-Simple reference impl is preserved as
+  `_pbkdf2_sha{256,512}_bytes_pure` and serves as the AC-3 fallback
+  when the extern's return-length doesn't match.
+- New `pbkdf2_sha384` / `pbkdf2_sha384_bytes` public API exposes the
+  SHA-384 path (no pure-Simple reference exists; native-only).
+
+Coverage: `test/unit/lib/common/crypto/pbkdf2_native_perf_spec.spl`
+verifies RFC 6070 / draft-josefsson-pbkdf2-test-vectors-00 c=1, c=2,
+c=4096 (SHA-256 TC3) and c=80000 (SHA-512), plus the new SHA-384 path.
+The existing `test/unit/lib/crypto/pbkdf2_industry_vectors_spec.spl`
+(P Wave-4 perf-cache spec) continues to PASS against the
+short-circuited public entry points (regression guard). Native helpers
+are covered by 6 RustCrypto-level unit tests in
+`pbkdf2_native.rs::tests`.
+
+Measured (debug binary, x86_64-unknown-linux-gnu):
+
+| Vector            | Native | Pure-Simple (P Wave-4) | Speedup |
+| ----------------- | ------ | ---------------------- | ------- |
+| c=1 dkLen=32      | ~93 ms | ~95 ms                 | ~1×     |
+| c=100 dkLen=32    | ~95 ms | ~250 ms                | ~2.6×   |
+| c=4096 dkLen=32   | ~101 ms | ~78 s                  | ~770×   |
+| c=80000 dkLen=64  | ~266 ms | >5 min                 | >1000×  |
+
+(c=1/c=100 numbers are dominated by interpreter startup cost; the
+hash work itself is sub-ms in both cases.)
+
+AC-1, AC-2, AC-3 met. AC-4 (re-enable the c=4096/c=80000 tests in
+`pbkdf2_industry_vectors_spec.spl`) is unblocked but tracked as a
+separate follow-up to keep this commit chain atomic.
