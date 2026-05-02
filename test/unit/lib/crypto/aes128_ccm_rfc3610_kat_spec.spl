@@ -155,8 +155,13 @@ fn _corrupt_last_byte(buf: [u8]) -> [u8]:
 # ============================================================================
 
 describe "AES-128-CCM RFC 3610 §8 reference vectors":
+    """Byte-exact KAT against RFC 3610 §8 Packet Vectors #1, #4, #7.
+
+    Each vector exercises encrypt (CT+tag match RFC) and decrypt
+    (round-trip + tampering rejection)."""
 
     it "Vector #1 encrypt: 8-byte AAD, 23-byte PT, M=8 — CT and tag match RFC":
+        """RFC 3610 §8 Packet Vector #1 byte-exact encrypt KAT."""
         val out = aes128_ccm_encrypt(_key_v1_4_7(), _v1_nonce(), _v1_aad(), _v1_plaintext(), 8)
         val ct = _split_ct(out, _v1_plaintext().len())
         val tag = _split_tag(out, _v1_plaintext().len())
@@ -170,7 +175,7 @@ describe "AES-128-CCM RFC 3610 §8 reference vectors":
             Aes128CcmResult.Ok(data):
                 expect(data).to_equal(_v1_plaintext())
             Aes128CcmResult.Err(msg):
-                expect(false).to_equal(true)
+                expect(msg).to_equal("")  # unreachable: encrypt must succeed
 
     it "Vector #1 decrypt: corrupted ciphertext is rejected":
         val bad_ct = _corrupt_last_byte(_v1_expected_ct())
@@ -178,9 +183,9 @@ describe "AES-128-CCM RFC 3610 §8 reference vectors":
                                          bad_ct, _v1_expected_tag())
         match result:
             Aes128CcmResult.Ok(data):
-                expect(false).to_equal(true)
+                expect(data.len()).to_equal(99999)  # unreachable: must take Err branch
             Aes128CcmResult.Err(msg):
-                expect(true).to_equal(true)
+                expect(msg.contains("tag mismatch")).to_equal(true)
 
     it "Vector #1 decrypt: modified AAD is rejected":
         val bad_aad = _corrupt_last_byte(_v1_aad())
@@ -188,9 +193,9 @@ describe "AES-128-CCM RFC 3610 §8 reference vectors":
                                          _v1_expected_ct(), _v1_expected_tag())
         match result:
             Aes128CcmResult.Ok(data):
-                expect(false).to_equal(true)
+                expect(data.len()).to_equal(99999)  # unreachable: must take Err branch
             Aes128CcmResult.Err(msg):
-                expect(true).to_equal(true)
+                expect(msg.contains("tag mismatch")).to_equal(true)
 
     it "Vector #4 encrypt: 12-byte AAD, 19-byte PT, M=8 — CT and tag match RFC":
         val out = aes128_ccm_encrypt(_key_v1_4_7(), _v4_nonce(), _v4_aad(), _v4_plaintext(), 8)
@@ -206,7 +211,7 @@ describe "AES-128-CCM RFC 3610 §8 reference vectors":
             Aes128CcmResult.Ok(data):
                 expect(data).to_equal(_v4_plaintext())
             Aes128CcmResult.Err(msg):
-                expect(false).to_equal(true)
+                expect(msg).to_equal("")  # unreachable: encrypt must succeed
 
     it "Vector #7 encrypt: M=10 (different tag length) — CT and tag match RFC":
         val out = aes128_ccm_encrypt(_key_v1_4_7(), _v7_nonce(), _v7_aad(), _v7_plaintext(), 10)
@@ -222,7 +227,7 @@ describe "AES-128-CCM RFC 3610 §8 reference vectors":
             Aes128CcmResult.Ok(data):
                 expect(data).to_equal(_v7_plaintext())
             Aes128CcmResult.Err(msg):
-                expect(false).to_equal(true)
+                expect(msg).to_equal("")  # unreachable: encrypt must succeed
 
     it "Vector #7 decrypt: corrupted tag is rejected":
         val bad_tag = _corrupt_last_byte(_v7_expected_tag())
@@ -230,13 +235,15 @@ describe "AES-128-CCM RFC 3610 §8 reference vectors":
                                          _v7_expected_ct(), bad_tag)
         match result:
             Aes128CcmResult.Ok(data):
-                expect(false).to_equal(true)
+                expect(data.len()).to_equal(99999)  # unreachable: must take Err branch
             Aes128CcmResult.Err(msg):
-                expect(true).to_equal(true)
+                expect(msg.contains("tag mismatch")).to_equal(true)
 
 describe "AES-128-CCM edge cases":
+    """Edge cases not covered by RFC 3610 §8: empty inputs and M=16 round-trip."""
 
     it "empty plaintext + empty AAD round-trips at M=8":
+        """Empty PT + AAD: output is just the 8-byte tag."""
         val empty: [u8] = []
         val nonce = _v1_nonce()
         val key = _key_v1_4_7()
@@ -249,7 +256,7 @@ describe "AES-128-CCM edge cases":
             Aes128CcmResult.Ok(data):
                 expect(data.len()).to_equal(0)
             Aes128CcmResult.Err(msg):
-                expect(false).to_equal(true)
+                expect(msg).to_equal("")  # unreachable: encrypt must succeed
 
     it "empty AAD + non-empty PT round-trips at M=16":
         # M=16 has no RFC 3610 §8 KAT; round-trip-only.
@@ -268,7 +275,7 @@ describe "AES-128-CCM edge cases":
             Aes128CcmResult.Ok(data):
                 expect(data).to_equal(pt)
             Aes128CcmResult.Err(msg):
-                expect(false).to_equal(true)
+                expect(msg).to_equal("")  # unreachable: encrypt must succeed
 
     it "M=16 detects single-bit ciphertext flip":
         val empty: [u8] = []
@@ -282,6 +289,6 @@ describe "AES-128-CCM edge cases":
         val result = aes128_ccm_decrypt(key, nonce, empty, bad_ct, tag)
         match result:
             Aes128CcmResult.Ok(data):
-                expect(false).to_equal(true)
+                expect(data.len()).to_equal(99999)  # unreachable: must take Err branch
             Aes128CcmResult.Err(msg):
-                expect(true).to_equal(true)
+                expect(msg.contains("tag mismatch")).to_equal(true)
