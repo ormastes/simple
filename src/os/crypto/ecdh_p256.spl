@@ -20,14 +20,22 @@
 #   Gx = 6B17D1F2E12C4247 F8BCE6E563A440F2 77037D812DEB33A0 F4A13945D898C296
 #   Gy = 4FE342E2FE1A7F9B 8EE7EB4A7C0F9E16 2BCE33576B315ECE CBB6406837BF51F5
 #
-# Side-channel posture for THIS landing: NOT constant-time. Branches in
-# `_jacobian_add_mixed` short-circuit on point-at-infinity / equal points.
-# This is acceptable for the M3 advertise-only scope where the scalar is not
-# yet wired into a handshake-secret derivation. Constant-time hardening is
-# tracked at:
+# Side-channel posture: scalar-bit code path is constant-time as of 2026-05-01.
+# `_scalar_mul_affine` now uses an always-add-and-select inner loop with the
+# `p256_point_cselect` XOR-mask helper (mirrors `ed_point_cselect` in
+# `ed25519.spl` and `fe_cond_select` in `fe_p256.spl`). Both `_jac_double` and
+# `_jac_add_mixed` fire on every bit; a constant-time mask chooses whether to
+# keep the added candidate. There is no branch on a scalar bit.
+#
+# Residual non-CT branches still tracked under the same FR (items #2/#3):
+#   * `_jac_add_mixed` short-circuits on `p.inf` and on the equal-points case
+#     (`fe_eq(p.x,u2)` / `fe_eq(p.y,s2)`).
+#   * `_jac_double`/`_to_affine` short-circuit on `p.inf`.
+# These are intermediate-point branches, not scalar-bit branches; they are
+# not attacker-observable through the scalar's Hamming weight on the typical
+# secret-scalar trajectory but should still land before broad ECDHE exposure.
+# See:
 #   doc/08_tracking/feature_request/p256_scalar_mult_constant_time_2026-05-01.md
-# and MUST land before any caller exposes the ephemeral private key to a
-# wire-attacker through the handshake_secret schedule.
 #
 # References:
 #   * SEC2 v2.0 §2.4.2 (P-256 parameters)
@@ -157,8 +165,62 @@ fn _jac_add_mixed(p: JacP256, ax: FeP256, ay: FeP256) -> JacP256:
     JacP256(x: x3, y: y3, z: z3, inf: false)
 
 # ============================================================================
-# 256-bit MSB-first double-and-add scalar mult on (ax, ay).
-# scalar: 32 bytes big-endian. Not constant-time (see header).
+# Constant-time conditional Jacobian point select.
+#
+# Mirrors the XOR-mask discipline of `fe_cond_select` (in `fe_p256.spl`) and
+# `ed_point_cselect` (in `ed25519.spl`). Returns `p1` when `choose_p1 == 1`,
+# else `p0`. Same field operations execute regardless of the mask bit; no
+# data-dependent branches.
+#
+# `inf` is a `bool`, so we convert to a `u64` (0/1), apply the same XOR-mask,
+# and convert back. The B6 memory note applies: the compiler must NOT
+# branch-fold these XOR/AND ops — they are arithmetic, not compares.
+# ============================================================================
+
+fn p256_point_cselect(p0: JacP256, p1: JacP256, choose_p1: u64) -> JacP256:
+    """Constant-time point select: returns p1 if choose_p1=1, else p0.
+
+    Uses the XOR-mask pattern from `fe_cond_select`:
+        out = a ^ (mask & (a ^ b))
+    where mask = 0 - choose_p1 (all-ones if 1, all-zeros if 0).
+    """
+    val mask: u64 = 0 - choose_p1
+    val inf0_u: u64 = if p0.inf: 1u64 else: 0u64
+    val inf1_u: u64 = if p1.inf: 1u64 else: 0u64
+    val inf_out_u: u64 = inf0_u ^ (mask & (inf0_u ^ inf1_u))
+    JacP256(
+        x: FeP256(
+            l0: p0.x.l0 ^ (mask & (p0.x.l0 ^ p1.x.l0)),
+            l1: p0.x.l1 ^ (mask & (p0.x.l1 ^ p1.x.l1)),
+            l2: p0.x.l2 ^ (mask & (p0.x.l2 ^ p1.x.l2)),
+            l3: p0.x.l3 ^ (mask & (p0.x.l3 ^ p1.x.l3))
+        ),
+        y: FeP256(
+            l0: p0.y.l0 ^ (mask & (p0.y.l0 ^ p1.y.l0)),
+            l1: p0.y.l1 ^ (mask & (p0.y.l1 ^ p1.y.l1)),
+            l2: p0.y.l2 ^ (mask & (p0.y.l2 ^ p1.y.l2)),
+            l3: p0.y.l3 ^ (mask & (p0.y.l3 ^ p1.y.l3))
+        ),
+        z: FeP256(
+            l0: p0.z.l0 ^ (mask & (p0.z.l0 ^ p1.z.l0)),
+            l1: p0.z.l1 ^ (mask & (p0.z.l1 ^ p1.z.l1)),
+            l2: p0.z.l2 ^ (mask & (p0.z.l2 ^ p1.z.l2)),
+            l3: p0.z.l3 ^ (mask & (p0.z.l3 ^ p1.z.l3))
+        ),
+        inf: inf_out_u == 1u64
+    )
+
+# ============================================================================
+# 256-bit MSB-first scalar mult on (ax, ay) — always-add-and-select.
+#
+# scalar: 32 bytes big-endian. Constant-time on the secret-scalar code path
+# w.r.t. the scalar's Hamming weight: every bit fires both `_jac_double` and
+# `_jac_add_mixed`, then a `p256_point_cselect` chooses between the doubled-
+# only accumulator and the doubled-then-added accumulator. No data-dependent
+# branch on scalar bits. (Lower-level `_jac_add_mixed`/`_jac_double`/
+# `_to_affine` still carry the `if p.inf:`/`fe_eq` branches tracked under
+# items #2/#3 of the same FR; that hardening is intentionally out of scope
+# for this fix per the FR's Required Changes #1.)
 # ============================================================================
 
 fn _scalar_mul_affine(scalar: [u8], ax: FeP256, ay: FeP256) -> JacP256:
@@ -169,9 +231,10 @@ fn _scalar_mul_affine(scalar: [u8], ax: FeP256, ay: FeP256) -> JacP256:
         var bit: u64 = 0
         while bit < 8:
             acc = _jac_double(acc)
-            val mask: u8 = (0x80u8 >> bit.to_u8()).to_u8()
-            if (byte & mask) != 0u8:
-                acc = _jac_add_mixed(acc, ax, ay)
+            # MSB-first bit_set; data-independent shift on `bit`, not on `byte`.
+            val bit_set: u64 = (byte.to_u64() >> (7u64 - bit)) & 1u64
+            val candidate = _jac_add_mixed(acc, ax, ay)
+            acc = p256_point_cselect(p0: acc, p1: candidate, choose_p1: bit_set)
             bit = bit + 1
         i = i + 1
     acc
