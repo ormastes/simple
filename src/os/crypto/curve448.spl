@@ -1,0 +1,513 @@
+# Curve448 — Pure Simple X448 Diffie-Hellman (RFC 7748 §5)
+#
+# Implements X448 key exchange on Curve448 (Goldilocks).
+# No SFFI/Rust FFI — pure Simple language, suitable for baremetal.
+#
+# Field: GF(2^448 - 2^224 - 1), 16 limbs of 28 bits (u64).
+# Curve: Montgomery y^2 = x^3 + 156326*x^2 + x
+# a24 = (156326 - 2) / 4 = 39081
+# Scalar mult via Montgomery ladder, 447 bits.
+#
+# Goldilocks reduction identity: 2^448 ≡ 2^224 + 1 (mod p)
+# So for a product limb at index k >= 16:
+#   contribution folds into h[k-16] (+1 term) and h[k-8] (+2^224 term).
+#
+# Reference: RFC 7748 §5
+
+fn _curve448_debug(msg: text):
+    nil
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val MASK28: u64 = 0xFFFFFFF    # 2^28 - 1
+val A24_448: u64 = 39081       # (156326 - 2) / 4
+
+# ============================================================================
+# Field helpers — return [u64] arrays of length 16
+# ============================================================================
+
+fn _f448_zero() -> [u64]:
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+fn _f448_one() -> [u64]:
+    [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+
+fn _f448_carry(a: [u64]) -> [u64]:
+    """Normalize 16 28-bit limbs. Two passes: first forward, then fold overflow."""
+    var h0  = a[0]
+    var h1  = a[1]
+    var h2  = a[2]
+    var h3  = a[3]
+    var h4  = a[4]
+    var h5  = a[5]
+    var h6  = a[6]
+    var h7  = a[7]
+    var h8  = a[8]
+    var h9  = a[9]
+    var h10 = a[10]
+    var h11 = a[11]
+    var h12 = a[12]
+    var h13 = a[13]
+    var h14 = a[14]
+    var h15 = a[15]
+
+    var c: u64 = 0
+
+    c = h0 >> 28;  h0  = h0  & MASK28;  h1  = h1  + c
+    c = h1 >> 28;  h1  = h1  & MASK28;  h2  = h2  + c
+    c = h2 >> 28;  h2  = h2  & MASK28;  h3  = h3  + c
+    c = h3 >> 28;  h3  = h3  & MASK28;  h4  = h4  + c
+    c = h4 >> 28;  h4  = h4  & MASK28;  h5  = h5  + c
+    c = h5 >> 28;  h5  = h5  & MASK28;  h6  = h6  + c
+    c = h6 >> 28;  h6  = h6  & MASK28;  h7  = h7  + c
+    c = h7 >> 28;  h7  = h7  & MASK28;  h8  = h8  + c
+    c = h8 >> 28;  h8  = h8  & MASK28;  h9  = h9  + c
+    c = h9 >> 28;  h9  = h9  & MASK28;  h10 = h10 + c
+    c = h10 >> 28; h10 = h10 & MASK28;  h11 = h11 + c
+    c = h11 >> 28; h11 = h11 & MASK28;  h12 = h12 + c
+    c = h12 >> 28; h12 = h12 & MASK28;  h13 = h13 + c
+    c = h13 >> 28; h13 = h13 & MASK28;  h14 = h14 + c
+    c = h14 >> 28; h14 = h14 & MASK28;  h15 = h15 + c
+
+    # Goldilocks fold: c * 2^448 ≡ c * (2^224 + 1) mod p
+    c = h15 >> 28; h15 = h15 & MASK28
+    h0 = h0 + c    # +1 term
+    h8 = h8 + c    # +2^224 term
+
+    # Second pass to absorb any carries introduced by the fold
+    c = h0 >> 28;  h0  = h0  & MASK28;  h1  = h1  + c
+    c = h1 >> 28;  h1  = h1  & MASK28;  h2  = h2  + c
+    c = h2 >> 28;  h2  = h2  & MASK28;  h3  = h3  + c
+    c = h3 >> 28;  h3  = h3  & MASK28;  h4  = h4  + c
+    c = h4 >> 28;  h4  = h4  & MASK28;  h5  = h5  + c
+    c = h5 >> 28;  h5  = h5  & MASK28;  h6  = h6  + c
+    c = h6 >> 28;  h6  = h6  & MASK28;  h7  = h7  + c
+    c = h7 >> 28;  h7  = h7  & MASK28;  h8  = h8  + c
+    c = h8 >> 28;  h8  = h8  & MASK28;  h9  = h9  + c
+    c = h9 >> 28;  h9  = h9  & MASK28;  h10 = h10 + c
+    c = h10 >> 28; h10 = h10 & MASK28;  h11 = h11 + c
+    c = h11 >> 28; h11 = h11 & MASK28;  h12 = h12 + c
+    c = h12 >> 28; h12 = h12 & MASK28;  h13 = h13 + c
+    c = h13 >> 28; h13 = h13 & MASK28;  h14 = h14 + c
+    c = h14 >> 28; h14 = h14 & MASK28;  h15 = h15 + c
+    c = h15 >> 28; h15 = h15 & MASK28
+    h0 = h0 + c
+    h8 = h8 + c
+
+    [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15]
+
+fn _f448_add(a: [u64], b: [u64]) -> [u64]:
+    _f448_carry([
+        a[0]+b[0],   a[1]+b[1],   a[2]+b[2],   a[3]+b[3],
+        a[4]+b[4],   a[5]+b[5],   a[6]+b[6],   a[7]+b[7],
+        a[8]+b[8],   a[9]+b[9],   a[10]+b[10], a[11]+b[11],
+        a[12]+b[12], a[13]+b[13], a[14]+b[14], a[15]+b[15]
+    ])
+
+fn _f448_sub(a: [u64], b: [u64]) -> [u64]:
+    # Add 2p before subtracting: each limb of 2p = 2*MASK28 = 0x1FFFFFFE.
+    # The Goldilocks fold from carry() will absorb the 2p bias correctly.
+    val tp: u64 = 2 * MASK28
+    _f448_carry([
+        a[0]+tp-b[0],   a[1]+tp-b[1],   a[2]+tp-b[2],   a[3]+tp-b[3],
+        a[4]+tp-b[4],   a[5]+tp-b[5],   a[6]+tp-b[6],   a[7]+tp-b[7],
+        a[8]+tp-b[8],   a[9]+tp-b[9],   a[10]+tp-b[10], a[11]+tp-b[11],
+        a[12]+tp-b[12], a[13]+tp-b[13], a[14]+tp-b[14], a[15]+tp-b[15]
+    ])
+
+fn _f448_mul_scalar(a: [u64], s: u64) -> [u64]:
+    _f448_carry([
+        a[0]*s,   a[1]*s,   a[2]*s,   a[3]*s,
+        a[4]*s,   a[5]*s,   a[6]*s,   a[7]*s,
+        a[8]*s,   a[9]*s,   a[10]*s,  a[11]*s,
+        a[12]*s,  a[13]*s,  a[14]*s,  a[15]*s
+    ])
+
+fn _f448_fold31(t: [u64]) -> [u64]:
+    """Fold a 31-limb product into 16 limbs using Goldilocks.
+
+    t[k] for k in 16..30 folds as:
+      k = 16+i (i=0..7):  h[i] += t[k], h[i+8] += t[k]
+      k = 24+j (j=0..6):  position k = 16+(8+j), so inner pos 8+j:
+        h[8+j] += t[k]  (direct fold)
+        h[16+j] ← second fold: h[j] += t[k], h[j+8] += t[k]
+        Net: h[j] += t[k], h[j+8] += 2*t[k]
+    """
+    var h0  = t[0]
+    var h1  = t[1]
+    var h2  = t[2]
+    var h3  = t[3]
+    var h4  = t[4]
+    var h5  = t[5]
+    var h6  = t[6]
+    var h7  = t[7]
+    var h8  = t[8]
+    var h9  = t[9]
+    var h10 = t[10]
+    var h11 = t[11]
+    var h12 = t[12]
+    var h13 = t[13]
+    var h14 = t[14]
+    var h15 = t[15]
+
+    # i = 0..7: t[16..23] folds to h[i] and h[i+8]
+    h0  = h0  + t[16];  h8  = h8  + t[16]
+    h1  = h1  + t[17];  h9  = h9  + t[17]
+    h2  = h2  + t[18];  h10 = h10 + t[18]
+    h3  = h3  + t[19];  h11 = h11 + t[19]
+    h4  = h4  + t[20];  h12 = h12 + t[20]
+    h5  = h5  + t[21];  h13 = h13 + t[21]
+    h6  = h6  + t[22];  h14 = h14 + t[22]
+    h7  = h7  + t[23];  h15 = h15 + t[23]
+
+    # j = 0..6: t[24..30] double-folds
+    h0  = h0  + t[24];  h8  = h8  + t[24] + t[24]
+    h1  = h1  + t[25];  h9  = h9  + t[25] + t[25]
+    h2  = h2  + t[26];  h10 = h10 + t[26] + t[26]
+    h3  = h3  + t[27];  h11 = h11 + t[27] + t[27]
+    h4  = h4  + t[28];  h12 = h12 + t[28] + t[28]
+    h5  = h5  + t[29];  h13 = h13 + t[29] + t[29]
+    h6  = h6  + t[30];  h14 = h14 + t[30] + t[30]
+
+    _f448_carry([h0, h1, h2, h3, h4, h5, h6, h7,
+                 h8, h9, h10, h11, h12, h13, h14, h15])
+
+fn _f448_mul(a: [u64], b: [u64]) -> [u64]:
+    """Schoolbook multiplication + Goldilocks fold."""
+    val a0  = a[0];  val a1  = a[1];  val a2  = a[2];  val a3  = a[3]
+    val a4  = a[4];  val a5  = a[5];  val a6  = a[6];  val a7  = a[7]
+    val a8  = a[8];  val a9  = a[9];  val a10 = a[10]; val a11 = a[11]
+    val a12 = a[12]; val a13 = a[13]; val a14 = a[14]; val a15 = a[15]
+
+    val b0  = b[0];  val b1  = b[1];  val b2  = b[2];  val b3  = b[3]
+    val b4  = b[4];  val b5  = b[5];  val b6  = b[6];  val b7  = b[7]
+    val b8  = b[8];  val b9  = b[9];  val b10 = b[10]; val b11 = b[11]
+    val b12 = b[12]; val b13 = b[13]; val b14 = b[14]; val b15 = b[15]
+
+    val t0  = a0*b0
+    val t1  = a0*b1  + a1*b0
+    val t2  = a0*b2  + a1*b1  + a2*b0
+    val t3  = a0*b3  + a1*b2  + a2*b1  + a3*b0
+    val t4  = a0*b4  + a1*b3  + a2*b2  + a3*b1  + a4*b0
+    val t5  = a0*b5  + a1*b4  + a2*b3  + a3*b2  + a4*b1  + a5*b0
+    val t6  = a0*b6  + a1*b5  + a2*b4  + a3*b3  + a4*b2  + a5*b1  + a6*b0
+    val t7  = a0*b7  + a1*b6  + a2*b5  + a3*b4  + a4*b3  + a5*b2  + a6*b1  + a7*b0
+    val t8  = a0*b8  + a1*b7  + a2*b6  + a3*b5  + a4*b4  + a5*b3  + a6*b2  + a7*b1  + a8*b0
+    val t9  = a0*b9  + a1*b8  + a2*b7  + a3*b6  + a4*b5  + a5*b4  + a6*b3  + a7*b2  + a8*b1  + a9*b0
+    val t10 = a0*b10 + a1*b9  + a2*b8  + a3*b7  + a4*b6  + a5*b5  + a6*b4  + a7*b3  + a8*b2  + a9*b1  + a10*b0
+    val t11 = a0*b11 + a1*b10 + a2*b9  + a3*b8  + a4*b7  + a5*b6  + a6*b5  + a7*b4  + a8*b3  + a9*b2  + a10*b1 + a11*b0
+    val t12 = a0*b12 + a1*b11 + a2*b10 + a3*b9  + a4*b8  + a5*b7  + a6*b6  + a7*b5  + a8*b4  + a9*b3  + a10*b2 + a11*b1 + a12*b0
+    val t13 = a0*b13 + a1*b12 + a2*b11 + a3*b10 + a4*b9  + a5*b8  + a6*b7  + a7*b6  + a8*b5  + a9*b4  + a10*b3 + a11*b2 + a12*b1 + a13*b0
+    val t14 = a0*b14 + a1*b13 + a2*b12 + a3*b11 + a4*b10 + a5*b9  + a6*b8  + a7*b7  + a8*b6  + a9*b5  + a10*b4 + a11*b3 + a12*b2 + a13*b1 + a14*b0
+    val t15 = a0*b15 + a1*b14 + a2*b13 + a3*b12 + a4*b11 + a5*b10 + a6*b9  + a7*b8  + a8*b7  + a9*b6  + a10*b5 + a11*b4 + a12*b3 + a13*b2 + a14*b1 + a15*b0
+    val t16 =          a1*b15 + a2*b14 + a3*b13 + a4*b12 + a5*b11 + a6*b10 + a7*b9  + a8*b8  + a9*b7  + a10*b6 + a11*b5 + a12*b4 + a13*b3 + a14*b2 + a15*b1
+    val t17 =                   a2*b15 + a3*b14 + a4*b13 + a5*b12 + a6*b11 + a7*b10 + a8*b9  + a9*b8  + a10*b7 + a11*b6 + a12*b5 + a13*b4 + a14*b3 + a15*b2
+    val t18 =                            a3*b15 + a4*b14 + a5*b13 + a6*b12 + a7*b11 + a8*b10 + a9*b9  + a10*b8 + a11*b7 + a12*b6 + a13*b5 + a14*b4 + a15*b3
+    val t19 =                                     a4*b15 + a5*b14 + a6*b13 + a7*b12 + a8*b11 + a9*b10 + a10*b9 + a11*b8 + a12*b7 + a13*b6 + a14*b5 + a15*b4
+    val t20 =                                              a5*b15 + a6*b14 + a7*b13 + a8*b12 + a9*b11 + a10*b10 + a11*b9 + a12*b8 + a13*b7 + a14*b6 + a15*b5
+    val t21 =                                                       a6*b15 + a7*b14 + a8*b13 + a9*b12 + a10*b11 + a11*b10 + a12*b9 + a13*b8 + a14*b7 + a15*b6
+    val t22 =                                                                a7*b15 + a8*b14 + a9*b13 + a10*b12 + a11*b11 + a12*b10 + a13*b9 + a14*b8 + a15*b7
+    val t23 =                                                                         a8*b15 + a9*b14 + a10*b13 + a11*b12 + a12*b11 + a13*b10 + a14*b9 + a15*b8
+    val t24 =                                                                                  a9*b15 + a10*b14 + a11*b13 + a12*b12 + a13*b11 + a14*b10 + a15*b9
+    val t25 =                                                                                           a10*b15 + a11*b14 + a12*b13 + a13*b12 + a14*b11 + a15*b10
+    val t26 =                                                                                                     a11*b15 + a12*b14 + a13*b13 + a14*b12 + a15*b11
+    val t27 =                                                                                                               a12*b15 + a13*b14 + a14*b13 + a15*b12
+    val t28 =                                                                                                                         a13*b15 + a14*b14 + a15*b13
+    val t29 =                                                                                                                                   a14*b15 + a15*b14
+    val t30 =                                                                                                                                             a15*b15
+
+    _f448_fold31([
+        t0,  t1,  t2,  t3,  t4,  t5,  t6,  t7,
+        t8,  t9,  t10, t11, t12, t13, t14, t15,
+        t16, t17, t18, t19, t20, t21, t22, t23,
+        t24, t25, t26, t27, t28, t29, t30
+    ])
+
+fn _f448_sq(a: [u64]) -> [u64]:
+    _f448_mul(a: a, b: a)
+
+# ============================================================================
+# Byte encoding / decoding
+# 56 bytes ↔ 16 × 28-bit limbs, little-endian bit packing.
+# Limb k covers bits [28k .. 28k+27].
+# 28k bits = 28k/8 whole bytes + (28k mod 8) bit shift.
+# Pattern repeats every 2 limbs with 7-byte period:
+#   limb 2j+0: byte_off = 7j,    bit_shift = 0
+#   limb 2j+1: byte_off = 7j+3,  bit_shift = 4
+# ============================================================================
+
+fn _x448_load7(b: [u8], off: i64) -> u64:
+    """Load up to 7 bytes little-endian from b[off..]."""
+    var r: u64 = 0
+    var i: i64 = 0
+    while i < 7:
+        if (off + i) < b.len():
+            r = r | (b[off + i].to_u64() << (i.to_u64() * 8u64))
+        i = i + 1
+    r
+
+fn _f448_from_bytes(b: [u8]) -> [u64]:
+    """56-byte LE → 16 × 28-bit limbs. No top-bit masking (RFC 7748 §5)."""
+    val h0  = _x448_load7(b,  0)          & MASK28
+    val h1  = (_x448_load7(b,  3) >> 4)   & MASK28
+    val h2  = _x448_load7(b,  7)          & MASK28
+    val h3  = (_x448_load7(b, 10) >> 4)   & MASK28
+    val h4  = _x448_load7(b, 14)          & MASK28
+    val h5  = (_x448_load7(b, 17) >> 4)   & MASK28
+    val h6  = _x448_load7(b, 21)          & MASK28
+    val h7  = (_x448_load7(b, 24) >> 4)   & MASK28
+    val h8  = _x448_load7(b, 28)          & MASK28
+    val h9  = (_x448_load7(b, 31) >> 4)   & MASK28
+    val h10 = _x448_load7(b, 35)          & MASK28
+    val h11 = (_x448_load7(b, 38) >> 4)   & MASK28
+    val h12 = _x448_load7(b, 42)          & MASK28
+    val h13 = (_x448_load7(b, 45) >> 4)   & MASK28
+    val h14 = _x448_load7(b, 49)          & MASK28
+    val h15 = (_x448_load7(b, 52) >> 4)   & MASK28
+    [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15]
+
+fn _x448_store28(buf: [u8], limb: u64, byte_off: i64, bit_shift: u64):
+    """OR a 28-bit limb, shifted left by bit_shift, into buf at byte_off."""
+    val shifted = limb << bit_shift
+    var i: i64 = 0
+    while i < 5:
+        if (byte_off + i) < 56:
+            val bv = ((shifted >> (i.to_u64() * 8u64)) & 0xFFu64).to_u8()
+            buf[byte_off + i] = buf[byte_off + i] | bv
+        i = i + 1
+
+fn _f448_reduce(a: [u64]) -> [u64]:
+    """Canonical reduction to [0, p)."""
+    var h = _f448_carry(a)
+    h = _f448_carry(h)
+
+    # Add (2^224 + 1) = the "distance from 2*p complement" and check overflow.
+    # p = 2^448 - 2^224 - 1.  h >= p iff h + (2^224+1) overflows 448 bits.
+    # In 28-bit limbs: +1 to h[0] and +1 to h[8], then propagate.
+    var t0  = h[0]  + 1
+    var c: u64 = t0 >> 28; t0  = t0  & MASK28
+    var t1  = h[1]  + c;   c = t1 >> 28; t1  = t1  & MASK28
+    var t2  = h[2]  + c;   c = t2 >> 28; t2  = t2  & MASK28
+    var t3  = h[3]  + c;   c = t3 >> 28; t3  = t3  & MASK28
+    var t4  = h[4]  + c;   c = t4 >> 28; t4  = t4  & MASK28
+    var t5  = h[5]  + c;   c = t5 >> 28; t5  = t5  & MASK28
+    var t6  = h[6]  + c;   c = t6 >> 28; t6  = t6  & MASK28
+    var t7  = h[7]  + c;   c = t7 >> 28; t7  = t7  & MASK28
+    var t8  = h[8]  + c + 1   # +1 for the 2^224 component of (2^224+1)
+    c = t8 >> 28; t8  = t8  & MASK28
+    var t9  = h[9]  + c;   c = t9 >> 28; t9  = t9  & MASK28
+    var t10 = h[10] + c;   c = t10 >> 28; t10 = t10 & MASK28
+    var t11 = h[11] + c;   c = t11 >> 28; t11 = t11 & MASK28
+    var t12 = h[12] + c;   c = t12 >> 28; t12 = t12 & MASK28
+    var t13 = h[13] + c;   c = t13 >> 28; t13 = t13 & MASK28
+    var t14 = h[14] + c;   c = t14 >> 28; t14 = t14 & MASK28
+    var t15 = h[15] + c;   c = t15 >> 28   # c=1 means h >= p
+
+    # Select t (h-p) if c=1, else h.
+    val sel: u64 = 0 - c          # 0xFFFFFFFFFFFFFFFF if overflow, else 0
+    val not_sel: u64 = sel ^ 0xFFFFFFFFFFFFFFFFu64  # complement of sel
+
+    [
+        (t0  & sel) | (h[0]  & not_sel),
+        (t1  & sel) | (h[1]  & not_sel),
+        (t2  & sel) | (h[2]  & not_sel),
+        (t3  & sel) | (h[3]  & not_sel),
+        (t4  & sel) | (h[4]  & not_sel),
+        (t5  & sel) | (h[5]  & not_sel),
+        (t6  & sel) | (h[6]  & not_sel),
+        (t7  & sel) | (h[7]  & not_sel),
+        (t8  & sel) | (h[8]  & not_sel),
+        (t9  & sel) | (h[9]  & not_sel),
+        (t10 & sel) | (h[10] & not_sel),
+        (t11 & sel) | (h[11] & not_sel),
+        (t12 & sel) | (h[12] & not_sel),
+        (t13 & sel) | (h[13] & not_sel),
+        (t14 & sel) | (h[14] & not_sel),
+        (t15 & sel) | (h[15] & not_sel)
+    ]
+
+fn _f448_to_bytes(a: [u64]) -> [u8]:
+    """16 × 28-bit limbs → 56-byte LE array."""
+    val h = _f448_reduce(a)
+    var s: [u8] = [
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0
+    ]
+    _x448_store28(buf: s, limb: h[0],  byte_off: 0,  bit_shift: 0u64)
+    _x448_store28(buf: s, limb: h[1],  byte_off: 3,  bit_shift: 4u64)
+    _x448_store28(buf: s, limb: h[2],  byte_off: 7,  bit_shift: 0u64)
+    _x448_store28(buf: s, limb: h[3],  byte_off: 10, bit_shift: 4u64)
+    _x448_store28(buf: s, limb: h[4],  byte_off: 14, bit_shift: 0u64)
+    _x448_store28(buf: s, limb: h[5],  byte_off: 17, bit_shift: 4u64)
+    _x448_store28(buf: s, limb: h[6],  byte_off: 21, bit_shift: 0u64)
+    _x448_store28(buf: s, limb: h[7],  byte_off: 24, bit_shift: 4u64)
+    _x448_store28(buf: s, limb: h[8],  byte_off: 28, bit_shift: 0u64)
+    _x448_store28(buf: s, limb: h[9],  byte_off: 31, bit_shift: 4u64)
+    _x448_store28(buf: s, limb: h[10], byte_off: 35, bit_shift: 0u64)
+    _x448_store28(buf: s, limb: h[11], byte_off: 38, bit_shift: 4u64)
+    _x448_store28(buf: s, limb: h[12], byte_off: 42, bit_shift: 0u64)
+    _x448_store28(buf: s, limb: h[13], byte_off: 45, bit_shift: 4u64)
+    _x448_store28(buf: s, limb: h[14], byte_off: 49, bit_shift: 0u64)
+    _x448_store28(buf: s, limb: h[15], byte_off: 52, bit_shift: 4u64)
+    s
+
+# ============================================================================
+# Field inversion: z^(p-2) mod p
+#
+# p-2 = 2^448 - 2^224 - 3
+# Binary exponent (bit 447 down to bit 0):
+#   bits 447..225 = 1  (223 ones)
+#   bit  224      = 0
+#   bits 223..2   = 1  (222 ones)
+#   bit  1        = 0
+#   bit  0        = 1
+#
+# Square-and-multiply over that bit sequence.
+# Total squarings: 447.  Total multiplications: 223+222+1 = 446.
+# ============================================================================
+
+fn _f448_invert(z: [u64]) -> [u64]:
+    """z^(p-2) via square-and-multiply over p-2 bit pattern."""
+    # Start at bit 447 (value 1): r = z
+    var r = z
+
+    # Bits 446..225: 222 more ones → sq+mul each
+    var i: i64 = 0
+    while i < 222:
+        r = _f448_sq(r)
+        r = _f448_mul(a: r, b: z)
+        i = i + 1
+
+    # Bit 224: 0 → square only
+    r = _f448_sq(r)
+
+    # Bits 223..2: 222 ones → sq+mul each
+    i = 0
+    while i < 222:
+        r = _f448_sq(r)
+        r = _f448_mul(a: r, b: z)
+        i = i + 1
+
+    # Bit 1: 0 → square only
+    r = _f448_sq(r)
+
+    # Bit 0: 1 → square+mul
+    r = _f448_sq(r)
+    r = _f448_mul(a: r, b: z)
+
+    r
+
+# ============================================================================
+# Conditional swap
+# ============================================================================
+
+fn _f448_cswap4(x2: [u64], z2: [u64], x3: [u64], z3: [u64], swap: i64) -> [list]:
+    """Swap (x2,z2) ↔ (x3,z3) if swap=1."""
+    if swap == 0:
+        return [x2, z2, x3, z3]
+    [x3, z3, x2, z2]
+
+# ============================================================================
+# Montgomery ladder step
+# ============================================================================
+
+fn _x448_ladder_step(x2: [u64], z2: [u64], x3: [u64], z3: [u64], x1: [u64]) -> [list]:
+    """One differential-add-and-double step. Returns [new_x2, new_z2, new_x3, new_z3]."""
+    val a   = _f448_add(a: x2, b: z2)
+    val aa  = _f448_sq(a)
+    val b   = _f448_sub(a: x2, b: z2)
+    val bb  = _f448_sq(b)
+    val e   = _f448_sub(a: aa, b: bb)
+    val c   = _f448_add(a: x3, b: z3)
+    val d   = _f448_sub(a: x3, b: z3)
+    val da  = _f448_mul(a: d, b: a)
+    val cb  = _f448_mul(a: c, b: b)
+
+    val new_x3 = _f448_sq(_f448_add(a: da, b: cb))
+    val new_z3 = _f448_mul(a: x1, b: _f448_sq(_f448_sub(a: da, b: cb)))
+    val new_x2 = _f448_mul(a: aa, b: bb)
+    val new_z2 = _f448_mul(a: e, b: _f448_add(a: aa, b: _f448_mul_scalar(e, A24_448)))
+
+    [new_x2, new_z2, new_x3, new_z3]
+
+# ============================================================================
+# X448 Public API
+# ============================================================================
+
+fn x448_clamp(scalar: [u8]) -> [u8]:
+    """Clamp a 56-byte X448 scalar per RFC 7748 §5.
+    scalar[0] &= 0xFC  (clear low 2 bits)
+    scalar[55] |= 0x80 (set high bit)
+    """
+    var c: [u8] = []
+    var i: i64 = 0
+    while i < 56:
+        c.push(scalar[i])
+        i = i + 1
+    c[0]  = c[0]  & 0xFCu8
+    c[55] = c[55] | 0x80u8
+    c
+
+fn x448_scalar_mult(scalar: [u8], u_coord: [u8]) -> [u8]:
+    """X448(k, u): RFC 7748 §5 Montgomery ladder.
+    scalar and u_coord are 56-byte arrays.
+    Returns 56-byte result.
+    """
+    val k = x448_clamp(scalar)
+    val u = _f448_from_bytes(u_coord)
+
+    var x_2 = _f448_one()
+    var z_2 = _f448_zero()
+    var x_3 = u
+    var z_3 = _f448_one()
+
+    var prev_bit: i64 = 0
+    var bit_pos: i64 = 447
+    while bit_pos >= 0:
+        val byte_idx = bit_pos / 8
+        val bit_idx  = bit_pos % 8
+        val k_bit: i64 = (k[byte_idx].to_i64() >> bit_idx) & 1
+        val swap = k_bit ^ prev_bit
+        prev_bit = k_bit
+
+        val sw = _f448_cswap4(x2: x_2, z2: z_2, x3: x_3, z3: z_3, swap: swap)
+        x_2 = sw[0]; z_2 = sw[1]; x_3 = sw[2]; z_3 = sw[3]
+
+        val st = _x448_ladder_step(x2: x_2, z2: z_2, x3: x_3, z3: z_3, x1: u)
+        x_2 = st[0]; z_2 = st[1]; x_3 = st[2]; z_3 = st[3]
+
+        if bit_pos == 0:
+            val fsw = _f448_cswap4(x2: x_2, z2: z_2, x3: x_3, z3: z_3, swap: prev_bit)
+            x_2 = fsw[0]; z_2 = fsw[1]
+            return _f448_to_bytes(_f448_mul(a: x_2, b: _f448_invert(z_2)))
+
+        bit_pos = bit_pos - 1
+
+    _f448_to_bytes(_f448_mul(a: x_2, b: _f448_invert(z_2)))
+
+fn _x448_base_point() -> [u8]:
+    """Base point u = 5 for Curve448 (RFC 7748 §4.2)."""
+    var bp: [u8] = [
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0
+    ]
+    bp[0] = 5u8
+    bp
+
+fn x448_keygen(priv_seed: [u8]) -> [list]:
+    """Derive (clamped_priv, pub) from a 56-byte seed.
+    Returns [private_key: [u8], public_key: [u8]].
+    """
+    val priv = x448_clamp(priv_seed)
+    val pub  = x448_scalar_mult(priv, _x448_base_point())
+    [priv, pub]
+
+fn x448_dh(priv_key: [u8], peer_pub: [u8]) -> [u8]:
+    """X448 Diffie-Hellman: compute shared secret from priv + peer public key."""
+    x448_scalar_mult(priv_key, peer_pub)

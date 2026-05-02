@@ -604,6 +604,31 @@ pub extern "C" fn rt_aes128_encrypt_block_into(
     0
 }
 
+// ----------------------------------------------------------------------------
+// rt_aes128_encrypt_block_pure(key, block) -> [u8]
+// Pure-functional AES-128 single-block encrypt. Returns a fresh 16-byte cipher
+// array. Bridges the interpreter-mode Arc-clone footgun where rt_*_encrypt_block_into
+// silently discarded the result. See bug doc:
+// doc/08_tracking/bug/rt_aes_encrypt_block_into_interpreter_arc_2026-05-02.md
+// Returns empty array on bad sizes.
+// ----------------------------------------------------------------------------
+#[no_mangle]
+pub extern "C" fn rt_aes128_encrypt_block_pure(
+    key: RuntimeValue,
+    block: RuntimeValue,
+) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return empty_runtime_array();
+    };
+    let Some(block_bytes) = runtime_array_to_bytes(block) else {
+        return empty_runtime_array();
+    };
+    let Some(cipher) = aes128_encrypt_one_block(&key_bytes, &block_bytes) else {
+        return empty_runtime_array();
+    };
+    runtime_array_from_bytes(&cipher)
+}
+
 // ============================================================================
 // AES-128-GCM (NIST SP 800-38D) — TLS 1.3-shaped AEAD encrypt extern.
 // Returns ciphertext || tag (16-byte tag concatenated).  Empty array on error.
@@ -955,6 +980,30 @@ pub extern "C" fn rt_aes256_encrypt_block_into(
         super::collections::rt_array_set(out, i as i64, RuntimeValue::from_int(*byte as i64));
     }
     0
+}
+
+// ----------------------------------------------------------------------------
+// rt_aes256_encrypt_block_pure(key, block) -> [u8]
+// Pure-functional AES-256 single-block encrypt. Returns a fresh 16-byte cipher
+// array. Companion to rt_aes128_encrypt_block_pure. See bug doc:
+// doc/08_tracking/bug/rt_aes_encrypt_block_into_interpreter_arc_2026-05-02.md
+// Returns empty array on bad sizes (key must be 32B, block 16B).
+// ----------------------------------------------------------------------------
+#[no_mangle]
+pub extern "C" fn rt_aes256_encrypt_block_pure(
+    key: RuntimeValue,
+    block: RuntimeValue,
+) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return empty_runtime_array();
+    };
+    let Some(block_bytes) = runtime_array_to_bytes(block) else {
+        return empty_runtime_array();
+    };
+    let Some(cipher) = aes256_encrypt_one_block(&key_bytes, &block_bytes) else {
+        return empty_runtime_array();
+    };
+    runtime_array_from_bytes(&cipher)
 }
 
 pub fn aes256_gcm_encrypt_bytes(

@@ -530,10 +530,11 @@ impl LlvmBackend {
             CodeModel::Default
         };
 
-        // Match the freestanding linker ISA contract for the generated soft-core
-        // lanes. RV64/RV32 compiled payloads are allowed to use compressed
-        // instructions, so codegen must keep C enabled.
+        // Allow per-lane freestanding RISC-V feature overrides so generated
+        // soft-core runners can pin payload ISA to the exact simulated core.
+        let freestanding_riscv32_features = std::env::var("SIMPLE_RISCV32_LLVM_FEATURES").ok();
         let features = match self.target.arch {
+            TargetArch::Riscv32 if is_freestanding => freestanding_riscv32_features.as_deref().unwrap_or("+m,+a,+c"),
             TargetArch::Riscv32 => "+m,+a,+c",
             TargetArch::Riscv64 => "+m,+a,+c",
             _ => "",

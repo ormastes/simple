@@ -91,6 +91,7 @@ pub mod span_ffi;
 pub mod rc;
 pub mod wffi;
 pub mod crypto;
+pub mod sha512;
 pub mod dynamic_ffi;
 #[cfg(feature = "gui")]
 pub mod winit_ffi;
@@ -459,6 +460,12 @@ pub(crate) fn call_extern_function(
         "rt_pbkdf2_hmac_sha384" => pbkdf2::rt_pbkdf2_hmac_sha384(&evaluated),
         "rt_pbkdf2_hmac_sha512" => pbkdf2::rt_pbkdf2_hmac_sha512(&evaluated),
         "rt_tls13_sha256" => tls13::rt_tls13_sha256(&evaluated),
+        // SHA-512 interpreter dispatch (FR sha512_interpreter_dispatch).
+        // Required by W14-D SLH-DSA-{192s,256s} and Ed25519/HKDF-SHA-512.
+        "rt_sha512_hash" => sha512::rt_sha512_hash(&evaluated),
+        "rt_sha512_byte" => sha512::rt_sha512_byte(&evaluated),
+        "rt_sha512_K" => sha512::rt_sha512_k(&evaluated),
+        "rt_sha512_H" => sha512::rt_sha512_h(&evaluated),
         "rt_tls13_hkdf_extract" => tls13::rt_tls13_hkdf_extract(&evaluated),
         "rt_tls13_hkdf_extract_into" => tls13::rt_tls13_hkdf_extract_into(&evaluated),
         "rt_tls13_hkdf_expand_into" => tls13::rt_tls13_hkdf_expand_into(&evaluated),
@@ -837,9 +844,11 @@ pub(crate) fn call_extern_function(
         "rt_aes_sbox" => simd::rt_aes_sbox(&evaluated),
         "rt_aes_rcon" => simd::rt_aes_rcon(&evaluated),
         "rt_aes128_encrypt_block_into" => simd::rt_aes128_encrypt_block_into(&evaluated),
+        "rt_aes128_encrypt_block_pure" => simd::rt_aes128_encrypt_block_pure(&evaluated),
         "rt_tls13_aes128_gcm_encrypt" => simd::rt_tls13_aes128_gcm_encrypt(&evaluated),
         "rt_tls13_aes128_gcm_decrypt" => simd::rt_tls13_aes128_gcm_decrypt(&evaluated),
         "rt_aes256_encrypt_block_into" => simd::rt_aes256_encrypt_block_into(&evaluated),
+        "rt_aes256_encrypt_block_pure" => simd::rt_aes256_encrypt_block_pure(&evaluated),
         "rt_tls13_aes256_gcm_encrypt" => simd::rt_tls13_aes256_gcm_encrypt(&evaluated),
         "rt_tls13_aes256_gcm_decrypt" => simd::rt_tls13_aes256_gcm_decrypt(&evaluated),
         "rt_utf8_count_codepoints" => simd::rt_utf8_count_codepoints(&evaluated),

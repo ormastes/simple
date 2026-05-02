@@ -1,5 +1,4 @@
 use compress.types.{CompressionError}
-use compress.zstd_bits.{ZstdBitWriter, zstd_bit_writer_new, zstd_bit_writer_append_lsb, zstd_bit_writer_finish}
 use compress.zstd_fse.{ZstdFseEncodeTable, zstd_fse_build_encode_table, zstd_fse_encode_symbols}
 
 val ZSTD_HUF_MAX_BITS: i64 = 11
@@ -364,6 +363,28 @@ fn _zstd_huf_encoder_lookup(canonical: [ZstdHufCanonicalEntry]) -> [ZstdHufEncod
 # `_zstd_decode_huffman_stream` decoder) plus the weight set written into
 # the literals header. Caller is responsible for prepending the
 # Huffman_Tree_Description and Jump_Table (if any) per RFC 8478 §4.2.1.
+#
+# Bit-layout (W14-A fix, 2026-05-02). The matching `ZstdBackwardBits`
+# reader, after init+full-refill, exposes the bit stream LSB-first in a
+# scrambled byte order:
+#
+#     reservoir bits (low -> high) = data[end-1] bits 0..V-1,
+#                                    data[end-2] bits 0..7,
+#                                    data[end-3] bits 0..7,
+#                                    ...,
+#                                    data[start] bits 0..7
+#
+# where V = K mod 8 is the count of valid data bits in the marker byte
+# (the bit at position V holds the `1` end-of-stream marker). The encoder
+# therefore emits literals in INPUT order (lit[0] first, lit[len-1] last)
+# into a flat LSB-first bit buffer, then repacks into the layout above so
+# emission i lands at decoder read position i.
+#
+# The previous W9-C encoder used `zstd_bit_writer_append_lsb` + reverse
+# literal order, which only round-tripped while the whole stream fit in a
+# single byte; longer streams produced corrupted literals because the
+# decoder's byte-reversed refill scrambles bit positions across byte
+# boundaries (W13-B falsifying probe).
 fn zstd_huf_encode_literals(literals: [u8]) -> Result<([u8], [i64]), CompressionError>:
     if literals.len() == 0:
         return Err(CompressionError.UnsupportedFeature("zstd huf encode of empty literal stream"))
@@ -377,12 +398,13 @@ fn zstd_huf_encode_literals(literals: [u8]) -> Result<([u8], [i64]), Compression
         return Err(canonical_res.unwrap_err())
     val canonical = canonical_res.unwrap()
     val lookup = _zstd_huf_encoder_lookup(canonical)
-    var writer = zstd_bit_writer_new()
-    # Emit literals in REVERSE order: the matching backward reader reads
-    # the first literal from the END of the byte buffer, so the LAST
-    # literal in input order must hit the writer first.
-    var i = literals.len() - 1
-    while i >= 0:
+    # Flat LSB-first bit buffer: byte_buf[k] holds emission bits 8k..8k+7,
+    # leftover holds the trailing leftover_count bits (0..7).
+    var byte_buf: [u8] = []
+    var leftover: u64 = 0u64
+    var leftover_count: i64 = 0
+    var i = 0
+    while i < literals.len():
         val sym = literals[i].to_i64()
         val entry = lookup[sym]
         if entry.bits <= 0:
@@ -392,15 +414,60 @@ fn zstd_huf_encode_literals(literals: [u8]) -> Result<([u8], [i64]), Compression
         # is LSB-first; the encoder must emit the *reversed* code so the
         # reader's table lookup yields the original symbol.
         val emitted = zstd_huf_reverse_bits(entry.code, entry.bits)
-        val w_res = zstd_bit_writer_append_lsb(writer, emitted.to_u64(), entry.bits)
-        if w_res.is_err():
-            return Err(w_res.unwrap_err())
-        writer = w_res.unwrap()
-        i = i - 1
-    val finished = zstd_bit_writer_finish(writer)
-    if finished.is_err():
-        return Err(finished.unwrap_err())
-    Ok((finished.unwrap(), weights))
+        leftover = leftover | (emitted.to_u64() << leftover_count.to_u64())
+        leftover_count = leftover_count + entry.bits
+        while leftover_count >= 8:
+            byte_buf.push((leftover & 0xFFu64).to_u8())
+            leftover = leftover >> 8u64
+            leftover_count = leftover_count - 8
+        i = i + 1
+    # Repack into decoder layout. K = total emission bits.
+    val k_full_bytes = byte_buf.len()
+    val v_tail = leftover_count
+    # Marker byte: lower v_tail bits = bit-stream bits 0..v_tail-1
+    # (which are byte_buf[0]'s lowest v_tail bits when v_tail > 0,
+    # or zero when v_tail == 0 because no bits precede the marker).
+    var marker_byte: u8 = 0u8
+    if v_tail > 0:
+        if k_full_bytes > 0:
+            marker_byte = byte_buf[0] & ((1u8 << v_tail.to_u8()) - 1u8)
+        else:
+            marker_byte = (leftover & 0xFFu64).to_u8()
+    marker_byte = marker_byte | (1u8 << v_tail.to_u8())
+    # Remaining bits: bit positions v_tail..K-1, sliced into bytes
+    # LSB-first (8 bits each, last potentially partial). Each slice
+    # straddles two adjacent entries of byte_buf (or byte_buf+leftover)
+    # because v_tail shifts the byte boundary.
+    var remaining_bytes: [u8] = []
+    var src_idx = 0
+    while src_idx < k_full_bytes:
+        # Take high (8 - v_tail) bits of byte_buf[src_idx] as the low
+        # bits of the output byte, then the low v_tail bits of the next
+        # source as the high bits.
+        var out_byte: u64 = 0u64
+        if v_tail == 0:
+            out_byte = byte_buf[src_idx].to_u64()
+        else:
+            out_byte = (byte_buf[src_idx].to_u64() >> v_tail.to_u64()) & 0xFFu64
+            val next_low: u64 = if src_idx + 1 < k_full_bytes:
+                    byte_buf[src_idx + 1].to_u64()
+                else:
+                    leftover
+            out_byte = out_byte | ((next_low & ((1u64 << v_tail.to_u64()) - 1u64)) << (8 - v_tail).to_u64())
+        remaining_bytes.push((out_byte & 0xFFu64).to_u8())
+        src_idx = src_idx + 1
+    # remaining_bytes[0] holds bit-stream bits v_tail..v_tail+7,
+    # remaining_bytes[N-2] holds bits v_tail+8(N-2)..K-1. Decoder
+    # expects out[end-1] = marker_byte, out[end-2] = remaining_bytes[0],
+    # ..., out[start] = remaining_bytes[N-2]. So output = reverse
+    # remaining_bytes ++ [marker_byte].
+    var out: [u8] = []
+    var rb = remaining_bytes.len() - 1
+    while rb >= 0:
+        out.push(remaining_bytes[rb])
+        rb = rb - 1
+    out.push(marker_byte)
+    Ok((out, weights))
 
 # Encode the Huffman weight set as a *direct* (uncompressed) header per RFC
 # 8478 §4.2.1.1 with `headerByte >= 128`. Each direct weight uses 4 bits;

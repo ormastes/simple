@@ -713,8 +713,7 @@ pub(super) fn eval_bdd_builtin(
             // Comparison-form: `expect a == b`, `expect a != b`, `expect a > b`, …
             if let Expr::Binary { op, left, right } = arg_expr {
                 let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                let right_val =
-                    evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                 let (matched, op_word) = match op {
                     BinOp::Eq => (left_val == right_val, "equal"),
                     BinOp::NotEq => (left_val != right_val, "not equal"),
@@ -730,9 +729,7 @@ pub(super) fn eval_bdd_builtin(
                             BinOp::GtEq => ">=",
                             _ => "?",
                         };
-                        let value = evaluate_expr(
-                            arg_expr, env, functions, classes, enums, impl_methods,
-                        )?;
+                        let value = evaluate_expr(arg_expr, env, functions, classes, enums, impl_methods)?;
                         if !value.truthy() {
                             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
                             BDD_FAILURE_MSG.with(|cell| {

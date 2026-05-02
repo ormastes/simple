@@ -4,7 +4,7 @@
 # with the option to spawn real DAP server subprocesses in the future.
 # Hardware debug tools validate target_type before executing.
 
-use .dap_bridge
+use .dap_bridge.{DapSession, dap_create_session, dap_list_sessions, dap_close_session, dap_find_session, dap_add_breakpoint, dap_remove_breakpoint}
 
 val _DEBUG_NL = "\n"
 
@@ -12,6 +12,64 @@ fn bool_text(v: bool) -> text:
     if v:
         return "true"
     "false"
+
+fn _json_text_array(values: [text]) -> text:
+    var arr = SB_L()
+    var first = true
+    for value in values:
+        if not first:
+            arr = arr + ","
+        first = false
+        arr = arr + js(value)
+    arr = arr + SB_R()
+    arr
+
+fn _session_json(session: DapSession) -> text:
+    var obj = LB()
+    obj = obj + jp("session_id", js(session.id))
+    obj = obj + "," + jp("program", js(session.program))
+    obj = obj + "," + jp("target_type", js(session.target_type))
+    obj = obj + "," + jp("state", js(session.state))
+    obj = obj + "," + jp("arch", js(session.arch))
+    obj = obj + "," + jp("exec_mode", js(session.exec_mode))
+    obj = obj + "," + jp("vendor", js(session.vendor))
+    obj = obj + "," + jp("probe_kind", js(session.probe_kind))
+    obj = obj + "," + jp("server_kind", js(session.server_kind))
+    obj = obj + "," + jp("transport", js(session.transport))
+    obj = obj + "," + jp("backend_id", js(session.backend_id))
+    obj = obj + "," + jp("attach_semantics", js(session.attach_semantics))
+    obj = obj + "," + jp("persistent_session", bool_text(session.persistent_session))
+    obj = obj + "," + jp("capabilities", _json_text_array(session.capabilities))
+    obj = obj + "," + jp("host", js(session.host))
+    obj = obj + "," + jp("port", str(session.port))
+    obj = obj + "," + jp("config_path", js(session.config_path))
+    obj = obj + "," + jp("probe_serial", js(session.probe_serial))
+    obj = obj + "," + jp("bitbang_host", js(session.bitbang_host))
+    obj = obj + "," + jp("bitbang_port", str(session.bitbang_port))
+    obj = obj + "," + jp("jtag_device", js(session.jtag_device))
+    obj = obj + "," + jp("bootstrap_discovery_command", js(session.bootstrap_discovery_command))
+    obj = obj + "," + jp("bootstrap_launch_command", js(session.bootstrap_launch_command))
+    obj = obj + "," + jp("bootstrap_attach_target", js(session.bootstrap_attach_target))
+    obj = obj + "," + jp("bootstrap_config", js(session.bootstrap_config))
+    obj = obj + "," + jp("bootstrap_notes", _json_text_array(session.bootstrap_notes))
+    obj = obj + RB()
+    obj
+
+fn _hw_session_plan_result(id: text, session: DapSession, operation: text, payload_key: text, payload_value: text) -> text:
+    var r = LB()
+    r = r + jp("session_id", js(session.id))
+    r = r + "," + jp("operation", js(operation))
+    r = r + "," + jp("backend_id", js(session.backend_id))
+    r = r + "," + jp("transport", js(session.transport))
+    r = r + "," + jp("state", js(session.state))
+    r = r + "," + jp("capabilities", _json_text_array(session.capabilities))
+    r = r + "," + jp("bootstrap_launch_command", js(session.bootstrap_launch_command))
+    r = r + "," + jp("bootstrap_attach_target", js(session.bootstrap_attach_target))
+    r = r + "," + jp("bootstrap_config", js(session.bootstrap_config))
+    if payload_key != "":
+        r = r + "," + jp(payload_key, js(payload_value))
+    r = r + RB()
+    make_tool_result(id, r)
 
 # ============================================================================
 # Session Management
@@ -24,14 +82,25 @@ fn handle_debug_create_session(id: text, body: text) -> text:
     var target_type = extract_field(body, "target_type")
     if target_type == "":
         target_type = "interpreter"
-    val session = dap_create_session(program, target_type)
-    var r = LB()
-    r = r + jp("session_id", js(session.id))
-    r = r + "," + jp("program", js(program))
-    r = r + "," + jp("target_type", js(target_type))
-    r = r + "," + jp("state", js(session.state))
-    r = r + RB()
-    make_tool_result(id, r)
+    val session = dap_create_session(
+        program,
+        target_type,
+        extract_field(body, "transport"),
+        extract_field(body, "arch"),
+        extract_field(body, "exec_mode"),
+        extract_field(body, "vendor"),
+        extract_field(body, "probe_kind"),
+        extract_field(body, "server_kind"),
+        extract_field(body, "host"),
+        extract_field(body, "port"),
+        extract_field(body, "config_path"),
+        extract_field(body, "probe_serial"),
+        extract_field(body, "bitbang_host"),
+        extract_field(body, "bitbang_port"),
+        extract_field(body, "jtag_device"),
+        extract_field(body, "persistent_session")
+    )
+    make_tool_result(id, _session_json(session))
 
 fn handle_debug_list_sessions(id: text) -> text:
     val sessions = dap_list_sessions()
@@ -41,13 +110,7 @@ fn handle_debug_list_sessions(id: text) -> text:
         if not first:
             arr = arr + ","
         first = false
-        var obj = LB()
-        obj = obj + jp("session_id", js(s.id))
-        obj = obj + "," + jp("program", js(s.program))
-        obj = obj + "," + jp("target_type", js(s.target_type))
-        obj = obj + "," + jp("state", js(s.state))
-        obj = obj + RB()
-        arr = arr + obj
+        arr = arr + _session_json(s)
     arr = arr + SB_R()
     make_tool_result(id, arr)
 
@@ -352,21 +415,19 @@ fn _require_hw_session(id: text, session_id: text, required_types: [text]) -> (t
         return (make_tool_error(id, -32602, "Requires " + required_types.join("/") + " session (current: " + session.target_type + ")"), "")
     ("", session.target_type)
 
-fn _unsupported_hw_backend(id: text, session_id: text, operation: text) -> text:
-    make_tool_error(id, -32603, operation + " is not implemented in this MCP server for hardware-backed sessions. Session " + session_id + " is configuration-only.")
-
 fn handle_debug_trace_capture(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
     val (err, _) = _require_hw_session(id, session_id, ["t32", "t32_gdb"])
     if err != "":
         return err
+    val session = dap_find_session(session_id)
     var duration_str = extract_field(body, "duration_ms")
     var duration = 1000
     if duration_str != "":
         duration = int(duration_str)
         if duration < 1:
             duration = 1000
-    _unsupported_hw_backend(id, session_id, "debug_trace_capture")
+    _hw_session_plan_result(id, session, "debug_trace_capture", "duration_ms", str(duration))
 
 fn handle_debug_coverage_collect(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
@@ -376,24 +437,24 @@ fn handle_debug_coverage_collect(id: text, body: text) -> text:
     val (err, _) = _require_hw_session(id, session_id, ["t32", "t32_gdb"])
     if err != "":
         return err
-    _unsupported_hw_backend(id, session_id, "debug_coverage_collect")
+    _hw_session_plan_result(id, dap_find_session(session_id), "debug_coverage_collect", "module", module)
 
 fn handle_debug_flash_program(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
     val elf_path = extract_field(body, "elf_path")
     if elf_path == "":
         return make_tool_error(id, -32602, "Missing required parameter: elf_path")
-    val (err, _) = _require_hw_session(id, session_id, ["t32", "t32_gdb", "openocd"])
+    val (err, _) = _require_hw_session(id, session_id, ["t32", "t32_gdb", "openocd", "intel_jtagd"])
     if err != "":
         return err
-    _unsupported_hw_backend(id, session_id, "debug_flash_program")
+    _hw_session_plan_result(id, dap_find_session(session_id), "debug_flash_program", "elf_path", elf_path)
 
 fn handle_debug_system_reset(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
-    val (err, _) = _require_hw_session(id, session_id, ["t32", "t32_gdb", "openocd"])
+    val (err, _) = _require_hw_session(id, session_id, ["t32", "t32_gdb", "openocd", "intel_jtagd"])
     if err != "":
         return err
-    _unsupported_hw_backend(id, session_id, "debug_system_reset")
+    _hw_session_plan_result(id, dap_find_session(session_id), "debug_system_reset", "", "")
 
 fn handle_debug_practice_script(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
@@ -403,7 +464,7 @@ fn handle_debug_practice_script(id: text, body: text) -> text:
     val (err, _) = _require_hw_session(id, session_id, ["t32", "t32_gdb"])
     if err != "":
         return err
-    _unsupported_hw_backend(id, session_id, "debug_practice_script")
+    _hw_session_plan_result(id, dap_find_session(session_id), "debug_practice_script", "script", script)
 
 fn handle_debug_openocd_monitor(id: text, body: text) -> text:
     val session_id = extract_field(body, "session_id")
@@ -413,4 +474,4 @@ fn handle_debug_openocd_monitor(id: text, body: text) -> text:
     val (err, _) = _require_hw_session(id, session_id, ["openocd"])
     if err != "":
         return err
-    _unsupported_hw_backend(id, session_id, "debug_openocd_monitor")
+    _hw_session_plan_result(id, dap_find_session(session_id), "debug_openocd_monitor", "command", command)

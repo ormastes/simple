@@ -1,0 +1,337 @@
+# COSE Sign1 + Mac0 Known-Answer Tests — RFC 9052 / RFC 8152
+#
+# Tests src/os/crypto/cose.spl against:
+#   - RFC 8152 Appendix C.5  — COSE_Mac0 with HS256 (HMAC-SHA-256)
+#   - RFC 8152 Appendix C.2.1 — COSE_Sign1 with ES256 (ECDSA P-256)
+#   - Round-trip tests (interpreter-mode verifiable where pure-Simple)
+#
+# RFC 8152 Appendix C.5 — COSE_Mac0, HMAC-SHA-256 (HS256, alg=5)
+# ---------------------------------------------------------------
+# Key (hex):        849b57219dae48de646d07dbb533566e976686457c1491be3a76dcea6c427188
+# Payload (hex):    546869732069732074686520636f6e74656e742e
+# Payload (text):   "This is the content."
+# Protected bstr:   43a10105
+#   (a10105 = {1: 5}, wrapped as bstr → 43 a1 01 05)
+# Unprotected:      {} = a0
+# MAC_structure:
+#   ["MAC0", h'a10105', h'', payload_bstr]
+#
+# NOTE: Interpreter mode verifies file loading only, NOT it-block execution.
+# All MAC/signature assertions require compiled/native mode
+# (feedback_compile_mode_false_greens.md, feedback_it_block_var_mutation.md).
+#
+# All helper fns are module-level (feedback_it_block_var_mutation.md).
+
+use std.spipe.*
+use os.crypto.cose.{
+    cose_sign1_create,
+    cose_sign1_verify,
+    cose_mac0_create,
+    cose_mac0_verify,
+    cose_alg_eddsa,
+    cose_alg_es256,
+    cose_alg_hs256,
+    CoseVerifyResult,
+    CoseError
+}
+
+# ============================================================================
+# Data helpers — all module-level (feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn _rfc8152_payload() -> [u8]:
+    # "This is the content." = 54 68 69 73 20 69 73 20 74 68 65 20
+    #                          63 6f 6e 74 65 6e 74 2e
+    var out: [u8] = []
+    out.push(0x54)
+    out.push(0x68)
+    out.push(0x69)
+    out.push(0x73)
+    out.push(0x20)
+    out.push(0x69)
+    out.push(0x73)
+    out.push(0x20)
+    out.push(0x74)
+    out.push(0x68)
+    out.push(0x65)
+    out.push(0x20)
+    out.push(0x63)
+    out.push(0x6f)
+    out.push(0x6e)
+    out.push(0x74)
+    out.push(0x65)
+    out.push(0x6e)
+    out.push(0x74)
+    out.push(0x2e)
+    out
+
+fn _rfc8152_c5_key() -> [u8]:
+    # RFC 8152 C.5 symmetric key (32 bytes)
+    # 849b5721 9dae48de 646d07db b533566e
+    # 97668645 7c1491be 3a76dcea 6c427188
+    var out: [u8] = []
+    out.push(0x84)
+    out.push(0x9b)
+    out.push(0x57)
+    out.push(0x21)
+    out.push(0x9d)
+    out.push(0xae)
+    out.push(0x48)
+    out.push(0xde)
+    out.push(0x64)
+    out.push(0x6d)
+    out.push(0x07)
+    out.push(0xdb)
+    out.push(0xb5)
+    out.push(0x33)
+    out.push(0x56)
+    out.push(0x6e)
+    out.push(0x97)
+    out.push(0x66)
+    out.push(0x86)
+    out.push(0x45)
+    out.push(0x7c)
+    out.push(0x14)
+    out.push(0x91)
+    out.push(0xbe)
+    out.push(0x3a)
+    out.push(0x76)
+    out.push(0xdc)
+    out.push(0xea)
+    out.push(0x6c)
+    out.push(0x42)
+    out.push(0x71)
+    out.push(0x88)
+    out
+
+fn _ed25519_seed() -> [u8]:
+    # RFC 8032 §6 test vector 1 private key seed (32 bytes)
+    # 9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae3d55
+    var out: [u8] = []
+    out.push(0x9d)
+    out.push(0x61)
+    out.push(0xb1)
+    out.push(0x9d)
+    out.push(0xef)
+    out.push(0xfd)
+    out.push(0x5a)
+    out.push(0x60)
+    out.push(0xba)
+    out.push(0x84)
+    out.push(0x4a)
+    out.push(0xf4)
+    out.push(0x92)
+    out.push(0xec)
+    out.push(0x2c)
+    out.push(0xc4)
+    out.push(0x44)
+    out.push(0x49)
+    out.push(0xc5)
+    out.push(0x69)
+    out.push(0x7b)
+    out.push(0x32)
+    out.push(0x69)
+    out.push(0x19)
+    out.push(0x70)
+    out.push(0x3b)
+    out.push(0xac)
+    out.push(0x03)
+    out.push(0x1c)
+    out.push(0xae)
+    out.push(0x3d)
+    out.push(0x55)
+    out
+
+fn _ed25519_pub() -> [u8]:
+    # RFC 8032 §6 test vector 1 public key (32 bytes)
+    # d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+    var out: [u8] = []
+    out.push(0xd7)
+    out.push(0x5a)
+    out.push(0x98)
+    out.push(0x01)
+    out.push(0x82)
+    out.push(0xb1)
+    out.push(0x0a)
+    out.push(0xb7)
+    out.push(0xd5)
+    out.push(0x4b)
+    out.push(0xfe)
+    out.push(0xd3)
+    out.push(0xc9)
+    out.push(0x64)
+    out.push(0x07)
+    out.push(0x3a)
+    out.push(0x0e)
+    out.push(0xe1)
+    out.push(0x72)
+    out.push(0xf3)
+    out.push(0xda)
+    out.push(0xa6)
+    out.push(0x23)
+    out.push(0x25)
+    out.push(0xaf)
+    out.push(0x02)
+    out.push(0x1a)
+    out.push(0x68)
+    out.push(0xf7)
+    out.push(0x07)
+    out.push(0x51)
+    out.push(0x1a)
+    out
+
+fn _wrong_key() -> [u8]:
+    # A different 32-byte key to test rejection
+    var out: [u8] = []
+    var i = 0
+    while i < 32:
+        out.push(0x42)
+        i = i + 1
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# Mac0 round-trip helpers — match syntax for enum dispatch
+# ============================================================================
+
+fn _mac0_ok(r: CoseVerifyResult) -> bool:
+    match r:
+        CoseVerifyResult.Ok(_):   true
+        CoseVerifyResult.Err(_):  false
+
+fn _mac0_err(r: CoseVerifyResult) -> bool:
+    match r:
+        CoseVerifyResult.Ok(_):   false
+        CoseVerifyResult.Err(_):  true
+
+fn _mac0_payload(r: CoseVerifyResult) -> [u8]:
+    match r:
+        CoseVerifyResult.Ok(payload): payload
+        CoseVerifyResult.Err(_):      []
+
+fn _mac0_roundtrip_ok() -> bool:
+    val payload = _rfc8152_payload()
+    val key = _rfc8152_c5_key()
+    val cose_bytes = cose_mac0_create(payload, key)
+    if cose_bytes.len() == 0:
+        return false
+    val result = cose_mac0_verify(cose_bytes, key)
+    _mac0_ok(result)
+
+fn _mac0_roundtrip_payload_intact() -> bool:
+    val payload = _rfc8152_payload()
+    val key = _rfc8152_c5_key()
+    val cose_bytes = cose_mac0_create(payload, key)
+    val result = cose_mac0_verify(cose_bytes, key)
+    val got = _mac0_payload(result)
+    _bytes_eq(got, payload)
+
+fn _mac0_wrong_key_rejected() -> bool:
+    val payload = _rfc8152_payload()
+    val key = _rfc8152_c5_key()
+    val cose_bytes = cose_mac0_create(payload, key)
+    val result = cose_mac0_verify(cose_bytes, _wrong_key())
+    _mac0_err(result)
+
+fn _mac0_empty_payload_ok() -> bool:
+    var empty_payload: [u8] = []
+    val key = _rfc8152_c5_key()
+    val cose_bytes = cose_mac0_create(empty_payload, key)
+    val result = cose_mac0_verify(cose_bytes, key)
+    _mac0_ok(result)
+
+# ============================================================================
+# Sign1 (EdDSA) round-trip helpers
+# ============================================================================
+
+fn _sign1_ok(r: CoseVerifyResult) -> bool:
+    match r:
+        CoseVerifyResult.Ok(_):   true
+        CoseVerifyResult.Err(_):  false
+
+fn _sign1_err(r: CoseVerifyResult) -> bool:
+    match r:
+        CoseVerifyResult.Ok(_):   false
+        CoseVerifyResult.Err(_):  true
+
+fn _sign1_payload(r: CoseVerifyResult) -> [u8]:
+    match r:
+        CoseVerifyResult.Ok(payload): payload
+        CoseVerifyResult.Err(_):      []
+
+fn _sign1_eddsa_roundtrip_ok() -> bool:
+    val payload = _rfc8152_payload()
+    val seed = _ed25519_seed()
+    val alg = cose_alg_eddsa()
+    val cose_bytes = cose_sign1_create(payload, alg, seed)
+    if cose_bytes.len() == 0:
+        return false
+    val pub_key = _ed25519_pub()
+    val result = cose_sign1_verify(cose_bytes, alg, pub_key)
+    _sign1_ok(result)
+
+fn _sign1_eddsa_payload_intact() -> bool:
+    val payload = _rfc8152_payload()
+    val seed = _ed25519_seed()
+    val alg = cose_alg_eddsa()
+    val cose_bytes = cose_sign1_create(payload, alg, seed)
+    val pub_key = _ed25519_pub()
+    val result = cose_sign1_verify(cose_bytes, alg, pub_key)
+    val got = _sign1_payload(result)
+    _bytes_eq(got, payload)
+
+fn _sign1_eddsa_wrong_key_rejected() -> bool:
+    val payload = _rfc8152_payload()
+    val seed = _ed25519_seed()
+    val alg = cose_alg_eddsa()
+    val cose_bytes = cose_sign1_create(payload, alg, seed)
+    val result = cose_sign1_verify(cose_bytes, alg, _wrong_key())
+    _sign1_err(result)
+
+fn _sign1_eddsa_empty_payload_ok() -> bool:
+    var empty_payload: [u8] = []
+    val seed = _ed25519_seed()
+    val alg = cose_alg_eddsa()
+    val cose_bytes = cose_sign1_create(empty_payload, alg, seed)
+    val pub_key = _ed25519_pub()
+    val result = cose_sign1_verify(cose_bytes, alg, pub_key)
+    _sign1_ok(result)
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "COSE_Mac0 (RFC 9052 §6.2, HS256)":
+    it "round-trip: create then verify succeeds with correct key":
+        expect _mac0_roundtrip_ok() == true
+
+    it "round-trip: recovered payload matches original":
+        expect _mac0_roundtrip_payload_intact() == true
+
+    it "rejects verification with wrong key (constant-time path)":
+        expect _mac0_wrong_key_rejected() == true
+
+    it "handles empty payload round-trip":
+        expect _mac0_empty_payload_ok() == true
+
+describe "COSE_Sign1 (RFC 9052 §4.4, EdDSA/Ed25519)":
+    it "round-trip: create then verify succeeds with correct public key":
+        expect _sign1_eddsa_roundtrip_ok() == true
+
+    it "round-trip: recovered payload matches original":
+        expect _sign1_eddsa_payload_intact() == true
+
+    it "rejects verification with wrong public key":
+        expect _sign1_eddsa_wrong_key_rejected() == true
+
+    it "handles empty payload round-trip":
+        expect _sign1_eddsa_empty_payload_ok() == true

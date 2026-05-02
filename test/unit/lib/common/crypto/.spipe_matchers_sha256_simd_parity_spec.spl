@@ -1,0 +1,71 @@
+# SHA-256 SIMD/scalar parity spec (2026-05-01)
+#
+# Verifies that the SIMD-vectorized message-schedule path
+# (`sha256_bytes`, routed through `sha256_process_block_simd`) produces
+# byte-identical output to the pure-scalar reference (`sha256_bytes_scalar`)
+# across a range of payload sizes that exercise multi-block boundaries.
+#
+# Also cross-checks one RFC 6234 §8.5 / FIPS 180-4 §B.1 canonical vector
+# ("abc") against both code paths to anchor the parity claim to the spec.
+#
+# Run with `bin/simple <this file>` (direct invocation) — `bin/simple test`
+# is the false-green path per feedback_compile_mode_false_greens.md.
+
+use std.spipe.*
+use std.crypto.sha256.{sha256_bytes, sha256_bytes_scalar}
+use std.crypto.types.{bytes_to_hex}
+
+# ----- helpers --------------------------------------------------------------
+
+fn _make_n_bytes(n: i64, fill: i64) -> list:
+    var out = []
+    var i: i64 = 0
+    while i < n:
+        out.push(fill)
+        i = i + 1
+    out
+
+fn _make_pattern(n: i64) -> list:
+    # Deterministic non-trivial pattern: byte i = (i * 31 + 7) & 0xFF
+    var out = []
+    var i: i64 = 0
+    while i < n:
+        out.push((i * 31 + 7) & 0xFF)
+        i = i + 1
+    out
+
+# ----- specs ----------------------------------------------------------------
+
+describe "SHA-256 SIMD/scalar parity":
+
+    it "RFC 6234 §8.5 / FIPS 180-4 §B.1 'abc' — both paths match canonical digest":
+        # Canonical: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        val abc_bytes = [0x61, 0x62, 0x63]
+        val expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        expect bytes_to_hex(sha256_bytes(abc_bytes)) == expected
+        expect bytes_to_hex(sha256_bytes_scalar(abc_bytes)) == expected
+
+    it "1-byte payload — SIMD == scalar":
+        val msg = _make_n_bytes(1, 0xAA)
+        expect bytes_to_hex(sha256_bytes(msg)) == bytes_to_hex(sha256_bytes_scalar(msg))
+
+    it "55-byte payload (one-block boundary, no overflow into 2nd block) — SIMD == scalar":
+        val msg = _make_pattern(55)
+        expect bytes_to_hex(sha256_bytes(msg)) == bytes_to_hex(sha256_bytes_scalar(msg))
+
+    it "56-byte payload (forces 2nd block due to length encoding) — SIMD == scalar":
+        val msg = _make_pattern(56)
+        expect bytes_to_hex(sha256_bytes(msg)) == bytes_to_hex(sha256_bytes_scalar(msg))
+
+    it "64-byte payload (exact one-block multiple) — SIMD == scalar":
+        val msg = _make_pattern(64)
+        expect bytes_to_hex(sha256_bytes(msg)) == bytes_to_hex(sha256_bytes_scalar(msg))
+
+    it "1024-byte payload (16 blocks) — SIMD == scalar":
+        # Smaller-than-1KiB-spec workhorse to keep interpreter timing tight.
+        val msg = _make_pattern(1024)
+        expect bytes_to_hex(sha256_bytes(msg)) == bytes_to_hex(sha256_bytes_scalar(msg))
+
+    it "2048-byte payload (32 blocks, mixed pattern) — SIMD == scalar":
+        val msg = _make_pattern(2048)
+        expect bytes_to_hex(sha256_bytes(msg)) == bytes_to_hex(sha256_bytes_scalar(msg))

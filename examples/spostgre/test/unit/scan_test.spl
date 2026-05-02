@@ -1,0 +1,59 @@
+use std.spipe.*
+use std.db.accel.{ScanPredicate, ScanPredicateKind}
+use engine.brin.{BrinValue, BRIN_KIND_INT, brin_new, brin_summarize_range}
+use engine.scan.{spostgre_scan_text, spostgre_scan_text_with_brin, spostgre_text_search}
+
+describe "spostgre scan — shared accel refinement":
+    it "filters text rows in batches without BRIN":
+        val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "user", key_value: 0)
+        val result = spostgre_scan_text(["user:1", "admin:9", "user:2"], predicate)
+        expect(result.matched_rows.len()).to_equal(2)
+        expect(result.matched_rows[0]).to_equal(0)
+        expect(result.matched_rows[1]).to_equal(2)
+
+    it "uses BRIN ranges as the coarse filter before tuple refinement":
+        val idx0 = brin_new(1u32, 128u32)
+        val idx1 = brin_summarize_range(idx0, 0u32, [
+            BrinValue(kind: BRIN_KIND_INT, raw: 10),
+            BrinValue(kind: BRIN_KIND_INT, raw: 19)
+        ])
+        val idx2 = brin_summarize_range(idx1, 1u32, [
+            BrinValue(kind: BRIN_KIND_INT, raw: 20),
+            BrinValue(kind: BRIN_KIND_INT, raw: 29)
+        ])
+        val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "match", key_value: 0)
+        val result = spostgre_scan_text_with_brin(
+            [0u32, 0u32, 1u32, 1u32],
+            ["miss", "match-zero", "match-one", "skip"],
+            idx2,
+            BrinValue(kind: BRIN_KIND_INT, raw: 20),
+            BrinValue(kind: BRIN_KIND_INT, raw: 25),
+            predicate
+        )
+        expect(result.matched_ranges.len()).to_equal(1)
+        expect(result.matched_ranges[0]).to_equal(1u32)
+        expect(result.matched_rows.len()).to_equal(1)
+        expect(result.matched_rows[0]).to_equal(2)
+        expect(result.used_brin).to_equal(true)
+        expect(result.filter_stats.rows_scanned).to_equal(2)
+
+    it "offers token and trigram text-search candidates":
+        val results = spostgre_text_search(
+            ["users by region", "regional user metrics", "system wal"],
+            "user"
+        )
+        expect(results.len()).to_equal(2)
+
+    it "preserves matches across multiple accel batches":
+        var values: [text] = []
+        for idx in 0..130:
+            if idx == 63 or idx == 64 or idx == 129:
+                values.push("token=user|row={idx}")
+            else:
+                values.push("token=guest|row={idx}")
+        val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
+        val result = spostgre_scan_text(values, predicate)
+        expect(result.matched_rows.len()).to_equal(3)
+        expect(result.matched_rows[0]).to_equal(63)
+        expect(result.matched_rows[1]).to_equal(64)
+        expect(result.matched_rows[2]).to_equal(129)

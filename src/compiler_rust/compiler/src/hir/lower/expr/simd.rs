@@ -283,7 +283,11 @@ impl Lowerer {
             return Ok(result);
         }
 
-        let class_ty = self.module.types.lookup(class_name).or_else(|| self.globals.get(class_name).copied());
+        let class_ty = self
+            .module
+            .types
+            .lookup(class_name)
+            .or_else(|| self.globals.get(class_name).copied());
 
         if let Some(type_id) = class_ty {
             if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) && method == "new" {

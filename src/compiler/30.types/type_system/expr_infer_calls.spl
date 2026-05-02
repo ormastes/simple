@@ -7,9 +7,23 @@
 use compiler.types.type_system.stmt_check.{bind_pattern}
 use inference.types.{Type, TypeVarId, UnifyError, InferError}
 use inference.infer.{InferenceEngine}
-use ast.{Expr, MacroArg}
+use compiler.frontend.parser_types_expr.{Expr, CallArg as Argument, MatchArm, LambdaParam}
+use compiler.semantics.macro_check.{MacroArg}
 use compiler.types.type_system.checker.{TypeError}
 use compiler.types.type_system.module_check.{ast_type_to_inference_type_engine}
+
+# ============================================================================
+# Typed AST Access Helpers
+# ============================================================================
+
+fn _call_arg_value(arg: Argument) -> Expr:
+    arg.value
+
+fn _lambda_param_type_or_fresh(param: LambdaParam, engine: InferenceEngine) -> Type:
+    if param.has_type_:
+        ast_type_to_inference_type_engine(param.type_, engine)
+    else:
+        engine_fresh_var(engine)
 
 # ============================================================================
 # Function Calls
@@ -25,7 +39,7 @@ fn infer_call(engine: InferenceEngine, callee: Expr, args: [Argument],
     # Infer argument types
     var arg_types: [Type] = []
     for arg in args:
-        val arg_ty = infer_expr(engine, arg.value, env)
+        val arg_ty = infer_expr(engine, _call_arg_value(arg), env)
         if arg_ty.is_err():
             return arg_ty
         arg_types = arg_types_push(arg_types, arg_ty)
@@ -57,7 +71,7 @@ fn infer_method_call(engine: InferenceEngine, receiver: Expr, method: text,
 
     # Infer argument types
     for arg in args:
-        val _unused_19 = infer_expr(engine, arg.value, env)?
+        val _unused_19 = infer_expr(engine, _call_arg_value(arg), env)?
 
     # Special handling for .with method (FString template instantiation)
     if method == "with":
@@ -67,7 +81,7 @@ fn infer_method_call(engine: InferenceEngine, receiver: Expr, method: text,
             case Generic(base, key_types) if base == "FString":
                 # Verify dict argument has all required keys
                 if args_len(args) >= 1:
-                    val arg_ty = infer_expr(engine, args[0].value, env)?
+                    val arg_ty = infer_expr(engine, _call_arg_value(args[0]), env)?
                     # Dict type should be compatible with FString's key set
                     engine.unify(arg_ty, Type.Generic(base: "Dict", args: [Type.Str, Type.Str]))?
             case _:
@@ -92,10 +106,7 @@ fn infer_lambda(engine: InferenceEngine, params: [LambdaParam], body: Expr,
     var new_env = env
 
     for param in params:
-        val param_ty = if param.has_ty:
-            ast_type_to_inference_type_engine(param.ty_value, engine)
-        else:
-            engine_fresh_var(engine)
+        val param_ty = _lambda_param_type_or_fresh(param, engine)
 
         param_types = param_types_push(param_types, param_ty)
         new_env[param.name] = param_ty
@@ -305,4 +316,3 @@ fn infer_macro(engine: InferenceEngine, name: text, args: [MacroArg],
 # ============================================================================
 # Exports
 # ============================================================================
-

@@ -129,6 +129,11 @@ impl Lowerer {
                         if matches!(self.module.types.get(type_id), Some(HirType::Enum { .. })) {
                             return Ok(type_id);
                         }
+                        if let Some(canonical_member) = self.resolve_static_member_name(recv_name, field) {
+                            if let Some(ret_ty) = self.static_member_return_type(recv_name, &canonical_member) {
+                                return Ok(ret_ty);
+                            }
+                        }
                     }
                 }
                 // Infer field type from struct type, with the same fallback

@@ -17,6 +17,19 @@ pub(crate) struct ImportMapResult {
     pub re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Global struct definitions: struct_name -> field names (in order).
     pub struct_defs: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Global enum definitions: enum_name -> variants, where each variant is
+    /// `(variant_name, payload_arity)`. `payload_arity = None` means a unit
+    /// variant (no fields); `Some(n)` means a payload variant with `n` fields
+    /// (field types are unknown at this layer and will be `TypeId::ANY` when
+    /// the lowerer eagerly registers the enum into its TypeRegistry).
+    ///
+    /// W15-H: this fixes class-1 of the HIR ANY-field bug — TitleCase enum
+    /// receivers (`TypeKind`, `TokenKind`, etc.) referenced in a compilation
+    /// unit that does not transitively reach them via a `use` chain were
+    /// missing from `module.types.name_to_id`, so `lookup(recv_name)` in
+    /// `expr/access.rs::lower_field_access` returned None and the
+    /// enum-variant early-return fell through to the field-access fallback.
+    pub enum_defs: std::collections::HashMap<String, Vec<(String, Option<usize>)>>,
     /// Set of mangled names that correspond to module-level `val`/`var`/`const`
     /// (i.e. DATA, not functions). Used by the cranelift backend to decide
     /// whether a cross-module imported global should be declared as a data
@@ -190,6 +203,7 @@ pub(crate) fn build_import_map(
 
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
     let mut struct_defs: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut enum_defs: HashMap<String, Vec<(String, Option<usize>)>> = HashMap::new();
     let mut data_exports: HashSet<String> = HashSet::new();
 
     let mut seen_canonical = HashSet::new();
@@ -317,6 +331,19 @@ pub(crate) fn build_import_map(
                             .or_default()
                             .push(type_mangled.clone());
                         data_exports.insert(type_mangled);
+                        // W15-H: harvest enum variant arity into the global
+                        // enum-defs sidecar so the lowerer can eagerly seed
+                        // `module.types.name_to_id` and `self.globals` with
+                        // the real enum TypeId for cross-module receivers.
+                        let variant_summary: Vec<(String, Option<usize>)> = e
+                            .variants
+                            .iter()
+                            .map(|v| {
+                                let payload_arity = v.fields.as_ref().map(|fields| fields.len());
+                                (v.name.clone(), payload_arity)
+                            })
+                            .collect();
+                        enum_defs.entry(e.name.clone()).or_insert(variant_summary);
                         for m in &e.methods {
                             if !m.body.statements.is_empty() {
                                 let raw = format!("{}.{}", e.name, m.name);
@@ -479,6 +506,7 @@ pub(crate) fn build_import_map(
         all_mangled: raw_to_mangled,
         re_exports,
         struct_defs,
+        enum_defs,
         data_exports,
     }
 }

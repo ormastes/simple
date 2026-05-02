@@ -9,8 +9,7 @@ use crate::value_bridge::{runtime_to_value, value_to_runtime};
 use simple_runtime::value::aes::{
     aes128_encrypt_one_block, aes128_gcm_decrypt_bytes, aes128_gcm_encrypt_bytes, aes256_encrypt_one_block,
     aes256_gcm_decrypt_bytes, aes256_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
-    encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon, rt_aes_sbox as ffi_aes_sbox,
-    AesGcmDecryptOutcome,
+    encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon, rt_aes_sbox as ffi_aes_sbox, AesGcmDecryptOutcome,
 };
 use simple_runtime::value::simd::{
     rt_simd_detect_profile as ffi_detect_profile, rt_simd_has_avx as ffi_has_avx, rt_simd_has_avx2 as ffi_has_avx2,
@@ -184,7 +183,9 @@ pub fn rt_aes_sbox(args: &[Value]) -> Result<Value, CompileError> {
     }
     match &args[0] {
         Value::Int(i) => Ok(Value::Int(ffi_aes_sbox(*i))),
-        _ => Err(CompileError::runtime("rt_aes_sbox expects an integer index".to_string())),
+        _ => Err(CompileError::runtime(
+            "rt_aes_sbox expects an integer index".to_string(),
+        )),
     }
 }
 
@@ -194,7 +195,9 @@ pub fn rt_aes_rcon(args: &[Value]) -> Result<Value, CompileError> {
     }
     match &args[0] {
         Value::Int(i) => Ok(Value::Int(ffi_aes_rcon(*i))),
-        _ => Err(CompileError::runtime("rt_aes_rcon expects an integer index".to_string())),
+        _ => Err(CompileError::runtime(
+            "rt_aes_rcon expects an integer index".to_string(),
+        )),
     }
 }
 
@@ -224,6 +227,26 @@ pub fn rt_aes128_encrypt_block_into(args: &[Value]) -> Result<Value, CompileErro
     } else {
         Ok(Value::Int(1))
     }
+}
+
+// rt_aes128_encrypt_block_pure(key: [u8] (16B), block: [u8] (16B)) -> [u8]
+// Pure-functional companion to rt_aes128_encrypt_block_into. Returns the 16-byte
+// cipher as a fresh Value::array (interpreter mode); compile-mode form lives
+// at src/compiler_rust/runtime/src/value/aes.rs:rt_aes128_encrypt_block_pure.
+// Bug: doc/08_tracking/bug/rt_aes_encrypt_block_into_interpreter_arc_2026-05-02.md
+pub fn rt_aes128_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_aes128_encrypt_block_pure expects 2 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_aes128_encrypt_block_pure", &args[0])?;
+    let block = expect_byte_array("rt_aes128_encrypt_block_pure", &args[1])?;
+    if key.len() != 16 || block.len() != 16 {
+        return Ok(Value::array(vec![]));
+    }
+    let cipher = aes128_encrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
+    Ok(Value::array(cipher.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 // rt_tls13_aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
@@ -263,6 +286,24 @@ pub fn rt_aes256_encrypt_block_into(args: &[Value]) -> Result<Value, CompileErro
     } else {
         Ok(Value::Int(1))
     }
+}
+
+// rt_aes256_encrypt_block_pure(key: [u8] (32B), block: [u8] (16B)) -> [u8]
+// Pure-functional companion to rt_aes256_encrypt_block_into. Returns the 16-byte
+// cipher as a fresh Value::array. See rt_aes128_encrypt_block_pure above.
+pub fn rt_aes256_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_aes256_encrypt_block_pure expects 2 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_aes256_encrypt_block_pure", &args[0])?;
+    let block = expect_byte_array("rt_aes256_encrypt_block_pure", &args[1])?;
+    if key.len() != 32 || block.len() != 16 {
+        return Ok(Value::array(vec![]));
+    }
+    let cipher = aes256_encrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
+    Ok(Value::array(cipher.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 // rt_tls13_aes256_gcm_encrypt(key: [u8] (32B), nonce: [u8] (12B), plaintext: [u8], aad: [u8]) -> [u8]
@@ -358,9 +399,7 @@ fn require_i32_field(name: &str, fields: &HashMap<String, Value>, field: &str) -
             "{name}: field {field} must be an integer, got {:?}",
             other
         ))),
-        None => Err(CompileError::runtime(format!(
-            "{name}: missing field {field}"
-        ))),
+        None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
     }
 }
 
@@ -368,9 +407,7 @@ fn unpack_vec4i(name: &str, value: &Value) -> Result<[i32; 4], CompileError> {
     match value {
         Value::Object { class, fields } => {
             if class != "Vec4i" {
-                return Err(CompileError::runtime(format!(
-                    "{name}: expected Vec4i, got {class}"
-                )));
+                return Err(CompileError::runtime(format!("{name}: expected Vec4i, got {class}")));
             }
             Ok([
                 require_i32_field(name, fields, "x")?,
@@ -402,9 +439,7 @@ fn unpack_vec8i(name: &str, value: &Value) -> Result<[i32; 8], CompileError> {
     match value {
         Value::Object { class, fields } => {
             if class != "Vec8i" {
-                return Err(CompileError::runtime(format!(
-                    "{name}: expected Vec8i, got {class}"
-                )));
+                return Err(CompileError::runtime(format!("{name}: expected Vec8i, got {class}")));
             }
             Ok([
                 require_i32_field(name, fields, "e0")?,
@@ -581,9 +616,7 @@ fn require_u8_field(name: &str, fields: &HashMap<String, Value>, field: &str) ->
             "{name}: field {field} must be an integer, got {:?}",
             other
         ))),
-        None => Err(CompileError::runtime(format!(
-            "{name}: missing field {field}"
-        ))),
+        None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
     }
 }
 
@@ -595,9 +628,7 @@ fn unpack_vec16u8(name: &str, value: &Value) -> Result<[u8; 16], CompileError> {
     match value {
         Value::Object { class, fields } => {
             if class != "Vec16u8" {
-                return Err(CompileError::runtime(format!(
-                    "{name}: expected Vec16u8, got {class}"
-                )));
+                return Err(CompileError::runtime(format!("{name}: expected Vec16u8, got {class}")));
             }
             let mut lanes = [0_u8; 16];
             for (i, fname) in VEC16U8_FIELDS.iter().enumerate() {
@@ -686,9 +717,7 @@ fn unpack_vec2u64(name: &str, value: &Value) -> Result<[u64; 2], CompileError> {
     match value {
         Value::Object { class, fields } => {
             if class != "Vec2u64" {
-                return Err(CompileError::runtime(format!(
-                    "{name}: expected Vec2u64, got {class}"
-                )));
+                return Err(CompileError::runtime(format!("{name}: expected Vec2u64, got {class}")));
             }
             let lo = require_u64_field(name, fields, "lo")?;
             let hi = require_u64_field(name, fields, "hi")?;
@@ -703,8 +732,20 @@ fn unpack_vec2u64(name: &str, value: &Value) -> Result<[u64; 2], CompileError> {
 
 fn pack_vec2u64(lanes: [u64; 2]) -> Value {
     let mut fields = HashMap::with_capacity(2);
-    fields.insert("lo".to_string(), Value::UInt { value: lanes[0], width: 64 });
-    fields.insert("hi".to_string(), Value::UInt { value: lanes[1], width: 64 });
+    fields.insert(
+        "lo".to_string(),
+        Value::UInt {
+            value: lanes[0],
+            width: 64,
+        },
+    );
+    fields.insert(
+        "hi".to_string(),
+        Value::UInt {
+            value: lanes[1],
+            width: 64,
+        },
+    );
     Value::Object {
         class: "Vec2u64".to_string(),
         fields: Arc::new(fields),
@@ -741,7 +782,10 @@ pub fn rt_simd_vec2u64_lo(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let lanes = unpack_vec2u64("rt_simd_vec2u64_lo", &args[0])?;
-    Ok(Value::UInt { value: lanes[0], width: 64 })
+    Ok(Value::UInt {
+        value: lanes[0],
+        width: 64,
+    })
 }
 
 pub fn rt_simd_vec2u64_hi(args: &[Value]) -> Result<Value, CompileError> {
@@ -751,7 +795,10 @@ pub fn rt_simd_vec2u64_hi(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let lanes = unpack_vec2u64("rt_simd_vec2u64_hi", &args[0])?;
-    Ok(Value::UInt { value: lanes[1], width: 64 })
+    Ok(Value::UInt {
+        value: lanes[1],
+        width: 64,
+    })
 }
 
 pub fn rt_simd_clmul_lo_u64(args: &[Value]) -> Result<Value, CompileError> {

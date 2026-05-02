@@ -708,13 +708,23 @@ MIR: `MirSimdMaskedStore { data: Q1, mask: Q2, ptr: X0, ty: f32x4 }`
 
 Synthesis (B2 §3.1): `BSL v2.16b, v1.16b, v_mem.16b` then `ST1 {v2.4s}, [x0]`
 ```
-# BSL v2.16b, v1.16b, v3.16b
-Bytes: 0x62 0x1C 0x33 0x6E   # UNVERIFIED — ARMv9 ARM BSL §C7.2.x
+# BSL v2.16b, v1.16b, v3.16b   (Rd=2, Rn=1, Rm=3)
+# ARMv8 ARM §C7.2.22 BSL bit-pattern (Q=1 16B form):
+#   0|Q|1|01110|0|11|Rm[4:0]|000111|Rn[4:0]|Rd[4:0]
+# Field placement:
+#   bits[31:24] = 0110_1110 = 0x6E  (0,Q=1,1,01110)
+#   bits[23:16] = 0110_0011 = 0x63  (0,size[1]=1,size[0]=1,Rm=00011)
+#   bits[15:8]  = 0001_1100 = 0x1C  (opcode=000111 split + const)
+#   bits[7:0]   = 0010_0010 = 0x22  (Rn[2:0]=001, Rd=00010)
+# LE word: 0x6E631C22
+# [ERR-002 corrected 2026-05-02] Original bytes 0x62 0x1C 0x33 0x6E were wrong:
+#   decoded to Rm=19 (bits[20:16]=10011), Rn=3 (bits[9:5]=00011) — both fields wrong.
+Bytes: 0x22 0x1C 0x63 0x6E   # VERIFIED — ARMv8 ARM §C7.2.22 bit-field derivation
 
 # ST1 {v2.4s}, [x0]
 Bytes: 0x02 0x78 0x00 0x4C   # UNVERIFIED — ARMv9 ARM §C7.2.339
 ```
-**UNVERIFIED** — both bytes require ARMv9 ARM §C7 confirmation.
+**BSL VERIFIED** per ERR-002 bit-field derivation (ARMv8 ARM §C7.2.22). ST1 bytes remain UNVERIFIED — ARMv9 ARM §C7.2.339 not yet confirmed.
 
 ---
 

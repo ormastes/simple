@@ -102,6 +102,12 @@ impl Lowerer {
                     )));
                 }
             }
+
+            if self.module.types.lookup(recv_name).is_some() {
+                if let Some(expr) = self.try_lower_static_member_value_with_sugar(recv_name, field, ctx)? {
+                    return Ok(expr);
+                }
+            }
         }
 
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
@@ -184,7 +190,9 @@ impl Lowerer {
                             ty: field_ty,
                         });
                     }
-                    if let Some(field_index) = self.try_resolve_global_field_index_by_name(&candidate_struct_name, field) {
+                    if let Some(field_index) =
+                        self.try_resolve_global_field_index_by_name(&candidate_struct_name, field)
+                    {
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -263,11 +271,7 @@ impl Lowerer {
             .find_map(|(idx, (fname, _))| if fname == field_name { Some(idx) } else { None })
     }
 
-    fn try_resolve_receiver_struct_name_from_expr(
-        &mut self,
-        receiver: &Expr,
-        ctx: &FunctionContext,
-    ) -> Option<String> {
+    fn try_resolve_receiver_struct_name_from_expr(&mut self, receiver: &Expr, ctx: &FunctionContext) -> Option<String> {
         match receiver {
             Expr::Identifier(name) => {
                 let ty = if let Some(idx) = ctx.lookup(name) {
@@ -354,13 +358,15 @@ impl Lowerer {
 
     fn enum_variant_payload_type(&self, ty: TypeId, enum_name: &str, variant_name: &str) -> Option<TypeId> {
         match self.module.types.get(ty) {
-            Some(HirType::Enum { name, variants, .. }) if name == enum_name => variants.iter().find_map(|(name, payload)| {
-                if name == variant_name {
-                    payload.as_ref().and_then(|fields| fields.first()).copied()
-                } else {
-                    None
-                }
-            }),
+            Some(HirType::Enum { name, variants, .. }) if name == enum_name => {
+                variants.iter().find_map(|(name, payload)| {
+                    if name == variant_name {
+                        payload.as_ref().and_then(|fields| fields.first()).copied()
+                    } else {
+                        None
+                    }
+                })
+            }
             Some(HirType::Pointer { inner, .. }) => self.enum_variant_payload_type(*inner, enum_name, variant_name),
             _ => None,
         }

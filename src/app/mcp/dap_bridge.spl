@@ -7,6 +7,12 @@
 # For now, this is a lightweight bridge that spawns DAP processes and
 # translates MCP tool calls to DAP requests via file-based IPC.
 
+use std.nogc_sync_mut.debug.remote.session_model.{
+    DebugCapabilitySet, DebugConnectionHints, DebugTargetDescriptor, DebugBackendRegistration,
+    DebugBootstrapPlan, debug_target_descriptor, debug_select_backend,
+    debug_bootstrap_plan
+}
+
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
@@ -22,21 +28,131 @@ class DapSession:
     next_bp_id: i64
     breakpoints: [text]
     watches: [text]
+    arch: text
+    exec_mode: text
+    vendor: text
+    probe_kind: text
+    server_kind: text
+    transport: text
+    backend_id: text
+    attach_semantics: text
+    persistent_session: bool
+    capabilities: [text]
+    host: text
+    port: i32
+    config_path: text
+    probe_serial: text
+    bitbang_host: text
+    bitbang_port: i32
+    jtag_device: text
+    bootstrap_discovery_command: text
+    bootstrap_launch_command: text
+    bootstrap_attach_target: text
+    bootstrap_config: text
+    bootstrap_notes: [text]
 
 var DAP_SESSIONS: [DapSession] = []
 var DAP_NEXT_ID: i64 = 1
 
-fn dap_create_session(program: text, target_type: text) -> DapSession:
+fn dap_empty_backend(target: DebugTargetDescriptor) -> DebugBackendRegistration:
+    DebugBackendRegistration(
+        backend_id: "",
+        session_type: "",
+        display_name: "",
+        transport: target.transport,
+        exec_mode: target.exec_mode,
+        vendors: [],
+        capabilities: DebugCapabilitySet.create(false, false, false, false, false, false),
+        default_port: 0,
+        attach_semantics: ""
+    )
+
+fn dap_make_connection_hints(host: text, port: text, config_path: text, probe_serial: text,
+                             bitbang_host: text, bitbang_port: text, jtag_device: text) -> DebugConnectionHints:
+    var hints = DebugConnectionHints.empty()
+    if host.trim() != "":
+        hints.host = host.trim()
+    if port.trim() != "":
+        hints.port = int(port)
+    if config_path.trim() != "":
+        hints.config_path = config_path.trim()
+    if probe_serial.trim() != "":
+        hints.probe_serial = probe_serial.trim()
+    if bitbang_host.trim() != "":
+        hints.bitbang_host = bitbang_host.trim()
+    if bitbang_port.trim() != "":
+        hints.bitbang_port = int(bitbang_port)
+    if jtag_device.trim() != "":
+        hints.jtag_device = jtag_device.trim()
+    hints
+
+fn dap_is_embedded_session(target_type: text, target: DebugTargetDescriptor, backend: DebugBackendRegistration) -> bool:
+    if target_type == "t32" or target_type == "t32_gdb" or target_type == "openocd" or target_type == "intel_jtagd":
+        return true
+    val transport = target.transport.to_string()
+    if transport == "openocd_jtag" or transport == "openocd_remote_bitbang" or transport == "intel_jtagd" or transport == "trace32_native" or transport == "trace32_gdb":
+        return true
+    backend.session_type == "openocd" or backend.session_type == "intel_jtagd" or backend.session_type == "t32" or backend.session_type == "t32_gdb"
+
+fn dap_create_session(program: text, target_type: text, transport: text, arch: text, exec_mode: text,
+                      vendor: text, probe_kind: text, server_kind: text, host: text, port: text,
+                      config_path: text, probe_serial: text, bitbang_host: text,
+                      bitbang_port: text, jtag_device: text, persistent_session: text) -> DapSession:
     val sid = "dap-" + str(DAP_NEXT_ID)
     DAP_NEXT_ID = DAP_NEXT_ID + 1
+    val target = debug_target_descriptor(target_type, transport, arch, exec_mode, vendor, probe_kind, server_kind)
+    val backend_result = debug_select_backend(target)
+    var backend = dap_empty_backend(target)
+    var backend_error = ""
+    match backend_result:
+        Ok(selected):
+            backend = selected
+        Err(err):
+            backend_error = err
+    val hints = dap_make_connection_hints(host, port, config_path, probe_serial, bitbang_host, bitbang_port, jtag_device)
+    var bootstrap_plan = DebugBootstrapPlan(
+        backend_id: "",
+        discovery_command: "",
+        launch_command: "",
+        attach_target: "",
+        generated_config: "",
+        notes: []
+    )
+    if backend_error == "":
+        match debug_bootstrap_plan(target, hints, program):
+            Ok(plan):
+                bootstrap_plan = plan
+            Err(err):
+                backend_error = err
+    var persistent = false
+    if persistent_session == "true" or persistent_session == "1":
+        persistent = true
+    if backend_error == "" and backend.capabilities.persistent_session:
+        persistent = true
 
     var pid = -1
     var state = "configured"
-    if target_type != "t32" and target_type != "t32_gdb" and target_type != "openocd":
-        # Hardware session kinds are not wired to a backend here.
+    if backend_error != "":
+        state = "failed"
+    elif not dap_is_embedded_session(target_type, target, backend):
         val _bin = _mcp_find_simple_binary()
         pid = rt_process_spawn_async(_bin, ["dap", "--session", sid, program])
-        state = if pid > 0: "initialized" else: "failed"
+        if pid > 0:
+            state = "initialized"
+        else:
+            state = "failed"
+    elif target.exec_mode.to_string() == "rtl_sim":
+        state = "bootstrap_ready"
+    else:
+        state = "configured"
+
+    var capabilities: [text] = []
+    var bootstrap_notes: [text] = []
+    if backend_error == "":
+        capabilities = backend.capabilities.to_list()
+        bootstrap_notes = bootstrap_plan.notes
+    else:
+        bootstrap_notes = [backend_error]
 
     var session = DapSession(
         id: sid,
@@ -46,7 +162,29 @@ fn dap_create_session(program: text, target_type: text) -> DapSession:
         state: state,
         next_bp_id: 1,
         breakpoints: [],
-        watches: []
+        watches: [],
+        arch: target.arch.to_string(),
+        exec_mode: target.exec_mode.to_string(),
+        vendor: target.vendor,
+        probe_kind: target.probe_kind,
+        server_kind: target.server_kind,
+        transport: target.transport.to_string(),
+        backend_id: backend.backend_id,
+        attach_semantics: backend.attach_semantics,
+        persistent_session: persistent,
+        capabilities: capabilities,
+        host: hints.host,
+        port: hints.port,
+        config_path: hints.config_path,
+        probe_serial: hints.probe_serial,
+        bitbang_host: hints.bitbang_host,
+        bitbang_port: hints.bitbang_port,
+        jtag_device: hints.jtag_device,
+        bootstrap_discovery_command: bootstrap_plan.discovery_command,
+        bootstrap_launch_command: bootstrap_plan.launch_command,
+        bootstrap_attach_target: bootstrap_plan.attach_target,
+        bootstrap_config: bootstrap_plan.generated_config,
+        bootstrap_notes: bootstrap_notes
     )
     DAP_SESSIONS = DAP_SESSIONS + [session]
     session
@@ -55,7 +193,16 @@ fn dap_find_session(session_id: text) -> DapSession:
     for s in DAP_SESSIONS:
         if s.id == session_id:
             return s
-    DapSession(id: "", program: "", target_type: "", pid: -1, state: "not_found", next_bp_id: 1, breakpoints: [], watches: [])
+    DapSession(
+        id: "", program: "", target_type: "", pid: -1, state: "not_found",
+        next_bp_id: 1, breakpoints: [], watches: [], arch: "", exec_mode: "",
+        vendor: "", probe_kind: "", server_kind: "", transport: "", backend_id: "",
+        attach_semantics: "", persistent_session: false, capabilities: [],
+        host: "", port: 0, config_path: "", probe_serial: "", bitbang_host: "",
+        bitbang_port: 0, jtag_device: "", bootstrap_discovery_command: "",
+        bootstrap_launch_command: "", bootstrap_attach_target: "", bootstrap_config: "",
+        bootstrap_notes: []
+    )
 
 fn dap_close_session(session_id: text) -> bool:
     var new_sessions: [DapSession] = []
@@ -116,3 +263,9 @@ fn dap_list_sessions() -> [DapSession]:
         updated.push(session)
     DAP_SESSIONS = updated
     DAP_SESSIONS
+
+fn dap_session_supports(session: DapSession, capability: text) -> bool:
+    for entry in session.capabilities:
+        if entry == capability:
+            return true
+    false

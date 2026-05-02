@@ -434,17 +434,18 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
     std::fs::create_dir_all(consumer_path.parent().unwrap()).unwrap();
 
     std::fs::write(&logger_path, "fn log_info(msg: text):\n    pass\n").unwrap();
-    std::fs::write(&consumer_path, "use lib.nogc_async_mut_noalloc.log.*\nfn main():\n    log_info(\"x\")\n").unwrap();
+    std::fs::write(
+        &consumer_path,
+        "use lib.nogc_async_mut_noalloc.log.*\nfn main():\n    log_info(\"x\")\n",
+    )
+    .unwrap();
 
     let file_sources = vec![
         (logger_path.clone(), std::fs::read_to_string(&logger_path).unwrap()),
         (consumer_path.clone(), std::fs::read_to_string(&consumer_path).unwrap()),
     ];
     let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
-    let expected = format!(
-        "{}__log_info",
-        module_prefix_from_path(&logger_path, &lib_root)
-    );
+    let expected = format!("{}__log_info", module_prefix_from_path(&logger_path, &lib_root));
 
     let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
         .parse()
@@ -471,7 +472,11 @@ fn test_re_exports_include_glob_imported_facade_symbols() {
 
     std::fs::write(&logger_path, "fn log_info(msg: text):\n    pass\n").unwrap();
     std::fs::write(&facade_path, "use lib.nogc_async_mut_noalloc.log.*\nexport log_info\n").unwrap();
-    std::fs::write(&consumer_path, "use os.kernel.log.klog_api.{log_info}\nfn main():\n    log_info(\"x\")\n").unwrap();
+    std::fs::write(
+        &consumer_path,
+        "use os.kernel.log.klog_api.{log_info}\nfn main():\n    log_info(\"x\")\n",
+    )
+    .unwrap();
 
     let file_sources = vec![
         (logger_path.clone(), std::fs::read_to_string(&logger_path).unwrap()),
@@ -480,10 +485,7 @@ fn test_re_exports_include_glob_imported_facade_symbols() {
     ];
     let source_dirs = vec![lib_root.clone(), os_root.clone(), src_root.join("app")];
     let result = super::imports::build_import_map(&file_sources, &source_dirs, &src_root);
-    let expected = format!(
-        "{}__log_info",
-        module_prefix_from_path(&logger_path, &lib_root)
-    );
+    let expected = format!("{}__log_info", module_prefix_from_path(&logger_path, &lib_root));
     let facade_prefix = module_prefix_from_path(&facade_path, &os_root);
 
     let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
@@ -564,8 +566,10 @@ void app_call(void) { rt_used(); }
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
     };
 
     let roots =
@@ -648,8 +652,10 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
     };
 
     let aliases = NativeProjectBuilder::freestanding_weak_boot_defsyms(&[simple_o], &[boot_o], &imports).unwrap();

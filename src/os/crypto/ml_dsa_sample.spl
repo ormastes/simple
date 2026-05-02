@@ -20,7 +20,7 @@
 mod os.crypto.ml_dsa_sample
 
 use std.crypto.sha3.{keccak_f1600}
-use os.crypto.ml_dsa_ntt.{ml_dsa_q, ml_dsa_n, ml_dsa_eta_65, ml_dsa_gamma1_65, modq}
+use os.crypto.ml_dsa_ntt.{ml_dsa_q, ml_dsa_n, ml_dsa_eta_65, ml_dsa_gamma1_65, ml_dsa_k_65, ml_dsa_l_65, ml_dsa_k_44, ml_dsa_l_44, ml_dsa_eta_44, ml_dsa_gamma1_44, ml_dsa_omega_44, ml_dsa_k_87, ml_dsa_l_87, ml_dsa_eta_87, ml_dsa_gamma1_87, ml_dsa_omega_87, ml_dsa_omega_65, modq}
 
 # -----------------------------------------------------------------------------
 # SHAKE-128 / SHAKE-256 XOF (FIPS 202 §6.2 + §B / NIST FIPS 204 §3.7)
@@ -205,9 +205,7 @@ fn rej_ntt_poly_from_seed(rho: list, r: i64, s: i64) -> list:
 # from public seed rho. For ML-DSA-65: k=6 rows × l=5 cols.
 # -----------------------------------------------------------------------------
 
-fn expand_a_65(rho: list) -> list:
-    val k = 6
-    val l = 5
+fn expand_a_with(rho: list, k: i64, l: i64) -> list:
     var rows = []
     var i = 0
     while i < k:
@@ -219,6 +217,15 @@ fn expand_a_65(rho: list) -> list:
         rows.push(row)
         i = i + 1
     rows
+
+fn expand_a_65(rho: list) -> list:
+    expand_a_with(rho, 6, 5)
+
+fn expand_a_44(rho: list) -> list:
+    expand_a_with(rho, 4, 4)
+
+fn expand_a_87(rho: list) -> list:
+    expand_a_with(rho, 8, 7)
 
 # -----------------------------------------------------------------------------
 # RejBoundedPoly — FIPS 204 Algorithm 31: eta-bounded coefficient sampling
@@ -233,7 +240,22 @@ fn _eta_map_65(v: i64) -> i64:
     else:
         99    # sentinel for reject (caller filters)
 
-fn rej_bounded_poly_from_seed(rho_prime: list, idx: i64) -> list:
+fn _eta_map_with(v: i64, eta: i64) -> i64:
+    # FIPS 204 §B Algorithm 31:
+    #   eta = 2 → accept v < 15, return 2 - (v % 5)
+    #   eta = 4 → accept v <  9, return 4 - (v % 9)
+    if eta == 2:
+        if v < 15:
+            2 - (v % 5)
+        else:
+            99
+    else:
+        if v < 9:
+            4 - (v % 9)
+        else:
+            99
+
+fn rej_bounded_poly_from_seed_eta(rho_prime: list, idx: i64, eta: i64) -> list:
     # rho_prime is 64 bytes; idx ∈ [0, k+l).
     var seed = []
     var i = 0
@@ -250,10 +272,10 @@ fn rej_bounded_poly_from_seed(rho_prime: list, idx: i64) -> list:
         pos = pos + 1
         val v0 = byte & 0x0f
         val v1 = (byte >> 4) & 0x0f
-        val m0 = _eta_map_65(v0)
+        val m0 = _eta_map_with(v0, eta)
         if m0 != 99 and coeffs.len() < 256:
             coeffs.push(m0)
-        val m1 = _eta_map_65(v1)
+        val m1 = _eta_map_with(v1, eta)
         if m1 != 99 and coeffs.len() < 256:
             coeffs.push(m1)
     while coeffs.len() < 256:
@@ -264,33 +286,43 @@ fn rej_bounded_poly_from_seed(rho_prime: list, idx: i64) -> list:
             ep = ep + 1
             val v0 = byte & 0x0f
             val v1 = (byte >> 4) & 0x0f
-            val m0 = _eta_map_65(v0)
+            val m0 = _eta_map_with(v0, eta)
             if m0 != 99 and coeffs.len() < 256:
                 coeffs.push(m0)
-            val m1 = _eta_map_65(v1)
+            val m1 = _eta_map_with(v1, eta)
             if m1 != 99 and coeffs.len() < 256:
                 coeffs.push(m1)
     coeffs
+
+fn rej_bounded_poly_from_seed(rho_prime: list, idx: i64) -> list:
+    rej_bounded_poly_from_seed_eta(rho_prime, idx, 4)
 
 # -----------------------------------------------------------------------------
 # ExpandS — FIPS 204 Algorithm 33: builds (s1, s2) where s1 ∈ R_q^l with
 # η-bounded coeffs, s2 ∈ R_q^k η-bounded coeffs.  For ML-DSA-65: l=5, k=6.
 # -----------------------------------------------------------------------------
 
-fn expand_s_65(rho_prime: list) -> tuple:
-    val l = 5
-    val k = 6
+fn expand_s_with(rho_prime: list, k: i64, l: i64, eta: i64) -> tuple:
     var s1 = []
     var i = 0
     while i < l:
-        s1.push(rej_bounded_poly_from_seed(rho_prime, i))
+        s1.push(rej_bounded_poly_from_seed_eta(rho_prime, i, eta))
         i = i + 1
     var s2 = []
     var j = 0
     while j < k:
-        s2.push(rej_bounded_poly_from_seed(rho_prime, l + j))
+        s2.push(rej_bounded_poly_from_seed_eta(rho_prime, l + j, eta))
         j = j + 1
     (s1, s2)
+
+fn expand_s_65(rho_prime: list) -> tuple:
+    expand_s_with(rho_prime, 6, 5, 4)
+
+fn expand_s_44(rho_prime: list) -> tuple:
+    expand_s_with(rho_prime, 4, 4, 2)
+
+fn expand_s_87(rho_prime: list) -> tuple:
+    expand_s_with(rho_prime, 8, 7, 2)
 
 # -----------------------------------------------------------------------------
 # ExpandMask — FIPS 204 Algorithm 34: γ1-bounded mask polynomial vector.
@@ -306,10 +338,12 @@ fn _read_uint20(bytes: list, off: i64) -> i64:
     val b2 = bytes.get(off + 2) & 0x0f
     b0 | (b1 << 8) | (b2 << 16)
 
-fn expand_mask_poly(rho_prime: list, mu: i64, idx: i64) -> list:
-    val gamma1 = ml_dsa_gamma1_65()    # 2^19
+fn expand_mask_poly_with(rho_prime: list, mu: i64, idx: i64, gamma1: i64) -> list:
     val q = ml_dsa_q()
-    # Seed = rho_prime || (mu+idx) as 2 bytes (FIPS 204 §B uses LE 16-bit).
+    # Bit width: 18 for γ1=2^17 (ML-DSA-44), 20 for γ1=2^19 (ML-DSA-65/87).
+    val bits = if gamma1 == 131072: 18 else: 20
+    val byte_len = bits * 256 / 8     # 576 (44) or 640 (65/87)
+    val mask_v = (1 << bits) - 1      # 0x3ffff (44) or 0xfffff (65/87)
     var seed = []
     var i = 0
     while i < rho_prime.len():
@@ -318,33 +352,43 @@ fn expand_mask_poly(rho_prime: list, mu: i64, idx: i64) -> list:
     val tag = mu + idx
     seed.push(tag & 0xff)
     seed.push((tag >> 8) & 0xff)
-    # Each coeff is 20 bits = 2.5 bytes; 256 coeffs → 640 bytes (γ1 = 2^19).
-    val raw = shake256(seed, 640)
+    val raw = shake256(seed, byte_len)
     var coeffs = []
     var bit_off = 0
     while coeffs.len() < 256:
         val byte_off = bit_off / 8
         val rem = bit_off % 8
-        # Build 20 bits from raw stream starting at bit_off.
+        # Build up-to-24 bits from raw stream starting at bit_off.
         val b0 = raw.get(byte_off)
         val b1 = raw.get(byte_off + 1)
         val b2 = raw.get(byte_off + 2)
         var combined = b0 | (b1 << 8) | (b2 << 16)
         combined = combined >> rem
-        val v = combined & 0xfffff      # 20 bits
+        val v = combined & mask_v
         # Coefficient = γ1 - v, reduced mod q.
         coeffs.push(modq(gamma1 - v))
-        bit_off = bit_off + 20
+        bit_off = bit_off + bits
     coeffs
 
-fn expand_mask_65(rho_prime: list, mu: i64) -> list:
-    val l = 5
+fn expand_mask_poly(rho_prime: list, mu: i64, idx: i64) -> list:
+    expand_mask_poly_with(rho_prime, mu, idx, ml_dsa_gamma1_65())
+
+fn expand_mask_with(rho_prime: list, mu: i64, l: i64, gamma1: i64) -> list:
     var y = []
     var i = 0
     while i < l:
-        y.push(expand_mask_poly(rho_prime, mu, i))
+        y.push(expand_mask_poly_with(rho_prime, mu, i, gamma1))
         i = i + 1
     y
+
+fn expand_mask_65(rho_prime: list, mu: i64) -> list:
+    expand_mask_with(rho_prime, mu, 5, ml_dsa_gamma1_65())
+
+fn expand_mask_44(rho_prime: list, mu: i64) -> list:
+    expand_mask_with(rho_prime, mu, 4, ml_dsa_gamma1_44())
+
+fn expand_mask_87(rho_prime: list, mu: i64) -> list:
+    expand_mask_with(rho_prime, mu, 7, ml_dsa_gamma1_87())
 
 # -----------------------------------------------------------------------------
 # SimpleBitPack — FIPS 204 Algorithm 16: pack coefficients in [0, 2^bitlen)
@@ -467,7 +511,7 @@ fn sample_in_ball(seed: list, tau: i64) -> list:
 # Public key size = 32 + k * 320 = 32 + 6*320 = 1952.
 # -----------------------------------------------------------------------------
 
-fn pk_encode_65(rho: list, t1: list) -> list:
+fn pk_encode_with(rho: list, t1: list) -> list:
     var out = []
     var i = 0
     while i < rho.len():
@@ -483,7 +527,16 @@ fn pk_encode_65(rho: list, t1: list) -> list:
         p = p + 1
     out
 
-fn pk_decode_65(bytes: list) -> tuple:
+fn pk_encode_65(rho: list, t1: list) -> list:
+    pk_encode_with(rho, t1)
+
+fn pk_encode_44(rho: list, t1: list) -> list:
+    pk_encode_with(rho, t1)
+
+fn pk_encode_87(rho: list, t1: list) -> list:
+    pk_encode_with(rho, t1)
+
+fn pk_decode_with(bytes: list, k: i64) -> tuple:
     var rho = []
     var i = 0
     while i < 32:
@@ -492,22 +545,44 @@ fn pk_decode_65(bytes: list) -> tuple:
     var t1 = []
     var poly_idx = 0
     val poly_bytes = 320     # 256 * 10 / 8
-    while poly_idx < 6:
+    while poly_idx < k:
         var poly_buf = []
-        var k = 0
-        while k < poly_bytes:
-            poly_buf.push(bytes.get(32 + poly_idx * poly_bytes + k))
-            k = k + 1
+        var bi = 0
+        while bi < poly_bytes:
+            poly_buf.push(bytes.get(32 + poly_idx * poly_bytes + bi))
+            bi = bi + 1
         t1.push(simple_bit_unpack(poly_buf, 10, 256))
         poly_idx = poly_idx + 1
     (rho, t1)
 
+fn pk_decode_65(bytes: list) -> tuple:
+    pk_decode_with(bytes, 6)
+
+fn pk_decode_44(bytes: list) -> tuple:
+    pk_decode_with(bytes, 4)
+
+fn pk_decode_87(bytes: list) -> tuple:
+    pk_decode_with(bytes, 8)
+
 # -----------------------------------------------------------------------------
-# Encoded sizes for ML-DSA-65 (FIPS 204 §B Table):
-#   pk_size = 32 + 6*320           = 1952
-#   sk_size = 128 + (l + k)*128 + k*416 = 128 + 11*128 + 6*416 = 4032
-#   sig_size = 32 + l*640 + omega + k = 32 + 5*640 + 55 + 6  = 3293
+# Encoded sizes (FIPS 204 §B Table 2). Note: in-tree implementation uses
+# c_tilde = 32 bytes for all variants (W13-D baseline); this differs from the
+# canonical FIPS 204 lambda-derived c_tilde widths (32/48/64) but matches the
+# 65 baseline that is currently exercised by ml_dsa_65_spec.spl.
 # -----------------------------------------------------------------------------
+
+fn pk_size_with(k: i64) -> i64:
+    32 + k * 320
+
+fn sk_size_with(k: i64, l: i64, eta: i64) -> i64:
+    # 32 (rho) + 32 (K) + 64 (tr) + (l+k)*32*bitlen(2eta) + k*32*13 (t0=13b)
+    val s_bits = if eta == 2: 3 else: 4
+    128 + (l + k) * 32 * s_bits + k * 32 * 13
+
+fn sig_size_with(k: i64, l: i64, gamma1: i64, omega: i64) -> i64:
+    val z_bits = if gamma1 == 131072: 18 else: 20
+    val z_bytes = z_bits * 256 / 8
+    32 + l * z_bytes + omega + k
 
 fn pk_size_65() -> i64:
     1952
@@ -515,5 +590,26 @@ fn pk_size_65() -> i64:
 fn sk_size_65() -> i64:
     4032
 
+# Pre-existing 65 baseline returns 3309 (16 bytes over the strict
+# FIPS 204 c_tilde=32 calculation 3293). Preserved unchanged to match existing
+# ml_dsa_65_spec.spl callers; see note in module header.
 fn sig_size_65() -> i64:
     3309
+
+fn pk_size_44() -> i64:
+    1312
+
+fn sk_size_44() -> i64:
+    2560
+
+fn sig_size_44() -> i64:
+    2420
+
+fn pk_size_87() -> i64:
+    2592
+
+fn sk_size_87() -> i64:
+    4896
+
+fn sig_size_87() -> i64:
+    4627

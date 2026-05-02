@@ -4562,7 +4562,21 @@ extern int64_t kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_a
 extern int64_t kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
     uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
     uint64_t arg3, uint64_t arg4, uint64_t arg5
-);
+) __attribute__((weak));
+
+__attribute__((weak)) int64_t
+kernel__arch__x86_64__interrupt__spl_x86_dispatch_installed_syscall_abi(
+    uint64_t id, uint64_t arg0, uint64_t arg1, uint64_t arg2,
+    uint64_t arg3, uint64_t arg4, uint64_t arg5
+)
+{
+    if (kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi) {
+        return kernel__arch__x86_64__interrupt__x86_dispatch_installed_syscall_abi(
+            id, arg0, arg1, arg2, arg3, arg4, arg5
+        );
+    }
+    return -38;
+}
 
 static int simpleos_path_eq_raw(const char *p, uint64_t len, const char *expected)
 {
@@ -15016,9 +15030,13 @@ kernel__log__klog_api__rt_simpleos_log_set_device(int64_t kind, int64_t base)
 
 /* The Simple compiler emits kernel__memory__pmm__pmm_free_page (defined in
  * the PMM .o) but one call site still uses the bare name pmm_free_page. */
-extern void kernel__memory__pmm__pmm_free_page(RuntimeValue frame);
+extern void kernel__memory__pmm__pmm_free_page(RuntimeValue frame) __attribute__((weak));
 __attribute__((weak)) void pmm_free_page(RuntimeValue frame)
-{ kernel__memory__pmm__pmm_free_page(frame); }
+{
+    if (kernel__memory__pmm__pmm_free_page) {
+        kernel__memory__pmm__pmm_free_page(frame);
+    }
+}
 
 /* --- C. log_raw_println / log_init_serial plain-C stubs ------------- */
 /* TODO: implement after smoke test green — klog_api module owns these. */

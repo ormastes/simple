@@ -244,14 +244,18 @@ fn zstd_bit_writer_append_lsb(state: ZstdBitWriter, value: u64, count: i64) -> R
     next.bits_in_reservoir = next.bits_in_reservoir + count
     Ok(_zstd_bit_writer_flush_full_bytes(next))
 
-# Append `count` low bits of `value` MSB-first to a stream consumed by the
-# `ZstdMsbBackwardBits` reader. The bit reader walks bytes end -> start and
-# within each byte reads bit 7 then 6 ... 0; the writer therefore must place
-# the most-significant data bit *first* in the byte that will be read first
-# (i.e. the last byte written before the terminator) and run downward.
-# Implementation: reverse the bit order of `value` over `count` bits and
-# call the LSB-first append; the backward reader then sees the original
-# ordering.
+# Append `count` low bits of `value` for consumption by the backward MSB
+# bit reader (`ZstdMsbBackwardBits`). The reservoir layout is LSB-first,
+# but the backward reader walks bytes end->start AND within each byte
+# reads bit 7 then 6 ... 0. Composing the two reversals leaves the
+# reader recovering values in their original bit-ordering when each
+# value is written and read symmetrically (writer pushes value LSB-first;
+# reader consumes the equivalent MSB-first via reverse-byte traversal).
+# Hence `append_msb` simply delegates to `append_lsb`. (Earlier revisions
+# added a redundant per-value bit reverse that double-inverted the
+# bitstream and broke round-trips with the MSB reader; W13-C verified
+# the inverted writer empirically and removed it. See
+# `test/unit/lib/common/zstd_bit_round_trip_spec.spl`.)
 fn zstd_bit_writer_append_msb(state: ZstdBitWriter, value: u64, count: i64) -> Result<ZstdBitWriter, CompressionError>:
     if count < 0:
         return Err(CompressionError.CorruptStream("zstd bit writer negative count"))
@@ -259,14 +263,7 @@ fn zstd_bit_writer_append_msb(state: ZstdBitWriter, value: u64, count: i64) -> R
         return Ok(state)
     if count > 32:
         return Err(CompressionError.UnsupportedFeature("zstd bit writer wider than 32 bits"))
-    var reversed: u64 = 0u64
-    var src = value
-    var i = 0
-    while i < count:
-        reversed = (reversed << 1u64) | (src & 1u64)
-        src = src >> 1u64
-        i = i + 1
-    zstd_bit_writer_append_lsb(state, reversed, count)
+    zstd_bit_writer_append_lsb(state, value, count)
 
 # Finalise the stream: append a `1` bit marker and pad to the next byte
 # boundary with zeroes. The matching reader (`zstd_bits_init` /

@@ -25,7 +25,9 @@ fn expect_length(name: &str, value: &Value) -> Result<usize, CompileError> {
     match value {
         Value::Int(n) if *n >= 0 => Ok(*n as usize),
         Value::UInt { value, .. } => Ok(*value as usize),
-        _ => Err(CompileError::runtime(format!("{name} expects a non-negative integer length"))),
+        _ => Err(CompileError::runtime(format!(
+            "{name} expects a non-negative integer length"
+        ))),
     }
 }
 
@@ -100,10 +102,7 @@ fn expand_label_fixed(
         Vec::new()
     };
     Ok(bytes_value(&hkdf_expand_label_sha256(
-        &secret,
-        label_tail,
-        &context,
-        length,
+        &secret, label_tail, &context, length,
     )))
 }
 
@@ -189,7 +188,13 @@ pub fn rt_tls13_hkdf_expand_label_derived(args: &[Value]) -> Result<Value, Compi
             "rt_tls13_hkdf_expand_label_derived expects 2 arguments".to_string(),
         ));
     }
-    expand_label_fixed(args, b"derived", Some(&args[1]), SHA256_LEN, "rt_tls13_hkdf_expand_label_derived")
+    expand_label_fixed(
+        args,
+        b"derived",
+        Some(&args[1]),
+        SHA256_LEN,
+        "rt_tls13_hkdf_expand_label_derived",
+    )
 }
 
 pub fn rt_tls13_hkdf_expand_label_key(args: &[Value]) -> Result<Value, CompileError> {
@@ -216,7 +221,13 @@ pub fn rt_tls13_hkdf_expand_label_finished(args: &[Value]) -> Result<Value, Comp
             "rt_tls13_hkdf_expand_label_finished expects 1 argument".to_string(),
         ));
     }
-    expand_label_fixed(args, b"finished", None, SHA256_LEN, "rt_tls13_hkdf_expand_label_finished")
+    expand_label_fixed(
+        args,
+        b"finished",
+        None,
+        SHA256_LEN,
+        "rt_tls13_hkdf_expand_label_finished",
+    )
 }
 
 pub fn rt_tls13_hkdf_expand_label_client_hs(args: &[Value]) -> Result<Value, CompileError> {
@@ -225,7 +236,13 @@ pub fn rt_tls13_hkdf_expand_label_client_hs(args: &[Value]) -> Result<Value, Com
             "rt_tls13_hkdf_expand_label_client_hs expects 2 arguments".to_string(),
         ));
     }
-    expand_label_fixed(args, b"c hs traffic", Some(&args[1]), SHA256_LEN, "rt_tls13_hkdf_expand_label_client_hs")
+    expand_label_fixed(
+        args,
+        b"c hs traffic",
+        Some(&args[1]),
+        SHA256_LEN,
+        "rt_tls13_hkdf_expand_label_client_hs",
+    )
 }
 
 pub fn rt_tls13_hkdf_expand_label_server_hs(args: &[Value]) -> Result<Value, CompileError> {
@@ -234,7 +251,13 @@ pub fn rt_tls13_hkdf_expand_label_server_hs(args: &[Value]) -> Result<Value, Com
             "rt_tls13_hkdf_expand_label_server_hs expects 2 arguments".to_string(),
         ));
     }
-    expand_label_fixed(args, b"s hs traffic", Some(&args[1]), SHA256_LEN, "rt_tls13_hkdf_expand_label_server_hs")
+    expand_label_fixed(
+        args,
+        b"s hs traffic",
+        Some(&args[1]),
+        SHA256_LEN,
+        "rt_tls13_hkdf_expand_label_server_hs",
+    )
 }
 
 pub fn rt_tls13_hkdf_expand_label_client_app(args: &[Value]) -> Result<Value, CompileError> {
@@ -243,7 +266,13 @@ pub fn rt_tls13_hkdf_expand_label_client_app(args: &[Value]) -> Result<Value, Co
             "rt_tls13_hkdf_expand_label_client_app expects 2 arguments".to_string(),
         ));
     }
-    expand_label_fixed(args, b"c ap traffic", Some(&args[1]), SHA256_LEN, "rt_tls13_hkdf_expand_label_client_app")
+    expand_label_fixed(
+        args,
+        b"c ap traffic",
+        Some(&args[1]),
+        SHA256_LEN,
+        "rt_tls13_hkdf_expand_label_client_app",
+    )
 }
 
 pub fn rt_tls13_hkdf_expand_label_server_app(args: &[Value]) -> Result<Value, CompileError> {
@@ -252,5 +281,11 @@ pub fn rt_tls13_hkdf_expand_label_server_app(args: &[Value]) -> Result<Value, Co
             "rt_tls13_hkdf_expand_label_server_app expects 2 arguments".to_string(),
         ));
     }
-    expand_label_fixed(args, b"s ap traffic", Some(&args[1]), SHA256_LEN, "rt_tls13_hkdf_expand_label_server_app")
+    expand_label_fixed(
+        args,
+        b"s ap traffic",
+        Some(&args[1]),
+        SHA256_LEN,
+        "rt_tls13_hkdf_expand_label_server_app",
+    )
 }

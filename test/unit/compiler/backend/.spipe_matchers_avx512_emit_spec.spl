@@ -1,0 +1,133 @@
+# test/unit/compiler/backend/avx512_emit_spec.spl
+#
+# Byte-level golden tests for AVX-512 EVEX emit bodies.
+# Verifies evex_encode_3op_zmm and 3 emit helpers produce exact Intel SDM bytes.
+#
+# Reference: doc/04_architecture/simd_strict_emit_errata.md ERR-001a/b RESOLVED
+#            Intel SDM Vol 2A §2.6.1 Table 2-36
+#            simd_spec_verification_2026-05-02.md V-06
+#
+# Register IDs (inline literals from x86_64_avx512.spl scaffold):
+#   X86_ZMM0=48, X86_ZMM1=49, X86_ZMM2=50
+#   X86_K0=80 (unmasked), X86_K1=81
+
+use compiler.backend.native.x86_64_avx512.{encode_avx512_add_f32x16, encode_avx512_mul_f32x16, encode_avx512_fma_f32x16}
+
+# ============================================================================
+# VADDPS zmm0, zmm0, zmm0 (no mask, no zeroing)
+# EVEX.512.0F.W0 58 /r
+# dest=0 src1=0 src2=0 k=k0 z=false
+# Expected: 62 F1 7C 48 58 C0
+# Intel SDM Vol 2B VADDPS -- ERR-001a/b RESOLVED
+# ============================================================================
+
+describe "AVX-512 EVEX emit VADDPS f32 golden":
+    it "VADDPS zmm0 zmm0 zmm0 emits 6 bytes":
+        val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
+        expect result.len() == 6
+
+    it "VADDPS zmm0 zmm0 zmm0 escape byte is 0x62":
+        val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
+        expect result[0] == 98
+
+    it "VADDPS zmm0 zmm0 zmm0 P0 is 0xF1":
+        # P0: ~R=1 ~X=1 ~B=1 ~R'=1 0 m2=0 m1=0 m0=1 = 0xF1 (mm=001=0F map)
+        val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
+        expect result[1] == 241
+
+    it "VADDPS zmm0 zmm0 zmm0 P1 is 0x7C":
+        # P1: W=0 ~vvvv=1111 must-1 pp=00 = 0x7C
+        val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
+        expect result[2] == 124
+
+    it "VADDPS zmm0 zmm0 zmm0 P2 is 0x48":
+        # P2: z=0 L'=1 L=0 b=0 ~V'=1 aaa=000 = 0x48
+        val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
+        expect result[3] == 72
+
+    it "VADDPS zmm0 zmm0 zmm0 opcode is 0x58":
+        val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
+        expect result[4] == 88
+
+    it "VADDPS zmm0 zmm0 zmm0 ModRM is 0xC0":
+        val result = encode_avx512_add_f32x16(48, 48, 48, 80, false)
+        expect result[5] == 192
+
+# ============================================================================
+# VMULPS zmm0, zmm0, zmm0 (no mask, no zeroing)
+# EVEX.512.0F.W0 59 /r
+# dest=0 src1=0 src2=0 k=k0 z=false
+# Expected: 62 F1 7C 48 59 C0
+# Intel SDM Vol 2B VMULPS -- ERR-001a/b RESOLVED
+# ============================================================================
+
+describe "AVX-512 EVEX emit VMULPS f32 golden":
+    it "VMULPS zmm0 zmm0 zmm0 emits 6 bytes":
+        val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
+        expect result.len() == 6
+
+    it "VMULPS zmm0 zmm0 zmm0 escape byte is 0x62":
+        val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
+        expect result[0] == 98
+
+    it "VMULPS zmm0 zmm0 zmm0 P0 is 0xF1":
+        val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
+        expect result[1] == 241
+
+    it "VMULPS zmm0 zmm0 zmm0 P1 is 0x7C":
+        val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
+        expect result[2] == 124
+
+    it "VMULPS zmm0 zmm0 zmm0 P2 is 0x48":
+        val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
+        expect result[3] == 72
+
+    it "VMULPS zmm0 zmm0 zmm0 opcode is 0x59":
+        val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
+        expect result[4] == 89
+
+    it "VMULPS zmm0 zmm0 zmm0 ModRM is 0xC0":
+        val result = encode_avx512_mul_f32x16(48, 48, 48, 80, false)
+        expect result[5] == 192
+
+# ============================================================================
+# VFMADD213PS zmm0 masked-k1 zeroing, zmm1, zmm2
+# EVEX.512.66.0F38.W0 A8 /r
+# dest=0(zmm0) src1=1(zmm1) src2=2(zmm2) k=k1 z=true
+# Expected: 62 F2 75 C9 A8 C2
+# Verified: simd_strict_emit_errata.md ERR-001 worked example + V-06
+# ============================================================================
+
+describe "AVX-512 EVEX emit VFMADD213PS f32 golden":
+    it "VFMADD213PS zmm0-k1-z zmm1 zmm2 emits 6 bytes":
+        # ZMM0=48, ZMM1=49, ZMM2=50, K1=81
+        val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
+        expect result.len() == 6
+
+    it "VFMADD213PS zmm0-k1-z zmm1 zmm2 escape byte is 0x62":
+        val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
+        expect result[0] == 98
+
+    it "VFMADD213PS zmm0-k1-z zmm1 zmm2 P0 is 0xF2":
+        # P0: ~R=1 ~X=1 ~B=1 ~R'=1 0 m2=0 m1=1 m0=0 = 0xF2 (MAP2=0F38)
+        val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
+        expect result[1] == 242
+
+    it "VFMADD213PS zmm0-k1-z zmm1 zmm2 P1 is 0x75":
+        # P1: W=0 ~vvvv=1110(zmm1) must-1 pp=01(0x66) = 0x75
+        val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
+        expect result[2] == 117
+
+    it "VFMADD213PS zmm0-k1-z zmm1 zmm2 P2 is 0xC9":
+        # P2: z=1 L'=1 L=0 b=0 ~V'=1 aaa=001 = 0xC9
+        val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
+        expect result[3] == 201
+
+    it "VFMADD213PS zmm0-k1-z zmm1 zmm2 opcode is 0xA8":
+        val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
+        expect result[4] == 168
+
+    it "VFMADD213PS zmm0-k1-z zmm1 zmm2 ModRM is 0xC2":
+        # ModRM: mod=11 reg=0(zmm0) rm=2(zmm2) = 0xC2
+        val result = encode_avx512_fma_f32x16(48, 49, 50, 81, true)
+        expect result[5] == 194

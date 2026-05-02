@@ -13,7 +13,7 @@
 
 mod crypto.types
 
-use std.simd.{Vec4i, simd_xor_i32x4, simd_shl_i32x4, simd_shr_i32x4, simd_or_i32x4}
+use std.simd.{Vec4i, simd_xor_i32x4, simd_shl_i32x4, simd_shr_i32x4, simd_or_i32x4, simd_and_i32x4, simd_rotr_i32x4}
 
 # =============================================================================
 # SHA-256 Constants and Initial Values
@@ -524,3 +524,329 @@ fn hash_stream_sha256(chunks: list) -> text:
 
     val hash = sha256_finalize(ctx)
     bytes_to_hex(hash)
+
+# =============================================================================
+# SHA-256 x4 SIMD — Vertical 4-block parallel (FIPS 180-4 §6.2)
+# =============================================================================
+#
+# SIMD strategy: VERTICAL 4-block parallel layout.
+# Each Vec4i holds the same word position from four independent message blocks.
+# Lane x = block 0, lane y = block 1, lane z = block 2, lane w = block 3.
+# All round operations are identical across lanes — no inter-lane shuffles needed.
+#
+# This mirrors the SHA-1 x4 (N3) and ChaCha20 x4 (K5) vertical 4-block layout.
+
+# Reinterpret an i64 constant (possibly > i32_max) as i32 bit-pattern.
+fn _sha256_u32_to_i32(x: i64) -> i32:
+    """Bit-reinterpret a 32-bit unsigned value (stored as i64) into i32."""
+    if x >= 2147483648:
+        (x - 4294967296).to_i32()
+    else:
+        x.to_i32()
+
+# 4-lane wrapping i32 add (mod 2^32). Follows ChaCha20 _vadd pattern.
+fn _sha256_vadd(a: Vec4i, b: Vec4i) -> Vec4i:
+    """4-lane wrapping i32 add. Relies on Simple's i32 overflow wrapping mod 2^32."""
+    Vec4i(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w)
+
+# Broadcast an i64 (u32 range) constant to all 4 lanes.
+fn _sha256_vsplat(k: i64) -> Vec4i:
+    """Broadcast k (32-bit constant) to all 4 Vec4i lanes."""
+    Vec4i.splat(_sha256_u32_to_i32(k))
+
+# Load one 32-bit big-endian word from a byte list at offset.
+fn _sha256_load_be_word(block: list, offset: i64) -> i64:
+    """Load big-endian 32-bit word from a byte list at the given byte offset."""
+    val b0 = block.get(offset)
+    val b1 = block.get(offset + 1)
+    val b2 = block.get(offset + 2)
+    val b3 = block.get(offset + 3)
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+# =============================================================================
+# SHA-256 x4 SIMD helper functions
+# =============================================================================
+
+# Vec4i small-sigma0: ROTR(x,7) ^ ROTR(x,18) ^ SHR(x,3)
+fn _sha256_vsmall_sigma0(v: Vec4i) -> Vec4i:
+    """σ0(x) = ROTR(x,7) XOR ROTR(x,18) XOR SHR(x,3) — all 4 lanes in parallel."""
+    val r7  = simd_rotr_i32x4(v, 7)
+    val r18 = simd_rotr_i32x4(v, 18)
+    val s3  = simd_shr_i32x4(v, 3)
+    simd_xor_i32x4(simd_xor_i32x4(r7, r18), s3)
+
+# Vec4i small-sigma1: ROTR(x,17) ^ ROTR(x,19) ^ SHR(x,10)
+fn _sha256_vsmall_sigma1(v: Vec4i) -> Vec4i:
+    """σ1(x) = ROTR(x,17) XOR ROTR(x,19) XOR SHR(x,10) — all 4 lanes in parallel."""
+    val r17 = simd_rotr_i32x4(v, 17)
+    val r19 = simd_rotr_i32x4(v, 19)
+    val s10 = simd_shr_i32x4(v, 10)
+    simd_xor_i32x4(simd_xor_i32x4(r17, r19), s10)
+
+# Vec4i big-Sigma0: ROTR(x,2) ^ ROTR(x,13) ^ ROTR(x,22)
+fn _sha256_vSigma0(v: Vec4i) -> Vec4i:
+    """Σ0(x) = ROTR(x,2) XOR ROTR(x,13) XOR ROTR(x,22) — all 4 lanes in parallel."""
+    val r2  = simd_rotr_i32x4(v, 2)
+    val r13 = simd_rotr_i32x4(v, 13)
+    val r22 = simd_rotr_i32x4(v, 22)
+    simd_xor_i32x4(simd_xor_i32x4(r2, r13), r22)
+
+# Vec4i big-Sigma1: ROTR(x,6) ^ ROTR(x,11) ^ ROTR(x,25)
+fn _sha256_vSigma1(v: Vec4i) -> Vec4i:
+    """Σ1(x) = ROTR(x,6) XOR ROTR(x,11) XOR ROTR(x,25) — all 4 lanes in parallel."""
+    val r6  = simd_rotr_i32x4(v, 6)
+    val r11 = simd_rotr_i32x4(v, 11)
+    val r25 = simd_rotr_i32x4(v, 25)
+    simd_xor_i32x4(simd_xor_i32x4(r6, r11), r25)
+
+# Vec4i Ch(e,f,g) = (e & f) ^ (~e & g)
+fn _sha256_vch(e: Vec4i, f: Vec4i, g: Vec4i) -> Vec4i:
+    """Ch(e,f,g) = (e AND f) XOR ((NOT e) AND g) — all 4 lanes in parallel."""
+    val not_e = simd_xor_i32x4(e, Vec4i.splat(-1))
+    simd_xor_i32x4(simd_and_i32x4(e, f), simd_and_i32x4(not_e, g))
+
+# Vec4i Maj(a,b,c) = (a & b) ^ (a & c) ^ (b & c)
+fn _sha256_vmaj(a: Vec4i, b: Vec4i, c: Vec4i) -> Vec4i:
+    """Maj(a,b,c) = (a AND b) XOR (a AND c) XOR (b AND c) — all 4 lanes in parallel."""
+    simd_xor_i32x4(simd_xor_i32x4(simd_and_i32x4(a, b), simd_and_i32x4(a, c)), simd_and_i32x4(b, c))
+
+# =============================================================================
+# SHA-256 x4 Core compression
+# =============================================================================
+
+# Build a Vec4i list of 16 words from 4 byte lists (list form, big-endian).
+fn _sha256_build_w_from_lists(b0: list, b1: list, b2: list, b3: list) -> list:
+    """Load 16 message schedule words from 4 byte lists into Vec4i vertical layout."""
+    var w = []
+    var i = 0
+    while i < 16:
+        val offset = i * 4
+        val w0_i = _sha256_load_be_word(b0, offset)
+        val w1_i = _sha256_load_be_word(b1, offset)
+        val w2_i = _sha256_load_be_word(b2, offset)
+        val w3_i = _sha256_load_be_word(b3, offset)
+        w.push(Vec4i(
+            x: _sha256_u32_to_i32(w0_i),
+            y: _sha256_u32_to_i32(w1_i),
+            z: _sha256_u32_to_i32(w2_i),
+            w: _sha256_u32_to_i32(w3_i)))
+        i = i + 1
+    w
+
+# SHA-256 initial state broadcast to 4 lanes.
+fn _sha256_iv_x4() -> list:
+    """Broadcast SHA-256 IV (FIPS 180-4 §5.3.3) to 4 Vec4i lanes."""
+    var hv = []
+    hv.push(_sha256_vsplat(0x6a09e667))
+    hv.push(_sha256_vsplat(0xbb67ae85))
+    hv.push(_sha256_vsplat(0x3c6ef372))
+    hv.push(_sha256_vsplat(0xa54ff53a))
+    hv.push(_sha256_vsplat(0x510e527f))
+    hv.push(_sha256_vsplat(0x9b05688c))
+    hv.push(_sha256_vsplat(0x1f83d9ab))
+    hv.push(_sha256_vsplat(0x5be0cd19))
+    hv
+
+# Core SHA-256 x4 compression: process 4 pre-loaded 16-word message schedules.
+# Each lane is an independent block; w_init holds 16 Vec4i (first 16 schedule words).
+# Returns 8-lane state (a..h Vec4i list) after adding to initial hash H.
+fn _sha256_x4_compress(
+    h0: Vec4i, h1: Vec4i, h2: Vec4i, h3: Vec4i,
+    h4: Vec4i, h5: Vec4i, h6: Vec4i, h7: Vec4i,
+    w_init: list) -> list:
+    """Run 64-round SHA-256 compression on 4 independent blocks in parallel.
+
+    w_init: list of 16 Vec4i (the first 16 words of W, one per message word,
+            each Vec4i holding word[i] from each of the 4 blocks).
+    h0..h7: Vec4i initial state (broadcast from SHA-256 IV or chained state).
+    Returns list of 8 Vec4i (new a..h state after IV add).
+    """
+    # Expand message schedule to 64 words using fully-vectorized σ0 and σ1
+    var w = []
+    var i = 0
+    while i < 16:
+        w.push(w_init.get(i))
+        i = i + 1
+
+    # W[i] = σ1(W[i-2]) + W[i-7] + σ0(W[i-15]) + W[i-16]
+    # In vertical 4-block layout all 4 lanes are independent → σ0 and σ1 fully vectorize
+    while i < 64:
+        val s0 = _sha256_vsmall_sigma0(w.get(i - 15))
+        val s1 = _sha256_vsmall_sigma1(w.get(i - 2))
+        val wi = _sha256_vadd(_sha256_vadd(_sha256_vadd(s1, w.get(i - 7)), s0), w.get(i - 16))
+        w.push(wi)
+        i = i + 1
+
+    # Initialize working variables from H
+    var va = h0
+    var vb = h1
+    var vc = h2
+    var vd = h3
+    var ve = h4
+    var vf = h5
+    var vg = h6
+    var vh = h7
+
+    val k = sha256_k_constants()
+
+    # 64 rounds (FIPS 180-4 §6.2.2 step 3)
+    i = 0
+    while i < 64:
+        val vS1   = _sha256_vSigma1(ve)
+        val vch   = _sha256_vch(ve, vf, vg)
+        val vki   = _sha256_vsplat(k.get(i))
+        val vt1   = _sha256_vadd(_sha256_vadd(_sha256_vadd(_sha256_vadd(vh, vS1), vch), vki), w.get(i))
+
+        val vS0   = _sha256_vSigma0(va)
+        val vmaj  = _sha256_vmaj(va, vb, vc)
+        val vt2   = _sha256_vadd(vS0, vmaj)
+
+        vh = vg
+        vg = vf
+        vf = ve
+        ve = _sha256_vadd(vd, vt1)
+        vd = vc
+        vc = vb
+        vb = va
+        va = _sha256_vadd(vt1, vt2)
+
+        i = i + 1
+
+    # Add working vars back to initial H
+    var result = []
+    result.push(_sha256_vadd(h0, va))
+    result.push(_sha256_vadd(h1, vb))
+    result.push(_sha256_vadd(h2, vc))
+    result.push(_sha256_vadd(h3, vd))
+    result.push(_sha256_vadd(h4, ve))
+    result.push(_sha256_vadd(h5, vf))
+    result.push(_sha256_vadd(h6, vg))
+    result.push(_sha256_vadd(h7, vh))
+    result
+
+# Extract one 32-byte digest from an 8-element Vec4i state list, for the given lane.
+fn _sha256_extract_digest(state: list, lane: i64) -> list:
+    """Extract one 32-byte big-endian digest from the given lane (0=x,1=y,2=z,3=w)."""
+    var out = []
+    var i = 0
+    while i < 8:
+        val v = state.get(i)
+        val word: i64 = if lane == 0: v.x.to_i64()
+                        else:
+                          if lane == 1: v.y.to_i64()
+                          else:
+                            if lane == 2: v.z.to_i64()
+                            else: v.w.to_i64()
+        val w32 = word & 0xFFFFFFFF
+        out.push((w32 >> 24) & 0xFF)
+        out.push((w32 >> 16) & 0xFF)
+        out.push((w32 >> 8) & 0xFF)
+        out.push(w32 & 0xFF)
+        i = i + 1
+    out
+
+# =============================================================================
+# Public API: sha256_x4 — process exactly one pre-padded 64-byte block per lane
+# =============================================================================
+
+# Process 4 independent pre-padded 64-byte blocks via SIMD and return 4 digests.
+# Each input must be exactly 64 bytes (one SHA-256 block). Caller is responsible
+# for padding (FIPS 180-4 §5.1.1). For messages needing automatic padding, use
+# sha256_x4_message.
+fn sha256_x4(b0: list, b1: list, b2: list, b3: list) -> tuple:
+    """SHA-256 x4: compute 4 independent SHA-256 digests from 4 padded 64-byte blocks.
+
+    Uses vertical Vec4i SIMD — each lane is one independent block.
+    Each input must be a list of exactly 64 bytes (pre-padded, FIPS 180-4 §5.1.1).
+    Returns a tuple of 4 lists, each a 32-byte digest.
+    """
+    val iv = _sha256_iv_x4()
+    val w_init = _sha256_build_w_from_lists(b0, b1, b2, b3)
+    val state = _sha256_x4_compress(
+        iv.get(0), iv.get(1), iv.get(2), iv.get(3),
+        iv.get(4), iv.get(5), iv.get(6), iv.get(7),
+        w_init)
+    val d0 = _sha256_extract_digest(state, 0)
+    val d1 = _sha256_extract_digest(state, 1)
+    val d2 = _sha256_extract_digest(state, 2)
+    val d3 = _sha256_extract_digest(state, 3)
+    (d0, d1, d2, d3)
+
+# =============================================================================
+# Public API: sha256_x4_message — hash 4 arbitrary messages with automatic padding
+# =============================================================================
+
+# Extract one 64-byte block from a padded message at the given block index.
+fn _sha256_get_block(padded: list, block_idx: i64) -> list:
+    """Extract one 64-byte block from a padded message (list of bytes)."""
+    var block = []
+    var j = 0
+    while j < 64:
+        block.push(padded.get(block_idx * 64 + j))
+        j = j + 1
+    block
+
+# Compress one padded message serially, returning final 8-word state as list.
+fn _sha256_compress_all_blocks(padded: list, h_init: list) -> list:
+    """Run SHA-256 compression over all blocks in a padded message, serially."""
+    var h = h_init
+    var block_i = 0
+    val num_blocks = padded.len() / 64
+    while block_i < num_blocks:
+        val block = _sha256_get_block(padded, block_i)
+        h = sha256_process_block_simd(h, block)
+        block_i = block_i + 1
+    h
+
+# Convert an 8-element state list (i64 words) to a 32-byte digest.
+fn _sha256_state_to_bytes(h: list) -> list:
+    """Serialize 8 SHA-256 state words to 32 big-endian bytes."""
+    var out = []
+    var i = 0
+    while i < 8:
+        val word = h.get(i)
+        out.push((word >> 24) & 0xFF)
+        out.push((word >> 16) & 0xFF)
+        out.push((word >> 8) & 0xFF)
+        out.push(word & 0xFF)
+        i = i + 1
+    out
+
+# Compute SHA-256 of 4 independent arbitrary byte-list messages via vectorized x4 path.
+# Handles padding and multi-block internally. For single-block messages (≤55 bytes)
+# all messages fit in one 64-byte block and the SIMD core is used. For multi-block
+# messages the lanes diverge in block count; each is compressed independently via
+# the scalar path and the results are returned in order.
+fn sha256_x4_message(m0: list, m1: list, m2: list, m3: list) -> tuple:
+    """Compute 4 independent SHA-256 digests for 4 arbitrary byte-list messages.
+
+    Pads each message independently (FIPS 180-4 §5.1.1).
+    For messages that pad to exactly one 64-byte block, uses the Vec4i SIMD path.
+    For multi-block messages, compresses each lane independently via scalar path.
+    Returns a tuple of 4 lists, each a 32-byte digest.
+    """
+    val p0 = sha256_pad_message(m0)
+    val p1 = sha256_pad_message(m1)
+    val p2 = sha256_pad_message(m2)
+    val p3 = sha256_pad_message(m3)
+
+    # If all 4 padded messages are exactly one 64-byte block, use SIMD x4 path.
+    if (p0.len() == 64) and (p1.len() == 64) and (p2.len() == 64) and (p3.len() == 64):
+        sha256_x4(p0, p1, p2, p3)
+    else:
+        # Fall back to independent scalar compression per lane.
+        val iv = sha256_initial_hash()
+        val h0_state = _sha256_compress_all_blocks(p0, iv)
+        val h1_state = _sha256_compress_all_blocks(p1, iv)
+        val h2_state = _sha256_compress_all_blocks(p2, iv)
+        val h3_state = _sha256_compress_all_blocks(p3, iv)
+        val d0 = _sha256_state_to_bytes(h0_state)
+        val d1 = _sha256_state_to_bytes(h1_state)
+        val d2 = _sha256_state_to_bytes(h2_state)
+        val d3 = _sha256_state_to_bytes(h3_state)
+        (d0, d1, d2, d3)
+
+# Hex-encode a 32-byte SHA-256 digest list.
+fn sha256_digest_to_hex(digest: list) -> text:
+    """Convert a 32-byte SHA-256 digest to lowercase hex text."""
+    bytes_to_hex(digest)

@@ -179,9 +179,7 @@ impl LlvmEmitter<'_> {
             "to_upper" | "upper" => Some("rt_string_to_upper"),
             "to_lower" | "lower" => Some("rt_string_to_lower"),
             "to_string" | "str" => Some("rt_to_string"),
-            "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
-                Some("rt_string_to_float")
-            }
+            "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
             "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
             "index_of" | "find_str" => Some("rt_string_index_of"),
             "rfind" | "last_index_of" => Some("rt_string_rfind"),
@@ -1271,7 +1269,12 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                     .builder
                     .build_ptr_to_int(v, int_type, "method_ptr_to_int")
                     .map_err(|e| format!("LLVM ptr_to_int failed: {}", e))?,
-                _ => return Err(format!("unsupported receiver kind for numeric cast method '{}'", method)),
+                _ => {
+                    return Err(format!(
+                        "unsupported receiver kind for numeric cast method '{}'",
+                        method
+                    ))
+                }
             };
             if let Some(d) = dest {
                 self.set(*d, value.into());

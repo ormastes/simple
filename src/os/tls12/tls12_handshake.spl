@@ -1,0 +1,457 @@
+#![allow(unnamed_duplicate_typed_args)]
+# TLS 1.2 Handshake Message Encoder/Decoder (pure, no crypto)
+#
+# Implements ClientHello / ServerHello framing per RFC 5246 §7.4.1.2 and
+# §7.4.1.3, plus the generic handshake envelope of §7.4:
+#
+#   struct {
+#       HandshakeType msg_type;     # uint8
+#       uint24 length;              # body length, big-endian
+#       opaque body[length];
+#   } Handshake;
+#
+# ClientHello (RFC 5246 §7.4.1.2):
+#   struct {
+#       ProtocolVersion client_version;
+#       Random random;                                # 32 bytes
+#       SessionID session_id;                         # opaque<0..32>
+#       CipherSuite cipher_suites<2..2^16-2>;          # uint16 list
+#       CompressionMethod compression_methods<1..2^8-1>; # uint8 list
+#       select (extensions_present) {
+#           case false: struct {};
+#           case true:  Extension extensions<0..2^16-1>;
+#       };
+#   } ClientHello;
+#
+# ServerHello (§7.4.1.3): parallel structure but with a SINGLE selected
+# CipherSuite (uint16) and a SINGLE selected CompressionMethod (uint8).
+#
+# Reference: RFC 5246 (TLS 1.2)
+
+use os.tls12.tls12_extensions.{
+    TlsExtension12, ExtensionListResult,
+    encode_extension_list, decode_extension_list
+}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+fn _byte_buf(cap: u64) -> [u8]:
+    rt_array_new_with_cap(cap.to_i64())
+
+fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
+    buf.push(byte_val.to_u8())
+    buf
+
+fn _u8_at(data: [u8], offset: u64) -> u8:
+    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
+
+fn _u16_be(data: [u8], offset: u64) -> u16:
+    """Read a big-endian u16 from data at offset."""
+    ((_u8_at(data, offset).to_u16() << 8) | _u8_at(data, offset + 1).to_u16()).to_u16()
+
+fn _u24_be(data: [u8], offset: u64) -> u64:
+    """Read a big-endian 24-bit value from data at offset."""
+    (_u8_at(data, offset).to_u64() << 16) |
+        (_u8_at(data, offset + 1).to_u64() << 8) |
+        _u8_at(data, offset + 2).to_u64()
+
+fn _put_u24_be(val: u64) -> [u8]:
+    """Encode a u64 value (low 24 bits) as 3 big-endian bytes."""
+    var out: [u8] = _byte_buf(3)
+    out = _push_byte(out, ((val >> 16) & 0xFF).to_i64())
+    out = _push_byte(out, ((val >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (val & 0xFF).to_i64())
+    out
+
+fn _append_into(out: [u8], src: [u8]):
+    """Append every byte of src onto out (mutates out in place)."""
+    var i: u64 = 0
+    val n = src.len().to_u64()
+    while i < n:
+        out = _push_byte(out, _u8_at(src, i).to_u64().to_i64())
+        i = i + 1
+
+# ============================================================================
+# Handshake Message Types (RFC 5246 §7.4)
+# ============================================================================
+
+val HS12_HELLO_REQUEST: u8        = 0
+val HS12_CLIENT_HELLO: u8         = 1
+val HS12_SERVER_HELLO: u8         = 2
+val HS12_CERTIFICATE: u8          = 11
+val HS12_SERVER_KEY_EXCHANGE: u8  = 12
+val HS12_CERTIFICATE_REQUEST: u8  = 13
+val HS12_SERVER_HELLO_DONE: u8    = 14
+val HS12_CERTIFICATE_VERIFY: u8   = 15
+val HS12_CLIENT_KEY_EXCHANGE: u8  = 16
+val HS12_FINISHED: u8             = 20
+
+# ============================================================================
+# ProtocolVersion (TLS 1.2 = {3, 3})
+# ============================================================================
+
+val TLS12_VERSION_MAJOR: u8 = 3
+val TLS12_VERSION_MINOR: u8 = 3
+
+# ============================================================================
+# Data Classes
+# ============================================================================
+
+class HandshakeMessage12:
+    """The generic Handshake envelope: type + uint24 length + body."""
+    msg_type: u8
+    body: [u8]
+
+enum HandshakeResult:
+    Ok(value: HandshakeMessage12)
+    Err(reason: text)
+
+class ClientHello12:
+    """Decoded TLS 1.2 ClientHello body (§7.4.1.2).
+
+    `extensions` is empty when the ClientHello carried no extensions block
+    on the wire (RFC 5246 §7.4.1.4 makes the trailing extensions field
+    optional).  `extensions_present` records whether the wire bytes
+    actually contained the uint16 list_len, since "no extensions" and
+    "extensions present but empty" are wire-distinct.
+    """
+    client_version_major: u8
+    client_version_minor: u8
+    random: [u8]                       # 32 bytes
+    session_id: [u8]                   # 0..32 bytes
+    cipher_suites: [u16]
+    compression_methods: [u8]
+    extensions_present: bool
+    extensions: [TlsExtension12]
+
+enum ClientHelloResult:
+    Ok(value: ClientHello12)
+    Err(reason: text)
+
+class ServerHello12:
+    """Decoded TLS 1.2 ServerHello body (§7.4.1.3).
+
+    Mirrors ClientHello but with a SINGLE selected cipher suite and SINGLE
+    compression method.  Same `extensions_present` distinction applies.
+    """
+    server_version_major: u8
+    server_version_minor: u8
+    random: [u8]                       # 32 bytes
+    session_id: [u8]                   # 0..32 bytes
+    cipher_suite: u16
+    compression_method: u8
+    extensions_present: bool
+    extensions: [TlsExtension12]
+
+enum ServerHelloResult:
+    Ok(value: ServerHello12)
+    Err(reason: text)
+
+# ============================================================================
+# Public: Encode the generic handshake envelope (type + uint24 length + body)
+# ============================================================================
+
+fn encode_handshake(msg: HandshakeMessage12) -> [u8]:
+    """Wrap msg.body in a 4-byte handshake envelope.
+
+    Wire layout: msg_type(1) || length(3 BE) || body[length].
+    """
+    val body_len = msg.body.len().to_u64()
+    var out: [u8] = _byte_buf(4u64 + body_len)
+    out = _push_byte(out, msg.msg_type.to_i64())
+    val len_bytes = _put_u24_be(body_len)
+    _append_into(out, len_bytes)
+    var i: u64 = 0
+    while i < body_len:
+        out = _push_byte(out, _u8_at(msg.body, i).to_u64().to_i64())
+        i = i + 1
+    out
+
+# ============================================================================
+# Public: Decode the generic handshake envelope
+# ============================================================================
+
+fn decode_handshake(data: [u8]) -> HandshakeResult:
+    """Parse the 4-byte handshake envelope.
+
+    Returns Ok with msg_type + body slice, or Err on truncation.
+    """
+    if data.len() < 4:
+        return HandshakeResult.Err(reason: "decode_error: handshake header truncated")
+    val msg_type = _u8_at(data, 0)
+    val body_len = _u24_be(data, 1)
+    if 4u64 + body_len > data.len().to_u64():
+        return HandshakeResult.Err(reason: "decode_error: handshake body truncated")
+    var body: [u8] = _byte_buf(body_len)
+    var i: u64 = 0
+    while i < body_len:
+        body = _push_byte(body, _u8_at(data, 4u64 + i).to_u64().to_i64())
+        i = i + 1
+    HandshakeResult.Ok(value: HandshakeMessage12(
+        msg_type: msg_type,
+        body: body
+    ))
+
+# ============================================================================
+# Internal: encode a uint16 cipher suite list (length-prefixed)
+# ============================================================================
+
+fn _encode_cipher_suites(suites: [u16]) -> [u8]:
+    val n = suites.len().to_u64()
+    val total_bytes = n * 2u64
+    var out: [u8] = _byte_buf(2u64 + total_bytes)
+    out = _push_byte(out, ((total_bytes >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (total_bytes & 0xFF).to_i64())
+    for cs in suites:
+        out = _push_byte(out, ((cs.to_u32() >> 8) & 0xFF).to_i64())
+        out = _push_byte(out, (cs.to_u32() & 0xFF).to_i64())
+    out
+
+# ============================================================================
+# Internal: encode a uint8 compression method list (length-prefixed)
+# ============================================================================
+
+fn _encode_compression_methods(methods: [u8]) -> [u8]:
+    val n = methods.len().to_u64()
+    var out: [u8] = _byte_buf(1u64 + n)
+    out = _push_byte(out, (n & 0xFF).to_i64())
+    for cm in methods:
+        out = _push_byte(out, cm.to_i64())
+    out
+
+# ============================================================================
+# Public: Build ClientHello body (RFC 5246 §7.4.1.2)
+# ============================================================================
+
+fn build_client_hello_body(ch: ClientHello12) -> [u8]:
+    """Encode a ClientHello body (everything inside the handshake envelope).
+
+    Caller wraps this with `encode_handshake` to get HS_CLIENT_HELLO bytes.
+
+    The ClientHello.session_id is length-prefixed by uint8; cipher_suites by
+    uint16; compression_methods by uint8.  Extensions are appended only
+    when ch.extensions_present is true (RFC 5246 §7.4.1.4 lets a sender
+    omit the trailing extensions block entirely).
+    """
+    var body: [u8] = _byte_buf(128)
+    body = _push_byte(body, ch.client_version_major.to_i64())
+    body = _push_byte(body, ch.client_version_minor.to_i64())
+    # random (32 bytes)
+    var i: u64 = 0
+    while i < 32:
+        if i < ch.random.len().to_u64():
+            body = _push_byte(body, _u8_at(ch.random, i).to_u64().to_i64())
+        else:
+            body = _push_byte(body, 0)
+        i = i + 1
+    # session_id
+    val sid_len = ch.session_id.len().to_u64()
+    body = _push_byte(body, (sid_len & 0xFF).to_i64())
+    var s: u64 = 0
+    while s < sid_len:
+        body = _push_byte(body, _u8_at(ch.session_id, s).to_u64().to_i64())
+        s = s + 1
+    # cipher_suites
+    val cs_bytes = _encode_cipher_suites(ch.cipher_suites)
+    _append_into(body, cs_bytes)
+    # compression_methods
+    val cm_bytes = _encode_compression_methods(ch.compression_methods)
+    _append_into(body, cm_bytes)
+    # extensions (optional)
+    if ch.extensions_present:
+        val ext_bytes = encode_extension_list(ch.extensions)
+        _append_into(body, ext_bytes)
+    body
+
+# ============================================================================
+# Public: Build full ClientHello handshake message (envelope + body)
+# ============================================================================
+
+fn build_client_hello(ch: ClientHello12) -> [u8]:
+    """Encode a complete ClientHello handshake message (type + len + body)."""
+    val body = build_client_hello_body(ch)
+    encode_handshake(HandshakeMessage12(msg_type: HS12_CLIENT_HELLO, body: body))
+
+# ============================================================================
+# Public: Parse ClientHello body (RFC 5246 §7.4.1.2)
+# ============================================================================
+
+fn parse_client_hello(body: [u8]) -> ClientHelloResult:
+    """Parse a ClientHello body (i.e. the bytes AFTER the 4-byte envelope).
+
+    Validates declared lengths against `body` length but does not interpret
+    extensions individually — that is delegated to follow-up wire wave.
+    """
+    val total = body.len().to_u64()
+    # version(2) + random(32) + sid_len(1) + cs_len(2) + cm_len(1) = 38 minimum
+    if total < 38u64:
+        return ClientHelloResult.Err(reason: "decode_error: ClientHello body too short")
+    val vmaj = _u8_at(body, 0)
+    val vmin = _u8_at(body, 1)
+    var random: [u8] = _byte_buf(32)
+    var i: u64 = 0
+    while i < 32:
+        random = _push_byte(random, _u8_at(body, 2u64 + i).to_u64().to_i64())
+        i = i + 1
+    var offset: u64 = 34u64
+    val sid_len = _u8_at(body, offset).to_u64()
+    offset = offset + 1u64
+    if sid_len > 32u64:
+        return ClientHelloResult.Err(reason: "decode_error: session_id length > 32")
+    if offset + sid_len > total:
+        return ClientHelloResult.Err(reason: "decode_error: session_id truncated")
+    var session_id: [u8] = _byte_buf(sid_len)
+    var s: u64 = 0
+    while s < sid_len:
+        session_id = _push_byte(session_id, _u8_at(body, offset + s).to_u64().to_i64())
+        s = s + 1
+    offset = offset + sid_len
+    # cipher_suites (uint16 length, even number of bytes)
+    if offset + 2u64 > total:
+        return ClientHelloResult.Err(reason: "decode_error: cipher_suites length truncated")
+    val cs_total = _u16_be(body, offset).to_u64()
+    offset = offset + 2u64
+    if cs_total == 0u64 or (cs_total % 2u64) != 0u64:
+        return ClientHelloResult.Err(reason: "decode_error: cipher_suites length invalid")
+    if offset + cs_total > total:
+        return ClientHelloResult.Err(reason: "decode_error: cipher_suites truncated")
+    var cipher_suites: [u16] = []
+    var c: u64 = 0
+    while c < cs_total:
+        val cs = _u16_be(body, offset + c)
+        cipher_suites.push(cs)
+        c = c + 2u64
+    offset = offset + cs_total
+    # compression_methods (uint8 length)
+    if offset + 1u64 > total:
+        return ClientHelloResult.Err(reason: "decode_error: compression_methods length truncated")
+    val cm_total = _u8_at(body, offset).to_u64()
+    offset = offset + 1u64
+    if cm_total == 0u64:
+        return ClientHelloResult.Err(reason: "decode_error: compression_methods length zero")
+    if offset + cm_total > total:
+        return ClientHelloResult.Err(reason: "decode_error: compression_methods truncated")
+    var compression_methods: [u8] = []
+    var m: u64 = 0
+    while m < cm_total:
+        compression_methods.push(_u8_at(body, offset + m))
+        m = m + 1u64
+    offset = offset + cm_total
+    # extensions (optional)
+    var ext_present = false
+    var exts: [TlsExtension12] = []
+    if offset < total:
+        ext_present = true
+        val parsed = decode_extension_list(body, offset)
+        if val ExtensionListResult.Ok(value) = parsed:
+            exts = value
+        else:
+            if val ExtensionListResult.Err(reason) = parsed:
+                return ClientHelloResult.Err(reason: reason)
+    ClientHelloResult.Ok(value: ClientHello12(
+        client_version_major: vmaj,
+        client_version_minor: vmin,
+        random: random,
+        session_id: session_id,
+        cipher_suites: cipher_suites,
+        compression_methods: compression_methods,
+        extensions_present: ext_present,
+        extensions: exts
+    ))
+
+# ============================================================================
+# Public: Build ServerHello body (RFC 5246 §7.4.1.3)
+# ============================================================================
+
+fn build_server_hello_body(sh: ServerHello12) -> [u8]:
+    """Encode a ServerHello body."""
+    var body: [u8] = _byte_buf(96)
+    body = _push_byte(body, sh.server_version_major.to_i64())
+    body = _push_byte(body, sh.server_version_minor.to_i64())
+    var i: u64 = 0
+    while i < 32:
+        if i < sh.random.len().to_u64():
+            body = _push_byte(body, _u8_at(sh.random, i).to_u64().to_i64())
+        else:
+            body = _push_byte(body, 0)
+        i = i + 1
+    val sid_len = sh.session_id.len().to_u64()
+    body = _push_byte(body, (sid_len & 0xFF).to_i64())
+    var s: u64 = 0
+    while s < sid_len:
+        body = _push_byte(body, _u8_at(sh.session_id, s).to_u64().to_i64())
+        s = s + 1
+    body = _push_byte(body, ((sh.cipher_suite.to_u32() >> 8) & 0xFF).to_i64())
+    body = _push_byte(body, (sh.cipher_suite.to_u32() & 0xFF).to_i64())
+    body = _push_byte(body, sh.compression_method.to_i64())
+    if sh.extensions_present:
+        val ext_bytes = encode_extension_list(sh.extensions)
+        _append_into(body, ext_bytes)
+    body
+
+# ============================================================================
+# Public: Build full ServerHello handshake message (envelope + body)
+# ============================================================================
+
+fn build_server_hello(sh: ServerHello12) -> [u8]:
+    """Encode a complete ServerHello handshake message (type + len + body)."""
+    val body = build_server_hello_body(sh)
+    encode_handshake(HandshakeMessage12(msg_type: HS12_SERVER_HELLO, body: body))
+
+# ============================================================================
+# Public: Parse ServerHello body (RFC 5246 §7.4.1.3)
+# ============================================================================
+
+fn parse_server_hello(body: [u8]) -> ServerHelloResult:
+    """Parse a ServerHello body (i.e. the bytes AFTER the 4-byte envelope)."""
+    val total = body.len().to_u64()
+    # version(2) + random(32) + sid_len(1) + cipher_suite(2) + compression(1) = 38 minimum
+    if total < 38u64:
+        return ServerHelloResult.Err(reason: "decode_error: ServerHello body too short")
+    val vmaj = _u8_at(body, 0)
+    val vmin = _u8_at(body, 1)
+    var random: [u8] = _byte_buf(32)
+    var i: u64 = 0
+    while i < 32:
+        random = _push_byte(random, _u8_at(body, 2u64 + i).to_u64().to_i64())
+        i = i + 1
+    var offset: u64 = 34u64
+    val sid_len = _u8_at(body, offset).to_u64()
+    offset = offset + 1u64
+    if sid_len > 32u64:
+        return ServerHelloResult.Err(reason: "decode_error: session_id length > 32")
+    if offset + sid_len > total:
+        return ServerHelloResult.Err(reason: "decode_error: session_id truncated")
+    var session_id: [u8] = _byte_buf(sid_len)
+    var s: u64 = 0
+    while s < sid_len:
+        session_id = _push_byte(session_id, _u8_at(body, offset + s).to_u64().to_i64())
+        s = s + 1
+    offset = offset + sid_len
+    if offset + 3u64 > total:
+        return ServerHelloResult.Err(reason: "decode_error: ServerHello tail truncated")
+    val cipher_suite = _u16_be(body, offset)
+    offset = offset + 2u64
+    val compression_method = _u8_at(body, offset)
+    offset = offset + 1u64
+    var ext_present = false
+    var exts: [TlsExtension12] = []
+    if offset < total:
+        ext_present = true
+        val parsed = decode_extension_list(body, offset)
+        if val ExtensionListResult.Ok(value) = parsed:
+            exts = value
+        else:
+            if val ExtensionListResult.Err(reason) = parsed:
+                return ServerHelloResult.Err(reason: reason)
+    ServerHelloResult.Ok(value: ServerHello12(
+        server_version_major: vmaj,
+        server_version_minor: vmin,
+        random: random,
+        session_id: session_id,
+        cipher_suite: cipher_suite,
+        compression_method: compression_method,
+        extensions_present: ext_present,
+        extensions: exts
+    ))

@@ -1,0 +1,80 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SHA-224 — Pure Simple Implementation (FIPS 180-4 §6.3)
+#
+# SHA-224 is SHA-256 with a different initial hash value (FIPS 180-4 §5.3.2)
+# and the output truncated to the leftmost 224 bits (28 bytes / first 7 of
+# the 8 hash words).
+#
+# This module reuses the SHA-256 compression core
+# (sha256_process_block, sha256_pad_with_len) from os.crypto.sha256, only
+# substituting the IV and dropping the last word from the digest.
+#
+# Reference: FIPS 180-4 (Secure Hash Standard) §5.3.2 and §6.3.
+
+use os.crypto.sha256.{sha256_pad_with_len, sha256_process_block, _copy_block64}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _u8_at_224(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# ============================================================================
+# SHA-224 Initial Hash Value (FIPS 180-4 §5.3.2)
+# ============================================================================
+
+fn _sha224_h(index: u64) -> u32:
+    """SHA-224 initial hash values, from FIPS 180-4 §5.3.2.
+
+    These are the second 32 bits of the fractional parts of the square roots
+    of the 9th through 16th primes (23..53).
+    """
+    if index == 0: 0xC1059ED8
+    else if index == 1: 0x367CD507
+    else if index == 2: 0x3070DD17
+    else if index == 3: 0xF70E5939
+    else if index == 4: 0xFFC00B31
+    else if index == 5: 0x68581511
+    else if index == 6: 0x64F98FA7
+    else if index == 7: 0xBEFA4FA4
+    else: 0
+
+# ============================================================================
+# SHA-224 Hash (pure Simple)
+# ============================================================================
+
+fn sha224(data: [u8]) -> [u8]:
+    """Compute SHA-224 hash (FIPS 180-4 §6.3) of `data`. Output is 28 bytes.
+
+    Pure-Simple — no rt_sha256_* / rt_sha224 externs. Reuses the SHA-256
+    compression core with the SHA-224 initial hash value, then truncates
+    the digest to 28 bytes (drop the last 32-bit word).
+    """
+    sha224_with_len(data, data.len().to_u64())
+
+fn sha224_with_len(data: [u8], data_len: u64) -> [u8]:
+    """SHA-224 over the first `data_len` bytes of `data`."""
+    val padded = sha256_pad_with_len(data, data_len)
+
+    var h: [u32] = []
+    var hi: u64 = 0
+    while hi < 8:
+        h.push(_sha224_h(hi))
+        hi = hi + 1
+
+    var offset: u64 = 0
+    while offset < padded.len():
+        val block = _copy_block64(padded, offset)
+        h = sha256_process_block(block, 0, h)
+        offset = offset + 64
+
+    # Truncate output: first 7 words = 224 bits = 28 bytes.
+    var out: [u8] = []
+    hi = 0
+    while hi < 7:
+        val word = h[hi]
+        out.push(((word >> 24) & 0xFF).to_u8())
+        out.push(((word >> 16) & 0xFF).to_u8())
+        out.push(((word >> 8) & 0xFF).to_u8())
+        out.push((word & 0xFF).to_u8())
+        hi = hi + 1
+    out

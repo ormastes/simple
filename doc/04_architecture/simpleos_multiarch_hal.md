@@ -11,6 +11,12 @@ the hardening matrix, and the multi-arch bootstrap pipeline for the six
 SimpleOS targets: **x86_64, x86_32 (i686), aarch64, armv7 (arm32), rv64gc,
 rv32imac**.
 
+Audit chain for this feature:
+- inventory: `doc/08_tracking/simpleos/c_to_simple_inventory.md`
+- architecture report: `build/multiarch/arch_loc_report.json`
+- owned-C policy report: `build/multiarch/owned_c_report.json`
+- generator: `bin/simple run src/os/port/multiarch_audit_report.spl`
+
 The HAL boundary already exists in `src/os/kernel/arch/hal.spl` (1,197 LoC,
 8 traits, 6-arch `@cfg`-dispatched implementations). This phase **consolidates
 and completes** that boundary; it does not greenfield it.
@@ -41,6 +47,21 @@ and completes** that boundary; it does not greenfield it.
 - Self-hosted `isel_armv7` / `isel_x86_32` codegen (32-bit lanes route through
   LLVM fallback, already wired in `qemu_runner.spl`).
 - Userland MDSOC+ port reshaping (orthogonal feature).
+
+## Verification
+
+The current repo state verifies this feature through the document + report
+chain above. The inventory file is the source of truth for the C→Simple port
+scope, while the generated `build/multiarch/*.json` artefacts record the
+arch-neutral import boundary and the kernel-path owned-C policy status.
+
+## Test Results
+
+| Check | Artefact |
+|---|---|
+| HAL trait surface + per-arch file presence | `test/os/multiarch/hal_trait_surface_spec.spl` |
+| inventory + owned-C policy chain | `test/os/multiarch/c_port_inventory_spec.spl` |
+| platform/lane/board contract | `test/unit/os/port/simpleos_multiplatform_build_spec.spl` |
 
 ---
 

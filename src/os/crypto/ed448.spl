@@ -1,0 +1,723 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Ed448 — Pure Simple Edwards-Curve Digital Signature Algorithm (RFC 8032 §5.2)
+#
+# PureEdDSA / Ed448 over the untwisted Edwards curve edwards448:
+#     x^2 + y^2 = 1 + d*x^2*y^2     d = -39081 mod p
+#     p = 2^448 - 2^224 - 1
+#     L = 2^446 - 13818066809895115352007386748515426880336692474882178609894547503885
+#
+# Cofactor h = 4 (c = 2). Public-key encoding is 57 bytes; signatures are 114
+# bytes. The dom4 prefix "SigEd448" || phflag || OLEN(ctx) || ctx is MANDATORY
+# even when ctx is empty (unlike Ed25519 PureEdDSA which uses the empty prefix).
+#
+# Field arithmetic backend: pure-Simple bigint helpers (`_bi_*`) copied from
+# the convention established by `os/crypto/curve25519_bigint.spl` and
+# `os/crypto/rsa_fallback.spl`. This avoids checked-overflow paths in the
+# interpreter and is the proven-correct path; it is slower than dedicated
+# limb arithmetic. If interpreter perf becomes a blocker for KAT, file a
+# perf feature request for dedicated 16-limb 28-bit field arithmetic — do
+# not silently swallow per `feedback_no_coverups.md`.
+#
+# SHAKE256 is reused from `os.crypto.ml_kem_kpke`.
+#
+# Public API (mirrors the Ed25519 module style):
+#   ed448_keygen(seed: [u8]) -> ([u8], [u8])
+#       Derive (private_seed, public_key). Same shape as ed25519_keypair_from_seed.
+#   ed448_sign(seed: [u8], pubkey: [u8], msg: [u8], ctx: [u8]) -> [u8]
+#       Returns a 114-byte signature. Pass ctx=[] for the standard PureEdDSA path.
+#   ed448_verify(pubkey: [u8], msg: [u8], sig: [u8], ctx: [u8]) -> bool
+#       Returns true iff the signature is valid for (msg, ctx) under pubkey.
+#
+# References:
+#   - RFC 8032 §5.2 (Edwards-Curve Digital Signature Algorithm — Ed448)
+#   - RFC 7748   (Elliptic Curves for Security; edwards448 parameters)
+
+use os.crypto.ml_kem_kpke.{shake256}
+
+# ============================================================================
+# Pure-Simple bigint helpers (file-private; copied from the established
+# `_bi_*` pattern in curve25519_bigint.spl). Limb base = 2^30, limbs are
+# little-endian i64 values in [0, 2^30).
+# ============================================================================
+
+val BIGINT_BASE: i64 = 1073741824
+val BIGINT_BITS_PER_LIMB: i64 = 30
+
+fn _bi_from_i64(n: i64) -> list:
+    if n == 0:
+        return [0]
+    var result = []
+    var value = n
+    while value > 0:
+        result.push(value % BIGINT_BASE)
+        value = value / BIGINT_BASE
+    result
+
+fn _bi_zero() -> list:
+    [0]
+
+fn _bi_one() -> list:
+    [1]
+
+fn _bi_is_zero(a: list) -> bool:
+    if a.len() == 0:
+        return true
+    if a.len() == 1:
+        return a[0] == 0
+    false
+
+fn _bi_compare(a: list, b: list) -> i64:
+    val len_a = a.len()
+    val len_b = b.len()
+    if len_a < len_b:
+        return -1
+    if len_a > len_b:
+        return 1
+    var i = len_a - 1
+    while i >= 0:
+        val limb_a = a[i]
+        val limb_b = b[i]
+        if limb_a < limb_b:
+            return -1
+        if limb_a > limb_b:
+            return 1
+        i = i - 1
+    0
+
+fn _bi_normalize(a: list) -> list:
+    var len = a.len()
+    while len > 1:
+        if a[len - 1] != 0:
+            break
+        len = len - 1
+    if len == a.len():
+        return a
+    var result = []
+    var i = 0
+    while i < len:
+        result.push(a[i])
+        i = i + 1
+    result
+
+fn _bi_add(a: list, b: list) -> list:
+    val len_a = a.len()
+    val len_b = b.len()
+    var max_len = len_a
+    if len_b > max_len:
+        max_len = len_b
+    var result = []
+    var carry = 0
+    var i = 0
+    while i < max_len:
+        var sum = carry
+        if i < len_a:
+            sum = sum + a[i]
+        if i < len_b:
+            sum = sum + b[i]
+        result.push(sum % BIGINT_BASE)
+        carry = sum / BIGINT_BASE
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    _bi_normalize(result)
+
+fn _bi_sub(a: list, b: list) -> list:
+    if _bi_compare(a, b) <= 0:
+        return _bi_zero()
+    val len_a = a.len()
+    val len_b = b.len()
+    var result = []
+    var borrow = 0
+    var i = 0
+    while i < len_a:
+        var limb_a = a[i] - borrow
+        var limb_b = 0
+        if i < len_b:
+            limb_b = b[i]
+        if limb_a < limb_b:
+            limb_a = limb_a + BIGINT_BASE
+            borrow = 1
+        else:
+            borrow = 0
+        result.push(limb_a - limb_b)
+        i = i + 1
+    _bi_normalize(result)
+
+fn _bi_mul(a: list, b: list) -> list:
+    if _bi_is_zero(a):
+        return _bi_zero()
+    if _bi_is_zero(b):
+        return _bi_zero()
+    val len_a = a.len()
+    val len_b = b.len()
+    var result = []
+    var k = 0
+    while k < len_a + len_b:
+        result.push(0)
+        k = k + 1
+    var i = 0
+    while i < len_a:
+        val limb_a = a[i]
+        var carry = 0
+        var j = 0
+        while j < len_b:
+            val idx = i + j
+            val prod = limb_a * b[j] + result[idx] + carry
+            result[idx] = prod % BIGINT_BASE
+            carry = prod / BIGINT_BASE
+            j = j + 1
+        if carry > 0:
+            val idx = i + len_b
+            result[idx] = result[idx] + carry
+        i = i + 1
+    _bi_normalize(result)
+
+fn _bi_mul_i64(a: list, n: i64) -> list:
+    if n == 0:
+        return _bi_zero()
+    if n == 1:
+        return a
+    val len_a = a.len()
+    var result = []
+    var carry = 0
+    var i = 0
+    while i < len_a:
+        val prod = a[i] * n + carry
+        result.push(prod % BIGINT_BASE)
+        carry = prod / BIGINT_BASE
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    _bi_normalize(result)
+
+fn _bi_divmod_i64(a: list, n: i64) -> list:
+    if n == 0:
+        return [_bi_zero(), _bi_zero()]
+    if n == 1:
+        return [a, _bi_zero()]
+    val len_a = a.len()
+    var quotient = []
+    var remainder = 0
+    var i = len_a - 1
+    while i >= 0:
+        val dividend = remainder * BIGINT_BASE + a[i]
+        quotient.push(dividend / n)
+        remainder = dividend % n
+        i = i - 1
+    var rev_quotient = []
+    i = quotient.len() - 1
+    while i >= 0:
+        rev_quotient.push(quotient[i])
+        i = i - 1
+    [_bi_normalize(rev_quotient), _bi_from_i64(remainder)]
+
+fn _bi_bit_length(a: list) -> i64:
+    val norm = _bi_normalize(a)
+    val len = norm.len()
+    if len == 0:
+        return 0
+    if _bi_is_zero(norm):
+        return 0
+    val top_limb = norm[len - 1]
+    val base_bits = (len - 1) * BIGINT_BITS_PER_LIMB
+    var bits = 0
+    var temp = top_limb
+    while temp > 0:
+        bits = bits + 1
+        temp = temp / 2
+    base_bits + bits
+
+fn _bi_get_bit(a: list, n: i64) -> i64:
+    val limb_idx = n / BIGINT_BITS_PER_LIMB
+    val bit_idx = n % BIGINT_BITS_PER_LIMB
+    val len = a.len()
+    if limb_idx >= len:
+        return 0
+    val limb = a.get(limb_idx)
+    val mask = 1 << bit_idx
+    (limb / mask) % 2
+
+fn _bi_shift_left_one(a: list) -> list:
+    if _bi_is_zero(a):
+        return a
+    val len = a.len()
+    var result = []
+    var carry = 0
+    var i: i64 = 0
+    while i < len:
+        val limb = a.get(i)
+        val shifted = limb * 2 + carry
+        result.push(shifted % BIGINT_BASE)
+        carry = shifted / BIGINT_BASE
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    _bi_normalize(result)
+
+fn _bi_mod(a: list, b: list) -> list:
+    if _bi_compare(a, b) < 0:
+        return a
+    if _bi_compare(a, b) == 0:
+        return _bi_zero()
+    var remainder = _bi_zero()
+    val bit_len = _bi_bit_length(a)
+    var i = bit_len - 1
+    while i >= 0:
+        remainder = _bi_shift_left_one(remainder)
+        if _bi_get_bit(a, i) == 1:
+            remainder = _bi_add(remainder, _bi_one())
+        if _bi_compare(remainder, b) >= 0:
+            remainder = _bi_sub(remainder, b)
+        i = i - 1
+    remainder
+
+# ============================================================================
+# Ed448 field & group constants (RFC 8032 §5.2; values verified against
+# the curve equation x^2 + y^2 = 1 + d*x^2*y^2 mod p).
+# Limbs are 30-bit little-endian (BIGINT_BASE = 2^30); 15 limbs cover 448 bits.
+# ============================================================================
+
+# p = 2^448 - 2^224 - 1
+fn _ed448_p() -> list:
+    [1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073725439, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 268435455]
+
+# d = -39081 mod p (untwisted Edwards448 curve constant)
+fn _ed448_d() -> list:
+    [1073702742, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073725439, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 268435455]
+
+# L = group order (cofactor 4; n = 447)
+fn _ed448_L() -> list:
+    [727205107, 232983114, 475592018, 456170659, 372674593, 997009083, 574528580, 1073733426, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 1073741823, 67108863]
+
+# Base point B coordinates from RFC 8032 §5.2 Table 2 (edwards448 in RFC 7748).
+fn _ed448_Bx() -> list:
+    [118276190, 412786863, 805910754, 249575522, 912593219, 946592938, 977682730, 952707316, 392686189, 364977212, 766107974, 696823757, 757210389, 430945335, 82941708]
+
+fn _ed448_By() -> list:
+    [842070548, 539092335, 763136729, 793037587, 1010418941, 268202905, 204305325, 654803304, 406882168, 231584398, 908377767, 232108657, 612922912, 96131824, 110359655]
+
+# ============================================================================
+# Field arithmetic mod p (operates on bigint-list field elements 0 <= x < p)
+# ============================================================================
+
+fn _fe_zero() -> list:
+    _bi_zero()
+
+fn _fe_one() -> list:
+    _bi_one()
+
+fn _fe_reduce(a: list) -> list:
+    _bi_mod(a, _ed448_p())
+
+fn _fe_add(a: list, b: list) -> list:
+    val s = _bi_add(a, b)
+    if _bi_compare(s, _ed448_p()) >= 0:
+        return _bi_sub(s, _ed448_p())
+    s
+
+fn _fe_sub(a: list, b: list) -> list:
+    if _bi_compare(a, b) >= 0:
+        return _bi_sub(a, b)
+    _bi_sub(_bi_add(a, _ed448_p()), b)
+
+fn _fe_mul(a: list, b: list) -> list:
+    _bi_mod(_bi_mul(a, b), _ed448_p())
+
+fn _fe_sq(a: list) -> list:
+    _fe_mul(a, a)
+
+fn _fe_neg(a: list) -> list:
+    if _bi_is_zero(a):
+        return _fe_zero()
+    _bi_sub(_ed448_p(), a)
+
+fn _fe_mul_i64(a: list, n: i64) -> list:
+    _bi_mod(_bi_mul_i64(a, n), _ed448_p())
+
+# Modular inverse via Fermat's little theorem: a^(p-2) mod p.
+# p-2 = 2^448 - 2^224 - 3 has bit length 448; we square-and-multiply over the
+# bits of (p-2) extracted from the bigint. Cost: ~448 squarings + ~226 muls.
+fn _fe_invert(a: list) -> list:
+    val pm2 = _bi_sub(_ed448_p(), _bi_from_i64(2))
+    val nbits = _bi_bit_length(pm2)
+    var result = _fe_one()
+    var i = nbits - 1
+    while i >= 0:
+        result = _fe_sq(result)
+        if _bi_get_bit(pm2, i) == 1:
+            result = _fe_mul(result, a)
+        i = i - 1
+    result
+
+# ============================================================================
+# Byte <-> field element (little-endian)
+# ============================================================================
+
+fn _bytes_to_bi_le(b: [u8]) -> list:
+    var result = _bi_zero()
+    var i = b.len().to_i64()
+    while i > 0:
+        i = i - 1
+        result = _bi_mul_i64(result, 256)
+        result = _bi_add(result, _bi_from_i64(b[i.to_u64()].to_i64()))
+    result
+
+fn _bi_to_bytes_le(n: list, byte_count: i64) -> [u8]:
+    var result: [u8] = []
+    var temp = n
+    var i: i64 = 0
+    while i < byte_count:
+        val divmod = _bi_divmod_i64(temp, 256)
+        val remainder = divmod.get(1)
+        if remainder.len() > 0:
+            result.push(remainder.get(0).to_u8())
+        else:
+            result.push(0u8)
+        temp = divmod.get(0)
+        i = i + 1
+    result
+
+fn _fe_to_bytes(a: list) -> [u8]:
+    _bi_to_bytes_le(_fe_reduce(a), 57)
+
+fn _fe_from_bytes(b: [u8]) -> list:
+    _fe_reduce(_bytes_to_bi_le(b))
+
+# Low-bit parity (used for sign-bit encoding).
+fn _fe_is_odd(a: list) -> bool:
+    val r = _fe_reduce(a)
+    if r.len() == 0:
+        return false
+    (r[0] % 2) == 1
+
+# ============================================================================
+# Edwards448 point operations.
+# Untwisted Edwards: x^2 + y^2 = 1 + d*x^2*y^2.
+# Projective coords (X:Y:Z) with affine (X/Z, Y/Z). RFC 8032 §5.2.4 add and
+# §5.2.4 (last paragraph) double formulas — DERIVED FOR a=1 EXPLICITLY.
+# Do NOT copy Ed25519 HWCD08 (a=-1) formulas verbatim; they will silently
+# fail for Ed448.
+# ============================================================================
+
+# Projective add (untwisted Edwards448, RFC 8032 §5.2.4):
+#   A = Z1*Z2; B = A^2; C = X1*X2; D = Y1*Y2;
+#   E = d*C*D; F = B-E; G = B+E;
+#   H = (X1+Y1)*(X2+Y2);
+#   X3 = A*F*(H - C - D)
+#   Y3 = A*G*(D - C)
+#   Z3 = F*G
+fn _ed448_add(p1: list, p2: list) -> list:
+    val x1 = p1.get(0)
+    val y1 = p1.get(1)
+    val z1 = p1.get(2)
+    val x2 = p2.get(0)
+    val y2 = p2.get(1)
+    val z2 = p2.get(2)
+    val a = _fe_mul(z1, z2)
+    val b = _fe_sq(a)
+    val c = _fe_mul(x1, x2)
+    val dd = _fe_mul(y1, y2)
+    val e = _fe_mul(_ed448_d(), _fe_mul(c, dd))
+    val f = _fe_sub(b, e)
+    val g = _fe_add(b, e)
+    val h = _fe_mul(_fe_add(x1, y1), _fe_add(x2, y2))
+    val x3 = _fe_mul(_fe_mul(a, f), _fe_sub(_fe_sub(h, c), dd))
+    val y3 = _fe_mul(_fe_mul(a, g), _fe_sub(dd, c))
+    val z3 = _fe_mul(f, g)
+    [x3, y3, z3]
+
+# Projective double for untwisted Edwards448 (RFC 8032 §5.2.4 last block):
+#   B = (X1+Y1)^2
+#   C = X1^2
+#   D = Y1^2
+#   E = C+D
+#   H = Z1^2
+#   J = E - 2*H
+#   X3 = (B - E) * J
+#   Y3 = E * (C - D)
+#   Z3 = E * J
+fn _ed448_double(p1: list) -> list:
+    val x1 = p1.get(0)
+    val y1 = p1.get(1)
+    val z1 = p1.get(2)
+    val b = _fe_sq(_fe_add(x1, y1))
+    val c = _fe_sq(x1)
+    val dd = _fe_sq(y1)
+    val e = _fe_add(c, dd)
+    val h = _fe_sq(z1)
+    val j = _fe_sub(e, _fe_add(h, h))
+    val x3 = _fe_mul(_fe_sub(b, e), j)
+    val y3 = _fe_mul(e, _fe_sub(c, dd))
+    val z3 = _fe_mul(e, j)
+    [x3, y3, z3]
+
+# Identity element (neutral) is (0, 1, 1).
+fn _ed448_identity() -> list:
+    [_fe_zero(), _fe_one(), _fe_one()]
+
+fn _ed448_base_point() -> list:
+    [_ed448_Bx(), _ed448_By(), _fe_one()]
+
+# Scalar multiplication by a bigint scalar (variable-time double-and-add over
+# the bit length of the scalar). NOT constant-time — Ed448 sign uses this for
+# r and s, both derived from a hash, but a private-seed-dependent path through
+# this function leaks. A constant-time refactor mirroring `ed_point_cselect`
+# (XOR-mask select pattern) tracked as a follow-up bug; matches the W14-F
+# scope which calls for "sign + verify" per RFC 8032 §5.2 with byte-match KAT,
+# not CT hardening.
+fn _ed448_scalar_mul(scalar: list, point: list) -> list:
+    val nbits = _bi_bit_length(scalar)
+    if nbits == 0:
+        return _ed448_identity()
+    var result = _ed448_identity()
+    var i = nbits - 1
+    while i >= 0:
+        result = _ed448_double(result)
+        if _bi_get_bit(scalar, i) == 1:
+            result = _ed448_add(result, point)
+        i = i - 1
+    result
+
+# Affine equality: p1 == p2 iff X1*Z2 == X2*Z1 and Y1*Z2 == Y2*Z1.
+fn _ed448_equal(p1: list, p2: list) -> bool:
+    val x1z2 = _fe_mul(p1.get(0), p2.get(2))
+    val x2z1 = _fe_mul(p2.get(0), p1.get(2))
+    if _bi_compare(_fe_reduce(x1z2), _fe_reduce(x2z1)) != 0:
+        return false
+    val y1z2 = _fe_mul(p1.get(1), p2.get(2))
+    val y2z1 = _fe_mul(p2.get(1), p1.get(2))
+    _bi_compare(_fe_reduce(y1z2), _fe_reduce(y2z1)) == 0
+
+# ============================================================================
+# Point encode / decode (RFC 8032 §5.2.2 / §5.2.3).
+# 57 bytes little-endian: bytes 0..55 hold y, byte 56 = (x_low_bit << 7).
+# ============================================================================
+
+fn _ed448_encode(p: list) -> [u8]:
+    val zinv = _fe_invert(p.get(2))
+    val x = _fe_mul(p.get(0), zinv)
+    val y = _fe_mul(p.get(1), zinv)
+    var out = _fe_to_bytes(y)
+    # The y-encoding already lives in 57 bytes. Bit 7 of byte 56 must encode
+    # the sign of x (low bit of x).
+    if _fe_is_odd(x):
+        out[56] = out[56] | 0x80u8
+    out
+
+# Decode a 57-byte encoding into a projective point. Returns Result so callers
+# can reject malformed encodings during verify.
+fn _ed448_decode(enc: [u8]) -> Result<list, text>:
+    if enc.len() != 57:
+        return Err("ed448: encoded point must be 57 bytes")
+    var ybytes: [u8] = []
+    var i: u64 = 0
+    while i < 56:
+        ybytes.push(enc[i])
+        i = i + 1
+    val last = enc[56].to_i64()
+    val x_sign = (last >> 7) & 1
+    ybytes.push((last & 0x7f).to_u8())
+    val y = _bytes_to_bi_le(ybytes)
+    if _bi_compare(y, _ed448_p()) >= 0:
+        return Err("ed448: y >= p in encoded point")
+    # Recover x from the curve equation:
+    #   x^2 + y^2 = 1 + d*x^2*y^2  =>  x^2 = (y^2 - 1) / (d*y^2 - 1) mod p
+    val yy = _fe_sq(y)
+    val num = _fe_sub(yy, _fe_one())
+    val den = _fe_sub(_fe_mul(_ed448_d(), yy), _fe_one())
+    if _bi_is_zero(den):
+        return Err("ed448: zero denominator in decode")
+    val xx = _fe_mul(num, _fe_invert(den))
+    # Square root mod p: p ≡ 3 (mod 4), so sqrt(a) = a^((p+1)/4) mod p.
+    val pp1over4 = _bi_divmod_i64(_bi_add(_ed448_p(), _bi_one()), 4).get(0)
+    val nbits = _bi_bit_length(pp1over4)
+    var x = _fe_one()
+    var bi = nbits - 1
+    while bi >= 0:
+        x = _fe_sq(x)
+        if _bi_get_bit(pp1over4, bi) == 1:
+            x = _fe_mul(x, xx)
+        bi = bi - 1
+    # Validate: x^2 must equal xx; otherwise no square root exists.
+    if _bi_compare(_fe_reduce(_fe_sq(x)), _fe_reduce(xx)) != 0:
+        return Err("ed448: x not a square in decode")
+    # Pick the root with parity matching x_sign.
+    val x_is_odd = _fe_is_odd(x)
+    val want_odd = x_sign == 1
+    if x_is_odd != want_odd:
+        # If x == 0 and x_sign == 1, the encoding is invalid.
+        if _bi_is_zero(x) and x_sign == 1:
+            return Err("ed448: x == 0 with sign bit set")
+        x = _fe_neg(x)
+    Ok([x, y, _fe_one()])
+
+# ============================================================================
+# SHAKE256 wrapper (the upstream module takes/returns `list` of byte-valued
+# i64s; convert to/from [u8]).
+# ============================================================================
+
+fn _shake256_bytes(input: [u8], nbytes: i64) -> [u8]:
+    var as_list: list = []
+    var i: u64 = 0
+    while i < input.len():
+        as_list.push(input[i].to_i64())
+        i = i + 1
+    val out_list = shake256(as_list, nbytes)
+    var out: [u8] = []
+    var j: i64 = 0
+    while j < out_list.len().to_i64():
+        out.push(out_list.get(j).to_u8())
+        j = j + 1
+    out
+
+# ============================================================================
+# dom4 prefix (RFC 8032 §2): "SigEd448" || OCTET(phflag) || OCTET(OLEN(ctx)) || ctx
+# For Ed448 (PureEdDSA, not Ed448ph), phflag = 0.
+# ============================================================================
+
+fn _ed448_dom4(phflag: i64, ctx: [u8]) -> [u8]:
+    var out: [u8] = [
+        0x53u8, 0x69u8, 0x67u8, 0x45u8, 0x64u8, 0x34u8, 0x34u8, 0x38u8
+    ]
+    out.push(phflag.to_u8())
+    out.push(ctx.len().to_u8())
+    var i: u64 = 0
+    while i < ctx.len():
+        out.push(ctx[i])
+        i = i + 1
+    out
+
+# Concatenate two/three byte arrays.
+fn _concat2(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < b.len():
+        out.push(b[i])
+        i = i + 1
+    out
+
+fn _concat3(a: [u8], b: [u8], c: [u8]) -> [u8]:
+    _concat2(_concat2(a, b), c)
+
+# ============================================================================
+# Pruning (RFC 8032 §5.2.5): clear low 2 bits of byte 0, set bit 7 of byte 55,
+# clear all bits of byte 56. Output is the 57-byte clamped scalar `s`.
+# ============================================================================
+
+fn _ed448_prune(buf: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 57:
+        out.push(buf[i])
+        i = i + 1
+    out[0] = out[0] & 0xfcu8
+    out[55] = out[55] | 0x80u8
+    out[56] = 0u8
+    out
+
+# ============================================================================
+# Scalar reduction mod L (114-byte buffer -> bigint mod L).
+# ============================================================================
+
+fn _ed448_scalar_from_bytes_mod_L(buf: [u8]) -> list:
+    val n = _bytes_to_bi_le(buf)
+    _bi_mod(n, _ed448_L())
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn ed448_keygen(seed: [u8]) -> ([u8], [u8]):
+    """Derive (private_seed, public_key) from a 57-byte seed (RFC 8032 §5.2.5).
+
+    Returns the seed unchanged as the private key, plus the encoded 57-byte
+    public key A = encode([s]B), where s is the pruned little-endian integer
+    from the lower 57 bytes of SHAKE256(seed, 114).
+    """
+    val h = _shake256_bytes(seed, 114)
+    val s_bytes = _ed448_prune(h)
+    val s_scalar = _bytes_to_bi_le(s_bytes)
+    val A = _ed448_scalar_mul(s_scalar, _ed448_base_point())
+    val A_enc = _ed448_encode(A)
+    (seed, A_enc)
+
+fn ed448_sign(seed: [u8], pubkey: [u8], msg: [u8], ctx: [u8]) -> [u8]:
+    """Sign `msg` with private `seed` (and previously-derived `pubkey` for the
+    challenge hash), under context `ctx` (pass [] for default). Returns the
+    114-byte signature R || S per RFC 8032 §5.2.6.
+    """
+    val h = _shake256_bytes(seed, 114)
+    val s_bytes = _ed448_prune(h)
+    val s_scalar = _bytes_to_bi_le(s_bytes)
+    # prefix = h[57..114] (57 bytes)
+    var prefix: [u8] = []
+    var i: u64 = 57
+    while i < 114:
+        prefix.push(h[i])
+        i = i + 1
+    # r = SHAKE256(dom4 || prefix || msg, 114) mod L
+    val dom = _ed448_dom4(0, ctx)
+    val r_input = _concat3(dom, prefix, msg)
+    val r_hash = _shake256_bytes(r_input, 114)
+    val r_scalar = _ed448_scalar_from_bytes_mod_L(r_hash)
+    # R = [r]B
+    val R_pt = _ed448_scalar_mul(r_scalar, _ed448_base_point())
+    val R_enc = _ed448_encode(R_pt)
+    # k = SHAKE256(dom4 || R || A || msg, 114) mod L
+    val k_input = _concat2(_concat3(dom, R_enc, pubkey), msg)
+    val k_hash = _shake256_bytes(k_input, 114)
+    val k_scalar = _ed448_scalar_from_bytes_mod_L(k_hash)
+    # S = (r + k*s) mod L
+    val ks = _bi_mod(_bi_mul(k_scalar, s_scalar), _ed448_L())
+    val S = _bi_mod(_bi_add(r_scalar, ks), _ed448_L())
+    val S_enc = _bi_to_bytes_le(S, 57)
+    _concat2(R_enc, S_enc)
+
+fn ed448_verify(pubkey: [u8], msg: [u8], sig: [u8], ctx: [u8]) -> bool:
+    """Verify a 114-byte Ed448 signature for `msg` under `pubkey` and context
+    `ctx`. Returns false on any encoding fault, S out of range, or group
+    equation mismatch (RFC 8032 §5.2.7).
+    """
+    if sig.len() != 114:
+        return false
+    if pubkey.len() != 57:
+        return false
+    # Split signature into R (first 57) and S (last 57).
+    var R_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 57:
+        R_bytes.push(sig[i])
+        i = i + 1
+    var S_bytes: [u8] = []
+    while i < 114:
+        S_bytes.push(sig[i])
+        i = i + 1
+    val S_scalar = _bytes_to_bi_le(S_bytes)
+    if _bi_compare(S_scalar, _ed448_L()) >= 0:
+        return false
+    val R_decoded_r = _ed448_decode(R_bytes)
+    val A_decoded_r = _ed448_decode(pubkey)
+    var R_pt: list = _ed448_identity()
+    var A_pt: list = _ed448_identity()
+    if val Ok(p) = R_decoded_r:
+        R_pt = p
+    else:
+        return false
+    if val Ok(p) = A_decoded_r:
+        A_pt = p
+    else:
+        return false
+    # k = SHAKE256(dom4 || R || A || msg, 114) mod L
+    val dom = _ed448_dom4(0, ctx)
+    val k_input = _concat2(_concat3(dom, R_bytes, pubkey), msg)
+    val k_hash = _shake256_bytes(k_input, 114)
+    val k_scalar = _ed448_scalar_from_bytes_mod_L(k_hash)
+    # Group equation (sufficient form per §5.2.7): [S]B == R + [k]A.
+    val SB = _ed448_scalar_mul(S_scalar, _ed448_base_point())
+    val kA = _ed448_scalar_mul(k_scalar, A_pt)
+    val R_plus_kA = _ed448_add(R_pt, kA)
+    _ed448_equal(SB, R_plus_kA)

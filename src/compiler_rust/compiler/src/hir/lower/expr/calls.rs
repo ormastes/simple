@@ -176,7 +176,7 @@ impl Lowerer {
                         return self.lower_bitfield_constructor(type_id, args, ctx);
                     }
                 }
-                return self.lower_static_method_call(&segments[0], &segments[1], args, ctx);
+                return self.lower_static_member_call_with_sugar(&segments[0], &segments[1], args, ctx);
             }
         }
 

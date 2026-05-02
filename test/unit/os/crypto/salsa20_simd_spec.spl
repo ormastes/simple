@@ -1,0 +1,247 @@
+# Salsa20/8 SIMD core — test suite
+#
+# Tests salsa20_8_core_x4 (vertical 4-block Vec4i SIMD path) in
+# src/os/crypto/scrypt.spl against:
+#   1. RFC 7914 §B.1 Salsa20/8 known-answer vector (byte-exact)
+#   2. Agreement with the scalar salsa20_8_core on the same input
+#   3. Lane independence — 4 different inputs give 4 different outputs
+#   4. The zero-input block (well-defined, non-trivial output)
+#   5. Regression: scrypt RFC 7914 §11 V1 still passes after SIMD additions
+#
+# Reference: RFC 7914 (Percival, Josefsson, August 2016) §B.1 and §11.
+#
+# Note: salsa20_8_core_x4 returns a flat 256-byte list;
+#       out0 = bytes [0..63], out1 = [64..127], out2 = [128..191], out3 = [192..255].
+
+use std.spipe.*
+use os.crypto.scrypt.{salsa20_8_core, salsa20_8_core_x4, scrypt}
+
+# ============================================================================
+# Module-level helpers (avoid it-block var mutation drop in interpreter mode)
+# per .claude/memory/feedback_it_block_var_mutation.md
+# ============================================================================
+
+fn _hex_nibble(n: i64) -> text:
+    if n == 0: "0"
+    else: if n == 1: "1"
+    else: if n == 2: "2"
+    else: if n == 3: "3"
+    else: if n == 4: "4"
+    else: if n == 5: "5"
+    else: if n == 6: "6"
+    else: if n == 7: "7"
+    else: if n == 8: "8"
+    else: if n == 9: "9"
+    else: if n == 10: "a"
+    else: if n == 11: "b"
+    else: if n == 12: "c"
+    else: if n == 13: "d"
+    else: if n == 14: "e"
+    else: "f"
+
+fn _list_hex(b: list) -> text:
+    var s = ""
+    var i = 0
+    val n = b.len()
+    while i < n:
+        val byte = b.get(i) & 0xFF
+        s = s + _hex_nibble((byte >> 4) & 0xF)
+        s = s + _hex_nibble(byte & 0xF)
+        i = i + 1
+    s
+
+fn _list_hex_range(b: list, from: i64, to: i64) -> text:
+    var s = ""
+    var i = from
+    while i < to:
+        val byte = b.get(i) & 0xFF
+        s = s + _hex_nibble((byte >> 4) & 0xF)
+        s = s + _hex_nibble(byte & 0xF)
+        i = i + 1
+    s
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s = ""
+    var i: u64 = 0
+    val n = b.len()
+    while i < n:
+        val byte = b[i].to_i64() & 0xFF
+        s = s + _hex_nibble((byte >> 4) & 0xF)
+        s = s + _hex_nibble(byte & 0xF)
+        i = i + 1
+    s
+
+# RFC 7914 §B.1 — 64-byte Salsa20/8 input as list-of-i64
+fn _rfc_input() -> list:
+    var b = []
+    b.push(0x7e) b.push(0x87) b.push(0x9a) b.push(0x21)
+    b.push(0x4f) b.push(0x3e) b.push(0xc9) b.push(0x86)
+    b.push(0x7c) b.push(0xa9) b.push(0x40) b.push(0xe6)
+    b.push(0x41) b.push(0x71) b.push(0x8f) b.push(0x26)
+    b.push(0xba) b.push(0xee) b.push(0x55) b.push(0x5b)
+    b.push(0x8c) b.push(0x61) b.push(0xc1) b.push(0xb5)
+    b.push(0x0d) b.push(0xf8) b.push(0x46) b.push(0x11)
+    b.push(0x6d) b.push(0xcd) b.push(0x3b) b.push(0x1d)
+    b.push(0xee) b.push(0x24) b.push(0xf3) b.push(0x19)
+    b.push(0xdf) b.push(0x9b) b.push(0x3d) b.push(0x85)
+    b.push(0x14) b.push(0x12) b.push(0x1e) b.push(0x4b)
+    b.push(0x5a) b.push(0xc5) b.push(0xaa) b.push(0x32)
+    b.push(0x76) b.push(0x02) b.push(0x17) b.push(0x31)
+    b.push(0x4d) b.push(0x2e) b.push(0x8b) b.push(0xeb)
+    b.push(0x85) b.push(0x75) b.push(0x52) b.push(0xa0)
+    b.push(0xc4) b.push(0x23) b.push(0xcc) b.push(0xad)
+    b
+
+# RFC 7914 §B.1 expected output as hex string
+fn _rfc_expected_hex() -> text:
+    "a41f859c6608cc993b81cacb020cef05044b2181a2fd337dfd7b1c6396682f29b4393168e3c9e6bcfe6bc5b7a06d96bae424cc102c91745c24ad673dc7618f81"
+
+# A distinct second block: byte-reversed input
+fn _alt_input() -> list:
+    var b = []
+    b.push(0xad) b.push(0xcc) b.push(0x23) b.push(0xc4)
+    b.push(0xa0) b.push(0x52) b.push(0x75) b.push(0x85)
+    b.push(0xeb) b.push(0x8b) b.push(0x2e) b.push(0x4d)
+    b.push(0x31) b.push(0x17) b.push(0x02) b.push(0x76)
+    b.push(0x32) b.push(0xaa) b.push(0xc5) b.push(0x5a)
+    b.push(0x4b) b.push(0x1e) b.push(0x12) b.push(0x14)
+    b.push(0x85) b.push(0x3d) b.push(0x9b) b.push(0xdf)
+    b.push(0x19) b.push(0xf3) b.push(0x24) b.push(0xee)
+    b.push(0x1d) b.push(0x3b) b.push(0xcd) b.push(0x6d)
+    b.push(0x11) b.push(0x46) b.push(0xf8) b.push(0x0d)
+    b.push(0xb5) b.push(0xc1) b.push(0x61) b.push(0x8c)
+    b.push(0x5b) b.push(0x55) b.push(0xee) b.push(0xba)
+    b.push(0x26) b.push(0x8f) b.push(0x71) b.push(0x41)
+    b.push(0xe6) b.push(0x40) b.push(0xa9) b.push(0x7c)
+    b.push(0x86) b.push(0xc9) b.push(0x3e) b.push(0x4f)
+    b.push(0x21) b.push(0x9a) b.push(0x87) b.push(0x7e)
+    b
+
+# A third block: incrementing bytes 0x00..0x3f
+fn _incr_input() -> list:
+    var b = []
+    var i = 0
+    while i < 64:
+        b.push(i)
+        i = i + 1
+    b
+
+# A fourth block: all bytes = 0x42
+fn _fill_input(v: i64) -> list:
+    var b = []
+    var i = 0
+    while i < 64:
+        b.push(v)
+        i = i + 1
+    b
+
+# Zero-filled 64-byte block
+fn _zero_input() -> list:
+    _fill_input(0)
+
+fn _empty_u8() -> [u8]:
+    var out: [u8] = []
+    out
+
+# ============================================================================
+# Test: RFC 7914 §B.1 — scalar baseline (sanity check for the scalar path)
+# ============================================================================
+
+describe "salsa20_8_core scalar — RFC 7914 §B.1":
+
+    it "scalar: RFC 7914 §B.1 vector matches byte-exact":
+        val out = salsa20_8_core(_rfc_input())
+        expect(_list_hex(out)).to_equal(_rfc_expected_hex())
+
+    it "scalar: output length is 64 bytes":
+        val out = salsa20_8_core(_rfc_input())
+        expect(out.len()).to_equal(64)
+
+# ============================================================================
+# Test: salsa20_8_core_x4 — RFC 7914 §B.1 via SIMD lane 0
+# ============================================================================
+
+describe "salsa20_8_core_x4 SIMD — RFC 7914 §B.1 (lane 0)":
+
+    it "x4 lane 0: RFC 7914 §B.1 vector matches byte-exact":
+        # Feed the RFC input in lane 0; the other 3 lanes receive distinct data.
+        val out256 = salsa20_8_core_x4(_rfc_input(), _alt_input(), _incr_input(), _fill_input(0x42))
+        val lane0_hex = _list_hex_range(out256, 0, 64)
+        expect(lane0_hex).to_equal(_rfc_expected_hex())
+
+    it "x4 output is 256 bytes total":
+        val out256 = salsa20_8_core_x4(_rfc_input(), _alt_input(), _incr_input(), _fill_input(0x42))
+        expect(out256.len()).to_equal(256)
+
+# ============================================================================
+# Test: SIMD agrees with scalar for all 4 lanes
+# ============================================================================
+
+describe "salsa20_8_core_x4 SIMD — parity with scalar on all 4 lanes":
+
+    it "x4 lane 0 == scalar(_rfc_input)":
+        val scalar0 = salsa20_8_core(_rfc_input())
+        val out256  = salsa20_8_core_x4(_rfc_input(), _alt_input(), _incr_input(), _fill_input(0x42))
+        expect(_list_hex_range(out256, 0, 64)).to_equal(_list_hex(scalar0))
+
+    it "x4 lane 1 == scalar(_alt_input)":
+        val scalar1 = salsa20_8_core(_alt_input())
+        val out256  = salsa20_8_core_x4(_rfc_input(), _alt_input(), _incr_input(), _fill_input(0x42))
+        expect(_list_hex_range(out256, 64, 128)).to_equal(_list_hex(scalar1))
+
+    it "x4 lane 2 == scalar(_incr_input)":
+        val scalar2 = salsa20_8_core(_incr_input())
+        val out256  = salsa20_8_core_x4(_rfc_input(), _alt_input(), _incr_input(), _fill_input(0x42))
+        expect(_list_hex_range(out256, 128, 192)).to_equal(_list_hex(scalar2))
+
+    it "x4 lane 3 == scalar(_fill_input(0x42))":
+        val scalar3 = salsa20_8_core(_fill_input(0x42))
+        val out256  = salsa20_8_core_x4(_rfc_input(), _alt_input(), _incr_input(), _fill_input(0x42))
+        expect(_list_hex_range(out256, 192, 256)).to_equal(_list_hex(scalar3))
+
+# ============================================================================
+# Test: Lane independence — 4 distinct inputs produce 4 distinct outputs
+# ============================================================================
+
+describe "salsa20_8_core_x4 SIMD — lane independence":
+
+    it "all 4 lane outputs are distinct":
+        val out256 = salsa20_8_core_x4(_rfc_input(), _alt_input(), _incr_input(), _fill_input(0x42))
+        val h0 = _list_hex_range(out256, 0,   64)
+        val h1 = _list_hex_range(out256, 64,  128)
+        val h2 = _list_hex_range(out256, 128, 192)
+        val h3 = _list_hex_range(out256, 192, 256)
+        # h0 != h1 != h2 != h3 (pairwise inequalities)
+        expect(h0 == h1).to_equal(false)
+        expect(h0 == h2).to_equal(false)
+        expect(h0 == h3).to_equal(false)
+        expect(h1 == h2).to_equal(false)
+        expect(h1 == h3).to_equal(false)
+        expect(h2 == h3).to_equal(false)
+
+# ============================================================================
+# Test: Zero-block (well-defined, non-trivial output)
+# ============================================================================
+
+describe "salsa20_8_core_x4 SIMD — zero-block consistency":
+
+    it "x4 with 4 identical zero inputs: all 4 lanes equal the scalar zero output":
+        val scalar_zero = salsa20_8_core(_zero_input())
+        val out256 = salsa20_8_core_x4(_zero_input(), _zero_input(), _zero_input(), _zero_input())
+        val expected = _list_hex(scalar_zero)
+        expect(_list_hex_range(out256, 0,   64)).to_equal(expected)
+        expect(_list_hex_range(out256, 64,  128)).to_equal(expected)
+        expect(_list_hex_range(out256, 128, 192)).to_equal(expected)
+        expect(_list_hex_range(out256, 192, 256)).to_equal(expected)
+
+# ============================================================================
+# Test: Regression — scrypt RFC 7914 §11 V1 still passes
+# ============================================================================
+
+describe "scrypt RFC 7914 §11 V1 — regression after SIMD addition":
+
+    it "V1: P=\"\" S=\"\" N=16 r=1 p=1 dkLen=64 → 77d65762...":
+        val out = scrypt(_empty_u8(), _empty_u8(), 16, 1, 1, 64)
+        expect(_bytes_hex(out)).to_equal(
+            "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
+        )

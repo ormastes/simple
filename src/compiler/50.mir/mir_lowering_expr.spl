@@ -31,19 +31,23 @@ impl MirLowering:
 
     me bitfield_field_result_type(field: HirBitfieldField) -> MirType:
         """Choose the MIR result type for a lowered bitfield field read."""
-        if field.has_type_:
-            match field.type_.kind:
-                case Bool:
-                    return MirType.bool()
-                case _:
-                    return MirType.bits(field.bit_width)
-        MirType.bits(field.bit_width)
+        match field:
+            case HirBitfieldField(_, _, has_type_, type_, bit_width, _, _, _):
+                if has_type_:
+                    match type_.kind:
+                        case Bool:
+                            return MirType.bool()
+                        case _:
+                            return MirType.bits(bit_width)
+                MirType.bits(bit_width)
 
     me bitfield_total_width(fields: [HirBitfieldField]) -> i64:
         """Return the packed storage width for a bitfield definition."""
         var total = 0
         for field in fields:
-            total = total + field.bit_width
+            match field:
+                case HirBitfieldField(_, _, _, _, bit_width, _, _, _):
+                    total = total + bit_width
         total
 
     me lower_expr(expr: HirExpr) -> LocalId:
@@ -624,50 +628,54 @@ impl MirLowering:
         if not type_sym.?:
             return nil
 
-        val sym_id = type_sym.unwrap().id
+        val sym_id = self.symbol_id_value(type_sym.unwrap())
         if not self.bitfield_map.has(sym_id):
             return nil
 
         val fields = self.bitfield_map[sym_id]
         var idx = 0
         while idx < fields.len():
-            val field = fields[idx]
-            if field.name == field_name and not field.is_reserved:
-                var b = self.builder
-                val result = if self.current_has_vhdl_metadata:
-                    val slice_dest = b.new_temp(self.bitfield_field_result_type(field))
-                    val hi = field.bit_offset + field.bit_width - 1
-                    b.emit(MirInst(
-                        kind: MirInstKind.VhdlSlice(
-                            slice_dest,
-                            mir_operand_copy(base_local),
-                            hi,
-                            field.bit_offset
-                        ),
-                        span: nil
-                    ))
-                    slice_dest
-                else:
-                    val mask = self.bitfield_field_mask(field.bit_width)
-                    val shifted = if field.bit_offset == 0:
-                        base_local
+            match fields[idx]:
+                case HirBitfieldField(_, name, _, _, bit_width, bit_offset, is_reserved, _):
+                    if name != field_name or is_reserved:
+                        idx = idx + 1
+                        continue
+                    val field = fields[idx]
+                    var b = self.builder
+                    val result = if self.current_has_vhdl_metadata:
+                        val slice_dest = b.new_temp(self.bitfield_field_result_type(field))
+                        val hi = bit_offset + bit_width - 1
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlSlice(
+                                slice_dest,
+                                mir_operand_copy(base_local),
+                                hi,
+                                bit_offset
+                            ),
+                            span: nil
+                        ))
+                        slice_dest
                     else:
-                        val offset_const = b.emit_const_int(field.bit_offset)
+                        val mask = self.bitfield_field_mask(bit_width)
+                        val shifted = if bit_offset == 0:
+                            base_local
+                        else:
+                            val offset_const = b.emit_const_int(bit_offset)
+                            b.emit_binop(
+                                MirBinOp.Shr,
+                                mir_operand_copy(base_local),
+                                mir_operand_copy(offset_const),
+                                MirType.i64()
+                            )
+                        val mask_const = b.emit_const_int(mask)
                         b.emit_binop(
-                            MirBinOp.Shr,
-                            mir_operand_copy(base_local),
-                            mir_operand_copy(offset_const),
+                            MirBinOp.BitAnd,
+                            mir_operand_copy(shifted),
+                            mir_operand_copy(mask_const),
                             MirType.i64()
                         )
-                    val mask_const = b.emit_const_int(mask)
-                    b.emit_binop(
-                        MirBinOp.BitAnd,
-                        mir_operand_copy(shifted),
-                        mir_operand_copy(mask_const),
-                        MirType.i64()
-                    )
-                self.builder = b
-                return Some(result)
+                    self.builder = b
+                    return Some(result)
             idx = idx + 1
 
         nil
@@ -1125,7 +1133,7 @@ impl MirLowering:
         """Convert a symbol to a function pointer operand."""
         # Look up function name from symbol table for direct calls
         val sym = self.symbols.get(symbol)
-        val name = if sym.?: sym.name else: "unknown_{symbol.id}"
+        val name = if sym.?: sym.name else: "unknown_{self.symbol_id_value(symbol)}"
         MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(name),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))

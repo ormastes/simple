@@ -79,7 +79,7 @@ fn treesitter_parse_function_outline(self: TreeSitter, visibility: Visibility, i
 
         val body_start = self.current.span.start
         self.skip_block()
-        val body_end = self.previous.span.end
+        val body_end = self.previous.span.end_pos
 
         # Restore previous context
         self.current_context = prev_context
@@ -159,7 +159,7 @@ fn treesitter_parse_param(self: TreeSitter) -> ParamOutline:
         if self.match_token(TokenKind.Assign):
             val default_start = self.current.span.start
             self.skip_expression()
-            default_span = span_new(default_start, self.previous.span.end, 0, 0)
+            default_span = span_new(default_start, self.previous.span.end_pos, 0, 0)
 
         ParamOutline(
             name: name,
@@ -192,6 +192,32 @@ fn treesitter_parse_type_param(self: TreeSitter) -> TypeParamOutline:
         )
 
 
+fn treesitter_parse_params(self: TreeSitter) -> [ParamOutline]:
+        var params: [ParamOutline] = []
+        if self.check(TokenKind.RParen):
+            return params
+
+        params = params.push(self.parse_param())
+        while self.match_token(TokenKind.Comma):
+            if self.check(TokenKind.RParen):
+                break
+            params = params.push(self.parse_param())
+        params
+
+
+fn treesitter_parse_type_params(self: TreeSitter) -> [TypeParamOutline]:
+        var type_params: [TypeParamOutline] = []
+        if self.check(TokenKind.Gt):
+            return type_params
+
+        type_params = type_params.push(self.parse_type_param())
+        while self.match_token(TokenKind.Comma):
+            if self.check(TokenKind.Gt):
+                break
+            type_params = type_params.push(self.parse_type_param())
+        type_params
+
+
 fn treesitter_parse_optional_type_params(self: TreeSitter) -> [TypeParamOutline]:
         """Parse optional type parameters if present.
 
@@ -204,7 +230,10 @@ fn treesitter_parse_optional_type_params(self: TreeSitter) -> [TypeParamOutline]
         Returns:
             List of type parameters (empty if none present)
         """
-        val type_params = self.parse_optional_type_params()
+        var type_params: [TypeParamOutline] = []
+        if self.match_token(TokenKind.Lt):
+            type_params = self.parse_type_params()
+            self.expect(TokenKind.Gt, "expected '>' after type parameters")
         type_params
 
 
@@ -254,9 +283,9 @@ fn treesitter_parse_class_outline(self: TreeSitter, visibility: Visibility, doc:
                     methods = methods_push(methods, m)
                 case KwVar:
                     # Check for deprecated 'var fn' syntax
-                    if self.peek_next() == TokenKind.KwFn:
+                    self.advance()  # consume 'var'
+                    if self.check(TokenKind.KwFn):
                         self.warning("Deprecated: Replace `var fn method()` with `me method()`")
-                        self.advance()  # consume 'var'
                         val m = self.parse_function_outline(member_visibility, true, member_doc)
                         m.is_method = true
                         methods = methods_push(methods, m)
@@ -330,9 +359,9 @@ fn treesitter_parse_actor_outline(self: TreeSitter, visibility: Visibility, doc:
                     methods = methods_push(methods, m)
                 case KwVar:
                     # Check for deprecated 'var fn' syntax
-                    if self.peek_next() == TokenKind.KwFn:
+                    self.advance()  # consume 'var'
+                    if self.check(TokenKind.KwFn):
                         self.warning("Deprecated: Replace `var fn method()` with `me method()`")
-                        self.advance()  # consume 'var'
                         val m = self.parse_function_outline(member_visibility, true, member_doc)
                         m.is_method = true
                         methods = methods_push(methods, m)
@@ -449,6 +478,7 @@ fn treesitter_parse_field_outline(self: TreeSitter, visibility: Visibility) -> F
         var bits: i64 = nil
 
         # Check for trailing @bits(N) attribute after the field type.
+        var saw_address_marker = false
         if self.check(TokenKind.At):
             self.advance()  # consume '@'
             if self.check(TokenKind.Ident) and self.current.text == "bits":
@@ -458,22 +488,22 @@ fn treesitter_parse_field_outline(self: TreeSitter, visibility: Visibility) -> F
                     bits = self.parse_int_literal()
                 self.expect(TokenKind.RParen, "expected ')' after bit count")
             else:
-                # Not @bits, treat as memory-mapped address marker and rewind handling below.
-                self.pos = self.pos - 1
+                saw_address_marker = true
 
         # Check for @ address syntax: field: Type @ 0x40020000
         var address_span: Span = nil
-        if self.check(TokenKind.At):
-            self.advance()  # consume '@'
+        if saw_address_marker or self.check(TokenKind.At):
+            if not saw_address_marker:
+                self.advance()  # consume '@'
             val addr_start = self.current.span.start
             self.skip_expression()  # Skip the address expression
-            address_span = span_new(addr_start, self.previous.span.end, 0, 0)
+            address_span = span_new(addr_start, self.previous.span.end_pos, 0, 0)
 
         var default_span: Span = nil
         if self.match_token(TokenKind.Assign):
             val default_start = self.current.span.start
             self.skip_expression()
-            default_span = span_new(default_start, self.previous.span.end, 0, 0)
+            default_span = span_new(default_start, self.previous.span.end_pos, 0, 0)
 
         self.skip_newlines()
 

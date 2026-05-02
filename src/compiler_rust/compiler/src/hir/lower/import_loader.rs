@@ -12,6 +12,71 @@ use super::lowerer::Lowerer;
 use crate::CompileError;
 
 impl Lowerer {
+    fn preregister_imported_type_placeholder(&mut self, item: &Node) {
+        match item {
+            Node::Class(class_def) => {
+                if self.module.types.lookup(&class_def.name).is_none() {
+                    self.module.types.register_named(
+                        class_def.name.clone(),
+                        HirType::Struct {
+                            name: class_def.name.clone(),
+                            fields: vec![],
+                            has_snapshot: false,
+                            generic_params: class_def.generic_params.clone(),
+                            is_generic_template: class_def.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+            }
+            Node::Struct(struct_def) => {
+                if self.module.types.lookup(&struct_def.name).is_none() {
+                    self.module.types.register_named(
+                        struct_def.name.clone(),
+                        HirType::Struct {
+                            name: struct_def.name.clone(),
+                            fields: vec![],
+                            has_snapshot: false,
+                            generic_params: struct_def.generic_params.clone(),
+                            is_generic_template: struct_def.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+            }
+            Node::Bitfield(bitfield_def) => {
+                if self.module.types.lookup(&bitfield_def.name).is_none() {
+                    self.module.types.register_named(
+                        bitfield_def.name.clone(),
+                        HirType::Bitfield {
+                            name: bitfield_def.name.clone(),
+                            backing: TypeId::U64,
+                            fields: vec![],
+                            generic_params: Vec::new(),
+                            is_generic_template: false,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+            }
+            Node::Enum(enum_def) => {
+                if self.module.types.lookup(&enum_def.name).is_none() {
+                    self.module.types.register_named(
+                        enum_def.name.clone(),
+                        HirType::Enum {
+                            name: enum_def.name.clone(),
+                            variants: vec![],
+                            generic_params: enum_def.generic_params.clone(),
+                            is_generic_template: enum_def.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn requested_import_names(target: &ImportTarget, out: &mut Vec<String>) {
         match target {
             ImportTarget::Glob => {}
@@ -20,6 +85,105 @@ impl Lowerer {
             ImportTarget::Group(targets) => {
                 for nested in targets {
                     Self::requested_import_names(nested, out);
+                }
+            }
+        }
+    }
+
+    fn aliased_import_pairs(target: &ImportTarget, out: &mut Vec<(String, String)>) {
+        match target {
+            ImportTarget::Glob | ImportTarget::Single(_) => {}
+            ImportTarget::Aliased { name, alias } => out.push((name.clone(), alias.clone())),
+            ImportTarget::Group(targets) => {
+                for nested in targets {
+                    Self::aliased_import_pairs(nested, out);
+                }
+            }
+        }
+    }
+
+    fn item_defines_symbol(item: &Node, name: &str) -> bool {
+        match item {
+            Node::Class(class_def) => class_def.name == name,
+            Node::Struct(struct_def) => struct_def.name == name,
+            Node::Bitfield(bitfield_def) => bitfield_def.name == name,
+            Node::Enum(enum_def) => enum_def.name == name,
+            Node::Function(func_def) => func_def.name == name,
+            Node::TypeAlias(type_alias) => type_alias.name == name,
+            Node::Trait(trait_def) => trait_def.name == name,
+            Node::Static(static_stmt) => static_stmt.name == name,
+            Node::Const(const_stmt) => const_stmt.name == name,
+            Node::Let(let_stmt) => match &let_stmt.pattern {
+                simple_parser::Pattern::Identifier(binding) | simple_parser::Pattern::MutIdentifier(binding) => {
+                    binding == name
+                }
+                _ => false,
+            },
+            Node::Extern(extern_fn) => extern_fn.name == name,
+            _ => false,
+        }
+    }
+
+    fn item_defines_type_like_symbol(item: &Node, name: &str) -> bool {
+        match item {
+            Node::Class(class_def) => class_def.name == name,
+            Node::Struct(struct_def) => struct_def.name == name,
+            Node::Bitfield(bitfield_def) => bitfield_def.name == name,
+            Node::Enum(enum_def) => enum_def.name == name,
+            Node::TypeAlias(type_alias) => type_alias.name == name,
+            Node::Trait(trait_def) => trait_def.name == name,
+            _ => false,
+        }
+    }
+
+    fn item_defines_callable_symbol(item: &Node, name: &str) -> bool {
+        match item {
+            Node::Function(func_def) => func_def.name == name,
+            Node::Extern(extern_fn) => extern_fn.name == name,
+            _ => false,
+        }
+    }
+
+    fn materialize_import_aliases(&mut self, items: &[Node], target: &ImportTarget) {
+        let mut aliases = Vec::new();
+        Self::aliased_import_pairs(target, &mut aliases);
+
+        for (original_name, alias_name) in aliases {
+            if alias_name == original_name {
+                continue;
+            }
+            if !items.iter().any(|item| Self::item_defines_symbol(item, &original_name)) {
+                continue;
+            }
+
+            let is_type_like = items
+                .iter()
+                .any(|item| Self::item_defines_type_like_symbol(item, &original_name));
+            if is_type_like {
+                if let Some(type_id) = self.module.types.lookup(&original_name) {
+                    self.module.types.register_alias(alias_name.clone(), type_id);
+                    self.register_type_alias_mapping(alias_name.clone(), original_name.clone());
+                    self.globals.insert(alias_name.clone(), type_id);
+                }
+            }
+
+            if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
+                self.globals.insert(alias_name.clone(), symbol_ty);
+            }
+
+            let is_callable = items
+                .iter()
+                .any(|item| Self::item_defines_callable_symbol(item, &original_name));
+            if is_callable {
+                self.register_function_alias(alias_name.clone(), original_name.clone());
+                if self.imported_function_names.contains(&original_name) {
+                    self.imported_function_names.insert(alias_name.clone());
+                }
+                if self.extern_fn_names.contains(&original_name) {
+                    self.extern_fn_names.insert(alias_name.clone());
+                }
+                if self.pure_functions.contains(&original_name) {
+                    self.pure_functions.insert(alias_name);
                 }
             }
         }
@@ -67,53 +231,7 @@ impl Lowerer {
         // We register ALL types, not just imported ones, because imported types
         // may have fields that reference non-imported types from the same file.
         for item in items {
-            match item {
-                Node::Class(class_def) => {
-                    if self.module.types.lookup(&class_def.name).is_none() {
-                        self.module.types.register_named(
-                            class_def.name.clone(),
-                            HirType::Struct {
-                                name: class_def.name.clone(),
-                                fields: vec![],
-                                has_snapshot: false,
-                                generic_params: class_def.generic_params.clone(),
-                                is_generic_template: class_def.is_generic_template,
-                                type_bindings: std::collections::HashMap::new(),
-                            },
-                        );
-                    }
-                }
-                Node::Struct(struct_def) => {
-                    if self.module.types.lookup(&struct_def.name).is_none() {
-                        self.module.types.register_named(
-                            struct_def.name.clone(),
-                            HirType::Struct {
-                                name: struct_def.name.clone(),
-                                fields: vec![],
-                                has_snapshot: false,
-                                generic_params: struct_def.generic_params.clone(),
-                                is_generic_template: struct_def.is_generic_template,
-                                type_bindings: std::collections::HashMap::new(),
-                            },
-                        );
-                    }
-                }
-                Node::Enum(enum_def) => {
-                    if self.module.types.lookup(&enum_def.name).is_none() {
-                        self.module.types.register_named(
-                            enum_def.name.clone(),
-                            HirType::Enum {
-                                name: enum_def.name.clone(),
-                                variants: vec![],
-                                generic_params: enum_def.generic_params.clone(),
-                                is_generic_template: enum_def.is_generic_template,
-                                type_bindings: std::collections::HashMap::new(),
-                            },
-                        );
-                    }
-                }
-                _ => {}
-            }
+            self.preregister_imported_type_placeholder(item);
         }
 
         // Intra-file Pass 1: Full registration of imported symbols with field resolution
@@ -160,6 +278,13 @@ impl Lowerer {
                     if self.should_import_symbol(&struct_def.name, target) {
                         let struct_type_id = self.register_struct(struct_def)?;
                         self.globals.insert(struct_def.name.clone(), struct_type_id);
+                        imported_count += 1;
+                    }
+                }
+                Node::Bitfield(bitfield_def) => {
+                    if self.should_import_symbol(&bitfield_def.name, target) {
+                        let bitfield_type_id = self.register_bitfield(bitfield_def)?;
+                        self.globals.insert(bitfield_def.name.clone(), bitfield_type_id);
                         imported_count += 1;
                     }
                 }
@@ -374,6 +499,8 @@ impl Lowerer {
             }
         }
 
+        self.materialize_import_aliases(items, target);
+
         Ok(imported_count)
     }
 
@@ -479,59 +606,7 @@ impl Lowerer {
 
         // Pre-register type names as empty placeholders
         for item in &imported_module.items {
-            match item {
-                Node::Class(class_def) => {
-                    if (self.should_import_symbol(&class_def.name, target) || matches!(target, ImportTarget::Glob))
-                        && self.module.types.lookup(&class_def.name).is_none()
-                    {
-                        self.module.types.register_named(
-                            class_def.name.clone(),
-                            super::super::types::HirType::Struct {
-                                name: class_def.name.clone(),
-                                fields: vec![],
-                                has_snapshot: false,
-                                generic_params: class_def.generic_params.clone(),
-                                is_generic_template: class_def.is_generic_template,
-                                type_bindings: std::collections::HashMap::new(),
-                            },
-                        );
-                    }
-                }
-                Node::Struct(struct_def) => {
-                    if (self.should_import_symbol(&struct_def.name, target) || matches!(target, ImportTarget::Glob))
-                        && self.module.types.lookup(&struct_def.name).is_none()
-                    {
-                        self.module.types.register_named(
-                            struct_def.name.clone(),
-                            super::super::types::HirType::Struct {
-                                name: struct_def.name.clone(),
-                                fields: vec![],
-                                has_snapshot: false,
-                                generic_params: struct_def.generic_params.clone(),
-                                is_generic_template: struct_def.is_generic_template,
-                                type_bindings: std::collections::HashMap::new(),
-                            },
-                        );
-                    }
-                }
-                Node::Enum(enum_def) => {
-                    if (self.should_import_symbol(&enum_def.name, target) || matches!(target, ImportTarget::Glob))
-                        && self.module.types.lookup(&enum_def.name).is_none()
-                    {
-                        self.module.types.register_named(
-                            enum_def.name.clone(),
-                            super::super::types::HirType::Enum {
-                                name: enum_def.name.clone(),
-                                variants: vec![],
-                                generic_params: enum_def.generic_params.clone(),
-                                is_generic_template: enum_def.is_generic_template,
-                                type_bindings: std::collections::HashMap::new(),
-                            },
-                        );
-                    }
-                }
-                _ => {}
-            }
+            self.preregister_imported_type_placeholder(item);
         }
 
         // Also pre-register types from sibling files in the same package
@@ -583,59 +658,7 @@ impl Lowerer {
             };
 
             for item in &sibling_module.items {
-                match item {
-                    Node::Class(class_def) => {
-                        if (self.should_import_symbol(&class_def.name, target) || matches!(target, ImportTarget::Glob))
-                            && self.module.types.lookup(&class_def.name).is_none()
-                        {
-                            self.module.types.register_named(
-                                class_def.name.clone(),
-                                super::super::types::HirType::Struct {
-                                    name: class_def.name.clone(),
-                                    fields: vec![],
-                                    has_snapshot: false,
-                                    generic_params: class_def.generic_params.clone(),
-                                    is_generic_template: class_def.is_generic_template,
-                                    type_bindings: std::collections::HashMap::new(),
-                                },
-                            );
-                        }
-                    }
-                    Node::Struct(struct_def) => {
-                        if (self.should_import_symbol(&struct_def.name, target) || matches!(target, ImportTarget::Glob))
-                            && self.module.types.lookup(&struct_def.name).is_none()
-                        {
-                            self.module.types.register_named(
-                                struct_def.name.clone(),
-                                super::super::types::HirType::Struct {
-                                    name: struct_def.name.clone(),
-                                    fields: vec![],
-                                    has_snapshot: false,
-                                    generic_params: struct_def.generic_params.clone(),
-                                    is_generic_template: struct_def.is_generic_template,
-                                    type_bindings: std::collections::HashMap::new(),
-                                },
-                            );
-                        }
-                    }
-                    Node::Enum(enum_def) => {
-                        if (self.should_import_symbol(&enum_def.name, target) || matches!(target, ImportTarget::Glob))
-                            && self.module.types.lookup(&enum_def.name).is_none()
-                        {
-                            self.module.types.register_named(
-                                enum_def.name.clone(),
-                                super::super::types::HirType::Enum {
-                                    name: enum_def.name.clone(),
-                                    variants: vec![],
-                                    generic_params: enum_def.generic_params.clone(),
-                                    is_generic_template: enum_def.is_generic_template,
-                                    type_bindings: std::collections::HashMap::new(),
-                                },
-                            );
-                        }
-                    }
-                    _ => {}
-                }
+                self.preregister_imported_type_placeholder(item);
             }
         }
 

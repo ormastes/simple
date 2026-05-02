@@ -1,0 +1,440 @@
+#![allow(unnamed_duplicate_typed_args)]
+# SHA-384 — Pure Simple Implementation (FIPS 180-4 §6.5)
+#
+# SHA-384 is SHA-512 with a different initial hash value (FIPS 180-4 §5.3.4)
+# and the output truncated to the leftmost 384 bits (48 bytes / first 6 of
+# the 8 hash words).
+#
+# This module is self-contained: it does NOT depend on rt_sha512_K /
+# rt_sha512_H / rt_sha512_hash externs (which are not registered in the
+# interpreter). The K-constant lookup, the IV, padding, and the compression
+# loop are all reimplemented locally. The SHA-512 algorithm-of-record lives
+# in os.crypto.sha512; this file mirrors that algorithm exactly with a
+# different IV and 6-of-8 word truncation.
+#
+# Reference: FIPS 180-4 (Secure Hash Standard) §4.2.3, §5.3.4, §6.5.
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _u8_at_384(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# ============================================================================
+# SHA-384 / SHA-512 Round Constants K (FIPS 180-4 §4.2.3)
+# ============================================================================
+#
+# K[t] for t = 0..79. These are the first 64 bits of the fractional parts of
+# the cube roots of the first 80 primes. Stored as a local lookup helper
+# rather than a global val array (per the same Cranelift/baremetal constraint
+# documented in sha256.spl / sha512.spl).
+
+fn _sha384_k(index: u64) -> u64:
+    if index == 0: 0x428A2F98D728AE22
+    else if index == 1: 0x7137449123EF65CD
+    else if index == 2: 0xB5C0FBCFEC4D3B2F
+    else if index == 3: 0xE9B5DBA58189DBBC
+    else if index == 4: 0x3956C25BF348B538
+    else if index == 5: 0x59F111F1B605D019
+    else if index == 6: 0x923F82A4AF194F9B
+    else if index == 7: 0xAB1C5ED5DA6D8118
+    else if index == 8: 0xD807AA98A3030242
+    else if index == 9: 0x12835B0145706FBE
+    else if index == 10: 0x243185BE4EE4B28C
+    else if index == 11: 0x550C7DC3D5FFB4E2
+    else if index == 12: 0x72BE5D74F27B896F
+    else if index == 13: 0x80DEB1FE3B1696B1
+    else if index == 14: 0x9BDC06A725C71235
+    else if index == 15: 0xC19BF174CF692694
+    else if index == 16: 0xE49B69C19EF14AD2
+    else if index == 17: 0xEFBE4786384F25E3
+    else if index == 18: 0x0FC19DC68B8CD5B5
+    else if index == 19: 0x240CA1CC77AC9C65
+    else if index == 20: 0x2DE92C6F592B0275
+    else if index == 21: 0x4A7484AA6EA6E483
+    else if index == 22: 0x5CB0A9DCBD41FBD4
+    else if index == 23: 0x76F988DA831153B5
+    else if index == 24: 0x983E5152EE66DFAB
+    else if index == 25: 0xA831C66D2DB43210
+    else if index == 26: 0xB00327C898FB213F
+    else if index == 27: 0xBF597FC7BEEF0EE4
+    else if index == 28: 0xC6E00BF33DA88FC2
+    else if index == 29: 0xD5A79147930AA725
+    else if index == 30: 0x06CA6351E003826F
+    else if index == 31: 0x142929670A0E6E70
+    else if index == 32: 0x27B70A8546D22FFC
+    else if index == 33: 0x2E1B21385C26C926
+    else if index == 34: 0x4D2C6DFC5AC42AED
+    else if index == 35: 0x53380D139D95B3DF
+    else if index == 36: 0x650A73548BAF63DE
+    else if index == 37: 0x766A0ABB3C77B2A8
+    else if index == 38: 0x81C2C92E47EDAEE6
+    else if index == 39: 0x92722C851482353B
+    else if index == 40: 0xA2BFE8A14CF10364
+    else if index == 41: 0xA81A664BBC423001
+    else if index == 42: 0xC24B8B70D0F89791
+    else if index == 43: 0xC76C51A30654BE30
+    else if index == 44: 0xD192E819D6EF5218
+    else if index == 45: 0xD69906245565A910
+    else if index == 46: 0xF40E35855771202A
+    else if index == 47: 0x106AA07032BBD1B8
+    else if index == 48: 0x19A4C116B8D2D0C8
+    else if index == 49: 0x1E376C085141AB53
+    else if index == 50: 0x2748774CDF8EEB99
+    else if index == 51: 0x34B0BCB5E19B48A8
+    else if index == 52: 0x391C0CB3C5C95A63
+    else if index == 53: 0x4ED8AA4AE3418ACB
+    else if index == 54: 0x5B9CCA4F7763E373
+    else if index == 55: 0x682E6FF3D6B2B8A3
+    else if index == 56: 0x748F82EE5DEFB2FC
+    else if index == 57: 0x78A5636F43172F60
+    else if index == 58: 0x84C87814A1F0AB72
+    else if index == 59: 0x8CC702081A6439EC
+    else if index == 60: 0x90BEFFFA23631E28
+    else if index == 61: 0xA4506CEBDE82BDE9
+    else if index == 62: 0xBEF9A3F7B2C67915
+    else if index == 63: 0xC67178F2E372532B
+    else if index == 64: 0xCA273ECEEA26619C
+    else if index == 65: 0xD186B8C721C0C207
+    else if index == 66: 0xEADA7DD6CDE0EB1E
+    else if index == 67: 0xF57D4F7FEE6ED178
+    else if index == 68: 0x06F067AA72176FBA
+    else if index == 69: 0x0A637DC5A2C898A6
+    else if index == 70: 0x113F9804BEF90DAE
+    else if index == 71: 0x1B710B35131C471B
+    else if index == 72: 0x28DB77F523047D84
+    else if index == 73: 0x32CAAB7B40C72493
+    else if index == 74: 0x3C9EBE0A15C9BEBC
+    else if index == 75: 0x431D67C49C100D4C
+    else if index == 76: 0x4CC5D4BECB3E42B6
+    else if index == 77: 0x597F299CFC657E2A
+    else if index == 78: 0x5FCB6FAB3AD6FAEC
+    else: 0x6C44198C4A475817
+
+# ============================================================================
+# SHA-384 Initial Hash Value (FIPS 180-4 §5.3.4)
+# ============================================================================
+
+fn _sha384_h(index: u64) -> u64:
+    """SHA-384 initial hash values, from FIPS 180-4 §5.3.4."""
+    if index == 0: 0xCBBB9D5DC1059ED8
+    else if index == 1: 0x629A292A367CD507
+    else if index == 2: 0x9159015A3070DD17
+    else if index == 3: 0x152FECD8F70E5939
+    else if index == 4: 0x67332667FFC00B31
+    else if index == 5: 0x8EB44A8768581511
+    else if index == 6: 0xDB0C2E0D64F98FA7
+    else if index == 7: 0x47B5481DBEFA4FA4
+    else: 0
+
+# ============================================================================
+# Bit Manipulation Helpers (u64) — same as SHA-512 (FIPS 180-4 §4.1.3)
+# ============================================================================
+#
+# Every arithmetic op is masked to 64 bits — the interpreter does not
+# auto-wrap u64 arithmetic, so without masking the addition chain in the
+# round function overflows past 2^64 and produces consistent-but-wrong output.
+
+fn _u64_mask(x: u64) -> u64:
+    x & 0xFFFFFFFFFFFFFFFF
+
+fn _logical_shr64(x: u64, n: u64) -> u64:
+    """Logical right shift on a u64 fn parameter.
+
+    The interpreter's `>>` operator on a u64 fn parameter with bit 63 set
+    performs arithmetic (sign-extending) shift instead of logical shift —
+    it leaks 1-bits into the high positions. See
+    `doc/08_tracking/bug/u64_right_shift_fn_param_arithmetic_2026-05-02.md`.
+    Standalone `val x: u64 = 0xCB...; x >> n` is logical, but
+    `fn f(x: u64, n: u64): x >> n` is arithmetic. We mask the sign-extended
+    bits explicitly: only the low `(64 - n)` bits should be set after a
+    logical shift right by `n`. Valid for 1 <= n <= 63.
+    """
+    val mask: u64 = _u64_mask((1 << (64 - n)) - 1)
+    (x >> n) & mask
+
+fn _rotr64_384(x: u64, n: u64) -> u64:
+    _u64_mask(_logical_shr64(x, n) | _u64_mask(x << (64 - n)))
+
+fn _ch64_384(e: u64, f: u64, g: u64) -> u64:
+    _u64_mask((e & f) ^ (_u64_mask(~e) & g))
+
+fn _maj64_384(a: u64, b: u64, c: u64) -> u64:
+    _u64_mask((a & b) ^ (a & c) ^ (b & c))
+
+fn _big_sigma0_384(a: u64) -> u64:
+    _u64_mask(_rotr64_384(a, 28) ^ _rotr64_384(a, 34) ^ _rotr64_384(a, 39))
+
+fn _big_sigma1_384(e: u64) -> u64:
+    _u64_mask(_rotr64_384(e, 14) ^ _rotr64_384(e, 18) ^ _rotr64_384(e, 41))
+
+fn _small_sigma0_384(w: u64) -> u64:
+    _u64_mask(_rotr64_384(w, 1) ^ _rotr64_384(w, 8) ^ _logical_shr64(w, 7))
+
+fn _small_sigma1_384(w: u64) -> u64:
+    _u64_mask(_rotr64_384(w, 19) ^ _rotr64_384(w, 61) ^ _logical_shr64(w, 6))
+
+# ============================================================================
+# Message Padding (FIPS 180-4 §5.1.2)
+# ============================================================================
+
+fn _sha384_pad(data: [u8]) -> [u8]:
+    val data_len = data.len()
+    val bit_len: u64 = data_len.to_u64() * 8
+
+    var padded: [u8] = []
+    var i: u64 = 0
+    var padded_count: u64 = 0
+    while i < data_len:
+        padded.push(data[i])
+        padded_count = padded_count + 1
+        i = i + 1
+
+    padded.push(0x80)
+    padded_count = padded_count + 1
+
+    while (padded_count % 128) != 112:
+        padded.push(0x00)
+        padded_count = padded_count + 1
+
+    # Upper 64 bits of 128-bit length: zero (we cap at 64-bit message length).
+    i = 0
+    while i < 8:
+        padded.push(0x00)
+        padded_count = padded_count + 1
+        i = i + 1
+
+    padded.push(((bit_len >> 56) & 0xFF).to_u8())
+    padded.push(((bit_len >> 48) & 0xFF).to_u8())
+    padded.push(((bit_len >> 40) & 0xFF).to_u8())
+    padded.push(((bit_len >> 32) & 0xFF).to_u8())
+    padded.push(((bit_len >> 24) & 0xFF).to_u8())
+    padded.push(((bit_len >> 16) & 0xFF).to_u8())
+    padded.push(((bit_len >> 8) & 0xFF).to_u8())
+    padded.push((bit_len & 0xFF).to_u8())
+    padded_count = padded_count + 8
+
+    padded
+
+fn _sha384_padded_len(data_len: u64) -> u64:
+    val total_without_pad = data_len + 1 + 16
+    val remainder = total_without_pad % 128
+    if remainder == 0:
+        total_without_pad
+    else:
+        total_without_pad + (128 - remainder)
+
+# ============================================================================
+# Block Processing (FIPS 180-4 §6.4.2 / §6.5.2)
+# ============================================================================
+
+fn _sha384_process_block(block: [u8], offset: u64, h: [u64]) -> [u64]:
+    var w: [u64] = []
+    var t: u64 = 0
+    while t < 16:
+        val base = offset + t * 8
+        val w_t: u64 = _u64_mask(
+            (_u8_at_384(block, base).to_u64() << 56) |
+            (_u8_at_384(block, base + 1).to_u64() << 48) |
+            (_u8_at_384(block, base + 2).to_u64() << 40) |
+            (_u8_at_384(block, base + 3).to_u64() << 32) |
+            (_u8_at_384(block, base + 4).to_u64() << 24) |
+            (_u8_at_384(block, base + 5).to_u64() << 16) |
+            (_u8_at_384(block, base + 6).to_u64() << 8) |
+            _u8_at_384(block, base + 7).to_u64()
+        )
+        w.push(w_t)
+        t = t + 1
+
+    while t < 80:
+        val s0 = _small_sigma0_384(w[t - 15])
+        val s1 = _small_sigma1_384(w[t - 2])
+        val w_t: u64 = _u64_mask(_u64_mask(w[t - 16] + s0) + _u64_mask(w[t - 7] + s1))
+        w.push(w_t)
+        t = t + 1
+
+    var a = h[0]
+    var b = h[1]
+    var c = h[2]
+    var d = h[3]
+    var e = h[4]
+    var f = h[5]
+    var g = h[6]
+    var hh = h[7]
+
+    var round: u64 = 0
+    while round < 80:
+        val s1 = _big_sigma1_384(e)
+        val ch_val = _ch64_384(e, f, g)
+        val temp1_a = _u64_mask(hh + s1)
+        val temp1_b = _u64_mask(ch_val + _sha384_k(round))
+        val temp1_c = _u64_mask(temp1_a + temp1_b)
+        val temp1: u64 = _u64_mask(temp1_c + w[round])
+        val s0 = _big_sigma0_384(a)
+        val maj_val = _maj64_384(a, b, c)
+        val temp2: u64 = _u64_mask(s0 + maj_val)
+
+        hh = g
+        g = f
+        f = e
+        e = _u64_mask(d + temp1)
+        d = c
+        c = b
+        b = a
+        a = _u64_mask(temp1 + temp2)
+
+        round = round + 1
+
+    var result: [u64] = []
+    result.push(_u64_mask(h[0] + a))
+    result.push(_u64_mask(h[1] + b))
+    result.push(_u64_mask(h[2] + c))
+    result.push(_u64_mask(h[3] + d))
+    result.push(_u64_mask(h[4] + e))
+    result.push(_u64_mask(h[5] + f))
+    result.push(_u64_mask(h[6] + g))
+    result.push(_u64_mask(h[7] + hh))
+    result
+
+# ============================================================================
+# Diagnostic helpers (exposed for KAT spec to probe internal state).
+# ============================================================================
+
+fn _sha384_diag_w0(data: [u8]) -> u64:
+    """Decode the first 8 bytes of the padded message as a big-endian u64.
+    For empty input we expect 0x8000000000000000.
+    """
+    val padded = _sha384_pad(data)
+    _u64_mask(
+        (_u8_at_384(padded, 0).to_u64() << 56) |
+        (_u8_at_384(padded, 1).to_u64() << 48) |
+        (_u8_at_384(padded, 2).to_u64() << 40) |
+        (_u8_at_384(padded, 3).to_u64() << 32) |
+        (_u8_at_384(padded, 4).to_u64() << 24) |
+        (_u8_at_384(padded, 5).to_u64() << 16) |
+        (_u8_at_384(padded, 6).to_u64() << 8) |
+        _u8_at_384(padded, 7).to_u64()
+    )
+
+fn _sha384_diag_h0() -> u64:
+    """Initial hash word h[0] for SHA-384 — should be 0xcbbb9d5dc1059ed8."""
+    _sha384_h(0)
+
+fn _sha384_diag_rotr1() -> u64:
+    """rotr64(0x8000000000000000, 1) — should be 0x4000000000000000."""
+    val x: u64 = 0x8000000000000000
+    _rotr64_384(x, 1)
+
+fn _sha384_diag_shl63() -> u64:
+    """0x8000000000000000 << 63 in u64; with wrap, expect 0."""
+    val x: u64 = 0x8000000000000000
+    _u64_mask(x << 63)
+
+fn _sha384_diag_big_sigma0_h0() -> u64:
+    """Probe big_sigma0 against canonical for SHA-384 IV h[0].
+    Returns 0xdb9a810738c045b1. Regression guard for the u64-fn-param right-shift
+    sign-extension bug fixed via `_logical_shr64`. See
+    `doc/08_tracking/bug/u64_right_shift_fn_param_arithmetic_2026-05-02.md`.
+    """
+    _big_sigma0_384(0xCBBB9D5DC1059ED8)
+
+fn _sha384_diag_rotr_test() -> u64:
+    """Run one round computation: big_sigma1(h4 of SHA-384 IV) — fixed expected.
+
+    h[4] = 0x67332667FFC00B31. Sigma1 = ROTR^14 ^ ROTR^18 ^ ROTR^41.
+    Reference value (computed offline): 0x18d26a51fdc4ec88. (We'll see what
+    the interpreter actually returns to verify masks/rotations.)
+    """
+    _big_sigma1_384(0x67332667FFC00B31)
+
+# ============================================================================
+# SHA-384 Hash (pure Simple)
+# ============================================================================
+
+fn _sha512_h(index: u64) -> u64:
+    """SHA-512 initial hash values, from FIPS 180-4 §5.3.5.
+
+    Exposed for the SHA-512 KAT spec to probe whether the shared compression
+    chain in `_sha384_process_block` is correct independent of the SHA-384
+    IV / 6-of-8-word truncation. See `test/unit/os/crypto/sha512_kat_spec.spl`.
+    """
+    if index == 0: 0x6A09E667F3BCC908
+    else if index == 1: 0xBB67AE8584CAA73B
+    else if index == 2: 0x3C6EF372FE94F82B
+    else if index == 3: 0xA54FF53A5F1D36F1
+    else if index == 4: 0x510E527FADE682D1
+    else if index == 5: 0x9B05688C2B3E6C1F
+    else if index == 6: 0x1F83D9ABFB41BD6B
+    else if index == 7: 0x5BE0CD19137E2179
+    else: 0
+
+fn _sha384_sha512_emulate(data: [u8]) -> [u8]:
+    """Run the SHA-384 compression chain with the SHA-512 IV and emit all 8
+    output words. Used by `test/unit/os/crypto/sha512_kat_spec.spl` to baseline
+    whether the shared compression chain is correct.
+    """
+    val padded = _sha384_pad(data)
+
+    var h: [u64] = []
+    var hi: u64 = 0
+    while hi < 8:
+        h.push(_sha512_h(hi))
+        hi = hi + 1
+
+    val num_blocks = _sha384_padded_len(data.len().to_u64()) / 128
+    var block_idx: u64 = 0
+    while block_idx < num_blocks:
+        h = _sha384_process_block(padded, block_idx * 128, h)
+        block_idx = block_idx + 1
+
+    var digest: [u8] = []
+    hi = 0
+    while hi < 8:
+        val word = h[hi]
+        digest.push(((word >> 56) & 0xFF).to_u8())
+        digest.push(((word >> 48) & 0xFF).to_u8())
+        digest.push(((word >> 40) & 0xFF).to_u8())
+        digest.push(((word >> 32) & 0xFF).to_u8())
+        digest.push(((word >> 24) & 0xFF).to_u8())
+        digest.push(((word >> 16) & 0xFF).to_u8())
+        digest.push(((word >> 8) & 0xFF).to_u8())
+        digest.push((word & 0xFF).to_u8())
+        hi = hi + 1
+    digest
+
+fn sha384(data: [u8]) -> [u8]:
+    """Compute SHA-384 hash (FIPS 180-4 §6.5) of `data`. Output is 48 bytes.
+
+    Pure-Simple — does not depend on `rt_sha512_K`, `rt_sha512_H`, or
+    `rt_sha512_hash`. Reuses the SHA-512 algorithm with the SHA-384 IV
+    (FIPS 180-4 §5.3.4) and truncates the digest to 48 bytes (first 6 of
+    8 words).
+    """
+    val padded = _sha384_pad(data)
+
+    var h: [u64] = []
+    var hi: u64 = 0
+    while hi < 8:
+        h.push(_sha384_h(hi))
+        hi = hi + 1
+
+    val num_blocks = _sha384_padded_len(data.len().to_u64()) / 128
+    var block_idx: u64 = 0
+    while block_idx < num_blocks:
+        h = _sha384_process_block(padded, block_idx * 128, h)
+        block_idx = block_idx + 1
+
+    # Truncate: first 6 words = 384 bits = 48 bytes.
+    var digest: [u8] = []
+    hi = 0
+    while hi < 6:
+        val word = h[hi]
+        digest.push(((word >> 56) & 0xFF).to_u8())
+        digest.push(((word >> 48) & 0xFF).to_u8())
+        digest.push(((word >> 40) & 0xFF).to_u8())
+        digest.push(((word >> 32) & 0xFF).to_u8())
+        digest.push(((word >> 24) & 0xFF).to_u8())
+        digest.push(((word >> 16) & 0xFF).to_u8())
+        digest.push(((word >> 8) & 0xFF).to_u8())
+        digest.push((word & 0xFF).to_u8())
+        hi = hi + 1
+    digest

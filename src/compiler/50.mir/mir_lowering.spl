@@ -43,6 +43,50 @@ impl MirLowering:
             current_has_vhdl_metadata: false
         )
 
+    fn symbol_id_value(symbol: SymbolId) -> i64:
+        match symbol:
+            case SymbolId(id): id
+
+    fn hir_bitfield_fields(bitfield_def: HirBitfield) -> [HirBitfieldField]:
+        match bitfield_def:
+            case HirBitfield(_, _, _, fields, _, _, _, _, _, _):
+                fields
+
+    fn hir_module_function(module: HirModule, symbol: SymbolId) -> HirFunction:
+        module.functions[symbol]
+
+    fn hir_function_is_extern(fn_: HirFunction) -> bool:
+        match fn_:
+            case HirFunction(_, _, _, _, _, _, _, _, _, _, _, _, _, _, is_extern, _, _, _, _, _, _, _, _, _, _):
+                is_extern
+
+    fn asm_version_constraint_op(vc: AsmVersionConstraint) -> text:
+        vc.op
+
+    fn asm_version_constraint_value(vc: AsmVersionConstraint) -> i64:
+        vc.version
+
+    fn asm_target_spec_archs(spec: AsmTargetSpec) -> [text]:
+        spec.archs
+
+    fn asm_target_spec_has_os(spec: AsmTargetSpec) -> bool:
+        spec.has_os
+
+    fn asm_target_spec_os(spec: AsmTargetSpec) -> text:
+        spec.os
+
+    fn asm_target_spec_has_abi(spec: AsmTargetSpec) -> bool:
+        spec.has_abi
+
+    fn asm_target_spec_abi(spec: AsmTargetSpec) -> text:
+        spec.abi
+
+    fn asm_target_spec_has_backend(spec: AsmTargetSpec) -> bool:
+        spec.has_backend
+
+    fn asm_target_spec_backend(spec: AsmTargetSpec) -> text:
+        spec.backend
+
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
         # Copy-modify-reassign: nested field mutations don't propagate in interpreter
@@ -64,7 +108,7 @@ impl MirLowering:
             while fi < struct_def.fields.len():
                 field_names.push(struct_def.fields[fi].name)
                 fi = fi + 1
-            self.field_map[sym_id.id] = field_names
+            self.field_map[self.symbol_id_value(sym_id)] = field_names
             si = si + 1
 
         val class_keys = module.classes.keys()
@@ -77,7 +121,7 @@ impl MirLowering:
             while fi < class_def.fields.len():
                 field_names.push(class_def.fields[fi].name)
                 fi = fi + 1
-            self.field_map[sym_id.id] = field_names
+            self.field_map[self.symbol_id_value(sym_id)] = field_names
             ci = ci + 1
 
         val bitfield_keys = module.bitfields.keys()
@@ -85,7 +129,7 @@ impl MirLowering:
         while bi < bitfield_keys.len():
             val sym_id = bitfield_keys[bi]
             val bitfield_def = module.bitfields[sym_id]
-            self.bitfield_map[sym_id.id] = bitfield_def.fields
+            self.bitfield_map[self.symbol_id_value(sym_id)] = self.hir_bitfield_fields(bitfield_def)
             bi = bi + 1
 
         # Lower type definitions so headers/export wrappers can consume real MIR types.
@@ -104,14 +148,12 @@ impl MirLowering:
             cti = cti + 1
 
         # Lower functions (skip extern declarations - they have no body)
-        val fn_vals = module.functions.values()
+        val fn_keys = module.functions.keys()
         var fni = 0
-        while fni < fn_vals.len():
-            val fn_ = fn_vals[fni]
-            var fn_is_extern = false
-            if fn_.is_extern.?:
-                fn_is_extern = fn_.is_extern
-            if fn_is_extern:
+        while fni < fn_keys.len():
+            val fn_sym = fn_keys[fni]
+            val fn_ = self.hir_module_function(module, fn_sym)
+            if self.hir_function_is_extern(fn_):
                 fni = fni + 1
                 # skip extern functions
             else:
@@ -356,7 +398,7 @@ impl MirLowering:
                     mir_members = mir_members.push(self.lower_type(m))
                 MirType(kind: MirTypeKind.Union(mir_members))
             case Named(symbol, _):
-                val underlying = custom_primitive_underlying_type_tag_by_symbol(symbol.id)
+                val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
                 if underlying == TYPE_BOOL:
                     return MirType(kind: MirTypeKind.Bool)
                 if underlying == TYPE_I64:
@@ -490,7 +532,7 @@ impl MirLowering:
         # Try to get the type symbol from the base expression's type
         val type_sym = self.expr_type_symbol(base)
         if type_sym.?:
-            val sym_id = type_sym.unwrap().id
+            val sym_id = self.symbol_id_value(type_sym.unwrap())
             if self.field_map.has(sym_id):
                 val fields = self.field_map[sym_id]
                 val n = fields.len()
@@ -571,12 +613,12 @@ impl MirLowering:
                 val ver_ops: [text] = []
                 val ver_vals: [i64] = []
                 for vc in spec.version_constraints:
-                    ver_ops.push(vc.op)
-                    ver_vals.push(vc.version)
+                    ver_ops.push(self.asm_version_constraint_op(vc))
+                    ver_vals.push(self.asm_version_constraint_value(vc))
 
                 val result = match_target_spec(
-                    spec.archs, spec.has_os, spec.os,
-                    spec.has_abi, spec.abi, spec.has_backend, spec.backend,
+                    self.asm_target_spec_archs(spec), self.asm_target_spec_has_os(spec), self.asm_target_spec_os(spec),
+                    self.asm_target_spec_has_abi(spec), self.asm_target_spec_abi(spec), self.asm_target_spec_has_backend(spec), self.asm_target_spec_backend(spec),
                     ver_ops, ver_vals,
                     target_arch, target_os, target_abi, target_backend,
                     target_backend_version
@@ -622,12 +664,12 @@ impl MirLowering:
         val ver_ops: [text] = []
         val ver_vals: [i64] = []
         for vc in spec.version_constraints:
-            ver_ops.push(vc.op)
-            ver_vals.push(vc.version)
+            ver_ops.push(self.asm_version_constraint_op(vc))
+            ver_vals.push(self.asm_version_constraint_value(vc))
 
         val result = match_target_spec(
-            spec.archs, spec.has_os, spec.os,
-            spec.has_abi, spec.abi, spec.has_backend, spec.backend,
+            self.asm_target_spec_archs(spec), self.asm_target_spec_has_os(spec), self.asm_target_spec_os(spec),
+            self.asm_target_spec_has_abi(spec), self.asm_target_spec_abi(spec), self.asm_target_spec_has_backend(spec), self.asm_target_spec_backend(spec),
             ver_ops, ver_vals,
             target_arch, target_os, target_abi, target_backend,
             target_backend_version
@@ -674,74 +716,6 @@ impl MirLowering:
     me error(message: text, span: Span?):
         """Record a lowering error."""
         self.errors = self.errors.push(MirError(message: message, span: span))
-
-fn MirLowering_dot_lower_module(self: MirLowering, module: HirModule) -> MirModule:
-    """Bootstrap-safe MIR lowering entrypoint."""
-    var builder = self.builder
-    var builder_module = builder.module
-    builder_module.name = module.name
-    builder.module = builder_module
-    self.builder = builder
-    self.bitfield_map = {}
-
-    val struct_keys = module.structs.keys()
-    var si = 0
-    while si < struct_keys.len():
-        val sym_id = struct_keys[si]
-        val struct_def = module.structs[sym_id]
-        var field_names: [text] = []
-        var fi = 0
-        while fi < struct_def.fields.len():
-            field_names.push(struct_def.fields[fi].name)
-            fi = fi + 1
-        self.field_map[sym_id.id] = field_names
-        si = si + 1
-
-    val class_keys = module.classes.keys()
-    var ci = 0
-    while ci < class_keys.len():
-        val sym_id = class_keys[ci]
-        val class_def = module.classes[sym_id]
-        var field_names: [text] = []
-        var fi = 0
-        while fi < class_def.fields.len():
-            field_names.push(class_def.fields[fi].name)
-            fi = fi + 1
-        self.field_map[sym_id.id] = field_names
-        ci = ci + 1
-
-    val bitfield_keys = module.bitfields.keys()
-    var bi = 0
-    while bi < bitfield_keys.len():
-        val sym_id = bitfield_keys[bi]
-        val bitfield_def = module.bitfields[sym_id]
-        self.bitfield_map[sym_id.id] = bitfield_def.fields
-        bi = bi + 1
-
-    val fn_vals = module.functions.values()
-    var fni = 0
-    while fni < fn_vals.len():
-        val fn_ = fn_vals[fni]
-        var fn_is_extern = false
-        if fn_.is_extern.?:
-            fn_is_extern = fn_.is_extern
-        if fn_is_extern:
-            fni = fni + 1
-        else:
-            val mir_fn = self.lower_function(fn_)
-            var bldr = self.builder
-            bldr.add_function(mir_fn)
-            self.builder = bldr
-            fni = fni + 1
-
-    val const_vals = module.constants.values()
-    var coni = 0
-    while coni < const_vals.len():
-        self.lower_const(const_vals[coni])
-        coni = coni + 1
-
-    self.builder.module
-
 # ============================================================================
 # Exports
 # ============================================================================

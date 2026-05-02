@@ -1,0 +1,535 @@
+#![allow(unnamed_duplicate_typed_args)]
+# AES-XTS — Pure Simple Implementation
+#
+# AES in XTS (XEX-based Tweaked CodeBook with Ciphertext Stealing) mode per:
+#   - IEEE Std 1619-2007 — XTS-AES specification for encryption of data on
+#     storage devices.
+#
+# Used by full-disk encryption: LUKS2, BitLocker, FileVault, dm-crypt,
+# VeraCrypt. No SFFI/Rust FFI shim *in the XTS layer* — pure Simple language;
+# we delegate AES block encrypt/decrypt to runtime primitives that already
+# exist (rt_aes128_encrypt_block_pure / rt_aes_decrypt_block_with_expanded).
+#
+# Reuses block primitives from os.crypto.{aes128_gcm,aes256_gcm}:
+#   - aes128_key_expansion + aes128_encrypt_block (pure — W13-A path)
+#   - aes256_key_expansion + aes256_encrypt_block (pure — W13-A path)
+# Decrypt uses rt_aes_decrypt_block_with_expanded (same primitive
+# src/lib/common/aes/cipher.spl uses).
+#
+# Exposed surface:
+#   aes128_xts_encrypt_sector(key1, key2, sector_idx, plaintext) -> ciphertext
+#   aes128_xts_decrypt_sector(key1, key2, sector_idx, ciphertext) -> plaintext
+#   aes256_xts_encrypt_sector(key1, key2, sector_idx, plaintext) -> ciphertext
+#   aes256_xts_decrypt_sector(key1, key2, sector_idx, ciphertext) -> plaintext
+#
+# IEEE 1619 §5.1 spec notes:
+#   - key1 (data key) and key2 (tweak key) MUST NOT be equal. Callers are
+#     responsible for enforcing this; this layer does NOT validate it (mirrors
+#     other crypto modules' precondition pattern).
+#   - Plaintext length MUST be >= 16 bytes (one AES block). Lengths 1..15
+#     are not defined by IEEE 1619; this implementation panics via the byte
+#     access primitive on out-of-range indexing if violated. Callers must
+#     guard.
+#   - Ciphertext-stealing path activates when len > 16 and len % 16 != 0.
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_aes_decrypt_block_with_expanded(block: [u8], expanded_key: [u8], num_rounds: i64) -> [u8]
+
+use os.crypto.aes128_gcm.{aes128_encrypt_block, aes128_key_expansion}
+use os.crypto.aes256_gcm.{aes256_encrypt_block}
+
+# ============================================================================
+# Helpers — block-level scratch + XOR
+# ============================================================================
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# Allocate a 16-byte zero-initialized block.
+fn _zero_block16() -> [u8]:
+    var b: [u8] = rt_array_new_with_cap(16)
+    var i: i64 = 0
+    while i < 16:
+        b.push(0x00)
+        i = i + 1
+    b
+
+# XOR two 16-byte blocks into a fresh output block.
+fn _xor_block16(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        out.push(_u8_at(a, i) ^ _u8_at(b, i))
+        i = i + 1
+    out
+
+# ============================================================================
+# Sector index → 16-byte tweak block (IEEE 1619 §5.1)
+# ============================================================================
+#
+# Sector index is encoded little-endian into T[0..8]; T[8..16] is zero.
+# We accept i64 and treat negative values as their two's-complement bit
+# pattern (caller responsibility to use sane sector indices). Only the
+# unsigned 64-bit interpretation matters for byte layout.
+
+fn _sector_idx_to_block(sector_idx: i64) -> [u8]:
+    var t: [u8] = rt_array_new_with_cap(16)
+    val s: u64 = sector_idx.to_u64()
+    var i: u64 = 0
+    while i < 8:
+        val byte: u8 = ((s >> (i * 8)) & 0xFFu64).to_u8()
+        t.push(byte)
+        i = i + 1
+    var j: u64 = 0
+    while j < 8:
+        t.push(0x00)
+        j = j + 1
+    t
+
+# ============================================================================
+# GF(2^128) tweak doubling — α = x in GF(2^128)/(x^128 + x^7 + x^2 + x + 1)
+# ============================================================================
+#
+# IEEE 1619 §5.2: the tweak T_{j+1} = α · T_j, with byte ordering OPPOSITE to
+# AES-CMAC (T[0] = least-significant byte). Algorithm:
+#
+#   carry = 0
+#   for i in 0..16:
+#       new_carry = (T[i] >> 7) & 1
+#       T'[i]     = ((T[i] << 1) | carry) & 0xFF
+#       carry     = new_carry
+#   if carry == 1:           # MSB of T[15] was 1 → reduce
+#       T'[0] ^= 0x87
+#
+# Note this is the LSB-first complement of the CMAC `_shift_left_one` in
+# aes_cmac.spl — DO NOT confuse them.
+
+fn _gf128_mul_alpha(t: [u8]) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    var carry: u32 = 0u32
+    while i < 16:
+        val cur: u32 = _u8_at(t, i).to_u32()
+        val new_carry: u32 = (cur >> 7) & 0x01u32
+        val shifted: u8 = (((cur << 1) & 0xFFu32) | carry).to_u8()
+        out.push(shifted)
+        carry = new_carry
+        i = i + 1
+    if carry == 1u32:
+        val tail: u8 = _u8_at(out, 0)
+        out[0] = (tail.to_u32() ^ 0x87u32).to_u8()
+    out
+
+# ============================================================================
+# AES block encrypt/decrypt — mode-agnostic dispatch over key size
+# ============================================================================
+#
+# IEEE 1619 §5.3/§5.4 calls AES_K(.) (encrypt) and AES^{-1}_K(.) (decrypt) on
+# the data key K1. The tweak key K2 is only used for ENCRYPT (T_0 = AES_K2(i))
+# even on the decrypt path.
+
+fn _aes128_decrypt_block(block: [u8], key: [u8]) -> [u8]:
+    val expanded = aes128_key_expansion(key)
+    rt_aes_decrypt_block_with_expanded(block, expanded, 10)
+
+fn _aes256_decrypt_block(block: [u8], key: [u8]) -> [u8]:
+    # AES-256 uses 14 rounds; key_expansion in os.crypto.aes256_gcm produces
+    # the 240-byte schedule that rt_aes_decrypt_block_with_expanded expects.
+    # We import only aes256_encrypt_block (key-taking variant); to drive the
+    # decrypt extern we re-derive the schedule via the same key-expansion
+    # primitive aes256_encrypt_block calls internally. Inline the relevant
+    # primitive here through aes256_encrypt_block's import is impossible
+    # (it's not re-exported), so we route through the runtime helper directly.
+    # NOTE: aes256_gcm does NOT export aes256_key_expansion; we expand by
+    # encrypting a sentinel… too brittle. Instead we issue a dedicated
+    # decrypt-with-raw-key path below.
+    _aes256_decrypt_block_with_raw_key(block, key)
+
+# Inline AES-256 key expansion mirror — copy of aes256_gcm.aes256_key_expansion.
+# We DO NOT import aes256_key_expansion (not re-exported in W13-A surface),
+# so we need our own copy that produces the 240-byte schedule used by
+# rt_aes_decrypt_block_with_expanded.
+extern fn rt_aes_sbox(i: i64) -> i64
+extern fn rt_aes_rcon(i: i64) -> i64
+
+fn _aes_sbox(index: i64) -> u8:
+    rt_aes_sbox(index).to_u8()
+
+fn _aes_rcon(index: i64) -> u32:
+    rt_aes_rcon(index).to_u32()
+
+# AES-256 key expansion (FIPS 197 §5.2 with NK=8 special cases).
+# Produces a 240-byte schedule = 60 32-bit words; layout matches
+# aes256_gcm.aes256_key_expansion byte-for-byte (verified against the
+# rt_aes_decrypt_block_with_expanded contract).
+fn _aes256_expand_key(key: [u8]) -> [u8]:
+    val nk: u64 = 8
+    val nr: u64 = 14
+    val total_words: u64 = 4 * (nr + 1)  # 60
+
+    # words: list of 60 u32 stored as 4-byte big-endian groups.
+    var schedule: [u8] = rt_array_new_with_cap((total_words * 4).to_i64())
+
+    # Copy the 32-byte key as the first 8 words.
+    var i: u64 = 0
+    while i < 32:
+        schedule.push(_u8_at(key, i))
+        i = i + 1
+
+    # Generate remaining words.
+    var w: u64 = nk
+    while w < total_words:
+        # temp = previous word (4 bytes at offset (w-1)*4).
+        var t0: u8 = _u8_at(schedule, (w - 1) * 4 + 0)
+        var t1: u8 = _u8_at(schedule, (w - 1) * 4 + 1)
+        var t2: u8 = _u8_at(schedule, (w - 1) * 4 + 2)
+        var t3: u8 = _u8_at(schedule, (w - 1) * 4 + 3)
+
+        if w % nk == 0:
+            # RotWord: (t0,t1,t2,t3) -> (t1,t2,t3,t0)
+            val r0 = t1
+            val r1 = t2
+            val r2 = t3
+            val r3 = t0
+            # SubWord
+            val s0 = _aes_sbox(r0.to_i64())
+            val s1 = _aes_sbox(r1.to_i64())
+            val s2 = _aes_sbox(r2.to_i64())
+            val s3 = _aes_sbox(r3.to_i64())
+            # XOR Rcon (only top byte is non-zero, applied to s0).
+            val rc: u32 = _aes_rcon((w / nk).to_i64())
+            t0 = (s0.to_u32() ^ rc).to_u8()
+            t1 = s1
+            t2 = s2
+            t3 = s3
+        else:
+            if nk > 6 and w % nk == 4:
+                # AES-256 special case: SubWord only (no RotWord, no Rcon).
+                t0 = _aes_sbox(t0.to_i64())
+                t1 = _aes_sbox(t1.to_i64())
+                t2 = _aes_sbox(t2.to_i64())
+                t3 = _aes_sbox(t3.to_i64())
+
+        # w[i] = w[i-nk] ^ temp
+        val p0: u8 = _u8_at(schedule, (w - nk) * 4 + 0)
+        val p1: u8 = _u8_at(schedule, (w - nk) * 4 + 1)
+        val p2: u8 = _u8_at(schedule, (w - nk) * 4 + 2)
+        val p3: u8 = _u8_at(schedule, (w - nk) * 4 + 3)
+        schedule.push(p0 ^ t0)
+        schedule.push(p1 ^ t1)
+        schedule.push(p2 ^ t2)
+        schedule.push(p3 ^ t3)
+
+        w = w + 1
+    schedule
+
+fn _aes256_decrypt_block_with_raw_key(block: [u8], key: [u8]) -> [u8]:
+    val expanded = _aes256_expand_key(key)
+    rt_aes_decrypt_block_with_expanded(block, expanded, 14)
+
+# ============================================================================
+# XTS-AES single-block "XEX" tweak step (IEEE 1619 §5.3)
+# ============================================================================
+#
+#   XEX_enc(P, T, K1) = AES_K1(P xor T) xor T
+#   XEX_dec(C, T, K1) = AES^{-1}_K1(C xor T) xor T
+
+fn _xex128_encrypt(p: [u8], t: [u8], key1: [u8]) -> [u8]:
+    val pt = _xor_block16(p, t)
+    # aes128_encrypt_block expects round_keys but only reads first 16 bytes
+    # back as the raw key (per W13-A wrapper); pass raw key directly.
+    val ct_inner = aes128_encrypt_block(pt, key1)
+    _xor_block16(ct_inner, t)
+
+fn _xex128_decrypt(c: [u8], t: [u8], key1: [u8]) -> [u8]:
+    val ct = _xor_block16(c, t)
+    val pt_inner = _aes128_decrypt_block(ct, key1)
+    _xor_block16(pt_inner, t)
+
+fn _xex256_encrypt(p: [u8], t: [u8], key1: [u8]) -> [u8]:
+    val pt = _xor_block16(p, t)
+    val ct_inner = aes256_encrypt_block(pt, key1)
+    _xor_block16(ct_inner, t)
+
+fn _xex256_decrypt(c: [u8], t: [u8], key1: [u8]) -> [u8]:
+    val ct = _xor_block16(c, t)
+    val pt_inner = _aes256_decrypt_block_with_raw_key(ct, key1)
+    _xor_block16(pt_inner, t)
+
+# ============================================================================
+# Block slicing helpers — extract a 16-byte window starting at `start`.
+# ============================================================================
+
+fn _slice_block16(message: [u8], start: u64) -> [u8]:
+    var block: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        block.push(_u8_at(message, start + i))
+        i = i + 1
+    block
+
+# ============================================================================
+# AES-128-XTS — encrypt/decrypt one sector (IEEE 1619 §5.3 + §5.4 CTS)
+# ============================================================================
+#
+# Sector layout: bytes are partitioned into m = ceil(len/16) blocks. If len is
+# a multiple of 16, all m blocks go through XEX directly. Otherwise the last
+# two blocks (P_{m-1}, P_m where |P_m| = s in 1..15) use ciphertext-stealing
+# per IEEE 1619 §5.4:
+#   CC          = XEX(P_{m-1}, T_{m-1}, K1)        # full-block intermediate
+#   C_m         = CC[0..s]                          # first s bytes
+#   PP          = P_m || CC[s..16]                  # steal the rest
+#   C_{m-1}     = XEX(PP, T_m, K1)                  # uses T_m, NOT T_{m-1}
+
+fn aes128_xts_encrypt_sector(key1: [u8], key2: [u8], sector_idx: i64, plaintext: [u8]) -> [u8]:
+    val plen: u64 = plaintext.len()
+
+    # T_0 = AES_K2(sector_idx_block) — encrypt with the tweak key.
+    val sec_block = _sector_idx_to_block(sector_idx)
+    var tweak: [u8] = aes128_encrypt_block(sec_block, key2)
+
+    val full_blocks: u64 = plen / 16
+    val tail_len: u64 = plen % 16
+
+    # Determine how many "regular" (non-CTS) blocks to process. With CTS we
+    # hold back the last full block so its tweak (T_{m-1}) is available for
+    # the steal; without CTS we process all full blocks normally.
+    var regular_blocks: u64 = full_blocks
+    if tail_len != 0:
+        regular_blocks = full_blocks - 1
+
+    var out: [u8] = rt_array_new_with_cap(plen.to_i64())
+
+    # 1) Process the regular full blocks 0..regular_blocks-1.
+    var i: u64 = 0
+    while i < regular_blocks:
+        val p_i = _slice_block16(plaintext, i * 16)
+        val c_i = _xex128_encrypt(p_i, tweak, key1)
+        var k: u64 = 0
+        while k < 16:
+            out.push(_u8_at(c_i, k))
+            k = k + 1
+        tweak = _gf128_mul_alpha(tweak)
+        i = i + 1
+
+    if tail_len == 0:
+        return out
+
+    # 2) Ciphertext-stealing path: regular_blocks = full_blocks - 1.
+    # tweak currently equals T_{m-1} (the held-back block's tweak).
+    # P_{m-1} is the last full block at offset regular_blocks * 16.
+    val p_m_minus_1 = _slice_block16(plaintext, regular_blocks * 16)
+    val cc = _xex128_encrypt(p_m_minus_1, tweak, key1)
+
+    # Advance tweak to T_m for the second steal-step encrypt.
+    val tweak_m: [u8] = _gf128_mul_alpha(tweak)
+
+    # P_m is the partial tail at offset full_blocks * 16, length s = tail_len.
+    # Build PP = P_m || CC[s..16].
+    var pp: [u8] = rt_array_new_with_cap(16)
+    var u: u64 = 0
+    while u < tail_len:
+        pp.push(_u8_at(plaintext, full_blocks * 16 + u))
+        u = u + 1
+    var v: u64 = tail_len
+    while v < 16:
+        pp.push(_u8_at(cc, v))
+        v = v + 1
+
+    val c_m_minus_1 = _xex128_encrypt(pp, tweak_m, key1)
+
+    # Output order is C_0, ..., C_{m-2}, C_{m-1}, C_m where |C_m| = s.
+    # But IEEE 1619 ciphertext layout actually places them in plaintext order
+    # — the swap is purely in computation, not in the byte stream. Append
+    # C_{m-1} (full 16 bytes) then C_m = CC[0..s].
+    var w: u64 = 0
+    while w < 16:
+        out.push(_u8_at(c_m_minus_1, w))
+        w = w + 1
+    var s2: u64 = 0
+    while s2 < tail_len:
+        out.push(_u8_at(cc, s2))
+        s2 = s2 + 1
+    out
+
+fn aes128_xts_decrypt_sector(key1: [u8], key2: [u8], sector_idx: i64, ciphertext: [u8]) -> [u8]:
+    val clen: u64 = ciphertext.len()
+
+    val sec_block = _sector_idx_to_block(sector_idx)
+    var tweak: [u8] = aes128_encrypt_block(sec_block, key2)
+
+    val full_blocks: u64 = clen / 16
+    val tail_len: u64 = clen % 16
+
+    var regular_blocks: u64 = full_blocks
+    if tail_len != 0:
+        regular_blocks = full_blocks - 1
+
+    var out: [u8] = rt_array_new_with_cap(clen.to_i64())
+
+    # 1) Decrypt regular blocks.
+    var i: u64 = 0
+    while i < regular_blocks:
+        val c_i = _slice_block16(ciphertext, i * 16)
+        val p_i = _xex128_decrypt(c_i, tweak, key1)
+        var k: u64 = 0
+        while k < 16:
+            out.push(_u8_at(p_i, k))
+            k = k + 1
+        tweak = _gf128_mul_alpha(tweak)
+        i = i + 1
+
+    if tail_len == 0:
+        return out
+
+    # 2) CTS decrypt path. tweak is currently T_{m-1}. Per §5.4, we need
+    # T_m FIRST to recover PP, then T_{m-1} to recover P_{m-1}.
+    val tweak_m_minus_1 = tweak
+    val tweak_m: [u8] = _gf128_mul_alpha(tweak)
+
+    # C_{m-1} occupies the full block at offset regular_blocks * 16.
+    val c_m_minus_1 = _slice_block16(ciphertext, regular_blocks * 16)
+    # CC = XEX_dec(C_{m-1}, T_m, K1) (decrypt with the SHIFTED tweak first).
+    val cc = _xex128_decrypt(c_m_minus_1, tweak_m, key1)
+
+    # P_m = CC[0..s]; PP = C_m || CC[s..16].
+    var pp: [u8] = rt_array_new_with_cap(16)
+    var u: u64 = 0
+    while u < tail_len:
+        pp.push(_u8_at(ciphertext, full_blocks * 16 + u))
+        u = u + 1
+    var v: u64 = tail_len
+    while v < 16:
+        pp.push(_u8_at(cc, v))
+        v = v + 1
+
+    # Recover P_{m-1} using T_{m-1}.
+    val p_m_minus_1 = _xex128_decrypt(pp, tweak_m_minus_1, key1)
+
+    # Plaintext byte order: P_0, ..., P_{m-2}, P_{m-1}, P_m where |P_m| = s.
+    var w: u64 = 0
+    while w < 16:
+        out.push(_u8_at(p_m_minus_1, w))
+        w = w + 1
+    var s2: u64 = 0
+    while s2 < tail_len:
+        out.push(_u8_at(cc, s2))
+        s2 = s2 + 1
+    out
+
+# ============================================================================
+# AES-256-XTS — same construction, AES-256 block primitive
+# ============================================================================
+
+fn aes256_xts_encrypt_sector(key1: [u8], key2: [u8], sector_idx: i64, plaintext: [u8]) -> [u8]:
+    val plen: u64 = plaintext.len()
+
+    val sec_block = _sector_idx_to_block(sector_idx)
+    var tweak: [u8] = aes256_encrypt_block(sec_block, key2)
+
+    val full_blocks: u64 = plen / 16
+    val tail_len: u64 = plen % 16
+
+    var regular_blocks: u64 = full_blocks
+    if tail_len != 0:
+        regular_blocks = full_blocks - 1
+
+    var out: [u8] = rt_array_new_with_cap(plen.to_i64())
+
+    var i: u64 = 0
+    while i < regular_blocks:
+        val p_i = _slice_block16(plaintext, i * 16)
+        val c_i = _xex256_encrypt(p_i, tweak, key1)
+        var k: u64 = 0
+        while k < 16:
+            out.push(_u8_at(c_i, k))
+            k = k + 1
+        tweak = _gf128_mul_alpha(tweak)
+        i = i + 1
+
+    if tail_len == 0:
+        return out
+
+    val p_m_minus_1 = _slice_block16(plaintext, regular_blocks * 16)
+    val cc = _xex256_encrypt(p_m_minus_1, tweak, key1)
+    val tweak_m: [u8] = _gf128_mul_alpha(tweak)
+
+    var pp: [u8] = rt_array_new_with_cap(16)
+    var u: u64 = 0
+    while u < tail_len:
+        pp.push(_u8_at(plaintext, full_blocks * 16 + u))
+        u = u + 1
+    var v: u64 = tail_len
+    while v < 16:
+        pp.push(_u8_at(cc, v))
+        v = v + 1
+
+    val c_m_minus_1 = _xex256_encrypt(pp, tweak_m, key1)
+
+    var w: u64 = 0
+    while w < 16:
+        out.push(_u8_at(c_m_minus_1, w))
+        w = w + 1
+    var s2: u64 = 0
+    while s2 < tail_len:
+        out.push(_u8_at(cc, s2))
+        s2 = s2 + 1
+    out
+
+fn aes256_xts_decrypt_sector(key1: [u8], key2: [u8], sector_idx: i64, ciphertext: [u8]) -> [u8]:
+    val clen: u64 = ciphertext.len()
+
+    val sec_block = _sector_idx_to_block(sector_idx)
+    var tweak: [u8] = aes256_encrypt_block(sec_block, key2)
+
+    val full_blocks: u64 = clen / 16
+    val tail_len: u64 = clen % 16
+
+    var regular_blocks: u64 = full_blocks
+    if tail_len != 0:
+        regular_blocks = full_blocks - 1
+
+    var out: [u8] = rt_array_new_with_cap(clen.to_i64())
+
+    var i: u64 = 0
+    while i < regular_blocks:
+        val c_i = _slice_block16(ciphertext, i * 16)
+        val p_i = _xex256_decrypt(c_i, tweak, key1)
+        var k: u64 = 0
+        while k < 16:
+            out.push(_u8_at(p_i, k))
+            k = k + 1
+        tweak = _gf128_mul_alpha(tweak)
+        i = i + 1
+
+    if tail_len == 0:
+        return out
+
+    val tweak_m_minus_1 = tweak
+    val tweak_m: [u8] = _gf128_mul_alpha(tweak)
+
+    val c_m_minus_1 = _slice_block16(ciphertext, regular_blocks * 16)
+    val cc = _xex256_decrypt(c_m_minus_1, tweak_m, key1)
+
+    var pp: [u8] = rt_array_new_with_cap(16)
+    var u: u64 = 0
+    while u < tail_len:
+        pp.push(_u8_at(ciphertext, full_blocks * 16 + u))
+        u = u + 1
+    var v: u64 = tail_len
+    while v < 16:
+        pp.push(_u8_at(cc, v))
+        v = v + 1
+
+    val p_m_minus_1 = _xex256_decrypt(pp, tweak_m_minus_1, key1)
+
+    var w: u64 = 0
+    while w < 16:
+        out.push(_u8_at(p_m_minus_1, w))
+        w = w + 1
+    var s2: u64 = 0
+    while s2 < tail_len:
+        out.push(_u8_at(cc, s2))
+        s2 = s2 + 1
+    out

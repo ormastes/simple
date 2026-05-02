@@ -1,15 +1,25 @@
+#![allow(unknown_attribute)]
+
 # RISC-V 32 GHDL Linux acceptance payload.
 #
 # This is intentionally small and freestanding: it preserves the Linux handoff
 # ABI, probes the DTB header directly, records telemetry into the proof window,
 # emits the canonical Linux acceptance markers over UART, and then halts.
 
-val PASS_ADDR: u32 = 0x80000100
-val A0_ADDR: u32 = 0x80000110
-val A1_ADDR: u32 = 0x80000114
-val DTB_VALID_ADDR: u32 = 0x80000118
-val SATP_ADDR: u32 = 0x8000011C
-val UART_ADDR: u32 = 0x10000000
+val PASS_ADDR: u32 = 0x801FF000
+val A0_ADDR: u32 = 0x801FF010
+val A1_ADDR: u32 = 0x801FF014
+val DTB_VALID_ADDR: u32 = 0x801FF018
+val SATP_ADDR: u32 = 0x801FF01C
+
+extern fn rt_rv32_probe_load8(addr: u32) -> u32
+extern fn rt_rv32_probe_read_satp() -> u32
+extern fn rt_rv32_probe_uart_put(byte: u32)
+extern fn rt_rv32_probe_store_pass(value: u32)
+extern fn rt_rv32_probe_store_a0(value: u32)
+extern fn rt_rv32_probe_store_a1(value: u32)
+extern fn rt_rv32_probe_store_dtb_valid(value: u32)
+extern fn rt_rv32_probe_store_satp(value: u32)
 
 @section(".text.entry")
 @naked
@@ -26,36 +36,14 @@ fn _start():
         "wfi"
         "j .Lghdl_linux_acceptance_halt"
 
-fn _store_word(addr: u32, value: u32):
-    unsafe:
-        asm volatile:
-            "sw {value}, 0({addr})"
-            addr = in(reg) addr
-            value = in(reg) value
-
 fn _load_u8(addr: u32) -> u32:
-    var value: u32 = 0
-    unsafe:
-        asm volatile:
-            "lbu {out}, 0({addr})"
-            addr = in(reg) addr
-            out = out(reg) value
-    value
+    rt_rv32_probe_load8(addr)
 
 fn _read_satp() -> u32:
-    var value: u32 = 0
-    unsafe:
-        asm volatile:
-            "csrr {out}, satp"
-            out = out(reg) value
-    value
+    rt_rv32_probe_read_satp()
 
 fn _uart_put(byte: u32):
-    unsafe:
-        asm volatile:
-            "sb {byte}, 0({addr})"
-            addr = in(reg) UART_ADDR
-            byte = in(reg) byte
+    rt_rv32_probe_uart_put(byte)
 
 fn _crlf():
     _uart_put(13)
@@ -150,14 +138,14 @@ fn _dtb_magic_valid(dtb_addr: u32) -> bool:
     _load_u8(dtb_addr + 3) == 0xED
 
 fn boot_main(hart_id: u32, dtb_addr: u32):
-    _store_word(A0_ADDR, hart_id)
-    _store_word(A1_ADDR, dtb_addr)
-    _store_word(SATP_ADDR, _read_satp())
+    rt_rv32_probe_store_a0(hart_id)
+    rt_rv32_probe_store_a1(dtb_addr)
+    rt_rv32_probe_store_satp(_read_satp())
     if _dtb_magic_valid(dtb_addr):
-        _store_word(DTB_VALID_ADDR, 1)
+        rt_rv32_probe_store_dtb_valid(1)
     else:
-        _store_word(DTB_VALID_ADDR, 0)
-    _store_word(PASS_ADDR, 42)
+        rt_rv32_probe_store_dtb_valid(0)
+    rt_rv32_probe_store_pass(42)
     _emit_opensbi()
     _emit_linux_version()
     _emit_of_fdt()

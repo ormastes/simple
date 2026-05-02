@@ -1,0 +1,552 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Canonical Simple web stack verification sample app.
+
+use std.database.{SdnRow, SdnDatabase, load_sdn_database, new_sdn_database}
+use std.database.sql.codec.{DbCodec}
+use std.database.sql.schema.{TableSchema}
+use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.connection.{Database}
+use std.database.sql.repository.{Repository}
+use std.time.{now_iso8601}
+use std.crypto.hmac.{hmac_sha256}
+use std.web_framework.persistence.{SimpleDbRecordAdapter, WebRecordStore}
+use std.web_framework.session.{SessionStore}
+
+class SampleUser:
+    id: i64
+    username: text
+    email: text
+    password_hash: text
+    created_at: text
+
+class SampleItem:
+    id: i64
+    user_id: i64
+    title: text
+    details: text
+    created_at: text
+    updated_at: text
+
+class SampleResponse:
+    status: i64
+    redirect_to: text
+    body: text
+    session_id: text
+    flash: text
+
+class WebStackSampleApp:
+    backend_kind: text
+    users: WebRecordStore<SampleUser>
+    items: WebRecordStore<SampleItem>
+    sessions: SessionStore
+    sqlite_db: Database?
+    simple_db_path: text
+
+class SampleUserCodec with DbCodec<SampleUser>:
+    fn table_name() -> text:
+        "sample_users"
+
+    fn schema() -> TableSchema:
+        var table = TableSchema.new("sample_users")
+        table = table.id_col()
+        table = table.text_col("username")
+        table = table.text_col("email")
+        table = table.text_col("password_hash")
+        table = table.text_col("created_at")
+        table
+
+    fn columns() -> [text]:
+        ["username", "email", "password_hash", "created_at"]
+
+    fn encode(entity: SampleUser) -> [DbValue]:
+        [
+            DbValue.Text(value: entity.username),
+            DbValue.Text(value: entity.email),
+            DbValue.Text(value: entity.password_hash),
+            DbValue.Text(value: entity.created_at)
+        ]
+
+    fn decode(row: DbRow) -> Result<SampleUser, DbError>:
+        val id = row.get_int("id")
+        val username = row.get_text("username")
+        val email = row.get_text("email")
+        val password_hash = row.get_text("password_hash")
+        val created_at = row.get_text("created_at")
+        if id.? and username.? and email.? and password_hash.? and created_at.?:
+            return Ok(SampleUser(
+                id: id ?? 0,
+                username: username ?? "",
+                email: email ?? "",
+                password_hash: password_hash ?? "",
+                created_at: created_at ?? ""
+            ))
+        Err(DbError.TypeMismatch(column: "sample_users", expected: "complete row", actual: "missing"))
+
+class SampleItemCodec with DbCodec<SampleItem>:
+    fn table_name() -> text:
+        "sample_items"
+
+    fn schema() -> TableSchema:
+        var table = TableSchema.new("sample_items")
+        table = table.id_col()
+        table = table.int_col("user_id")
+        table = table.text_col("title")
+        table = table.text_col("details")
+        table = table.text_col("created_at")
+        table = table.text_col("updated_at")
+        table
+
+    fn columns() -> [text]:
+        ["user_id", "title", "details", "created_at", "updated_at"]
+
+    fn encode(entity: SampleItem) -> [DbValue]:
+        [
+            DbValue.Integer(value: entity.user_id),
+            DbValue.Text(value: entity.title),
+            DbValue.Text(value: entity.details),
+            DbValue.Text(value: entity.created_at),
+            DbValue.Text(value: entity.updated_at)
+        ]
+
+    fn decode(row: DbRow) -> Result<SampleItem, DbError>:
+        val id = row.get_int("id")
+        val user_id = row.get_int("user_id")
+        val title = row.get_text("title")
+        val details = row.get_text("details")
+        val created_at = row.get_text("created_at")
+        val updated_at = row.get_text("updated_at")
+        if id.? and user_id.? and title.? and details.? and created_at.? and updated_at.?:
+            return Ok(SampleItem(
+                id: id ?? 0,
+                user_id: user_id ?? 0,
+                title: title ?? "",
+                details: details ?? "",
+                created_at: created_at ?? "",
+                updated_at: updated_at ?? ""
+            ))
+        Err(DbError.TypeMismatch(column: "sample_items", expected: "complete row", actual: "missing"))
+
+fn sample_user_row(id: i64, entity: SampleUser) -> SdnRow:
+    val row = SdnRow.empty()
+    row.set("id", "{id}")
+    row.set("valid", "true")
+    row.set("username", entity.username)
+    row.set("email", entity.email)
+    row.set("password_hash", entity.password_hash)
+    row.set("created_at", entity.created_at)
+    row
+
+fn sample_user_from_row(row: SdnRow) -> Result<SampleUser, text>:
+    Ok(SampleUser(
+        id: (row.get("id") ?? "0").to_int() ?? 0,
+        username: row.get("username") ?? "",
+        email: row.get("email") ?? "",
+        password_hash: row.get("password_hash") ?? "",
+        created_at: row.get("created_at") ?? ""
+    ))
+
+fn sample_user_field(entity: SampleUser, field: text) -> text:
+    match field:
+        case "id": "{entity.id}"
+        case "username": entity.username
+        case "email": entity.email
+        case "password_hash": entity.password_hash
+        case "created_at": entity.created_at
+        _: ""
+
+fn sample_user_adapter() -> SimpleDbRecordAdapter<SampleUser>:
+    SimpleDbRecordAdapter(
+        table_name: "sample_users",
+        columns: ["username", "email", "password_hash", "created_at"],
+        to_row_fn: sample_user_row,
+        from_row_fn: sample_user_from_row,
+        field_text_fn: sample_user_field
+    )
+
+fn sample_item_row(id: i64, entity: SampleItem) -> SdnRow:
+    val row = SdnRow.empty()
+    row.set("id", "{id}")
+    row.set("valid", "true")
+    row.set("user_id", "{entity.user_id}")
+    row.set("title", entity.title)
+    row.set("details", entity.details)
+    row.set("created_at", entity.created_at)
+    row.set("updated_at", entity.updated_at)
+    row
+
+fn sample_item_from_row(row: SdnRow) -> Result<SampleItem, text>:
+    Ok(SampleItem(
+        id: (row.get("id") ?? "0").to_int() ?? 0,
+        user_id: (row.get("user_id") ?? "0").to_int() ?? 0,
+        title: row.get("title") ?? "",
+        details: row.get("details") ?? "",
+        created_at: row.get("created_at") ?? "",
+        updated_at: row.get("updated_at") ?? ""
+    ))
+
+fn sample_item_field(entity: SampleItem, field: text) -> text:
+    match field:
+        case "id": "{entity.id}"
+        case "user_id": "{entity.user_id}"
+        case "title": entity.title
+        case "details": entity.details
+        case "created_at": entity.created_at
+        case "updated_at": entity.updated_at
+        _: ""
+
+fn sample_item_adapter() -> SimpleDbRecordAdapter<SampleItem>:
+    SimpleDbRecordAdapter(
+        table_name: "sample_items",
+        columns: ["user_id", "title", "details", "created_at", "updated_at"],
+        to_row_fn: sample_item_row,
+        from_row_fn: sample_item_from_row,
+        field_text_fn: sample_item_field
+    )
+
+fn open_web_stack_sample(backend_kind: text, path: text) -> Result<WebStackSampleApp, text>:
+    if backend_kind == "sqlite":
+        val db_result = if path == ":memory:":
+            Database.memory()
+        else:
+            Database.open(path)
+        val db = match db_result:
+            Ok(opened): opened
+            Err(_e): return Err("Failed to open SQLite database")
+        val user_repo = Repository.new(db, SampleUserCodec())
+        val item_repo = Repository.new(db, SampleItemCodec())
+        var users = WebRecordStore.sql(user_repo, sample_user_adapter())
+        var items = WebRecordStore.sql(item_repo, sample_item_adapter())
+        users.create_table()?
+        items.create_table()?
+        var sessions = SessionStore.sqlite(db)
+        sessions.init()?
+        return Ok(WebStackSampleApp(
+            backend_kind: "sqlite",
+            users: users,
+            items: items,
+            sessions: sessions,
+            sqlite_db: Some(db),
+            simple_db_path: ""
+        ))
+
+    var simple_db = load_sdn_database(path) ?? new_sdn_database(path)
+    var users = WebRecordStore.simpledb(simple_db, sample_user_adapter())
+    users.create_table()?
+    simple_db = users.require_simple_db()?
+    var items = WebRecordStore.simpledb(simple_db, sample_item_adapter())
+    items.create_table()?
+    simple_db = items.require_simple_db()?
+    var sessions = SessionStore.simpledb(simple_db)
+    sessions.init()?
+    Ok(WebStackSampleApp(
+        backend_kind: "simpledb",
+        users: users,
+        items: items,
+        sessions: sessions,
+        sqlite_db: nil,
+        simple_db_path: path
+    ))
+
+impl WebStackSampleApp:
+    fn homepage(session_id: text?) -> Result<SampleResponse, text>:
+        if session_id.?:
+            val auth = self.require_user(session_id ?? "")
+            match auth:
+                Ok(_user): return self.list_items(session_id ?? "", "")
+                Err(_e): ()
+        Ok(SampleResponse(status: 302, redirect_to: "/login", body: "", session_id: session_id ?? "", flash: ""))
+
+    fn login_form() -> SampleResponse:
+        SampleResponse(status: 200, redirect_to: "", body: render_login_page(""), session_id: "", flash: "")
+
+    fn register_form() -> SampleResponse:
+        SampleResponse(status: 200, redirect_to: "", body: render_register_page(""), session_id: "", flash: "")
+
+    me register_user(username: text, email: text, password: text) -> Result<SampleUser, text>:
+        val clean_username = username.trim()
+        val clean_email = email.trim()
+        if clean_username.len() < 3:
+            return Err("Username must be at least 3 characters")
+        if not clean_email.contains("@"):
+            return Err("Email must contain @")
+        if password.len() < 8:
+            return Err("Password must be at least 8 characters")
+        if self.users.find_by_field_equals("username", clean_username)?.len() > 0:
+            return Err("Username is already registered")
+        if self.users.find_by_field_equals("email", clean_email)?.len() > 0:
+            return Err("Email is already registered")
+        val user = SampleUser(
+            id: 0,
+            username: clean_username,
+            email: clean_email,
+            password_hash: hash_password(password),
+            created_at: now_iso8601()
+        )
+        val id = self.users.insert(user)?
+        val saved = self.users.find_by_id(id)?
+        if saved.?:
+            return Ok(saved.unwrap())
+        Err("Failed to reload registered user")
+
+    me post_register(username: text, email: text, password: text) -> Result<SampleResponse, text>:
+        val user = self.register_user(username, email, password)?
+        val session_id = self.sessions.create("{user.id}")?
+        Ok(SampleResponse(
+            status: 302,
+            redirect_to: "/items",
+            body: "",
+            session_id: session_id,
+            flash: "registered"
+        ))
+
+    fn authenticate(username: text, password: text) -> Result<SampleUser?, text>:
+        val found = self.users.find_by_field_equals("username", username.trim())?
+        if found.len() == 0:
+            return Ok(nil)
+        val user = found[0]
+        if user.password_hash != hash_password(password):
+            return Ok(nil)
+        Ok(Some(user))
+
+    me post_login(username: text, password: text) -> Result<SampleResponse, text>:
+        val user = self.authenticate(username, password)?
+        if not user.?:
+            return Ok(SampleResponse(status: 401, redirect_to: "", body: render_login_page("Invalid credentials"), session_id: "", flash: ""))
+        val sid = self.sessions.create("{user.unwrap().id}")?
+        Ok(SampleResponse(status: 302, redirect_to: "/items", body: "", session_id: sid, flash: "logged-in"))
+
+    me post_logout(session_id: text) -> Result<SampleResponse, text>:
+        if session_id.len() > 0:
+            self.sessions.destroy(session_id)?
+        Ok(SampleResponse(status: 302, redirect_to: "/login", body: "", session_id: "", flash: "logged-out"))
+
+    fn list_items(session_id: text, query: text) -> Result<SampleResponse, text>:
+        val user = self.require_user(session_id)?
+        val items = self.items_for_user(user.id, query)?
+        Ok(SampleResponse(
+            status: 200,
+            redirect_to: "",
+            body: render_items_page(user, items, query, ""),
+            session_id: session_id,
+            flash: ""
+        ))
+
+    fn new_item_form(session_id: text) -> Result<SampleResponse, text>:
+        self.require_user(session_id)?
+        Ok(SampleResponse(status: 200, redirect_to: "", body: render_item_form_page("Create Item", "/items/new", "", "", "", ""), session_id: session_id, flash: ""))
+
+    fn edit_item_form(session_id: text, item_id: i64) -> Result<SampleResponse, text>:
+        val item = self.require_owned_item(session_id, item_id)?
+        Ok(SampleResponse(
+            status: 200,
+            redirect_to: "",
+            body: render_item_form_page("Edit Item", "/items/{item_id}/edit", item.title, item.details, "{item_id}", ""),
+            session_id: session_id,
+            flash: ""
+        ))
+
+    me create_item(session_id: text, title: text, details: text) -> Result<SampleItem, text>:
+        val user = self.require_user(session_id)?
+        val clean_title = title.trim()
+        if clean_title.len() == 0:
+            return Err("Title is required")
+        val now = now_iso8601()
+        val item = SampleItem(
+            id: 0,
+            user_id: user.id,
+            title: clean_title,
+            details: details.trim(),
+            created_at: now,
+            updated_at: now
+        )
+        val id = self.items.insert(item)?
+        val saved = self.items.find_by_id(id)?
+        if saved.?:
+            return Ok(saved.unwrap())
+        Err("Failed to reload created item")
+
+    me post_new_item(session_id: text, title: text, details: text) -> Result<SampleResponse, text>:
+        val item = self.create_item(session_id, title, details)?
+        val user = self.require_user(session_id)?
+        val items = self.items_for_user(user.id, "")?
+        Ok(SampleResponse(
+            status: 200,
+            redirect_to: "",
+            body: render_items_page(user, items, "", item.title),
+            session_id: session_id,
+            flash: "created"
+        ))
+
+    me post_edit_item(session_id: text, item_id: i64, title: text, details: text) -> Result<SampleResponse, text>:
+        val item = self.require_owned_item(session_id, item_id)?
+        val clean_title = title.trim()
+        if clean_title.len() == 0:
+            return Err("Title is required")
+        val updated = SampleItem(
+            id: item.id,
+            user_id: item.user_id,
+            title: clean_title,
+            details: details.trim(),
+            created_at: item.created_at,
+            updated_at: now_iso8601()
+        )
+        self.items.update(item_id, updated)?
+        val user = self.require_user(session_id)?
+        val items = self.items_for_user(user.id, "")?
+        Ok(SampleResponse(
+            status: 200,
+            redirect_to: "",
+            body: render_items_page(user, items, "", ""),
+            session_id: session_id,
+            flash: "updated"
+        ))
+
+    me post_delete_item(session_id: text, item_id: i64) -> Result<SampleResponse, text>:
+        self.require_owned_item(session_id, item_id)?
+        self.items.delete_by_id(item_id)?
+        return self.list_items(session_id, "")
+
+    fn search_items(session_id: text, query: text) -> Result<SampleResponse, text>:
+        val user = self.require_user(session_id)?
+        val items = self.items_for_user(user.id, query)?
+        Ok(SampleResponse(
+            status: 200,
+            redirect_to: "",
+            body: render_items_page(user, items, query, ""),
+            session_id: session_id,
+            flash: ""
+        ))
+
+    fn require_user(session_id: text) -> Result<SampleUser, text>:
+        val session_data = self.sessions.get(session_id)?
+        val user_id = session_data.get("_user_id") ?? ""
+        if user_id.len() == 0:
+            return Err("Authentication required")
+        val maybe_user = self.users.find_by_id(user_id.to_int() ?? 0)?
+        if maybe_user.?:
+            return Ok(maybe_user.unwrap())
+        Err("User not found")
+
+    fn require_owned_item(session_id: text, item_id: i64) -> Result<SampleItem, text>:
+        val user = self.require_user(session_id)?
+        val maybe_item = self.items.find_by_id(item_id)?
+        if not maybe_item.?:
+            return Err("Item not found")
+        val item = maybe_item.unwrap()
+        if item.user_id != user.id:
+            return Err("Item does not belong to the current user")
+        Ok(item)
+
+    fn items_for_user(user_id: i64, query: text) -> Result<[SampleItem], text>:
+        val all = self.items.find_all()?
+        val needle = query.trim().lower()
+        var items: [SampleItem] = []
+        for item in all:
+            if item.user_id != user_id:
+                continue
+            if needle.len() > 0:
+                val blob = (item.title + "\n" + item.details).lower()
+                if not blob.contains(needle):
+                    continue
+            items.push(item)
+        Ok(items)
+
+fn render_layout(title: text, body: text) -> text:
+    "<!doctype html>\n" +
+    "<html><head><meta charset=\"utf-8\"><title>{title}</title></head>" +
+    "<body><main data-test=\"page-root\">" +
+    "<h1 data-test=\"page-title\">{title}</h1>" +
+    body +
+    "</main></body></html>"
+
+fn render_login_page(message: text) -> text:
+    val body = render_flash(message) +
+        "<div data-test=\"login-page-marker\">LOGIN-PAGE</div>" +
+        "<form method=\"POST\" action=\"/login\">" +
+        "<label>Username <input type=\"text\" name=\"username\" value=\"\"></label>" +
+        "<label>Password <input type=\"text\" name=\"password\" value=\"\"></label>" +
+        "<button type=\"submit\">Log In</button>" +
+        "</form>" +
+        "<a href=\"/register\">Create account</a>"
+    render_layout("Web Stack Sample Login", body)
+
+fn render_register_page(message: text) -> text:
+    val body = render_flash(message) +
+        "<div data-test=\"register-page-marker\">REGISTER-PAGE</div>" +
+        "<form method=\"POST\" action=\"/register\">" +
+        "<label>Username <input type=\"text\" name=\"username\" value=\"\"></label>" +
+        "<label>Email <input type=\"text\" name=\"email\" value=\"\"></label>" +
+        "<label>Password <input type=\"text\" name=\"password\" value=\"\"></label>" +
+        "<button type=\"submit\">Register</button>" +
+        "</form>"
+    render_layout("Web Stack Sample Register", body)
+
+fn render_item_form_page(title: text, action: text, item_title: text, details: text, item_id: text, message: text) -> text:
+    val body = render_flash(message) +
+        "<div data-test=\"item-form-marker\">ITEM-FORM</div>" +
+        "<form method=\"POST\" action=\"{action}\">" +
+        "<input type=\"hidden\" name=\"item_id\" value=\"{item_id}\">" +
+        "<label>Title <input type=\"text\" name=\"title\" value=\"{item_title}\"></label>" +
+        "<label>Details <textarea name=\"details\">{details}</textarea></label>" +
+        "<button type=\"submit\">Save Item</button>" +
+        "</form>"
+    render_layout(title, body)
+
+fn render_items_page(user: SampleUser, items: [SampleItem], query: text, created_marker: text) -> text:
+    var list_html = "<ul data-test=\"items-list\">"
+    for item in items:
+        list_html = list_html +
+            "<li data-test=\"item-row\">" +
+            "<span data-test=\"item-title\">{item.title}</span>" +
+            "<span data-test=\"item-details\">{item.details}</span>" +
+            "<a href=\"/items/{item.id}/edit\">Edit</a>" +
+            "<form method=\"POST\" action=\"/items/{item.id}/delete\"><button type=\"submit\">Delete</button></form>" +
+            "</li>"
+    list_html = list_html + "</ul>"
+
+    var markers = "<div data-test=\"login-success-marker\">LOGIN-SUCCESS:{user.username}</div>"
+    if created_marker.len() > 0:
+        markers = markers + "<div data-test=\"created-item-marker\">ITEM-CREATED:{created_marker}</div>"
+    if query.trim().len() > 0:
+        if items.len() > 0:
+            markers = markers + "<div data-test=\"search-result-marker\">SEARCH-HIT:{items[0].title}</div>"
+        else:
+            markers = markers + "<div data-test=\"search-result-marker\">SEARCH-HIT:none</div>"
+
+    val body = markers +
+        "<form method=\"GET\" action=\"/items/search\">" +
+        "<label>Search <input type=\"search\" name=\"q\" value=\"{query}\"></label>" +
+        "<button type=\"submit\">Search</button>" +
+        "</form>" +
+        "<a href=\"/items/new\">New Item</a>" +
+        "<form method=\"POST\" action=\"/logout\"><button type=\"submit\">Log Out</button></form>" +
+        list_html
+    render_layout("Web Stack Sample Items", body)
+
+fn render_flash(message: text) -> text:
+    if message.len() == 0:
+        return ""
+    "<div data-test=\"flash-message\">{message}</div>"
+
+fn hash_password(password: text) -> text:
+    bytes_to_hex(hmac_sha256("web-stack-sample", password))
+
+fn bytes_to_hex(bytes: [i64]) -> text:
+    var parts: [text] = []
+    for b in bytes:
+        val hi = (b / 16) % 16
+        val lo = b % 16
+        parts.push(hex_digit(hi))
+        parts.push(hex_digit(lo))
+    parts.join("")
+
+fn hex_digit(n: i64) -> text:
+    if n < 10:
+        return "{n}"
+    match n:
+        case 10: "a"
+        case 11: "b"
+        case 12: "c"
+        case 13: "d"
+        case 14: "e"
+        _: "f"

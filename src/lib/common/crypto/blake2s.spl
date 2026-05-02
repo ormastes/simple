@@ -1,0 +1,532 @@
+# BLAKE2s Hash — Pure Simple stdlib implementation (RFC 7693)
+#
+# BLAKE2s is an ARX (add-rotate-xor) hash function optimized for 32-bit platforms.
+# This module implements the sequential hashing mode (no tree hashing).
+#
+# SIMD strategy (horizontal layout, 2026-05-02):
+#   Pack the 16-word state column-wise into 4 Vec4i vectors:
+#     a = Vec4i(v0,  v1,  v2,  v3)
+#     b = Vec4i(v4,  v5,  v6,  v7)
+#     c = Vec4i(v8,  v9,  v10, v11)
+#     d = Vec4i(v12, v13, v14, v15)
+#   Column rounds operate on (a,b,c,d) directly — one SIMD G call.
+#   Diagonal rounds pseudo-rotate lanes via struct-field reorder, then undo.
+#   ROTR amounts: 16, 12, 8, 7 (BLAKE2s uses ROTR not ROTL).
+#   Message-word indexing uses the σ permutation tables (scalar); the G
+#   function itself stays Vec4i throughout.
+#
+# Reference: RFC 7693 §2–§3
+#   https://datatracker.ietf.org/doc/html/rfc7693
+#
+# Public API:
+#   blake2s_init(key, output_len)        -> Blake2sState
+#   blake2s_update(state, msg)           -> Blake2sState
+#   blake2s_final(state)                 -> [u8]
+#   blake2s_hash(key, output_len, msg)   -> [u8]
+
+mod crypto.blake2s
+
+use std.simd.{Vec4i, simd_xor_i32x4, simd_rotr_i32x4}
+
+# ============================================================================
+# Scalar helpers
+# ============================================================================
+
+fn _u32_to_i32(x: u32) -> i32:
+    """Reinterpret u32 bit pattern as i32 (via i64 round-trip)."""
+    val signed = x.to_i64()
+    if signed >= 2147483648:
+        (signed - 4294967296).to_i32()
+    else:
+        signed.to_i32()
+
+fn _i32_to_u32(x: i32) -> u32:
+    """Reinterpret i32 bit pattern as u32."""
+    x.to_u32()
+
+fn _u32_mask(x: u32) -> u32:
+    """Mask to 32 bits (identity for u32; explicit for clarity)."""
+    x & 0xFFFFFFFFu32
+
+fn _add32(a: u32, b: u32) -> u32:
+    """Wrapping 32-bit add."""
+    _u32_mask(a + b)
+
+fn _rotr32(x: u32, n: u32) -> u32:
+    """32-bit right rotation."""
+    _u32_mask((x >> n) | (x << (32u32 - n)))
+
+fn _le32_load(buf: [u8], off: u64) -> u32:
+    """Load 4 bytes from buf at off as little-endian u32."""
+    buf[off].to_u32() |
+    (buf[off + 1].to_u32() << 8u32) |
+    (buf[off + 2].to_u32() << 16u32) |
+    (buf[off + 3].to_u32() << 24u32)
+
+# ============================================================================
+# SIMD helpers — ROTR variants for BLAKE2s (RFC 7693 §3.1: ROTR 16,12,8,7)
+# ============================================================================
+
+fn _vadd(a: Vec4i, b: Vec4i) -> Vec4i:
+    """4-lane wrapping i32 add."""
+    Vec4i(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w)
+
+fn _vrotr16(v: Vec4i) -> Vec4i:
+    """Rotate-right 16 on all 4 i32 lanes."""
+    simd_rotr_i32x4(v, 16)
+
+fn _vrotr12(v: Vec4i) -> Vec4i:
+    """Rotate-right 12 on all 4 i32 lanes."""
+    simd_rotr_i32x4(v, 12)
+
+fn _vrotr8(v: Vec4i) -> Vec4i:
+    """Rotate-right 8 on all 4 i32 lanes."""
+    simd_rotr_i32x4(v, 8)
+
+fn _vrotr7(v: Vec4i) -> Vec4i:
+    """Rotate-right 7 on all 4 i32 lanes."""
+    simd_rotr_i32x4(v, 7)
+
+# ============================================================================
+# BLAKE2s IV (RFC 7693 §2.6) — SHA-256 initial hash values
+# ============================================================================
+
+fn _blake2s_iv() -> [u32]:
+    """BLAKE2s initialization vector (first 32 bits of sqrt fractional parts)."""
+    var iv: [u32] = []
+    iv.push(0x6A09E667u32)
+    iv.push(0xBB67AE85u32)
+    iv.push(0x3C6EF372u32)
+    iv.push(0xA54FF53Au32)
+    iv.push(0x510E527Fu32)
+    iv.push(0x9B05688Cu32)
+    iv.push(0x1F83D9ABu32)
+    iv.push(0x5BE0CD19u32)
+    iv
+
+# ============================================================================
+# σ permutation tables (RFC 7693 §2.7, Table 1) — 10 rounds × 16 indices
+# ============================================================================
+
+fn _sigma() -> [[u64]]:
+    """BLAKE2s message-word permutation schedule (10 rows)."""
+    var s: [[u64]] = []
+    var row0: [u64] = []
+    row0.push(0); row0.push(1); row0.push(2); row0.push(3)
+    row0.push(4); row0.push(5); row0.push(6); row0.push(7)
+    row0.push(8); row0.push(9); row0.push(10); row0.push(11)
+    row0.push(12); row0.push(13); row0.push(14); row0.push(15)
+    s.push(row0)
+    var row1: [u64] = []
+    row1.push(14); row1.push(10); row1.push(4); row1.push(8)
+    row1.push(9); row1.push(15); row1.push(13); row1.push(6)
+    row1.push(1); row1.push(12); row1.push(0); row1.push(2)
+    row1.push(11); row1.push(7); row1.push(5); row1.push(3)
+    s.push(row1)
+    var row2: [u64] = []
+    row2.push(11); row2.push(8); row2.push(12); row2.push(0)
+    row2.push(5); row2.push(2); row2.push(15); row2.push(13)
+    row2.push(10); row2.push(14); row2.push(3); row2.push(6)
+    row2.push(7); row2.push(1); row2.push(9); row2.push(4)
+    s.push(row2)
+    var row3: [u64] = []
+    row3.push(7); row3.push(9); row3.push(3); row3.push(1)
+    row3.push(13); row3.push(12); row3.push(11); row3.push(14)
+    row3.push(2); row3.push(6); row3.push(5); row3.push(10)
+    row3.push(4); row3.push(0); row3.push(15); row3.push(8)
+    s.push(row3)
+    var row4: [u64] = []
+    row4.push(9); row4.push(0); row4.push(5); row4.push(7)
+    row4.push(2); row4.push(4); row4.push(10); row4.push(15)
+    row4.push(14); row4.push(1); row4.push(11); row4.push(12)
+    row4.push(6); row4.push(8); row4.push(3); row4.push(13)
+    s.push(row4)
+    var row5: [u64] = []
+    row5.push(2); row5.push(12); row5.push(6); row5.push(10)
+    row5.push(0); row5.push(11); row5.push(8); row5.push(3)
+    row5.push(4); row5.push(13); row5.push(7); row5.push(5)
+    row5.push(15); row5.push(14); row5.push(1); row5.push(9)
+    s.push(row5)
+    var row6: [u64] = []
+    row6.push(12); row6.push(5); row6.push(1); row6.push(15)
+    row6.push(14); row6.push(13); row6.push(4); row6.push(10)
+    row6.push(0); row6.push(7); row6.push(6); row6.push(3)
+    row6.push(9); row6.push(2); row6.push(8); row6.push(11)
+    s.push(row6)
+    var row7: [u64] = []
+    row7.push(13); row7.push(11); row7.push(7); row7.push(14)
+    row7.push(12); row7.push(1); row7.push(3); row7.push(9)
+    row7.push(5); row7.push(0); row7.push(15); row7.push(4)
+    row7.push(8); row7.push(6); row7.push(2); row7.push(10)
+    s.push(row7)
+    var row8: [u64] = []
+    row8.push(6); row8.push(15); row8.push(14); row8.push(9)
+    row8.push(11); row8.push(3); row8.push(0); row8.push(8)
+    row8.push(12); row8.push(2); row8.push(13); row8.push(7)
+    row8.push(1); row8.push(4); row8.push(10); row8.push(5)
+    s.push(row8)
+    var row9: [u64] = []
+    row9.push(10); row9.push(2); row9.push(8); row9.push(4)
+    row9.push(7); row9.push(6); row9.push(1); row9.push(5)
+    row9.push(15); row9.push(11); row9.push(9); row9.push(14)
+    row9.push(3); row9.push(12); row9.push(13); row9.push(0)
+    s.push(row9)
+    s
+
+# ============================================================================
+# SIMD G function (RFC 7693 §3.1) — horizontal 4-lane layout
+#
+# Packs 4 parallel G evaluations into one Vec4i pass.
+# a,b,c,d are each Vec4i; mx,my are Vec4i of message words.
+# Uses ROTR: 16, 12, 8, 7.
+# ============================================================================
+
+fn _vg(a: Vec4i, b: Vec4i, c: Vec4i, d: Vec4i, mx: Vec4i, my: Vec4i) -> [Vec4i]:
+    """BLAKE2s G function on 4 lanes in parallel (RFC 7693 §3.1).
+
+    G(a,b,c,d,x,y):
+        a = a + b + x;   d = ROTR(d^a, 16)
+        c = c + d;       b = ROTR(b^c, 12)
+        a = a + b + y;   d = ROTR(d^a, 8)
+        c = c + d;       b = ROTR(b^c, 7)
+    """
+    var va = _vadd(_vadd(a, b), mx)
+    var vd = _vrotr16(simd_xor_i32x4(d, va))
+    var vc = _vadd(c, vd)
+    var vb = _vrotr12(simd_xor_i32x4(b, vc))
+    va = _vadd(_vadd(va, vb), my)
+    vd = _vrotr8(simd_xor_i32x4(vd, va))
+    vc = _vadd(vc, vd)
+    vb = _vrotr7(simd_xor_i32x4(vb, vc))
+    var result: [Vec4i] = []
+    result.push(va)
+    result.push(vb)
+    result.push(vc)
+    result.push(vd)
+    result
+
+# ============================================================================
+# Compression function (RFC 7693 §3.2)
+# ============================================================================
+
+fn _blake2s_compress(h: [u32], block: [u8], t_lo: u32, t_hi: u32, f0: u32) -> [u32]:
+    """BLAKE2s compression F (RFC 7693 §3.2).
+
+    h:     8-word chained state (u32).
+    block: 64-byte padded block.
+    t_lo:  counter low word (bytes processed, low 32 bits).
+    t_hi:  counter high word (bytes processed, high 32 bits).
+    f0:    finalization flag (0xFFFFFFFF if last block, else 0).
+
+    Returns updated h (8 words).
+    """
+    val iv = _blake2s_iv()
+    val sigma = _sigma()
+
+    # Parse message block as 16 u32 little-endian words
+    var m: [u32] = []
+    var mi: u64 = 0
+    while mi < 16:
+        m.push(_le32_load(block, mi * 4))
+        mi = mi + 1
+
+    # Initialize working vector v[0..15] (RFC 7693 §3.1 Step 2)
+    # v[0..7] = h[0..7], v[8..15] = IV[0..7]
+    # v[12] ^= t_lo, v[13] ^= t_hi, v[14] ^= f0
+    var v0 = h[0]
+    var v1 = h[1]
+    var v2 = h[2]
+    var v3 = h[3]
+    var v4 = h[4]
+    var v5 = h[5]
+    var v6 = h[6]
+    var v7 = h[7]
+    var v8  = iv[0]
+    var v9  = iv[1]
+    var v10 = iv[2]
+    var v11 = iv[3]
+    var v12 = iv[4] ^ t_lo
+    var v13 = iv[5] ^ t_hi
+    var v14 = iv[6] ^ f0
+    var v15 = iv[7]
+
+    # 10 rounds
+    var r: u64 = 0
+    while r < 10:
+        val sr = sigma[r]
+
+        # Build message Vec4i for column and diagonal phases
+        # Column: G(v0,v4,v8,v12) G(v1,v5,v9,v13) G(v2,v6,v10,v14) G(v3,v7,v11,v15)
+        # mx_col = σ[r][0,2,4,6]  my_col = σ[r][1,3,5,7]
+        val mx_col = Vec4i(
+            x: _u32_to_i32(m[sr[0]]),
+            y: _u32_to_i32(m[sr[2]]),
+            z: _u32_to_i32(m[sr[4]]),
+            w: _u32_to_i32(m[sr[6]]))
+        val my_col = Vec4i(
+            x: _u32_to_i32(m[sr[1]]),
+            y: _u32_to_i32(m[sr[3]]),
+            z: _u32_to_i32(m[sr[5]]),
+            w: _u32_to_i32(m[sr[7]]))
+
+        val va_in = Vec4i(x: _u32_to_i32(v0), y: _u32_to_i32(v1), z: _u32_to_i32(v2), w: _u32_to_i32(v3))
+        val vb_in = Vec4i(x: _u32_to_i32(v4), y: _u32_to_i32(v5), z: _u32_to_i32(v6), w: _u32_to_i32(v7))
+        val vc_in = Vec4i(x: _u32_to_i32(v8), y: _u32_to_i32(v9), z: _u32_to_i32(v10), w: _u32_to_i32(v11))
+        val vd_in = Vec4i(x: _u32_to_i32(v12), y: _u32_to_i32(v13), z: _u32_to_i32(v14), w: _u32_to_i32(v15))
+
+        val col_out = _vg(va_in, vb_in, vc_in, vd_in, mx_col, my_col)
+        val ca = col_out[0]
+        val cb = col_out[1]
+        val cc = col_out[2]
+        val cd = col_out[3]
+
+        # Diagonal phase: rotate lanes before G, then un-rotate after
+        # b: (y,z,w,x)  c: (z,w,x,y)  d: (w,x,y,z)
+        val cb_d = Vec4i(x: cb.y, y: cb.z, z: cb.w, w: cb.x)
+        val cc_d = Vec4i(x: cc.z, y: cc.w, z: cc.x, w: cc.y)
+        val cd_d = Vec4i(x: cd.w, y: cd.x, z: cd.y, w: cd.z)
+
+        # Diagonal: G(v0,v5,v10,v15) G(v1,v6,v11,v12) G(v2,v7,v8,v13) G(v3,v4,v9,v14)
+        # mx_diag = σ[r][8,10,12,14]  my_diag = σ[r][9,11,13,15]
+        val mx_diag = Vec4i(
+            x: _u32_to_i32(m[sr[8]]),
+            y: _u32_to_i32(m[sr[10]]),
+            z: _u32_to_i32(m[sr[12]]),
+            w: _u32_to_i32(m[sr[14]]))
+        val my_diag = Vec4i(
+            x: _u32_to_i32(m[sr[9]]),
+            y: _u32_to_i32(m[sr[11]]),
+            z: _u32_to_i32(m[sr[13]]),
+            w: _u32_to_i32(m[sr[15]]))
+
+        val diag_out = _vg(ca, cb_d, cc_d, cd_d, mx_diag, my_diag)
+        val da = diag_out[0]
+        val db_r = diag_out[1]
+        val dc_r = diag_out[2]
+        val dd_r = diag_out[3]
+
+        # Un-rotate: b: (w,x,y,z)  c: (z,w,x,y)  d: (y,z,w,x)
+        val db = Vec4i(x: db_r.w, y: db_r.x, z: db_r.y, w: db_r.z)
+        val dc = Vec4i(x: dc_r.z, y: dc_r.w, z: dc_r.x, w: dc_r.y)
+        val dd = Vec4i(x: dd_r.y, y: dd_r.z, z: dd_r.w, w: dd_r.x)
+
+        # Extract updated words
+        v0  = _i32_to_u32(da.x)
+        v1  = _i32_to_u32(da.y)
+        v2  = _i32_to_u32(da.z)
+        v3  = _i32_to_u32(da.w)
+        v4  = _i32_to_u32(db.x)
+        v5  = _i32_to_u32(db.y)
+        v6  = _i32_to_u32(db.z)
+        v7  = _i32_to_u32(db.w)
+        v8  = _i32_to_u32(dc.x)
+        v9  = _i32_to_u32(dc.y)
+        v10 = _i32_to_u32(dc.z)
+        v11 = _i32_to_u32(dc.w)
+        v12 = _i32_to_u32(dd.x)
+        v13 = _i32_to_u32(dd.y)
+        v14 = _i32_to_u32(dd.z)
+        v15 = _i32_to_u32(dd.w)
+
+        r = r + 1
+
+    # Finalize: h[i] ^= v[i] ^ v[i+8]
+    var new_h: [u32] = []
+    new_h.push(h[0] ^ v0 ^ v8)
+    new_h.push(h[1] ^ v1 ^ v9)
+    new_h.push(h[2] ^ v2 ^ v10)
+    new_h.push(h[3] ^ v3 ^ v11)
+    new_h.push(h[4] ^ v4 ^ v12)
+    new_h.push(h[5] ^ v5 ^ v13)
+    new_h.push(h[6] ^ v6 ^ v14)
+    new_h.push(h[7] ^ v7 ^ v15)
+    new_h
+
+# ============================================================================
+# Blake2sState — streaming hash context
+# ============================================================================
+
+struct Blake2sState:
+    """BLAKE2s streaming hash context (RFC 7693 §2.2)."""
+    h:          [u32]  # 8-word chained state
+    buf:        [u8]   # internal input buffer (max 64 bytes)
+    t_lo:       u32    # counter low word
+    t_hi:       u32    # counter high word
+    output_len: u32    # desired output length (1..32)
+    key_len:    u32    # key length (0 = unkeyed)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn blake2s_init(key: [u8], output_len: u32) -> Blake2sState:
+    """Initialize a BLAKE2s context (RFC 7693 §3.3).
+
+    key:        0..32-byte key; empty slice for unkeyed hashing.
+    output_len: desired output length in bytes (1..32).
+
+    Returns an initialized Blake2sState.
+
+    Example:
+        val st = blake2s_init([], 32u32)
+    """
+    val iv = _blake2s_iv()
+    val kk = key.len().to_u32()
+    val nn = output_len
+
+    # Parameter block p0 = 0x01010000 ^ (kk << 8) ^ nn
+    val p0 = 0x01010000u32 ^ (kk << 8u32) ^ nn
+
+    var h: [u32] = []
+    h.push(iv[0] ^ p0)
+    h.push(iv[1])
+    h.push(iv[2])
+    h.push(iv[3])
+    h.push(iv[4])
+    h.push(iv[5])
+    h.push(iv[6])
+    h.push(iv[7])
+
+    var buf: [u8] = []
+
+    # Keyed mode: prepend key block (key padded to 64 bytes)
+    if kk > 0u32:
+        var key_block: [u8] = []
+        var ki: u64 = 0
+        while ki < key.len():
+            key_block.push(key[ki])
+            ki = ki + 1
+        # Pad to 64 bytes
+        while key_block.len() < 64:
+            key_block.push(0u8)
+        # Store as buffered but do NOT compress yet — will be flushed in update/final
+        var bi: u64 = 0
+        while bi < 64:
+            buf.push(key_block[bi])
+            bi = bi + 1
+
+    Blake2sState(
+        h:          h,
+        buf:        buf,
+        t_lo:       0u32,
+        t_hi:       0u32,
+        output_len: nn,
+        key_len:    kk)
+
+fn blake2s_update(state: Blake2sState, msg: [u8]) -> Blake2sState:
+    """Feed bytes into a BLAKE2s context (RFC 7693 §3.3).
+
+    Buffers data and compresses full 64-byte blocks, holding back the last
+    block so blake2s_final can set the finalization flag.
+
+    Returns the updated Blake2sState.
+
+    Example:
+        val st2 = blake2s_update(st, data)
+    """
+    if msg.len() == 0:
+        return state
+
+    var h    = state.h
+    var buf  = state.buf
+    var t_lo = state.t_lo
+    var t_hi = state.t_hi
+    var mi: u64 = 0
+
+    while mi < msg.len():
+        # If buffer is full (64 bytes) and we have more data, compress it now
+        # (it is NOT the last block)
+        if buf.len() == 64:
+            # Increment counter by 64
+            val old_t = t_lo
+            t_lo = _add32(t_lo, 64u32)
+            if t_lo < old_t:
+                t_hi = _add32(t_hi, 1u32)
+            h = _blake2s_compress(h, buf, t_lo, t_hi, 0u32)
+            buf = []
+
+        buf.push(msg[mi])
+        mi = mi + 1
+
+    Blake2sState(
+        h:          h,
+        buf:        buf,
+        t_lo:       t_lo,
+        t_hi:       t_hi,
+        output_len: state.output_len,
+        key_len:    state.key_len)
+
+fn blake2s_final(state: Blake2sState) -> [u8]:
+    """Finalize a BLAKE2s context and return the digest (RFC 7693 §3.3).
+
+    Pads the last block to 64 bytes, sets the finalization flag, compresses,
+    and serializes output_len bytes little-endian from the chained state.
+
+    Returns output_len bytes.
+
+    Example:
+        val digest = blake2s_final(st)
+    """
+    var h    = state.h
+    var buf  = state.buf
+    var t_lo = state.t_lo
+    var t_hi = state.t_hi
+
+    # Pad buffer to 64 bytes
+    while buf.len() < 64:
+        buf.push(0u8)
+
+    # Increment counter by the number of real bytes in the last block.
+    # For keyed mode the key block was already in buf at init; if it was
+    # never flushed (no message data at all), it counts as 64 bytes.
+    # We compute: bytes_in_last_block = buf.len() before padding — but we
+    # already padded above. Track via the original buf length before the loop.
+    # Actually: after update(), buf contains 1..64 bytes of real content.
+    # If key_len > 0 and no update was called, buf is exactly the 64-byte key block.
+    # The counter should reflect the key block (64) + message bytes.
+    # Re-derive: total bytes processed so far = t_lo (already incremented for
+    # all compressed blocks). The final block contains buf_real_len real bytes.
+    # buf_real_len = buf.len() before the padding loop above. Since we mutated buf,
+    # we must count real bytes differently.
+    # Approach: buf contained buf_pre_pad bytes of real data before padding loop.
+    # We capture this as: final block real bytes = state.buf.len() (original).
+    val final_real = state.buf.len().to_u32()
+    val old_t = t_lo
+    t_lo = _add32(t_lo, final_real)
+    if t_lo < old_t:
+        t_hi = _add32(t_hi, 1u32)
+
+    # Finalization flag f0 = 0xFFFFFFFF
+    h = _blake2s_compress(h, buf, t_lo, t_hi, 0xFFFFFFFFu32)
+
+    # Serialize: little-endian words → bytes, take output_len bytes
+    var out: [u8] = []
+    val nn = state.output_len.to_u64()
+    var wi: u64 = 0
+    while wi < 8 and out.len() < nn:
+        val word = h[wi]
+        var bi: u64 = 0
+        while bi < 4 and out.len() < nn:
+            out.push(((word >> (bi * 8u32)) & 0xFFu32).to_u8())
+            bi = bi + 1
+        wi = wi + 1
+
+    out
+
+fn blake2s_hash(key: [u8], output_len: u32, msg: [u8]) -> [u8]:
+    """One-shot BLAKE2s hash (RFC 7693 §3.3).
+
+    Convenience wrapper: init → update → final.
+
+    key:        0..32-byte key; empty for unkeyed.
+    output_len: desired output length (1..32).
+    msg:        input message bytes.
+
+    Returns output_len bytes.
+
+    Example:
+        val digest = blake2s_hash([], 32u32, msg_bytes)
+    """
+    val st0 = blake2s_init(key, output_len)
+    val st1 = blake2s_update(st0, msg)
+    blake2s_final(st1)

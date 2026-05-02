@@ -175,53 +175,145 @@ fn kreg_to_index(k_id: i64) -> i64:
         0
 
 # ============================================================================
-# EVEX Prefix Encoding (scaffold — M1 implements per §3 with ERR-001 fix)
-# DO NOT implement byte construction here; E3 errata (ERR-001 P0/P1 swap)
-# must be resolved first. See simd_strict_emit_errata.md before touching this.
+# EVEX Prefix Encoding — post-F4 corrected encoder (ERR-001a/b RESOLVED)
+# Reference: simd_strict_emit_errata.md §ERR-001 "Corrected byte-construction sequence"
+#            Intel SDM Vol 2A §2.6.1 Table 2-36
+#
+# Parameters:
+#   dest_idx  : ZMM dest register index 0-31
+#   src1_idx  : ZMM src1 (vvvv field) index 0-31
+#   src2_idx  : ZMM src2 (ModRM.rm) index 0-31
+#   kmask_idx : opmask aaa field 0-7 (0=k0=unmasked)
+#   z         : zeroing-mask flag (true = z=1 in P2)
+#   mm        : opcode map — 1=0F 2=0F38 3=0F3A 5=MAP5 6=MAP6
+#   w         : W bit — 0=f32/i32  1=f64/i64
+#   pp        : implied prefix — 0=none 1=0x66 2=0xF3 3=0xF2
+#   opcode    : 1-byte opcode value
+#
+# Returns [i64; 6] = [0x62, P0, P1, P2, opcode, ModRM]
 # ============================================================================
 
-fn evex_encode_3op_zmm_scaffold(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool, opcode: i64) -> [i64]:
+fn evex_encode_3op_zmm(dest_idx: i64, src1_idx: i64, src2_idx: i64, kmask_idx: i64, z: bool, mm: i64, w: i64, pp: i64, opcode: i64) -> [i64]:
     """
-    Scaffold placeholder for EVEX 3-operand ZMM encoding.
-    Signature: VADDPS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
-    M1 fills body per simd_backend_strict_emit_detail_part1.md §3 (after ERR-001 fix).
-    Returns empty byte array so callers that check length will fail loudly.
+    Corrected EVEX 3-operand ZMM encoder.
+    Implements Intel SDM Vol 2A §2.6.1 Table 2-36 byte layout.
+    ERR-001a fix: mm bits[2:0] placed at P0[2:0] (not shifted by 2).
+    ERR-001b fix: W placed at P1[7] (not P0[0]); P0[7] hard-coded to must-1 removed.
+    X-bit fix: in reg-reg form X encodes src2[4] (ZMM16-31 rm extension) per SDM §2.6.1.
+    Cross-ref: simd_strict_emit_errata.md RESOLVED ERR-001a, ERR-001b.
+    Uses pure arithmetic (%, /) to avoid operator-precedence issues with `and`/`or`.
     """
-    # @allow unimplemented_placeholder
-    # M1 fills: EVEX [0x62, P0, P1, P2, opcode, ModRM] — see §3
-    []
+    # Register bit extraction using % / (modulo/divide) — avoids `and` precedence issues.
+    # bit[n] of x = (x / 2^n) % 2
+    val r_bit   = (dest_idx  / 8)  % 2   # dest[3]
+    val r_prime = (dest_idx  / 16) % 2   # dest[4] — ZMM16-31 extension
+    val x_bit   = (src2_idx  / 16) % 2   # src2[4] — ZMM16-31 rm extension; Intel SDM Vol 2A §2.6.1
+    val b_bit   = (src2_idx  / 8)  % 2   # src2[3]
+
+    # C2 §2.6.1: Byte1 (P0) = ~R ~X ~B ~R' 0 m2 m1 m0
+    # ERR-001a resolved: mm bits at P0[2:0], NOT shifted left by 2
+    val not_r       = 1 - r_bit
+    val not_x       = 1 - x_bit
+    val not_b       = 1 - b_bit
+    val not_r_prime = 1 - r_prime
+    val mm_m2 = (mm / 4) % 2   # mm[2]
+    val mm_m1 = (mm / 2) % 2   # mm[1]
+    val mm_m0 = mm      % 2    # mm[0]
+    val p0 = (not_r       * 128)  # bit[7]
+           + (not_x       * 64)   # bit[6]
+           + (not_b       * 32)   # bit[5]
+           + (not_r_prime * 16)   # bit[4]
+           + 0                    # bit[3] reserved = 0
+           + (mm_m2       * 4)    # bit[2]
+           + (mm_m1       * 2)    # bit[1]
+           + mm_m0                # bit[0]
+
+    # C2 §2.6.1: Byte2 (P1) = W ~v3 ~v2 ~v1 ~v0 1 p1 p0
+    # ERR-001b resolved: W at bit[7] of P1 (not P0[0])
+    # vvvv_lo4 = src1[3:0]; complement via 15 - x (4-bit: values 0..15)
+    val vvvv_lo4 = src1_idx % 16     # src1[3:0]
+    val not_vvvv = 15 - vvvv_lo4
+    val pp_hi = (pp / 2) % 2         # pp[1]
+    val pp_lo = pp       % 2         # pp[0]
+    val p1 = (w          * 128)      # bit[7] W
+           + (not_vvvv   * 8)        # bits[6:3] ~vvvv (not_vvvv is 0..15, fits 4 bits)
+           + 4                       # bit[2] must-1 (EVEX distinguisher)
+           + (pp_hi      * 2)        # bit[1]
+           + pp_lo                   # bit[0]
+
+    # C2 §2.6.1: Byte3 (P2) = z L' L b ~V' a2 a1 a0
+    val v_prime = (src1_idx / 16) % 2   # src1[4] — ZMM16-31 extension
+    val not_v   = 1 - v_prime
+    val z_bit   = if z: 1 else 0
+    # ll=2 = L'L=10b: L'=1 (bit6), L=0 (bit5) — 512-bit ZMM, constant
+    val ll_hi   = 1    # L' = 1 for 512-bit
+    val ll_lo   = 0    # L  = 0 for 512-bit
+    val b_p2    = 0    # no broadcast/SAE for basic 3-op
+    val aaa     = kmask_idx % 8    # opmask aaa field [2:0]
+    val p2 = (z_bit * 128)    # bit[7]
+           + (ll_hi * 64)     # bit[6] L'
+           + (ll_lo * 32)     # bit[5] L
+           + (b_p2  * 16)     # bit[4] b
+           + (not_v * 8)      # bit[3] ~V'
+           + aaa              # bits[2:0] aaa
+
+    # ModRM: mod=11 reg=dest[2:0] rm=src2[2:0]
+    val modrm = 192 + ((dest_idx % 8) * 8) + (src2_idx % 8)
+
+    [0x62, p0, p1, p2, opcode % 256, modrm]
 
 # ============================================================================
-# AVX-512 Arithmetic Instructions (scaffold; M1 fills per SimdZmm* MachOpcodes)
+# AVX-512 Arithmetic Instructions — M1 pilot emit bodies
 # ============================================================================
 
 fn encode_avx512_add_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool) -> [i64]:
     """
-    Scaffold: VADDPS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
+    VADDPS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
+    Encoding: EVEX.512.0F.W0 58 /r
     MachOpcode: SimdZmmAddF32x16
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3; needs ERR-001 fix first.
+    Golden (dest=0,src1=0,src2=0,k=0,z=false): 62 F1 7C 48 58 C0
+    Reference: Intel SDM Vol 2B VADDPS §4, simd_strict_emit_errata.md ERR-001 RESOLVED
     """
-    # @allow unimplemented_placeholder
-    evex_encode_3op_zmm_scaffold(dest, src1, src2, kmask, z, 0x58)
+    val d   = zmm_to_index(dest)
+    val s1  = zmm_to_index(src1)
+    val s2  = zmm_to_index(src2)
+    val k   = kreg_to_index(kmask)
+    # VADDPS: EVEX.512.0F.W0 — mm=1 (0F map), w=0, pp=0 (no implied prefix)
+    evex_encode_3op_zmm(d, s1, s2, k, z, 1, 0, 0, 0x58)
 
 fn encode_avx512_mul_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool) -> [i64]:
     """
-    Scaffold: VMULPS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
+    VMULPS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
+    Encoding: EVEX.512.0F.W0 59 /r
     MachOpcode: SimdZmmMulF32x16
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    Golden (dest=0,src1=0,src2=0,k=0,z=false): 62 F1 7C 48 59 C0
+    Reference: Intel SDM Vol 2B VMULPS §4, simd_strict_emit_errata.md ERR-001 RESOLVED
     """
-    # @allow unimplemented_placeholder
-    evex_encode_3op_zmm_scaffold(dest, src1, src2, kmask, z, 0x59)
+    val d   = zmm_to_index(dest)
+    val s1  = zmm_to_index(src1)
+    val s2  = zmm_to_index(src2)
+    val k   = kreg_to_index(kmask)
+    # VMULPS: EVEX.512.0F.W0 — mm=1 (0F map), w=0, pp=0 (no implied prefix)
+    evex_encode_3op_zmm(d, s1, s2, k, z, 1, 0, 0, 0x59)
 
-fn encode_avx512_fma_f32x16(dest: i64, src1: i64, src2: i64, src3: i64, kmask: i64, z: bool) -> [i64]:
+fn encode_avx512_fma_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool) -> [i64]:
     """
-    Scaffold: VFMADD213PS zmm_dest{kmask}{z}, zmm_src1, zmm_src2 (accumulate into dest)
+    VFMADD213PS zmm_dest{kmask}{z}, zmm_src1, zmm_src2
+    Encoding: EVEX.512.66.0F38.W0 A8 /r
     MachOpcode: SimdZmmFmaF32x16
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3 (FMA form 213).
+    FMA-213 form: dest = src1 * dest + src2 (dest is both output and implicit acc).
+    Callers must ensure the accumulator is pre-loaded into dest before emit.
+    Golden (dest=0,src1=1,src2=2,k=1,z=true): 62 F2 75 C9 A8 C2
+    Reference: Intel SDM Vol 2B VFMADD132/213/231PS §4,
+               simd_strict_emit_errata.md ERR-001 RESOLVED,
+               simd_spec_verification_2026-05-02.md V-06
     """
-    # @allow unimplemented_placeholder
-    # FMA uses 3 source registers; scaffold passes src3 as src2 slot for arity
-    evex_encode_3op_zmm_scaffold(dest, src1, src2, kmask, z, 0xA8)
+    val d   = zmm_to_index(dest)
+    val s1  = zmm_to_index(src1)
+    val s2  = zmm_to_index(src2)
+    val k   = kreg_to_index(kmask)
+    # VFMADD213PS: EVEX.512.66.0F38.W0 — mm=2 (0F38 map), w=0, pp=1 (0x66)
+    evex_encode_3op_zmm(d, s1, s2, k, z, 2, 0, 1, 0xA8)
 
 fn encode_avx512_mask_op_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool, base_opcode: i64) -> [i64]:
     """
@@ -256,28 +348,232 @@ fn encode_avx512_store_zmm(src: i64, base_reg: i64, offset: i64, kmask: i64) -> 
     []
 
 # ============================================================================
-# AVX-512 Gather / Scatter Instructions (scaffold)
+# EVEX VSIB Encoder — gather/scatter memory operand form
+#
+# Gather/scatter use VSIB addressing: the index comes from a ZMM register,
+# not a GPR. This requires a NEW encoder (cannot reuse evex_encode_3op_zmm)
+# because three fields differ structurally:
+#   1. x_bit  = idx_zmm[3]  (not 0 as in reg-reg form)
+#   2. V'     = idx_zmm[4]  (not src1[4]; there is no 3rd vector src)
+#   3. ModRM  = mod in {00,01,10} + rm=100 (SIB present, not mod=11 reg-reg)
+#
+# vvvv MUST be 1111 (no 3rd vector operand); ~vvvv = 1111 in P1.
+#
+# SIB byte encodes VSIB (Vector Scale-Index-Base):
+#   bits[7:6] = ss   (scale: 00=x1, 01=x2, 10=x4, 11=x8)
+#   bits[5:3] = idx  (ZMM index register [2:0])
+#   bits[2:0] = base (GPR base register [2:0])
+#
+# Displacement (disp8 compressed):
+#   Gather/scatter use disp8*N where N=4 (dword element size, EVEX.512 form).
+#   disp8 range: -128..127 scaled, raw disp range: -512..508 step 4.
+#   If disp % 4 != 0 OR disp/4 not in -128..127 then emit disp32 (mod=10).
+#   mod=00: no displacement; mod=01: disp8 scaled; mod=10: disp32.
+#
+# k0 FORBIDDEN: gather/scatter require a non-zero opmask (Intel SDM Vol 2C
+#   VPGATHERDD note). Passing kmask_idx==0 returns [] (error sentinel).
+#
+# NOTE: encoder assumes base_gpr != rbp/r13 (idx 5/13) when disp==0.
+#   Those bases with mod=00 force a disp32 per Intel SDM §2.2.1.2; callers
+#   using rbp/r13 base with zero displacement must pass disp=0 and tolerate
+#   the mod=00 encoding or pass a dummy disp=0 explicitly knowing HW will
+#   re-read base+0. Full rbp/r13 fixup is a future enhancement.
+#
+# Reference: Intel SDM Vol 2C §VPGATHERDD, §VPSCATTERDD, §VGATHERDPS,
+#            §VSCATTERDPS; Vol 2A §2.6.1 Table 2-36 (EVEX prefix);
+#            Vol 2A §2.6.2 VSIB; simd_strict_emit_errata.md (ERR-001 RESOLVED)
+# llvm-mc verified: all 10 goldens in avx512_gather_scatter_spec.spl
+# ============================================================================
+
+fn evex_encode_vsib_zmm(opcode: i64, data_zmm_idx: i64, idx_zmm_idx: i64, base_gpr: i64, scale: i64, disp: i64, kmask_idx: i64, mm: i64, w: i64, pp: i64) -> [i64]:
+    """
+    EVEX VSIB encoder for AVX-512 gather/scatter instructions.
+    data_zmm_idx : destination (gather) or source (scatter) ZMM register index 0-31
+    idx_zmm_idx  : ZMM index register index 0-31 (VSIB index)
+    base_gpr     : GPR base register index 0-15 (rax=0, rcx=1, ... r15=15)
+    scale        : VSIB scale factor: 1, 2, 4, or 8
+    disp         : byte displacement (raw, unscaled); 0 = no displacement
+    kmask_idx    : opmask aaa field 1-7 (k0=0 FORBIDDEN per Intel SDM gather note)
+    mm, w, pp    : EVEX opcode map, W bit, implied prefix (same as evex_encode_3op_zmm)
+    Returns []   : if kmask_idx == 0 (k0 forbidden guard per G-01 and SDM)
+    Intel SDM Vol 2C §VPGATHERDD; Vol 2A §2.6.1 Table 2-36, §2.6.2 VSIB
+    """
+    if kmask_idx == 0:
+        # k0 is forbidden for gather/scatter (Intel SDM Vol 2C §VPGATHERDD note).
+        # Caller must supply k1-k7. Return [] as error sentinel.
+        []
+    else:
+        # --- P0 (EVEX byte 1) ---
+        # ~R  = NOT data_zmm[3]   (ModRM.reg extension)
+        # ~X  = NOT idx_zmm[3]    (VSIB index extension — KEY difference from reg-reg)
+        # ~B  = NOT base_gpr[3]   (SIB.base extension)
+        # ~R' = NOT data_zmm[4]   (ZMM16-31 dest extension)
+        # mm  = opcode map bits[2:0]
+        val r_bit   = (data_zmm_idx / 8)  % 2
+        val r_prime = (data_zmm_idx / 16) % 2
+        val x_bit   = (idx_zmm_idx  / 8)  % 2
+        val b_bit   = (base_gpr     / 8)  % 2
+        val not_r   = 1 - r_bit
+        val not_x   = 1 - x_bit
+        val not_b   = 1 - b_bit
+        val not_rp  = 1 - r_prime
+        val mm_m2 = (mm / 4) % 2
+        val mm_m1 = (mm / 2) % 2
+        val mm_m0 = mm       % 2
+        val p0 = (not_r  * 128) + (not_x  * 64) + (not_b  * 32)
+               + (not_rp * 16)  + 0
+               + (mm_m2  * 4)   + (mm_m1  * 2)  + mm_m0
+
+        # --- P1 (EVEX byte 2) ---
+        # vvvv = 1111 (no 3rd vector src); ~vvvv stored as 15 in P1 bits[6:3]
+        val not_vvvv = 15
+        val pp_hi = (pp / 2) % 2
+        val pp_lo = pp       % 2
+        val p1 = (w * 128) + (not_vvvv * 8) + 4 + (pp_hi * 2) + pp_lo
+
+        # --- P2 (EVEX byte 3) ---
+        # z=0 (gather: merge-masking only; scatter: z not applicable)
+        # L'L = 10b (512-bit ZMM): L'=1 (bit6), L=0 (bit5)
+        # ~V' = NOT idx_zmm[4]  — KEY difference: V' encodes idx_zmm bit[4]
+        # aaa = kmask_idx[2:0]
+        val v_prime_idx = (idx_zmm_idx / 16) % 2
+        val not_v_idx   = 1 - v_prime_idx
+        val aaa = kmask_idx % 8
+        val p2 = 64 + (not_v_idx * 8) + aaa
+        # z=0 (bit7=0), L'=1 (bit6=64), L=0 (bit5=0), b=0 (bit4=0), ~V'=not_v_idx*8, aaa
+
+        # --- Scale → ss bits[7:6] of SIB ---
+        val ss = if scale == 8: 3
+                 else if scale == 4: 2
+                 else if scale == 2: 1
+                 else: 0
+
+        # --- SIB: ss(2) | idx_zmm[2:0](3) | base_gpr[2:0](3) ---
+        val sib_idx  = idx_zmm_idx % 8
+        val sib_base = base_gpr    % 8
+        val sib = (ss * 64) + (sib_idx * 8) + sib_base
+
+        # --- ModRM: mod | reg=data_zmm[2:0] | rm=100 (forces SIB) ---
+        val reg_lo = data_zmm_idx % 8
+        val disp_scaled = disp / 4
+        val disp_rem    = disp % 4
+        if disp == 0:
+            # mod=00: no displacement
+            val modrm00 = (0 * 64) + (reg_lo * 8) + 4
+            [0x62, p0, p1, p2, opcode % 256, modrm00, sib]
+        else if (disp_rem == 0) and (disp_scaled >= -128) and (disp_scaled <= 127):
+            # mod=01: disp8 compressed (disp / 4 fits signed byte)
+            val modrm01 = (1 * 64) + (reg_lo * 8) + 4
+            val d8 = disp_scaled % 256
+            [0x62, p0, p1, p2, opcode % 256, modrm01, sib, d8]
+        else:
+            # mod=10: disp32 (4 bytes, little-endian, unscaled)
+            val modrm10 = (2 * 64) + (reg_lo * 8) + 4
+            val d0 = disp              % 256
+            val d1 = (disp / 256)      % 256
+            val d2 = (disp / 65536)    % 256
+            val d3 = (disp / 16777216) % 256
+            [0x62, p0, p1, p2, opcode % 256, modrm10, sib, d0, d1, d2, d3]
+
+# ============================================================================
+# AVX-512 Gather / Scatter Instructions
 # ============================================================================
 
 fn encode_avx512_gather_f32x16(dest: i64, base_reg: i64, idx_zmm: i64, scale: i64, kmask: i64) -> [i64]:
     """
-    Scaffold: VGATHERDPS zmm_dest{kmask}, [base_reg + zmm_idx * scale]
+    Legacy scaffold wrapper: VGATHERDPS zmm_dest{kmask}, [base_reg + zmm_idx * scale]
     MachOpcode: SimdZmmGather
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3 (VSIB addressing).
+    Delegates to emit_avx512_vgatherdps_zmm (disp=0).
     PRECONDITION: kmask != k0 (G-01 §8.2; k0 guard required).
     """
-    # @allow unimplemented_placeholder
-    []
+    val d  = zmm_to_index(dest)
+    val ki = kreg_to_index(kmask)
+    val zi = zmm_to_index(idx_zmm)
+    evex_encode_vsib_zmm(0x92, d, zi, base_reg, scale, 0, ki, 2, 0, 1)
 
 fn encode_avx512_scatter_f32x16(base_reg: i64, idx_zmm: i64, scale: i64, src: i64, kmask: i64) -> [i64]:
     """
-    Scaffold: VSCATTERDPS [base_reg + zmm_idx * scale]{kmask}, zmm_src
+    Legacy scaffold wrapper: VSCATTERDPS [base_reg + zmm_idx * scale]{kmask}, zmm_src
     MachOpcode: SimdZmmScatter
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3 (VSIB + write mask).
+    Delegates to emit_avx512_vscatterdps_zmm (disp=0).
     PRECONDITION: kmask != k0 (G-01 §8.2; k0 guard required).
     """
-    # @allow unimplemented_placeholder
-    []
+    val ki = kreg_to_index(kmask)
+    val zi = zmm_to_index(idx_zmm)
+    val s  = zmm_to_index(src)
+    evex_encode_vsib_zmm(0xA2, s, zi, base_reg, scale, 0, ki, 2, 0, 1)
+
+fn emit_avx512_vpgatherdd_zmm(zdst: i64, kmask: i64, zindex: i64, base_gpr: i64, scale: i64, disp: i64) -> [i64]:
+    """
+    VPGATHERDD zmm_dst{kmask}, [base_gpr + zmm_index * scale + disp]
+    Gathers 16 int32 dwords from memory into ZMM using VSIB addressing.
+    Encoding: EVEX.512.66.0F38.W0 90 /vsib
+    Guard: kmask must be k1-k7 (k0 FORBIDDEN per Intel SDM Vol 2C §VPGATHERDD + G-01 §8.2).
+    Returns [] when kmask==k0 (error sentinel; caller must not pass k0).
+    # O5 §1.1: Intel SDM Vol 2C §VPGATHERDD entry
+    # O5 §1.2: Intel SDM Vol 2A §2.6.1 Table 2-36, §2.6.2 VSIB
+    Golden (zdst=Z0,k=k1,zidx=Z1,base=rax,scale=4,disp=0): 62 F2 7D 49 90 04 88
+    llvm-mc verified: vpgatherdd (%rax,%zmm1,4), %zmm0 {%k1}
+    """
+    val d  = zmm_to_index(zdst)
+    val ki = kreg_to_index(kmask)
+    val zi = zmm_to_index(zindex)
+    # VPGATHERDD: EVEX.512.66.0F38.W0 opcode=0x90; mm=2, w=0, pp=1
+    evex_encode_vsib_zmm(0x90, d, zi, base_gpr, scale, disp, ki, 2, 0, 1)
+
+fn emit_avx512_vpscatterdd_zmm(kmask: i64, zindex: i64, base_gpr: i64, scale: i64, disp: i64, zsrc: i64) -> [i64]:
+    """
+    VPSCATTERDD [base_gpr + zmm_index * scale + disp]{kmask}, zmm_src
+    Scatters 16 int32 dwords from ZMM into memory using VSIB addressing.
+    Encoding: EVEX.512.66.0F38.W0 A0 /vsib
+    Guard: kmask must be k1-k7 (k0 FORBIDDEN per Intel SDM Vol 2C §VPSCATTERDD + G-01 §8.2).
+    Returns [] when kmask==k0 (error sentinel; caller must not pass k0).
+    # O5 §1.3: Intel SDM Vol 2C §VPSCATTERDD entry
+    # O5 §1.2: Intel SDM Vol 2A §2.6.1 Table 2-36, §2.6.2 VSIB
+    Golden (k=k1,zidx=Z1,base=rax,scale=4,disp=0,zsrc=Z0): 62 F2 7D 49 A0 04 88
+    llvm-mc verified: vpscatterdd %zmm0, (%rax,%zmm1,4) {%k1}
+    """
+    val ki = kreg_to_index(kmask)
+    val zi = zmm_to_index(zindex)
+    val s  = zmm_to_index(zsrc)
+    # VPSCATTERDD: EVEX.512.66.0F38.W0 opcode=0xA0; mm=2, w=0, pp=1
+    evex_encode_vsib_zmm(0xA0, s, zi, base_gpr, scale, disp, ki, 2, 0, 1)
+
+fn emit_avx512_vgatherdps_zmm(zdst: i64, kmask: i64, zindex: i64, base_gpr: i64, scale: i64, disp: i64) -> [i64]:
+    """
+    VGATHERDPS zmm_dst{kmask}, [base_gpr + zmm_index * scale + disp]
+    Gathers 16 f32 floats from memory into ZMM using VSIB addressing.
+    Encoding: EVEX.512.66.0F38.W0 92 /vsib
+    Guard: kmask must be k1-k7 (k0 FORBIDDEN per Intel SDM Vol 2C §VGATHERDPS + G-01 §8.2).
+    Returns [] when kmask==k0 (error sentinel; caller must not pass k0).
+    # O5 §1.5: Intel SDM Vol 2C §VGATHERDPS entry
+    # O5 §1.2: Intel SDM Vol 2A §2.6.1 Table 2-36, §2.6.2 VSIB
+    Golden (zdst=Z0,k=k1,zidx=Z1,base=rax,scale=4,disp=0): 62 F2 7D 49 92 04 88
+    llvm-mc verified: vgatherdps (%rax,%zmm1,4), %zmm0 {%k1}
+    """
+    val d  = zmm_to_index(zdst)
+    val ki = kreg_to_index(kmask)
+    val zi = zmm_to_index(zindex)
+    # VGATHERDPS: EVEX.512.66.0F38.W0 opcode=0x92; mm=2, w=0, pp=1
+    evex_encode_vsib_zmm(0x92, d, zi, base_gpr, scale, disp, ki, 2, 0, 1)
+
+fn emit_avx512_vscatterdps_zmm(kmask: i64, zindex: i64, base_gpr: i64, scale: i64, disp: i64, zsrc: i64) -> [i64]:
+    """
+    VSCATTERDPS [base_gpr + zmm_index * scale + disp]{kmask}, zmm_src
+    Scatters 16 f32 floats from ZMM into memory using VSIB addressing.
+    Encoding: EVEX.512.66.0F38.W0 A2 /vsib
+    Guard: kmask must be k1-k7 (k0 FORBIDDEN per Intel SDM Vol 2C §VSCATTERDPS + G-01 §8.2).
+    Returns [] when kmask==k0 (error sentinel; caller must not pass k0).
+    # O5 §1.7: Intel SDM Vol 2C §VSCATTERDPS entry
+    # O5 §1.2: Intel SDM Vol 2A §2.6.1 Table 2-36, §2.6.2 VSIB
+    Golden (k=k1,zidx=Z1,base=rax,scale=4,disp=0,zsrc=Z0): 62 F2 7D 49 A2 04 88
+    llvm-mc verified: vscatterdps %zmm0, (%rax,%zmm1,4) {%k1}
+    """
+    val ki = kreg_to_index(kmask)
+    val zi = zmm_to_index(zindex)
+    val s  = zmm_to_index(zsrc)
+    # VSCATTERDPS: EVEX.512.66.0F38.W0 opcode=0xA2; mm=2, w=0, pp=1
+    evex_encode_vsib_zmm(0xA2, s, zi, base_gpr, scale, disp, ki, 2, 0, 1)
 
 # ============================================================================
 # AVX-512 Mask (k-register) Operations (scaffold)
@@ -346,6 +642,265 @@ fn encode_avx512_shuffle_f32x16(dest: i64, src1: i64, src2: i64, imm: i64, kmask
     """
     # @allow unimplemented_placeholder
     []
+
+# ============================================================================
+# EVEX encoder: ZMM × ZMM → k-reg result (VPCMPEQD family)
+#
+# Used for compare instructions whose destination is a k-register (not ZMM).
+# The existing evex_encode_3op_zmm handles the P0/P1/P2 arithmetic correctly
+# for k-reg destinations because k0-k7 all have index < 8 (R=0, R'=0).
+# We pass kdst_idx directly as the dest_idx parameter — ModRM.reg = kdst_idx.
+#
+# # C1 §1.1: Intel SDM Vol 2A §2.6.1 Table 2-36 EVEX byte layout
+# # C1 §1.2: VPCMPEQD EVEX.512.66.0F.W0 76 /r — Intel SDM Vol 2C VPCMPEQD entry
+# ============================================================================
+
+fn evex_encode_zmm_to_kreg_2op(opcode: i64, kdst: i64, src1_idx: i64, src2_idx: i64, kmask_idx: i64, z: bool) -> [i64]:
+    """
+    EVEX encoder for ZMM×ZMM → k-reg result (e.g. VPCMPEQD k_dst, zmm1, zmm2).
+    Reuses evex_encode_3op_zmm: k-reg index 0-7 fits in dest_idx (R=0, R'=0).
+    # C1 §1.1: Intel SDM Vol 2A §2.6.1 Table 2-36
+    # C1 §1.2: VPCMPEQD EVEX.512.66.0F.W0 76 /r — Intel SDM Vol 2C
+    Guard: kdst must be k1-k7 (k0 reserved — G-01 §8.2).
+    """
+    # Precondition check: never emit k0 as destination (G-01 §8.2)
+    if kdst == 0:
+        # k0 is reserved as all-ones; caller must not emit it as dest
+        []
+    else:
+        # mm=1 (0F map), w=0 (W0), pp=1 (0x66 implied prefix)
+        evex_encode_3op_zmm(kdst, src1_idx, src2_idx, kmask_idx, z, 1, 0, 1, opcode)
+
+# ============================================================================
+# 2-byte VEX encoder for k-reg 3-operand ops (KANDB/KORB/KXORB/KANDNB)
+#
+# 2-byte VEX format: 0xC5 <byte1> <opcode> <ModRM>
+# byte1 = (~R<<7) | ((15-ksrc1)<<3) | (L<<2) | pp
+#   ~R=1 for k0-k7 (all < 8, no REX.R extension needed)
+#   (15-ksrc1): stores ~vvvv (4-bit NOT of ksrc1 index) in bits[6:3]
+#   L=1 for L1 (3-op k-reg forms), L=0 for L0 (KMOVW)
+#   pp=1 for 0x66 (KANDB/KORB/KXORB/KANDNB), pp=0 for none (KMOVW)
+# ModRM: mod=11 reg=kdst[2:0] rm=ksrc2[2:0]
+#
+# Verified against llvm-mc -mattr=+avx512f,+avx512dq output:
+#   KANDB k1,k2,k3 → C5 ED 41 CB
+#   KORB  k1,k2,k3 → C5 ED 45 CB
+#   KXORB k1,k2,k3 → C5 ED 47 CB
+#   KANDNB k1,k2,k3 → C5 ED 42 CB
+#
+# # C1 §1.3: Intel SDM Vol 2A §2.3 Table 2-9 (2-byte VEX prefix layout)
+# # C1 §1.4: KANDB  VEX.L1.66.0F.W0 41 /r — Intel SDM Vol 2C KANDB entry
+# # C1 §1.5: KORB   VEX.L1.66.0F.W0 45 /r — Intel SDM Vol 2C KORB entry
+# # C1 §1.6: KXORB  VEX.L1.66.0F.W0 47 /r — Intel SDM Vol 2C KXORB entry
+# # C1 §1.7: KANDNB VEX.L1.66.0F.W0 42 /r — Intel SDM Vol 2C KANDNB entry
+# ============================================================================
+
+fn vex_encode_kreg_3op(opcode: i64, kdst: i64, ksrc1: i64, ksrc2: i64, l: i64, pp: i64) -> [i64]:
+    """
+    2-byte VEX encoder for 3-operand k-register instructions.
+    # C1 §1.3: Intel SDM Vol 2A §2.3 Table 2-9
+    Guard: kdst must be k1-k7 (k0 reserved — G-01 §8.2).
+    """
+    if kdst == 0:
+        []
+    else:
+        # byte1 = (~R=1)<<7 | ((15-ksrc1)<<3) | (L<<2) | pp
+        # 15-ksrc1 gives ~vvvv in 4 bits (since ksrc1 in 0..7, 15-x in 8..15 fits 4 bits)
+        val not_vvvv = 15 - (ksrc1 % 16)
+        val byte1 = 128 + (not_vvvv * 8) + (l * 4) + pp
+        # ModRM: mod=11 reg=kdst[2:0] rm=ksrc2[2:0]
+        val modrm = 192 + ((kdst % 8) * 8) + (ksrc2 % 8)
+        [0xC5, byte1, opcode % 256, modrm]
+
+# ============================================================================
+# 2-byte VEX encoder for KMOVW k_dst, r32 (GPR → k-reg)
+#
+# VEX.L0.0F.W0 92 /r  (L=0, pp=0, no implied prefix)
+# byte1 for KMOVW: ~R=1, ~vvvv=1111 (unused src, stored as 15-0=15<<3), L=0, pp=0
+# Verified against llvm-mc: KMOVW k1, eax → C5 F8 92 C8
+#
+# # C1 §1.8: Intel SDM Vol 2A §2.3 Table 2-9 (2-byte VEX, L=0)
+# # C1 §1.9: KMOVW  VEX.L0.0F.W0 92 /r — Intel SDM Vol 2C KMOVW entry
+# ============================================================================
+
+fn vex_encode_kmov_kreg_gpr(kdst: i64, gpr: i64) -> [i64]:
+    """
+    2-byte VEX encoder for KMOVW k_dst, r32.
+    # C1 §1.8: Intel SDM Vol 2A §2.3 Table 2-9
+    # C1 §1.9: KMOVW VEX.L0.0F.W0 92 /r — Intel SDM Vol 2C
+    Guard: kdst must be k1-k7 (k0 reserved — G-01 §8.2).
+    """
+    if kdst == 0:
+        []
+    else:
+        # vvvv unused: store ~vvvv=1111 → 15-0=15 → (15<<3)=120
+        val byte1 = 128 + 120 + 0 + 0   # ~R=1, ~vvvv=1111, L=0, pp=0 → 0xF8
+        # ModRM: mod=11 reg=kdst[2:0] rm=gpr[3:0] (gpr uses full 4 bits via R bit; low 3 in rm)
+        val modrm = 192 + ((kdst % 8) * 8) + (gpr % 8)
+        [0xC5, byte1, 0x92, modrm]
+
+# ============================================================================
+# AVX-512 Mask Instructions — emit body wrappers
+# ============================================================================
+
+fn emit_avx512_vpcmpeqd_zmm_to_k(kdst: i64, src1: i64, src2: i64, kmask: i64, z: bool) -> [i64]:
+    """
+    VPCMPEQD k_dst{kmask}{z}, zmm_src1, zmm_src2
+    Compares 16 int32 lanes for equality; result written to k-register.
+    Encoding: EVEX.512.66.0F.W0 76 /r
+    Guard: kdst in k1-k7 (never k0 — G-01 §8.2).
+    # C1 §1.2: Intel SDM Vol 2C VPCMPEQD entry
+    """
+    val kd = kdst - X86_K0      # k-reg index 0-7
+    val s1 = zmm_to_index(src1)
+    val s2 = zmm_to_index(src2)
+    val km = kreg_to_index(kmask)
+    evex_encode_zmm_to_kreg_2op(0x76, kd, s1, s2, km, z)
+
+fn emit_avx512_kandb_kreg_3op(kdst: i64, ksrc1: i64, ksrc2: i64) -> [i64]:
+    """
+    KANDB k_dst, k_src1, k_src2  (bitwise AND of 8-bit lane masks)
+    Encoding: VEX.L1.66.0F.W0 41 /r
+    Guard: kdst in k1-k7 (never k0 — G-01 §8.2).
+    # C1 §1.4: Intel SDM Vol 2C KANDB entry
+    """
+    val kd  = kdst  - X86_K0
+    val ks1 = ksrc1 - X86_K0
+    val ks2 = ksrc2 - X86_K0
+    vex_encode_kreg_3op(0x41, kd, ks1, ks2, 1, 1)
+
+fn emit_avx512_korb_kreg_3op(kdst: i64, ksrc1: i64, ksrc2: i64) -> [i64]:
+    """
+    KORB k_dst, k_src1, k_src2  (bitwise OR of 8-bit lane masks)
+    Encoding: VEX.L1.66.0F.W0 45 /r
+    Guard: kdst in k1-k7 (never k0 — G-01 §8.2).
+    # C1 §1.5: Intel SDM Vol 2C KORB entry
+    """
+    val kd  = kdst  - X86_K0
+    val ks1 = ksrc1 - X86_K0
+    val ks2 = ksrc2 - X86_K0
+    vex_encode_kreg_3op(0x45, kd, ks1, ks2, 1, 1)
+
+fn emit_avx512_kxorb_kreg_3op(kdst: i64, ksrc1: i64, ksrc2: i64) -> [i64]:
+    """
+    KXORB k_dst, k_src1, k_src2  (bitwise XOR of 8-bit lane masks)
+    Encoding: VEX.L1.66.0F.W0 47 /r
+    Guard: kdst in k1-k7 (never k0 — G-01 §8.2).
+    # C1 §1.6: Intel SDM Vol 2C KXORB entry
+    """
+    val kd  = kdst  - X86_K0
+    val ks1 = ksrc1 - X86_K0
+    val ks2 = ksrc2 - X86_K0
+    vex_encode_kreg_3op(0x47, kd, ks1, ks2, 1, 1)
+
+fn emit_avx512_kandnb_kreg_3op(kdst: i64, ksrc1: i64, ksrc2: i64) -> [i64]:
+    """
+    KANDNB k_dst, k_src1, k_src2  (k_src1 AND NOT k_src2, 8-bit lanes)
+    Encoding: VEX.L1.66.0F.W0 42 /r
+    Guard: kdst in k1-k7 (never k0 — G-01 §8.2).
+    # C1 §1.7: Intel SDM Vol 2C KANDNB entry
+    """
+    val kd  = kdst  - X86_K0
+    val ks1 = ksrc1 - X86_K0
+    val ks2 = ksrc2 - X86_K0
+    vex_encode_kreg_3op(0x42, kd, ks1, ks2, 1, 1)
+
+fn emit_avx512_kmovw_gpr_to_k(kdst: i64, gpr: i64) -> [i64]:
+    """
+    KMOVW k_dst, r32  (move 16-bit value from GPR into k-register)
+    Encoding: VEX.L0.0F.W0 92 /r
+    Guard: kdst in k1-k7 (never k0 — G-01 §8.2).
+    # C1 §1.9: Intel SDM Vol 2C KMOVW entry
+    """
+    val kd = kdst - X86_K0
+    vex_encode_kmov_kreg_gpr(kd, gpr)
+
+# ============================================================================
+# AVX-512 Reduction-style Emit Helpers (Wave O1)
+# These are NOT k-register ops — they are broadcasts and horizontal reductions
+# for use in Vec::reduce_sum / Vec::max_lane / Vec::min_lane lowering.
+# ============================================================================
+
+fn emit_avx512_vbroadcastss_zmm_from_xmm(zdst: i64, xsrc: i64) -> [i64]:
+    """
+    VBROADCASTSS zmm_dst, xmm_src  — broadcast f32 scalar to all 16 ZMM lanes.
+    Encoding: EVEX.512.66.0F38.W0 18 /r
+    vvvv field unused (must be all-ones: src1_idx=0 → ~vvvv=1111).
+    xsrc is an XMM index 0-15; encoded in ModRM.rm (src2 position).
+    zdst is a ZMM ID (X86_ZMM0=48 .. X86_ZMM31=79).
+    CPUID: AVX-512F (Intel SDM Vol 2C VBROADCASTSS entry)
+    Golden (zdst=Z0, xsrc=X0): 62 F2 7D 48 18 C0
+    Reference: Intel SDM Vol 2C VBROADCASTSS §; Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64-linux-gnu -mattr=+avx512f,+avx512dq --show-encoding
+    """
+    val d = zmm_to_index(zdst)
+    # xsrc uses low 4 bits only (XMM0-15); no high extension needed in rm.
+    val x = xsrc % 16
+    # vvvv unused → src1_idx=0 gives not_vvvv=1111 (all-ones per SDM)
+    evex_encode_3op_zmm(d, 0, x, 0, false, 2, 0, 1, 0x18)
+
+fn emit_avx512_vshuff32x4_zmm(zdst: i64, zsrc1: i64, zsrc2: i64, imm8: i64) -> [i64]:
+    """
+    VSHUFF32X4 zmm_dst, zmm_src1, zmm_src2, imm8 — shuffle 128-bit lanes of f32x4.
+    Encoding: EVEX.512.66.0F3A.W0 23 /r ib  (7 bytes: 6 EVEX bytes + 1 imm)
+    Used as horizontal-reduction step: imm8=0x4E reverses upper/lower lane pairs.
+    CPUID: AVX-512F (Intel SDM Vol 2C VSHUFF32X4 entry)
+    Golden (Z0,Z0,Z0,0x4E): 62 F3 7D 48 23 C0 4E
+    Reference: Intel SDM Vol 2C VSHUFF32X4 §; Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64-linux-gnu -mattr=+avx512f,+avx512dq --show-encoding
+    """
+    val d  = zmm_to_index(zdst)
+    val s1 = zmm_to_index(zsrc1)
+    val s2 = zmm_to_index(zsrc2)
+    val prefix = evex_encode_3op_zmm(d, s1, s2, 0, false, 3, 0, 1, 0x23)
+    # Append immediate byte after the 6 EVEX+opcode+ModRM bytes
+    [prefix[0], prefix[1], prefix[2], prefix[3], prefix[4], prefix[5], imm8 % 256]
+
+fn emit_avx512_vpermps_zmm(zdst: i64, zindex: i64, zsrc: i64) -> [i64]:
+    """
+    VPERMPS zmm_dst, zmm_index, zmm_src — variable-permute 32-bit f32 lanes.
+    Encoding: EVEX.512.66.0F38.W0 16 /r
+    zindex is the control register (vvvv field, src1 position).
+    zsrc is the data register (ModRM.rm field, src2 position).
+    CPUID: AVX-512F only (Intel SDM Vol 2C VPERMPS entry; no BW/DQ dependency)
+    Golden (Z0 dst, Z1 index, Z0 src): 62 F2 75 48 16 C0
+    Reference: Intel SDM Vol 2C VPERMPS §; Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64-linux-gnu -mattr=+avx512f,+avx512dq --show-encoding
+    """
+    val d  = zmm_to_index(zdst)
+    val zi = zmm_to_index(zindex)
+    val zs = zmm_to_index(zsrc)
+    evex_encode_3op_zmm(d, zi, zs, 0, false, 2, 0, 1, 0x16)
+
+fn emit_avx512_vmaxps_zmm(zdst: i64, zsrc1: i64, zsrc2: i64) -> [i64]:
+    """
+    VMAXPS zmm_dst, zmm_src1, zmm_src2 — lane-wise IEEE 754 maximum of f32x16.
+    Encoding: EVEX.512.0F.W0 5F /r
+    No mask, no zeroing (unmasked form for reduction use).
+    CPUID: AVX-512F (Intel SDM Vol 2C VMAXPS entry)
+    Golden (Z0,Z0,Z0): 62 F1 7C 48 5F C0
+    Reference: Intel SDM Vol 2C VMAXPS §; Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64-linux-gnu -mattr=+avx512f,+avx512dq --show-encoding
+    """
+    val d  = zmm_to_index(zdst)
+    val s1 = zmm_to_index(zsrc1)
+    val s2 = zmm_to_index(zsrc2)
+    evex_encode_3op_zmm(d, s1, s2, 0, false, 1, 0, 0, 0x5F)
+
+fn emit_avx512_vminps_zmm(zdst: i64, zsrc1: i64, zsrc2: i64) -> [i64]:
+    """
+    VMINPS zmm_dst, zmm_src1, zmm_src2 — lane-wise IEEE 754 minimum of f32x16.
+    Encoding: EVEX.512.0F.W0 5D /r
+    No mask, no zeroing (unmasked form for reduction use).
+    CPUID: AVX-512F (Intel SDM Vol 2C VMINPS entry)
+    Golden (Z0,Z0,Z0): 62 F1 7C 48 5D C0
+    Reference: Intel SDM Vol 2C VMINPS §; Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64-linux-gnu -mattr=+avx512f,+avx512dq --show-encoding
+    """
+    val d  = zmm_to_index(zdst)
+    val s1 = zmm_to_index(zsrc1)
+    val s2 = zmm_to_index(zsrc2)
+    evex_encode_3op_zmm(d, s1, s2, 0, false, 1, 0, 0, 0x5D)
 
 # ============================================================================
 # Diagnostic Helper

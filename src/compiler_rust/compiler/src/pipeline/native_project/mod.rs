@@ -103,6 +103,15 @@ pub(crate) struct ModuleImports {
     /// Global struct definitions: struct_name -> [(field_name, field_type_name)].
     /// Shared across all compilation units for consistent cross-module field offsets.
     pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
+    /// Global enum definitions: enum_name -> [(variant_name, payload_arity)].
+    /// Shared across all compilation units. The HIR lowerer consumes this in
+    /// `compile_file_to_object` to eagerly seed `module.types.name_to_id` and
+    /// `globals` with real enum TypeIds for cross-module enum receivers
+    /// (W15-H follow-up to W13-F: 29 stage4 sites where
+    /// `expr/access.rs::lower_field_access` was emitting `Global(EnumName)`
+    /// with `ty=ANY` because the enum reached the file via re-export but
+    /// not via a direct `use` chain that triggered `preregister_imported_type_names`).
+    pub enum_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
     /// Set of mangled names that correspond to module-level data (`val`/`var`/
     /// `const`/`static`) rather than functions. Consulted by the cranelift
     /// backend so cross-module imported data constants are declared as
@@ -118,6 +127,16 @@ pub(crate) struct ModuleImports {
     /// `get_field_info` is unlikely to mis-resolve — currently set only for
     /// `--entry-closure` builds.
     pub populate_global_struct_defs: bool,
+    /// When true, pass `enum_defs` to the HIR lowerer so cross-module enum
+    /// receivers (`TypeKind.Inferred`, `TokenKind.KwPub`, etc.) resolve via
+    /// the enum-variant early-return in `expr/access.rs::lower_field_access`
+    /// instead of falling through to the field-access fallback that emits
+    /// `Cannot infer field type` (W13-F class 1, fixed in W15-H).
+    /// Always-on for both bootstrap and non-bootstrap builds — populating
+    /// this map only adds enum names to the type registry of files that
+    /// don't already have them; existing local definitions (registered in
+    /// Pass 0 of `module_pass.rs::lower_module`) take precedence.
+    pub populate_global_enum_defs: bool,
 }
 
 /// Configuration for native project builds.
@@ -488,8 +507,10 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(result.all_mangled),
                 re_exports: std::sync::Arc::new(result.re_exports),
                 struct_defs: std::sync::Arc::new(result.struct_defs),
+                enum_defs: std::sync::Arc::new(result.enum_defs),
                 data_exports: std::sync::Arc::new(result.data_exports),
                 populate_global_struct_defs: self.config.entry_closure,
+                populate_global_enum_defs: true,
             }
         } else {
             ModuleImports {
@@ -498,8 +519,10 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
                 re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 populate_global_struct_defs: false,
+                populate_global_enum_defs: false,
             }
         };
 

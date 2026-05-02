@@ -34,8 +34,8 @@
 
 mod os.crypto.ml_dsa
 
-use os.crypto.ml_dsa_ntt.{ntt, intt, ntt_multiply, poly_add, poly_sub, poly_scalar_mul, modq, modq_centered, ml_dsa_q, ml_dsa_n, ml_dsa_eta_65, ml_dsa_gamma1_65, ml_dsa_gamma2_65, ml_dsa_tau_65, ml_dsa_beta_65, ml_dsa_omega_65, ml_dsa_k_65, ml_dsa_l_65, power2round_poly, decompose_poly, high_bits_poly, low_bits_poly, make_hint_poly, use_hint_poly, ml_dsa_d}
-use os.crypto.ml_dsa_sample.{shake128, shake256, expand_a_65, expand_s_65, expand_mask_65, sample_in_ball, simple_bit_pack, simple_bit_unpack, bit_pack_signed, bit_unpack_signed, pk_encode_65, pk_decode_65, pk_size_65, sk_size_65, sig_size_65}
+use os.crypto.ml_dsa_ntt.{ntt, intt, ntt_multiply, poly_add, poly_sub, poly_scalar_mul, modq, modq_centered, ml_dsa_q, ml_dsa_n, ml_dsa_eta_65, ml_dsa_gamma1_65, ml_dsa_gamma2_65, ml_dsa_tau_65, ml_dsa_beta_65, ml_dsa_omega_65, ml_dsa_k_65, ml_dsa_l_65, ml_dsa_eta_44, ml_dsa_gamma1_44, ml_dsa_gamma2_44, ml_dsa_tau_44, ml_dsa_beta_44, ml_dsa_omega_44, ml_dsa_k_44, ml_dsa_l_44, ml_dsa_eta_87, ml_dsa_gamma1_87, ml_dsa_gamma2_87, ml_dsa_tau_87, ml_dsa_beta_87, ml_dsa_omega_87, ml_dsa_k_87, ml_dsa_l_87, power2round_poly, decompose_poly, high_bits_poly, low_bits_poly, high_bits_poly_with, low_bits_poly_with, make_hint_poly, make_hint_poly_with, use_hint_poly, use_hint_poly_with, ml_dsa_d}
+use os.crypto.ml_dsa_sample.{shake128, shake256, expand_a_65, expand_s_65, expand_mask_65, expand_a_44, expand_s_44, expand_mask_44, expand_a_87, expand_s_87, expand_mask_87, expand_a_with, expand_s_with, expand_mask_with, sample_in_ball, simple_bit_pack, simple_bit_unpack, bit_pack_signed, bit_unpack_signed, pk_encode_65, pk_decode_65, pk_encode_44, pk_decode_44, pk_encode_87, pk_decode_87, pk_encode_with, pk_decode_with, pk_size_65, sk_size_65, sig_size_65, pk_size_44, sk_size_44, sig_size_44, pk_size_87, sk_size_87, sig_size_87}
 
 # -----------------------------------------------------------------------------
 # Helpers — concat / slice byte arrays, zero polynomial.
@@ -162,12 +162,42 @@ fn _poly_times_vec_ntt(c_ntt: list, v_ntt: list) -> list:
 # Encoding helpers (FIPS 204 §B).
 # -----------------------------------------------------------------------------
 
-fn _z_pack(z: list) -> list:
-    val gamma1 = ml_dsa_gamma1_65()
+fn _poly_centered(p: list) -> list:
+    # Convert each coefficient from its [0, q) representative to its centered
+    # representative in (-q/2, q/2].  Required before bit-packing signed values
+    # like z (∈ y + c·s1) where the [0, q) form aliases negatives close to q.
+    var out = []
+    var i = 0
+    while i < p.len():
+        out.push(modq_centered(p.get(i)))
+        i = i + 1
+    out
+
+fn _z_bits_for(gamma1: i64) -> i64:
+    if gamma1 == 131072: 18 else: 20
+
+fn _z_poly_bytes_for(gamma1: i64) -> i64:
+    _z_bits_for(gamma1) * 256 / 8     # 576 (44) or 640 (65/87)
+
+fn _s_bits_for(eta: i64) -> i64:
+    if eta == 2: 3 else: 4
+
+fn _s_poly_bytes_for(eta: i64) -> i64:
+    _s_bits_for(eta) * 256 / 8        # 96 (eta=2) or 128 (eta=4)
+
+fn _w1_bits_for(gamma2: i64) -> i64:
+    # m = (q-1)/(2 gamma2). For gamma2=95232 (44) m=44 → 6 bits; else 16 → 4.
+    if gamma2 == 95232: 6 else: 4
+
+fn _z_pack_with(z: list, gamma1: i64) -> list:
+    val z_bits = _z_bits_for(gamma1)
     var out = []
     var i = 0
     while i < z.len():
-        val packed = bit_pack_signed(z.get(i), gamma1, 20)
+        # W13-D fix: center each polynomial before bit_pack_signed so q-aliased
+        # negatives encode correctly. MUST be preserved for every gamma1 width.
+        val centered = _poly_centered(z.get(i))
+        val packed = bit_pack_signed(centered, gamma1, z_bits)
         var b = 0
         while b < packed.len():
             out.push(packed.get(b))
@@ -175,20 +205,32 @@ fn _z_pack(z: list) -> list:
         i = i + 1
     out
 
-fn _z_unpack(bytes: list, l: i64) -> list:
-    val gamma1 = ml_dsa_gamma1_65()
-    val poly_bytes = 640
+fn _z_pack(z: list) -> list:
+    _z_pack_with(z, ml_dsa_gamma1_65())
+
+fn _z_unpack_with(bytes: list, l: i64, gamma1: i64) -> list:
+    val z_bits = _z_bits_for(gamma1)
+    val poly_bytes = _z_poly_bytes_for(gamma1)
     var z = []
     var i = 0
     while i < l:
         val poly_buf = _slice(bytes, i * poly_bytes, (i + 1) * poly_bytes)
-        z.push(bit_unpack_signed(poly_buf, gamma1, 20, 256))
+        # bit_unpack_signed returns coefficients in (-gamma1, gamma1]; lift
+        # back into [0, q) so downstream NTT / vec arithmetic stays consistent.
+        val raw = bit_unpack_signed(poly_buf, gamma1, z_bits, 256)
+        var lifted = []
+        var ri = 0
+        while ri < raw.len():
+            lifted.push(modq(raw.get(ri)))
+            ri = ri + 1
+        z.push(lifted)
         i = i + 1
     z
 
-fn _hint_pack(h: list) -> list:
-    val omega = ml_dsa_omega_65()
-    val k = ml_dsa_k_65()
+fn _z_unpack(bytes: list, l: i64) -> list:
+    _z_unpack_with(bytes, l, ml_dsa_gamma1_65())
+
+fn _hint_pack_with(h: list, omega: i64, k: i64) -> list:
     var indices = []
     var counts = []
     var idx_i = 0
@@ -208,9 +250,10 @@ fn _hint_pack(h: list) -> list:
         poly_i = poly_i + 1
     _concat(indices, counts)
 
-fn _hint_unpack(bytes: list) -> list:
-    val omega = ml_dsa_omega_65()
-    val k = ml_dsa_k_65()
+fn _hint_pack(h: list) -> list:
+    _hint_pack_with(h, ml_dsa_omega_65(), ml_dsa_k_65())
+
+fn _hint_unpack_with(bytes: list, omega: i64, k: i64) -> list:
     var h = []
     var written_prev = 0
     var poly_i = 0
@@ -229,28 +272,35 @@ fn _hint_unpack(bytes: list) -> list:
         poly_i = poly_i + 1
     h
 
-fn sig_encode(c_tilde: list, z: list, h: list) -> list:
-    val packed_z = _z_pack(z)
-    val packed_h = _hint_pack(h)
+fn _hint_unpack(bytes: list) -> list:
+    _hint_unpack_with(bytes, ml_dsa_omega_65(), ml_dsa_k_65())
+
+fn sig_encode_with(c_tilde: list, z: list, h: list, gamma1: i64, omega: i64, k: i64) -> list:
+    val packed_z = _z_pack_with(z, gamma1)
+    val packed_h = _hint_pack_with(h, omega, k)
     _concat(_concat(c_tilde, packed_z), packed_h)
 
-fn sig_decode(bytes: list) -> tuple:
-    val l = ml_dsa_l_65()
-    val omega = ml_dsa_omega_65()
-    val k = ml_dsa_k_65()
+fn sig_encode(c_tilde: list, z: list, h: list) -> list:
+    sig_encode_with(c_tilde, z, h, ml_dsa_gamma1_65(), ml_dsa_omega_65(), ml_dsa_k_65())
+
+fn sig_decode_with(bytes: list, k: i64, l: i64, gamma1: i64, omega: i64) -> tuple:
+    val z_poly_bytes = _z_poly_bytes_for(gamma1)
     val c_tilde = _slice(bytes, 0, 32)
-    val z_bytes = _slice(bytes, 32, 32 + l * 640)
-    val h_bytes = _slice(bytes, 32 + l * 640, 32 + l * 640 + omega + k)
-    val z = _z_unpack(z_bytes, l)
-    val h = _hint_unpack(h_bytes)
+    val z_bytes = _slice(bytes, 32, 32 + l * z_poly_bytes)
+    val h_bytes = _slice(bytes, 32 + l * z_poly_bytes, 32 + l * z_poly_bytes + omega + k)
+    val z = _z_unpack_with(z_bytes, l, gamma1)
+    val h = _hint_unpack_with(h_bytes, omega, k)
     (c_tilde, z, h)
 
-fn sk_encode(rho: list, K: list, tr: list, s1: list, s2: list, t0: list) -> list:
-    val eta = ml_dsa_eta_65()
+fn sig_decode(bytes: list) -> tuple:
+    sig_decode_with(bytes, ml_dsa_k_65(), ml_dsa_l_65(), ml_dsa_gamma1_65(), ml_dsa_omega_65())
+
+fn sk_encode_with(rho: list, K: list, tr: list, s1: list, s2: list, t0: list, eta: i64) -> list:
+    val s_bits = _s_bits_for(eta)
     var out = _concat(_concat(rho, K), tr)
     var i = 0
     while i < s1.len():
-        val packed = bit_pack_signed(s1.get(i), eta, 4)
+        val packed = bit_pack_signed(s1.get(i), eta, s_bits)
         var b = 0
         while b < packed.len():
             out.push(packed.get(b))
@@ -258,7 +308,7 @@ fn sk_encode(rho: list, K: list, tr: list, s1: list, s2: list, t0: list) -> list
         i = i + 1
     var j = 0
     while j < s2.len():
-        val packed = bit_pack_signed(s2.get(j), eta, 4)
+        val packed = bit_pack_signed(s2.get(j), eta, s_bits)
         var b = 0
         while b < packed.len():
             out.push(packed.get(b))
@@ -274,10 +324,12 @@ fn sk_encode(rho: list, K: list, tr: list, s1: list, s2: list, t0: list) -> list
         t = t + 1
     out
 
-fn sk_decode(bytes: list) -> tuple:
-    val eta = ml_dsa_eta_65()
-    val l = ml_dsa_l_65()
-    val k = ml_dsa_k_65()
+fn sk_encode(rho: list, K: list, tr: list, s1: list, s2: list, t0: list) -> list:
+    sk_encode_with(rho, K, tr, s1, s2, t0, ml_dsa_eta_65())
+
+fn sk_decode_with(bytes: list, k: i64, l: i64, eta: i64) -> tuple:
+    val s_bits = _s_bits_for(eta)
+    val s_poly_bytes = _s_poly_bytes_for(eta)
     val rho = _slice(bytes, 0, 32)
     val K   = _slice(bytes, 32, 64)
     val tr  = _slice(bytes, 64, 128)
@@ -285,16 +337,16 @@ fn sk_decode(bytes: list) -> tuple:
     var s1 = []
     var i = 0
     while i < l:
-        val poly_buf = _slice(bytes, off, off + 128)
-        s1.push(bit_unpack_signed(poly_buf, eta, 4, 256))
-        off = off + 128
+        val poly_buf = _slice(bytes, off, off + s_poly_bytes)
+        s1.push(bit_unpack_signed(poly_buf, eta, s_bits, 256))
+        off = off + s_poly_bytes
         i = i + 1
     var s2 = []
     var j = 0
     while j < k:
-        val poly_buf = _slice(bytes, off, off + 128)
-        s2.push(bit_unpack_signed(poly_buf, eta, 4, 256))
-        off = off + 128
+        val poly_buf = _slice(bytes, off, off + s_poly_bytes)
+        s2.push(bit_unpack_signed(poly_buf, eta, s_bits, 256))
+        off = off + s_poly_bytes
         j = j + 1
     var t0 = []
     var t = 0
@@ -305,13 +357,14 @@ fn sk_decode(bytes: list) -> tuple:
         t = t + 1
     (rho, K, tr, s1, s2, t0)
 
+fn sk_decode(bytes: list) -> tuple:
+    sk_decode_with(bytes, ml_dsa_k_65(), ml_dsa_l_65(), ml_dsa_eta_65())
+
 # -----------------------------------------------------------------------------
 # ML-DSA.KeyGen — FIPS 204 Algorithm 1.
 # -----------------------------------------------------------------------------
 
-fn ml_dsa_keygen_65(xi: list) -> tuple:
-    val k = ml_dsa_k_65()
-    val l = ml_dsa_l_65()
+fn _keygen_params(xi: list, k: i64, l: i64, eta: i64) -> tuple:
     var seed = []
     var si = 0
     while si < xi.len():
@@ -323,8 +376,8 @@ fn ml_dsa_keygen_65(xi: list) -> tuple:
     val rho     = _slice(expanded, 0, 32)
     val rho_p   = _slice(expanded, 32, 96)
     val K_seed  = _slice(expanded, 96, 128)
-    val A = expand_a_65(rho)
-    val s_pair = expand_s_65(rho_p)
+    val A = expand_a_with(rho, k, l)
+    val s_pair = expand_s_with(rho_p, k, l, eta)
     val s1 = s_pair[0]
     val s2 = s_pair[1]
     val s1_hat = _vec_ntt(s1)
@@ -339,10 +392,19 @@ fn ml_dsa_keygen_65(xi: list) -> tuple:
         t1.push(pair[0])
         t0.push(pair[1])
         i = i + 1
-    val pk = pk_encode_65(rho, t1)
+    val pk = pk_encode_with(rho, t1)
     val tr = shake256(pk, 64)
-    val sk = sk_encode(rho, K_seed, tr, s1, s2, t0)
+    val sk = sk_encode_with(rho, K_seed, tr, s1, s2, t0, eta)
     (pk, sk)
+
+fn ml_dsa_keygen_65(xi: list) -> tuple:
+    _keygen_params(xi, ml_dsa_k_65(), ml_dsa_l_65(), ml_dsa_eta_65())
+
+fn ml_dsa_keygen_44(xi: list) -> tuple:
+    _keygen_params(xi, ml_dsa_k_44(), ml_dsa_l_44(), ml_dsa_eta_44())
+
+fn ml_dsa_keygen_87(xi: list) -> tuple:
+    _keygen_params(xi, ml_dsa_k_87(), ml_dsa_l_87(), ml_dsa_eta_87())
 
 # -----------------------------------------------------------------------------
 # ML-DSA.Sign — FIPS 204 Algorithm 2 (randomized variant).
@@ -352,15 +414,9 @@ fn ml_dsa_keygen_65(xi: list) -> tuple:
 #   doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md
 # -----------------------------------------------------------------------------
 
-fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
-    val k = ml_dsa_k_65()
-    val l = ml_dsa_l_65()
-    val gamma1 = ml_dsa_gamma1_65()
-    val gamma2 = ml_dsa_gamma2_65()
-    val beta   = ml_dsa_beta_65()
-    val omega  = ml_dsa_omega_65()
-    val tau    = ml_dsa_tau_65()
-    val parts = sk_decode(sk)
+fn _sign_params(sk: list, msg: list, rnd: list, k: i64, l: i64, eta: i64, gamma1: i64, gamma2: i64, beta: i64, omega: i64, tau: i64) -> list:
+    val w1_bits = _w1_bits_for(gamma2)
+    val parts = sk_decode_with(sk, k, l, eta)
     val rho = parts[0]
     val K_seed = parts[1]
     val tr = parts[2]
@@ -369,7 +425,7 @@ fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
     val t0 = parts[5]
     val mu = shake256(_concat(tr, msg), 64)
     val rho_pp = shake256(_concat(_concat(K_seed, rnd), mu), 64)
-    val A = expand_a_65(rho)
+    val A = expand_a_with(rho, k, l)
     val s1_hat = _vec_ntt(s1)
     val s2_hat = _vec_ntt(s2)
     val t0_hat = _vec_ntt(t0)
@@ -379,19 +435,19 @@ fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
     val max_iters = 1000
     var iter = 0
     while not done and iter < max_iters:
-        val y = expand_mask_65(rho_pp, kappa)
+        val y = expand_mask_with(rho_pp, kappa, l, gamma1)
         val y_hat = _vec_ntt(y)
         val w_hat = _matvec_ntt(A, y_hat)
         val w = _vec_intt(w_hat)
         var w1 = []
         var i = 0
         while i < k:
-            w1.push(high_bits_poly(w.get(i)))
+            w1.push(high_bits_poly_with(w.get(i), gamma2))
             i = i + 1
         var w1_bytes = []
         var wp = 0
         while wp < k:
-            val packed = simple_bit_pack(w1.get(wp), 4)
+            val packed = simple_bit_pack(w1.get(wp), w1_bits)
             var b = 0
             while b < packed.len():
                 w1_bytes.push(packed.get(b))
@@ -409,7 +465,7 @@ fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
         var r0 = []
         var ri = 0
         while ri < k:
-            r0.push(low_bits_poly(w_minus_cs2.get(ri)))
+            r0.push(low_bits_poly_with(w_minus_cs2.get(ri), gamma2))
             ri = ri + 1
         val z_fail  = _vec_norm_ge(z,  gamma1 - beta)
         val r0_fail = _vec_norm_ge(r0, gamma2 - beta)
@@ -423,7 +479,7 @@ fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
                 var h = []
                 var hi = 0
                 while hi < k:
-                    h.push(make_hint_poly(neg_ct0.get(hi), w_minus_cs2_plus_ct0.get(hi)))
+                    h.push(make_hint_poly_with(neg_ct0.get(hi), w_minus_cs2_plus_ct0.get(hi), gamma2))
                     hi = hi + 1
                 var ones = 0
                 var hj = 0
@@ -435,11 +491,29 @@ fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
                         hk2 = hk2 + 1
                     hj = hj + 1
                 if ones <= omega:
-                    sig_out = sig_encode(c_tilde, z, h)
+                    sig_out = sig_encode_with(c_tilde, z, h, gamma1, omega, k)
                     done = true
         kappa = kappa + l
         iter = iter + 1
     sig_out
+
+fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
+    _sign_params(sk, msg, rnd,
+        ml_dsa_k_65(), ml_dsa_l_65(), ml_dsa_eta_65(),
+        ml_dsa_gamma1_65(), ml_dsa_gamma2_65(),
+        ml_dsa_beta_65(), ml_dsa_omega_65(), ml_dsa_tau_65())
+
+fn ml_dsa_sign_44(sk: list, msg: list, rnd: list) -> list:
+    _sign_params(sk, msg, rnd,
+        ml_dsa_k_44(), ml_dsa_l_44(), ml_dsa_eta_44(),
+        ml_dsa_gamma1_44(), ml_dsa_gamma2_44(),
+        ml_dsa_beta_44(), ml_dsa_omega_44(), ml_dsa_tau_44())
+
+fn ml_dsa_sign_87(sk: list, msg: list, rnd: list) -> list:
+    _sign_params(sk, msg, rnd,
+        ml_dsa_k_87(), ml_dsa_l_87(), ml_dsa_eta_87(),
+        ml_dsa_gamma1_87(), ml_dsa_gamma2_87(),
+        ml_dsa_beta_87(), ml_dsa_omega_87(), ml_dsa_tau_87())
 
 # -----------------------------------------------------------------------------
 # ML-DSA.Verify — FIPS 204 Algorithm 3.
@@ -448,24 +522,18 @@ fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
 # sign path; see ml_dsa_sign_verify_pipeline_2026-05-02 bug doc.
 # -----------------------------------------------------------------------------
 
-fn ml_dsa_verify_65(pk: list, msg: list, sig: list) -> bool:
-    val gamma1 = ml_dsa_gamma1_65()
-    val gamma2 = ml_dsa_gamma2_65()
-    val beta   = ml_dsa_beta_65()
-    val omega  = ml_dsa_omega_65()
-    val tau    = ml_dsa_tau_65()
-    val k = ml_dsa_k_65()
-    val l = ml_dsa_l_65()
-    val pk_parts = pk_decode_65(pk)
+fn _verify_params(pk: list, msg: list, sig: list, k: i64, l: i64, gamma1: i64, gamma2: i64, beta: i64, omega: i64, tau: i64) -> bool:
+    val w1_bits = _w1_bits_for(gamma2)
+    val pk_parts = pk_decode_with(pk, k)
     val rho = pk_parts[0]
     val t1  = pk_parts[1]
-    val sig_parts = sig_decode(sig)
+    val sig_parts = sig_decode_with(sig, k, l, gamma1, omega)
     val c_tilde = sig_parts[0]
     val z = sig_parts[1]
     val h = sig_parts[2]
     if h.len() == 0:
         return false
-    val A = expand_a_65(rho)
+    val A = expand_a_with(rho, k, l)
     val tr = shake256(pk, 64)
     val mu = shake256(_concat(tr, msg), 64)
     val c = sample_in_ball(c_tilde, tau)
@@ -487,12 +555,12 @@ fn ml_dsa_verify_65(pk: list, msg: list, sig: list) -> bool:
     var w1p = []
     var j = 0
     while j < k:
-        w1p.push(use_hint_poly(h.get(j), w_prime.get(j)))
+        w1p.push(use_hint_poly_with(h.get(j), w_prime.get(j), gamma2))
         j = j + 1
     var w1_bytes = []
     var wp = 0
     while wp < k:
-        val packed = simple_bit_pack(w1p.get(wp), 4)
+        val packed = simple_bit_pack(w1p.get(wp), w1_bits)
         var b = 0
         while b < packed.len():
             w1_bytes.push(packed.get(b))
@@ -505,3 +573,21 @@ fn ml_dsa_verify_65(pk: list, msg: list, sig: list) -> bool:
         diff = diff | (c_tilde.get(ci) ^ c_tilde_prime.get(ci))
         ci = ci + 1
     diff == 0
+
+fn ml_dsa_verify_65(pk: list, msg: list, sig: list) -> bool:
+    _verify_params(pk, msg, sig,
+        ml_dsa_k_65(), ml_dsa_l_65(),
+        ml_dsa_gamma1_65(), ml_dsa_gamma2_65(),
+        ml_dsa_beta_65(), ml_dsa_omega_65(), ml_dsa_tau_65())
+
+fn ml_dsa_verify_44(pk: list, msg: list, sig: list) -> bool:
+    _verify_params(pk, msg, sig,
+        ml_dsa_k_44(), ml_dsa_l_44(),
+        ml_dsa_gamma1_44(), ml_dsa_gamma2_44(),
+        ml_dsa_beta_44(), ml_dsa_omega_44(), ml_dsa_tau_44())
+
+fn ml_dsa_verify_87(pk: list, msg: list, sig: list) -> bool:
+    _verify_params(pk, msg, sig,
+        ml_dsa_k_87(), ml_dsa_l_87(),
+        ml_dsa_gamma1_87(), ml_dsa_gamma2_87(),
+        ml_dsa_beta_87(), ml_dsa_omega_87(), ml_dsa_tau_87())

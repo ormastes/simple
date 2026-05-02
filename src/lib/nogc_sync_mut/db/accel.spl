@@ -1,0 +1,531 @@
+# Shared DB acceleration helpers.
+#
+# Phase 1 keeps behavior-identical scalar implementations and exposes a stable
+# capability/reporting surface so callers can adopt batch scans now and gain
+# host SIMD kernels later without changing their contracts.
+
+use std.simd.{detect_profile, profile_name, simd_width, SimdTier}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+val DB_ACCEL_DEFAULT_BATCH_SIZE: i64 = 64
+val DB_ACCEL_HASH_MODULUS: i64 = 65_521
+
+enum ScanPredicateKind:
+    Eq
+    Ne
+    Lt
+    Le
+    Gt
+    Ge
+    StartsWith
+    EndsWith
+    Contains
+    ContainsToken
+
+struct KeySpan:
+    values: [i64]
+    start: i64
+    len: i64
+
+struct ByteSpan:
+    bytes: [u8]
+    start: i64
+    len: i64
+
+struct TextSpan:
+    value: text
+    start: i64
+    len: i64
+
+struct VectorBatch<T>:
+    values: [T]
+    start: i64
+    len: i64
+
+struct ScanPredicate:
+    kind: ScanPredicateKind
+    text_value: text
+    key_value: i64
+
+struct FilterStats:
+    rows_scanned: i64
+    candidates_kept: i64
+    bitmap_density: f64
+    fallback_count: i64
+
+struct AccelCapabilityReport:
+    tier_name: text
+    simd_available: bool
+    simd_active: bool
+    scalar_fallback: bool
+    simd_width_bits: i64
+
+struct RowBitmap:
+    row_count: i64
+    words: [u64]
+
+    static fn empty(row_count: i64) -> RowBitmap:
+        val word_count = row_bitmap_word_count(row_count)
+        RowBitmap(row_count: row_count, words: [0u64; word_count])
+
+    static fn full(row_count: i64) -> RowBitmap:
+        val word_count = row_bitmap_word_count(row_count)
+        if word_count == 0:
+            return RowBitmap(row_count: row_count, words: [])
+        var words: [u64] = [0u64; word_count]
+        val full_words = row_count / 64
+        var idx = 0
+        while idx < full_words:
+            words[idx as i32] = ~0u64
+            idx = idx + 1
+        val tail_bits = row_count % 64
+        if tail_bits > 0:
+            var bit = 0
+            while bit < tail_bits:
+                words[full_words as i32] = words[full_words as i32] | (1u64 << (bit as u64))
+                bit = bit + 1
+        RowBitmap(row_count: row_count, words: words)
+
+    me fn set(idx: i64):
+        if idx < 0 or idx >= self.row_count:
+            return
+        val word_idx = idx / 64
+        val bit_idx = idx % 64
+        val word_i = word_idx as i32
+        self.words[word_i] = self.words[word_i] | (1u64 << (bit_idx as u64))
+
+    me fn clear(idx: i64):
+        if idx < 0 or idx >= self.row_count:
+            return
+        val word_idx = idx / 64
+        val bit_idx = idx % 64
+        val word_i = word_idx as i32
+        self.words[word_i] = self.words[word_i] & (~(1u64 << (bit_idx as u64)))
+
+    fn get(idx: i64) -> bool:
+        if idx < 0 or idx >= self.row_count:
+            return false
+        val word_idx = idx / 64
+        val bit_idx = idx % 64
+        ((self.words[word_idx as i32] >> (bit_idx as u64)) & 1u64) != 0u64
+
+    fn count() -> i64:
+        var total = 0
+        var idx = 0
+        while idx < self.words.len():
+            total = total + popcount_u64(self.words[idx as i32])
+            idx = idx + 1
+        total
+
+    fn density() -> f64:
+        if self.row_count == 0:
+            return 0.0
+        self.count().to_float() / self.row_count.to_float()
+
+    fn and_with(rhs: RowBitmap) -> RowBitmap:
+        val limit = row_bitmap_min_words(self.words.len(), rhs.words.len())
+        var words: [u64] = []
+        var idx = 0
+        while idx < limit:
+            words.push(self.words[idx as i32] & rhs.words[idx as i32])
+            idx = idx + 1
+        RowBitmap(row_count: row_bitmap_min(self.row_count, rhs.row_count), words: words)
+
+    fn or_with(rhs: RowBitmap) -> RowBitmap:
+        val limit = row_bitmap_max_words(self.words.len(), rhs.words.len())
+        var words: [u64] = []
+        var idx = 0
+        while idx < limit:
+            val lhs_word = if idx < self.words.len(): self.words[idx as i32] else: 0u64
+            val rhs_word = if idx < rhs.words.len(): rhs.words[idx as i32] else: 0u64
+            words.push(lhs_word | rhs_word)
+            idx = idx + 1
+        RowBitmap(row_count: row_bitmap_max(self.row_count, rhs.row_count), words: words)
+
+    fn and_not(rhs: RowBitmap) -> RowBitmap:
+        val limit = self.words.len()
+        var words: [u64] = []
+        var idx = 0
+        while idx < limit:
+            val rhs_word = if idx < rhs.words.len(): rhs.words[idx as i32] else: 0u64
+            words.push(self.words[idx as i32] & (~rhs_word))
+            idx = idx + 1
+        RowBitmap(row_count: self.row_count, words: words)
+
+fn row_bitmap_word_count(row_count: i64) -> i64:
+    if row_count <= 0:
+        0
+    else:
+        (row_count + 63) / 64
+
+fn row_bitmap_min(lhs: i64, rhs: i64) -> i64:
+    if lhs < rhs: lhs else: rhs
+
+fn row_bitmap_max(lhs: i64, rhs: i64) -> i64:
+    if lhs > rhs: lhs else: rhs
+
+fn row_bitmap_min_words(lhs: i64, rhs: i64) -> i64:
+    if lhs < rhs: lhs else: rhs
+
+fn row_bitmap_max_words(lhs: i64, rhs: i64) -> i64:
+    if lhs > rhs: lhs else: rhs
+
+fn row_bitmap_indices(bitmap: RowBitmap) -> [i64]:
+    var result: [i64] = []
+    var word_idx = 0
+    while word_idx < bitmap.words.len():
+        var word = bitmap.words[word_idx as i32]
+        if word != 0u64:
+            var bit_idx = 0
+            while bit_idx < 64:
+                if (word & 1u64) != 0u64:
+                    val row_idx = (word_idx * 64) + bit_idx
+                    if row_idx < bitmap.row_count:
+                        result.push(row_idx)
+                word = word >> 1u64
+                if word == 0u64:
+                    bit_idx = 64
+                else:
+                    bit_idx = bit_idx + 1
+        word_idx = word_idx + 1
+    result
+
+fn popcount_u64(word: u64) -> i64:
+    var remaining = word
+    var total = 0
+    while remaining != 0u64:
+        remaining = remaining & (remaining - 1u64)
+        total = total + 1
+    total
+
+fn accel_capability_report() -> AccelCapabilityReport:
+    val tier = detect_profile()
+    val available = match tier:
+        case SimdTier.scalar: false
+        case _: true
+    AccelCapabilityReport(
+        tier_name: profile_name(),
+        simd_available: available,
+        simd_active: false,
+        scalar_fallback: true,
+        simd_width_bits: simd_width()
+    )
+
+fn make_key_span(values: [i64], start: i64, len: i64) -> KeySpan:
+    KeySpan(values: values, start: start, len: len)
+
+fn make_byte_span(bytes: [u8], start: i64, len: i64) -> ByteSpan:
+    ByteSpan(bytes: bytes, start: start, len: len)
+
+fn make_text_span(value: text, start: i64, len: i64) -> TextSpan:
+    TextSpan(value: value, start: start, len: len)
+
+fn make_vector_batch<T>(values: [T], start: i64, len: i64) -> VectorBatch<T>:
+    VectorBatch<T>(values: values, start: start, len: len)
+
+fn span_text(span: TextSpan) -> text:
+    var result = ""
+    var idx = 0
+    while idx < span.len and (span.start + idx) < span.value.len():
+        result = result + span.value.char_at(span.start + idx)
+        idx = idx + 1
+    result
+
+fn text_to_byte_span(value: text) -> ByteSpan:
+    val bytes = rt_text_to_bytes(value)
+    ByteSpan(bytes: bytes, start: 0, len: bytes.len())
+
+fn byte_span_equals(lhs: ByteSpan, rhs: ByteSpan) -> bool:
+    if lhs.len != rhs.len:
+        return false
+    var idx = 0
+    while idx < lhs.len:
+        if lhs.bytes[lhs.start + idx] != rhs.bytes[rhs.start + idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn byte_span_prefix_len(lhs: ByteSpan, rhs: ByteSpan) -> i64:
+    val limit = row_bitmap_min(lhs.len, rhs.len)
+    var idx = 0
+    while idx < limit:
+        if lhs.bytes[lhs.start + idx] != rhs.bytes[rhs.start + idx]:
+            return idx
+        idx = idx + 1
+    limit
+
+fn is_delimiter_byte(byte: u8) -> bool:
+    byte == (" " as u8) or byte == ("\t" as u8) or byte == ("\n" as u8) or
+    byte == ("\r" as u8) or byte == ("," as u8) or byte == ("|" as u8) or
+    byte == ("\"" as u8) or byte == ("'" as u8)
+
+fn byte_span_find_delimiter(span: ByteSpan) -> i64:
+    var idx = 0
+    while idx < span.len:
+        if is_delimiter_byte(span.bytes[span.start + idx]):
+            return idx
+        idx = idx + 1
+    -1
+
+fn text_find_delimiter(value: text) -> i64:
+    var idx = 0
+    while idx < value.len():
+        if is_delimiter_text_char(value.char_at(idx)):
+            return idx
+        idx = idx + 1
+    -1
+
+fn text_equals_span(lhs: text, rhs: text) -> bool:
+    lhs == rhs
+
+fn text_starts_with_span(value: text, prefix: text) -> bool:
+    value.starts_with(prefix)
+
+fn text_ends_with_span(value: text, suffix: text) -> bool:
+    value.ends_with(suffix)
+
+fn text_contains_fragment(value: text, needle: text) -> bool:
+    value.contains(needle)
+
+fn is_token_boundary_char(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == "," or
+    ch == "|" or ch == "\"" or ch == "'" or ch == "(" or ch == ")" or
+    ch == "[" or ch == "]" or ch == "{" or ch == "}" or ch == ":" or
+    ch == ";" or ch == "/" or ch == "\\"
+
+fn is_delimiter_text_char(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == "," or
+    ch == "|" or ch == "\"" or ch == "'"
+
+fn text_matches_at(value: text, start: i64, token: text) -> bool:
+    var offset = 0
+    while offset < token.len():
+        if value.char_at(start + offset) != token.char_at(offset):
+            return false
+        offset = offset + 1
+    true
+
+fn text_contains_token(value: text, token: text) -> bool:
+    if token == "":
+        return false
+    if not value.contains(token):
+        return false
+    val token_len = token.len()
+    val first = token.char_at(0)
+    var start = 0
+    while start <= value.len() - token_len:
+        if value.char_at(start) == first and text_matches_at(value, start, token):
+            val left_ok = if start == 0: true else: is_token_boundary_char(value.char_at(start - 1))
+            val right_idx = start + token_len
+            val right_ok = if right_idx >= value.len(): true else: is_token_boundary_char(value.char_at(right_idx))
+            if left_ok and right_ok:
+                return true
+        start = start + 1
+    false
+
+fn trigram_extract(value: text) -> [text]:
+    if value.len() < 3:
+        if value == "":
+            return []
+        return [value]
+    var result: [text] = []
+    var idx = 0
+    while idx <= value.len() - 3:
+        result.push(value.char_at(idx) + value.char_at(idx + 1) + value.char_at(idx + 2))
+        idx = idx + 1
+    result
+
+fn trigram_overlap_count(lhs: text, rhs: text) -> i64:
+    val left = trigram_extract(lhs)
+    val right = trigram_extract(rhs)
+    var total = 0
+    var li = 0
+    while li < left.len():
+        var ri = 0
+        var matched = false
+        while ri < right.len():
+            if left[li] == right[ri]:
+                matched = true
+                ri = right.len()
+            else:
+                ri = ri + 1
+        if matched:
+            total = total + 1
+        li = li + 1
+    total
+
+fn summary_text_hash(value: text) -> i64:
+    val bytes = rt_text_to_bytes(value)
+    var total = 0
+    var idx = 0
+    while idx < bytes.len():
+        total = (total + bytes[idx]) % DB_ACCEL_HASH_MODULUS
+        idx = idx + 1
+    total
+
+fn text_matches_predicate(value: text, predicate: ScanPredicate) -> bool:
+    match predicate.kind:
+        case ScanPredicateKind.Eq: text_equals_span(value, predicate.text_value)
+        case ScanPredicateKind.Ne: not text_equals_span(value, predicate.text_value)
+        case ScanPredicateKind.Lt: value < predicate.text_value
+        case ScanPredicateKind.Le: value <= predicate.text_value
+        case ScanPredicateKind.Gt: value > predicate.text_value
+        case ScanPredicateKind.Ge: value >= predicate.text_value
+        case ScanPredicateKind.StartsWith: text_starts_with_span(value, predicate.text_value)
+        case ScanPredicateKind.EndsWith: text_ends_with_span(value, predicate.text_value)
+        case ScanPredicateKind.Contains: text_contains_fragment(value, predicate.text_value)
+        case ScanPredicateKind.ContainsToken: text_contains_token(value, predicate.text_value)
+
+fn key_matches_predicate(value: i64, predicate: ScanPredicate) -> bool:
+    match predicate.kind:
+        case ScanPredicateKind.Eq: value == predicate.key_value
+        case ScanPredicateKind.Ne: value != predicate.key_value
+        case ScanPredicateKind.Lt: value < predicate.key_value
+        case ScanPredicateKind.Le: value <= predicate.key_value
+        case ScanPredicateKind.Gt: value > predicate.key_value
+        case ScanPredicateKind.Ge: value >= predicate.key_value
+        case _: false
+
+fn collect_text_row_indices(values: [text], predicate: ScanPredicate) -> ([i64], FilterStats):
+    val row_count = values.len()
+    var rows: [i64] = []
+    match predicate.kind:
+        case ScanPredicateKind.Eq:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_equals_span(values[idx], expected):
+                    rows.push(idx)
+                idx = idx + 1
+        case ScanPredicateKind.Ne:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if not text_equals_span(values[idx], expected):
+                    rows.push(idx)
+                idx = idx + 1
+        case ScanPredicateKind.StartsWith:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_starts_with_span(values[idx], expected):
+                    rows.push(idx)
+                idx = idx + 1
+        case ScanPredicateKind.EndsWith:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_ends_with_span(values[idx], expected):
+                    rows.push(idx)
+                idx = idx + 1
+        case ScanPredicateKind.Contains:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_contains_fragment(values[idx], expected):
+                    rows.push(idx)
+                idx = idx + 1
+        case ScanPredicateKind.ContainsToken:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_contains_token(values[idx], expected):
+                    rows.push(idx)
+                idx = idx + 1
+        case _:
+            var idx = 0
+            while idx < row_count:
+                if text_matches_predicate(values[idx], predicate):
+                    rows.push(idx)
+                idx = idx + 1
+    val kept = rows.len()
+    (rows, FilterStats(
+        rows_scanned: row_count,
+        candidates_kept: kept,
+        bitmap_density: if row_count == 0: 0.0 else: kept.to_float() / row_count.to_float(),
+        fallback_count: row_count
+    ))
+
+fn scan_text_values(values: [text], predicate: ScanPredicate) -> (RowBitmap, FilterStats):
+    val row_count = values.len()
+    var bitmap = RowBitmap.empty(row_count)
+    var kept = 0
+    match predicate.kind:
+        case ScanPredicateKind.Eq:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_equals_span(values[idx], expected):
+                    bitmap.set(idx)
+                    kept = kept + 1
+                idx = idx + 1
+        case ScanPredicateKind.Ne:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if not text_equals_span(values[idx], expected):
+                    bitmap.set(idx)
+                    kept = kept + 1
+                idx = idx + 1
+        case ScanPredicateKind.StartsWith:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_starts_with_span(values[idx], expected):
+                    bitmap.set(idx)
+                    kept = kept + 1
+                idx = idx + 1
+        case ScanPredicateKind.EndsWith:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_ends_with_span(values[idx], expected):
+                    bitmap.set(idx)
+                    kept = kept + 1
+                idx = idx + 1
+        case ScanPredicateKind.Contains:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_contains_fragment(values[idx], expected):
+                    bitmap.set(idx)
+                    kept = kept + 1
+                idx = idx + 1
+        case ScanPredicateKind.ContainsToken:
+            val expected = predicate.text_value
+            var idx = 0
+            while idx < row_count:
+                if text_contains_token(values[idx], expected):
+                    bitmap.set(idx)
+                    kept = kept + 1
+                idx = idx + 1
+        case _:
+            var idx = 0
+            while idx < row_count:
+                if text_matches_predicate(values[idx], predicate):
+                    bitmap.set(idx)
+                    kept = kept + 1
+                idx = idx + 1
+    (bitmap, FilterStats(
+        rows_scanned: row_count,
+        candidates_kept: kept,
+        bitmap_density: if row_count == 0: 0.0 else: kept.to_float() / row_count.to_float(),
+        fallback_count: row_count
+    ))
+
+fn scan_key_span(span: KeySpan, predicate: ScanPredicate) -> (RowBitmap, FilterStats):
+    var bitmap = RowBitmap.empty(span.len)
+    var kept = 0
+    var idx = 0
+    while idx < span.len:
+        if key_matches_predicate(span.values[span.start + idx], predicate):
+            bitmap.set(idx)
+            kept = kept + 1
+        idx = idx + 1
+    (bitmap, FilterStats(
+        rows_scanned: span.len,
+        candidates_kept: kept,
+        bitmap_density: if span.len == 0: 0.0 else: kept.to_float() / span.len.to_float(),
+        fallback_count: span.len
+    ))

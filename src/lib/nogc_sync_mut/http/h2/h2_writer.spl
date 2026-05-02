@@ -1,0 +1,189 @@
+# HTTP/2 Frame Serializer — RFC 9113 §4 + §6
+#
+# H2Frame -> [u8]. Big-endian, R-bit always written as 0 per RFC 9113 §4.1.
+#
+# Scope (W15-F):
+#   - All 10 frame types from §6.1-§6.10
+#   - Always writes well-formed frame header + payload
+#   - Caller is responsible for SETTINGS_MAX_FRAME_SIZE compliance — the writer
+#     does not split / chunk
+#
+# Out of scope (W16+):
+#   - PADDED flag — caller must leave PADDED bit clear in flags. We do NOT
+#     inject pad-length / padding bytes.
+#   - PRIORITY-in-HEADERS sub-payload — writer does NOT prepend the 5-byte
+#     priority block when HEADERS.flags has PRIORITY set; caller must clear it.
+#
+# These boundaries match the parser's symmetric scope.
+
+use std.http.h2.h2_frame.{
+    H2Frame, H2Setting,
+    H2_FRAME_DATA, H2_FRAME_HEADERS, H2_FRAME_PRIORITY, H2_FRAME_RST_STREAM,
+    H2_FRAME_SETTINGS, H2_FRAME_PUSH_PROMISE, H2_FRAME_PING, H2_FRAME_GOAWAY,
+    H2_FRAME_WINDOW_UPDATE, H2_FRAME_CONTINUATION
+}
+
+# ============================================================================
+# Big-endian byte emission helpers
+# ============================================================================
+
+# Append the low 24 bits of `value` as 3 bytes (network byte order / big-endian).
+fn _push_u24_be(out: [u8], value: i64):
+    out.push((value >> 16) & 0xff)
+    out.push((value >> 8) & 0xff)
+    out.push(value & 0xff)
+
+# Append the low 32 bits of `value` as 4 bytes big-endian.
+fn _push_u32_be(out: [u8], value: i64):
+    out.push((value >> 24) & 0xff)
+    out.push((value >> 16) & 0xff)
+    out.push((value >> 8) & 0xff)
+    out.push(value & 0xff)
+
+fn _push_u16_be(out: [u8], value: i64):
+    out.push((value >> 8) & 0xff)
+    out.push(value & 0xff)
+
+# Append `src` bytes onto `out`.
+fn _append_bytes(out: [u8], src: [u8]):
+    var i = 0
+    val n = src.len()
+    loop:
+        if i >= n:
+            break
+        out.push(src[i])
+        i = i + 1
+
+# ============================================================================
+# Frame header writer (RFC 9113 §4.1)
+# ============================================================================
+#
+# 9-byte header:
+#   length   24 bits  payload length (does NOT include the 9 header bytes)
+#   type      8 bits  frame type code
+#   flags     8 bits
+#   R         1 bit   reserved, MUST be 0 on send
+#   stream_id 31 bits
+#
+# stream_id is masked to 31 bits as a defensive measure.
+fn _write_frame_header(out: [u8], length: i64, frame_type: i64, flags: i64, stream_id: i64):
+    _push_u24_be(out, length & 0xffffff)
+    out.push(frame_type & 0xff)
+    out.push(flags & 0xff)
+    # R-bit always zero on write per RFC 9113 §4.1.
+    val sid_31 = stream_id & 0x7fffffff
+    _push_u32_be(out, sid_31)
+
+# ============================================================================
+# Per-type payload encoders. Each returns the payload [u8] (length determined
+# by caller).
+# ============================================================================
+
+fn _encode_priority_payload(exclusive: bool, stream_dependency: i64, weight: i64) -> [u8]:
+    var out: [u8] = []
+    val dep_31 = stream_dependency & 0x7fffffff
+    var top: i64 = 0
+    if exclusive:
+        top = 0x80000000
+    val word = top | dep_31
+    _push_u32_be(out, word)
+    out.push(weight & 0xff)
+    return out
+
+fn _encode_settings_payload(settings: [H2Setting]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    val n = settings.len()
+    loop:
+        if i >= n:
+            break
+        val s = settings[i]
+        _push_u16_be(out, s.identifier & 0xffff)
+        _push_u32_be(out, s.value & 0xffffffff)
+        i = i + 1
+    return out
+
+fn _encode_rst_stream_payload(error_code: i64) -> [u8]:
+    var out: [u8] = []
+    _push_u32_be(out, error_code & 0xffffffff)
+    return out
+
+fn _encode_push_promise_payload(promised_stream_id: i64, header_block: [u8]) -> [u8]:
+    var out: [u8] = []
+    val pid_31 = promised_stream_id & 0x7fffffff
+    _push_u32_be(out, pid_31)
+    _append_bytes(out, header_block)
+    return out
+
+fn _encode_goaway_payload(last_stream_id: i64, error_code: i64, debug_data: [u8]) -> [u8]:
+    var out: [u8] = []
+    val sid_31 = last_stream_id & 0x7fffffff
+    _push_u32_be(out, sid_31)
+    _push_u32_be(out, error_code & 0xffffffff)
+    _append_bytes(out, debug_data)
+    return out
+
+fn _encode_window_update_payload(increment: i64) -> [u8]:
+    var out: [u8] = []
+    val inc_31 = increment & 0x7fffffff
+    _push_u32_be(out, inc_31)
+    return out
+
+# ============================================================================
+# Top-level writer: H2Frame -> [u8]
+# ============================================================================
+
+fn h2_write_frame(frame: H2Frame) -> [u8]:
+    var out: [u8] = []
+    match frame:
+        case Data(d):
+            val payload_len = d.data.len()
+            _write_frame_header(out, payload_len, H2_FRAME_DATA, d.flags, d.stream_id)
+            _append_bytes(out, d.data)
+        case Headers(h):
+            val payload_len = h.header_block.len()
+            _write_frame_header(out, payload_len, H2_FRAME_HEADERS, h.flags, h.stream_id)
+            _append_bytes(out, h.header_block)
+        case Priority(p):
+            val payload = _encode_priority_payload(p.exclusive, p.stream_dependency, p.weight)
+            val payload_len = payload.len()
+            _write_frame_header(out, payload_len, H2_FRAME_PRIORITY, 0, p.stream_id)
+            _append_bytes(out, payload)
+        case RstStream(r):
+            val payload = _encode_rst_stream_payload(r.error_code)
+            val payload_len = payload.len()
+            _write_frame_header(out, payload_len, H2_FRAME_RST_STREAM, 0, r.stream_id)
+            _append_bytes(out, payload)
+        case Settings(s):
+            val payload = _encode_settings_payload(s.settings)
+            val payload_len = payload.len()
+            # SETTINGS stream_id MUST be 0 (RFC 9113 §6.5).
+            _write_frame_header(out, payload_len, H2_FRAME_SETTINGS, s.flags, 0)
+            _append_bytes(out, payload)
+        case PushPromise(pp):
+            val payload = _encode_push_promise_payload(pp.promised_stream_id, pp.header_block)
+            val payload_len = payload.len()
+            _write_frame_header(out, payload_len, H2_FRAME_PUSH_PROMISE, pp.flags, pp.stream_id)
+            _append_bytes(out, payload)
+        case Ping(pg):
+            # PING payload MUST be exactly 8 bytes. We trust the caller; if the
+            # caller passes wrong length, we still emit length=opaque.len() so
+            # the parser will reject — fail-loud.
+            val payload_len = pg.opaque_data.len()
+            _write_frame_header(out, payload_len, H2_FRAME_PING, pg.flags, 0)
+            _append_bytes(out, pg.opaque_data)
+        case Goaway(g):
+            val payload = _encode_goaway_payload(g.last_stream_id, g.error_code, g.debug_data)
+            val payload_len = payload.len()
+            _write_frame_header(out, payload_len, H2_FRAME_GOAWAY, 0, 0)
+            _append_bytes(out, payload)
+        case WindowUpdate(w):
+            val payload = _encode_window_update_payload(w.increment)
+            val payload_len = payload.len()
+            _write_frame_header(out, payload_len, H2_FRAME_WINDOW_UPDATE, 0, w.stream_id)
+            _append_bytes(out, payload)
+        case Continuation(c):
+            val payload_len = c.header_block.len()
+            _write_frame_header(out, payload_len, H2_FRAME_CONTINUATION, c.flags, c.stream_id)
+            _append_bytes(out, c.header_block)
+    return out

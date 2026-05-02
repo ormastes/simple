@@ -1,0 +1,119 @@
+use std.spipe.*
+use std.db.accel.{
+    RowBitmap, ScanPredicate, ScanPredicateKind,
+    byte_span_find_delimiter, make_byte_span,
+    accel_capability_report, make_key_span, scan_key_span,
+    collect_text_row_indices, scan_text_values, summary_text_hash, text_contains_token,
+    text_find_delimiter,
+    text_starts_with_span, trigram_extract, trigram_overlap_count
+}
+
+fn build_boundary_scan_values() -> [text]:
+    var values: [text] = []
+    var idx = 0
+    while idx < 70:
+        if idx == 0 or idx == 63 or idx == 64 or idx == 69:
+            values.push("src/hit.spl")
+        else:
+            values.push("doc/miss.md")
+        idx = idx + 1
+    values
+
+describe "DB accel — bitmap operations":
+    it "preserves counts across and/or/and_not":
+        val lhs = RowBitmap.empty(8)
+        lhs.set(1)
+        lhs.set(3)
+        lhs.set(5)
+        val rhs = RowBitmap.empty(8)
+        rhs.set(3)
+        rhs.set(4)
+        rhs.set(5)
+
+        val both = lhs.and_with(rhs)
+        val either = lhs.or_with(rhs)
+        val only_lhs = lhs.and_not(rhs)
+
+        expect both.count() == 2
+        expect either.count() == 4
+        expect only_lhs.count() == 1
+
+    it "supports full, get, and clear without changing bitmap semantics":
+        val bitmap = RowBitmap.full(70)
+        expect bitmap.count() == 70
+        expect bitmap.get(0) == true
+        expect bitmap.get(69) == true
+        expect bitmap.get(70) == false
+
+        bitmap.clear(0)
+        bitmap.clear(69)
+        expect bitmap.get(0) == false
+        expect bitmap.get(1) == true
+        expect bitmap.get(69) == false
+        expect bitmap.count() == 68
+
+describe "DB accel — text predicates":
+    it "matches prefix and token boundaries":
+        expect text_starts_with_span("alpha beta", "alpha") == true
+        expect text_contains_token("alpha|beta,gamma", "beta") == true
+        expect text_contains_token("alphabet soup", "alpha") == false
+
+    it "finds shared delimiter boundaries in bytes and text":
+        val span = make_byte_span([("a" as u8), ("|" as u8), ("b" as u8)], 0, 3)
+        expect byte_span_find_delimiter(span) == 1
+        expect text_find_delimiter("path,tail") == 4
+
+    it "extracts trigrams and overlap":
+        val trigrams = trigram_extract("token")
+        expect trigrams.len() == 3
+        expect trigram_overlap_count("token", "stokenized") > 0
+
+describe "DB accel — batched scalar scans":
+    it "scans keys with identical scalar and bitmap counts":
+        val span = make_key_span([10, 20, 30, 20, 50], 0, 5)
+        val predicate = ScanPredicate(kind: ScanPredicateKind.Eq, text_value: "", key_value: 20)
+        val (bitmap, stats) = scan_key_span(span, predicate)
+        expect bitmap.count() == 2
+        expect stats.candidates_kept == 2
+        expect stats.rows_scanned == 5
+
+    it "scans text values for contains":
+        val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "src", key_value: 0)
+        val (bitmap, stats) = scan_text_values(["src/main.spl", "doc/readme.md", "src/lib.spl"], predicate)
+        expect bitmap.count() == 2
+        expect stats.bitmap_density > 0.5
+
+    it "collects row indices without bitmap materialization":
+        val predicate = ScanPredicate(kind: ScanPredicateKind.ContainsToken, text_value: "beta", key_value: 0)
+        val (rows, stats) = collect_text_row_indices(
+            ["alpha|beta,gamma", "alpha beta", "beta", "betamax"],
+            predicate
+        )
+        expect rows.len() == 3
+        expect rows[0] == 0
+        expect rows[1] == 1
+        expect rows[2] == 2
+        expect stats.candidates_kept == 3
+        expect stats.rows_scanned == 4
+
+    it "preserves matches across 64-row bitmap word boundaries":
+        val values = build_boundary_scan_values()
+        val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "src/", key_value: 0)
+        val (bitmap, stats) = scan_text_values(values, predicate)
+        expect bitmap.get(0) == true
+        expect bitmap.get(63) == true
+        expect bitmap.get(64) == true
+        expect bitmap.get(69) == true
+        expect bitmap.count() == 4
+        expect stats.candidates_kept == 4
+
+describe "DB accel — capability report":
+    it "reports runtime tier and keeps scalar fallback available":
+        val report = accel_capability_report()
+        expect report.scalar_fallback == true
+        expect report.tier_name.len() > 0
+        expect report.simd_width_bits > -1
+        expect report.simd_active == false
+
+    it "uses deterministic summary hashes for scan prefilters":
+        expect summary_text_hash("ab") == summary_text_hash("ba")

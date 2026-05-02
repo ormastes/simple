@@ -1,0 +1,189 @@
+"""
+Wave 15-D — Spec: StaticFileHandler ↔ StaticCompressionCache wiring.
+
+Exercises the per-request compression decision at the handler-helper
+boundary, focusing on `Accept-Encoding` negotiation cases the existing
+`static_file_compression_cache_spec.spl` does NOT cover:
+
+  - Codec preference order across multi-codec Accept-Encoding lists.
+  - Server preference (zstd before lz4) when client lists both equally.
+  - q=0 explicitly forbids an otherwise-supported codec.
+  - Wildcard `*` falls back to the server's first supported codec.
+  - Identity-only Accept-Encoding serves the raw response.
+  - Unwired client codecs (gzip / br) negotiate to identity, not Err.
+
+Server's currently wired codecs (see
+`src/lib/nogc_async_mut/http_server/compression.spl::supported_encodings`)
+are `["zstd", "lz4"]`. `gzip`, `br`, and `deflate` return `Err` from
+`compress_response_body` today, so a client offering ONLY those
+codecs ends up with identity (no codec match in `supported_encodings`,
+NOT a failed compress). That is the honest behavior covered here.
+
+All payloads are built from module-level fns to dodge the
+interpreter-mode `it`-block var-mutation footgun.
+"""
+
+use std.spipe.*
+use std.nogc_async_mut.http_server.static_file.{
+    StaticCompressionCache,
+    serve_compressed_or_plain,
+}
+
+# ---------------------------------------------------------------------------
+# Payload helper — module-level, not inside it blocks.
+# ---------------------------------------------------------------------------
+
+fn _make_text_payload() -> text:
+    # ~600 bytes of repeating ASCII — well above any min-size threshold
+    # and easily compressible by zstd.
+    var s: text = ""
+    var i: i64 = 0
+    while i < 30:
+        s = s + "<p>Hello, compression cache integration test payload.</p>"
+        i = i + 1
+    s
+
+fn _content_encoding_of(headers: [(text, text)]) -> text:
+    for h in headers:
+        if h.0.lower() == "content-encoding":
+            return h.1
+    ""
+
+fn _has_vary_accept_encoding(headers: [(text, text)]) -> bool:
+    for h in headers:
+        if h.0.lower() == "vary" and h.1 == "Accept-Encoding":
+            return true
+    false
+
+# ---------------------------------------------------------------------------
+# Specs
+# ---------------------------------------------------------------------------
+
+describe "StaticFileHandler Accept-Encoding negotiation":
+
+    it "client prefers zstd → server emits zstd Content-Encoding":
+        # zstd is in supported_encodings() and the codec is wired.
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val resp = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/index.html", "zstd", cache
+        )
+        expect resp.status == 200
+        expect _content_encoding_of(resp.headers) == "zstd"
+        expect _has_vary_accept_encoding(resp.headers) == true
+        expect resp.body_bytes.len() > 0 == true
+        expect resp.body == ""
+
+    it "client prefers br only → server falls back to identity (br unwired)":
+        # br is NOT in supported_encodings(); negotiate_encoding returns ""
+        # so the helper short-circuits to plain identity. This is the
+        # "no codec match" path, not the compression-error path.
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val resp = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/page.html", "br", cache
+        )
+        expect resp.status == 200
+        expect _content_encoding_of(resp.headers) == ""
+        expect resp.body == body
+        expect resp.body_bytes.len() == 0
+        # No compression happened → cache must remain empty.
+        expect cache.entries.len() == 0
+
+    it "Accept-Encoding: identity only → raw response, cache untouched":
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val resp = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/about.html", "identity", cache
+        )
+        expect resp.status == 200
+        expect _content_encoding_of(resp.headers) == ""
+        expect resp.body == body
+        expect resp.body_bytes.len() == 0
+        expect cache.entries.len() == 0
+
+    it "client lists gzip+br only → no supported match, identity served":
+        # Both gzip and br are unwired; supported_encodings() = [zstd, lz4].
+        # negotiate_encoding finds no overlap → "" → plain response.
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val resp = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/foo.html", "gzip, br", cache
+        )
+        expect resp.status == 200
+        expect _content_encoding_of(resp.headers) == ""
+        expect resp.body == body
+        expect cache.entries.len() == 0
+
+    it "Accept-Encoding: zstd;q=0 forbids zstd → identity served":
+        # q=0 explicitly bans the coding. Even though zstd IS supported,
+        # the client has rejected it. With no other codec offered, the
+        # server falls through to identity.
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val resp = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/q0.html", "zstd;q=0", cache
+        )
+        expect resp.status == 200
+        expect _content_encoding_of(resp.headers) == ""
+        expect resp.body == body
+        expect resp.body_bytes.len() == 0
+        expect cache.entries.len() == 0
+
+    it "Accept-Encoding: zstd, lz4 → server preference picks zstd first":
+        # Both codecs supported, both at default q=1. negotiate_encoding
+        # ties on q and breaks ties by `supported_encodings()` order,
+        # which lists zstd before lz4.
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val resp = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/multi.html", "zstd, lz4", cache
+        )
+        expect resp.status == 200
+        expect _content_encoding_of(resp.headers) == "zstd"
+        expect resp.body_bytes.len() > 0 == true
+        expect cache.entries.len() == 1
+
+    it "client demotes zstd via q=0.1 but lz4 at q=1 → lz4 wins":
+        # zstd is otherwise server-preferred, but the client has lowered
+        # its quality to 0.1 while lz4 stays at q=1 → lz4 wins on q.
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val resp = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/demote.html", "zstd;q=0.1, lz4;q=1.0", cache
+        )
+        expect resp.status == 200
+        expect _content_encoding_of(resp.headers) == "lz4"
+        expect resp.body_bytes.len() > 0 == true
+
+    it "Accept-Encoding: * → first supported codec is chosen":
+        # `*` matches any codec at q=1; server preference order picks zstd.
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val resp = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/star.html", "*", cache
+        )
+        expect resp.status == 200
+        expect _content_encoding_of(resp.headers) == "zstd"
+        expect resp.body_bytes.len() > 0 == true
+
+    it "cache miss compresses+stores; second hit serves identical bytes":
+        # End-to-end (path,encoding) keyed cache check on the negotiation
+        # path — distinct from the existing spec because we route through
+        # a multi-codec Accept-Encoding header, not a single-codec one.
+        val cache = StaticCompressionCache.new(8, 1048576)
+        val body = _make_text_payload()
+        val first = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/cached.html", "zstd, lz4", cache
+        )
+        expect first.body_bytes.len() > 0 == true
+        val first_len = first.body_bytes.len()
+        expect cache.entries.len() == 1
+        val second = serve_compressed_or_plain(
+            body, "text/html; charset=utf-8", "/cached.html", "zstd, lz4", cache
+        )
+        expect second.status == 200
+        expect _content_encoding_of(second.headers) == "zstd"
+        expect second.body_bytes.len() == first_len
+        # Entry count unchanged → served from cache, not recompressed.
+        expect cache.entries.len() == 1

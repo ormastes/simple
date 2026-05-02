@@ -603,6 +603,103 @@ fn _brotli_read_meta_block(r: BrotliBitReader, output: [u8]) -> Result<_MetaBloc
     return _decode_compressed_block(r2, output, mlen, is_last)
 
 # -------------------------------------------------------------------------
+# Internal: distance code decoding (RFC 7932 §4) for NPOSTFIX=0, NDIRECT=0.
+#
+# Distance alphabet (16 + NDIRECT + (48 << NPOSTFIX) = 64 codes):
+#   - codes  0..15: ring-buffer references (no extra bits).
+#   - codes 16..63: regular distances with extra bits per the formulas:
+#       ndistbits = 1 + ((sym - 16) >> 1)   (NPOSTFIX=0 ⇒ shift by NPOSTFIX+1=1)
+#       hcode     = (sym - 16) >> 0         (NPOSTFIX=0)
+#       offset    = ((2 + (hcode & 1)) << ndistbits) - 4
+#       distance  = offset + dextra + 1     (NPOSTFIX=0, NDIRECT=0)
+#
+# Ring-buffer codes 0..15 map to:
+#   0..3  -> R[idx-0..3] (i.e. four ring positions, most-recent first)
+#   4..15 -> R[idx-(c%4)] +/- offset; (c-4)/4 in 0..2 selects the
+#            ring position; (c-4)%4 selects the +/- offset
+#            (codes 4..9: ±1, ±2, ±3 around R[3]; 10..15 around R[2]).
+# RFC 7932 §4 Table 4 spells this out precisely.
+#
+# Returns:
+#   - distance:    the resolved distance value (>= 1)
+#   - update_ring: true iff the ring buffer should be updated AFTER the copy
+#                  (true for regular distances 16..63 and for ring codes
+#                   4..15 which produce a distance not already in the ring).
+#   - reader:      bit-reader after consuming any extra bits.
+# -------------------------------------------------------------------------
+struct _DistanceResult:
+    distance: i64
+    update_ring: bool
+    reader: BrotliBitReader
+
+fn _ring_at(ring: [i64], idx: i64, offset: i64) -> i64:
+    # Return ring[(idx - offset) & 3] without modifying the input.
+    val pos = (idx - offset) & 3
+    ring[pos]
+
+fn _decode_distance(sym: i64, r: BrotliBitReader, ring: [i64], ring_idx: i64) -> Result<_DistanceResult, CompressionError>:
+    if sym < 0:
+        return Err(CompressionError.CorruptStream("brotli negative distance symbol"))
+    if sym <= 3:
+        # Ring buffer references: R[ring_idx], R[ring_idx-1], R[ring_idx-2], R[ring_idx-3]
+        val d = _ring_at(ring, ring_idx, sym)
+        return Ok(_DistanceResult(distance: d, update_ring: false, reader: r))
+    if sym <= 15:
+        # RFC 7932 §4 Table 4: codes 4..15 are R[3] ± k or R[2] ± k.
+        # The mapping (per RFC 7932 §4) for symbols 4..15 is:
+        #   sym  formula
+        #    4   R[3] - 1
+        #    5   R[3] + 1
+        #    6   R[3] - 2
+        #    7   R[3] + 2
+        #    8   R[3] - 3
+        #    9   R[3] + 3
+        #   10   R[2] - 1
+        #   11   R[2] + 1
+        #   12   R[2] - 2
+        #   13   R[2] + 2
+        #   14   R[2] - 3
+        #   15   R[2] + 3
+        var ring_pick = 0
+        var delta = 0
+        if sym <= 9:
+            ring_pick = 0  # R[3] = ring[ring_idx]
+            val k = sym - 4
+            val mag = (k >> 1) + 1
+            if (k & 1) == 0:
+                delta = -mag
+            else:
+                delta = mag
+        else:
+            ring_pick = 1  # R[2] = ring[ring_idx - 1]
+            val k = sym - 10
+            val mag = (k >> 1) + 1
+            if (k & 1) == 0:
+                delta = -mag
+            else:
+                delta = mag
+        val base = _ring_at(ring, ring_idx, ring_pick)
+        val d = base + delta
+        if d <= 0:
+            return Err(CompressionError.CorruptStream("brotli ring distance non-positive"))
+        return Ok(_DistanceResult(distance: d, update_ring: true, reader: r))
+    # sym in 16..63: regular distance with extra bits.
+    if sym > 63:
+        return Err(CompressionError.CorruptStream("brotli distance symbol out of range"))
+    val s16 = sym - 16
+    val ndistbits = 1 + (s16 >> 1)
+    val hcode = s16
+    val offset = ((2 + (hcode & 1)) << ndistbits) - 4
+    val de_res = brotli_bits_read(r, ndistbits)
+    if de_res.is_err():
+        return Err(de_res.unwrap_err())
+    val de = de_res.unwrap()
+    val distance = offset + de.value + 1
+    if distance <= 0:
+        return Err(CompressionError.CorruptStream("brotli regular distance non-positive"))
+    Ok(_DistanceResult(distance: distance, update_ring: true, reader: de.reader))
+
+# -------------------------------------------------------------------------
 # Internal: compressed meta block (literal-only tier)
 # -------------------------------------------------------------------------
 fn _decode_compressed_block(r0: BrotliBitReader, output: [u8], mlen: i64, is_last: bool) -> Result<_MetaBlockResult, CompressionError>:
@@ -698,6 +795,17 @@ fn _decode_compressed_block(r0: BrotliBitReader, output: [u8], mlen: i64, is_las
     val dist_tree = dist_res.unwrap()
     r = dist_tree.reader
 
+    # Distance ring buffer (RFC 7932 §4): initialized to (16, 15, 11, 4)
+    # with R[0]=16, R[1]=15, R[2]=11, R[3]=4.  R[3] is the most-recent.
+    # We store as [R0, R1, R2, R3]; dist_ring_idx points to the most-recent
+    # slot (initially 3, wrapping by +1 mod 4 on each new regular distance).
+    var dist_ring: [i64] = []
+    dist_ring.push(16)
+    dist_ring.push(15)
+    dist_ring.push(11)
+    dist_ring.push(4)
+    var dist_ring_idx = 3
+
     # Command loop: emit insert literals + (omitted) copy until output reaches mlen.
     var out = output
     val target = out.len() + mlen
@@ -753,10 +861,56 @@ fn _decode_compressed_block(r0: BrotliBitReader, output: [u8], mlen: i64, is_las
         if out.len() == target:
             break
 
-        # Otherwise, a real copy is needed -> distance command.  This is the
-        # LZ77 path which we DO NOT support in the literal-only tier.
-        # We still need to consume the distance code + extras to emit a clear
-        # error message.  But since we're refusing anyway, emit the error.
-        return Err(CompressionError.UnsupportedFeature("brotli copy command (LZ77) not supported"))
+        # Real copy: requires a distance.  ICP kinds 0..3 omit the distance
+        # tree symbol and use distance_code = 0 (the most-recent distance from
+        # the ring buffer); kinds 4..10 read a distance symbol from dist_tree.
+        var distance = 0
+        if decomp.has_distance:
+            val ds_res = _decode_symbol(dist_tree, r)
+            if ds_res.is_err():
+                return Err(ds_res.unwrap_err())
+            val ds = ds_res.unwrap()
+            r = ds.reader
+            val dist_decoded = _decode_distance(ds.symbol, r, dist_ring, dist_ring_idx)
+            if dist_decoded.is_err():
+                return Err(dist_decoded.unwrap_err())
+            val dd = dist_decoded.unwrap()
+            distance = dd.distance
+            r = dd.reader
+            if dd.update_ring:
+                # Update ring buffer: shift R[0]..R[3] to make room for the new
+                # distance at R[3] (most-recent slot).
+                # Per RFC §4: ring is updated only when distance_code != 0
+                # AND the resolved distance is not "implicit" (i.e. not from a
+                # ring-buffer reference).  Our _decode_distance reports
+                # update_ring = true only when the regular branch was taken.
+                dist_ring_idx = (dist_ring_idx + 1) & 3
+                dist_ring[dist_ring_idx] = distance
+        else:
+            # ICP kinds 0..3: distance defaults to "previous distance"
+            # (R[dist_ring_idx]); ring is NOT updated.
+            distance = dist_ring[dist_ring_idx]
+
+        if distance <= 0:
+            return Err(CompressionError.CorruptStream("brotli zero/negative distance"))
+        if distance > out.len():
+            # RFC 7932 §4 also allows the static dictionary for distances >
+            # max_distance, but we don't implement the static dictionary tier.
+            return Err(CompressionError.UnsupportedFeature("brotli static dictionary distance"))
+
+        # Emit copy_length bytes from the sliding window.
+        # Brotli copies one byte at a time — distance can be < copy_length so
+        # the copied region may overlap with itself (run-length style).
+        var c = 0
+        val src_start = out.len() - distance
+        while c < copy_length:
+            if out.len() >= target:
+                return Err(CompressionError.CorruptStream("brotli copy exceeds MLEN"))
+            val src_idx = src_start + c
+            # Re-read out[src_idx] each iteration — when copy overlaps the
+            # destination region, byte k+distance is the byte we just wrote.
+            val byte = out[src_idx]
+            out.push(byte)
+            c = c + 1
 
     Ok(_MetaBlockResult(output: out, reader: r, is_last: is_last))

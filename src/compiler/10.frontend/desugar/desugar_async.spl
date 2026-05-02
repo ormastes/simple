@@ -155,7 +155,7 @@ fn desugar_async_body_simple(body: Block) -> Block:
     )
 
     Block(
-        statements: [Stmt(kind: stmtkind_Expr(wrapper_call), span: body.span)],
+        stmts: [Stmt(kind: stmtkind_Expr(wrapper_call), span: body.span)],
         span: body.span
     )
 
@@ -181,13 +181,13 @@ fn make_generator_call(func_name: text, span: Span) -> Block:
     val lambda = Expr(
         kind: ExprKind.Lambda(
             [
-                Param(name: "state", type_: nil, default: nil, span: span),
-                Param(name: "waker", type_: nil, default: nil, span: span)
+                LambdaParam(name: "state", type_: nil, span: span),
+                LambdaParam(name: "waker", type_: nil, span: span)
             ],
-            Block(
-                statements: [Stmt(kind: stmtkind_Expr(lambda_body), span: span)],
+            Expr(kind: ExprKind.Block(Block(
+                stmts: [Stmt(kind: stmtkind_Expr(lambda_body), span: span)],
                 span: span
-            )
+            )), span: span)
         ),
         span: span
     )
@@ -204,7 +204,7 @@ fn make_generator_call(func_name: text, span: Span) -> Block:
     )
 
     Block(
-        statements: [Stmt(kind: stmtkind_Expr(generator_call), span: span)],
+        stmts: [Stmt(kind: stmtkind_Expr(generator_call), span: span)],
         span: span
     )
 
@@ -227,15 +227,15 @@ fn desugar_await_expr(expr: Expr) -> Expr:
                 case Ready(v): return v
                 case Pending: yield_to_runtime()
     """
-    match expr.kind:
+    match expr_kind(expr):
         case exprkind_Await(awaited):
             # Simple desugaring: await x => block_on(x)
             Expr(
                 kind: ExprKind.Call(
-                    Expr(kind: ExprKind.Ident("block_on"), span: expr.span),
+                    Expr(kind: ExprKind.Ident("block_on"), span: awaited.span),
                     [CallArg(value: awaited, name: nil)]
                 ),
-                span: expr.span
+                span: awaited.span
             )
         case _:
             expr
@@ -253,14 +253,14 @@ fn desugar_spawn_expr(expr: Expr) -> Expr:
     Output:
         spawn_actor(Worker(id: 1))
     """
-    match expr.kind:
+    match expr_kind(expr):
         case exprkind_Spawn(spawned):
             Expr(
                 kind: ExprKind.Call(
-                    Expr(kind: ExprKind.Ident("spawn_actor"), span: expr.span),
+                    Expr(kind: ExprKind.Ident("spawn_actor"), span: spawned.span),
                     [CallArg(value: spawned, name: nil)]
                 ),
-                span: expr.span
+                span: spawned.span
             )
         case _:
             expr
@@ -390,13 +390,13 @@ fn desugar_block(block: Block) -> Block:
         desugared_stmts_push(desugared_stmts, desugared)
 
     Block(
-        statements: desugared_stmts,
+        stmts: desugared_stmts,
         span: block.span
     )
 
 fn desugar_stmt(stmt: Stmt) -> Stmt:
     """Desugar a single statement."""
-    match stmt.kind:
+    match stmt_kind(stmt):
         case stmtkind_Expr(expr):
             val desugared_expr = desugar_expr(expr)
             Stmt(kind: stmtkind_Expr(desugared_expr), span: stmt.span)
@@ -406,7 +406,7 @@ fn desugar_stmt(stmt: Stmt) -> Stmt:
 fn desugar_expr(expr: Expr) -> Expr:
     """Recursively desugar expressions."""
     # First check if this expression itself needs desugaring
-    match expr.kind:
+    match expr_kind(expr):
         case exprkind_Await(_):
             return desugar_await_expr(expr)
         case exprkind_Spawn(_):

@@ -70,6 +70,64 @@ fn ml_dsa_omega_65() -> i64:
     55
 
 # -----------------------------------------------------------------------------
+# Parameter accessors — ML-DSA-44 (FIPS 204 §4 Table 1, security category 2).
+#   k=4, l=4, eta=2, tau=39, gamma1=2^17, gamma2=(q-1)/88, omega=80, beta=78.
+# -----------------------------------------------------------------------------
+
+fn ml_dsa_tau_44() -> i64:
+    39
+
+fn ml_dsa_gamma1_44() -> i64:
+    131072
+
+fn ml_dsa_gamma2_44() -> i64:
+    95232
+
+fn ml_dsa_k_44() -> i64:
+    4
+
+fn ml_dsa_l_44() -> i64:
+    4
+
+fn ml_dsa_eta_44() -> i64:
+    2
+
+fn ml_dsa_beta_44() -> i64:
+    78
+
+fn ml_dsa_omega_44() -> i64:
+    80
+
+# -----------------------------------------------------------------------------
+# Parameter accessors — ML-DSA-87 (FIPS 204 §4 Table 1, security category 5).
+#   k=8, l=7, eta=2, tau=60, gamma1=2^19, gamma2=(q-1)/32, omega=75, beta=120.
+# -----------------------------------------------------------------------------
+
+fn ml_dsa_tau_87() -> i64:
+    60
+
+fn ml_dsa_gamma1_87() -> i64:
+    524288
+
+fn ml_dsa_gamma2_87() -> i64:
+    261888
+
+fn ml_dsa_k_87() -> i64:
+    8
+
+fn ml_dsa_l_87() -> i64:
+    7
+
+fn ml_dsa_eta_87() -> i64:
+    2
+
+fn ml_dsa_beta_87() -> i64:
+    120
+
+fn ml_dsa_omega_87() -> i64:
+    75
+
+# -----------------------------------------------------------------------------
 # Modular reduction helpers (Z_q with q = 8380417).
 # Caller-side discipline keeps intermediates within ±2^53, so a centred
 # `((x % q) + q) % q` is safe under i64 arithmetic.
@@ -318,10 +376,9 @@ fn power2round_poly(r: list) -> tuple:
 # For ML-DSA-65: γ2 = (q-1)/32 = 261888, so 2γ2 divides q-1.
 # -----------------------------------------------------------------------------
 
-fn decompose_int(r_in: i64) -> tuple:
+fn decompose_int_with(r_in: i64, gamma2: i64) -> tuple:
     val q = ml_dsa_q()
-    val gamma2 = ml_dsa_gamma2_65()
-    val two_g  = 2 * gamma2     # 523776
+    val two_g  = 2 * gamma2
     val r = modq(r_in)
     val low = r % two_g
     var r0 = low
@@ -334,16 +391,22 @@ fn decompose_int(r_in: i64) -> tuple:
         r0 = r0 - 1
     (r1, r0)
 
-fn decompose_poly(r: list) -> tuple:
+fn decompose_int(r_in: i64) -> tuple:
+    decompose_int_with(r_in, ml_dsa_gamma2_65())
+
+fn decompose_poly_with(r: list, gamma2: i64) -> tuple:
     var r1 = []
     var r0 = []
     var i = 0
     while i < 256:
-        val pair = decompose_int(r.get(i))
+        val pair = decompose_int_with(r.get(i), gamma2)
         r1.push(pair[0])
         r0.push(pair[1])
         i = i + 1
     (r1, r0)
+
+fn decompose_poly(r: list) -> tuple:
+    decompose_poly_with(r, ml_dsa_gamma2_65())
 
 # HighBits / LowBits — projections of Decompose (Algorithms 37 & 38).
 fn high_bits_int(r: i64) -> i64:
@@ -354,12 +417,28 @@ fn low_bits_int(r: i64) -> i64:
     val pair = decompose_int(r)
     pair[1]
 
+fn high_bits_int_with(r: i64, gamma2: i64) -> i64:
+    val pair = decompose_int_with(r, gamma2)
+    pair[0]
+
+fn low_bits_int_with(r: i64, gamma2: i64) -> i64:
+    val pair = decompose_int_with(r, gamma2)
+    pair[1]
+
 fn high_bits_poly(r: list) -> list:
     val parts = decompose_poly(r)
     parts[0]
 
 fn low_bits_poly(r: list) -> list:
     val parts = decompose_poly(r)
+    parts[1]
+
+fn high_bits_poly_with(r: list, gamma2: i64) -> list:
+    val parts = decompose_poly_with(r, gamma2)
+    parts[0]
+
+fn low_bits_poly_with(r: list, gamma2: i64) -> list:
+    val parts = decompose_poly_with(r, gamma2)
     parts[1]
 
 # -----------------------------------------------------------------------------
@@ -369,31 +448,39 @@ fn low_bits_poly(r: list) -> list:
 # UseHint(h, r):   recovers the corrected high bits given hint bit h.
 # -----------------------------------------------------------------------------
 
-fn make_hint_int(z: i64, r: i64) -> i64:
-    val a = high_bits_int(r)
-    val b = high_bits_int(r + z)
+fn make_hint_int_with(z: i64, r: i64, gamma2: i64) -> i64:
+    val a = high_bits_int_with(r, gamma2)
+    val b = high_bits_int_with(r + z, gamma2)
     if a == b:
         0
     else:
         1
 
-fn make_hint_poly(z: list, r: list) -> list:
+fn make_hint_int(z: i64, r: i64) -> i64:
+    make_hint_int_with(z, r, ml_dsa_gamma2_65())
+
+fn make_hint_poly_with(z: list, r: list, gamma2: i64) -> list:
     var h = []
     var i = 0
     while i < 256:
-        h.push(make_hint_int(z.get(i), r.get(i)))
+        h.push(make_hint_int_with(z.get(i), r.get(i), gamma2))
         i = i + 1
     h
 
-# Cardinality m = (q-1)/(2γ2) = 16 for ML-DSA-65 → r1 ∈ [0, 16).
-fn _hint_modulus_65() -> i64:
+fn make_hint_poly(z: list, r: list) -> list:
+    make_hint_poly_with(z, r, ml_dsa_gamma2_65())
+
+# Cardinality m = (q-1)/(2γ2) — 16 for ML-DSA-65/87, 44 for ML-DSA-44.
+fn _hint_modulus_with(gamma2: i64) -> i64:
     val q = ml_dsa_q()
-    val gamma2 = ml_dsa_gamma2_65()
     (q - 1) / (2 * gamma2)
 
-fn use_hint_int(h: i64, r: i64) -> i64:
-    val m = _hint_modulus_65()
-    val parts = decompose_int(r)
+fn _hint_modulus_65() -> i64:
+    _hint_modulus_with(ml_dsa_gamma2_65())
+
+fn use_hint_int_with(h: i64, r: i64, gamma2: i64) -> i64:
+    val m = _hint_modulus_with(gamma2)
+    val parts = decompose_int_with(r, gamma2)
     val r1 = parts[0]
     val r0 = parts[1]
     if h == 0:
@@ -404,10 +491,16 @@ fn use_hint_int(h: i64, r: i64) -> i64:
         else:
             ((r1 - 1) % m + m) % m
 
-fn use_hint_poly(h: list, r: list) -> list:
+fn use_hint_int(h: i64, r: i64) -> i64:
+    use_hint_int_with(h, r, ml_dsa_gamma2_65())
+
+fn use_hint_poly_with(h: list, r: list, gamma2: i64) -> list:
     var w1 = []
     var i = 0
     while i < 256:
-        w1.push(use_hint_int(h.get(i), r.get(i)))
+        w1.push(use_hint_int_with(h.get(i), r.get(i), gamma2))
         i = i + 1
     w1
+
+fn use_hint_poly(h: list, r: list) -> list:
+    use_hint_poly_with(h, r, ml_dsa_gamma2_65())

@@ -292,9 +292,9 @@ fn treesitter_parse_trait_outline(self: TreeSitter, visibility: Visibility, doc:
                     methods = methods_push(methods, self.parse_function_outline(method_visibility, true, method_doc))
                 case KwVar:
                     # Check for deprecated 'var fn' syntax
-                    if self.peek_next() == TokenKind.KwFn:
+                    self.advance()  # consume 'var'
+                    if self.check(TokenKind.KwFn):
                         self.warning("Deprecated: Replace `var fn method()` with `me method()`")
-                        self.advance()  # consume 'var'
                         methods = methods_push(methods, self.parse_function_outline(method_visibility, true, method_doc))
                     else:
                         self.error("expected method or type in trait")
@@ -364,9 +364,9 @@ fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
                     methods = methods_push(methods, m)
                 case KwVar:
                     # Check for deprecated 'var fn' syntax
-                    if self.peek_next() == TokenKind.KwFn:
+                    self.advance()  # consume 'var'
+                    if self.check(TokenKind.KwFn):
                         self.warning("Deprecated: Replace `var fn method()` with `me method()`")
-                        self.advance()  # consume 'var'
                         val m = self.parse_function_outline(method_visibility, true, method_doc)
                         m.is_method = true
                         methods = methods_push(methods, m)
@@ -415,17 +415,13 @@ fn treesitter_parse_assoc_type_outline(self: TreeSitter) -> AssocTypeDeclOutline
         # Parse optional bounds (: Trait1 + Trait2)
         # Distinguish `type Item: Display` (bound) from just `type Item` followed by newline
         var bounds: [TypeOutline] = []
-        if self.check(TokenKind.Colon):
-            val next = self.peek_next()
-            # Only parse bounds if what follows the colon is an identifier (type name)
-            match next:
-                case Ident:
-                    self.advance()  # consume ':'
+        if self.match_token(TokenKind.Colon):
+            if self.check(TokenKind.Ident):
+                bounds = bounds.push(self.parse_type_outline())
+                while self.match_token(TokenKind.Plus):
                     bounds = bounds.push(self.parse_type_outline())
-                    while self.match_token(TokenKind.Plus):
-                        bounds = bounds.push(self.parse_type_outline())
-                case _:
-                    pass  # Not a bound, leave colon unconsumed
+            else:
+                self.error("expected type bound after ':'")
 
         # Parse optional default/concrete type (= Type)
         var default_type: TypeOutline = nil
@@ -497,7 +493,7 @@ fn treesitter_parse_const_outline(self: TreeSitter, visibility: Visibility, attr
             self.advance()  # consume '@'
             val addr_start = self.current.span.start
             self.skip_expression()
-            address_span = span_new(addr_start, self.previous.span.end, 0, 0)
+            address_span = span_new(addr_start, self.previous.span.end_pos, 0, 0)
             # Memory-mapped variables are implicitly volatile
             is_volatile = true
 
@@ -506,7 +502,7 @@ fn treesitter_parse_const_outline(self: TreeSitter, visibility: Visibility, attr
         if self.match_token(TokenKind.Assign):
             val value_start = self.current.span.start
             self.skip_expression()
-            value_span = span_new(value_start, self.previous.span.end, 0, 0)
+            value_span = span_new(value_start, self.previous.span.end_pos, 0, 0)
 
         self.skip_newlines()
 
@@ -536,7 +532,7 @@ fn treesitter_parse_static_assert_outline(self: TreeSitter) -> StaticAssertOutli
         # Parse condition expression
         val condition_start = self.current.span.start
         self.skip_expression()
-        val condition_span = span_new(condition_start, self.previous.span.end, 0, 0)
+        val condition_span = span_new(condition_start, self.previous.span.end_pos, 0, 0)
 
         # Optional error message after comma
         var message: text = nil

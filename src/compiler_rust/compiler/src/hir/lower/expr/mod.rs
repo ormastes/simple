@@ -291,6 +291,115 @@ impl Lowerer {
     // Method calls (largest section - GPU/SIMD intrinsics)
     // ============================================================================
 
+    fn looks_like_wrapper_static_member_sugar(member: &str) -> bool {
+        member.chars().next().map(|ch| ch.is_ascii_uppercase()).unwrap_or(false)
+    }
+
+    fn wrapper_static_member_candidates(member: &str) -> Vec<String> {
+        let mut candidates = Vec::new();
+        let mut chars = member.chars();
+        if let Some(first) = chars.next() {
+            if first.is_ascii_uppercase() {
+                let mut lower_first = String::with_capacity(member.len());
+                lower_first.push(first.to_ascii_lowercase());
+                lower_first.push_str(chars.as_str());
+                if lower_first != member {
+                    candidates.push(lower_first);
+                }
+            }
+        }
+
+        let lower_all = member.to_ascii_lowercase();
+        if lower_all != member && !candidates.iter().any(|candidate| candidate == &lower_all) {
+            candidates.push(lower_all);
+        }
+
+        candidates
+    }
+
+    fn static_member_return_type(&self, type_name: &str, member: &str) -> Option<TypeId> {
+        let qualified = format!("{}.{}", type_name, member);
+        self.method_return_types
+            .get(&qualified)
+            .copied()
+            .or_else(|| {
+                self.module
+                    .functions
+                    .iter()
+                    .find(|function| function.name == qualified)
+                    .map(|function| function.return_type)
+            })
+            .or_else(|| self.globals.get(&qualified).copied())
+    }
+
+    fn resolve_static_member_name(&self, type_name: &str, member: &str) -> Option<String> {
+        if self.static_member_return_type(type_name, member).is_some() {
+            return Some(member.to_string());
+        }
+        if !Self::looks_like_wrapper_static_member_sugar(member) {
+            return None;
+        }
+
+        Self::wrapper_static_member_candidates(member)
+            .into_iter()
+            .find(|candidate| self.static_member_return_type(type_name, candidate).is_some())
+    }
+
+    fn unknown_wrapper_static_member_error(&self, type_name: &str, member: &str) -> LowerError {
+        let tried = Self::wrapper_static_member_candidates(member)
+            .into_iter()
+            .map(|candidate| format!("{}.{}", type_name, candidate))
+            .collect::<Vec<_>>();
+
+        let mut message = format!(
+            "unknown static member '{}.{}'; wrapper-type static-member sugar only resolves to existing static methods",
+            type_name, member
+        );
+        if !tried.is_empty() {
+            message.push_str(&format!(" (tried: {})", tried.join(", ")));
+        }
+
+        LowerError::Unsupported(message)
+    }
+
+    pub(super) fn lower_static_member_call_with_sugar(
+        &mut self,
+        type_name: &str,
+        member: &str,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if let Some(canonical_member) = self.resolve_static_member_name(type_name, member) {
+            return self.lower_static_method_call(type_name, &canonical_member, args, ctx);
+        }
+        if Self::looks_like_wrapper_static_member_sugar(member) && !self.lenient_types {
+            return Err(self.unknown_wrapper_static_member_error(type_name, member));
+        }
+        self.lower_static_method_call(type_name, member, args, ctx)
+    }
+
+    pub(super) fn try_lower_static_member_value_with_sugar(
+        &mut self,
+        type_name: &str,
+        member: &str,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<HirExpr>> {
+        if !Self::looks_like_wrapper_static_member_sugar(member) {
+            return Ok(None);
+        }
+
+        if let Some(canonical_member) = self.resolve_static_member_name(type_name, member) {
+            return self
+                .lower_static_method_call(type_name, &canonical_member, &[], ctx)
+                .map(Some);
+        }
+        if self.lenient_types {
+            return Ok(None);
+        }
+
+        Err(self.unknown_wrapper_static_member_error(type_name, member))
+    }
+
     fn lower_method_call(
         &mut self,
         receiver: &Expr,
@@ -331,7 +440,7 @@ impl Lowerer {
                 if let Some(result) = self.lower_simd_static_method(recv_name, method, args, ctx)? {
                     return Ok(result);
                 }
-                return self.lower_static_method_call(recv_name, method, args, ctx);
+                return self.lower_static_member_call_with_sugar(recv_name, method, args, ctx);
             }
         }
 
@@ -468,9 +577,7 @@ impl Lowerer {
                     }
                 }
                 "unwrap_err" => {
-                    if let Some(payload_ty) =
-                        self.enum_variant_payload_type_for_builtin_method(receiver.ty, "Err")
-                    {
+                    if let Some(payload_ty) = self.enum_variant_payload_type_for_builtin_method(receiver.ty, "Err") {
                         return Ok(Some(HirExpr {
                             kind: HirExprKind::BuiltinCall {
                                 name: "rt_enum_payload".to_string(),
@@ -505,9 +612,7 @@ impl Lowerer {
                             args: vec![
                                 receiver.clone(),
                                 HirExpr {
-                                    kind: HirExprKind::Integer(
-                                        self.enum_variant_discriminant_for_builtin_method("Ok"),
-                                    ),
+                                    kind: HirExprKind::Integer(self.enum_variant_discriminant_for_builtin_method("Ok")),
                                     ty: TypeId::I64,
                                 },
                             ],
@@ -672,7 +777,7 @@ impl Lowerer {
     /// Provides helpful error messages for common mistakes:
     /// - `ClassName.new()` should be `ClassName()` (Python-style constructor)
     /// - Other static methods are not yet supported in native compilation
-    fn lower_path(&self, segments: &[String], _ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    fn lower_path(&mut self, segments: &[String], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         if segments.len() == 2 {
             let class_name = &segments[0];
             let method_name = &segments[1];
@@ -688,6 +793,12 @@ impl Lowerer {
                 return Err(LowerError::UseConstructorNotNew {
                     class_name: class_name.clone(),
                 });
+            }
+
+            if self.module.types.lookup(class_name).is_some() {
+                if let Some(expr) = self.try_lower_static_member_value_with_sugar(class_name, method_name, ctx)? {
+                    return Ok(expr);
+                }
             }
 
             // Static method reference — produce Global("ClassName.method")

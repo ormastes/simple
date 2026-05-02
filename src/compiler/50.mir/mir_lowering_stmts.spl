@@ -131,132 +131,135 @@ impl MirLowering:
         if not type_sym.?:
             return nil
 
-        val sym_id = type_sym.unwrap().id
+        val sym_id = self.symbol_id_value(type_sym.unwrap())
         if not self.bitfield_map.has(sym_id):
             return nil
 
         val fields = self.bitfield_map[sym_id]
         var idx = 0
         while idx < fields.len():
-            val field = fields[idx]
-            if field.name == field_name and not field.is_reserved:
-                val total_width = self.bitfield_total_width(fields)
-                if self.current_has_vhdl_metadata and field.bit_offset == 0 and field.bit_width > 0 and total_width > field.bit_width:
-                    var b = self.builder
-                    val preserved_high = b.new_temp(MirType.bits(total_width - field.bit_width))
-                    b.emit(MirInst(
-                        kind: MirInstKind.VhdlSlice(
-                            preserved_high,
-                            mir_operand_copy(base_local),
-                            total_width - 1,
-                            field.bit_width
-                        ),
-                        span: nil
-                    ))
-                    val casted_new = b.emit_cast(mir_operand_copy(value_local), MirType.bits(field.bit_width))
-                    val result = b.new_temp(MirType.bits(total_width))
-                    b.emit(MirInst(
-                        kind: MirInstKind.VhdlConcat(
-                            result,
-                            [mir_operand_copy(preserved_high), mir_operand_copy(casted_new)]
-                        ),
-                        span: nil
-                    ))
-                    self.builder = b
-                    return Some(result)
-                elif self.current_has_vhdl_metadata and field.bit_offset + field.bit_width == total_width and field.bit_width > 0 and field.bit_offset > 0:
-                    var b = self.builder
-                    val casted_new = b.emit_cast(mir_operand_copy(value_local), MirType.bits(field.bit_width))
-                    val preserved_low = b.new_temp(MirType.bits(field.bit_offset))
-                    b.emit(MirInst(
-                        kind: MirInstKind.VhdlSlice(
-                            preserved_low,
-                            mir_operand_copy(base_local),
-                            field.bit_offset - 1,
-                            0
-                        ),
-                        span: nil
-                    ))
-                    val result = b.new_temp(MirType.bits(total_width))
-                    b.emit(MirInst(
-                        kind: MirInstKind.VhdlConcat(
-                            result,
-                            [mir_operand_copy(casted_new), mir_operand_copy(preserved_low)]
-                        ),
-                        span: nil
-                    ))
-                    self.builder = b
-                    return Some(result)
-                elif self.current_has_vhdl_metadata and field.bit_offset > 0 and field.bit_width > 0 and field.bit_offset + field.bit_width < total_width:
-                    var b = self.builder
-                    val high_width = total_width - (field.bit_offset + field.bit_width)
-                    val preserved_high = b.new_temp(MirType.bits(high_width))
-                    b.emit(MirInst(
-                        kind: MirInstKind.VhdlSlice(
-                            preserved_high,
-                            mir_operand_copy(base_local),
-                            total_width - 1,
-                            field.bit_offset + field.bit_width
-                        ),
-                        span: nil
-                    ))
-                    val casted_new = b.emit_cast(mir_operand_copy(value_local), MirType.bits(field.bit_width))
-                    val preserved_low = b.new_temp(MirType.bits(field.bit_offset))
-                    b.emit(MirInst(
-                        kind: MirInstKind.VhdlSlice(
-                            preserved_low,
-                            mir_operand_copy(base_local),
-                            field.bit_offset - 1,
-                            0
-                        ),
-                        span: nil
-                    ))
-                    val result = b.new_temp(MirType.bits(total_width))
-                    b.emit(MirInst(
-                        kind: MirInstKind.VhdlConcat(
-                            result,
-                            [mir_operand_copy(preserved_high), mir_operand_copy(casted_new), mir_operand_copy(preserved_low)]
-                        ),
-                        span: nil
-                    ))
-                    self.builder = b
-                    return Some(result)
+            match fields[idx]:
+                case HirBitfieldField(_, name, _, _, bit_width, bit_offset, is_reserved, _):
+                    if name != field_name or is_reserved:
+                        idx = idx + 1
+                        continue
+                    val total_width = self.bitfield_total_width(fields)
+                    if self.current_has_vhdl_metadata and bit_offset == 0 and bit_width > 0 and total_width > bit_width:
+                        var b = self.builder
+                        val preserved_high = b.new_temp(MirType.bits(total_width - bit_width))
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlSlice(
+                                preserved_high,
+                                mir_operand_copy(base_local),
+                                total_width - 1,
+                                bit_width
+                            ),
+                            span: nil
+                        ))
+                        val casted_new = b.emit_cast(mir_operand_copy(value_local), MirType.bits(bit_width))
+                        val result = b.new_temp(MirType.bits(total_width))
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlConcat(
+                                result,
+                                [mir_operand_copy(preserved_high), mir_operand_copy(casted_new)]
+                            ),
+                            span: nil
+                        ))
+                        self.builder = b
+                        return Some(result)
+                    elif self.current_has_vhdl_metadata and bit_offset + bit_width == total_width and bit_width > 0 and bit_offset > 0:
+                        var b = self.builder
+                        val casted_new = b.emit_cast(mir_operand_copy(value_local), MirType.bits(bit_width))
+                        val preserved_low = b.new_temp(MirType.bits(bit_offset))
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlSlice(
+                                preserved_low,
+                                mir_operand_copy(base_local),
+                                bit_offset - 1,
+                                0
+                            ),
+                            span: nil
+                        ))
+                        val result = b.new_temp(MirType.bits(total_width))
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlConcat(
+                                result,
+                                [mir_operand_copy(casted_new), mir_operand_copy(preserved_low)]
+                            ),
+                            span: nil
+                        ))
+                        self.builder = b
+                        return Some(result)
+                    elif self.current_has_vhdl_metadata and bit_offset > 0 and bit_width > 0 and bit_offset + bit_width < total_width:
+                        var b = self.builder
+                        val high_width = total_width - (bit_offset + bit_width)
+                        val preserved_high = b.new_temp(MirType.bits(high_width))
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlSlice(
+                                preserved_high,
+                                mir_operand_copy(base_local),
+                                total_width - 1,
+                                bit_offset + bit_width
+                            ),
+                            span: nil
+                        ))
+                        val casted_new = b.emit_cast(mir_operand_copy(value_local), MirType.bits(bit_width))
+                        val preserved_low = b.new_temp(MirType.bits(bit_offset))
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlSlice(
+                                preserved_low,
+                                mir_operand_copy(base_local),
+                                bit_offset - 1,
+                                0
+                            ),
+                            span: nil
+                        ))
+                        val result = b.new_temp(MirType.bits(total_width))
+                        b.emit(MirInst(
+                            kind: MirInstKind.VhdlConcat(
+                                result,
+                                [mir_operand_copy(preserved_high), mir_operand_copy(casted_new), mir_operand_copy(preserved_low)]
+                            ),
+                            span: nil
+                        ))
+                        self.builder = b
+                        return Some(result)
 
-                val mask = self.bitfield_field_mask(field.bit_width)
-                val shifted_mask = mask << field.bit_offset
-                var b = self.builder
-                val clear_mask_const = b.emit_const_int(~shifted_mask)
-                val cleared = b.emit_binop(
-                    MirBinOp.BitAnd,
-                    mir_operand_copy(base_local),
-                    mir_operand_copy(clear_mask_const),
-                    MirType.i64()
-                )
-                val mask_const = b.emit_const_int(mask)
-                val masked_new = b.emit_binop(
-                    MirBinOp.BitAnd,
-                    mir_operand_copy(value_local),
-                    mir_operand_copy(mask_const),
-                    MirType.i64()
-                )
-                val shifted_new = if field.bit_offset == 0:
-                    masked_new
-                else:
-                    val offset_const = b.emit_const_int(field.bit_offset)
-                    b.emit_binop(
-                        MirBinOp.Shl,
-                        mir_operand_copy(masked_new),
-                        mir_operand_copy(offset_const),
+                    val mask = self.bitfield_field_mask(bit_width)
+                    val shifted_mask = mask << bit_offset
+                    var b = self.builder
+                    val clear_mask_const = b.emit_const_int(~shifted_mask)
+                    val cleared = b.emit_binop(
+                        MirBinOp.BitAnd,
+                        mir_operand_copy(base_local),
+                        mir_operand_copy(clear_mask_const),
                         MirType.i64()
                     )
-                val result = b.emit_binop(
-                    MirBinOp.BitOr,
-                    mir_operand_copy(cleared),
-                    mir_operand_copy(shifted_new),
-                    MirType.i64()
-                )
-                self.builder = b
-                return Some(result)
+                    val mask_const = b.emit_const_int(mask)
+                    val masked_new = b.emit_binop(
+                        MirBinOp.BitAnd,
+                        mir_operand_copy(value_local),
+                        mir_operand_copy(mask_const),
+                        MirType.i64()
+                    )
+                    val shifted_new = if bit_offset == 0:
+                        masked_new
+                    else:
+                        val offset_const = b.emit_const_int(bit_offset)
+                        b.emit_binop(
+                            MirBinOp.Shl,
+                            mir_operand_copy(masked_new),
+                            mir_operand_copy(offset_const),
+                            MirType.i64()
+                        )
+                    val result = b.emit_binop(
+                        MirBinOp.BitOr,
+                        mir_operand_copy(cleared),
+                        mir_operand_copy(shifted_new),
+                        MirType.i64()
+                    )
+                    self.builder = b
+                    return Some(result)
             idx = idx + 1
 
         nil

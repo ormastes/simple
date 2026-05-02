@@ -137,6 +137,13 @@ Same principles as the Rust to-be, applied to numbered layers:
 | `hir.hir` | 7-layer fan-out — widest shared contract | Acceptable: HIR is the canonical middle-end IR; enforce facade discipline |
 | `mir.mir_data` | 82 imports from backend alone | Acceptable: MIR is the canonical low-level IR; backend convergence is by design |
 
+### SimpleOS Cross-Link
+
+The SimpleOS six-arch HAL consolidation is tracked separately in
+`doc/04_architecture/simpleos_multiarch_hal.md`; use that document for the
+board-ready, family-shared, and C→Simple migration contract rather than
+re-embedding those platform rules here.
+
 ### Construct Dimension (Vertical Sharing)
 
 The MDSOC construct dimension (`85.mdsoc/construct_types/`) already models vertical sharing explicitly:

@@ -1,0 +1,200 @@
+#![allow(unnamed_duplicate_typed_args)]
+# TLS 1.2 Extension framing (pure, no crypto)
+#
+# Implements the extension list framing described in RFC 5246 §7.4.1.4:
+#
+#   struct {
+#       ExtensionType extension_type;     # uint16
+#       opaque extension_data<0..2^16-1>;  # uint16 length prefix + bytes
+#   } Extension;
+#
+# A list of Extensions is itself wrapped in a uint16 length prefix when it
+# appears as the trailing field of ClientHello / ServerHello (§7.4.1.2 /
+# §7.4.1.3).
+#
+# This module exposes ONLY framing — populating specific extensions
+# (server_name, supported_groups, signature_algorithms, etc.) is the
+# follow-up wave.
+#
+# Reference: RFC 5246 (TLS 1.2), RFC 6066 (extensions baseline)
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+fn _byte_buf(cap: u64) -> [u8]:
+    rt_array_new_with_cap(cap.to_i64())
+
+fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
+    buf.push(byte_val.to_u8())
+    buf
+
+fn _u8_at(data: [u8], offset: u64) -> u8:
+    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
+
+fn _u16_be(data: [u8], offset: u64) -> u16:
+    """Read a big-endian u16 from data at offset."""
+    ((_u8_at(data, offset).to_u16() << 8) | _u8_at(data, offset + 1).to_u16()).to_u16()
+
+fn _put_u16_be(val: u16) -> [u8]:
+    """Encode a u16 as 2 big-endian bytes."""
+    var out: [u8] = _byte_buf(2)
+    out = _push_byte(out, ((val.to_u32() >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (val.to_u32() & 0xFF).to_i64())
+    out
+
+# ============================================================================
+# ExtensionType (RFC 5246 + RFC 6066 + IANA registry)
+#
+# Only the codepoints that already appear in the TLS 1.3 module are
+# duplicated here; specific extension bodies are out-of-scope for this wave.
+# ============================================================================
+
+val EXT12_SNI: u16                    = 0
+val EXT12_MAX_FRAGMENT_LENGTH: u16    = 1
+val EXT12_SUPPORTED_GROUPS: u16       = 10
+val EXT12_EC_POINT_FORMATS: u16       = 11
+val EXT12_SIG_ALGS: u16               = 13
+val EXT12_ALPN: u16                   = 16
+val EXT12_RENEGOTIATION_INFO: u16     = 65281    # 0xFF01
+
+# ============================================================================
+# Data Classes
+# ============================================================================
+
+class TlsExtension12:
+    """A single TLS 1.2 Extension (extension_type + opaque extension_data)."""
+    extension_type: u16
+    extension_data: [u8]
+
+enum ExtensionResult:
+    Ok(value: TlsExtension12)
+    Err(reason: text)
+
+enum ExtensionListResult:
+    Ok(value: [TlsExtension12])
+    Err(reason: text)
+
+# ============================================================================
+# Public: Encode a single Extension (extension_type + uint16 data length)
+# ============================================================================
+
+fn encode_extension(ext: TlsExtension12) -> [u8]:
+    """Encode one Extension to wire bytes: type(2) || data_len(2) || data."""
+    val data_len = ext.extension_data.len().to_u64()
+    var out: [u8] = _byte_buf(4u64 + data_len)
+    val type_bytes = _put_u16_be(ext.extension_type)
+    out = _push_byte(out, _u8_at(type_bytes, 0u64).to_u64().to_i64())
+    out = _push_byte(out, _u8_at(type_bytes, 1u64).to_u64().to_i64())
+    out = _push_byte(out, ((data_len >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (data_len & 0xFF).to_i64())
+    var i: u64 = 0
+    while i < data_len:
+        out = _push_byte(out, _u8_at(ext.extension_data, i).to_u64().to_i64())
+        i = i + 1
+    out
+
+# ============================================================================
+# Public: Encode an Extension list with the outer uint16 length prefix
+# ============================================================================
+
+fn encode_extension_list(exts: [TlsExtension12]) -> [u8]:
+    """Encode `exts` as the trailing extensions block of a Hello message.
+
+    Wire layout: list_len(2 BE) || ext1 || ext2 || ...
+    Returns at minimum two bytes (length=0) when the list is empty.
+    """
+    var body: [u8] = _byte_buf(64)
+    for ext in exts:
+        val ext_bytes = encode_extension(ext)
+        var i: u64 = 0
+        val n = ext_bytes.len().to_u64()
+        while i < n:
+            body = _push_byte(body, _u8_at(ext_bytes, i).to_u64().to_i64())
+            i = i + 1
+    val total = body.len().to_u64()
+    var out: [u8] = _byte_buf(2u64 + total)
+    out = _push_byte(out, ((total >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (total & 0xFF).to_i64())
+    var k: u64 = 0
+    while k < total:
+        out = _push_byte(out, _u8_at(body, k).to_u64().to_i64())
+        k = k + 1
+    out
+
+# ============================================================================
+# Public: Decode a single Extension (caller positions at extension_type)
+# ============================================================================
+
+fn decode_extension(data: [u8], offset: u64) -> ExtensionResult:
+    """Decode one Extension starting at `offset` in `data`.
+
+    Returns Ok with a TlsExtension12 whose data is a fresh copy of the
+    declared extension_data slice, or Err on truncation.
+
+    NOTE: this primitive does not advance the offset for the caller; use
+    decode_extension_list when walking a full list.
+    """
+    if offset + 4 > data.len().to_u64():
+        return ExtensionResult.Err(reason: "decode_error: extension header truncated")
+    val ext_type = _u16_be(data, offset)
+    val ext_len = _u16_be(data, offset + 2).to_u64()
+    val data_start = offset + 4
+    if data_start + ext_len > data.len().to_u64():
+        return ExtensionResult.Err(reason: "decode_error: extension data truncated")
+    var ext_data: [u8] = _byte_buf(ext_len)
+    var i: u64 = 0
+    while i < ext_len:
+        ext_data = _push_byte(ext_data, _u8_at(data, data_start + i).to_u64().to_i64())
+        i = i + 1
+    ExtensionResult.Ok(value: TlsExtension12(
+        extension_type: ext_type,
+        extension_data: ext_data
+    ))
+
+# ============================================================================
+# Public: Decode an Extension list (caller positions at the uint16 list len)
+# ============================================================================
+
+fn decode_extension_list(data: [u8], offset: u64) -> ExtensionListResult:
+    """Walk a length-prefixed extension list starting at `offset` in `data`.
+
+    Wire layout: list_len(2 BE) || ext1 || ext2 || ...
+
+    Returns Ok with a freshly-built [TlsExtension12] (in declared order) or
+    Err on truncation / inconsistent length.
+
+    NOTE: an extensions field that is wholly absent (e.g. SSL3-style hello
+    with no trailing block) is the caller's responsibility to detect — this
+    decoder REQUIRES the 2-byte list_len.  RFC 5246 §7.4.1.4 states the
+    extensions field is OPTIONAL in ClientHello/ServerHello; when the
+    sender includes no extensions it MAY simply omit the list entirely (no
+    list_len bytes) for backwards compatibility.
+    """
+    if offset + 2 > data.len().to_u64():
+        return ExtensionListResult.Err(reason: "decode_error: extension list length truncated")
+    val list_len = _u16_be(data, offset).to_u64()
+    val list_start = offset + 2
+    val list_end = list_start + list_len
+    if list_end > data.len().to_u64():
+        return ExtensionListResult.Err(reason: "decode_error: extension list truncated")
+    var out: [TlsExtension12] = []
+    var cursor = list_start
+    while cursor + 4 <= list_end:
+        val ext_type = _u16_be(data, cursor)
+        val ext_len = _u16_be(data, cursor + 2).to_u64()
+        val data_start = cursor + 4
+        if data_start + ext_len > list_end:
+            return ExtensionListResult.Err(reason: "decode_error: extension overruns list")
+        var ext_data: [u8] = _byte_buf(ext_len)
+        var i: u64 = 0
+        while i < ext_len:
+            ext_data = _push_byte(ext_data, _u8_at(data, data_start + i).to_u64().to_i64())
+            i = i + 1
+        out.push(TlsExtension12(
+            extension_type: ext_type,
+            extension_data: ext_data
+        ))
+        cursor = data_start + ext_len
+    if cursor != list_end:
+        return ExtensionListResult.Err(reason: "decode_error: extension list trailing bytes")
+    ExtensionListResult.Ok(value: out)

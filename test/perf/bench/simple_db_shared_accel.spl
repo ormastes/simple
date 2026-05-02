@@ -1,0 +1,260 @@
+# test/perf/bench/simple_db_shared_accel.spl
+#
+# Shared Simple DB accel benchmark.
+# Measures representative SDN, DBFS, and spostgre hot paths using the Phase 1
+# shared accel layer. This is a scalar-fallback benchmark today: the runtime
+# capability report is real, but the current kernels remain behavior-identical
+# scalar implementations. Labels below distinguish shared-path fallback costs
+# from handwritten scalar baselines, and include a BRIN-aware spostgre case to
+# better reflect intended use.
+#
+# Run:
+#   bin/simple run test/perf/bench/simple_db_shared_accel.spl
+
+use test.perf.bench.lib.timing.{BenchResult, bench_print, bench_csv, bench_csv_header, bench_measure}
+use std.db.accel.{RowBitmap, ScanPredicate, ScanPredicateKind, accel_capability_report, row_bitmap_indices, scan_text_values}
+use std.database.core.{SdnRow, SdnTable}
+use std.database.query.{CompareOp, QueryBuilder}
+use std.db.dbfs_engine.schema.{DentryRow, SchemaTable}
+use examples.spostgre.src.engine.brin.{BrinIndex, BrinValue, BRIN_KIND_INT, brin_new, brin_summarize_range}
+use examples.spostgre.src.engine.scan.{spostgre_scan_text, spostgre_scan_text_with_brin, spostgre_text_search}
+
+fn build_text_values(row_count: i64) -> [text]:
+    var values: [text] = []
+    var idx = 0
+    while idx < row_count:
+        if idx % 5 == 0:
+            values.push("src/feature_{idx}|token=user|kind=keep")
+        else:
+            values.push("doc/readme_{idx}|token=guest|kind=skip")
+        idx = idx + 1
+    values
+
+fn build_spostgre_ranges(row_count: i64, rows_per_range: i64) -> [u32]:
+    var range_ids: [u32] = []
+    var idx = 0
+    while idx < row_count:
+        range_ids.push((idx / rows_per_range) as u32)
+        idx = idx + 1
+    range_ids
+
+fn build_spostgre_brin(row_count: i64, rows_per_range: i64) -> BrinIndex:
+    var idx = brin_new(1u32, rows_per_range as u32)
+    val range_count = (row_count + rows_per_range - 1) / rows_per_range
+    var range_id = 0
+    while range_id < range_count:
+        val raw = range_id * 100
+        idx = brin_summarize_range(idx, range_id as u32, [
+            BrinValue(kind: BRIN_KIND_INT, raw: raw),
+            BrinValue(kind: BRIN_KIND_INT, raw: raw + 99)
+        ])
+        range_id = range_id + 1
+    idx
+
+fn build_sdn_table(row_count: i64) -> SdnTable:
+    val table = SdnTable.new("bench_rows", ["id", "path", "valid"])
+    var idx = 0
+    while idx < row_count:
+        val row = SdnRow.empty()
+        row.set("id", idx.to_text())
+        if idx % 4 == 0:
+            row.set("path", "src/module_{idx}.spl")
+            row.set("valid", "true")
+        else:
+            row.set("path", "doc/module_{idx}.md")
+            row.set("valid", "false")
+        table.add_row(row)
+        idx = idx + 1
+    table
+
+fn build_dentry_table(row_count: i64) -> SchemaTable:
+    val table = SchemaTable.dentry()
+    var idx = 0
+    while idx < row_count:
+        val prefix = if idx % 3 == 0: "src_" else: "doc_"
+        table.insert(DentryRow(parent_ino: 7, name: "{prefix}entry_{idx}", child_ino: idx + 100, gen: 0)).unwrap()
+        idx = idx + 1
+    table
+
+fn scalar_text_count(values: [text], needle: text) -> i64:
+    var kept = 0
+    for value in values:
+        if value.contains(needle):
+            kept = kept + 1
+    kept
+
+fn scalar_text_bitmap_count(values: [text], needle: text) -> i64:
+    var bitmap = RowBitmap.empty(values.len())
+    var kept = 0
+    var idx = 0
+    var word_idx = 0
+    var mask = 1u64
+    while idx < values.len():
+        if values[idx].contains(needle):
+            bitmap.words[word_idx as i32] = bitmap.words[word_idx as i32] | mask
+            kept = kept + 1
+        idx = idx + 1
+        if mask == (1u64 << 63u64):
+            word_idx = word_idx + 1
+            mask = 1u64
+        else:
+            mask = mask << 1u64
+    kept
+
+fn scalar_sdn_query_count(table: SdnTable) -> i64:
+    var rows: [SdnRow] = []
+    for row in table.rows:
+        val path = row.get("path") ?? ""
+        val valid = row.get("valid") ?? ""
+        if path.starts_with("src/") and valid == "true":
+            rows.push(row)
+    rows.len()
+
+fn scalar_dentry_find_child(table: SchemaTable, target: text) -> i64:
+    val rows = table.list_children(7)
+    for row in rows:
+        if row.name == target:
+            return row.child_ino
+    -1
+
+fn scalar_dentry_prefix_count(table: SchemaTable, prefix: text) -> i64:
+    var matched_rows: [DentryRow] = []
+    val rows = table.list_children(7)
+    for row in rows:
+        if row.name.starts_with(prefix):
+            matched_rows.push(row)
+    matched_rows.len()
+
+fn scalar_spostgre_count(values: [text], needle: text) -> i64:
+    var matched_rows: [i64] = []
+    for (idx, value) in values.enumerate():
+        if value.contains(needle):
+            matched_rows.push(idx)
+    matched_rows.len()
+
+fn bench_accel_text_scan(values: [text]) -> BenchResult:
+    val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
+    bench_measure("shared_text_scan_fallback_contains", 40, \:
+        val (_bitmap, stats) = scan_text_values(values, predicate)
+        val _count = stats.candidates_kept
+    )
+
+fn bench_accel_text_scan_row_ids(values: [text]) -> BenchResult:
+    val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
+    bench_measure("shared_text_scan_fallback_contains_row_ids", 40, \:
+        val (bitmap, _stats) = scan_text_values(values, predicate)
+        val _rows = row_bitmap_indices(bitmap)
+    )
+
+fn bench_scalar_text_scan(values: [text]) -> BenchResult:
+    bench_measure("scalar_text_scan_contains_loop", 40, \:
+        val _count = scalar_text_count(values, "token=user")
+    )
+
+fn bench_scalar_text_scan_bitmap(values: [text]) -> BenchResult:
+    bench_measure("scalar_text_scan_contains_bitmap_build", 40, \:
+        val _count = scalar_text_bitmap_count(values, "token=user")
+    )
+
+fn bench_sdn_query_batch(table: SdnTable) -> BenchResult:
+    bench_measure("sdn_querybuilder_shared_fallback", 24, \:
+        val _rows = QueryBuilder.for_table(table)
+            .filter_by("path", CompareOp.StartsWith, "src/")
+            .filter_by("valid", CompareOp.Eq, "true")
+            .execute()
+    )
+
+fn bench_sdn_query_scalar(table: SdnTable) -> BenchResult:
+    bench_measure("sdn_handrolled_scalar_filter", 24, \:
+        val _count = scalar_sdn_query_count(table)
+    )
+
+fn bench_dbfs_find_child_accel(table: SchemaTable, target: text) -> BenchResult:
+    bench_measure("dbfs_find_child_accel", 40, \:
+        val _row = table.find_child_accel(7, target).unwrap()
+    )
+
+fn bench_dbfs_find_child_scalar(table: SchemaTable, target: text) -> BenchResult:
+    bench_measure("dbfs_find_child_scalar", 40, \:
+        val _child = scalar_dentry_find_child(table, target)
+    )
+
+fn bench_dbfs_prefix_accel(table: SchemaTable) -> BenchResult:
+    bench_measure("dbfs_prefix_accel", 24, \:
+        val _rows = table.list_children_with_prefix(7, "src_")
+    )
+
+fn bench_dbfs_prefix_scalar(table: SchemaTable) -> BenchResult:
+    bench_measure("dbfs_prefix_scalar", 24, \:
+        val _count = scalar_dentry_prefix_count(table, "src_")
+    )
+
+fn bench_spostgre_accel(values: [text]) -> BenchResult:
+    val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
+    bench_measure("spostgre_shared_fallback_fullscan", 32, \:
+        val _scan = spostgre_scan_text(values, predicate)
+    )
+
+fn bench_spostgre_brin(values: [text], range_ids: [u32], idx: BrinIndex) -> BenchResult:
+    val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
+    bench_measure("spostgre_shared_fallback_brin_refine", 32, \:
+        val _scan = spostgre_scan_text_with_brin(
+            range_ids,
+            values,
+            idx,
+            BrinValue(kind: BRIN_KIND_INT, raw: 300),
+            BrinValue(kind: BRIN_KIND_INT, raw: 399),
+            predicate
+        )
+    )
+
+fn bench_spostgre_scalar(values: [text]) -> BenchResult:
+    bench_measure("spostgre_scalar_fullscan", 32, \:
+        val _count = scalar_spostgre_count(values, "token=user")
+    )
+
+fn bench_spostgre_text_search(values: [text]) -> BenchResult:
+    bench_measure("spostgre_text_search_candidates", 32, \:
+        val _rows = spostgre_text_search(values, "user")
+    )
+
+fn main():
+    val capability = accel_capability_report()
+    val text_values = build_text_values(1024)
+    val spostgre_range_ids = build_spostgre_ranges(1024, 128)
+    val spostgre_brin = build_spostgre_brin(1024, 128)
+    val sdn_table = build_sdn_table(512)
+    val dentry_table = build_dentry_table(384)
+    val target_name = "src_entry_381"
+
+    print "=== simple_db_shared_accel benchmark ==="
+    print "capability tier={capability.tier_name} simd_available={capability.simd_available} simd_active={capability.simd_active} scalar_fallback={capability.scalar_fallback} width_bits={capability.simd_width_bits}"
+    print "note: Phase 1 shared accel still uses scalar kernels; shared/fallback benches measure API, bitmap construction, row-id materialization, and coarse-filter behavior as much as kernel speed."
+    print "note: SDN labels distinguish QueryBuilder fallback from handwritten scalar loops. spostgre includes both full-scan and BRIN-aware refinement paths."
+    print ""
+
+    val results = [
+        bench_accel_text_scan(text_values),
+        bench_accel_text_scan_row_ids(text_values),
+        bench_scalar_text_scan(text_values),
+        bench_scalar_text_scan_bitmap(text_values),
+        bench_sdn_query_batch(sdn_table),
+        bench_sdn_query_scalar(sdn_table),
+        bench_dbfs_find_child_accel(dentry_table, target_name),
+        bench_dbfs_find_child_scalar(dentry_table, target_name),
+        bench_dbfs_prefix_accel(dentry_table),
+        bench_dbfs_prefix_scalar(dentry_table),
+        bench_spostgre_accel(text_values),
+        bench_spostgre_brin(text_values, spostgre_range_ids, spostgre_brin),
+        bench_spostgre_scalar(text_values),
+        bench_spostgre_text_search(text_values)
+    ]
+
+    for result in results:
+        bench_print(result)
+        print ""
+
+    print "=== CSV ==="
+    print bench_csv_header()
+    for result in results:
+        print bench_csv(result)

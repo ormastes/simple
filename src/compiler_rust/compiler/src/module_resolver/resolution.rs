@@ -92,11 +92,7 @@ fn layered_dir_alias_name(current: &Path) -> Option<String> {
     Some(name.to_string())
 }
 
-fn resolve_module_in_dir(
-    dir: &Path,
-    last: &str,
-    original_path: &ModulePath,
-) -> Option<ResolvedModule> {
+fn resolve_module_in_dir(dir: &Path, last: &str, original_path: &ModulePath) -> Option<ResolvedModule> {
     let dir_path = dir.join(last);
     let init_path = dir_path.join("__init__.spl");
     if init_path.exists() && init_path.is_file() {

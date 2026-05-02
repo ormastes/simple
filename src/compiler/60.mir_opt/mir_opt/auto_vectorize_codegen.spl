@@ -3,7 +3,7 @@
 # Transforms scalar loop bodies into SIMD equivalents.
 # Generates prologue (alignment), vector body, and epilogue (remainder).
 
-use compiler.mir.mir_data.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirBinOp, LocalId, BlockId}
+use compiler.mir.mir_data.{MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
 use compiler.mir_opt.auto_vectorize_types.{LoopInfo}
 
 # ============================================================================
@@ -77,44 +77,103 @@ fn generate_prologue(ctx: VectorizeContext, loop: LoopInfo) -> [MirBlock]:
 
 fn create_alignment_check_block(ctx: VectorizeContext, loop: LoopInfo) -> MirBlock:
     """
-    Create block that checks array alignment.
-    If aligned, skip peeling. If not, run peeling iterations.
+    Create block that computes mismatch = (end - start) % chunk_width at runtime
+    and branches: if mismatch == 0 → vector loop (next_local+2); else → peeling block
+    (next_local+1).
+
+    MIR shape produced:
+      BB_align_check:
+        %range   = BinOp(Sub, end_value, start_value)       # trip count
+        %mismatch = BinOp(Rem, %range, chunk_width_const)   # remainder mod VF
+        %zero_const = Const(0)
+        %is_aligned = BinOp(Sub, %mismatch, %zero_const)    # 0 iff aligned
+        If(%is_aligned == 0 → BB_vector, BB_peel)
+        → represented as If(%mismatch, BB_peel, BB_vector)
+          (non-zero mismatch → peel; zero → vector)
+
+    Block IDs used:
+      ctx.next_local+0 = this alignment-check block
+      ctx.next_local+1 = peeling block (sibling, created by create_peeling_block)
+      ctx.next_local+2 = vector loop entry (successor after peel or direct)
     """
-    var insts: [MirInst] = []
-
-    # Check alignment of first array access
-    # Simplified: just create a placeholder block
     val block_id = BlockId.new(ctx.next_local)
+    val peel_id  = BlockId.new(ctx.next_local + 1)
+    val vec_id   = BlockId.new(ctx.next_local + 2)
 
-    # Terminator: branch based on alignment
-    val terminator = MirTerminator.Goto(BlockId.new(ctx.next_local + 1))
+    # Locals for the alignment computation
+    val range_dest    = LocalId(id: ctx.next_local + 100)
+    val mismatch_dest = LocalId(id: ctx.next_local + 101)
+
+    # Operands: loop bounds and chunk width come from LoopInfo / VectorizeContext
+    val end_op   = MirOperand(kind: MirOperandKind.Const("i64", "{loop.end_value}"))
+    val start_op = MirOperand(kind: MirOperandKind.Const("i64", "{loop.start_value}"))
+    val vf_op    = MirOperand(kind: MirOperandKind.Const("i64", "{ctx.vector_width}"))
+
+    # %range = end - start
+    val range_inst = MirInst(
+        kind: MirInstKind.BinOp(range_dest, MirBinOp.Sub, end_op, start_op),
+        span: nil
+    )
+    # %mismatch = %range % vector_width
+    val mismatch_inst = MirInst(
+        kind: MirInstKind.BinOp(mismatch_dest, MirBinOp.Rem,
+            MirOperand(kind: MirOperandKind.Copy(range_dest)), vf_op),
+        span: nil
+    )
+
+    # Terminator: If(%mismatch != 0) → peel, else → vector
+    # MirTerminator.If branches to then_ when cond is truthy (non-zero).
+    # mismatch is non-zero when alignment is needed → branch to peel.
+    val terminator = MirTerminator.If(
+        cond:  MirOperand(kind: MirOperandKind.Copy(mismatch_dest)),
+        then_: peel_id,
+        else_: vec_id
+    )
 
     MirBlock(
-        id: block_id,
-        label: Some("align_check"),
-        instructions: insts,
-        terminator: terminator
+        id:           block_id,
+        label:        Some("align_check"),
+        instructions: [range_inst, mismatch_inst],
+        terminator:   terminator
     )
 
 fn create_peeling_block(ctx: VectorizeContext, loop: LoopInfo) -> MirBlock:
     """
-    Create block that runs peeling iterations to align data.
-    Peeling runs 0-7 iterations to ensure vector loop starts on aligned boundary.
+    Create scalar-fixup peeling block that runs the loop body for the misaligned
+    prefix (lower edge) before the vector loop.
+
+    MIR shape produced:
+      BB_peel:
+        # Scalar body: copy of loop body for one iteration at the lower edge.
+        # The actual iteration count (mismatch) is not statically known here;
+        # the Wave L rewriter will emit a counted scalar loop.
+        # For now we emit the scalar body instructions for one peel iteration
+        # and branch unconditionally to the vector entry (next_local+2).
+        #
+        # Alignment-peel design (§6.3): peel from start_value until
+        # start_value + mismatch, running the original scalar body once per iter.
+        # The scalar body is not cloned here (body_blocks are not in scope for
+        # the prologue generator); instead a Goto to the vector entry acts as a
+        # structural placeholder.  Wave L will splice in the actual body clone.
+        Goto(BB_vector)
+
+    Block IDs:
+      ctx.next_local+1 = this peel block
+      ctx.next_local+2 = vector loop entry (falls through after peeling)
     """
-    var insts: [MirInst] = []
-
     val block_id = BlockId.new(ctx.next_local + 1)
+    val vec_id   = BlockId.new(ctx.next_local + 2)
 
-    # Peeling loop: runs until alignment is achieved
-    # Simplified: placeholder
-
-    val terminator = MirTerminator.Goto(BlockId.new(ctx.next_local + 2))
+    # Structural placeholder: zero instructions, fall through to vector loop.
+    # Wave L: replace Goto with a counted scalar loop over mismatch iterations.
+    # TODO(Wave L): emit scalar body clone for mismatch iterations here.
+    val terminator = MirTerminator.Goto(vec_id)
 
     MirBlock(
-        id: block_id,
-        label: Some("peel_loop"),
-        instructions: insts,
-        terminator: terminator
+        id:           block_id,
+        label:        Some("peel_loop"),
+        instructions: [],
+        terminator:   terminator
     )
 
 # ============================================================================
@@ -308,6 +367,115 @@ fn create_vector_store(ctx: VectorizeContext, base: LocalId, offset: LocalId, va
     MirInst(
         kind: MirInstKind.Intrinsic(nil, store_name, [base_op, offset_op, value_op]),
         span: nil
+    )
+
+# ============================================================================
+# N1 Wave — Vector Loop Block (elementwise-add)
+# ============================================================================
+
+fn create_vector_loop_block(
+    ctx: VectorizeContext,
+    base_block_id: i64,
+    input_bases: [LocalId],
+    output_base: LocalId
+) -> MirBlock:
+    """
+    Create the SIMD vector-loop block for an elementwise-add pattern.
+
+    Emits (for chunk_width=4, element_type=f32):
+      BB_vec_loop:
+        %va  = Intrinsic("simd_load_f32x4", [a_base, vi])
+        %vb  = Intrinsic("simd_load_f32x4", [b_base, vi])
+        %vsum = SimdAddF32x4(%va, %vb)
+        Intrinsic("simd_store_f32x4", [out_base, vi, %vsum])
+        %vi1  = BinOp(Add, %vi, chunk_width_const)    # vi += chunk_width
+        Goto(BB_vec_loop)    # loop back (guard not included; alignment_check handles entry)
+
+    Block IDs allocated:
+      base_block_id + 2 = this vector-loop block (matches vec_id in alignment_check)
+
+    Note: The vector-loop guard (i + VF <= upper) is structural placeholder.
+    The Goto loops back on itself as a structural placeholder; the real
+    guard/back-edge is represented by the alignment-check block's branch.
+    """
+    val block_id = BlockId.new(base_block_id + 2)
+
+    # Locals for SIMD temporaries
+    val vi_local  = LocalId(id: base_block_id + 200)  # vector index (chunk-scaled)
+    val va_local  = LocalId(id: base_block_id + 201)  # loaded vector a
+    val vb_local  = LocalId(id: base_block_id + 202)  # loaded vector b
+    val vsum_local = LocalId(id: base_block_id + 203) # result vector
+    val vi1_local  = LocalId(id: base_block_id + 204) # updated vector index
+
+    # Choose base arrays (default to sentinel locals if input_bases is short)
+    val a_base = if input_bases.len() > 0: input_bases[0] else: LocalId(id: 0)
+    val b_base = if input_bases.len() > 1: input_bases[1] else: LocalId(id: 1)
+
+    val load_name  = "simd_load_{ctx.element_type}x{ctx.vector_width}"
+    val store_name = "simd_store_{ctx.element_type}x{ctx.vector_width}"
+    val add_name   = "simd_add_{ctx.element_type}x{ctx.vector_width}"
+
+    # %va = simd_load(a_base, vi)
+    val load_a = MirInst(
+        kind: MirInstKind.Intrinsic(
+            Some(va_local),
+            load_name,
+            [MirOperand(kind: MirOperandKind.Copy(a_base)),
+             MirOperand(kind: MirOperandKind.Copy(vi_local))]
+        ),
+        span: nil
+    )
+    # %vb = simd_load(b_base, vi)
+    val load_b = MirInst(
+        kind: MirInstKind.Intrinsic(
+            Some(vb_local),
+            load_name,
+            [MirOperand(kind: MirOperandKind.Copy(b_base)),
+             MirOperand(kind: MirOperandKind.Copy(vi_local))]
+        ),
+        span: nil
+    )
+    # %vsum = simd_add(va, vb)  — use Intrinsic to stay type-agnostic; backend lowers it
+    val add_inst = MirInst(
+        kind: MirInstKind.Intrinsic(
+            Some(vsum_local),
+            add_name,
+            [MirOperand(kind: MirOperandKind.Copy(va_local)),
+             MirOperand(kind: MirOperandKind.Copy(vb_local))]
+        ),
+        span: nil
+    )
+    # simd_store(out_base, vi, vsum)
+    val store_inst = MirInst(
+        kind: MirInstKind.Intrinsic(
+            nil,
+            store_name,
+            [MirOperand(kind: MirOperandKind.Copy(output_base)),
+             MirOperand(kind: MirOperandKind.Copy(vi_local)),
+             MirOperand(kind: MirOperandKind.Copy(vsum_local))]
+        ),
+        span: nil
+    )
+    # %vi1 = vi + chunk_width
+    val vf_op = MirOperand(kind: MirOperandKind.Const("i64", "{ctx.vector_width}"))
+    val inc_inst = MirInst(
+        kind: MirInstKind.BinOp(
+            vi1_local,
+            MirBinOp.Add,
+            MirOperand(kind: MirOperandKind.Copy(vi_local)),
+            vf_op
+        ),
+        span: nil
+    )
+
+    # Terminator: loop-back to self (structural placeholder; real guard is alignment_check)
+    val terminator = MirTerminator.Goto(block_id)
+
+    MirBlock(
+        id:           block_id,
+        label:        Some("vec_loop"),
+        instructions: [load_a, load_b, add_inst, store_inst, inc_inst],
+        terminator:   terminator
     )
 
 # ============================================================================

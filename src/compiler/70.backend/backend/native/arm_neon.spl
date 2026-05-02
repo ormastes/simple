@@ -375,6 +375,370 @@ fn encode_neon_f32x4_3reg(opcode: i64, qd: i64, qn: i64, qm: i64) -> [i64]:
     neon_encode_f32x4_3reg(opcode, qd, qn, qm)
 
 # ============================================================================
+# Strict-Emit Encoder Helpers (H2 pilot — ARMv8 ARM §C7.2)
+# ============================================================================
+#
+# These helpers accept raw register indices (0-31 for V0-V31) directly —
+# NOT the mach_inst ID range (64-79). Call sites must convert with q_to_index
+# if passing mach_inst IDs, or pass the raw index directly.
+#
+# All return [i64] (4 bytes, little-endian) per ARMv8 ABI fixed 32-bit instruction.
+
+fn neon_encode_3reg_4s_arith(opcode_base: i64, rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Encode a 3-register NEON Advanced SIMD arithmetic instruction for .4S (f32x4).
+    Raw register indices 0-31. Dispatches to the existing neon_encode_f32x4_3reg
+    layout: Rd in bits[4:0], Rn in bits[9:5], Rm in bits[20:16].
+
+    # C1 §2.2: ARMv8 NEON Advanced SIMD 3-register same-type format
+    # ARMv8 ARM §C7.2: FADD/FMUL/FMLA vector encoding
+    """
+    var inst = opcode_base
+    inst = inst + rd
+    inst = inst + (rn * 32)
+    inst = inst + (rm * 65536)
+    val byte0 = inst % 256
+    val byte1 = (inst / 256) % 256
+    val byte2 = (inst / 65536) % 256
+    val byte3 = (inst / 16777216) % 256
+    [byte0, byte1, byte2, byte3]
+
+fn neon_encode_3reg_4s_fma(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Encode FMLA Vd.4S, Vn.4S, Vm.4S (fused multiply-add: Vd += Vn * Vm).
+    Base opcode 0x4E20CC00: Q=1 (128-bit), U=0, size=00 (f32), opcode=11001.
+    Raw register indices 0-31.
+
+    # C1 §2.2: NEON 3-same FMLA encoding
+    # ARMv8 ARM §C7.2.110 FMLA (vector)
+    """
+    neon_encode_3reg_4s_arith(0x4E20CC00, rd, rn, rm)
+
+fn neon_encode_3reg_16b_bsl(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Encode BSL Vd.16B, Vn.16B, Vm.16B (bitwise select: Vd = (Vd & Vn) | (~Vd & Vm)).
+    Base opcode 0x6E601C00: Q=1 (128-bit), U=1, size=01 (BSL group), opcode=00011.
+    Raw register indices 0-31.
+
+    # C1 §2.2: NEON BSL/BIT/BIF bitwise select encoding (U=1 distinguishes BSL)
+    # ARMv8 ARM §C7.2.22 BSL
+    # V-25 NOTE: when used to lower cmp_lt(a,b), the mask input must come from
+    # FCMGT(b, a) — operands swapped at call site, NOT in this encoder.
+    """
+    neon_encode_3reg_4s_arith(0x6E601C00, rd, rn, rm)
+
+# ============================================================================
+# Strict-Emit Wrapper Bodies (H2 pilot)
+# ============================================================================
+#
+# These wrappers accept raw register indices (0-31 for V0-V31) directly.
+
+fn emit_neon_vaddq_f32(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit FADD Vd.4S, Vn.4S, Vm.4S — add 4 single-precision floats (128-bit).
+    Base opcode 0x4E20D400: Q=1, U=0, size=00 (f32), opcode=11010.
+    Raw register indices 0-31.
+
+    # C1 §2.2: NEON FADD .4S encoding
+    # ARMv8 ARM §C7.2.94 FADD (vector)
+    # Canonical bytes (V0,V0,V0): 0x00 0xD4 0x20 0x4E
+    """
+    neon_encode_3reg_4s_arith(0x4E20D400, rd, rn, rm)
+
+fn emit_neon_vmulq_f32(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit FMUL Vd.4S, Vn.4S, Vm.4S — multiply 4 single-precision floats (128-bit).
+    Base opcode 0x6E20DC00: Q=1, U=1, size=00 (f32), opcode=11011.
+    Raw register indices 0-31.
+
+    # C1 §2.2: NEON FMUL .4S encoding
+    # ARMv8 ARM §C7.2.136 FMUL (vector)
+    # Canonical bytes (V0,V0,V0): 0x00 0xDC 0x20 0x6E
+    """
+    neon_encode_3reg_4s_arith(0x6E20DC00, rd, rn, rm)
+
+fn emit_neon_vfmaq_f32(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit FMLA Vd.4S, Vn.4S, Vm.4S — fused multiply-add (Vd accumulates: Vd += Vn * Vm).
+    Raw register indices 0-31.
+
+    # C1 §2.2: NEON FMLA .4S encoding
+    # ARMv8 ARM §C7.2.110 FMLA (vector)
+    # Canonical bytes (V0,V0,V0): 0x00 0xCC 0x20 0x4E
+    """
+    neon_encode_3reg_4s_fma(rd, rn, rm)
+
+fn emit_neon_vbslq_u8(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit BSL Vd.16B, Vn.16B, Vm.16B — bitwise select (mask blend for 128-bit).
+    Raw register indices 0-31.
+
+    # C1 §2.2: NEON BSL encoding
+    # ARMv8 ARM §C7.2.22 BSL
+    # Canonical bytes (V0,V0,V0): 0x00 0x1C 0x60 0x6E  [UNVERIFIED vs primary spec]
+    # V-25: for cmp_lt(a,b), pass mask from FCMGT(b,a) — operands swapped by caller
+    """
+    neon_encode_3reg_16b_bsl(rd, rn, rm)
+
+# ============================================================================
+# Strict-Emit Load/Store Helpers (N4 — ARMv8 ARM §C7.2)
+# ============================================================================
+#
+# These helpers accept raw register indices directly:
+#   rt: vector register index 0-31 (Vt)
+#   rn: GP base register index 0-30 (Xn); 31 = SP
+# All return [i64] (4 bytes, little-endian).
+#
+# Encoding reference: ARMv8 ARM Advanced SIMD load/store multiple structures.
+# No-offset (base-register only) form:
+#   0 Q 001100 0 L 000000 opcode[3:0] size[1:0] Rn[4:0] Rt[4:0]
+# Post-index immediate form (offset encoded as 11111 in Rm field):
+#   0 Q 001100 1 L 11111  opcode[3:0] size[1:0] Rn[4:0] Rt[4:0]
+
+fn neon_encode_load_store_multi(opcode_base: i64, rt: i64, rn: i64) -> [i64]:
+    """
+    Encode an LD1/ST1/LD2/ST2 multiple-structures instruction.
+    opcode_base: pre-computed base with all fixed bits set (Q, L, opcode, size).
+    rt: vector register index 0-31 (placed in bits[4:0]).
+    rn: GP base register index 0-31 (placed in bits[9:5]).
+    Returns 4 bytes little-endian.
+
+    # ARMv8 ARM §C7.2 Advanced SIMD load/store multiple structures base encoding.
+    """
+    var inst = opcode_base
+    inst = inst + (rt % 32)
+    inst = inst + ((rn % 32) * 32)
+    val byte0 = inst % 256
+    val byte1 = (inst / 256) % 256
+    val byte2 = (inst / 65536) % 256
+    val byte3 = (inst / 16777216) % 256
+    [byte0, byte1, byte2, byte3]
+
+fn emit_neon_ld1q_16b_immoff(rt: i64, rn: i64) -> [i64]:
+    """
+    Emit LD1 {Vt.16B}, [Xn] — load one 128-bit register, 16-byte (byte) arrangement.
+    Raw vector register index rt (0-31), GP base register rn (0-31).
+    Base opcode 0x4C407000: Q=1, L=1, opcode=0111 (1-reg), size=00 (B).
+
+    # ARMv8 ARM §C7.2.219 LD1 (multiple structures, no offset variant)
+    # Encoding: 0_Q_001100_0_L_000000_opcode_size_Rn_Rt
+    # Q=1 (128-bit), L=1 (load), opcode=0111 (1 register), size=00 (8-bit/B)
+    # Base word: 0x4C407000 → LE bytes: 0x00 0x70 0x40 0x4C
+    # Canonical: LD1 V0.16B, [X0] → 0x00 0x70 0x40 0x4C
+    # Fields: bits[4:0]=Rt, bits[9:5]=Rn, bits[11:10]=size=00, bits[15:12]=opcode=0111
+    """
+    neon_encode_load_store_multi(0x4C407000, rt, rn)
+
+fn emit_neon_st1q_16b_immoff(rt: i64, rn: i64) -> [i64]:
+    """
+    Emit ST1 {Vt.16B}, [Xn] — store one 128-bit register, 16-byte arrangement.
+    Base opcode 0x4C007000: Q=1, L=0, opcode=0111 (1-reg), size=00 (B).
+
+    # ARMv8 ARM §C7.2.385 ST1 (multiple structures, no offset variant)
+    # Q=1, L=0 (store), opcode=0111, size=00
+    # Base word: 0x4C007000 → LE bytes: 0x00 0x70 0x00 0x4C
+    # Canonical: ST1 V0.16B, [X0] → 0x00 0x70 0x00 0x4C
+    """
+    neon_encode_load_store_multi(0x4C007000, rt, rn)
+
+fn emit_neon_ld1q_4s_immoff(rt: i64, rn: i64) -> [i64]:
+    """
+    Emit LD1 {Vt.4S}, [Xn] — load one 128-bit register, 4×32-bit (S) arrangement.
+    Base opcode 0x4C407800: Q=1, L=1, opcode=0111 (1-reg), size=10 (S/32-bit).
+
+    # ARMv8 ARM §C7.2.219 LD1 (multiple structures, no offset variant)
+    # Q=1, L=1, opcode=0111, size=10 (S = 32-bit element)
+    # Base word: 0x4C407800 → LE bytes: 0x00 0x78 0x40 0x4C
+    # Canonical: LD1 V0.4S, [X0] → 0x00 0x78 0x40 0x4C
+    # Fields: bits[11:10]=10 (size=S), bits[15:12]=0111 (1 register)
+    """
+    neon_encode_load_store_multi(0x4C407800, rt, rn)
+
+fn emit_neon_st1q_4s_immoff(rt: i64, rn: i64) -> [i64]:
+    """
+    Emit ST1 {Vt.4S}, [Xn] — store one 128-bit register, 4×32-bit arrangement.
+    Base opcode 0x4C007800: Q=1, L=0, opcode=0111 (1-reg), size=10 (S).
+
+    # ARMv8 ARM §C7.2.385 ST1 (multiple structures, no offset variant)
+    # Q=1, L=0 (store), opcode=0111, size=10
+    # Base word: 0x4C007800 → LE bytes: 0x00 0x78 0x00 0x4C
+    # Canonical: ST1 V0.4S, [X0] → 0x00 0x78 0x00 0x4C
+    """
+    neon_encode_load_store_multi(0x4C007800, rt, rn)
+
+fn emit_neon_ld2_4s_post(rt: i64, rn: i64) -> [i64]:
+    """
+    Emit LD2 {Vt.4S, Vt2.4S}, [Xn], #32 — load two 128-bit registers, 4S, post-index #32.
+    Base opcode 0x4CDF8800: Q=1, L=1, Rm=11111 (imm post-index), opcode=1000 (2-reg), size=10 (S).
+
+    # ARMv8 ARM §C7.2.222 LD2 (multiple structures)
+    # Post-index immediate form: bits[23]=1 (post-index), bits[21:16]=11111 (imm offset, not register)
+    # Q=1, L=1, opcode=1000 (2 registers), size=10 (S), post-index offset=#32 (Rm=11111)
+    # Base word: 0x4CDF8800 → LE bytes: 0x00 0x88 0xDF 0x4C
+    # Canonical: LD2 {V0.4S, V1.4S}, [X0], #32 → 0x00 0x88 0xDF 0x4C
+    # Fields: bits[23]=1 (post), bits[22]=L=1, bits[21:16]=111111→ wait: Rm=11111 in bits[20:16]
+    # bits[23]=1 (post-index enable), bits[21:16]=011111 (imm); final: 0x4CDF8800
+    """
+    neon_encode_load_store_multi(0x4CDF8800, rt, rn)
+
+fn emit_neon_st2_4s_post(rt: i64, rn: i64) -> [i64]:
+    """
+    Emit ST2 {Vt.4S, Vt2.4S}, [Xn], #32 — store two 128-bit registers, 4S, post-index #32.
+    Base opcode 0x4C9F8800: Q=1, L=0, Rm=11111 (imm post-index), opcode=1000 (2-reg), size=10 (S).
+
+    # ARMv8 ARM §C7.2.388 ST2 (multiple structures)
+    # Post-index immediate form: Q=1, L=0 (store), opcode=1000, size=10, Rm=11111
+    # Base word: 0x4C9F8800 → LE bytes: 0x00 0x88 0x9F 0x4C
+    # Canonical: ST2 {V0.4S, V1.4S}, [X0], #32 → 0x00 0x88 0x9F 0x4C
+    """
+    neon_encode_load_store_multi(0x4C9F8800, rt, rn)
+
+# ============================================================================
+# Strict-Emit Arithmetic Extras (O2 — ARMv8 ARM §C7.2)
+# ============================================================================
+#
+# FSUB, FMIN, FMAX, FCMGT, FCMGE helpers for Vec::sub, min, max, and mask ops.
+# All helpers accept raw register indices 0-31 and return [i64] (4 bytes, LE).
+# Opcodes verified via llvm-mc -triple=aarch64-none-linux-gnu --show-encoding.
+
+fn neon_encode_3reg_4s_fsub(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Encode FSUB Vd.4S, Vn.4S, Vm.4S (128-bit float subtract, 4 lanes).
+    Base opcode 0x4EA0D400: Q=1, U=0, sz=1 (bit23), size=00→f32, opcode=11010.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.183 FSUB (vector, .4S form)
+    # Encoding: 0_1_0_01110_1_0_1_Rm_110101_Rn_Rd
+    # Base word: 0x4EA0D400 → LE: 0x00 0xD4 0xA0 0x4E
+    # Canonical: FSUB V0.4S, V0.4S, V0.4S → [0x00, 0xD4, 0xA0, 0x4E] (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_arith(0x4EA0D400, rd, rn, rm)
+
+fn neon_encode_3reg_4s_fmin(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Encode FMIN Vd.4S, Vn.4S, Vm.4S (128-bit float min, NaN-propagating, 4 lanes).
+    Base opcode 0x4EA0F400: Q=1, U=0, sz=1 (bit23), size=00→f32, opcode=11110.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.135 FMIN (vector, .4S form)
+    # NaN behaviour: FMIN propagates NaN (IEEE-754 minNum NOT applied here).
+    # For IEEE minNum (non-NaN result when one operand is NaN) use FMINNM §C7.2.137.
+    # Base word: 0x4EA0F400 → LE: 0x00 0xF4 0xA0 0x4E
+    # Canonical: FMIN V0.4S, V0.4S, V0.4S → [0x00, 0xF4, 0xA0, 0x4E] (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_arith(0x4EA0F400, rd, rn, rm)
+
+fn neon_encode_3reg_4s_fmax(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Encode FMAX Vd.4S, Vn.4S, Vm.4S (128-bit float max, NaN-propagating, 4 lanes).
+    Base opcode 0x4E20F400: Q=1, U=0, sz=0 (bit23), size=00→f32, opcode=11110.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.136 FMAX (vector, .4S form)
+    # NaN behaviour: FMAX propagates NaN. For IEEE maxNum use FMAXNM §C7.2.138.
+    # Base word: 0x4E20F400 → LE: 0x00 0xF4 0x20 0x4E
+    # Canonical: FMAX V0.4S, V0.4S, V0.4S → [0x00, 0xF4, 0x20, 0x4E] (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_arith(0x4E20F400, rd, rn, rm)
+
+fn neon_encode_3reg_4s_fcmgt(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Encode FCMGT Vd.4S, Vn.4S, Vm.4S — floating-point compare greater-than, 4 lanes.
+    Result lanes are all-ones (0xFFFFFFFF) where Vn > Vm, all-zeros otherwise.
+    Base opcode 0x6EA0E400: Q=1, U=1, sz=1 (bit23), size=00→f32, opcode=11100.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.111 FCMGT (vector, register form, .4S)
+    # V-25 POLARITY NOTE (per E4-verified GCC source, doc/01_research/simd_spec_verification):
+    #   To compute cmp_lt(a, b) use FCMGT(b, a) — swap Vn/Vm at the call site.
+    #   This encoder takes (rn, rm) literally as the assembly operand order FCMGT Vd, Vn, Vm.
+    #   Caller responsibility: for a<b, call emit_neon_vcgtq_f32(rd, b_reg, a_reg).
+    # Base word: 0x6EA0E400 → LE: 0x00 0xE4 0xA0 0x6E
+    # Canonical: FCMGT V0.4S, V0.4S, V0.4S → [0x00, 0xE4, 0xA0, 0x6E] (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_arith(0x6EA0E400, rd, rn, rm)
+
+fn neon_encode_3reg_4s_fcmge(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Encode FCMGE Vd.4S, Vn.4S, Vm.4S — floating-point compare greater-or-equal, 4 lanes.
+    Result lanes are all-ones (0xFFFFFFFF) where Vn >= Vm, all-zeros otherwise.
+    Base opcode 0x6E20E400: Q=1, U=1, sz=0 (bit23), size=00→f32, opcode=11100.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.110 FCMGE (vector, register form, .4S)
+    # V-25 NOTE: to compute cmp_le(a, b) use FCMGE(b, a) — swap Vn/Vm at call site.
+    # Base word: 0x6E20E400 → LE: 0x00 0xE4 0x20 0x6E
+    # Canonical: FCMGE V0.4S, V0.4S, V0.4S → [0x00, 0xE4, 0x20, 0x6E] (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_arith(0x6E20E400, rd, rn, rm)
+
+# ============================================================================
+# Strict-Emit Wrapper Bodies (O2 arithmetic extras)
+# ============================================================================
+
+fn emit_neon_vsubq_f32(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit FSUB Vd.4S, Vn.4S, Vm.4S — subtract 4 single-precision floats (128-bit).
+    Base opcode 0x4EA0D400: Q=1, U=0, sz=1, size=00 (f32), opcode=11010.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.183 FSUB (vector)
+    # Canonical bytes (V0,V0,V0): 0x00 0xD4 0xA0 0x4E  (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_fsub(rd, rn, rm)
+
+fn emit_neon_vminq_f32(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit FMIN Vd.4S, Vn.4S, Vm.4S — minimum of 4 single-precision floats (NaN-propagating).
+    Base opcode 0x4EA0F400: Q=1, U=0, sz=1, size=00 (f32), opcode=11110.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.135 FMIN (vector) — NaN-propagating per §C7.2.135
+    # For IEEE minimumNumber (non-NaN preference) use FMINNM §C7.2.137 (follow-up).
+    # Canonical bytes (V0,V0,V0): 0x00 0xF4 0xA0 0x4E  (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_fmin(rd, rn, rm)
+
+fn emit_neon_vmaxq_f32(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit FMAX Vd.4S, Vn.4S, Vm.4S — maximum of 4 single-precision floats (NaN-propagating).
+    Base opcode 0x4E20F400: Q=1, U=0, sz=0, size=00 (f32), opcode=11110.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.136 FMAX (vector) — NaN-propagating per §C7.2.136
+    # For IEEE maximumNumber (non-NaN preference) use FMAXNM §C7.2.138 (follow-up).
+    # Canonical bytes (V0,V0,V0): 0x00 0xF4 0x20 0x4E  (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_fmax(rd, rn, rm)
+
+fn emit_neon_vcgtq_f32(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit FCMGT Vd.4S, Vn.4S, Vm.4S — compare greater-than for 4 f32 lanes.
+    Produces all-ones mask per lane where Vn > Vm.
+    Base opcode 0x6EA0E400: Q=1, U=1, sz=1, size=00 (f32), opcode=11100.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.111 FCMGT (vector, register form)
+    # V-25 POLARITY: for cmp_lt(a, b), call emit_neon_vcgtq_f32(rd, b_reg, a_reg).
+    #   The encoder passes (rn, rm) to hardware as Vn, Vm — operand swap is caller's job.
+    # Canonical bytes (V0,V0,V0): 0x00 0xE4 0xA0 0x6E  (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_fcmgt(rd, rn, rm)
+
+fn emit_neon_vcgeq_f32(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    Emit FCMGE Vd.4S, Vn.4S, Vm.4S — compare greater-or-equal for 4 f32 lanes.
+    Produces all-ones mask per lane where Vn >= Vm.
+    Base opcode 0x6E20E400: Q=1, U=1, sz=0, size=00 (f32), opcode=11100.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.110 FCMGE (vector, register form)
+    # V-25 NOTE: for cmp_le(a, b), call emit_neon_vcgeq_f32(rd, b_reg, a_reg).
+    # Canonical bytes (V0,V0,V0): 0x00 0xE4 0x20 0x6E  (llvm-mc VERIFIED)
+    """
+    neon_encode_3reg_4s_fcmge(rd, rn, rm)
+
+# ============================================================================
 # Exports
 # ============================================================================
 

@@ -20,6 +20,12 @@
 # Maps to: AC-3, AC-10, AC-9, D3.
 
 use std.io_runtime
+use std.db.accel.{
+    accel_capability_report,
+    RowBitmap, ScanPredicate, ScanPredicateKind,
+    make_key_span, row_bitmap_indices, scan_key_span,
+    summary_text_hash, text_starts_with_span
+}
 
 # ============================================================
 # INODE
@@ -295,6 +301,70 @@ impl DentryTable:
             if self.entries[i].key.parent_ino == parent_ino:
                 result.push(self.entries[i].row)
             i = i + 1
+        result
+
+    fn find_child_accel(parent_ino: i64, name: text) -> Result<DentryRow, text>:
+        if not accel_capability_report().simd_active:
+            var j: i32 = 0
+            while j < self.entries.len() as i32:
+                val entry = self.entries[j]
+                if entry.key.parent_ino == parent_ino and entry.key.name == name:
+                    return Ok(entry.row)
+                j = j + 1
+            return Err("schema: DENTRY not found")
+        var candidates: [DentryRow] = []
+        var summary_hashes: [i64] = []
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            val entry = self.entries[i]
+            if entry.key.parent_ino == parent_ino:
+                candidates.push(entry.row)
+                summary_hashes.push(summary_text_hash(entry.key.name))
+            i = i + 1
+
+        val target_hash = summary_text_hash(name)
+        val predicate = ScanPredicate(
+            kind: ScanPredicateKind.Eq,
+            text_value: "",
+            key_value: target_hash
+        )
+        val (bitmap, _) = scan_key_span(make_key_span(summary_hashes, 0, summary_hashes.len()), predicate)
+        for idx in row_bitmap_indices(bitmap):
+            val row = candidates[idx]
+            if row.name == name:
+                return Ok(row)
+        Err("schema: DENTRY not found")
+
+    fn list_children_with_prefix(parent_ino: i64, prefix: text) -> [DentryRow]:
+        if not accel_capability_report().simd_active:
+            var fast_result: [DentryRow] = []
+            var j: i32 = 0
+            while j < self.entries.len() as i32:
+                val entry = self.entries[j]
+                if entry.key.parent_ino == parent_ino and text_starts_with_span(entry.key.name, prefix):
+                    fast_result.push(entry.row)
+                j = j + 1
+            return fast_result
+        var result: [DentryRow] = []
+        var candidates: [DentryRow] = []
+        var prefix_hashes: [i64] = []
+        var i: i32 = 0
+        while i < self.entries.len() as i32:
+            val entry = self.entries[i]
+            if entry.key.parent_ino == parent_ino:
+                candidates.push(entry.row)
+                val prefix_match = if text_starts_with_span(entry.key.name, prefix): 1 else: 0
+                prefix_hashes.push(prefix_match)
+            i = i + 1
+
+        val predicate = ScanPredicate(
+            kind: ScanPredicateKind.Eq,
+            text_value: "",
+            key_value: 1
+        )
+        val (bitmap, _) = scan_key_span(make_key_span(prefix_hashes, 0, prefix_hashes.len()), predicate)
+        for idx in row_bitmap_indices(bitmap):
+            result.push(candidates[idx])
         result
 
     me fn remove(key: DentryKey) -> Result<(), text>:

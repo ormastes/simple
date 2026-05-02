@@ -1,0 +1,161 @@
+#![allow(unnamed_duplicate_typed_args)]
+# TLS 1.2 Record Layer (pure, no crypto)
+#
+# Implements TLSPlaintext / TLSCompressed / TLSCiphertext record framing
+# per RFC 5246 §6.2.1-§6.2.3.  No cryptographic operations are performed
+# here; all byte manipulation is pure Simple.  AEAD/CBC encryption of the
+# fragment is the follow-up wave.
+#
+# Wire format (RFC 5246 §6.2.1):
+#   struct {
+#       ContentType type;            # uint8
+#       ProtocolVersion version;     # struct { uint8 major; uint8 minor; }
+#       uint16 length;               # length of opaque fragment, max 2^14
+#       opaque fragment[length];
+#   } TLSPlaintext;
+#
+# Reference: RFC 5246 (TLS 1.2)
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+fn _byte_buf(cap: u64) -> [u8]:
+    rt_array_new_with_cap(cap.to_i64())
+
+fn _push_byte(buf: [u8], byte_val: i64) -> [u8]:
+    buf.push(byte_val.to_u8())
+    buf
+
+fn _u8_at(data: [u8], offset: u64) -> u8:
+    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
+
+fn _u16_be(data: [u8], offset: u64) -> u16:
+    """Read a big-endian u16 from data at offset."""
+    ((_u8_at(data, offset).to_u16() << 8) | _u8_at(data, offset + 1).to_u16()).to_u16()
+
+# ============================================================================
+# ContentType (RFC 5246 §6.2.1)
+# ============================================================================
+
+val CT_CHANGE_CIPHER_SPEC: u8 = 20
+val CT_ALERT: u8              = 21
+val CT_HANDSHAKE: u8          = 22
+val CT_APPLICATION_DATA: u8   = 23
+
+# ============================================================================
+# ProtocolVersion (RFC 5246 §A.1)
+# TLS 1.2 = { 3, 3 }
+# ============================================================================
+
+val TLS12_VERSION_MAJOR: u8 = 3
+val TLS12_VERSION_MINOR: u8 = 3
+
+# RFC 5246 §6.2.1: TLSPlaintext.fragment length MUST NOT exceed 2^14.
+val TLS12_MAX_PLAINTEXT_FRAGMENT: u64 = 16384u64
+
+# ============================================================================
+# Data Classes
+# ============================================================================
+
+class TlsRecord12:
+    """A decoded TLSPlaintext / TLSCompressed / TLSCiphertext record.
+
+    The same wire shape covers all three record types in RFC 5246 §6.2; the
+    difference between Plaintext / Compressed / Ciphertext is purely about
+    what the fragment bytes mean (compression / AEAD applied), not the
+    framing.  This module handles framing only.
+    """
+    content_type: u8     # ContentType enum (CT_*)
+    version_major: u8    # ProtocolVersion.major (3 for TLS 1.0+)
+    version_minor: u8    # ProtocolVersion.minor (3 for TLS 1.2)
+    fragment: [u8]       # opaque fragment
+
+enum RecordResult:
+    Ok(value: TlsRecord12)
+    Err(reason: text)
+
+# ============================================================================
+# Public: Encode TLSPlaintext (RFC 5246 §6.2.1)
+# ============================================================================
+
+fn encode_record(record: TlsRecord12) -> [u8]:
+    """Encode a TLSPlaintext / TLSCompressed / TLSCiphertext record to wire bytes.
+
+    Wire layout: type(1) || version_major(1) || version_minor(1) ||
+                 length(2 BE) || fragment[length].
+
+    Returns: raw record bytes ready for transport write.
+    """
+    val frag_len = record.fragment.len().to_u64()
+    var out: [u8] = _byte_buf(5u64 + frag_len)
+    out = _push_byte(out, record.content_type.to_i64())
+    out = _push_byte(out, record.version_major.to_i64())
+    out = _push_byte(out, record.version_minor.to_i64())
+    # uint16 length, big-endian
+    out = _push_byte(out, ((frag_len >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (frag_len & 0xFF).to_i64())
+    var i: u64 = 0
+    while i < frag_len:
+        out = _push_byte(out, _u8_at(record.fragment, i).to_u64().to_i64())
+        i = i + 1
+    out
+
+# ============================================================================
+# Public: Decode TLSPlaintext (RFC 5246 §6.2.1)
+# ============================================================================
+
+fn decode_record(data: [u8]) -> RecordResult:
+    """Decode a single TLS record from `data`.
+
+    Validates:
+      - 5-byte header is present
+      - declared length does not overrun `data`
+      - declared length does not exceed RFC 5246 §6.2.1 plaintext bound (2^14)
+
+    NOTE: the 2^14 bound is the TLSPlaintext fragment cap; TLSCiphertext may
+    legally be up to 2^14 + 2048 due to MAC/padding (§6.2.3).  This decoder
+    enforces the looser TLSCiphertext bound (2^14 + 2048) so it accepts both
+    plaintext and ciphertext frames; tighter checks belong to the caller that
+    knows whether a CipherSpec has been activated.
+
+    Returns: RecordResult.Ok(TlsRecord12) on success, .Err(reason) otherwise.
+    """
+    if data.len() < 5:
+        return RecordResult.Err(reason: "decode_error: record header truncated")
+    val ct = _u8_at(data, 0)
+    val vmaj = _u8_at(data, 1)
+    val vmin = _u8_at(data, 2)
+    val frag_len = _u16_be(data, 3).to_u64()
+    # RFC 5246 §6.2.3: TLSCiphertext.fragment max = 2^14 + 2048.
+    val ciphertext_max = TLS12_MAX_PLAINTEXT_FRAGMENT + 2048u64
+    if frag_len > ciphertext_max:
+        return RecordResult.Err(reason: "record_overflow: fragment length exceeds 2^14+2048")
+    if 5u64 + frag_len > data.len().to_u64():
+        return RecordResult.Err(reason: "decode_error: fragment truncated")
+    var frag: [u8] = _byte_buf(frag_len)
+    var i: u64 = 0
+    while i < frag_len:
+        frag = _push_byte(frag, _u8_at(data, 5u64 + i).to_u64().to_i64())
+        i = i + 1
+    RecordResult.Ok(value: TlsRecord12(
+        content_type: ct,
+        version_major: vmaj,
+        version_minor: vmin,
+        fragment: frag
+    ))
+
+# ============================================================================
+# Public: Convenience — build a TLS 1.2 plaintext record around a fragment
+# ============================================================================
+
+fn make_plaintext_record(content_type: u8, fragment: [u8]) -> TlsRecord12:
+    """Wrap `fragment` in a TLS 1.2 TLSPlaintext record value.
+
+    Caller passes the bytes through `encode_record` to obtain wire bytes.
+    """
+    TlsRecord12(
+        content_type: content_type,
+        version_major: TLS12_VERSION_MAJOR,
+        version_minor: TLS12_VERSION_MINOR,
+        fragment: fragment
+    )

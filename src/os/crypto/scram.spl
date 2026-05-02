@@ -1,0 +1,580 @@
+# SCRAM-SHA-256 — RFC 5802 + RFC 7677
+#
+# Salted Challenge Response Authentication Mechanism using SHA-256.
+# Used by PostgreSQL, MongoDB, XMPP, IMAP/SMTP for mutual authentication.
+#
+# References:
+#   RFC 5802 — SCRAM base protocol
+#   RFC 7677 — SCRAM-SHA-256 and SCRAM-SHA-256-PLUS (§3 test vectors)
+#   RFC 2104 — HMAC
+#
+# DESIGN NOTES:
+# - All byte buffers use [u8] in the public API (username, password, nonces,
+#   salts, proofs, signatures). Text-only byte cliffs are avoided per
+#   .claude/memory/feedback_text_only_byte_cliffs.md.
+# - Internal crypto calls (PBKDF2, HMAC, SHA-256) use `list` of i64 (0..=255)
+#   matching the convention of std.crypto.pbkdf2 / std.crypto.hmac.
+# - Constant-time proof comparison uses XOR-accumulate + rt_black_box to
+#   prevent Cranelift dead-code elimination of the diff variable
+#   (feedback_no_coverups.md + compiler_bugs_for_crypto_2026-04-25.md).
+# - Module-level helper fns are used for all [u8] construction to avoid
+#   it-block var-mutation drop (feedback_it_block_var_mutation.md).
+# - Public API takes two args: scram_sha256_client_first(user, client_nonce)
+#   so KAT can supply a deterministic nonce; callers supply a random one.
+#
+# Key derivation (RFC 5802 §3):
+#   SaltedPassword  = PBKDF2-HMAC-SHA-256(password, salt, i, 32)
+#   ClientKey       = HMAC-SHA-256(SaltedPassword, "Client Key")
+#   StoredKey       = SHA-256(ClientKey)
+#   AuthMessage     = client-first-bare "," server-first "," client-final-without-proof
+#   ClientSignature = HMAC-SHA-256(StoredKey, AuthMessage)
+#   ClientProof     = ClientKey XOR ClientSignature
+#   ServerKey       = HMAC-SHA-256(SaltedPassword, "Server Key")
+#   ServerSignature = HMAC-SHA-256(ServerKey, AuthMessage)
+
+mod os.crypto.scram
+
+use std.crypto.pbkdf2.{pbkdf2_sha256_bytes}
+use std.crypto.hmac.{hmac_sha256_bytes}
+use std.crypto.sha256.{sha256_bytes}
+use string.{char_from_code}
+
+# rt_black_box prevents Cranelift from rewriting the XOR-accumulate loop
+# in _ct_eq_bytes into an early-exit branch (same pattern as
+# std.crypto.constant_time; see compiler_bugs_for_crypto_2026-04-25.md).
+extern fn rt_black_box(x: i64) -> i64
+
+# ===========================================================================
+# Internal bridge helpers: [u8] <-> list-of-i64
+# ===========================================================================
+
+fn _u8_to_list(buf: [u8]) -> list:
+    """Convert [u8] array to list-of-i64 for crypto primitives."""
+    var out = []
+    var i: u64 = 0
+    val n = buf.len().to_u64()
+    while i < n:
+        out.push(buf[i].to_i64())
+        i = i + 1
+    out
+
+fn _base64_decode_u8_range(buf: [u8], start: i64, end_excl: i64) -> [u8]:
+    """Decode base64 directly from a [u8] byte buffer (ASCII codes).
+    No text conversion — avoids char_from_code round-trip entirely."""
+    var out: [u8] = []
+    val n = end_excl - start
+    var i = 0
+    while i + 4 <= n:
+        val p = (start + i).to_u64()
+        val v0 = _b64_val_code(buf[p].to_i64())
+        val v1 = _b64_val_code(buf[p + 1].to_i64())
+        val v2 = _b64_val_code(buf[p + 2].to_i64())
+        val v3 = _b64_val_code(buf[p + 3].to_i64())
+        out.push(((v0 << 2) | (v1 >> 4)).to_u8())
+        if v2 != -1:
+            out.push((((v1 & 0xF) << 4) | (v2 >> 2)).to_u8())
+        if v3 != -1:
+            out.push((((v2 & 0x3) << 6) | v3).to_u8())
+        i = i + 4
+    out
+
+fn _parse_field_b64_u8(buf: [u8], prefix: text) -> [u8]:
+    """Find a SCRAM field in a [u8] buffer and base64-decode its value.
+    Operates entirely on byte values — no char_from_code round-trip."""
+    val plen = prefix.len()
+    val n = buf.len()
+    val comma_code: i64 = 44  # ','
+    var i: i64 = 0
+    while i < n:
+        var j: i64 = i
+        while j < n and buf[j.to_u64()].to_i64() != comma_code:
+            j = j + 1
+        val tlen = j - i
+        if tlen >= plen:
+            var match: bool = true
+            var k: i64 = 0
+            while k < plen:
+                if buf[(i + k).to_u64()].to_i64() != prefix.char_code_at(k):
+                    match = false
+                    k = plen
+                k = k + 1
+            if match:
+                return _base64_decode_u8_range(buf, i + plen, j)
+        i = j + 1
+    []
+
+fn _list_to_u8(buf: list) -> [u8]:
+    """Convert list-of-i64 (each 0..=255) to [u8] array."""
+    var out: [u8] = []
+    var i = 0
+    while i < buf.len():
+        val b = buf.get(i)
+        out.push(b.to_u8())
+        i = i + 1
+    out
+
+fn _text_to_list(s: text) -> list:
+    """Encode an ASCII text string to list-of-i64 bytes."""
+    var out = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i))
+        i = i + 1
+    out
+
+fn _u8_concat(a: [u8], b: [u8]) -> [u8]:
+    """Concatenate two [u8] arrays."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len().to_u64():
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < b.len().to_u64():
+        out.push(b[i])
+        i = i + 1
+    out
+
+fn _u8_xor(a: [u8], b: [u8]) -> [u8]:
+    """XOR two equal-length [u8] arrays."""
+    var out: [u8] = []
+    var i: u64 = 0
+    val n = a.len().to_u64()
+    while i < n:
+        out.push((a[i].to_i64() ^ b[i].to_i64()).to_u8())
+        i = i + 1
+    out
+
+# ===========================================================================
+# Constant-time comparison for [u8] (proof / signature verification).
+# XOR-accumulate all bytes; wrap accumulator through rt_black_box before
+# the final comparison to prevent Cranelift from emitting an early-exit
+# branch (mirrors std.crypto.constant_time pattern).
+# ===========================================================================
+
+fn _ct_eq_bytes(a: [u8], b: [u8]) -> bool:
+    """Constant-time equality for two byte arrays.
+    Length inequality is public information in SCRAM (output length is fixed
+    at 32 bytes for SHA-256), so early exit on length mismatch is safe.
+    Content comparison is timing-safe via XOR-accumulate + rt_black_box."""
+    if a.len() != b.len():
+        return false
+    var diff: i64 = 0
+    var i: u64 = 0
+    val n = a.len().to_u64()
+    while i < n:
+        diff = diff | (a[i].to_i64() ^ b[i].to_i64())
+        i = i + 1
+    rt_black_box(diff) == 0
+
+# ===========================================================================
+# Base64 encoding/decoding (RFC 4648 §4, standard alphabet with padding)
+# Required to encode ClientProof in client-final and decode the salt field
+# from server-first.
+# ===========================================================================
+
+fn _b64_char(v: i64) -> text:
+    """Map a 6-bit value (0..63) to its base64 alphabet character."""
+    if v == 0: "A"
+    else if v == 1: "B"
+    else if v == 2: "C"
+    else if v == 3: "D"
+    else if v == 4: "E"
+    else if v == 5: "F"
+    else if v == 6: "G"
+    else if v == 7: "H"
+    else if v == 8: "I"
+    else if v == 9: "J"
+    else if v == 10: "K"
+    else if v == 11: "L"
+    else if v == 12: "M"
+    else if v == 13: "N"
+    else if v == 14: "O"
+    else if v == 15: "P"
+    else if v == 16: "Q"
+    else if v == 17: "R"
+    else if v == 18: "S"
+    else if v == 19: "T"
+    else if v == 20: "U"
+    else if v == 21: "V"
+    else if v == 22: "W"
+    else if v == 23: "X"
+    else if v == 24: "Y"
+    else if v == 25: "Z"
+    else if v == 26: "a"
+    else if v == 27: "b"
+    else if v == 28: "c"
+    else if v == 29: "d"
+    else if v == 30: "e"
+    else if v == 31: "f"
+    else if v == 32: "g"
+    else if v == 33: "h"
+    else if v == 34: "i"
+    else if v == 35: "j"
+    else if v == 36: "k"
+    else if v == 37: "l"
+    else if v == 38: "m"
+    else if v == 39: "n"
+    else if v == 40: "o"
+    else if v == 41: "p"
+    else if v == 42: "q"
+    else if v == 43: "r"
+    else if v == 44: "s"
+    else if v == 45: "t"
+    else if v == 46: "u"
+    else if v == 47: "v"
+    else if v == 48: "w"
+    else if v == 49: "x"
+    else if v == 50: "y"
+    else if v == 51: "z"
+    else if v == 52: "0"
+    else if v == 53: "1"
+    else if v == 54: "2"
+    else if v == 55: "3"
+    else if v == 56: "4"
+    else if v == 57: "5"
+    else if v == 58: "6"
+    else if v == 59: "7"
+    else if v == 60: "8"
+    else if v == 61: "9"
+    else if v == 62: "+"
+    else: "/"
+
+fn _base64_encode(bytes: [u8]) -> text:
+    """Standard base64 encode (RFC 4648 §4)."""
+    var out: text = ""
+    val n = bytes.len()
+    var i: u64 = 0
+    while i.to_i64() < n:
+        val b0 = bytes[i].to_i64()
+        val has1 = (i.to_i64() + 1) < n
+        val has2 = (i.to_i64() + 2) < n
+        val b1 = if has1: bytes[i + 1].to_i64() else: 0
+        val b2 = if has2: bytes[i + 2].to_i64() else: 0
+
+        out = out + _b64_char((b0 >> 2) & 0x3F)
+        out = out + _b64_char(((b0 << 4) | (b1 >> 4)) & 0x3F)
+        out = out + (if has1: _b64_char(((b1 << 2) | (b2 >> 6)) & 0x3F) else: "=")
+        out = out + (if has2: _b64_char(b2 & 0x3F) else: "=")
+        i = i + 3
+    out
+
+fn _b64_val_code(code: i64) -> i64:
+    """Decode one base64 character (by ASCII code) to its 6-bit value; -1 for '='."""
+    # '=' = 61
+    if code == 61: return -1
+    # 'A'..'Z' = 65..90 → 0..25
+    if code >= 65 and code <= 90: return code - 65
+    # 'a'..'z' = 97..122 → 26..51
+    if code >= 97 and code <= 122: return code - 97 + 26
+    # '0'..'9' = 48..57 → 52..61
+    if code >= 48 and code <= 57: return code - 48 + 52
+    # '+' = 43 → 62
+    if code == 43: return 62
+    # '/' = 47 → 63
+    if code == 47: return 63
+    -1
+
+fn _base64_decode(s: text) -> [u8]:
+    """Standard base64 decode (RFC 4648 §4)."""
+    _base64_decode_range(s, 0, s.len())
+
+fn _base64_decode_range(s: text, start: i64, end_excl: i64) -> [u8]:
+    """Decode base64 from s[start..end_excl] using char_code_at directly.
+    Avoids any text-slice or char_from_code round-trip."""
+    var out: [u8] = []
+    val n = end_excl - start
+    var i = 0
+    while i + 4 <= n:
+        val v0 = _b64_val_code(s.char_code_at(start + i))
+        val v1 = _b64_val_code(s.char_code_at(start + i + 1))
+        val v2 = _b64_val_code(s.char_code_at(start + i + 2))
+        val v3 = _b64_val_code(s.char_code_at(start + i + 3))
+        out.push(((v0 << 2) | (v1 >> 4)).to_u8())
+        if v2 != -1:
+            out.push((((v1 & 0xF) << 4) | (v2 >> 2)).to_u8())
+        if v3 != -1:
+            out.push((((v2 & 0x3) << 6) | v3).to_u8())
+        i = i + 4
+    out
+
+# ===========================================================================
+# SCRAM-SHA-256 core key derivation (RFC 5802 §3)
+# ===========================================================================
+
+fn _scram_sha256_derive(password: [u8], salt: [u8], iterations: i64) -> ([u8], [u8], [u8]):
+    """Derive (salted_password, server_key, client_key) for SCRAM-SHA-256.
+
+    SaltedPassword = PBKDF2-HMAC-SHA-256(password, salt, iterations, 32)
+    ClientKey      = HMAC-SHA-256(SaltedPassword, "Client Key")
+    ServerKey      = HMAC-SHA-256(SaltedPassword, "Server Key")
+    """
+    val pw_list = _u8_to_list(password)
+    val salt_list = _u8_to_list(salt)
+
+    val salted_pw_list = pbkdf2_sha256_bytes(pw_list, salt_list, iterations, 32)
+    val salted_pw = _list_to_u8(salted_pw_list)
+
+    val ck_label = _text_to_list("Client Key")
+    val client_key_list = hmac_sha256_bytes(salted_pw_list, ck_label)
+    val client_key = _list_to_u8(client_key_list)
+
+    val sk_label = _text_to_list("Server Key")
+    val server_key_list = hmac_sha256_bytes(salted_pw_list, sk_label)
+    val server_key = _list_to_u8(server_key_list)
+
+    (salted_pw, server_key, client_key)
+
+fn _scram_sha256_proof_and_server_sig(
+    client_key: [u8],
+    server_key: [u8],
+    auth_message: [u8]
+) -> ([u8], [u8]):
+    """Compute (ClientProof, ServerSignature) given keys and AuthMessage.
+
+    StoredKey       = SHA-256(ClientKey)
+    ClientSignature = HMAC-SHA-256(StoredKey, AuthMessage)
+    ClientProof     = ClientKey XOR ClientSignature
+    ServerSignature = HMAC-SHA-256(ServerKey, AuthMessage)
+    """
+    val ck_list = _u8_to_list(client_key)
+    val stored_key_list = sha256_bytes(ck_list)
+
+    val am_list = _u8_to_list(auth_message)
+    val client_sig_list = hmac_sha256_bytes(stored_key_list, am_list)
+    val client_sig = _list_to_u8(client_sig_list)
+
+    val client_proof = _u8_xor(client_key, client_sig)
+
+    val sk_list = _u8_to_list(server_key)
+    val server_sig_list = hmac_sha256_bytes(sk_list, am_list)
+    val server_sig = _list_to_u8(server_sig_list)
+
+    (client_proof, server_sig)
+
+# ===========================================================================
+# Text helpers (ASCII-safe; all SCRAM protocol strings are ASCII)
+# ===========================================================================
+
+fn _code_to_char(code: i64) -> text:
+    """Convert ASCII code point (32–126) to a single-character text."""
+    if code >= 32 and code <= 126:
+        char_from_code(code)
+    else:
+        ""
+
+fn _u8_to_text(buf: [u8]) -> text:
+    """Decode [u8] ASCII bytes to text."""
+    var s: text = ""
+    var i: u64 = 0
+    val n = buf.len().to_u64()
+    while i < n:
+        s = s + _code_to_char(buf[i].to_i64())
+        i = i + 1
+    s
+
+fn _u8_to_text_from(buf: [u8], start: i64) -> text:
+    """Decode [u8] ASCII bytes starting at `start` offset."""
+    var s: text = ""
+    var i: u64 = start.to_u64()
+    val n = buf.len().to_u64()
+    while i < n:
+        s = s + _code_to_char(buf[i].to_i64())
+        i = i + 1
+    s
+
+fn _text_to_u8(s: text) -> [u8]:
+    """Encode ASCII text to [u8]."""
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+fn _prefix_matches(s: text, pos: i64, prefix: text) -> bool:
+    """Check whether `s` starting at `pos` has the given prefix (char-code comparison)."""
+    val plen = prefix.len()
+    if pos + plen > s.len():
+        return false
+    var k = 0
+    while k < plen:
+        if s.char_code_at(pos + k) != prefix.char_code_at(k):
+            return false
+        k = k + 1
+    true
+
+fn _extract_substr(s: text, start: i64, end_excl: i64) -> text:
+    """Extract substring s[start..end_excl] by building char-by-char."""
+    var out: text = ""
+    var k = start
+    while k < end_excl:
+        out = out + char_from_code(s.char_code_at(k))
+        k = k + 1
+    out
+
+fn _find_field_range(s: text, prefix: text) -> (i64, i64):
+    """Return (value_start, value_end) for the first matching SCRAM field.
+    Returns (-1, -1) if not found. value_start/end are char indices into s."""
+    val plen = prefix.len()
+    val slen = s.len()
+    val comma_code = 44  # ','
+    var i = 0
+    while i < slen:
+        var j = i
+        while j < slen and s.char_code_at(j) != comma_code:
+            j = j + 1
+        if j - i >= plen:
+            if _prefix_matches(s, i, prefix):
+                return (i + plen, j)
+        i = j + 1
+    (-1, -1)
+
+fn _parse_field(s: text, prefix: text) -> text:
+    """Extract value of a SCRAM message field given its prefix (e.g. 'r=', 's=', 'i=').
+    Scans comma-separated tokens; returns the value after the first match.
+    Returns empty string if not found."""
+    val (vstart, vend) = _find_field_range(s, prefix)
+    if vstart == -1:
+        return ""
+    _extract_substr(s, vstart, vend)
+
+fn _parse_field_b64(s: text, prefix: text) -> [u8]:
+    """Like _parse_field but decodes the value as base64 directly from the
+    original text using char_code_at — avoids the char_from_code round-trip."""
+    val (vstart, vend) = _find_field_range(s, prefix)
+    if vstart == -1:
+        return []
+    _base64_decode_range(s, vstart, vend)
+
+fn _text_to_i64(s: text) -> i64:
+    """Parse a non-negative decimal integer from text."""
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val digit = s.char_code_at(i) - 48
+        result = result * 10 + digit
+        i = i + 1
+    result
+
+# ===========================================================================
+# Public API
+# ===========================================================================
+
+fn scram_sha256_client_first(user: [u8], client_nonce: [u8]) -> [u8]:
+    """Build the client-first message for SCRAM-SHA-256 (RFC 5802 §5).
+
+    Format (gs2-header + client-first-bare):
+      "n,,n=<user>,r=<client-nonce>"
+
+    gs2-cbind-flag = 'n' (no channel binding per RFC 5802 §6).
+    `client_nonce` must be random printable ASCII (caller-supplied).
+
+    Returns the complete client-first message as [u8].
+    """
+    val prefix = _text_to_u8("n,,n=")
+    val comma_r = _text_to_u8(",r=")
+    val msg = _u8_concat(_u8_concat(prefix, user), comma_r)
+    _u8_concat(msg, client_nonce)
+
+fn scram_sha256_client_final(
+    client_first: [u8],
+    server_first: [u8],
+    password: [u8],
+    channel_binding: [u8]
+) -> ([u8], [u8]):
+    """Build the client-final message and return the expected ServerSignature.
+
+    Parses server-first to extract combined-nonce, salt (base64), and
+    iteration count. Derives keys and computes ClientProof.
+
+    `channel_binding` should be the raw GS2 header bytes (for no channel
+    binding pass the bytes of 'n,,' = [0x6e, 0x2c, 0x2c]).
+
+    Returns (client_final_message, expected_server_signature).
+    """
+    val sf_text = _u8_to_text(server_first)
+
+    val combined_nonce = _parse_field(sf_text, "r=")
+    val salt = _parse_field_b64(sf_text, "s=")
+    val iter_text = _parse_field(sf_text, "i=")
+    val iterations = _text_to_i64(iter_text)
+
+    # client-final-without-proof: "c=<base64(channel_binding)>,r=<combined_nonce>"
+    val cb_b64 = _base64_encode(channel_binding)
+    val cf_no_proof_text = "c=" + cb_b64 + ",r=" + combined_nonce
+
+    # client-first-bare strips the 3-byte gs2 header "n,,"
+    val cf_bare_text = _u8_to_text_from(client_first, 3)
+
+    # AuthMessage = client-first-bare + "," + server-first + "," + client-final-without-proof
+    val auth_message_text = cf_bare_text + "," + sf_text + "," + cf_no_proof_text
+    val auth_message = _text_to_u8(auth_message_text)
+
+    val (_, server_key, client_key) = _scram_sha256_derive(password, salt, iterations)
+    val (client_proof, server_sig) = _scram_sha256_proof_and_server_sig(
+        client_key, server_key, auth_message
+    )
+
+    val proof_b64 = _base64_encode(client_proof)
+    val cf_text = cf_no_proof_text + ",p=" + proof_b64
+    val client_final = _text_to_u8(cf_text)
+
+    (client_final, server_sig)
+
+fn scram_sha256_server_verify(
+    client_final: [u8],
+    password: [u8],
+    salt: [u8],
+    iterations: i64,
+    auth_message: [u8]
+) -> bool:
+    """Server-side verification of a client-final message (RFC 5802 §3).
+
+    Extracts ClientProof from client-final, recomputes the expected proof
+    from password/salt/iterations, and compares constant-time.
+
+    The comparison recovers ClientKey from ClientProof XOR ClientSignature,
+    hashes it to StoredKey', and checks StoredKey' == SHA-256(ClientKey).
+    This avoids storing the password in plaintext on the server.
+
+    Returns true if the proof is valid.
+    """
+    val received_proof = _parse_field_b64_u8(client_final, "p=")
+
+    val (_, _, client_key) = _scram_sha256_derive(password, salt, iterations)
+
+    val ck_list = _u8_to_list(client_key)
+    val stored_key_list = sha256_bytes(ck_list)
+
+    val am_list = _u8_to_list(auth_message)
+    val client_sig_list = hmac_sha256_bytes(stored_key_list, am_list)
+    val client_sig = _list_to_u8(client_sig_list)
+
+    # Recover ClientKey = received_proof XOR ClientSignature,
+    # then verify SHA-256(recovered_ck) == StoredKey constant-time.
+    val recovered_ck = _u8_xor(received_proof, client_sig)
+    val rck_list = _u8_to_list(recovered_ck)
+    val recovered_stored = _list_to_u8(sha256_bytes(rck_list))
+    val expected_stored = _list_to_u8(stored_key_list)
+
+    _ct_eq_bytes(recovered_stored, expected_stored)
+
+fn scram_sha256_ct_eq(a: [u8], b: [u8]) -> bool:
+    """Public wrapper for constant-time equality — used by KAT to verify
+    _ct_eq_bytes works correctly before testing server_signature_check."""
+    _ct_eq_bytes(a, b)
+
+fn scram_sha256_decode_server_final(server_final: [u8]) -> [u8]:
+    """Debug helper: decode the ServerSignature from a server-final message.
+    Exposed for KAT verification only."""
+    _parse_field_b64_u8(server_final, "v=")
+
+fn scram_sha256_server_signature_check(server_final: [u8], expected_sig: [u8]) -> bool:
+    """Verify the server-final message for mutual auth (RFC 5802 §3).
+
+    server-final format: "v=<base64(ServerSignature)>"
+    Returns true iff the decoded signature matches expected_sig constant-time.
+    """
+    val received_sig = _parse_field_b64_u8(server_final, "v=")
+    _ct_eq_bytes(received_sig, expected_sig)

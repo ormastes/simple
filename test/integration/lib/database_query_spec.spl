@@ -7,7 +7,7 @@ fn check(condition: bool):
 fn check_msg(condition: bool, message: text):
     if not condition:
         expect(message).to_equal("")
-use std.database.core.{SdnDatabase, SdnTable, SdnRow}
+use std.database.core.{SdnTable, SdnRow}
 use std.database.query.{QueryBuilder, CompareOp}
 
 fn slow_it(name: text, block: fn()):
@@ -87,9 +87,20 @@ describe "QueryBuilder":
         check(first_path.contains("src"))
 
     slow_it "filters with in operator":
-        # SKIP: filter_in uses additive AND filters (not OR), so filtering
-        # status==Open AND status==Closed returns 0 results instead of 4
-        print "SKIP: filter_in implementation uses AND semantics instead of OR"
+        var table = SdnTable(name: "issues", columns: ["id", "status"], rows: [], index: {})
+        val statuses = ["Open", "Closed", "Open", "Pending", "Closed"]
+        for idx in 0..statuses.len():
+            var row = SdnRow(fields: {})
+            row.set("id", "issue_{idx}")
+            row.set("status", statuses[idx])
+            table.add_row(row)
+
+        var query = QueryBuilder.for_table(table)
+        var filtered = query.filter_in("status", ["Open", "Closed"])
+        val results = filtered.execute()
+
+        check(results.len() == 4)
+        check(results[0].get("status")? != "Pending")
 
     slow_it "chains multiple filters":
         var table = SdnTable(name: "products", columns: ["name", "category", "price"], rows: [], index: {})
@@ -144,25 +155,100 @@ describe "QueryBuilder":
         # Should get only valid rows (0, 2, 4)
         check(results.len() == 3)
 
+    slow_it "filters rows by prefix and suffix":
+        var table = SdnTable(name: "paths", columns: ["path"], rows: [], index: {})
+        val paths = ["src/main.spl", "src/test.txt", "doc/readme.md", "main.spl"]
+        for path in paths:
+            var row = SdnRow(fields: {})
+            row.set("path", path)
+            table.add_row(row)
+
+        var prefix_query = QueryBuilder.for_table(table)
+        val prefix_results = prefix_query.filter_by("path", CompareOp.StartsWith, "src/").execute()
+        check(prefix_results.len() == 2)
+
+        var suffix_query = QueryBuilder.for_table(table)
+        val suffix_results = suffix_query.filter_by("path", CompareOp.EndsWith, ".spl").execute()
+        check(suffix_results.len() == 2)
+
+    slow_it "preserves query matches across batch boundaries":
+        var table = SdnTable(name: "batch_paths", columns: ["id", "path", "valid"], rows: [], index: {})
+        for idx in 0..130:
+            var row = SdnRow(fields: {})
+            row.set("id", "{idx}")
+            if idx == 63 or idx == 64 or idx == 129:
+                row.set("path", "src/hit_{idx}.spl")
+                row.set("valid", "true")
+            else:
+                row.set("path", "doc/miss_{idx}.md")
+                row.set("valid", "false")
+            table.add_row(row)
+
+        val results = QueryBuilder.for_table(table)
+            .filter_by("path", CompareOp.StartsWith, "src/")
+            .filter_by("valid", CompareOp.Eq, "true")
+            .execute()
+
+        check(results.len() == 3)
+
     slow_it "orders results ascending":
-        # SKIP: QueryBuilder sort_field is text? (optional), accessing sort_field?
-        # triggers 'class QueryBuilder has no field named sort_field?' in interpreter
-        print "SKIP: QueryBuilder optional field sort_field? access fails in interpreter mode"
+        var table = SdnTable(name: "scores", columns: ["id", "score"], rows: [], index: {})
+        val scores = [("a", "30"), ("b", "10"), ("c", "20")]
+        for score in scores:
+            var row = SdnRow(fields: {})
+            row.set("id", score.0)
+            row.set("score", score.1)
+            table.add_row(row)
+
+        val results = QueryBuilder.for_table(table).order_by("score", false).execute()
+        check(results.len() == 3)
+        check(results[0].get("score")? == "10")
+        check(results[2].get("score")? == "30")
 
     slow_it "orders results descending":
-        # SKIP: QueryBuilder sort_field is text? (optional), accessing sort_field?
-        # triggers 'class QueryBuilder has no field named sort_field?' in interpreter
-        print "SKIP: QueryBuilder optional field sort_field? access fails in interpreter mode"
+        var table = SdnTable(name: "scores", columns: ["id", "score"], rows: [], index: {})
+        val scores = [("a", "30"), ("b", "10"), ("c", "20")]
+        for score in scores:
+            var row = SdnRow(fields: {})
+            row.set("id", score.0)
+            row.set("score", score.1)
+            table.add_row(row)
+
+        val results = QueryBuilder.for_table(table).order_by("score", true).execute()
+        check(results.len() == 3)
+        check(results[0].get("score")? == "30")
+        check(results[2].get("score")? == "10")
 
     slow_it "limits number of results":
-        # SKIP: QueryBuilder limit_count is i64? (optional), accessing limit_count?
-        # triggers 'class QueryBuilder has no field named limit_count?' in interpreter
-        print "SKIP: QueryBuilder optional field limit_count? access fails in interpreter mode"
+        var table = SdnTable(name: "numbers", columns: ["id"], rows: [], index: {})
+        for i in 0..5:
+            var row = SdnRow(fields: {})
+            row.set("id", "{i}")
+            table.add_row(row)
+
+        val results = QueryBuilder.for_table(table).take(2).execute()
+        check(results.len() == 2)
+        check(results[0].get("id")? == "0")
+        check(results[1].get("id")? == "1")
 
     slow_it "combines filter, order, and limit":
-        # SKIP: QueryBuilder sort_field/limit_count are optional types,
-        # accessing them triggers field-not-found errors in interpreter mode
-        print "SKIP: QueryBuilder optional fields sort_field?/limit_count? fail in interpreter mode"
+        var table = SdnTable(name: "items", columns: ["id", "kind"], rows: [], index: {})
+        val items = [("4", "c"), ("1", "b"), ("3", "b"), ("2", "a")]
+        for item in items:
+            var row = SdnRow(fields: {})
+            row.set("id", item.0)
+            row.set("kind", item.1)
+            table.add_row(row)
+
+        val results = QueryBuilder.for_table(table)
+            .filter_by("kind", CompareOp.Gt, "a")
+            .order_by("id", false)
+            .take(2)
+            .execute()
+
+        check(results.len() == 2)
+        check(results[0].get("id")? == "1")
+        check(results[1].get("id")? == "3")
 
     slow_it "returns empty for empty table":
         val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})

@@ -84,34 +84,30 @@ describe "zstd FSE + Huffman encoder primitives":
         expect(got_b).to_be(0b101)
         expect(got_a).to_be(0b10110)
 
-    it "FSE encoder builds a state table whose layout matches the decoder spread":
+    it "FSE encoder builds per-symbol slot lists matching the decoder dual":
         # Eight equally-likely symbols at table_log = 5: each gets count 4
-        # (sum = 32 = table_size). The encoder must produce a state-table
-        # of the same size as the decoder would build, with the same
-        # spread positions.
-        #
-        # TODO(W12-F): full encode->decode round-trip on these flat counts
-        # currently fails with `zstd fse encode state index oor` from the
-        # broken `nb_bits` formula at zstd_fse.spl:415. Tracked in
-        # `doc/08_tracking/bug/bug_zstd_huf_literal_encoder_bit_layout_2026-05-02.md`
-        # ("Revised hypothesis" -> "B. FSE encoder ..."). W12-E (2026-05-02)
-        # disproved the W9-D Brotli bit-direction analogy and scoped the
-        # FSE rewrite to a follow-up lane; the structural assertion below
-        # is intentionally retained until the rewrite lands so the regression
-        # is caught the moment encode_one_symbol changes shape.
+        # (sum = 32 = table_size). The encoder is built by inverting the
+        # decoder table (W13-C 2026-05-02), so the union of all
+        # slot-buckets must partition [0, table_size), and every slot's
+        # `bits`/`baseline`/`p` must be sane.
         val table_log = 5
+        val table_size = 1 << table_log
         val counts = [4, 4, 4, 4, 4, 4, 4, 4]
         val encode_table = zstd_fse_build_encode_table(table_log, counts).unwrap()
         expect(encode_table.table_log).to_be(table_log)
-        expect(encode_table.state_table.len()).to_be(1 << table_log)
-        # Every state-table entry must lie inside the [table_size, 2*table_size)
-        # half-open range — that's the encoder's invariant for the next-state
-        # lookup before the per-symbol nb_bits subtraction.
-        var i = 0
-        while i < encode_table.state_table.len():
-            expect(encode_table.state_table[i] >= (1 << table_log)).to_be(true)
-            expect(encode_table.state_table[i] < (2 << table_log)).to_be(true)
-            i = i + 1
+        expect(encode_table.slots.len()).to_be(counts.len())
+        # Per-symbol slot count must match its normalised count.
+        expect(encode_table.slots[0].len()).to_be(counts[0])
+        expect(encode_table.slots[1].len()).to_be(counts[1])
+        expect(encode_table.slots[7].len()).to_be(counts[7])
+        # Spot-check first slot of symbol 0: bounds and within-range.
+        val first = encode_table.slots[0][0]
+        expect(first.bits >= 0).to_be(true)
+        expect(first.bits <= table_log).to_be(true)
+        expect(first.baseline >= 0).to_be(true)
+        expect(first.baseline + (1 << first.bits) <= table_size).to_be(true)
+        expect(first.p >= 0).to_be(true)
+        expect(first.p < table_size).to_be(true)
 
     it "Huffman direct weight header produces RFC 8478 §4.2.1.1 byte layout":
         # Three-symbol alphabet with weights [1, 1, ?] where '?' is the

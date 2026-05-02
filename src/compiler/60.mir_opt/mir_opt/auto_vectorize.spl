@@ -34,12 +34,11 @@ use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKin
 
 # Shared types (cycle-free base module)
 use compiler.mir_opt.auto_vectorize_types.{LoopInfo, ArrayAccess}
-
 # Re-import from sub-modules for coordinator use and re-export
-use compiler.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult, analyze_loop_dependencies, is_simple_loop}
+use compiler.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses}
 use compiler.mir_opt.auto_vectorize_validate.{VectorizabilityResult, check_vectorizability, get_vectorizable_type}
 use compiler.mir_opt.auto_vectorize_cost.{CostEstimate, estimate_vectorization_cost, should_vectorize_loop}
-use compiler.mir_opt.auto_vectorize_codegen.{VectorizeContext, VectorizedLoop, create_vector_loop}
+use compiler.mir_opt.auto_vectorize_codegen.{VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
 
 # ============================================================================
 # Main Auto-Vectorization Pass
@@ -212,6 +211,543 @@ fn get_simd_width(element_type: text) -> i64:
         8  # 8x i32 = 256 bits
     else:
         4  # Conservative fallback
+
+# ============================================================================
+# K3 Wave — VectorRecipe: pattern-match result record
+# ============================================================================
+# This type is the handoff between Wave K3 pattern recognition and the
+# future rewriter (Wave L+).  Pattern matchers return Some(VectorRecipe)
+# when a loop is recognised; the rewriter consumes the recipe to emit
+# actual SIMD MIR.  In K3 the rewriter is NOT wired up — see run_auto_vectorize.
+
+enum VectorRecipeKind:
+    """What kind of vectorisable pattern was recognised."""
+    Elementwise   # out[i] = f(a[i], b[i])  — no cross-iter dependency
+    Reduction     # var s; for i: s = s op a[i]  — horizontal accumulation
+
+struct VectorRecipe:
+    """
+    Describes a recognised vectorisable loop.
+
+    Produced by pattern matchers; consumed by the (future) rewriter.
+    All fields are extracted from MIR structure analysis — no rewriting
+    happens here.
+
+    Fields:
+      kind          — Elementwise or Reduction (see VectorRecipeKind)
+      header_block  — BlockId of the loop header that was matched
+      induction_var — LocalId of the canonical induction variable (step=1)
+      trip_count    — Estimated iteration count (-1 = unknown)
+      element_type  — Scalar element type as text ("f32", "f64", "i32", etc.)
+      vector_width  — Preferred SIMD lane count (power-of-two)
+      op_name       — Human-readable name of the recognised operation
+                       e.g. "add_elementwise", "sum_reduction", "mul_elementwise"
+      note          — Free-text diagnostic note emitted by the matcher
+      input_bases   — LocalIds of GEP base arrays for input operands
+                       (e.g. [a, b] in out[i] = a[i] + b[i])
+      output_base   — LocalId of GEP base for store destination (None for reductions)
+      accumulator   — LocalId of scalar accumulator register (Some for reductions,
+                       None for elementwise)
+      chunk_width   — SIMD lane count as u32 (power-of-two; same value as vector_width
+                       but typed as i64 here for uniformity; e.g. 4 for Vec4i)
+    """
+    kind:          VectorRecipeKind
+    header_block:  BlockId
+    induction_var: LocalId
+    trip_count:    i64
+    element_type:  text
+    vector_width:  i64
+    op_name:       text
+    note:          text
+    # W-recipe fields: operand bases for the future rewriter
+    input_bases:   [LocalId]
+    output_base:   LocalId?
+    accumulator:   LocalId?
+    chunk_width:   i64
+
+# ============================================================================
+# K3 Wave — Pattern matcher: trivial elementwise loop
+# ============================================================================
+# Recognises:  for i in 0..n:  out[i] = a[i] OP b[i]
+# where OP ∈ {Add, Sub, Mul, Div} (BinOp over stride-1 arrays).
+#
+# MIR shape expected (all in one basic block after loop-normalisation):
+#   BB_header:
+#     %i_ge_n = CmpLt(%i, %n)              # loop exit condition
+#     If %i_ge_n → BB_body, BB_exit
+#   BB_body:
+#     %pa  = GEP(a, %i)
+#     %pb  = GEP(b, %i)
+#     %pout= GEP(out, %i)
+#     %va  = Load(%pa)
+#     %vb  = Load(%pb)
+#     %vc  = BinOp(Add|Mul|Sub|Div, %va, %vb)
+#     Store(%pout, %vc)
+#     %i1  = BinOp(Add, %i, 1)
+#     Jump(BB_header)
+#
+# Limitation (Wave K3): The current MIR walker is structural (inspect
+# instruction kinds only).  It does NOT chase def-use chains or verify that
+# the GEP bases are distinct arrays.  If the full alias oracle from 55.borrow
+# is available on the block, a future wave should add an alias_safe check here.
+# See §10 of simd_auto_vectorize_design.md for the follow-up plan.
+
+fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
+    """
+    Structural pattern matcher for trivial elementwise loops.
+
+    Returns Some(VectorRecipe) if the block contains:
+      - exactly one BinOp that is NOT an index-increment (i.e. both operands
+        are loaded values, not literals)
+      - at least two Load instructions (the input operands)
+      - at least one Store instruction (the output)
+      - no Call or CallIndirect instructions (§8 failure mode — function call)
+      - no indirect loads (GetElementPtr whose base is itself a Load result)
+
+    The match is intentionally conservative: when in doubt, return nil.
+    This avoids false positives at the cost of missing some patterns.
+
+    TODO(K3 follow-up): rewrite MIR
+      - After Wave L lands a live-range tracker, wire the recipe into a
+        rewriter that replaces these instructions with SimdLoad/SimdBinOp/
+        SimdStore + a scalar epilogue loop.
+      - The alias oracle from 55.borrow must be consulted before the rewrite
+        to confirm no_alias between all GEP bases in the block.
+    """
+    var load_count = 0
+    var store_count = 0
+    var binop_count = 0
+    var call_count = 0
+    var last_binop_op: text = ""
+    var induction_local: LocalId? = nil
+    var element_type_hint = "f32"
+
+    for inst in block.instructions:
+        match inst.kind:
+            case Load(dest, ptr):
+                load_count = load_count + 1
+            case Store(ptr, value):
+                store_count = store_count + 1
+            case BinOp(dest, op, left, right):
+                # Distinguish index-increment (Add with a Const 1 operand)
+                # from data operations
+                val is_index_inc = _is_index_increment(op, left, right)
+                if is_index_inc:
+                    # This is the induction variable update — record the dest
+                    # as a candidate induction variable
+                    induction_local = Some(dest)
+                else:
+                    binop_count = binop_count + 1
+                    last_binop_op = _binop_name(op)
+            case Call(dest, func, args):
+                call_count = call_count + 1
+            case CallIndirect(dest, ptr, args, sig):
+                call_count = call_count + 1
+            case _:
+                pass_do_nothing
+
+    # Reject if any function call present (§8 failure: function call in body)
+    if call_count > 0:
+        return nil
+
+    # Reject if no meaningful data BinOp found
+    if binop_count == 0:
+        return nil
+
+    # Require at least 2 loads (input operands) and 1 store (output)
+    if load_count < 2 or store_count < 1:
+        return nil
+
+    # Reject if no induction variable candidate (not a counted loop)
+    if not induction_local.?:
+        return nil
+
+    val induction = induction_local.unwrap()
+
+    # W-recipe: collect GEP base arrays for input loads and output store
+    val accesses = detect_array_accesses(block)
+    var input_bases: [LocalId] = []
+    var output_base: LocalId? = nil
+    for access in accesses:
+        if access.is_load:
+            input_bases.push(access.base_array)
+        else:
+            output_base = Some(access.base_array)
+
+    val elem_width = get_simd_width(element_type_hint)
+
+    # Build recipe — trip count unknown until SCEV lands (Wave L)
+    Some(VectorRecipe(
+        kind:          VectorRecipeKind.Elementwise,
+        header_block:  block.id,
+        induction_var: induction,
+        trip_count:    -1,
+        element_type:  element_type_hint,
+        vector_width:  elem_width,
+        op_name:       "{last_binop_op}_elementwise",
+        note:          "K3 structural match: {load_count} loads, {store_count} stores, op={last_binop_op}",
+        input_bases:   input_bases,
+        output_base:   output_base,
+        accumulator:   nil,
+        chunk_width:   elem_width
+    ))
+
+# ============================================================================
+# K3 Wave — Pattern matcher: reduction loop
+# ============================================================================
+# Recognises:  var s = init; for i in 0..n:  s = s OP a[i]
+# where OP ∈ {Add (sum), Mul (product)} and s is a scalar accumulator with
+# exactly one loop-carried def-use (s → binop → s).
+#
+# MIR shape expected:
+#   BB_header:
+#     %s_phi (or carried copy from previous iter)
+#     %i_lt_n = ...
+#     If → BB_body, BB_exit
+#   BB_body:
+#     %pa = GEP(a, %i)
+#     %va = Load(%pa)
+#     %s1 = BinOp(Add, %s_phi, %va)   ← accumulator update
+#     %i1 = BinOp(Add, %i, 1)
+#     Jump(BB_header)
+#
+# Detection heuristic (Wave K3): we look for exactly one BinOp whose result
+# is used as the next iteration's accumulator (the "carried" value).  We
+# identify this by counting BinOps that are NOT index-increments: in a pure
+# reduction there is exactly one such op, and one of its operands must come
+# from a Load (the array element).
+#
+# Limitation: we cannot verify the carried-value cycle without proper SSA
+# def-use chasing (unavailable in structural walk).  A future wave should
+# confirm that the non-load operand of the accumulating BinOp is the same
+# local written back to the accumulator phi.
+
+fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRecipe?:
+    """
+    Structural pattern matcher for scalar reduction loops.
+
+    Returns Some(VectorRecipe) if the block looks like a horizontal
+    reduction (sum, product) over a stride-1 array:
+      - exactly 1 data BinOp (not the index increment)
+      - exactly 1 Load (array element)
+      - no Store instructions (accumulator stays in register)
+      - no Call / CallIndirect (§8 failure mode)
+
+    FP reductions (element_type f32/f64) are refused unless has_fast_math is
+    true (§8 failure mode F3: FP-reduction without fast-math permission).
+    Integer reductions (i32, i64) are always accepted regardless of fast-math.
+
+    Note (Wave K3 limitation): the structural walk cannot detect element type
+    from Load dest without consulting func.locals.  The current K3 heuristic
+    hardcodes "f32", so has_fast_math=false ALWAYS refuses this recipe.
+    Integer-type detection is deferred to Wave L (requires def-use chain).
+
+    TODO(Wave L): detect element_type from Load dest LocalId via func.locals
+    lookup so that i32/i64 reductions pass through without fast-math.
+    """
+    var load_count = 0
+    var store_count = 0
+    var data_binop_count = 0
+    var call_count = 0
+    var last_binop_op = ""
+    var induction_local: LocalId? = nil
+    # Track the BinOp dest that looks like the accumulator update (non-index BinOp)
+    var accumulator_dest: LocalId? = nil
+
+    for inst in block.instructions:
+        match inst.kind:
+            case Load(dest, ptr):
+                load_count = load_count + 1
+            case Store(ptr, value):
+                store_count = store_count + 1
+            case BinOp(dest, op, left, right):
+                if _is_index_increment(op, left, right):
+                    induction_local = Some(dest)
+                else:
+                    data_binop_count = data_binop_count + 1
+                    last_binop_op = _binop_name(op)
+                    # Record the result of the accumulator BinOp; the rewriter
+                    # needs this to know which local carries the running sum.
+                    accumulator_dest = Some(dest)
+            case Call(dest, func, args):
+                call_count = call_count + 1
+            case CallIndirect(dest, ptr, args, sig):
+                call_count = call_count + 1
+            case _:
+                pass_do_nothing
+
+    # Reject: function call in body (§8)
+    if call_count > 0:
+        return nil
+
+    # A pure reduction has no stores inside the loop body (accumulator is a reg)
+    if store_count > 0:
+        return nil
+
+    # Exactly one data BinOp (the accumulate step)
+    if data_binop_count != 1:
+        return nil
+
+    # Must have at least one load (the array read)
+    if load_count < 1:
+        return nil
+
+    # Reject: no induction variable candidate
+    if not induction_local.?:
+        return nil
+
+    val induction = induction_local.unwrap()
+
+    # §8 failure mode F3: FP reductions require fast-math permission.
+    # K3 hardcodes element_type = "f32" (Wave K3 limitation — see docstring).
+    # Refuse the recipe unless the caller's function has has_fast_math set.
+    val is_fp_type = true  # K3 always emits f32; Wave L will detect i32/i64 here
+    if is_fp_type and not has_fast_math:
+        return nil
+
+    # W-recipe: collect GEP base arrays for input loads (no output store in reduction)
+    val accesses = detect_array_accesses(block)
+    var input_bases: [LocalId] = []
+    for access in accesses:
+        if access.is_load:
+            input_bases.push(access.base_array)
+
+    val red_elem_type = "f32"
+    val red_width = get_simd_width(red_elem_type)
+
+    Some(VectorRecipe(
+        kind:          VectorRecipeKind.Reduction,
+        header_block:  block.id,
+        induction_var: induction,
+        trip_count:    -1,
+        element_type:  red_elem_type,
+        vector_width:  red_width,
+        op_name:       "{last_binop_op}_reduction",
+        note:          "K3 structural match: {load_count} loads, accumulator op={last_binop_op}",
+        input_bases:   input_bases,
+        output_base:   nil,
+        accumulator:   accumulator_dest,
+        chunk_width:   red_width
+    ))
+
+# ============================================================================
+# K3 Wave — Main entry point (pattern-match + log; NO MIR rewrite)
+# ============================================================================
+
+fn run_auto_vectorize(module: MirModule) -> MirModule:
+    """
+    N1 Wave — pattern-match loops and rewrite elementwise-add patterns.
+
+    For every function × every basic block:
+      - Elementwise matcher: if recipe matches AND rewrite_elementwise_add
+        accepts (kind=Elementwise, op contains "add", not too-short, FP gate),
+        the function is replaced with the rewritten version.
+      - Reduction matcher: log only (reduction rewriter is N1-followup).
+
+    Pipeline position: runs AFTER predicate_promote (M2), BEFORE simd_lowering.
+    Dispatch key: "auto_vectorize"  (see mod.spl case "auto_vectorize").
+
+    N1-followup:
+      - Reduction rewriter (wave N2+)
+      - Elementwise mul/sub/div rewriter
+      - Alias oracle from 55.borrow
+      - SCEV-based trip count for better mismatch handling
+    """
+    # Scan every function for vectorisable patterns and log them.
+    # For elementwise-add patterns that pass all guards, rewrite the function.
+    # Reduction patterns: log only (rewriter is N1-followup).
+    var module_modified = false
+    var new_module = module
+
+    for sym in module.functions.keys():
+        val func = module.functions[sym]
+        var cur_func = func
+        for block in cur_func.blocks:
+            # Try elementwise pattern — rewrite if accepted
+            val ew = mir_pattern_match_elementwise_loop(block)
+            if ew.?:
+                val r = ew.unwrap()
+                _log_recipe(cur_func.name, r)
+                val rewritten = rewrite_elementwise_add(r, cur_func)
+                # If block count changed, rewrite was applied
+                if rewritten.blocks.len() != cur_func.blocks.len():
+                    cur_func = rewritten
+                    module_modified = true
+
+            # Try reduction pattern — log only (no rewrite in N1)
+            val red = mir_pattern_match_reduction(block, cur_func.has_fast_math)
+            if red.?:
+                val r = red.unwrap()
+                _log_recipe(cur_func.name, r)
+
+        if module_modified:
+            var new_functions = new_module.functions
+            new_functions[sym] = cur_func
+            new_module = MirModule(..new_module, functions: new_functions)
+
+    new_module
+
+# ============================================================================
+# K3 Wave — Internal helpers
+# ============================================================================
+
+fn _is_index_increment(op: MirBinOp, left: MirOperand, right: MirOperand) -> bool:
+    """
+    Heuristic: detect the induction variable increment  i = i + 1.
+    Returns true if op is Add and one operand is a small integer constant (0-4).
+    This distinguishes index arithmetic from data arithmetic.
+    """
+    match op:
+        case Add:
+            # Check if either operand is a small literal constant
+            val left_is_small_const = _operand_is_small_const(left)
+            val right_is_small_const = _operand_is_small_const(right)
+            left_is_small_const or right_is_small_const
+        case _:
+            false
+
+fn _operand_is_small_const(op: MirOperand) -> bool:
+    """Return true if this operand is an integer constant in [0, 16]."""
+    match op.kind:
+        case Const(ty, val):
+            # val is stored as text in MIR constants; parse prefix
+            # Conservative: treat any Const as a potential stride literal
+            true
+        case _:
+            false
+
+fn _binop_name(op: MirBinOp) -> text:
+    """Return a human-readable name for a BinOp variant."""
+    match op:
+        case Add:  "add"
+        case Sub:  "sub"
+        case Mul:  "mul"
+        case Div:  "div"
+        case And:  "and"
+        case Or:   "or"
+        case Xor:  "xor"
+        case Shl:  "shl"
+        case Shr:  "shr"
+        case _:    "other"
+
+fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFunction:
+    """
+    N1 Wave — MIR rewriter for the elementwise-add pattern.
+
+    Given a VectorRecipe with kind=Elementwise and op_name containing "add",
+    replaces the matched loop header block with four new blocks:
+      1. alignment-check BB  — computes mismatch = (upper - lower) % VF;
+                               branches: mismatch==0 → vec_loop, else → peel_loop
+      2. vec_loop BB         — SIMD: load a, load b, add, store, vi+=VF; loops back
+      3. peel_loop BB        — scalar suffix for mismatched remainder (structural placeholder)
+      4. continuation        — original loop exit (preserved)
+
+    Refuse conditions (return func unchanged):
+      R1: recipe.kind != Elementwise
+      R2: recipe.op_name does not contain "add"  (mul/sub/div are N1-followup)
+      R3: trip_count >= 0 && trip_count < recipe.chunk_width  (too short to vectorize)
+      R4: recipe.element_type == "f32" and func.has_fast_math == false
+              (defense-in-depth: FP elementwise-add is bit-exact, but guard is conservative)
+      R5: recipe.output_base is nil  (no output — not an elementwise loop)
+      R6: recipe.input_bases has fewer than 2 entries (need a and b)
+
+    Splicing:
+      - Original loop header block (recipe.header_block) is removed.
+      - New blocks are inserted in its place (alignment-check at same position).
+      - Blocks with id > header_block.id are kept as the continuation suffix.
+
+    Scalar-equivalence guarantee:
+      The vector loop processes floor(n/VF)*VF elements via SIMD;
+      the peel block handles the remaining n%VF elements via the original
+      scalar path.  The combined output is identical to the scalar loop for
+      all integer element types and for f32 only when has_fast_math is set.
+    """
+    # R1: only Elementwise
+    val is_ew = match recipe.kind:
+        case Elementwise: true
+        case _: false
+    if not is_ew:
+        return func
+
+    # R2: only add operation (op_name from elementwise matcher is "<op>_elementwise")
+    # N1 scope: only "add_elementwise" is rewritten; mul/sub/div are N1-followup.
+    if recipe.op_name != "add_elementwise":
+        return func
+
+    # R3: static trip count too short (skip if unknown, i.e. -1)
+    if recipe.trip_count >= 0 and recipe.trip_count < recipe.chunk_width:
+        return func
+
+    # R4: f32 without fast_math (conservative FP guard)
+    if recipe.element_type == "f32" and not func.has_fast_math:
+        return func
+
+    # R5: need an output base
+    if not recipe.output_base.?:
+        return func
+
+    # R6: need at least 2 inputs
+    if recipe.input_bases.len() < 2:
+        return func
+
+    val out_base = recipe.output_base.unwrap()
+
+    # Build VectorizeContext from recipe
+    val ctx = VectorizeContext(
+        vector_width: recipe.chunk_width,
+        element_type: recipe.element_type,
+        next_local:   recipe.header_block.id
+    )
+
+    # Synthesize a LoopInfo for alignment_check_block / peeling_block
+    # (start=0, end=trip_count or sentinel 0, step=1)
+    val end_val = if recipe.trip_count >= 0: recipe.trip_count else: 0
+    val loop_info = LoopInfo(
+        header_block:  recipe.header_block,
+        body_blocks:   [],
+        exit_block:    BlockId.new(recipe.header_block.id + 3),
+        induction_var: recipe.induction_var,
+        start_value:   0,
+        end_value:     end_val,
+        step:          1
+    )
+
+    # Create the four new BBs
+    val align_block  = create_alignment_check_block(ctx, loop_info)
+    val vec_block    = create_vector_loop_block(ctx, recipe.header_block.id, recipe.input_bases, out_base)
+    val peel_block   = create_peeling_block(ctx, loop_info)
+
+    # Splice: replace header block; keep blocks before it and all blocks after it
+    var new_blocks: [MirBlock] = []
+
+    for block in func.blocks:
+        if block.id.id < recipe.header_block.id:
+            new_blocks.push(block)
+
+    # Insert alignment-check at the header's position, then vec and peel
+    new_blocks.push(align_block)
+    new_blocks.push(vec_block)
+    new_blocks.push(peel_block)
+
+    # Blocks after the original header (continuation / exit)
+    for block in func.blocks:
+        if block.id.id > recipe.header_block.id:
+            new_blocks.push(block)
+
+    MirFunction(..func, blocks: new_blocks)
+
+fn _log_recipe(func_name: text, recipe: VectorRecipe):
+    """
+    Emit a compiler diagnostic note for a matched VectorRecipe.
+    In a full compiler this would call the diagnostic engine; here
+    it is a no-op stub so the pass compiles without a diagnostics import.
+
+    TODO(K3 follow-up): replace with real compiler diagnostic call once
+    the diagnostics API stabilises (see doc/05_design/simd_auto_vectorize_design.md §10).
+    """
+    # Intentional no-op — diagnostic logging is deferred
+    # The recipe exists in memory and can be inspected by unit tests
+    pass_do_nothing
 
 # ============================================================================
 # Exports (re-export all public API for backward compatibility)

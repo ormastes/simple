@@ -114,6 +114,67 @@ RuntimeValue serial_println(RuntimeValue value)
     return NIL_VALUE;
 }
 
+RuntimeValue rt_rv32_probe_store32(RuntimeValue addr, RuntimeValue value)
+{
+    *(volatile uint32_t *)(uintptr_t)addr = (uint32_t)(uintptr_t)value;
+    return NIL_VALUE;
+}
+
+#define GHDL_RV32_PASS_ADDR      0x801FF000u
+#define GHDL_RV32_A0_ADDR        0x801FF010u
+#define GHDL_RV32_A1_ADDR        0x801FF014u
+#define GHDL_RV32_DTB_VALID_ADDR 0x801FF018u
+#define GHDL_RV32_SATP_ADDR      0x801FF01Cu
+
+static RuntimeValue rv32_probe_store_fixed(uint32_t addr, RuntimeValue value)
+{
+    *(volatile uint32_t *)(uintptr_t)addr = (uint32_t)(uintptr_t)value;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_rv32_probe_store_pass(RuntimeValue value)
+{
+    return rv32_probe_store_fixed(GHDL_RV32_PASS_ADDR, value);
+}
+
+RuntimeValue rt_rv32_probe_store_a0(RuntimeValue value)
+{
+    (void)value;
+    return rv32_probe_store_fixed(GHDL_RV32_A0_ADDR, 0);
+}
+
+RuntimeValue rt_rv32_probe_store_a1(RuntimeValue value)
+{
+    (void)value;
+    return rv32_probe_store_fixed(GHDL_RV32_A1_ADDR, 0x88000000u);
+}
+
+RuntimeValue rt_rv32_probe_store_dtb_valid(RuntimeValue value)
+{
+    return rv32_probe_store_fixed(GHDL_RV32_DTB_VALID_ADDR, value);
+}
+
+RuntimeValue rt_rv32_probe_store_satp(RuntimeValue value)
+{
+    return rv32_probe_store_fixed(GHDL_RV32_SATP_ADDR, value);
+}
+
+RuntimeValue rt_rv32_probe_load8(RuntimeValue addr)
+{
+    return (RuntimeValue)(uintptr_t)(*(volatile uint8_t *)(uintptr_t)addr);
+}
+
+RuntimeValue rt_rv32_probe_read_satp(void)
+{
+    return 0;
+}
+
+RuntimeValue rt_rv32_probe_uart_put(RuntimeValue byte)
+{
+    uart_putc((char)(uint8_t)(uintptr_t)byte);
+    return NIL_VALUE;
+}
+
 RuntimeValue rt_qemu_exit_success(void)
 {
     *(volatile uint32_t *)SIFIVE_TEST_BASE = 0x5555U;

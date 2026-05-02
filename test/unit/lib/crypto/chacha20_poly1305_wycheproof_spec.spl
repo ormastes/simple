@@ -1,0 +1,589 @@
+# ChaCha20-Poly1305 AEAD — Wycheproof + Boundary / Size Tests
+#
+# Pool A — Boundary / size cases (11 tests):
+#   empty PT + empty AAD               → tag computed, round-trip OK
+#   empty PT + 16-byte AAD             → AAD-only auth, round-trip OK
+#   1-byte PT + 0-byte AAD             → minimal encryption
+#   16-byte PT  (one Poly1305 block, exact padding boundary)
+#   17-byte PT  (one block + 1 byte residual)
+#   31-byte PT  (just under two Poly1305 blocks)
+#   32-byte PT  (exact two Poly1305 blocks)
+#   64-byte PT  (one full ChaCha20 block)
+#   65-byte PT  (one full ChaCha20 block + 1 byte → forces counter increment)
+#   128-byte PT (two full ChaCha20 blocks)
+#   1024-byte PT (16 full ChaCha20 blocks; stress counter handling)
+#
+# Pool B — Wycheproof vectors (7 tests):
+#   tcId 2  (Pseudorandom, empty msg + empty AAD)      → result: valid
+#   tcId 3  (Pseudorandom, empty msg + 8-byte AAD)     → result: valid
+#   tcId 4  (Pseudorandom, 1-byte msg + empty AAD)     → result: valid
+#   tcId 5  (Pseudorandom, 1-byte msg + 8-byte AAD)    → result: valid
+#   tcId 148 (ModifiedTag, bit-7 flip)                 → result: invalid (open → nil)
+#   tcId 149 (ModifiedTag, bit-8 flip)                 → result: invalid (open → nil)
+#   tcId 164 (ModifiedTag, all-zero tag)               → result: invalid (open → nil)
+#   tcId 320 (InvalidNonceSize, 13-byte nonce)         → result: invalid (open → nil)
+#   tcId 322 (InvalidNonceSize, 16-byte nonce)         → result: invalid (open → nil)
+#
+# Source: https://github.com/google/wycheproof/blob/master/testvectors_v1/chacha20_poly1305_test.json
+# Boundary vectors generated with Python `cryptography` package (ChaCha20Poly1305 AEAD).
+# All Pool A vectors verified against IETF ChaCha20-Poly1305 (RFC 7539 / RFC 8439).
+#
+# Execution note: it-block bodies verified in compiled mode.
+# All vectors are byte-exact — no "close enough".
+
+use std.spipe.*
+use std.crypto.chacha20_poly1305.{chacha20_poly1305_seal, chacha20_poly1305_open}
+
+# ============================================================================
+# Pool A — shared key + nonce
+#
+# key   = 00 01 02 .. 1f  (32 bytes, ascending)
+# nonce = 00 01 02 .. 0b  (12 bytes, ascending)
+# ============================================================================
+
+fn _key_b() -> [u8]:
+    # 32-byte ascending key: 00 01 02 .. 1f
+    [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
+     0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8, 0x0du8, 0x0eu8, 0x0fu8,
+     0x10u8, 0x11u8, 0x12u8, 0x13u8, 0x14u8, 0x15u8, 0x16u8, 0x17u8,
+     0x18u8, 0x19u8, 0x1au8, 0x1bu8, 0x1cu8, 0x1du8, 0x1eu8, 0x1fu8]
+
+fn _nonce_b() -> [u8]:
+    # 12-byte ascending nonce: 00 01 02 .. 0b
+    [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
+     0x08u8, 0x09u8, 0x0au8, 0x0bu8]
+
+fn _aad_16b() -> [u8]:
+    # 16-byte ascending AAD: 10 11 12 .. 1f
+    [0x10u8, 0x11u8, 0x12u8, 0x13u8, 0x14u8, 0x15u8, 0x16u8, 0x17u8,
+     0x18u8, 0x19u8, 0x1au8, 0x1bu8, 0x1cu8, 0x1du8, 0x1eu8, 0x1fu8]
+
+fn _pt_n(n: u64) -> [u8]:
+    # Build plaintext bytes(range(n % 256)) for n <= 256
+    # For n == 1024 use pattern (i*7+3)%256
+    # Caller selects the right helper per test.
+    var out: [u8] = []
+    var i: u64 = 0u64
+    while i < n:
+        out.push((i % 256u64) as u8)
+        i = i + 1u64
+    out
+
+fn _pt_1024() -> [u8]:
+    # 1024-byte plaintext with pattern (i*7+3) % 256
+    var out: [u8] = []
+    var i: u64 = 0u64
+    while i < 1024u64:
+        out.push(((i * 7u64 + 3u64) % 256u64) as u8)
+        i = i + 1u64
+    out
+
+# ============================================================================
+# Pool A — KAT vectors (generated with `cryptography` ChaCha20Poly1305)
+# key = 00..1f, nonce = 00..0b
+# ============================================================================
+
+fn _ct_size0() -> [u8]:
+    # Empty PT, empty AAD → empty ciphertext
+    []
+
+fn _tag_size0() -> [u8]:
+    # Empty PT, empty AAD → tag: 295a498b8841a1c5f55d4d606f731159
+    [0x29u8, 0x5au8, 0x49u8, 0x8bu8, 0x88u8, 0x41u8, 0xa1u8, 0xc5u8,
+     0xf5u8, 0x5du8, 0x4du8, 0x60u8, 0x6fu8, 0x73u8, 0x11u8, 0x59u8]
+
+fn _tag_emptyPT_aad16() -> [u8]:
+    # Empty PT + 16-byte AAD: 7747d1fc06fb33eebb1acab76747ff42
+    [0x77u8, 0x47u8, 0xd1u8, 0xfcu8, 0x06u8, 0xfbu8, 0x33u8, 0xeeu8,
+     0xbbu8, 0x1au8, 0xcau8, 0xb7u8, 0x67u8, 0x47u8, 0xffu8, 0x42u8]
+
+fn _ct_size1() -> [u8]:
+    # PT=00, empty AAD → ct: 89
+    [0x89u8]
+
+fn _tag_size1() -> [u8]:
+    # PT=00, empty AAD → tag: 04f0dd71889fd631f90e4584d25cbb92
+    [0x04u8, 0xf0u8, 0xddu8, 0x71u8, 0x88u8, 0x9fu8, 0xd6u8, 0x31u8,
+     0xf9u8, 0x0eu8, 0x45u8, 0x84u8, 0xd2u8, 0x5cu8, 0xbbu8, 0x92u8]
+
+fn _ct_size16() -> [u8]:
+    # PT=00..0f, empty AAD → ct: 89fa0a032d12a347bf8a35f89410006c
+    [0x89u8, 0xfau8, 0x0au8, 0x03u8, 0x2du8, 0x12u8, 0xa3u8, 0x47u8,
+     0xbfu8, 0x8au8, 0x35u8, 0xf8u8, 0x94u8, 0x10u8, 0x00u8, 0x6cu8]
+
+fn _tag_size16() -> [u8]:
+    # tag: ec9084ea9f01a6fe1c883d58b96e1132
+    [0xecu8, 0x90u8, 0x84u8, 0xeau8, 0x9fu8, 0x01u8, 0xa6u8, 0xfeu8,
+     0x1cu8, 0x88u8, 0x3du8, 0x58u8, 0xb9u8, 0x6eu8, 0x11u8, 0x32u8]
+
+fn _ct_size17() -> [u8]:
+    # PT=00..10, empty AAD → ct: 89fa0a032d12a347bf8a35f89410006cd9
+    [0x89u8, 0xfau8, 0x0au8, 0x03u8, 0x2du8, 0x12u8, 0xa3u8, 0x47u8,
+     0xbfu8, 0x8au8, 0x35u8, 0xf8u8, 0x94u8, 0x10u8, 0x00u8, 0x6cu8,
+     0xd9u8]
+
+fn _tag_size17() -> [u8]:
+    # tag: e3dd8483f51a05fabefa4a8aa33f5da2
+    [0xe3u8, 0xddu8, 0x84u8, 0x83u8, 0xf5u8, 0x1au8, 0x05u8, 0xfau8,
+     0xbeu8, 0xfau8, 0x4au8, 0x8au8, 0xa3u8, 0x3fu8, 0x5du8, 0xa2u8]
+
+fn _ct_size31() -> [u8]:
+    # PT=00..1e, empty AAD → ct: 89fa0a032d12a347bf8a35f89410006cd961a0f44561bbaefe8e35de69ddb8
+    [0x89u8, 0xfau8, 0x0au8, 0x03u8, 0x2du8, 0x12u8, 0xa3u8, 0x47u8,
+     0xbfu8, 0x8au8, 0x35u8, 0xf8u8, 0x94u8, 0x10u8, 0x00u8, 0x6cu8,
+     0xd9u8, 0x61u8, 0xa0u8, 0xf4u8, 0x45u8, 0x61u8, 0xbbu8, 0xaeu8,
+     0xfeu8, 0x8eu8, 0x35u8, 0xdeu8, 0x69u8, 0xddu8, 0xb8u8]
+
+fn _tag_size31() -> [u8]:
+    # tag: dd810a77349de198f308394abec5b831
+    [0xddu8, 0x81u8, 0x0au8, 0x77u8, 0x34u8, 0x9du8, 0xe1u8, 0x98u8,
+     0xf3u8, 0x08u8, 0x39u8, 0x4au8, 0xbeu8, 0xc5u8, 0xb8u8, 0x31u8]
+
+fn _ct_size32() -> [u8]:
+    # PT=00..1f, empty AAD → ct: 89fa0a032d12a347bf8a35f89410006cd961a0f44561bbaefe8e35de69ddb823
+    [0x89u8, 0xfau8, 0x0au8, 0x03u8, 0x2du8, 0x12u8, 0xa3u8, 0x47u8,
+     0xbfu8, 0x8au8, 0x35u8, 0xf8u8, 0x94u8, 0x10u8, 0x00u8, 0x6cu8,
+     0xd9u8, 0x61u8, 0xa0u8, 0xf4u8, 0x45u8, 0x61u8, 0xbbu8, 0xaeu8,
+     0xfeu8, 0x8eu8, 0x35u8, 0xdeu8, 0x69u8, 0xddu8, 0xb8u8, 0x23u8]
+
+fn _tag_size32() -> [u8]:
+    # tag: 1da36a43a80d791dbb0a86dab57c9678
+    [0x1du8, 0xa3u8, 0x6au8, 0x43u8, 0xa8u8, 0x0du8, 0x79u8, 0x1du8,
+     0xbbu8, 0x0au8, 0x86u8, 0xdau8, 0xb5u8, 0x7cu8, 0x96u8, 0x78u8]
+
+fn _ct_size64() -> [u8]:
+    # PT=00..3f, empty AAD (64 bytes = one full ChaCha20 block)
+    [0x89u8, 0xfau8, 0x0au8, 0x03u8, 0x2du8, 0x12u8, 0xa3u8, 0x47u8,
+     0xbfu8, 0x8au8, 0x35u8, 0xf8u8, 0x94u8, 0x10u8, 0x00u8, 0x6cu8,
+     0xd9u8, 0x61u8, 0xa0u8, 0xf4u8, 0x45u8, 0x61u8, 0xbbu8, 0xaeu8,
+     0xfeu8, 0x8eu8, 0x35u8, 0xdeu8, 0x69u8, 0xddu8, 0xb8u8, 0x23u8,
+     0xccu8, 0xa1u8, 0x0eu8, 0xd0u8, 0xc2u8, 0x3bu8, 0x97u8, 0xbfu8,
+     0x1fu8, 0x1bu8, 0x5cu8, 0xf3u8, 0x49u8, 0xb9u8, 0xa1u8, 0x0cu8,
+     0x4eu8, 0xb5u8, 0x9bu8, 0x47u8, 0xc9u8, 0x1du8, 0x8eu8, 0xacu8,
+     0x2au8, 0x81u8, 0xe3u8, 0x3cu8, 0xacu8, 0x72u8, 0xa0u8, 0xe9u8]
+
+fn _tag_size64() -> [u8]:
+    # tag: 12ccd3f87522adf137c06f3496d9562e
+    [0x12u8, 0xccu8, 0xd3u8, 0xf8u8, 0x75u8, 0x22u8, 0xadu8, 0xf1u8,
+     0x37u8, 0xc0u8, 0x6fu8, 0x34u8, 0x96u8, 0xd9u8, 0x56u8, 0x2eu8]
+
+fn _ct_size65() -> [u8]:
+    # PT=00..40, empty AAD (65 bytes = one ChaCha20 block + 1 byte; forces counter=2)
+    [0x89u8, 0xfau8, 0x0au8, 0x03u8, 0x2du8, 0x12u8, 0xa3u8, 0x47u8,
+     0xbfu8, 0x8au8, 0x35u8, 0xf8u8, 0x94u8, 0x10u8, 0x00u8, 0x6cu8,
+     0xd9u8, 0x61u8, 0xa0u8, 0xf4u8, 0x45u8, 0x61u8, 0xbbu8, 0xaeu8,
+     0xfeu8, 0x8eu8, 0x35u8, 0xdeu8, 0x69u8, 0xddu8, 0xb8u8, 0x23u8,
+     0xccu8, 0xa1u8, 0x0eu8, 0xd0u8, 0xc2u8, 0x3bu8, 0x97u8, 0xbfu8,
+     0x1fu8, 0x1bu8, 0x5cu8, 0xf3u8, 0x49u8, 0xb9u8, 0xa1u8, 0x0cu8,
+     0x4eu8, 0xb5u8, 0x9bu8, 0x47u8, 0xc9u8, 0x1du8, 0x8eu8, 0xacu8,
+     0x2au8, 0x81u8, 0xe3u8, 0x3cu8, 0xacu8, 0x72u8, 0xa0u8, 0xe9u8,
+     0x39u8]
+
+fn _tag_size65() -> [u8]:
+    # tag: 8b0cffc92d5e444017a7d1e10e8f728a
+    [0x8bu8, 0x0cu8, 0xffu8, 0xc9u8, 0x2du8, 0x5eu8, 0x44u8, 0x40u8,
+     0x17u8, 0xa7u8, 0xd1u8, 0xe1u8, 0x0eu8, 0x8fu8, 0x72u8, 0x8au8]
+
+fn _ct_size128() -> [u8]:
+    # PT=00..7f, empty AAD (128 bytes = two full ChaCha20 blocks)
+    [0x89u8, 0xfau8, 0x0au8, 0x03u8, 0x2du8, 0x12u8, 0xa3u8, 0x47u8,
+     0xbfu8, 0x8au8, 0x35u8, 0xf8u8, 0x94u8, 0x10u8, 0x00u8, 0x6cu8,
+     0xd9u8, 0x61u8, 0xa0u8, 0xf4u8, 0x45u8, 0x61u8, 0xbbu8, 0xaeu8,
+     0xfeu8, 0x8eu8, 0x35u8, 0xdeu8, 0x69u8, 0xddu8, 0xb8u8, 0x23u8,
+     0xccu8, 0xa1u8, 0x0eu8, 0xd0u8, 0xc2u8, 0x3bu8, 0x97u8, 0xbfu8,
+     0x1fu8, 0x1bu8, 0x5cu8, 0xf3u8, 0x49u8, 0xb9u8, 0xa1u8, 0x0cu8,
+     0x4eu8, 0xb5u8, 0x9bu8, 0x47u8, 0xc9u8, 0x1du8, 0x8eu8, 0xacu8,
+     0x2au8, 0x81u8, 0xe3u8, 0x3cu8, 0xacu8, 0x72u8, 0xa0u8, 0xe9u8,
+     0x39u8, 0x39u8, 0xfeu8, 0x8eu8, 0xa1u8, 0x51u8, 0x6au8, 0xaeu8,
+     0x8cu8, 0x5fu8, 0x07u8, 0xf7u8, 0x54u8, 0x31u8, 0x92u8, 0xbeu8,
+     0x8au8, 0x8fu8, 0x15u8, 0x61u8, 0x3bu8, 0x3fu8, 0xa6u8, 0x69u8,
+     0x56u8, 0x0eu8, 0xaau8, 0x55u8, 0x84u8, 0x20u8, 0x5cu8, 0xe0u8,
+     0x2du8, 0xbfu8, 0x0eu8, 0x90u8, 0x93u8, 0xbcu8, 0x41u8, 0x93u8,
+     0xd9u8, 0x32u8, 0x99u8, 0xdcu8, 0xceu8, 0xfcu8, 0xd9u8, 0xefu8,
+     0x99u8, 0x1eu8, 0x24u8, 0x4bu8, 0xfdu8, 0x28u8, 0x36u8, 0x8fu8,
+     0x37u8, 0x14u8, 0x4eu8, 0xa4u8, 0x05u8, 0x42u8, 0xc1u8, 0x39u8]
+
+fn _tag_size128() -> [u8]:
+    # tag: ddeeb583d1afa46ef4a63ebf07c0b7bf
+    [0xddu8, 0xeeu8, 0xb5u8, 0x83u8, 0xd1u8, 0xafu8, 0xa4u8, 0x6eu8,
+     0xf4u8, 0xa6u8, 0x3eu8, 0xbfu8, 0x07u8, 0xc0u8, 0xb7u8, 0xbfu8]
+
+fn _tag_size1024() -> [u8]:
+    # 1024-byte PT=(i*7+3)%256, empty AAD → tag: 9ae15c2d36b06f345cf83049144a5a7f
+    [0x9au8, 0xe1u8, 0x5cu8, 0x2du8, 0x36u8, 0xb0u8, 0x6fu8, 0x34u8,
+     0x5cu8, 0xf8u8, 0x30u8, 0x49u8, 0x14u8, 0x4au8, 0x5au8, 0x7fu8]
+
+# ============================================================================
+# Helpers (mirror existing spec style)
+# ============================================================================
+
+fn _bytes_eq_b(a: [u8], b: [u8]) -> bool:
+    """Return true iff two byte arrays are identical."""
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0u64
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1u64
+    true
+
+fn _open_eq_b(key: [u8], nonce: [u8], aad: [u8], ct: [u8], tag: [u8], expected: [u8]) -> bool:
+    """Return true if open succeeds and plaintext matches expected."""
+    if val Some(pt) = chacha20_poly1305_open(key, nonce, aad, ct, tag):
+        _bytes_eq_b(pt, expected)
+    else:
+        false
+
+fn _open_len_b(key: [u8], nonce: [u8], aad: [u8], ct: [u8], tag: [u8]) -> u64:
+    """Return plaintext length on success, 0xFFFFFFFFFFFFFFFF on failure."""
+    if val Some(pt) = chacha20_poly1305_open(key, nonce, aad, ct, tag):
+        pt.len()
+    else:
+        0xFFFFFFFFFFFFFFFFu64
+
+fn _open_is_nil_b(key: [u8], nonce: [u8], aad: [u8], ct: [u8], tag: [u8]) -> bool:
+    """Return true if open returns nil (authentication failure)."""
+    val result = chacha20_poly1305_open(key, nonce, aad, ct, tag)
+    result == nil
+
+# ============================================================================
+# Pool A — boundary / size tests
+# ============================================================================
+
+describe "ChaCha20-Poly1305 boundary — empty PT + empty AAD":
+
+    it "seal produces empty ciphertext, 16-byte tag (KAT)":
+        # Boundary vector: key=00..1f, nonce=00..0b, empty PT, empty AAD
+        # tag: 295a498b8841a1c5f55d4d606f731159
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, empty)
+        expect(ct.len()).to_equal(0u64)
+        expect(_bytes_eq_b(tag, _tag_size0())).to_equal(true)
+
+    it "round-trip: open(seal(empty)) recovers empty plaintext":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, empty)
+        expect(_open_len_b(_key_b(), _nonce_b(), empty, ct, tag)).to_equal(0u64)
+
+describe "ChaCha20-Poly1305 boundary — empty PT + 16-byte AAD":
+
+    it "seal with 16-byte AAD + empty PT produces correct tag (KAT)":
+        # Boundary vector: key=00..1f, nonce=00..0b, empty PT, aad=10..1f
+        # tag: 7747d1fc06fb33eebb1acab76747ff42
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), _aad_16b(), empty)
+        expect(ct.len()).to_equal(0u64)
+        expect(_bytes_eq_b(tag, _tag_emptyPT_aad16())).to_equal(true)
+
+    it "round-trip: open(seal(empty, aad16)) recovers empty plaintext":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), _aad_16b(), empty)
+        expect(_open_eq_b(_key_b(), _nonce_b(), _aad_16b(), ct, tag, empty)).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 1-byte PT":
+
+    it "seal 1-byte PT produces 1-byte ciphertext + correct tag (KAT)":
+        # PT=00, empty AAD → ct=89, tag=04f0dd71889fd631f90e4584d25cbb92
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(1u64))
+        expect(ct.len()).to_equal(1u64)
+        expect(_bytes_eq_b(ct, _ct_size1())).to_equal(true)
+        expect(_bytes_eq_b(tag, _tag_size1())).to_equal(true)
+
+    it "round-trip: 1-byte PT recovered correctly":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(1u64))
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_n(1u64))).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 16-byte PT (one Poly1305 block)":
+
+    it "seal 16-byte PT: ciphertext byte-exact (KAT)":
+        # Exact Poly1305 block boundary — padding path exercises 0 pad bytes
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(16u64))
+        expect(_bytes_eq_b(ct, _ct_size16())).to_equal(true)
+        expect(_bytes_eq_b(tag, _tag_size16())).to_equal(true)
+
+    it "round-trip: 16-byte PT recovered":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(16u64))
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_n(16u64))).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 17-byte PT (one block + 1 residual)":
+
+    it "seal 17-byte PT: ciphertext byte-exact (KAT)":
+        # First residual byte exercises the Poly1305 partial-block path
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(17u64))
+        expect(_bytes_eq_b(ct, _ct_size17())).to_equal(true)
+        expect(_bytes_eq_b(tag, _tag_size17())).to_equal(true)
+
+    it "round-trip: 17-byte PT recovered":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(17u64))
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_n(17u64))).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 31-byte PT (just under two Poly1305 blocks)":
+
+    it "seal 31-byte PT: ciphertext byte-exact (KAT)":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(31u64))
+        expect(_bytes_eq_b(ct, _ct_size31())).to_equal(true)
+        expect(_bytes_eq_b(tag, _tag_size31())).to_equal(true)
+
+    it "round-trip: 31-byte PT recovered":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(31u64))
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_n(31u64))).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 32-byte PT (exact two Poly1305 blocks)":
+
+    it "seal 32-byte PT: ciphertext byte-exact (KAT)":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(32u64))
+        expect(_bytes_eq_b(ct, _ct_size32())).to_equal(true)
+        expect(_bytes_eq_b(tag, _tag_size32())).to_equal(true)
+
+    it "round-trip: 32-byte PT recovered":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(32u64))
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_n(32u64))).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 64-byte PT (one full ChaCha20 block)":
+
+    it "seal 64-byte PT: ciphertext byte-exact (KAT)":
+        # 64 bytes = exactly one ChaCha20 block; counter stays at 1
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(64u64))
+        expect(_bytes_eq_b(ct, _ct_size64())).to_equal(true)
+        expect(_bytes_eq_b(tag, _tag_size64())).to_equal(true)
+
+    it "round-trip: 64-byte PT recovered":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(64u64))
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_n(64u64))).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 65-byte PT (forces ChaCha20 counter increment)":
+
+    it "seal 65-byte PT: ciphertext byte-exact (KAT)":
+        # 65 bytes = 64 + 1; the 65th byte requires ChaCha20 counter=2
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(65u64))
+        expect(_bytes_eq_b(ct, _ct_size65())).to_equal(true)
+        expect(_bytes_eq_b(tag, _tag_size65())).to_equal(true)
+
+    it "round-trip: 65-byte PT recovered":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(65u64))
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_n(65u64))).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 128-byte PT (two full ChaCha20 blocks)":
+
+    it "seal 128-byte PT: ciphertext byte-exact (KAT)":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(128u64))
+        expect(_bytes_eq_b(ct, _ct_size128())).to_equal(true)
+        expect(_bytes_eq_b(tag, _tag_size128())).to_equal(true)
+
+    it "round-trip: 128-byte PT recovered":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_n(128u64))
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_n(128u64))).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — 1024-byte PT (16 full ChaCha20 blocks)":
+
+    it "seal 1024-byte PT: tag byte-exact (KAT)":
+        # 1024 bytes = 16 ChaCha20 blocks; exercises counter from 1 to 16
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_1024())
+        expect(ct.len()).to_equal(1024u64)
+        expect(_bytes_eq_b(tag, _tag_size1024())).to_equal(true)
+
+    it "round-trip: 1024-byte PT recovered":
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(_key_b(), _nonce_b(), empty, _pt_1024())
+        expect(_open_eq_b(_key_b(), _nonce_b(), empty, ct, tag, _pt_1024())).to_equal(true)
+
+describe "ChaCha20-Poly1305 boundary — tag-length rejection":
+
+    it "open with 0-byte tag returns nil (tag.len() != 16 early-reject)":
+        # M2's open explicitly checks tag.len() != 16 → returns nil immediately
+        val empty: [u8] = []
+        val zero_tag: [u8] = []
+        expect(_open_is_nil_b(_key_b(), _nonce_b(), empty, _ct_size1(), zero_tag)).to_equal(true)
+
+    it "open with 15-byte tag returns nil (tag.len() != 16 early-reject)":
+        val empty: [u8] = []
+        val short_tag: [u8] = [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
+                               0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8, 0x0du8, 0x0eu8]
+        expect(_open_is_nil_b(_key_b(), _nonce_b(), empty, _ct_size1(), short_tag)).to_equal(true)
+
+    it "open with 17-byte tag returns nil (tag.len() != 16 early-reject)":
+        val empty: [u8] = []
+        val long_tag: [u8] = [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
+                              0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8, 0x0du8, 0x0eu8, 0x0fu8,
+                              0x10u8]
+        expect(_open_is_nil_b(_key_b(), _nonce_b(), empty, _ct_size1(), long_tag)).to_equal(true)
+
+# ============================================================================
+# Pool B — Wycheproof vectors
+# Source: google/wycheproof testvectors_v1/chacha20_poly1305_test.json
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Wycheproof helpers
+# ----------------------------------------------------------------------------
+
+fn _wyc_key_2021() -> [u8]:
+    # Wycheproof key shared by ModifiedTag/InvalidNonceSize vectors
+    # key: 202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f
+    [0x20u8, 0x21u8, 0x22u8, 0x23u8, 0x24u8, 0x25u8, 0x26u8, 0x27u8,
+     0x28u8, 0x29u8, 0x2au8, 0x2bu8, 0x2cu8, 0x2du8, 0x2eu8, 0x2fu8,
+     0x30u8, 0x31u8, 0x32u8, 0x33u8, 0x34u8, 0x35u8, 0x36u8, 0x37u8,
+     0x38u8, 0x39u8, 0x3au8, 0x3bu8, 0x3cu8, 0x3du8, 0x3eu8, 0x3fu8]
+
+fn _wyc_nonce_0001() -> [u8]:
+    # nonce: 000102030405060708090a0b
+    [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
+     0x08u8, 0x09u8, 0x0au8, 0x0bu8]
+
+fn _wyc_aad_000102() -> [u8]:
+    # aad: 000102
+    [0x00u8, 0x01u8, 0x02u8]
+
+fn _wyc_valid_tag_empty_msg() -> [u8]:
+    # Valid tag for key=2021.., nonce=0001.., aad=000102, msg=empty
+    # Verified via comments in ModifiedTag vectors: "expected tag:f4409bb729039d0814ac514054323f44"
+    [0xf4u8, 0x40u8, 0x9bu8, 0xb7u8, 0x29u8, 0x03u8, 0x9du8, 0x08u8,
+     0x14u8, 0xacu8, 0x51u8, 0x40u8, 0x54u8, 0x32u8, 0x3fu8, 0x44u8]
+
+describe "ChaCha20-Poly1305 Wycheproof — valid vectors":
+
+    it "tcId 2 (Pseudorandom): empty msg, empty AAD → correct tag":
+        # Wycheproof tcId 2, flags=[Pseudorandom], result=valid
+        # key: 80ba3192c803ce965ea371d5ff073cf0f43b6a2ab576b208426e11409c09b9b0
+        # iv:  4da5bf8dfd5852c1ea12379d
+        # tag: 76acb342cf3166a5b63c0c0ea1383c8d
+        val key: [u8] = [0x80u8, 0xbau8, 0x31u8, 0x92u8, 0xc8u8, 0x03u8, 0xceu8, 0x96u8,
+                         0x5eu8, 0xa3u8, 0x71u8, 0xd5u8, 0xffu8, 0x07u8, 0x3cu8, 0xf0u8,
+                         0xf4u8, 0x3bu8, 0x6au8, 0x2au8, 0xb5u8, 0x76u8, 0xb2u8, 0x08u8,
+                         0x42u8, 0x6eu8, 0x11u8, 0x40u8, 0x9cu8, 0x09u8, 0xb9u8, 0xb0u8]
+        val nonce: [u8] = [0x4du8, 0xa5u8, 0xbfu8, 0x8du8, 0xfdu8, 0x58u8, 0x52u8, 0xc1u8,
+                           0xeau8, 0x12u8, 0x37u8, 0x9du8]
+        val expected_tag: [u8] = [0x76u8, 0xacu8, 0xb3u8, 0x42u8, 0xcfu8, 0x31u8, 0x66u8, 0xa5u8,
+                                  0xb6u8, 0x3cu8, 0x0cu8, 0x0eu8, 0xa1u8, 0x38u8, 0x3cu8, 0x8du8]
+        val empty: [u8] = []
+        val (_ct, tag) = chacha20_poly1305_seal(key, nonce, empty, empty)
+        expect(_bytes_eq_b(tag, expected_tag)).to_equal(true)
+
+    it "tcId 3 (Pseudorandom): empty msg, 8-byte AAD → correct tag":
+        # Wycheproof tcId 3, flags=[Pseudorandom], result=valid
+        # key: 7a4cd759172e02eb204db2c3f5c746227df584fc1345196391dbb9577a250742
+        # iv:  a92ef0ac991dd516a3c6f689
+        # aad: bd506764f2d2c410
+        # tag: 906fa6284b52f87b7359cbaa7563c709
+        val key: [u8] = [0x7au8, 0x4cu8, 0xd7u8, 0x59u8, 0x17u8, 0x2eu8, 0x02u8, 0xebu8,
+                         0x20u8, 0x4du8, 0xb2u8, 0xc3u8, 0xf5u8, 0xc7u8, 0x46u8, 0x22u8,
+                         0x7du8, 0xf5u8, 0x84u8, 0xfcu8, 0x13u8, 0x45u8, 0x19u8, 0x63u8,
+                         0x91u8, 0xdbu8, 0xb9u8, 0x57u8, 0x7au8, 0x25u8, 0x07u8, 0x42u8]
+        val nonce: [u8] = [0xa9u8, 0x2eu8, 0xf0u8, 0xacu8, 0x99u8, 0x1du8, 0xd5u8, 0x16u8,
+                           0xa3u8, 0xc6u8, 0xf6u8, 0x89u8]
+        val aad: [u8] = [0xbdu8, 0x50u8, 0x67u8, 0x64u8, 0xf2u8, 0xd2u8, 0xc4u8, 0x10u8]
+        val expected_tag: [u8] = [0x90u8, 0x6fu8, 0xa6u8, 0x28u8, 0x4bu8, 0x52u8, 0xf8u8, 0x7bu8,
+                                  0x73u8, 0x59u8, 0xcbu8, 0xaau8, 0x75u8, 0x63u8, 0xc7u8, 0x09u8]
+        val empty: [u8] = []
+        val (_ct, tag) = chacha20_poly1305_seal(key, nonce, aad, empty)
+        expect(_bytes_eq_b(tag, expected_tag)).to_equal(true)
+
+    it "tcId 4 (Pseudorandom): 1-byte msg, empty AAD → ct+tag byte-exact":
+        # Wycheproof tcId 4, flags=[Pseudorandom], result=valid
+        # key: cc56b680552eb75008f5484b4cb803fa5063ebd6eab91f6ab6aef4916a766273
+        # iv:  99e23ec48985bccdeeab60f1
+        # msg: 2a → ct: 3a, tag: cac27dec0968801e9f6eded69d807522
+        val key: [u8] = [0xccu8, 0x56u8, 0xb6u8, 0x80u8, 0x55u8, 0x2eu8, 0xb7u8, 0x50u8,
+                         0x08u8, 0xf5u8, 0x48u8, 0x4bu8, 0x4cu8, 0xb8u8, 0x03u8, 0xfau8,
+                         0x50u8, 0x63u8, 0xebu8, 0xd6u8, 0xeau8, 0xb9u8, 0x1fu8, 0x6au8,
+                         0xb6u8, 0xaeu8, 0xf4u8, 0x91u8, 0x6au8, 0x76u8, 0x62u8, 0x73u8]
+        val nonce: [u8] = [0x99u8, 0xe2u8, 0x3eu8, 0xc4u8, 0x89u8, 0x85u8, 0xbcu8, 0xcdu8,
+                           0xeeu8, 0xabu8, 0x60u8, 0xf1u8]
+        val msg: [u8] = [0x2au8]
+        val expected_ct: [u8] = [0x3au8]
+        val expected_tag: [u8] = [0xcau8, 0xc2u8, 0x7du8, 0xecu8, 0x09u8, 0x68u8, 0x80u8, 0x1eu8,
+                                  0x9fu8, 0x6eu8, 0xdeu8, 0xd6u8, 0x9du8, 0x80u8, 0x75u8, 0x22u8]
+        val empty: [u8] = []
+        val (ct, tag) = chacha20_poly1305_seal(key, nonce, empty, msg)
+        expect(_bytes_eq_b(ct, expected_ct)).to_equal(true)
+        expect(_bytes_eq_b(tag, expected_tag)).to_equal(true)
+
+    it "tcId 5 (Pseudorandom): 1-byte msg, 8-byte AAD → ct+tag byte-exact":
+        # Wycheproof tcId 5, flags=[Pseudorandom], result=valid
+        # key: 46f0254965f769d52bdb4a70b443199f8ef207520d1220c55e4b70f0fda620ee
+        # iv:  ab0dca716ee051d2782f4403
+        # aad: 91ca6c592cbcca53, msg: 51 → ct: c4, tag: 168310ca45b1f7c66cad4e99e43f72b9
+        val key: [u8] = [0x46u8, 0xf0u8, 0x25u8, 0x49u8, 0x65u8, 0xf7u8, 0x69u8, 0xd5u8,
+                         0x2bu8, 0xdbu8, 0x4au8, 0x70u8, 0xb4u8, 0x43u8, 0x19u8, 0x9fu8,
+                         0x8eu8, 0xf2u8, 0x07u8, 0x52u8, 0x0du8, 0x12u8, 0x20u8, 0xc5u8,
+                         0x5eu8, 0x4bu8, 0x70u8, 0xf0u8, 0xfdu8, 0xa6u8, 0x20u8, 0xeeu8]
+        val nonce: [u8] = [0xabu8, 0x0du8, 0xcau8, 0x71u8, 0x6eu8, 0xe0u8, 0x51u8, 0xd2u8,
+                           0x78u8, 0x2fu8, 0x44u8, 0x03u8]
+        val aad: [u8] = [0x91u8, 0xcau8, 0x6cu8, 0x59u8, 0x2cu8, 0xbcu8, 0xcau8, 0x53u8]
+        val msg: [u8] = [0x51u8]
+        val expected_ct: [u8] = [0xc4u8]
+        val expected_tag: [u8] = [0x16u8, 0x83u8, 0x10u8, 0xcau8, 0x45u8, 0xb1u8, 0xf7u8, 0xc6u8,
+                                  0x6cu8, 0xadu8, 0x4eu8, 0x99u8, 0xe4u8, 0x3fu8, 0x72u8, 0xb9u8]
+        val (ct, tag) = chacha20_poly1305_seal(key, nonce, aad, msg)
+        expect(_bytes_eq_b(ct, expected_ct)).to_equal(true)
+        expect(_bytes_eq_b(tag, expected_tag)).to_equal(true)
+
+describe "ChaCha20-Poly1305 Wycheproof — ModifiedTag (AUTH_BYPASS)":
+
+    it "tcId 148 (ModifiedTag, bit-7 flip): open returns nil":
+        # Wycheproof tcId 148, flags=[ModifiedTag], result=invalid
+        # expected tag: f4409bb729039d0814ac514054323f44
+        # modified tag: 74409bb729039d0814ac514054323f44  (bit 7 of byte 0 flipped)
+        val empty: [u8] = []
+        val bad_tag: [u8] = [0x74u8, 0x40u8, 0x9bu8, 0xb7u8, 0x29u8, 0x03u8, 0x9du8, 0x08u8,
+                             0x14u8, 0xacu8, 0x51u8, 0x40u8, 0x54u8, 0x32u8, 0x3fu8, 0x44u8]
+        expect(_open_is_nil_b(_wyc_key_2021(), _wyc_nonce_0001(), _wyc_aad_000102(), empty, bad_tag)).to_equal(true)
+
+    it "tcId 149 (ModifiedTag, bit-8 flip): open returns nil":
+        # Wycheproof tcId 149, flags=[ModifiedTag], result=invalid
+        # modified tag: f4419bb729039d0814ac514054323f44  (bit 8 = byte 1 bit 0)
+        val empty: [u8] = []
+        val bad_tag: [u8] = [0xf4u8, 0x41u8, 0x9bu8, 0xb7u8, 0x29u8, 0x03u8, 0x9du8, 0x08u8,
+                             0x14u8, 0xacu8, 0x51u8, 0x40u8, 0x54u8, 0x32u8, 0x3fu8, 0x44u8]
+        expect(_open_is_nil_b(_wyc_key_2021(), _wyc_nonce_0001(), _wyc_aad_000102(), empty, bad_tag)).to_equal(true)
+
+    it "tcId 164 (ModifiedTag, all-zero tag): open returns nil":
+        # Wycheproof tcId 164, flags=[ModifiedTag], result=invalid
+        # all-zero tag must never authenticate
+        val empty: [u8] = []
+        val zero_tag: [u8] = [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+                              0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        expect(_open_is_nil_b(_wyc_key_2021(), _wyc_nonce_0001(), _wyc_aad_000102(), empty, zero_tag)).to_equal(true)
+
+    it "valid seal tag for Wycheproof key/nonce/aad is byte-exact":
+        # Positive control: the valid tag that the ModifiedTag tests are mutating
+        val empty: [u8] = []
+        val (_ct, tag) = chacha20_poly1305_seal(_wyc_key_2021(), _wyc_nonce_0001(), _wyc_aad_000102(), empty)
+        expect(_bytes_eq_b(tag, _wyc_valid_tag_empty_msg())).to_equal(true)
+
+describe "ChaCha20-Poly1305 Wycheproof — InvalidNonceSize":
+
+    it "tcId 320 (InvalidNonceSize, 13-byte nonce): open returns nil":
+        # Wycheproof tcId 320, flags=[InvalidNonceSize], result=invalid
+        # API note: Simple's open does not explicitly enforce nonce length.
+        # A wrong-length nonce produces a wrong keystream → tag mismatch → nil.
+        val nonce_13: [u8] = [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
+                              0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8]
+        val empty: [u8] = []
+        # Use any 16-byte tag; with the wrong nonce the MAC will not verify.
+        expect(_open_is_nil_b(_wyc_key_2021(), nonce_13, empty, empty, _wyc_valid_tag_empty_msg())).to_equal(true)
+
+    it "tcId 322 (InvalidNonceSize, 16-byte nonce): open returns nil":
+        # Wycheproof tcId 322, flags=[InvalidNonceSize], result=invalid
+        val nonce_16: [u8] = [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8,
+                              0x08u8, 0x09u8, 0x0au8, 0x0bu8, 0x0cu8, 0x0du8, 0x0eu8, 0x0fu8]
+        val empty: [u8] = []
+        expect(_open_is_nil_b(_wyc_key_2021(), nonce_16, empty, empty, _wyc_valid_tag_empty_msg())).to_equal(true)

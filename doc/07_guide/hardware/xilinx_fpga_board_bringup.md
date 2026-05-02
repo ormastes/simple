@@ -78,6 +78,8 @@ Current `MLK-S02-100T` wrapper/build scaffolds:
 
 Vendor bundle search and acquisition notes:
 - [mlk_s02_100t_vendor_resource_search_2026-05-01.md](/home/ormastes/dev/pub/simple/doc/09_report/2026/05/mlk_s02_100t_vendor_resource_search_2026-05-01.md)
+- [mlk_s02_100t_vendor_download_guide.md](/home/ormastes/dev/pub/simple/doc/07_guide/hardware/mlk_s02_100t_vendor_download_guide.md)
+- [mlk_s02_100t_assumed_profile.md](/home/ormastes/dev/pub/simple/doc/07_guide/hardware/mlk_s02_100t_assumed_profile.md)
 
 ## Commands That Prove Only Partial Readiness
 

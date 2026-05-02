@@ -11,7 +11,7 @@
 # - add the actual generated or handwritten core sources needed by the wrapper
 
 set project_name "simple_mlk_s02_100t"
-set part "xc7a100t-2ffg484i"
+set part "xc7a100tfgg484-2"
 set top "mlk_s02_100t_wrapper_stub"
 
 create_project -force $project_name ./build_mlk_s02_100t -part $part

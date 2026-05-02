@@ -1,0 +1,375 @@
+# src/compiler/70.backend/backend/native/arm_sve2.spl
+#
+# ARM SVE2 Code Generation — Strict-Emit Byte-Level Encoder (N5 pilot)
+#
+# Scalable Vector Extension 2 (SVE2) uses 32-bit fixed-width instructions.
+# Z-registers (Z0–Z31) are scalable vectors; width = VL (implementation-defined
+# multiple of 128 bits). P-registers (P0–P15) are scalable predicate registers.
+#
+# All helpers here accept raw register indices (0-31 for Z-regs, 0-15 for P-regs,
+# 0-30 for GPRs) and return [i64] (4 bytes, little-endian) matching the ARMv9 ABI.
+#
+# Verified byte goldens confirmed via llvm-mc -triple=aarch64-none-linux-gnu
+# -mattr=+sve2 --show-encoding (2026-05-02).
+#
+# Architecture references:
+#   ARMv9 ARM §C2 (SVE2 encoding), §C7.2 (individual instruction pages)
+#   doc/01_research/simd_isa_deep_2026-05-02.md §2
+#   doc/04_architecture/simd_backend_strict_emit_detail_part1.md §4
+
+# ============================================================================
+# Bit-field Packing Helpers
+# ============================================================================
+#
+# Simple uses integer arithmetic for bit manipulation (no shift operator in
+# this compiler stage). Helpers below encode field placement explicitly.
+
+fn _sve2_pack_5bit(field: i64, bit_offset: i64) -> i64:
+    """
+    Pack a 5-bit register index (0-31) into position bit_offset.
+    Equivalent to field << bit_offset for field in 0..31.
+    Uses multiplication as shift: field * (2^bit_offset).
+    """
+    if bit_offset == 0:
+        field % 32
+    else if bit_offset == 5:
+        (field % 32) * 32
+    else if bit_offset == 10:
+        (field % 32) * 1024
+    else if bit_offset == 16:
+        (field % 32) * 65536
+    else if bit_offset == 21:
+        (field % 32) * 2097152
+    else:
+        0
+
+fn _sve2_pack_4bit(field: i64, bit_offset: i64) -> i64:
+    """
+    Pack a 4-bit field (0-15) into position bit_offset.
+    Used for P-register (Pg) fields and size sub-fields.
+    """
+    if bit_offset == 10:
+        (field % 16) * 1024
+    else if bit_offset == 16:
+        (field % 16) * 65536
+    else if bit_offset == 20:
+        (field % 16) * 1048576
+    else:
+        0
+
+fn _sve2_word_to_bytes(word: i64) -> [i64]:
+    """Convert 32-bit instruction word to 4 little-endian bytes."""
+    val byte0 = word % 256
+    val byte1 = (word / 256) % 256
+    val byte2 = (word / 65536) % 256
+    val byte3 = (word / 16777216) % 256
+    [byte0, byte1, byte2, byte3]
+
+# ============================================================================
+# ADD (vectors, unpredicated) — SVE integer 3-register arithmetic
+# ============================================================================
+#
+# ADD ZD.<size>, ZN.<size>, ZM.<size>
+# Encoding (ARMv9 ARM §C7.2.2 ADD vectors, unpredicated):
+#   bits[31:24] = 0x04  (SVE integer arithmetic group)
+#   bits[23:22] = 00    (sub-group: add/sub vectors)
+#   bits[21:20] = size  (00=B 01=H 10=S 11=D)
+#   bit[19]     = 1     (opcode bit distinguishing ADD)
+#   bits[15:10] = 000000 (sub-opcode for ADD unpredicated)
+#   bits[9:5]   = Zn    (source 1)
+#   bits[4:0]   = Zd    (destination)
+#   bits[20:16] = Zm    (source 2, overlapping with size and bit19)
+#
+# Verified bit layout from llvm-mc:
+#   ADD Z0.S, Z0.S, Z0.S → [0x00, 0x00, 0xA0, 0x04]
+#   Word: 0x04A00000  → bits[31:24]=0x04 bits[23:21]=010 bit[20]=1 (Zm=0)
+#   ADD Z0.B → word 0x04200000; ADD Z0.H → 0x04600000; ADD Z0.D → 0x04E00000
+#   ADD Z31.S → [0xFF, 0x03, 0xBF, 0x04] = word 0x04BF03FF
+#
+# The base opcode per size (Zm=0, Zn=0, Zd=0):
+#   B: 0x04200000  (size bits[22:21]=00, bit[23]=0, bit[20]=1 Zm=0)
+#   H: 0x04600000  (size bits[22:21]=01)
+#   S: 0x04A00000  (size bits[22:21]=10)
+#   D: 0x04E00000  (size bits[22:21]=11)
+
+val SVE2_ADD_BASE_B = 0x04200000
+val SVE2_ADD_BASE_H = 0x04600000
+val SVE2_ADD_BASE_S = 0x04A00000
+val SVE2_ADD_BASE_D = 0x04E00000
+
+fn sve2_encode_add(zd: i64, zn: i64, zm: i64, base: i64) -> [i64]:
+    """
+    Encode ADD ZD.<size>, ZN.<size>, ZM.<size> — unpredicated vector integer add.
+    Parameters are raw Z-register indices 0-31.
+    base: size-specific base opcode (SVE2_ADD_BASE_[BHSD]).
+
+    # ARMv9 ARM §C7.2.2 ADD (vectors, unpredicated)
+    # Verified bytes via llvm-mc 2026-05-02
+    """
+    var word = base
+    word = word + _sve2_pack_5bit(zm, 16)
+    word = word + _sve2_pack_5bit(zn, 5)
+    word = word + _sve2_pack_5bit(zd, 0)
+    _sve2_word_to_bytes(word)
+
+fn emit_sve2_add_s(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit ADD ZD.S, ZN.S, ZM.S — 32-bit element unpredicated vector add.
+    Raw Z-register indices 0-31.
+
+    # ARMv9 ARM §C7.2.2 ADD (vectors, unpredicated) — S-element form
+    # Canonical bytes (Z0,Z0,Z0): 0x00 0x00 0xA0 0x04  [VERIFIED llvm-mc]
+    """
+    sve2_encode_add(zd, zn, zm, SVE2_ADD_BASE_S)
+
+fn emit_sve2_add_b(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit ADD ZD.B, ZN.B, ZM.B — 8-bit element unpredicated vector add.
+
+    # ARMv9 ARM §C7.2.2 ADD (vectors, unpredicated) — B-element form
+    # Canonical bytes (Z0,Z0,Z0): 0x00 0x00 0x20 0x04  [VERIFIED llvm-mc]
+    """
+    sve2_encode_add(zd, zn, zm, SVE2_ADD_BASE_B)
+
+fn emit_sve2_add_h(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit ADD ZD.H, ZN.H, ZM.H — 16-bit element unpredicated vector add.
+
+    # ARMv9 ARM §C7.2.2 ADD (vectors, unpredicated) — H-element form
+    # Canonical bytes (Z0,Z0,Z0): 0x00 0x00 0x60 0x04  [VERIFIED llvm-mc]
+    """
+    sve2_encode_add(zd, zn, zm, SVE2_ADD_BASE_H)
+
+fn emit_sve2_add_d(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit ADD ZD.D, ZN.D, ZM.D — 64-bit element unpredicated vector add.
+
+    # ARMv9 ARM §C7.2.2 ADD (vectors, unpredicated) — D-element form
+    # Canonical bytes (Z0,Z0,Z0): 0x00 0x00 0xE0 0x04  [VERIFIED llvm-mc]
+    """
+    sve2_encode_add(zd, zn, zm, SVE2_ADD_BASE_D)
+
+# ============================================================================
+# MUL (vectors, predicated) — SVE2 destructive 3-register integer multiply
+# ============================================================================
+#
+# MUL ZDN.<size>, PG/M, ZDN.<size>, ZM.<size>
+# NOTE: MUL is DESTRUCTIVE — the destination and first source must be the
+# same register. The asm form uses ZDN twice; this encoder takes a single
+# zdn parameter for the dest+accumulator, and a separate zm for the second
+# source.
+#
+# Encoding (ARMv9 ARM §C7.2.214 MUL vectors, predicated):
+#   bits[31:24] = 0x04  (SVE integer group)
+#   bits[23:20] = 1001  (opcode for predicated MUL, S-size → 0x90xxxx)
+#   bits[19:16] = Pg    (governing predicate, 4-bit field)  [NOTE: not at 12:10]
+#   bits[15:13] = 000   (sub-opcode continuation)
+#   bit[12]     = 0     (for MUL predicated)
+#   bits[9:5]   = Zdn   (dest = src1; ZM in the 3-op sense)
+#   bits[4:0]   = Zdn   (dest register repeated in low field)
+#
+# Wait — llvm-mc gives: mul z0.s, p0/m, z0.s, z1.s → [0x20, 0x00, 0x90, 0x04]
+# Word: 0x04900020 → bits[31:24]=0x04 bits[23:16]=0x90 bits[15:8]=0x00 bits[7:0]=0x20
+# Decoding 0x04900020:
+#   bits[31:24]=0x04=00000100
+#   bits[23:16]=0x90=10010000  → bits[23]=1 bits[22:21]=00(B?) but size=S...
+# Correct decoding: bits[22:20] encodes opcode sub-group + size together here.
+# 0x04900020: 0000_0100_1001_0000_0000_0000_0010_0000
+#   [31:24]=00000100=0x04
+#   [23:22]=10 (size=S when combined with bit[20]=0? No...)
+# Per verified bytes: bits[23:16]=0x90 for MUL .S P0/M
+# Zm=1 is at bits[9:5]: (0x0020 >> 5) = 1 ✓; Zdn=0 at bits[4:0]=0 ✓
+#
+# Base opcode for MUL .S, Pg=0, Zm=0, Zdn=0: 0x04900000
+# Pg in bits[19:16]: add Pg * 65536
+# Zm in bits[9:5]:   add Zm * 32
+# Zdn in bits[4:0]:  add Zdn
+
+val SVE2_MUL_BASE_S = 0x04900000
+
+fn emit_sve2_mul_s(zdn: i64, pg: i64, zm: i64) -> [i64]:
+    """
+    Emit MUL ZDN.S, PG/M, ZDN.S, ZM.S — predicated integer multiply (destructive).
+    ZDN is both destination and first source (architectural constraint).
+    Parameters: zdn = Z dest/src1 (0-31), pg = P governing predicate (0-15),
+                zm = Z second source (0-31).
+
+    # ARMv9 ARM §C7.2.214 MUL (vectors, predicated) — destructive form
+    # Canonical bytes (zdn=0, pg=0, zm=1): 0x20 0x00 0x90 0x04  [VERIFIED llvm-mc]
+    # Canonical bytes (zdn=0, pg=0, zm=0): 0x00 0x00 0x90 0x04
+    """
+    var word = SVE2_MUL_BASE_S
+    word = word + _sve2_pack_4bit(pg, 16)
+    word = word + _sve2_pack_5bit(zm, 5)
+    word = word + _sve2_pack_5bit(zdn, 0)
+    _sve2_word_to_bytes(word)
+
+# ============================================================================
+# FADD (vectors, predicated) — SVE floating-point add (destructive)
+# ============================================================================
+#
+# FADD ZDN.<size>, PG/M, ZDN.<size>, ZM.<size>
+# NOTE: FADD predicated is also DESTRUCTIVE — same ZDN constraint as MUL.
+#
+# Encoding (ARMv9 ARM §C7.2.57 FADD vectors, predicated):
+#   bits[31:24] = 0x65  (SVE FP arithmetic group, S-element variant when bits[22:21]=00)
+#   Verified: FADD Z0.S, P0/M, Z0.S, Z1.S → [0x20, 0x80, 0x80, 0x65]
+#   Word: 0x65808020
+#   bits[31:24]=0x65=01100101
+#   bits[23:16]=0x80=10000000 → for .S size: bit[23]=1 bits[22:21]=00 → hmm
+#   Actually: 0x65808020:
+#     0110_0101_1000_0000_1000_0000_0010_0000
+#     [31:24]=0x65  [23:16]=0x80  [15:8]=0x80  [7:0]=0x20
+#   bits[23:22]=10 → size=S=f32  bits[21:20]=00 → part of opcode
+#   bits[15:8]=0x80=10000000 → bit[15]=1 (M/Z), bits[12:10]=0 (Pg=0)
+#   bits[7:0]=0x20=00100000 → bits[9:5]=1=Zm, bits[4:0]=0=Zdn
+#
+# Cross-check FADD .H → [0x20, 0x80, 0x40, 0x65]: bits[23:22]=01(H)
+# Cross-check FADD .D → [0x20, 0x80, 0xC0, 0x65]: bits[23:22]=11(D)
+#
+# Size encoding in bits[23:22]: 01=H 10=S 11=D
+# Base (Pg=0, Zm=0, Zdn=0) for .S: 0x65808000
+# Pg in bits[12:10]: add Pg * 1024
+# Zm in bits[9:5]:   add Zm * 32
+# Zdn in bits[4:0]:  add Zdn
+
+val SVE2_FADD_BASE_S = 0x65808000
+val SVE2_FADD_BASE_H = 0x65408000
+val SVE2_FADD_BASE_D = 0x65C08000
+
+fn _sve2_encode_fadd(zdn: i64, pg: i64, zm: i64, base: i64) -> [i64]:
+    """
+    Encode FADD ZDN.<size>, PG/M, ZDN.<size>, ZM.<size> — predicated FP add (destructive).
+    Internal helper for size variants.
+
+    # ARMv9 ARM §C7.2.57 FADD (vectors, predicated)
+    # Verified bytes via llvm-mc 2026-05-02
+    """
+    var word = base
+    word = word + _sve2_pack_4bit(pg, 10)
+    word = word + _sve2_pack_5bit(zm, 5)
+    word = word + _sve2_pack_5bit(zdn, 0)
+    _sve2_word_to_bytes(word)
+
+fn emit_sve2_fadd_s(zdn: i64, pg: i64, zm: i64) -> [i64]:
+    """
+    Emit FADD ZDN.S, PG/M, ZDN.S, ZM.S — predicated f32 vector add (destructive).
+    ZDN is both destination and first source.
+
+    # ARMv9 ARM §C7.2.57 FADD (vectors, predicated) — S-element form
+    # Canonical bytes (zdn=0, pg=0, zm=1): 0x20 0x80 0x80 0x65  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_fadd(zdn, pg, zm, SVE2_FADD_BASE_S)
+
+fn emit_sve2_fadd_h(zdn: i64, pg: i64, zm: i64) -> [i64]:
+    """
+    Emit FADD ZDN.H, PG/M, ZDN.H, ZM.H — predicated f16 vector add (destructive).
+
+    # ARMv9 ARM §C7.2.57 FADD (vectors, predicated) — H-element form
+    # Canonical bytes (zdn=0, pg=0, zm=1): 0x20 0x80 0x40 0x65  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_fadd(zdn, pg, zm, SVE2_FADD_BASE_H)
+
+fn emit_sve2_fadd_d(zdn: i64, pg: i64, zm: i64) -> [i64]:
+    """
+    Emit FADD ZDN.D, PG/M, ZDN.D, ZM.D — predicated f64 vector add (destructive).
+
+    # ARMv9 ARM §C7.2.57 FADD (vectors, predicated) — D-element form
+    # Canonical bytes (zdn=0, pg=0, zm=1): 0x20 0x80 0xC0 0x65  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_fadd(zdn, pg, zm, SVE2_FADD_BASE_D)
+
+# ============================================================================
+# FMLA (vectors, predicated) — SVE floating-point fused multiply-add
+# ============================================================================
+#
+# FMLA ZDA.<size>, PG/M, ZN.<size>, ZM.<size>
+# Semantics: Zda[i] += Zn[i] * Zm[i]  (for active lanes per Pg)
+# NOTE: FMLA has 4 distinct operand fields — Zda (dest+acc), Pg, Zn, Zm.
+# The Zda register is NOT the same as Zn; this is NOT destructive in the
+# sense that Zda acts as accumulator, while Zn and Zm are independent sources.
+#
+# Encoding (ARMv9 ARM §C7.2.74 FMLA vectors, predicated):
+#   Verified: FMLA Z0.S, P0/M, Z1.S, Z2.S → [0x20, 0x00, 0xA2, 0x65]
+#   Word: 0x65A20020
+#   0110_0101_1010_0010_0000_0000_0010_0000
+#   [31:24]=0x65  [23:16]=0xA2  [15:8]=0x00  [7:0]=0x20
+#   bits[23:22]=10 → S-size  bits[21:16]=100010 → opcode+Zm
+#   More precisely: bits[23:22]=10(S), bit[21]=1(FMLA sub-op), bits[20:16]=Zm=2
+#   bits[15:13]=000 bits[12:10]=Pg=0 bits[9:5]=Zn=1 bits[4:0]=Zda=0
+#   → Zm in bits[20:16], Pg in bits[12:10], Zn in bits[9:5], Zda in bits[4:0]
+#
+# Cross-check: FMLA Z0.S, P0/M, Z0.S, Z1.S → [0x00, 0x00, 0xA1, 0x65]
+#   bits[20:16]=Zm=1, Zn=0, Zda=0 ✓
+#
+# Base (size=S, FMLA opcode, Zm=0, Pg=0, Zn=0, Zda=0): 0x65A00000
+# Zm in bits[20:16]: add Zm * 65536
+# Pg in bits[12:10]: add Pg * 1024
+# Zn in bits[9:5]:   add Zn * 32
+# Zda in bits[4:0]:  add Zda
+
+val SVE2_FMLA_BASE_S = 0x65A00000
+
+fn emit_sve2_fmla_s(zda: i64, pg: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit FMLA ZDA.S, PG/M, ZN.S, ZM.S — predicated f32 fused multiply-add.
+    Semantics: Zda[i] += Zn[i] * Zm[i]  for active lanes.
+    Zda is the accumulator (distinct from Zn — all 4 register fields independent).
+
+    # ARMv9 ARM §C7.2.74 FMLA (vectors, predicated) — S-element form
+    # Canonical bytes (zda=0, pg=0, zn=1, zm=2): 0x20 0x00 0xA2 0x65  [VERIFIED llvm-mc]
+    # Canonical bytes (zda=0, pg=0, zn=0, zm=1): 0x00 0x00 0xA1 0x65  [VERIFIED llvm-mc]
+    """
+    var word = SVE2_FMLA_BASE_S
+    word = word + _sve2_pack_5bit(zm, 16)
+    word = word + _sve2_pack_4bit(pg, 10)
+    word = word + _sve2_pack_5bit(zn, 5)
+    word = word + _sve2_pack_5bit(zda, 0)
+    _sve2_word_to_bytes(word)
+
+# ============================================================================
+# WHILELO (generate loop predicate) — SVE predicate-forming instruction
+# ============================================================================
+#
+# WHILELO PD.<size>, Xn, Xm
+# Generates a predicate covering elements [0..min(Xm-Xn, VL)) where Xn < Xm.
+# Operates on 64-bit general-purpose registers (X-registers, sf=1).
+#
+# Encoding (ARMv9 ARM §C7.2.376 WHILELO):
+#   Verified: WHILELO P0.S, X0, X1 → [0x00, 0x1C, 0xA1, 0x25]
+#   Word: 0x25A11C00
+#   0010_0101_1010_0001_0001_1100_0000_0000
+#   [31:24]=0x25  [23:16]=0xA1  [15:8]=0x1C  [7:0]=0x00
+#   bits[31:24]=0x25 → SVE predicate-forming group
+#   bits[23:22]=10 → size=S(f32/i32)
+#   bit[21]=1 (sf=1, X-register 64-bit form)
+#   bits[20:16]=Rm=1  → X1
+#   bits[15:14]=00  bit[13]=0  bit[12]=1 → 0x1C >> decoding
+#   Actually bits[15:8]=0x1C=00011100 → bits[12]=1 bit[11]=1 bit[10]=1
+#   bits[9:5]=Rn=0 → X0  bits[4:1]=Pd=0 → P0  bit[0]=0
+#
+# Cross-check P0.S X0 X2: [0x00, 0x1C, 0xA2, 0x25] → bits[20:16]=Rm=2 ✓
+# Cross-check P1.S X0 X1: [0x01, 0x1C, 0xA1, 0x25] → bits[3:0] has Pd=1 ✓
+#
+# Base (size=S sf=1, Rm=0, Rn=0, Pd=0): 0x25A01C00
+# Rm in bits[20:16]: add Rm * 65536
+# Rn in bits[9:5]:   add Rn * 32
+# Pd in bits[3:0]:   add Pd (note: result bit[0] is always 0 for WHILELO)
+
+val SVE2_WHILELO_BASE_S = 0x25A01C00
+
+fn emit_sve2_whilelo_s(pd: i64, xn: i64, xm: i64) -> [i64]:
+    """
+    Emit WHILELO PD.S, Xn, Xm — generate loop-tail predicate for 32-bit elements.
+    PD receives 1-bits for elements [0..min(Xm-Xn, VL)), 0-bits for the rest.
+    Parameters: pd = P dest register index (0-15), xn/xm = X GPR indices (0-30).
+
+    # ARMv9 ARM §C7.2.376 WHILELO — 64-bit (X-register) form, S-element
+    # Canonical bytes (pd=0, xn=0, xm=1): 0x00 0x1C 0xA1 0x25  [VERIFIED llvm-mc]
+    # Canonical bytes (pd=1, xn=0, xm=1): 0x01 0x1C 0xA1 0x25  [VERIFIED llvm-mc]
+    """
+    var word = SVE2_WHILELO_BASE_S
+    word = word + _sve2_pack_5bit(xm, 16)
+    word = word + _sve2_pack_5bit(xn, 5)
+    word = word + (pd % 16)
+    _sve2_word_to_bytes(word)

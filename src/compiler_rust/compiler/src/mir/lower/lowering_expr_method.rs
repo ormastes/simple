@@ -74,8 +74,11 @@ impl<'a> MirLowerer<'a> {
                         .enum_payload_type_for_method_receiver(receiver.ty)
                         .or_else(|| self.enum_payload_type_for_method_receiver(effective_ty))
                     {
-                        return self
-                            .lower_builtin_call_expr("rt_enum_payload", std::slice::from_ref(receiver), payload_ty);
+                        return self.lower_builtin_call_expr(
+                            "rt_enum_payload",
+                            std::slice::from_ref(receiver),
+                            payload_ty,
+                        );
                     }
                 }
                 "unwrap_err" => {
@@ -83,24 +86,33 @@ impl<'a> MirLowerer<'a> {
                         .enum_variant_payload_type_for_method_receiver(receiver.ty, "Err")
                         .or_else(|| self.enum_variant_payload_type_for_method_receiver(effective_ty, "Err"))
                     {
-                        return self
-                            .lower_builtin_call_expr("rt_enum_payload", std::slice::from_ref(receiver), payload_ty);
+                        return self.lower_builtin_call_expr(
+                            "rt_enum_payload",
+                            std::slice::from_ref(receiver),
+                            payload_ty,
+                        );
                     }
                 }
                 "is_some" => {
                     if self.enum_has_variant_for_method_receiver(receiver.ty, "Some")
                         || self.enum_has_variant_for_method_receiver(effective_ty, "Some")
                     {
-                        return self
-                            .lower_builtin_call_expr("rt_is_some", std::slice::from_ref(receiver), TypeId::BOOL);
+                        return self.lower_builtin_call_expr(
+                            "rt_is_some",
+                            std::slice::from_ref(receiver),
+                            TypeId::BOOL,
+                        );
                     }
                 }
                 "is_none" => {
                     if self.enum_has_variant_for_method_receiver(receiver.ty, "None")
                         || self.enum_has_variant_for_method_receiver(effective_ty, "None")
                     {
-                        return self
-                            .lower_builtin_call_expr("rt_is_none", std::slice::from_ref(receiver), TypeId::BOOL);
+                        return self.lower_builtin_call_expr(
+                            "rt_is_none",
+                            std::slice::from_ref(receiver),
+                            TypeId::BOOL,
+                        );
                     }
                 }
                 "is_ok" | "is_err" => {

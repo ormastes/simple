@@ -10,12 +10,26 @@
 # - Synthesize: Infer type from expression (bottom-up)
 # - Check: Verify expression against expected type (top-down)
 
-from inference.types import {Type, TypeVarId, UnifyError}
-from inference.infer import {InferenceEngine}
-from ast import {Expr, BinOp, UnaryOp, Argument, LambdaParam, Pattern, Block}
+use inference.types.{Type, TypeVarId, UnifyError}
+use inference.infer.{InferenceEngine}
+use compiler.frontend.parser_types_expr.{Expr, BinOp, UnaryOp, CallArg as Argument, LambdaParam, Pattern, Block}
 from compiler.types.type_system.checker import {TypeError}
 from compiler.types.type_system.expr_infer import {infer_expr as synthesize_expr}
 from compiler.types.type_system.module_check import {ast_type_to_inference_type_engine}
+from compiler.types.type_system.stmt_check import {check_stmt as regular_check_stmt}
+
+# ============================================================================
+# Typed AST Access Helpers
+# ============================================================================
+
+fn _call_arg_value(arg: Argument) -> Expr:
+    arg.value
+
+fn _lambda_param_type_or_fresh(param: LambdaParam, engine: InferenceEngine) -> Type:
+    if param.has_type_:
+        ast_type_to_inference_type_engine(param.type_, engine)
+    else:
+        engine_fresh_var(engine)
 
 # ============================================================================
 # Inference Mode
@@ -274,7 +288,7 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
             # Check arguments against inferred parameter types
             var i = 0
             while i < args_len(args):
-                val _unused_5 = check_expr(engine, args[i].value, param_types[i], env)?
+                val _unused_5 = check_expr(engine, _call_arg_value(args[i]), param_types[i], env)?
                 i = i + 1
 
             Ok(expected)
@@ -300,10 +314,7 @@ fn synthesize_lambda(engine: InferenceEngine, params: [LambdaParam], body: Expr,
     var new_env = env
 
     for param in params:
-        val param_ty = if param.has_ty:
-            ast_type_to_inference_type_engine(param.ty_value, engine)
-        else:
-            engine_fresh_var(engine)
+        val param_ty = _lambda_param_type_or_fresh(param, engine)
 
         param_types = param_types_push(param_types, param_ty)
         new_env[param.name] = param_ty
@@ -506,7 +517,7 @@ fn check_stmt_bidir(engine: InferenceEngine, stmt: Node, env: Dict<text, Type>,
 
         case _:
             # Delegate other statements to regular statement checking
-            compiler.types.type_system.stmt_check_check_stmt(stmt_check, engine, stmt, env, current_fn_ret_type)
+            regular_check_stmt(engine, stmt, env, current_fn_ret_type)
 
 # ============================================================================
 # Public API
@@ -529,4 +540,3 @@ fn infer_with_expected(engine: InferenceEngine, expr: Expr,
 # ============================================================================
 # Exports
 # ============================================================================
-

@@ -234,6 +234,20 @@ pub(crate) fn compile_file_to_object(
         lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
         lowerer.set_ambiguous_field_names(std::sync::Arc::new(std::collections::HashSet::new()));
     }
+    // W15-H: seed the lowerer with the project-wide enum table and
+    // eagerly register every entry into `module.types` + `self.globals`
+    // before `lower_module(&ast)` runs. Pass 0 of `module_pass.rs`
+    // overrides this for any locally-defined enum (we lookup-guard with
+    // `is_none()`), so the only effect is to fill in cross-module enum
+    // names that the per-`use_stmt` `preregister_imported_type_names`
+    // pass misses when an enum reaches this file via re-export rather
+    // than a direct `use` chain (W13-F class 1: 29 stage4 sites where
+    // `expr/access.rs::lower_field_access` was emitting
+    // `Global(EnumName)` with `ty=ANY`).
+    if imports.populate_global_enum_defs {
+        lowerer.set_global_enum_defs(std::sync::Arc::new((*imports.enum_defs).clone()));
+        lowerer.register_global_enums();
+    }
     let hir = lowerer
         .lower_module(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;

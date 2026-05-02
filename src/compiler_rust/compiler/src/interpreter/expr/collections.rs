@@ -48,9 +48,7 @@ fn require_integer_index_value(value: &Value, context: &str) -> Result<i64, Comp
                     }
                     _ => format!("{context} must fit in signed 64-bit range"),
                 };
-                let ctx = ErrorContext::new()
-                    .with_code(codes::INVALID_INDEX_TYPE)
-                    .with_help(help);
+                let ctx = ErrorContext::new().with_code(codes::INVALID_INDEX_TYPE).with_help(help);
                 CompileError::semantic_with_context(
                     format!("cannot index {context} with value `{}`", value.type_name()),
                     ctx,

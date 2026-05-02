@@ -1,0 +1,45 @@
+use std.nogc_sync_mut.debug.remote.{
+    DebugConnectionHints, debug_target_descriptor, debug_select_backend,
+    debug_bootstrap_plan, debug_extension_registry_entries
+}
+
+describe "remote debug session model":
+    it "selects Intel jtagd for Intel hardware sessions":
+        val target = debug_target_descriptor("intel_jtagd", "", "riscv32", "hw", "intel", "", "")
+        val backend = debug_select_backend(target)
+        match backend:
+            Ok(selected):
+                expect selected.backend_id == "intel_jtagd"
+                expect selected.capabilities.supports("persistent_session") == true
+            Err(_):
+                expect false == true
+
+    it "builds remote_bitbang bootstrap plan for RTL sessions":
+        val target = debug_target_descriptor("rtl_sim", "openocd_remote_bitbang", "riscv32", "rtl_sim", "", "", "")
+        var hints = DebugConnectionHints.empty()
+        hints.bitbang_host = "127.0.0.1"
+        hints.bitbang_port = 4567
+        val plan = debug_bootstrap_plan(target, hints, "build/rtl.elf")
+        match plan:
+            Ok(resolved):
+                expect resolved.backend_id == "openocd_remote_bitbang"
+                expect (resolved.launch_command).contains("remote_bitbang")
+                expect (resolved.generated_config).contains("remote_bitbang port 4567")
+            Err(_):
+                expect false == true
+
+    it "keeps QEMU as gdb remote validation lane":
+        val target = debug_target_descriptor("remote", "", "riscv32", "", "", "", "")
+        val backend = debug_select_backend(target)
+        match backend:
+            Ok(selected):
+                expect selected.backend_id == "gdb_remote"
+                expect selected.exec_mode.to_string() == "qemu_stub"
+            Err(_):
+                expect false == true
+
+    it "publishes future extension registry hooks":
+        val entries = debug_extension_registry_entries()
+        expect entries.len() > 5
+        expect (entries).contains("transport:swd")
+        expect (entries).contains("transport:xvc")

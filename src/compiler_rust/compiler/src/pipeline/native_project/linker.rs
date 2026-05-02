@@ -790,10 +790,15 @@ int main(int argc, char** argv) {
         };
 
         let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
+        let riscv32_march_override = std::env::var("SIMPLE_RISCV32_MARCH").ok();
+        let riscv32_mabi_override = std::env::var("SIMPLE_RISCV32_MABI").ok();
         let (march, mabi) = match cross_target.arch {
             simple_common::target::TargetArch::Riscv64 if use_llvm => ("-march=rv64imac", "-mabi=lp64"),
             simple_common::target::TargetArch::Riscv64 => ("-march=rv64gc", "-mabi=lp64d"),
-            simple_common::target::TargetArch::Riscv32 => ("-march=rv32imac", "-mabi=ilp32"),
+            simple_common::target::TargetArch::Riscv32 => (
+                riscv32_march_override.as_deref().unwrap_or("-march=rv32imac"),
+                riscv32_mabi_override.as_deref().unwrap_or("-mabi=ilp32"),
+            ),
             _ => ("", ""),
         };
         let inline_asm_o = inline_asm_emit::compile_inline_asm_c(temp_dir, Some((triple, march, mabi)))?;
@@ -818,8 +823,7 @@ int main(int argc, char** argv) {
                     .map(|name| name.starts_with("ghdl_boot_info"))
                     .unwrap_or(false);
             let boot_dir = entry.parent().unwrap_or(std::path::Path::new(".")).join("boot");
-            let debug_boot_sources =
-                self.config.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok();
+            let debug_boot_sources = self.config.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok();
             if skip_boot_autodiscovery && debug_boot_sources {
                 eprintln!("  Boot autodiscovery skipped for {}", entry.display());
             }
@@ -1068,14 +1072,8 @@ int main(int argc, char** argv) {
             ordered
         };
 
-        let freestanding_stub_obj = generate_stub_object_freestanding(
-            temp_dir,
-            object_paths,
-            &boot_objects,
-            triple,
-            march,
-            mabi,
-        )?;
+        let freestanding_stub_obj =
+            generate_stub_object_freestanding(temp_dir, object_paths, &boot_objects, triple, march, mabi)?;
         let weak_boot_defsyms = Self::freestanding_weak_boot_defsyms(object_paths, &boot_objects, imports)?;
         if !weak_boot_defsyms.is_empty() {
             eprintln!(

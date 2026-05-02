@@ -108,10 +108,7 @@ fn finalize_numeric_cast(result: CastNumericResult, target: NumericType) -> Valu
 fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileError> {
     match val {
         Value::Int(i) => Ok(finalize_numeric_cast(cast_int_to_numeric(i, target), target)),
-        Value::UInt { value, .. } => Ok(finalize_numeric_cast(
-            cast_int_to_numeric(value as i64, target),
-            target,
-        )),
+        Value::UInt { value, .. } => Ok(finalize_numeric_cast(cast_int_to_numeric(value as i64, target), target)),
         Value::Float(f) => Ok(finalize_numeric_cast(cast_float_to_numeric(f, target), target)),
         Value::Float32(f) => Ok(finalize_numeric_cast(cast_float_to_numeric(f as f64, target), target)),
         Value::Bool(b) => Ok(finalize_numeric_cast(cast_bool_to_numeric(b, target), target)),

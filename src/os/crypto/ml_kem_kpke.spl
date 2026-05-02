@@ -28,8 +28,13 @@ mod os.crypto.ml_kem_kpke
 use lib.common.crypto.sha3.{keccak_f1600, sha3_256_bytes, sha3_512_bytes}
 use os.crypto.ml_kem_ntt.{ntt, intt, ntt_multiply, poly_add, poly_sub,
     compress_poly, decompress_poly, byte_encode, byte_decode,
-    ml_kem_n, ml_kem_q, ml_kem_k_768, ml_kem_eta1_768, ml_kem_eta2_768,
-    ml_kem_du_768, ml_kem_dv_768}
+    ml_kem_n, ml_kem_q,
+    ml_kem_k_512, ml_kem_eta1_512, ml_kem_eta2_512,
+    ml_kem_du_512, ml_kem_dv_512,
+    ml_kem_k_768, ml_kem_eta1_768, ml_kem_eta2_768,
+    ml_kem_du_768, ml_kem_dv_768,
+    ml_kem_k_1024, ml_kem_eta1_1024, ml_kem_eta2_1024,
+    ml_kem_du_1024, ml_kem_dv_1024}
 
 # ============================================================================
 # SHAKE-128 / SHAKE-256 — FIPS 202 §6.2 / §6.3
@@ -415,13 +420,11 @@ fn _vec_intt(v: list) -> list:
         i = i + 1
     out
 
-# K-PKE.KeyGen — input 32-byte seed d. Returns (ek, dk, rho, t_hat, s_hat).
+# K-PKE.KeyGen (parameterized) — input 32-byte seed d, module rank k, CBD width eta1.
+# Returns (ek, dk, rho, t_hat, s_hat).
 # The auxiliary outputs (rho, t_hat, s_hat) are convenient for the wrapper
 # layer which avoids re-decoding bytes for follow-up operations during tests.
-fn kpke_keygen(d: list) -> tuple:
-    val k = ml_kem_k_768()
-    val eta1 = ml_kem_eta1_768()
-
+fn kpke_keygen_params(d: list, k: i64, eta1: i64) -> tuple:
     # (rho, sigma) = G(d || k), where the byte k is appended per FIPS 203
     # Algorithm 13 step 1 (FIPS 203 update — d is 32 bytes followed by 1 byte k).
     var seed_in = []
@@ -454,6 +457,17 @@ fn kpke_keygen(d: list) -> tuple:
     val ek = _bytes_concat(ek_t, rho)
     val dk = _encode_vec_12(s_hat)
     (ek, dk, rho, t_hat, s_hat)
+
+# 768 thin wrapper (preserved API).
+fn kpke_keygen(d: list) -> tuple:
+    kpke_keygen_params(d, ml_kem_k_768(), ml_kem_eta1_768())
+
+# 512 / 1024 thin wrappers.
+fn kpke_keygen_512(d: list) -> tuple:
+    kpke_keygen_params(d, ml_kem_k_512(), ml_kem_eta1_512())
+
+fn kpke_keygen_1024(d: list) -> tuple:
+    kpke_keygen_params(d, ml_kem_k_1024(), ml_kem_eta1_1024())
 
 # ============================================================================
 # K-PKE.Encrypt — FIPS 203 Algorithm 14
@@ -502,12 +516,8 @@ fn _transpose(a_hat: list, k: i64) -> list:
         ii = ii + 1
     out
 
-fn kpke_encrypt(ek: list, m: list, r: list) -> list:
-    val k = ml_kem_k_768()
-    val eta1 = ml_kem_eta1_768()
-    val eta2 = ml_kem_eta2_768()
-    val du = ml_kem_du_768()
-    val dv = ml_kem_dv_768()
+fn kpke_encrypt_params(ek: list, m: list, r: list,
+        k: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> list:
     val ek_polys_len = 384 * k
 
     # Decode t̂ and rho from ek.
@@ -592,6 +602,23 @@ fn kpke_encrypt(ek: list, m: list, r: list) -> list:
     val c2 = byte_encode(c2_compressed, dv)
     _bytes_concat(c1, c2)
 
+# 768 thin wrapper (preserved API).
+fn kpke_encrypt(ek: list, m: list, r: list) -> list:
+    kpke_encrypt_params(ek, m, r,
+        ml_kem_k_768(), ml_kem_eta1_768(), ml_kem_eta2_768(),
+        ml_kem_du_768(), ml_kem_dv_768())
+
+# 512 / 1024 thin wrappers.
+fn kpke_encrypt_512(ek: list, m: list, r: list) -> list:
+    kpke_encrypt_params(ek, m, r,
+        ml_kem_k_512(), ml_kem_eta1_512(), ml_kem_eta2_512(),
+        ml_kem_du_512(), ml_kem_dv_512())
+
+fn kpke_encrypt_1024(ek: list, m: list, r: list) -> list:
+    kpke_encrypt_params(ek, m, r,
+        ml_kem_k_1024(), ml_kem_eta1_1024(), ml_kem_eta2_1024(),
+        ml_kem_du_1024(), ml_kem_dv_1024())
+
 # ============================================================================
 # K-PKE.Decrypt — FIPS 203 Algorithm 15
 # ============================================================================
@@ -599,12 +626,9 @@ fn kpke_encrypt(ek: list, m: list, r: list) -> list:
 # Input: dkPKE = ByteEncode_12(ŝ) (1152 bytes), c (1088 bytes for ML-KEM-768).
 # Output: m' (32 bytes) = ByteEncode_1(Compress_1(v - sᵀ·u)).
 
-fn kpke_decrypt(dk: list, c: list) -> list:
-    val k = ml_kem_k_768()
-    val du = ml_kem_du_768()
-    val dv = ml_kem_dv_768()
-    val c1_len = 32 * du * k    # 960 for ML-KEM-768
-    val c2_len = 32 * dv         # 128 for ML-KEM-768
+fn kpke_decrypt_params(dk: list, c: list, k: i64, du: i64, dv: i64) -> list:
+    val c1_len = 32 * du * k     # 640/960/1408 for ML-KEM-512/768/1024
+    val c2_len = 32 * dv         # 128/128/160 for ML-KEM-512/768/1024
 
     # Decode u (k polys at du-bit) and v (1 poly at dv-bit).
     var u = []
@@ -647,3 +671,17 @@ fn kpke_decrypt(dk: list, c: list) -> list:
 
     # Compress_1(w) → 256 bits → ByteEncode_1 → 32 bytes.
     _poly_to_msg(w_poly)
+
+# 768 thin wrapper (preserved API).
+fn kpke_decrypt(dk: list, c: list) -> list:
+    kpke_decrypt_params(dk, c,
+        ml_kem_k_768(), ml_kem_du_768(), ml_kem_dv_768())
+
+# 512 / 1024 thin wrappers.
+fn kpke_decrypt_512(dk: list, c: list) -> list:
+    kpke_decrypt_params(dk, c,
+        ml_kem_k_512(), ml_kem_du_512(), ml_kem_dv_512())
+
+fn kpke_decrypt_1024(dk: list, c: list) -> list:
+    kpke_decrypt_params(dk, c,
+        ml_kem_k_1024(), ml_kem_du_1024(), ml_kem_dv_1024())

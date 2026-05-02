@@ -15,12 +15,9 @@
 #   7. SHAKE-128("") and SHAKE-256("") match NIST FIPS 202 KAT first-16 bytes
 #   8. ml_dsa_keygen_65(seed) → (pk, sk) of expected sizes (1952B, 4032B)
 #   9. SampleInBall produces exactly tau=49 nonzero coefficients in {-1, 0, +1}
-#
-# End-to-end Sign + Verify is DEFERRED — implementation produces a 3293-byte
-# signature but Verify currently rejects it (bug at
-# doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md).  Per
-# feedback_no_coverups.md we do NOT weaken assertions.  Algebraic invariants
-# above cover the ring + NTT + sampling + encoding contract.
+#  10. Sign(sk, m) → σ; Verify(pk, m, σ) == true  (W13-D, 2026-05-02)
+#  11. Verify rejects bit-flipped message and bit-flipped signature
+#       (negative-path correctness).
 #
 # Run via:  bin/simple test/unit/lib/crypto/ml_dsa_65_spec.spl
 # (Direct invocation per feedback_compile_mode_false_greens.md.)
@@ -243,10 +240,10 @@ fn _zero_rnd() -> list:
         i = i + 1
     r
 
-# End-to-end Sign + Verify round-trip.  Currently FAILS — Sign produces a
-# 3293-byte signature but Verify rejects it.  We file the failing test (NOT
-# skipped, NOT weakened) per feedback_no_coverups.md.  Bug doc:
-# doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md
+# End-to-end Sign + Verify round-trip.  Fixed in W13-D (2026-05-02): _z_pack
+# was bit-packing z values in their [0, q) representation rather than the
+# centered representation, so q-aliased negatives encoded to garbage and
+# Verify could not reconstruct the same w1.  See bug doc.
 fn _sign_verify_round_trip() -> bool:
     val xi = _seed32(0)
     val kp = ml_dsa_keygen_65(xi)
@@ -259,6 +256,42 @@ fn _sign_verify_round_trip() -> bool:
         false
     else:
         ml_dsa_verify_65(pk, msg, sig)
+
+# Negative path: tampered message must fail verification.  Critical companion
+# to the positive-case test (per W13-D discipline note: a verify-everything
+# implementation would pass the positive test for the wrong reason).
+fn _verify_rejects_tampered_msg() -> bool:
+    val xi = _seed32(0)
+    val kp = ml_dsa_keygen_65(xi)
+    val pk = kp[0]
+    val sk = kp[1]
+    val msg = _build_msg()
+    val rnd = _zero_rnd()
+    val sig = ml_dsa_sign_65(sk, msg, rnd)
+    var msg2 = []
+    var i = 0
+    while i < msg.len():
+        msg2.push(msg.get(i))
+        i = i + 1
+    msg2[0] = msg2.get(0) ^ 1
+    not ml_dsa_verify_65(pk, msg2, sig)
+
+# Negative path: bit-flip in c_tilde (sig prefix) must fail verification.
+fn _verify_rejects_tampered_sig() -> bool:
+    val xi = _seed32(0)
+    val kp = ml_dsa_keygen_65(xi)
+    val pk = kp[0]
+    val sk = kp[1]
+    val msg = _build_msg()
+    val rnd = _zero_rnd()
+    val sig = ml_dsa_sign_65(sk, msg, rnd)
+    var sig2 = []
+    var i = 0
+    while i < sig.len():
+        sig2.push(sig.get(i))
+        i = i + 1
+    sig2[0] = sig2.get(0) ^ 1
+    not ml_dsa_verify_65(pk, msg, sig2)
 
 # ----- specs -------------------------------------------------------------
 
@@ -344,20 +377,19 @@ describe "ML-DSA-65 KeyGen sizes":
         expect(_keygen_sk_len()).to_equal(sk_size_65())
 
 
-describe "ML-DSA-65 end-to-end Sign + Verify (currently failing)":
+describe "ML-DSA-65 end-to-end Sign + Verify":
 
-    # Status 2026-05-02: KNOWN FAIL — Sign produces a 3293-byte signature but
-    # Verify rejects it.  Bug filed at
-    # doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md.  Per
-    # feedback_no_coverups.md, the test is left failing (NOT skipped, NOT
-    # weakened); algebraic invariants above carry the contract until the
-    # bug is fixed in Wave 11+.
-    #
-    # Negative-path tests (verify rejects modified message / modified sig)
-    # are deliberately WITHHELD: a Verify that rejects everything would pass
-    # them for the wrong reason, which is a worse discipline violation than
-    # leaving the positive case red.  They land in the same wave that fixes
-    # the positive path.
+    # W13-D, 2026-05-02: fixed by centering z before _z_pack (see ml_dsa.spl).
+    # Bug doc:  doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md.
+    # Negative-path tests below are NON-NEGOTIABLE companions to the positive
+    # case — they prove Verify is not a reject-everything (or accept-everything)
+    # stub.
 
     it "Sign(sk, m) → σ; Verify(pk, m, σ) == true":
         expect(_sign_verify_round_trip()).to_equal(true)
+
+    it "Verify rejects bit-flipped message":
+        expect(_verify_rejects_tampered_msg()).to_equal(true)
+
+    it "Verify rejects bit-flipped signature (c_tilde)":
+        expect(_verify_rejects_tampered_sig()).to_equal(true)

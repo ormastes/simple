@@ -1,0 +1,83 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.zstd_huf.{
+    zstd_huf_encode_literals
+}
+use std.common.compress.zstd.{
+    zstd_huf_build_table_for_test,
+    zstd_huf_decode_stream_for_test
+}
+
+# W14-A round-trip regression for the zstd HUF encoder bit-layout fix.
+#
+# W13-B's empirical probe (see
+# `doc/08_tracking/bug/zstd_huf_decoder_strict_remaining_invariant_2026-05-02.md`)
+# disproved the original framing that the decoder's strict
+# `remaining != 0` invariant was incompatible with mixed-length encoders;
+# the corruption was on the encoder side, in `zstd_huf_encode_literals`'s
+# byte-layout. The encoder now emits literals in input order into a flat
+# LSB-first bit buffer and repacks bytes so that decoder read position i
+# holds emission i. This spec asserts byte-exact round-trip through
+# `_zstd_decode_huffman_stream` for the three inputs the W13-B probe
+# called out (uniform 2-symbol, skewed mixed-length, highly skewed).
+
+fn _round_trip(literals: [u8]):
+    val encoded_res = zstd_huf_encode_literals(literals)
+    expect encoded_res.is_err() == false
+    val (bitstream, weights) = encoded_res.unwrap()
+    expect bitstream.len() > 0 == true
+    val table_res = zstd_huf_build_table_for_test(weights)
+    expect table_res.is_err() == false
+    val table_state = table_res.unwrap()
+    val decoded_res = zstd_huf_decode_stream_for_test(
+        bitstream, 0, bitstream.len(), literals.len(), table_state
+    )
+    expect decoded_res.is_err() == false
+    val decoded = decoded_res.unwrap()
+    expect decoded.len() == literals.len()
+    var i = 0
+    while i < literals.len():
+        expect decoded[i] == literals[i]
+        i = i + 1
+
+describe "zstd huf encoder round-trips the existing decoder":
+    it "round-trips a 4-symbol mixed-length input":
+        # 'a' x 6, 'b' x 3, 'c' x 2, 'd' x 1 — same shape as the
+        # existing structural test in zstd_fse_huffman_weight_encode_spec
+        # (known to encode cleanly through `_zstd_huf_assign_weights`).
+        # Three distinct code lengths exercise cross-byte packing.
+        # (The original W13-B 2-symbol probe was blocked by the
+        # weight balancer rejecting alphabet size 2 — a separate,
+        # out-of-scope encoder issue.)
+        val literals: [u8] = [
+            0x61u8, 0x62u8, 0x61u8, 0x63u8, 0x61u8, 0x62u8,
+            0x61u8, 0x63u8, 0x61u8, 0x62u8, 0x61u8, 0x64u8
+        ]
+        _round_trip(literals)
+
+    it "round-trips a skewed 'a*8 b*4 c*2 d*1' mixed-length input":
+        # The W13-B probe showed this input decoded as 'a*9 ...'
+        # because the encoder's byte layout misaligned bit positions
+        # across byte boundaries. Mixed-length codes (1/2/3 bits)
+        # exercise the cross-byte packing path.
+        val literals: [u8] = [
+            0x61u8, 0x61u8, 0x61u8, 0x61u8,
+            0x61u8, 0x61u8, 0x61u8, 0x61u8,
+            0x62u8, 0x62u8, 0x62u8, 0x62u8,
+            0x63u8, 0x63u8,
+            0x64u8
+        ]
+        _round_trip(literals)
+
+    it "round-trips a highly skewed 'A*16 B*4 C*2 D*1' input":
+        # Larger run of the most-frequent symbol forces the bit stream
+        # well past one byte; W13-B saw `byte[16] got=65 want=66`.
+        val literals: [u8] = [
+            0x41u8, 0x41u8, 0x41u8, 0x41u8,
+            0x41u8, 0x41u8, 0x41u8, 0x41u8,
+            0x41u8, 0x41u8, 0x41u8, 0x41u8,
+            0x41u8, 0x41u8, 0x41u8, 0x41u8,
+            0x42u8, 0x42u8, 0x42u8, 0x42u8,
+            0x43u8, 0x43u8,
+            0x44u8
+        ]
+        _round_trip(literals)

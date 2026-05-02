@@ -6,6 +6,7 @@
 use compiler.driver.driver_api_core.{interpret_file}
 use compiler.tools.formatter.main.{Formatter, make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
+use compiler.tools.fix.rules.{check_simd_opportunities}
 use compiler.tools.lint.main.{LintConfig, LintLevel, Linter}
 use std.tooling.easy_fix.{FixConfidence}
 use compiler.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
@@ -163,12 +164,15 @@ fn cli_run_lint(args: [text]) -> i64:
     # Parse flags from args
     var files: [text] = []
     var run_mcp_perf = false
+    var run_simd = false
     for arg in args:
         if arg == "lint":
             # Skip the command name itself
             val _ = 0
         elif arg == "--mcp-perf" or arg == "--all":
             run_mcp_perf = true
+        elif arg == "--simd":
+            run_simd = true
         elif not arg.starts_with("-"):
             files.push(arg)
 
@@ -185,7 +189,7 @@ fn cli_run_lint(args: [text]) -> i64:
             exit_code = 1
 
     if files.len() == 0:
-        print "Usage: simple lint <file.spl> [file2.spl ...] [--mcp-perf]"
+        print "Usage: simple lint <file.spl> [file2.spl ...] [--mcp-perf] [--simd]"
         print ""
         print "Runs lint passes on Simple source files."
         print "Checks for:"
@@ -193,6 +197,7 @@ fn cli_run_lint(args: [text]) -> i64:
         print "  - Duplicate typed arguments (DTYP001)"
         print "  - Bare primitive types in public APIs"
         print "  - MCP wrapper, hot-path, and invalidation regressions (--mcp-perf)"
+        print "  - SIMD vectorisation opportunities L-SIMD-001..011 (--simd, info only)"
         return 1
 
     var total_warnings = 0
@@ -221,6 +226,17 @@ fn cli_run_lint(args: [text]) -> i64:
             # `Function 'line' not found` — see doc/08_tracking/bug/lint_val_crash_2026-04-28.md.
             # Restore proper field-access lowering, then keep this print as-is.
             print "{file_path}:{result.line}: {level_text}[{result.lint.code}]: {result.lint.message}"
+
+        # SIMD opportunity pass — info severity, never increments exit code
+        if run_simd:
+            val simd_fixes = check_simd_opportunities(source, file_path)
+            var si = 0
+            while si < simd_fixes.len():
+                val sf = simd_fixes[si]
+                val id_parts2 = sf.id.split(":")
+                val line_str2 = if id_parts2.len() > 3: id_parts2[3] else: "?"
+                print "{file_path}:{line_str2}: info[simd_opportunity]: {sf.description}"
+                si = si + 1
 
         if visible_count == 0:
             print "lint: {file_path} OK"

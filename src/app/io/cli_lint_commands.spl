@@ -5,6 +5,7 @@
 
 use compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
 use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
+use compiler.tools.fix.rules.{check_simd_opportunities}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run}
 
@@ -18,11 +19,14 @@ fn file_allows_lint(source: text, lint_name: text) -> bool:
 fn cli_run_lint(args: [text]) -> i64:
     var files: [text] = []
     var run_mcp_perf = false
+    var run_simd = false
     for arg in args:
         if arg == "lint":
             val _ = 0
         elif arg == "--mcp-perf" or arg == "--all":
             run_mcp_perf = true
+        elif arg == "--simd":
+            run_simd = true
         elif not arg.starts_with("-"):
             files.push(arg)
 
@@ -42,7 +46,7 @@ fn cli_run_lint(args: [text]) -> i64:
             exit_code = 1
 
     if files.len() == 0:
-        print "Usage: simple lint <file.spl> [file2.spl...] [--mcp-perf]"
+        print "Usage: simple lint <file.spl> [file2.spl...] [--mcp-perf] [--simd]"
         print ""
         print "Runs lint passes on Simple source files."
         print "Checks for:"
@@ -50,6 +54,7 @@ fn cli_run_lint(args: [text]) -> i64:
         print "  - Duplicate typed arguments (DTYP001)"
         print "  - Bare primitive types in public APIs"
         print "  - MCP wrapper, hot-path, and invalidation regressions (--mcp-perf)"
+        print "  - SIMD vectorisation opportunities L-SIMD-001..011 (--simd, info only)"
         return 1
 
     var total_warnings = 0
@@ -72,6 +77,17 @@ fn cli_run_lint(args: [text]) -> i64:
             val line_str = if id_parts.len() > 2: id_parts[2] else: "?"
             visible_fix_count = visible_fix_count + 1
             _cli_eprint("{file_path}:{line_str}: warning[{lint_name}]: {fix.description}")
+
+        # SIMD opportunity pass — info severity, never increments exit code
+        if run_simd:
+            val simd_fixes = check_simd_opportunities(source, file_path)
+            var si = 0
+            while si < simd_fixes.len():
+                val sf = simd_fixes[si]
+                val id_parts2 = sf.id.split(":")
+                val line_str2 = if id_parts2.len() > 3: id_parts2[3] else: "?"
+                print "{file_path}:{line_str2}: info[simd_opportunity]: {sf.description}"
+                si = si + 1
 
         if visible_fix_count == 0:
             print "lint: {file_path} OK"

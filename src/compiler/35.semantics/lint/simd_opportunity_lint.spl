@@ -1,0 +1,1103 @@
+# SIMD Opportunity Lint
+#
+# Source-level lint checks that detect scalar loops which could be
+# SIMDified but aren't, and emit concrete fix suggestions.
+# All checks are text-based (they scan raw .spl source lines) so they
+# run before the AST is formed — consistent with the other lint passes
+# in this directory.
+#
+# L-SIMD-001 (info):    element-wise add loop → FixedVec.add / ScalableVec.add
+# L-SIMD-002 (info):    scalar accumulator loop → FixedVec.reduce_sum
+# L-SIMD-003 (warning): byte-array XOR loop (hot inner loop) → FixedVec<u8,16>.xor
+# L-SIMD-004 (info):    element-wise max loop → FixedVec.max
+# L-SIMD-005 (note):    constant right-shift over loop → FixedVec.shr_logical
+# L-SIMD-006 (warning): memcpy loop out[i]=src[i] → FixedVec copy via from_array/to_array
+# L-SIMD-007 (info):    byte-mismatch scan loop → FixedVec.cmp_eq + reduce
+# L-SIMD-008 (warning): ASCII tolower loop → FixedVec mask_select + add
+# L-SIMD-009 (info):    ReLU loop max(a[i],0) → FixedVec.max(zero)
+# L-SIMD-010 (note):    byte-frequency histogram loop → byte_histogram_simd (if hot)
+# L-SIMD-011 (warning): key-XOR cipher loop out[i]=a[i]^key[i%keylen] → FixedVec.xor tiled
+#
+# Does NOT flag:
+# - Comment lines or docstrings
+# - Loops containing I/O calls (print, write, read, open, close, flush)
+# - Loops containing FFI calls (extern fn calls detected via rt_ prefix)
+# - Loops containing function calls (any token ending in '(')
+# - Loops with early return or break (control flow divergence)
+# - Loops inside FFI-annotated modules (@export("C") or @ffi)
+# - Loops that are already using FixedVec or ScalableVec
+#
+# Severity tiers:
+#   info    — definite but cosmetic; low confidence the loop is hot
+#   warning — high-confidence the loop is hot (e.g. XOR over bytes, hot inner loop)
+#   note    — suggestion-only; user may choose to ignore
+
+use compiler.semantics.lint.lint_text.{iter_code_lines, CodeLine}
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+pub struct SimdOpportunityWarning:
+    code: text        # L-SIMD-001, etc.
+    severity: text    # "info", "warning", "note"
+    message: text
+    hint: text
+    fix: text         # concrete replacement code snippet
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message} — {self.hint}"
+
+    fn fmt_with_fix() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message}\n  hint: {self.hint}\n  fix:  {self.fix}"
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _find_substr(haystack: text, needle: text) -> i64:
+    """Return index of first occurrence of needle in haystack, or -1."""
+    if needle.len() == 0:
+        return 0
+    if haystack.len() < needle.len():
+        return -1
+    var i = 0
+    val limit = haystack.len() - needle.len() + 1
+    while i < limit:
+        val chunk = haystack.slice(i, i + needle.len())
+        if chunk == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _is_for_range_loop(line: text) -> bool:
+    """Detect `for <ident> in 0..<expr>:` style range loops."""
+    val t = line.trim()
+    if not t.starts_with("for "):
+        return false
+    if _find_substr(t, "in 0..") >= 0:
+        return true
+    if _find_substr(t, "in 0 ..") >= 0:
+        return true
+    false
+
+fn _is_while_range_loop(line: text) -> bool:
+    """Detect `while <ident> < <expr>:` style range loops (canonical stdlib idiom)."""
+    val t = line.trim()
+    if not t.starts_with("while "):
+        return false
+    # Must contain `<var> < <expr>:` pattern — i.e. a comparison with <
+    if _find_substr(t, " < ") >= 0:
+        return true
+    false
+
+fn _extract_while_loop_var(line: text) -> text:
+    """Extract the loop variable from `while <var> < <expr>:`."""
+    val t = line.trim()
+    if not t.starts_with("while "):
+        return "i"
+    val rest = t.slice(6)  # skip "while "
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == " " or ch == "<" or ch == ":":
+            break
+        end = end + 1
+    if end == 0:
+        return "i"
+    rest.slice(0, end).trim()
+
+fn _extract_while_range_n(line: text) -> text:
+    """Extract upper bound from `while <var> < <n>:`."""
+    val t = line.trim()
+    val lt_idx = _find_substr(t, " < ")
+    if lt_idx < 0:
+        return "n"
+    val rest = t.slice(lt_idx + 3)
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == ":" or ch == " " or ch == ")":
+            break
+        end = end + 1
+    if end == 0:
+        return "n"
+    rest.slice(0, end).trim()
+
+fn _extract_loop_var_generic(line: text) -> text:
+    """Extract loop variable from either for or while range loop."""
+    val t = line.trim()
+    if t.starts_with("for "):
+        return _extract_loop_var(t)
+    if t.starts_with("while "):
+        return _extract_while_loop_var(t)
+    "i"
+
+fn _extract_range_n_generic(line: text) -> text:
+    """Extract upper bound from either for or while range loop."""
+    val t = line.trim()
+    if t.starts_with("for "):
+        return _extract_range_n(t)
+    if t.starts_with("while "):
+        return _extract_while_range_n(t)
+    "n"
+
+fn _has_io_call(line: text) -> bool:
+    """Detect I/O calls that make SIMD vectorisation unsafe."""
+    val t = line.trim()
+    if t.starts_with("#"):
+        return false
+    val io_tokens = ["print ", "print(", "println(", ".write(", ".read(", ".open(", ".close(", ".flush(", "file_read(", "file_write(", "rt_file_"]
+    var i = 0
+    while i < io_tokens.len():
+        if t.contains(io_tokens[i]):
+            return true
+        i = i + 1
+    false
+
+fn _has_ffi_call(line: text) -> bool:
+    """Detect FFI runtime calls (rt_ prefix) that block vectorisation."""
+    val t = line.trim()
+    if t.starts_with("#"):
+        return false
+    _find_substr(t, "rt_") >= 0 and t.contains("(")
+
+fn _is_simd_safe_call(line: text, call_end: i64) -> bool:
+    """Return true if the function call ending at call_end (the '(' position) is in the
+    SIMD-safe allowlist: max, min, abs, clamp.  These are pure scalar math functions
+    whose SIMD equivalents exist in FixedVec — all others are conservatively rejected."""
+    # Walk backwards from call_end to find the start of the identifier
+    var start = call_end - 1
+    while start > 0:
+        val ch = line.slice(start - 1, start)
+        val is_ident = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not is_ident:
+            break
+        start = start - 1
+    val name = line.slice(start, call_end)
+    name == "max" or name == "min" or name == "abs" or name == "clamp"
+
+fn _has_function_call(line: text) -> bool:
+    """Detect any non-trivial function call inside a loop body.
+    Excludes array index access (contains '[') and method-chain on arrays.
+    Allowlist: max(, min(, abs(, clamp( are pure scalar math — safe for SIMD.
+    A 'call' is identified by an identifier followed immediately by '('.
+    """
+    val t = line.trim()
+    if t.starts_with("#"):
+        return false
+    # Skip lines that are pure array indexing or comparisons
+    if not t.contains("("):
+        return false
+    # Detect identifier( pattern — any letter/underscore followed by (
+    var i = 0
+    while i < t.len():
+        val ch = t.slice(i, i + 1)
+        if ch == "(":
+            # Check char before paren
+            if i > 0:
+                val prev = t.slice(i - 1, i)
+                val is_ident_char = (prev >= "a" and prev <= "z") or (prev >= "A" and prev <= "Z") or (prev >= "0" and prev <= "9") or prev == "_"
+                if is_ident_char:
+                    # Allow .push( (array mutation), and pure SIMD-safe math functions
+                    val at_push = i >= 5 and t.slice(i - 5, i + 1) == ".push("
+                    if not at_push and not _is_simd_safe_call(t, i):
+                        return true
+            i = i + 1
+        else:
+            i = i + 1
+    false
+
+fn _has_break_return(line: text) -> bool:
+    """Detect early exit that blocks vectorisation."""
+    val t = line.trim()
+    if t.starts_with("#"):
+        return false
+    t.starts_with("return") or t.starts_with("break") or t.starts_with("continue")
+
+fn _has_simd_already(line: text) -> bool:
+    """Return true if this line already uses FixedVec or ScalableVec."""
+    line.contains("FixedVec") or line.contains("ScalableVec") or line.contains("fixedvec_") or line.contains("scalablevec_")
+
+fn _loop_body_is_safe(lines: [CodeLine], loop_start: i64, loop_indent: i64) -> bool:
+    """Return true if the loop body has no calls, I/O, FFI, or control flow
+    that would make SIMD rewriting unsafe.  Scans until dedent back to the
+    loop's indent level."""
+    var i = loop_start + 1
+    while i < lines.len():
+        val cl = lines[i]
+        val t = cl.trimmed
+        # Determine body indent: first non-empty non-comment line sets it
+        if t.len() == 0 or t.starts_with("#"):
+            i = i + 1
+            continue
+        # Count leading spaces of raw line
+        var indent = 0
+        var j = 0
+        while j < cl.raw.len():
+            val ch = cl.raw.slice(j, j + 1)
+            if ch == " ":
+                indent = indent + 1
+                j = j + 1
+            elif ch == "\t":
+                indent = indent + 4
+                j = j + 1
+            else:
+                break
+        # Back at or before loop's indent means we left the body
+        if indent <= loop_indent:
+            return true
+        # Unsafe patterns
+        if _has_io_call(t):
+            return false
+        if _has_ffi_call(t):
+            return false
+        if _has_break_return(t):
+            return false
+        if _has_simd_already(t):
+            return false
+        # Function calls (allowlisted: max, min, abs, clamp; .push( on array)
+        if _has_function_call(t):
+            return false
+        i = i + 1
+    true
+
+fn _loop_indent(line: text) -> i64:
+    """Count leading spaces of a raw line."""
+    var indent = 0
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == " ":
+            indent = indent + 1
+            i = i + 1
+        elif ch == "\t":
+            indent = indent + 4
+            i = i + 1
+        else:
+            break
+    indent
+
+fn _extract_loop_var(line: text) -> text:
+    """Extract the loop variable from `for <var> in ...`."""
+    val t = line.trim()
+    if not t.starts_with("for "):
+        return "i"
+    val rest = t.slice(4)
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == " " or ch == ":":
+            break
+        end = end + 1
+    if end == 0:
+        return "i"
+    rest.slice(0, end)
+
+fn _extract_range_n(line: text) -> text:
+    """Extract upper bound N from `for i in 0..N` or `for i in 0..n`."""
+    val t = line.trim()
+    val idx = _find_substr(t, "0..")
+    if idx < 0:
+        return "n"
+    val rest = t.slice(idx + 3)
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == ":" or ch == " " or ch == ")":
+            break
+        end = end + 1
+    if end == 0:
+        return "n"
+    rest.slice(0, end)
+
+# ============================================================================
+# L-SIMD-001: Element-wise add loop
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       out[i] = a[i] + b[i]
+#
+# Fix: replace with
+#   val out = fixedvec_from_slice(a).add(fixedvec_from_slice(b)).to_array()
+# or ScalableVec variant when n is not a literal constant.
+# ============================================================================
+
+pub fn lint_simd_elementwise_add(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect scalar element-wise add loops that could use FixedVec.add or ScalableVec.add."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            # Look for body line: out[i] = a[i] + b[i]
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                val add_pattern = (
+                    _find_substr(body, "[{lvar}] = ") >= 0 and
+                    _find_substr(body, "[{lvar}] + ") >= 0 and
+                    not body.contains("- ") and
+                    not body.contains("* ") and
+                    not body.contains("/ ")
+                )
+                if add_pattern and _loop_body_is_safe(code_lines, li, indent):
+                    # Extract array names from pattern: out[i] = a[i] + b[i]
+                    val eq_idx = _find_substr(body, "[{lvar}] = ")
+                    val out_arr = if eq_idx > 0: body.slice(0, eq_idx).trim() else: "out"
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-001",
+                        severity: "info",
+                        message: "scalar element-wise add loop over {n} elements can be SIMDified",
+                        hint: "use FixedVec.add for compile-time-known lane count, or ScalableVec.add for runtime-sized arrays",
+                        fix: "val {out_arr} = fixedvec_from_slice(a).add(fixedvec_from_slice(b)).to_array()  # or ScalableVec variant for large/runtime n",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-002: Scalar accumulator (reduce_sum)
+# ============================================================================
+#
+# Detects:
+#   var s = 0
+#   for i in 0..n:
+#       s = s + a[i]    (or s = s + a[i] or s += ...)
+#
+# Fix:
+#   val s = fixedvec_from_slice(a).reduce_sum()
+# ============================================================================
+
+pub fn lint_simd_reduce_sum(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect scalar accumulator loops that could use FixedVec.reduce_sum."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    # Track last seen `var <name> = 0` declarations
+    var last_accum_var = ""
+    var last_accum_line = 0
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#"):
+            # Detect `var s = 0` accumulator pattern
+            if t.starts_with("var ") and (t.contains("= 0") or t.contains("= 0.0")):
+                val rest = t.slice(4)
+                var name_end = 0
+                while name_end < rest.len():
+                    val ch = rest.slice(name_end, name_end + 1)
+                    if ch == " " or ch == ":":
+                        break
+                    name_end = name_end + 1
+                last_accum_var = rest.slice(0, name_end)
+                last_accum_line = cl.line_num
+
+            # Detect for-range or while-range loop following an accumulator var
+            if (_is_for_range_loop(t) or _is_while_range_loop(t)) and last_accum_var.len() > 0:
+                val lvar = _extract_loop_var_generic(t)
+                val n = _extract_range_n_generic(t)
+                val indent = _loop_indent(cl.raw)
+
+                if li + 1 < code_lines.len():
+                    val body = code_lines[li + 1].trimmed
+                    # Pattern: s = s + a[i]  or  s = s + arr[i]
+                    val accum_add = (
+                        body.starts_with("{last_accum_var} = {last_accum_var} + ") or
+                        body.starts_with("{last_accum_var} = {last_accum_var}+")
+                    )
+                    # Also catch: s = a[i] + s
+                    val accum_add2 = (
+                        body.starts_with("{last_accum_var} = ") and
+                        _find_substr(body, "+ {last_accum_var}") >= 0
+                    )
+                    if (accum_add or accum_add2) and _loop_body_is_safe(code_lines, li, indent):
+                        # Extract array name from pattern
+                        val arr_name = if accum_add:
+                            val prefix = "{last_accum_var} = {last_accum_var} + "
+                            val rest = body.slice(prefix.len())
+                            val bracket = _find_substr(rest, "[{lvar}]")
+                            if bracket > 0: rest.slice(0, bracket) else: "a"
+                        else:
+                            "a"
+                        warnings.push(SimdOpportunityWarning(
+                            code: "L-SIMD-002",
+                            severity: "info",
+                            message: "scalar accumulator loop over '{last_accum_var}' can be replaced with SIMD reduce_sum",
+                            hint: "use FixedVec.reduce_sum() to sum all lanes in one vector op",
+                            fix: "val {last_accum_var} = fixedvec_from_slice({arr_name}).reduce_sum()",
+                            line_num: cl.line_num,
+                            file_path: path
+                        ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-003 (warning): Byte-array XOR loop (hot kernel)
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       out[i] = a[i] ^ b[i]
+#   (or: out[i] = a[i] xor b[i] — Simple uses ^)
+#
+# This fires as WARNING because XOR-over-byte loops are canonical hot
+# crypto/cipher kernels — high confidence this is a performance hot path.
+#
+# Fix:
+#   val out = fixedvec_from_slice(a).xor(fixedvec_from_slice(b)).to_array()
+# For exactly 16 bytes:
+#   val out = FixedVec<u8>(elements: a, lanes: 16).xor(FixedVec<u8>(elements: b, lanes: 16)).to_array()
+# ============================================================================
+
+pub fn lint_simd_xor_loop(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect byte-array XOR loops that could use FixedVec<u8>.xor."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                # Pattern: out[i] = a[i] ^ b[i]
+                val xor_pattern = (
+                    _find_substr(body, "[{lvar}] = ") >= 0 and
+                    _find_substr(body, "[{lvar}] ^ ") >= 0
+                )
+                # Also catch: out[i] = a[i] ^ key  (scalar XOR with constant)
+                val xor_scalar_pattern = (
+                    _find_substr(body, "[{lvar}] = ") >= 0 and
+                    body.contains(" ^ ") and
+                    not _find_substr(body, "[{lvar}] ^ ") >= 0
+                )
+
+                if (xor_pattern or xor_scalar_pattern) and _loop_body_is_safe(code_lines, li, indent):
+                    val fix_snippet = if xor_pattern:
+                        "val out = fixedvec_from_slice(a).xor(fixedvec_from_slice(b)).to_array()  # use FixedVec<u8>(elements:a, lanes:16) for exactly 16 bytes"
+                    else:
+                        "val key_vec = FixedVec<u8>(elements: [key] * {n}, lanes: {n})\nval out = fixedvec_from_slice(a).xor(key_vec).to_array()"
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-003",
+                        severity: "warning",
+                        message: "byte-array XOR loop over {n} elements is a hot SIMD opportunity",
+                        hint: "XOR-cipher and hash kernels are canonical SIMD use cases — FixedVec<u8>.xor processes 16 bytes per vector op on SSE2+",
+                        fix: fix_snippet,
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-004: Element-wise max loop
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       out[i] = max(a[i], b[i])
+#   or: if a[i] > b[i]: out[i] = a[i] else: out[i] = b[i]
+#
+# Fix:
+#   val out = fixedvec_from_slice(a).max(fixedvec_from_slice(b)).to_array()
+# ============================================================================
+
+pub fn lint_simd_elementwise_max(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect scalar element-wise max loops that could use FixedVec.max."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                # Pattern 1: out[i] = max(a[i], b[i])  — using a global max() fn
+                # We specifically DO NOT flag this when max( has nested calls,
+                # but simple array-index args are fine.
+                val max_call_pattern = (
+                    _find_substr(body, "[{lvar}] = max(") >= 0 and
+                    body.ends_with(")")
+                )
+                # Pattern 2: out[i] = if a[i] > b[i]: a[i] else: b[i]
+                val max_ternary_pattern = (
+                    _find_substr(body, "[{lvar}] = if ") >= 0 and
+                    (body.contains("[{lvar}] >") or body.contains("[{lvar}] >="))
+                )
+
+                if (max_call_pattern or max_ternary_pattern) and _loop_body_is_safe(code_lines, li, indent):
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-004",
+                        severity: "info",
+                        message: "scalar element-wise max loop over {n} elements can be SIMDified",
+                        hint: "FixedVec.max(other) computes element-wise maximum in one vector op",
+                        fix: "val out = fixedvec_from_slice(a).max(fixedvec_from_slice(b)).to_array()",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-005 (note): Constant right-shift over loop
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       out[i] = a[i] >> K      (K is a numeric literal or a constant name)
+#
+# Fix:
+#   val out = fixedvec_from_slice(a).shr_logical(K).to_array()
+# ============================================================================
+
+pub fn lint_simd_const_shr_loop(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect constant right-shift loops that could use FixedVec.shr_logical."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                # Pattern: out[i] = a[i] >> K
+                val shr_pattern = (
+                    _find_substr(body, "[{lvar}] = ") >= 0 and
+                    _find_substr(body, "[{lvar}] >> ") >= 0
+                )
+
+                if shr_pattern and _loop_body_is_safe(code_lines, li, indent):
+                    # Extract shift amount
+                    val shr_idx = _find_substr(body, " >> ")
+                    val shift_amount = if shr_idx >= 0:
+                        val rest = body.slice(shr_idx + 4)
+                        var end = 0
+                        while end < rest.len():
+                            val ch = rest.slice(end, end + 1)
+                            if ch == " " or ch == ")" or ch == "\n":
+                                break
+                            end = end + 1
+                        rest.slice(0, end)
+                    else:
+                        "K"
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-005",
+                        severity: "note",
+                        message: "constant right-shift by {shift_amount} over {n} elements can use FixedVec.shr_logical",
+                        hint: "FixedVec.shr_logical(count) does logical (zero-fill) right shift on all lanes simultaneously",
+                        fix: "val out = fixedvec_from_slice(a).shr_logical({shift_amount}).to_array()",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-006 (warning): Memcpy loop
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       out[i] = src[i]
+#
+# Fix:
+#   val out = fixedvec_from_slice(src).to_array()
+#   # For in-place copy to existing buffer: fixedvec_from_slice(src).to_slice_into(out)
+# ============================================================================
+
+pub fn lint_simd_memcpy_loop(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect scalar element-copy loops (memcpy pattern) that could use FixedVec bulk copy."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                # Pattern: out[i] = src[i]  — no operator, pure copy
+                # Must have [lvar] on both sides and no arithmetic operators.
+                # has_src: search for a second [lvar] occurrence on the RHS of " = "
+                # to distinguish out[i] = src[i] (copy) from out[i] = literal (not copy).
+                val has_dest = _find_substr(body, "[{lvar}] = ") >= 0
+                val eq_pos   = _find_substr(body, "[{lvar}] = ")
+                # RHS starts after "[lvar] = "  (len("[i] = ") = lvar.len() + 5)
+                val rhs_start = if eq_pos >= 0: eq_pos + lvar.len() + 5 else: body.len()
+                val rhs      = if rhs_start < body.len(): body.slice(rhs_start) else: ""
+                val has_src  = _find_substr(rhs, "[{lvar}]") >= 0
+                val no_arith = (
+                    not body.contains(" + ") and
+                    not body.contains(" - ") and
+                    not body.contains(" * ") and
+                    not body.contains(" / ") and
+                    not body.contains(" ^ ") and
+                    not body.contains(" >> ") and
+                    not body.contains(" << ")
+                )
+                if has_dest and has_src and no_arith and _loop_body_is_safe(code_lines, li, indent):
+                    # Extract array names — reuse eq_pos computed above
+                    val dest_arr = if eq_pos > 0: body.slice(0, eq_pos).trim() else: "out"
+                    val src_bracket = _find_substr(rhs, "[{lvar}]")
+                    val src_arr = if src_bracket > 0: rhs.slice(0, src_bracket).trim() else: "src"
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-006",
+                        severity: "warning",
+                        message: "scalar element-copy loop over {n} elements is a memcpy SIMD opportunity",
+                        hint: "FixedVec bulk copy avoids per-element overhead; use to_slice_into for in-place",
+                        fix: "# fixed-width copy:\nval {dest_arr} = fixedvec_from_slice({src_arr}).to_array()\n# in-place into existing buffer:\nfixedvec_from_slice({src_arr}).to_slice_into({dest_arr})",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-007 (info): Byte-mismatch scan loop
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       if a[i] != b[i]:
+#           break
+#
+# Fix:
+#   # Use cmp_eq + reduce_and to find the first mismatch position:
+#   val eq_mask = fixedvec_from_slice(a).cmp_eq(fixedvec_from_slice(b))
+#   val all_equal = eq_mask.reduce_and()   # 0 means mismatch found
+#   # planned: find_first_mismatch(a, b) — see simd_opportunity_lint: L-SIMD-007 follow-up
+# ============================================================================
+
+pub fn lint_simd_byte_mismatch_scan(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect byte-mismatch scan loops (if a[i] != b[i]: break) that could use cmp_eq."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            # Look for pattern: if a[i] != b[i]: (next line) break
+            if li + 1 < code_lines.len():
+                val body1 = code_lines[li + 1].trimmed
+                # Allow break on same line after colon or on next line
+                val mismatch_if = (
+                    _find_substr(body1, "[{lvar}] != ") >= 0 and
+                    body1.starts_with("if ")
+                )
+                if mismatch_if:
+                    # Check if body has break (either same line or next)
+                    val has_break_same = body1.contains(": break") or body1.ends_with("break")
+                    val has_break_next = if li + 2 < code_lines.len():
+                        code_lines[li + 2].trimmed.starts_with("break")
+                    else:
+                        false
+                    if (has_break_same or has_break_next) and _loop_body_is_safe(code_lines, li, indent):
+                        warnings.push(SimdOpportunityWarning(
+                            code: "L-SIMD-007",
+                            severity: "info",
+                            message: "byte-mismatch scan loop over {n} elements can use SIMD cmp_eq",
+                            hint: "vpcmpeqb + movemask processes 16 bytes per iteration; see planned find_first_mismatch()",
+                            fix: "val eq_mask = fixedvec_from_slice(a).cmp_eq(fixedvec_from_slice(b))\nval all_equal = eq_mask.reduce_and()  # 0 = mismatch found\n# planned: find_first_mismatch(a, b)  — simd_opportunity_lint: L-SIMD-007 follow-up",
+                            line_num: cl.line_num,
+                            file_path: path
+                        ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-008 (warning): ASCII tolower loop
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       if a[i] >= 0x41 and a[i] <= 0x5A:
+#           out[i] = a[i] + 32
+#       else:
+#           out[i] = a[i]
+#
+# Also detects the compact assignment form:
+#   out[i] = if a[i] >= 65 and a[i] <= 90: a[i] + 32 else: a[i]
+#
+# Fix (using real FixedVec API — mask_select + add):
+#   val va = fixedvec_from_slice(a)
+#   val in_upper = va.cmp_ge(FixedVec<u8>(elements: [0x41u8] * n, lanes: n)).and(
+#                      va.cmp_le(FixedVec<u8>(elements: [0x5Au8] * n, lanes: n)))
+#   val out = FixedVec.mask_select(in_upper, va.add(FixedVec<u8>(elements: [32u8] * n, lanes: n)), va).to_array()
+# ============================================================================
+
+pub fn lint_simd_ascii_tolower(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect ASCII tolower loops (0x41..0x5A range + add 32) that could use FixedVec mask ops."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                # Pattern A: if a[i] >= 0x41 ... or >= 65 ...
+                val has_upper_check = (
+                    (body.contains(">= 0x41") or body.contains(">= 65")) and
+                    (body.contains("<= 0x5A") or body.contains("<= 90"))
+                )
+                # Pattern B: compact: out[i] = if a[i] >= 65 and a[i] <= 90: a[i] + 32
+                val compact_form = (
+                    _find_substr(body, "[{lvar}] = if ") >= 0 and
+                    (body.contains(">= 65") or body.contains(">= 0x41")) and
+                    body.contains("+ 32")
+                )
+                if (has_upper_check or compact_form) and _loop_body_is_safe(code_lines, li, indent):
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-008",
+                        severity: "warning",
+                        message: "ASCII tolower loop over {n} bytes can be SIMDified with mask_select",
+                        hint: "SSE2+ PCMPGTB + masked PADDB processes 16 chars/cycle; use FixedVec.cmp_ge/cmp_le + mask_select",
+                        fix: "val va = fixedvec_from_slice(a)\nval lo = FixedVec<u8>(elements: splat_array(0x41u8, {n}), lanes: {n})\nval hi = FixedVec<u8>(elements: splat_array(0x5Au8, {n}), lanes: {n})\nval delta = FixedVec<u8>(elements: splat_array(32u8, {n}), lanes: {n})\nval mask = va.cmp_ge(lo).and(va.cmp_le(hi))\nval out = FixedVec.mask_select(mask, va.add(delta), va).to_array()",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-009 (info): ReLU loop — max(a[i], 0)
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       out[i] = max(a[i], 0)
+#   or: out[i] = if a[i] >= 0: a[i] else: 0
+#
+# This is a specialisation of L-SIMD-004 (element-wise max) where one operand
+# is the constant zero — the classic ReLU activation pattern from ML code.
+# We emit a separate rule because the fix snippet uses FixedVec.max(zero_vec)
+# which is more specific and pedagogically useful than the generic max form.
+#
+# Fix:
+#   val zeros = FixedVec<f32>(elements: splat_array(0.0, n), lanes: n)
+#   val out   = fixedvec_from_slice(a).max(zeros).to_array()
+# ============================================================================
+
+pub fn lint_simd_relu(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect ReLU-shaped max(a[i], 0) loops that could use FixedVec.max(zero_vec)."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                # Pattern 1: out[i] = max(a[i], 0) or max(a[i], 0.0)
+                val max_zero = (
+                    _find_substr(body, "[{lvar}] = max(") >= 0 and
+                    (body.ends_with(", 0)") or body.ends_with(", 0.0)"))
+                )
+                # Pattern 2: out[i] = if a[i] >= 0: a[i] else: 0
+                val relu_ternary = (
+                    _find_substr(body, "[{lvar}] = if ") >= 0 and
+                    (body.contains("[{lvar}] >= 0") or body.contains("[{lvar}] > 0")) and
+                    body.ends_with(" else: 0") or body.ends_with(" else: 0.0")
+                )
+                if (max_zero or relu_ternary) and _loop_body_is_safe(code_lines, li, indent):
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-009",
+                        severity: "info",
+                        message: "ReLU-shaped max(a[{lvar}], 0) loop over {n} elements can use FixedVec.max",
+                        hint: "FixedVec.max(zero_vec) lowers to VMAXPS/VMAXSS — one instruction per 4 or 8 floats",
+                        fix: "val zeros = FixedVec<f32>(elements: splat_array(0.0, {n}), lanes: {n})\nval out   = fixedvec_from_slice(a).max(zeros).to_array()",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-010 (note): Byte-frequency histogram loop
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       histogram[a[i]] += 1
+#   or: histogram[a[i]] = histogram[a[i]] + 1
+#
+# This is a gather-scatter pattern.  SIMD is beneficial only when the data is
+# hot in cache and the loop is profiled hot.  The lint fires as NOTE because:
+#   - The access pattern (random scatter) is not trivially vectorisable
+#   - A naive 4-accumulator interleaved approach can still yield 2–3× speedup
+#   - The fix suggestion is a planned primitive, not a direct FixedVec call
+#
+# Does NOT fire when:
+#   - The index is not a plain array read (e.g., histogram[hash(a[i])])
+#   - The increment is not 1 (e.g., histogram[a[i]] += weight)
+# ============================================================================
+
+pub fn lint_simd_histogram(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect byte-frequency histogram loops; suggest byte_histogram_simd if profiled hot."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and _is_for_range_loop(t):
+            val lvar = _extract_loop_var(t)
+            val n = _extract_range_n(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                # Pattern: histogram[a[i]] += 1
+                val hist_incr = (
+                    _find_substr(body, "[a[{lvar}]] += 1") >= 0 or
+                    _find_substr(body, "[a[{lvar}]] = ") >= 0 and body.ends_with("] + 1")
+                )
+                # Negative: must be plain array read (not hash/fn call before [)
+                # If body contains a '(' before the '[a[i]]' pattern, skip
+                val bracket_pos = _find_substr(body, "[a[{lvar}]]")
+                val has_call_before = if bracket_pos > 0:
+                    val prefix = body.slice(0, bracket_pos)
+                    prefix.contains("(")
+                else:
+                    false
+                if hist_incr and not has_call_before and _loop_body_is_safe(code_lines, li, indent):
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-010",
+                        severity: "note",
+                        message: "byte-frequency histogram loop over {n} elements may benefit from SIMD if profiled hot",
+                        hint: "scatter-increment is not trivially SIMD; planned primitive byte_histogram_simd uses 4-accumulator interleaved approach — only worth it if this loop is profiled hot",
+                        fix: "# Only apply if this loop is confirmed hot by profiling:\n# val hist = byte_histogram_simd(a)  # planned — see simd_opportunity_lint: L-SIMD-010 follow-up\n# Manual 4-accumulator approach (available now):\nvar h0: [i64] = splat_array(0, 256)\nvar h1: [i64] = splat_array(0, 256)\nvar h2: [i64] = splat_array(0, 256)\nvar h3: [i64] = splat_array(0, 256)\nvar k = 0\nwhile k + 3 < {n}:\n    h0[a[k]]     = h0[a[k]] + 1\n    h1[a[k + 1]] = h1[a[k + 1]] + 1\n    h2[a[k + 2]] = h2[a[k + 2]] + 1\n    h3[a[k + 3]] = h3[a[k + 3]] + 1\n    k = k + 4",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-011 (warning): Key-XOR cipher loop
+# ============================================================================
+#
+# Detects:
+#   for i in 0..n:
+#       out[i] = a[i] ^ key[i % keylen]
+#
+# This is distinct from L-SIMD-003 (which detects a[i] ^ b[i] with matching
+# array indices).  The key-XOR pattern uses a modulo index for the key, which
+# is the canonical Vigenère / stream cipher inner loop.  The fix tiles the key
+# into a full-length buffer once, then uses FixedVec.xor.
+#
+# Fix:
+#   # Tile key to length n, then XOR:
+#   val tiled_key = tile_to_len(key, keylen, n)   # planned helper
+#   val out = fixedvec_from_slice(a).xor(fixedvec_from_slice(tiled_key)).to_array()
+#   # Manual tile (available now):
+#   var tiled: [u8] = []
+#   var k = 0
+#   while k < n:
+#       tiled.push(key[k % keylen])
+#       k = k + 1
+#   val out = fixedvec_from_slice(a).xor(fixedvec_from_slice(tiled)).to_array()
+# ============================================================================
+
+pub fn lint_simd_key_xor(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect key-XOR cipher loops (out[i] = a[i] ^ key[i % keylen]) that could use tiled FixedVec.xor."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and _is_for_range_loop(t):
+            val lvar = _extract_loop_var(t)
+            val n = _extract_range_n(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                # Pattern: out[i] = a[i] ^ key[i % keylen]  (modulo index on RHS of XOR)
+                val has_xor = body.contains(" ^ ")
+                val has_modulo_key = _find_substr(body, "[{lvar} % ") >= 0 or _find_substr(body, "[ {lvar} % ") >= 0
+                val xor_key_pattern = (
+                    _find_substr(body, "[{lvar}] = ") >= 0 and
+                    has_xor and
+                    has_modulo_key
+                )
+                if xor_key_pattern and _loop_body_is_safe(code_lines, li, indent):
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-011",
+                        severity: "warning",
+                        message: "key-XOR cipher loop over {n} bytes is a hot SIMD opportunity",
+                        hint: "tile key to length n once, then FixedVec.xor processes 16 bytes per PXOR; avoids per-byte modulo",
+                        fix: "# Tile key to length n, then XOR:\nvar tiled: [u8] = []\nvar k = 0\nwhile k < {n}:\n    tiled.push(key[k % keylen])\n    k = k + 1\nval out = fixedvec_from_slice(a).xor(fixedvec_from_slice(tiled)).to_array()\n# Or use planned: tile_to_len(key, keylen, {n}) — see simd_opportunity_lint: L-SIMD-011 follow-up",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# Composite entry point — run all SIMD opportunity checks
+# ============================================================================
+
+pub fn lint_simd_opportunities(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Run all 11 SIMD-opportunity lint rules on a source file.
+
+    Returns a combined list of warnings from all rules, sorted by line number.
+    """
+    var all: [SimdOpportunityWarning] = []
+
+    val w1 = lint_simd_elementwise_add(source, path)
+    var i = 0
+    while i < w1.len():
+        all.push(w1[i])
+        i = i + 1
+
+    val w2 = lint_simd_reduce_sum(source, path)
+    i = 0
+    while i < w2.len():
+        all.push(w2[i])
+        i = i + 1
+
+    val w3 = lint_simd_xor_loop(source, path)
+    i = 0
+    while i < w3.len():
+        all.push(w3[i])
+        i = i + 1
+
+    val w4 = lint_simd_elementwise_max(source, path)
+    i = 0
+    while i < w4.len():
+        all.push(w4[i])
+        i = i + 1
+
+    val w5 = lint_simd_const_shr_loop(source, path)
+    i = 0
+    while i < w5.len():
+        all.push(w5[i])
+        i = i + 1
+
+    val w6 = lint_simd_memcpy_loop(source, path)
+    i = 0
+    while i < w6.len():
+        all.push(w6[i])
+        i = i + 1
+
+    val w7 = lint_simd_byte_mismatch_scan(source, path)
+    i = 0
+    while i < w7.len():
+        all.push(w7[i])
+        i = i + 1
+
+    val w8 = lint_simd_ascii_tolower(source, path)
+    i = 0
+    while i < w8.len():
+        all.push(w8[i])
+        i = i + 1
+
+    val w9 = lint_simd_relu(source, path)
+    i = 0
+    while i < w9.len():
+        all.push(w9[i])
+        i = i + 1
+
+    val w10 = lint_simd_histogram(source, path)
+    i = 0
+    while i < w10.len():
+        all.push(w10[i])
+        i = i + 1
+
+    val w11 = lint_simd_key_xor(source, path)
+    i = 0
+    while i < w11.len():
+        all.push(w11[i])
+        i = i + 1
+
+    all

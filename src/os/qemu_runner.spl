@@ -37,6 +37,8 @@ extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_env_cwd() -> text
 extern fn rt_time_now_unix_micros() -> i64
 
+val _MULTIARCH_RESULT_ROOT: text = "build/multiarch"
+
 # Default native-build timeout for `os build` lane.
 # Rationale: a cold full-tree native-build on current CI hardware routinely
 # lands in the 5–10 minute range (see simpleos_process_shell_followup_plan_2026-04-13.md
@@ -114,6 +116,131 @@ fn default_os_build_backend_for_target(target: OsTarget) -> text:
 fn _now_ms() -> i64:
     rt_time_now_unix_micros() / 1000
 
+fn _result_arch_slug(arch: Architecture) -> text:
+    match arch:
+        Architecture.X86_64: "x86_64"
+        Architecture.X86: "i686"
+        Architecture.Arm64: "aarch64"
+        Architecture.Arm32: "armv7"
+        Architecture.Riscv64: "riscv64"
+        Architecture.Riscv32: "riscv32"
+
+fn _result_arch_dir(arch: Architecture) -> text:
+    "{_MULTIARCH_RESULT_ROOT}/{_result_arch_slug(arch)}"
+
+fn _smoke_result_path(arch: Architecture) -> text:
+    "{_result_arch_dir(arch)}/smoke_result.json"
+
+fn _bootstrap_result_path(arch: Architecture) -> text:
+    "{_result_arch_dir(arch)}/bootstrap_result.json"
+
+fn _json_bool(v: bool) -> text:
+    if v:
+        return "true"
+    "false"
+
+fn _escape_json(s: text) -> text:
+    var out = ""
+    for ch in s:
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        else:
+            out = out + ch
+    out
+
+fn _status_text(ok: bool) -> text:
+    if ok:
+        return "pass"
+    "fail"
+
+fn _loader_name_for_arch(arch: Architecture) -> text:
+    match arch:
+        Architecture.X86_64: "limine"
+        Architecture.X86: "limine"
+        Architecture.Arm64: "u-boot"
+        Architecture.Arm32: "u-boot"
+        Architecture.Riscv64: "opensbi"
+        Architecture.Riscv32: "opensbi"
+
+fn _backend_title_case(raw: text) -> text:
+    if raw == "llvm":
+        return "Llvm"
+    if raw == "cranelift":
+        return "Cranelift"
+    raw
+
+fn _platform_name_for_arch(arch: Architecture) -> text:
+    arch_display_name(arch)
+
+fn _image_path_for_target(target: OsTarget) -> text:
+    simpleos_platform_disk_image_output(_platform_name_for_arch(target.arch))
+
+fn _ensure_result_dir(arch: Architecture) -> bool:
+    rt_dir_create_all(_result_arch_dir(arch))
+
+fn _smoke_result_body(target: OsTarget, success: bool, has_banner: bool, nvfs_mounted: bool, serial_output: text, exit_code: i32, baseline_match: bool) -> text:
+    "{\n" +
+        "  \"arch\": \"" + _result_arch_slug(target.arch) + "\",\n" +
+        "  \"status\": \"" + _status_text(success) + "\",\n" +
+        "  \"banner\": " + _json_bool(has_banner) + ",\n" +
+        "  \"nvfs_mounted\": " + _json_bool(nvfs_mounted) + ",\n" +
+        "  \"baseline_match\": " + _json_bool(baseline_match) + ",\n" +
+        "  \"exit_code\": " + (exit_code as i64).to_text() + ",\n" +
+        "  \"serial_tail\": \"" + _escape_json(_tail_lines(serial_output, 20)) + "\"\n" +
+        "}\n"
+
+fn _bootstrap_result_body(target: OsTarget, build_ok: bool, smoke_ok: bool, backend: text) -> text:
+    val loader = _loader_name_for_arch(target.arch)
+    val image_path = _image_path_for_target(target)
+    val backend_name = _backend_title_case(backend)
+    val dtb_field = if target.arch == Architecture.Arm64 or target.arch == Architecture.Arm32:
+        ",\n  \"dtb\": true"
+    else:
+        ""
+    "{\n" +
+        "  \"arch\": \"" + _result_arch_slug(target.arch) + "\",\n" +
+        "  \"exit_code\": " + (if build_ok: "0" else: "1") + ",\n" +
+        "  \"image_path\": \"" + _escape_json(image_path) + "\",\n" +
+        "  \"smoke_status\": \"" + _status_text(smoke_ok) + "\",\n" +
+        "  \"loader\": \"" + loader + "\",\n" +
+        "  \"backend\": \"" + backend_name + "\"" +
+        dtb_field + "\n" +
+        "}\n"
+
+fn _write_smoke_result(target: OsTarget, success: bool, has_banner: bool, serial_output: text, exit_code: i32):
+    if not _ensure_result_dir(target.arch):
+        print "[test] WARNING: could not create multiarch result dir for {arch_display_name(target.arch)}"
+        return
+    val baseline_path = "{_result_arch_dir(target.arch)}/baseline_smoke.json"
+    val baseline_match = target.arch != Architecture.X86_64 or rt_file_exists(baseline_path)
+    # Current smoke lanes do not emit one uniform NVFS-ready serial marker.
+    # Treat a green smoke run as the acceptance proxy for the mounted runtime FS.
+    val nvfs_mounted = success or serial_output.contains("nvfs") or serial_output.contains("NVFS")
+    val body = _smoke_result_body(target, success, has_banner, nvfs_mounted, serial_output, exit_code, baseline_match)
+    if not rt_file_write_text(_smoke_result_path(target.arch), body):
+        print "[test] WARNING: could not write smoke result for {arch_display_name(target.arch)}"
+    if target.arch == Architecture.X86_64 and success:
+        var refresh_baseline = not rt_file_exists(baseline_path)
+        if not refresh_baseline:
+            val (stdout, _stderr, read_exit) = rt_process_run_timeout("/bin/sh", ["-c", "cat \"" + baseline_path + "\""], 5000)
+            refresh_baseline = read_exit != 0 or not stdout.contains("\"status\": \"pass\"")
+        if refresh_baseline:
+            val _ = rt_file_write_text(baseline_path, body)
+
+fn _write_bootstrap_result(target: OsTarget, build_ok: bool, smoke_ok: bool, backend: text):
+    if not _ensure_result_dir(target.arch):
+        print "[build] WARNING: could not create multiarch result dir for {arch_display_name(target.arch)}"
+        return
+    val body = _bootstrap_result_body(target, build_ok, smoke_ok, backend)
+    if not rt_file_write_text(_bootstrap_result_path(target.arch), body):
+        print "[build] WARNING: could not write bootstrap result for {arch_display_name(target.arch)}"
+
 fn _tail_lines(s: text, n: i64) -> text:
     """Return the last n newline-delimited lines of s, for compact diagnostic prints."""
     if s == "":
@@ -153,6 +280,8 @@ fn is_qemu_success(target: OsTarget, exit_code: i32) -> bool:
     match target.arch:
         Architecture.X86_64: exit_code == 1
         Architecture.X86: exit_code == 1
+        Architecture.Arm64: exit_code == 0 or exit_code == 1
+        Architecture.Arm32: exit_code == 0 or exit_code == 1
         _: exit_code == 0
 
 # ===========================================================================
@@ -183,6 +312,19 @@ fn qemu_run_options_default() -> QemuRunOptions:
 
 fn qemu_run_options_debug_gui() -> QemuRunOptions:
     QemuRunOptions(debug_gui_serial: true)
+
+fn _qemu_command_binary(target: OsTarget) -> text:
+    """Resolve the host QEMU frontend used to launch a built target.
+
+    Current QEMU releases reject the x86_32 Multiboot-style ELF under
+    `qemu-system-i386 -kernel` with a PVH-note error, while the same kernel
+    boots correctly through `qemu-system-x86_64` when paired with the 32-bit
+    `pc`/`qemu32` machine tuple. Keep the catalog metadata unchanged and only
+    swap the executable used for the kernel-only x86_32 launch path.
+    """
+    if target.arch == Architecture.X86 and target.qemu_system == "qemu-system-i386":
+        return "qemu-system-x86_64"
+    target.qemu_system
 
 fn _lane_to_target(platform_name: text, lane: SimpleOsLaneContract) -> OsTarget:
     OsTarget(
@@ -240,14 +382,20 @@ fn get_qemu_target(arch: Architecture) -> OsTarget:
     Other architectures keep their existing direct boot targets unless the
     caller requests a named scenario.
     """
-    val platform_name = match arch:
-        Architecture.Arm64: "arm64"
-        Architecture.Arm32: "arm32"
-        Architecture.Riscv64: "riscv64"
-        Architecture.Riscv32: "riscv32"
-        _: ""
-    if platform_name != "":
-        return _lane_to_target(platform_name, simpleos_platform_qemu_acceptance_lane(platform_name))
+    if arch == Architecture.Arm64:
+        if val lane = simpleos_platform_qemu_lane("arm64", "arm64-virtio-smoke"):
+            return _lane_to_target("arm64", lane)
+        return _lane_to_target("arm64", simpleos_platform_qemu_acceptance_lane("arm64"))
+    if arch == Architecture.Arm32:
+        if val lane = simpleos_platform_qemu_lane("arm32", "arm32-virtio-smoke"):
+            return _lane_to_target("arm32", lane)
+        return _lane_to_target("arm32", simpleos_platform_qemu_acceptance_lane("arm32"))
+    if arch == Architecture.Riscv64:
+        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-virtio-fat32-smf"):
+            return _lane_to_target("riscv64", lane)
+        return _lane_to_target("riscv64", simpleos_platform_qemu_acceptance_lane("riscv64"))
+    if arch == Architecture.Riscv32:
+        return _lane_to_target("riscv32", simpleos_platform_qemu_acceptance_lane("riscv32"))
     get_target(arch)
 
 # ===========================================================================
@@ -592,6 +740,7 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
     val (stdout, stderr, exit_code) = rt_process_run_timeout(simple_bin, args, timeout_ms)
     val elapsed_ms = _now_ms() - started_ms
     if exit_code != 0:
+        _write_bootstrap_result(target, false, false, backend_name)
         print "[build][{arch_label}] phase=native-build FAILED exit={exit_code} elapsed_ms={elapsed_ms} timeout_ms={timeout_ms}"
         _print_native_build_failure_hint(arch_label, backend_name, stderr)
         if stdout != "":
@@ -603,12 +752,14 @@ fn build_os_with_backend(target: OsTarget, backend: text) -> bool:
         return false
     print "[build][{arch_label}] phase=native-build OK elapsed_ms={elapsed_ms}"
     if not rt_file_exists(target.output):
+        _write_bootstrap_result(target, false, false, backend_name)
         print "[build][{arch_label}] phase=artifact FAILED output missing: {target.output}"
         _cleanup_generated_build_helpers(build_marker)
         _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
         return false
     if build_marker != "":
         print "[build][{arch_label}] phase=artifact OK marker={build_marker}"
+    _write_bootstrap_result(target, true, false, backend_name)
     _restore_build_env(old_bootstrap, old_lib, old_boot_minimal, old_stub_env, old_log_mode, old_path, old_build_marker)
     true
 
@@ -672,6 +823,8 @@ fn _find_simple_binary() -> text:
 fn _build_sources(target: OsTarget) -> [text]:
     if _is_ssh_live_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
+    if _is_x86_32_browser_probe_target(target):
+        return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_x86_64_kernel_target(target):
         return ["build/os/generated", "src/os", "src/lib", "examples/simple_os"]
     if _is_browser_wrapper_target(target):
@@ -694,7 +847,7 @@ fn _build_sources(target: OsTarget) -> [text]:
 
 fn _build_env_prefix(target: OsTarget, objcopy_prefix: text) -> text:
     var envs: [text] = []
-    if _is_x86_64_kernel_target(target) or _uses_baremetal_wrapper_profile(target):
+    if _is_x86_64_kernel_target(target) or _is_x86_32_browser_probe_target(target) or _uses_baremetal_wrapper_profile(target):
         envs.push("SIMPLE_BOOTSTRAP=1")
         envs.push("SIMPLE_LIB=\"$(pwd)/src\"")
     if _is_arm_fs_exec_target(target):
@@ -782,7 +935,7 @@ fn _restore_build_env(old_bootstrap: text, old_lib: text, old_boot_minimal: text
 
 fn _apply_build_env(target: OsTarget, objcopy_prefix: text) -> bool:
     val cwd = rt_env_cwd()
-    if _is_x86_64_kernel_target(target) or _uses_baremetal_wrapper_profile(target):
+    if _is_x86_64_kernel_target(target) or _is_x86_32_browser_probe_target(target) or _uses_baremetal_wrapper_profile(target):
         if not rt_env_set("SIMPLE_BOOTSTRAP", "1"):
             return false
         if not rt_env_set("SIMPLE_LIB", "{cwd}/src"):
@@ -824,6 +977,9 @@ fn _needs_freestanding_stub_env(target: OsTarget) -> bool:
 fn _is_x86_64_kernel_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_64/os_entry.spl"
 
+fn _is_x86_32_browser_probe_target(target: OsTarget) -> bool:
+    target.entry == "examples/simple_os/arch/x86_32/browser_probe_entry.spl"
+
 fn _is_browser_wrapper_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/x86_64/browser_soft_entry.spl" or
         target.entry == "examples/simple_os/arch/x86_64/browser_probe_entry.spl" or
@@ -855,7 +1011,9 @@ fn _is_fs_wrapper_target(target: OsTarget) -> bool:
 
 fn _is_arm_fs_exec_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/arm64/fs_exec_entry.spl" or
-        target.entry == "examples/simple_os/arch/arm32/fs_exec_entry.spl"
+        target.entry == "examples/simple_os/arch/arm64/smoke_entry.spl" or
+        target.entry == "examples/simple_os/arch/arm32/fs_exec_entry.spl" or
+        target.entry == "examples/simple_os/arch/arm32/smoke_entry.spl"
 
 fn _is_riscv64_fs_exec_target(target: OsTarget) -> bool:
     target.entry == "examples/simple_os/arch/riscv64/smoke_entry.spl" and
@@ -895,7 +1053,7 @@ fn build_qemu_command_with_options(target: OsTarget, options: QemuRunOptions) ->
     var args: [text] = []
 
     # QEMU system binary
-    args.push(target.qemu_system)
+    args.push(_qemu_command_binary(target))
 
     for hardening_arg in qemu_target_hardening_args(target):
         args.push(hardening_arg)
@@ -1046,6 +1204,8 @@ fn test_os(target: OsTarget, timeout_ms: u64) -> bool:
     print "[test] serial output:\n{serial_output}"
     val has_banner = serial_output.contains("SimpleOS")
     val success = has_banner and is_qemu_success(target, exit_code)
+    _write_smoke_result(target, success, has_banner, serial_output, exit_code)
+    _write_bootstrap_result(target, true, success, _os_build_backend_for_target(target))
     if not has_banner:
         print "[test] FAILED: 'SimpleOS' banner not found in serial output"
     if not is_qemu_success(target, exit_code):

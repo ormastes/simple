@@ -22,12 +22,45 @@
 
 mod os.crypto.ml_kem
 
-use os.crypto.ml_kem_kpke.{kpke_keygen, kpke_encrypt, kpke_decrypt,
+use os.crypto.ml_kem_kpke.{
+    kpke_keygen, kpke_encrypt, kpke_decrypt,
+    kpke_keygen_512, kpke_encrypt_512, kpke_decrypt_512,
+    kpke_keygen_1024, kpke_encrypt_1024, kpke_decrypt_1024,
+    kpke_keygen_params, kpke_encrypt_params, kpke_decrypt_params,
     ml_kem_g, ml_kem_h, ml_kem_j}
+use os.crypto.ml_kem_ntt.{
+    ml_kem_k_512, ml_kem_eta1_512, ml_kem_eta2_512,
+    ml_kem_du_512, ml_kem_dv_512,
+    ml_kem_k_768, ml_kem_eta1_768, ml_kem_eta2_768,
+    ml_kem_du_768, ml_kem_dv_768,
+    ml_kem_k_1024, ml_kem_eta1_1024, ml_kem_eta2_1024,
+    ml_kem_du_1024, ml_kem_dv_1024}
 
 # ============================================================================
-# ML-KEM-768 sizes
+# Per-parameter sizes (FIPS 203 §8 Table 3)
 # ============================================================================
+#
+# ML-KEM-512  : ek =  800, dk = 1632, ct =  768, ss = 32
+# ML-KEM-768  : ek = 1184, dk = 2400, ct = 1088, ss = 32
+# ML-KEM-1024 : ek = 1568, dk = 3168, ct = 1568, ss = 32
+#
+# In general:
+#   ek = 384·k + 32
+#   dk_pke = 384·k
+#   dk = dk_pke + ek + 32 + 32  =  768·k + 96
+#   ct = 32·du·k + 32·dv
+
+fn ml_kem_512_ek_bytes() -> i64:
+    800
+
+fn ml_kem_512_dk_bytes() -> i64:
+    1632
+
+fn ml_kem_512_ct_bytes() -> i64:
+    768
+
+fn ml_kem_512_ss_bytes() -> i64:
+    32
 
 fn ml_kem_768_ek_bytes() -> i64:
     1184
@@ -39,6 +72,18 @@ fn ml_kem_768_ct_bytes() -> i64:
     1088
 
 fn ml_kem_768_ss_bytes() -> i64:
+    32
+
+fn ml_kem_1024_ek_bytes() -> i64:
+    1568
+
+fn ml_kem_1024_dk_bytes() -> i64:
+    3168
+
+fn ml_kem_1024_ct_bytes() -> i64:
+    1568
+
+fn ml_kem_1024_ss_bytes() -> i64:
     32
 
 # ============================================================================
@@ -100,8 +145,9 @@ fn _ct_select_bytes(mask: i64, a: list, b: list) -> list:
 # splits a 64-byte seed into (d, z); we keep them separate here so callers
 # can plug their own RNG / KAT seed without re-allocating bytes.
 
-fn ml_kem_keygen(d: list, z: list) -> tuple:
-    val kp = kpke_keygen(d)
+# Parameterized keygen — shared by 512 / 768 / 1024 variants.
+fn ml_kem_keygen_params(d: list, z: list, k_param: i64, eta1: i64) -> tuple:
+    val kp = kpke_keygen_params(d, k_param, eta1)
     val ek_pke = kp[0]
     val dk_pke = kp[1]
 
@@ -118,16 +164,27 @@ fn ml_kem_keygen(d: list, z: list) -> tuple:
     while j < ek_pke.len():
         dk.push(ek_pke.get(j))
         j = j + 1
-    var k = 0
-    while k < h_ek.len():
-        dk.push(h_ek.get(k))
-        k = k + 1
+    var ki = 0
+    while ki < h_ek.len():
+        dk.push(h_ek.get(ki))
+        ki = ki + 1
     var l = 0
     while l < z.len():
         dk.push(z.get(l))
         l = l + 1
 
     (ek_pke, dk)
+
+# 768 entry point (preserved API).
+fn ml_kem_keygen(d: list, z: list) -> tuple:
+    ml_kem_keygen_params(d, z, ml_kem_k_768(), ml_kem_eta1_768())
+
+# 512 / 1024 entry points.
+fn ml_kem_keygen_512(d: list, z: list) -> tuple:
+    ml_kem_keygen_params(d, z, ml_kem_k_512(), ml_kem_eta1_512())
+
+fn ml_kem_keygen_1024(d: list, z: list) -> tuple:
+    ml_kem_keygen_params(d, z, ml_kem_k_1024(), ml_kem_eta1_1024())
 
 # ============================================================================
 # ML-KEM.Encaps — FIPS 203 Algorithm 17
@@ -142,7 +199,9 @@ fn ml_kem_keygen(d: list, z: list) -> tuple:
 # distribution. KAT-driven test code can pin m for reproducibility; live
 # callers pass random_bytes(32).
 
-fn ml_kem_encaps(ek: list, m: list) -> tuple:
+# Parameterized encaps — shared by 512 / 768 / 1024 variants.
+fn ml_kem_encaps_params(ek: list, m: list,
+        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> tuple:
     val h_ek = ml_kem_h(ek)
     var input = []
     var i = 0
@@ -156,8 +215,25 @@ fn ml_kem_encaps(ek: list, m: list) -> tuple:
     val kr = ml_kem_g(input)
     val k_shared = kr[0]
     val r = kr[1]
-    val c = kpke_encrypt(ek, m, r)
+    val c = kpke_encrypt_params(ek, m, r, k_param, eta1, eta2, du, dv)
     (k_shared, c)
+
+# 768 entry point (preserved API).
+fn ml_kem_encaps(ek: list, m: list) -> tuple:
+    ml_kem_encaps_params(ek, m,
+        ml_kem_k_768(), ml_kem_eta1_768(), ml_kem_eta2_768(),
+        ml_kem_du_768(), ml_kem_dv_768())
+
+# 512 / 1024 entry points.
+fn ml_kem_encaps_512(ek: list, m: list) -> tuple:
+    ml_kem_encaps_params(ek, m,
+        ml_kem_k_512(), ml_kem_eta1_512(), ml_kem_eta2_512(),
+        ml_kem_du_512(), ml_kem_dv_512())
+
+fn ml_kem_encaps_1024(ek: list, m: list) -> tuple:
+    ml_kem_encaps_params(ek, m,
+        ml_kem_k_1024(), ml_kem_eta1_1024(), ml_kem_eta2_1024(),
+        ml_kem_du_1024(), ml_kem_dv_1024())
 
 # ============================================================================
 # ML-KEM.Decaps — FIPS 203 Algorithm 18
@@ -175,11 +251,14 @@ fn ml_kem_encaps(ek: list, m: list) -> tuple:
 # whether the ciphertext was forged. Per `feedback_no_coverups.md` and the
 # ed25519/p256 CT precedent, we use _ct_bytes_eq + _ct_select_bytes.
 
-fn ml_kem_decaps(dk: list, c: list) -> list:
-    # Slice fields out of dk by fixed offsets (ML-KEM-768).
-    val ek_bytes = ml_kem_768_ek_bytes()  # 1184
-    val dk_pke_bytes = 1152                # 384·k = 1152
-    # dk = [dk_pke (1152) || ek (1184) || H(ek) (32) || z (32)] = 2400.
+# Parameterized decaps — shared by 512 / 768 / 1024 variants.
+# Slices the encoded dk by k-derived offsets and dispatches to the matching
+# K-PKE primitives.
+fn ml_kem_decaps_params(dk: list, c: list,
+        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> list:
+    val dk_pke_bytes = 384 * k_param            # ByteEncode_12(ŝ) length
+    val ek_bytes = 384 * k_param + 32           # ByteEncode_12(t̂) || rho
+    # dk = [dk_pke || ek || H(ek) (32) || z (32)] = 768·k + 96.
     var dk_pke = []
     var i = 0
     while i < dk_pke_bytes:
@@ -191,10 +270,10 @@ fn ml_kem_decaps(dk: list, c: list) -> list:
         ek.push(dk.get(dk_pke_bytes + j))
         j = j + 1
     var h_ek = []
-    var k = 0
-    while k < 32:
-        h_ek.push(dk.get(dk_pke_bytes + ek_bytes + k))
-        k = k + 1
+    var ki = 0
+    while ki < 32:
+        h_ek.push(dk.get(dk_pke_bytes + ek_bytes + ki))
+        ki = ki + 1
     var z = []
     var l = 0
     while l < 32:
@@ -202,7 +281,7 @@ fn ml_kem_decaps(dk: list, c: list) -> list:
         l = l + 1
 
     # m' = K-PKE.Decrypt(dk_pke, c)
-    val m_prime = kpke_decrypt(dk_pke, c)
+    val m_prime = kpke_decrypt_params(dk_pke, c, k_param, du, dv)
 
     # (K', r') = G(m' || H(ek))
     var input = []
@@ -231,8 +310,26 @@ fn ml_kem_decaps(dk: list, c: list) -> list:
     val k_implicit = ml_kem_j(zc)
 
     # c' = K-PKE.Encrypt(ek, m', r')
-    val c_prime = kpke_encrypt(ek, m_prime, r_prime)
+    val c_prime = kpke_encrypt_params(ek, m_prime, r_prime,
+        k_param, eta1, eta2, du, dv)
 
     # Constant-time select between K' and K_implicit by c ?= c'.
     val mask = _ct_bytes_eq(c, c_prime)
     _ct_select_bytes(mask, k_prime, k_implicit)
+
+# 768 entry point (preserved API).
+fn ml_kem_decaps(dk: list, c: list) -> list:
+    ml_kem_decaps_params(dk, c,
+        ml_kem_k_768(), ml_kem_eta1_768(), ml_kem_eta2_768(),
+        ml_kem_du_768(), ml_kem_dv_768())
+
+# 512 / 1024 entry points.
+fn ml_kem_decaps_512(dk: list, c: list) -> list:
+    ml_kem_decaps_params(dk, c,
+        ml_kem_k_512(), ml_kem_eta1_512(), ml_kem_eta2_512(),
+        ml_kem_du_512(), ml_kem_dv_512())
+
+fn ml_kem_decaps_1024(dk: list, c: list) -> list:
+    ml_kem_decaps_params(dk, c,
+        ml_kem_k_1024(), ml_kem_eta1_1024(), ml_kem_eta2_1024(),
+        ml_kem_du_1024(), ml_kem_dv_1024())

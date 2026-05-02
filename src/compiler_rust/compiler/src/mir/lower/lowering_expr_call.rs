@@ -118,11 +118,9 @@ impl<'a> MirLowerer<'a> {
                         "is_ok" | "is_err" => {
                             if let Some(receiver) = receiver {
                                 let expected = HirExpr {
-                                    kind: HirExprKind::Integer(Self::enum_variant_discriminant(if variant_name == "is_ok" {
-                                        "Ok"
-                                    } else {
-                                        "Err"
-                                    })),
+                                    kind: HirExprKind::Integer(Self::enum_variant_discriminant(
+                                        if variant_name == "is_ok" { "Ok" } else { "Err" },
+                                    )),
                                     ty: TypeId::I64,
                                 };
                                 let builtin_args = [receiver.clone(), expected];

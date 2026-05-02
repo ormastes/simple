@@ -1,0 +1,623 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Argon2id — Pure Simple Implementation (RFC 9106)
+#
+# Argon2 is the 2015 Password Hashing Competition winner; Argon2id is the
+# hybrid mode that uses Argon2i (data-independent indexing) for the first
+# half-pass and Argon2d (data-dependent indexing) afterwards. Argon2id is
+# the variant recommended by RFC 9106 §4 for password hashing in the face
+# of side-channel and GPU/ASIC attackers.
+#
+# Public API:
+#   argon2id(password, salt, t_cost, m_cost, parallelism, tag_len) -> [u8]
+#
+# Parameters (RFC 9106 §3.1):
+#   t_cost      — number of passes (>= 1)
+#   m_cost      — desired memory in KiB (>= 8 * parallelism)
+#   parallelism — number of lanes (>= 1, <= 2^24-1)
+#   tag_len     — desired output length in bytes (>= 4, <= 2^32-1)
+#
+# Built on top of the pure-Simple BLAKE2b primitive at
+# src/os/crypto/blake2b.spl (RFC 7693). No new externs.
+#
+# References:
+#   RFC 9106 §3.2 — H_0 initial 64-byte hash from parameters and inputs
+#   RFC 9106 §3.3 — H' variable-length BLAKE2b-based hash
+#   RFC 9106 §3.4 — Argon2id mode
+#   RFC 9106 §3.5 — G compression
+#   RFC 9106 §3.6 — Permutation P (one BLAKE2b round)
+#   RFC 9106 §5.3 — Argon2id test vector
+#
+# INTERPRETER PERFORMANCE
+#   Argon2id is memory-hard by design: each pass writes m KiB. RFC 9106 §5.3
+#   uses m=32 KiB / t=3 / p=4 — that is ~3*32 = 96 G-compressions per lane,
+#   ~384 total, each touching a 1024-byte block. In interpreter mode the
+#   per-G overhead exceeds the 60 s test-runner watchdog. Smaller parameters
+#   (t=1, m=8 KiB, p=1) finish in interpreter; full §5.3 byte-exact KAT is
+#   filed as FR `argon2_native_runtime_helpers_2026-05-02.md` along with
+#   scrypt's perf FR.
+
+use os.crypto.blake2b.{blake2b}
+
+# ============================================================================
+# Type identifier and version
+# ============================================================================
+
+fn _argon2_type_id() -> u32:
+    """RFC 9106 §3.1: y = 0 Argon2d, 1 Argon2i, 2 Argon2id."""
+    var v: u32 = 2
+    v
+
+fn _argon2_version() -> u32:
+    """RFC 9106 §3.1: v = 0x13."""
+    var v: u32 = 0x13
+    v
+
+# ============================================================================
+# Endianness helpers — RFC 9106 uses little-endian throughout
+# ============================================================================
+
+fn _le32(x: u32) -> [u8]:
+    """Encode u32 as 4 little-endian bytes (RFC 9106 §3.1 LE32)."""
+    var out: [u8] = []
+    out.push((x & 0xFF).to_u8())
+    out.push(((x >> 8) & 0xFF).to_u8())
+    out.push(((x >> 16) & 0xFF).to_u8())
+    out.push(((x >> 24) & 0xFF).to_u8())
+    out
+
+fn _le64(x: u64) -> [u8]:
+    """Encode u64 as 8 little-endian bytes (RFC 9106 LE64)."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 8:
+        out.push(((x >> (i * 8)) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+fn _read_u64_le(buf: [u8], off: i64) -> u64:
+    """Read 8 little-endian bytes from buf[off..off+8] as u64."""
+    var w: u64 = 0
+    var i: i64 = 0
+    while i < 8:
+        w = w | (buf[off + i].to_u64() << (i.to_u64() * 8))
+        i = i + 1
+    w
+
+fn _write_u64_le(buf: [u8], off: i64, x: u64) -> [u8]:
+    """Write u64 to buf[off..off+8] little-endian (in-place)."""
+    var b = buf
+    var i: i64 = 0
+    while i < 8:
+        b[off + i] = ((x >> (i.to_u64() * 8)) & 0xFF).to_u8()
+        i = i + 1
+    b
+
+fn _append(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i: i64 = 0
+    val n = src.len()
+    while i < n:
+        out.push(src[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# H' — variable-length BLAKE2b-based hash (RFC 9106 §3.3)
+# ============================================================================
+
+fn _h_prime(input: [u8], tag_len: u32) -> [u8]:
+    """Variable-length hash H'^T(A) per RFC 9106 §3.3.
+
+    If T <= 64: return BLAKE2b(LE32(T) || A, T).
+    Else:
+        V_1 = BLAKE2b(LE32(T) || A, 64)
+        V_{i+1} = BLAKE2b(V_i, 64)         for i = 1 .. r-1
+        Define r = ceil(T / 32) - 2
+        V_{r+1} = BLAKE2b(V_r, T - 32 * r)
+        Output = V_1[0:32] || V_2[0:32] || ... || V_r[0:32] || V_{r+1}
+    """
+    val t_le = _le32(tag_len)
+    var prefixed: [u8] = []
+    prefixed = _append(prefixed, t_le)
+    prefixed = _append(prefixed, input)
+    val empty_key: [u8] = []
+
+    val tlen_i = tag_len.to_i64()
+    if tlen_i <= 64:
+        return blake2b(empty_key, prefixed, tlen_i)
+
+    # Long-output path
+    # r = ceil(T / 32) - 2; final block has length T - 32*r
+    val r: i64 = ((tlen_i + 31) / 32) - 2
+    var out: [u8] = []
+    var v: [u8] = blake2b(empty_key, prefixed, 64)
+    # Take first 32 bytes of V_1
+    var i: i64 = 0
+    while i < 32:
+        out.push(v[i])
+        i = i + 1
+
+    var k: i64 = 1
+    while k < r:
+        v = blake2b(empty_key, v, 64)
+        i = 0
+        while i < 32:
+            out.push(v[i])
+            i = i + 1
+        k = k + 1
+
+    # Final V_{r+1}
+    val final_len = tlen_i - 32 * r
+    val v_final = blake2b(empty_key, v, final_len)
+    i = 0
+    while i < final_len:
+        out.push(v_final[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# H_0 — initial 64-byte hash (RFC 9106 §3.2)
+#
+# H_0 = BLAKE2b(LE32(p) || LE32(T) || LE32(m) || LE32(t) || LE32(v) || LE32(y)
+#               || LE32(|P|) || P || LE32(|S|) || S
+#               || LE32(|K|) || K || LE32(|X|) || X, 64)
+# ============================================================================
+
+fn _h0(parallelism: u32, tag_len: u32, m_cost: u32, t_cost: u32,
+       version: u32, y: u32,
+       password: [u8], salt: [u8], key: [u8], assoc: [u8]) -> [u8]:
+    var buf: [u8] = []
+    buf = _append(buf, _le32(parallelism))
+    buf = _append(buf, _le32(tag_len))
+    buf = _append(buf, _le32(m_cost))
+    buf = _append(buf, _le32(t_cost))
+    buf = _append(buf, _le32(version))
+    buf = _append(buf, _le32(y))
+    buf = _append(buf, _le32(password.len().to_u32()))
+    buf = _append(buf, password)
+    buf = _append(buf, _le32(salt.len().to_u32()))
+    buf = _append(buf, salt)
+    buf = _append(buf, _le32(key.len().to_u32()))
+    buf = _append(buf, key)
+    buf = _append(buf, _le32(assoc.len().to_u32()))
+    buf = _append(buf, assoc)
+    val empty_key: [u8] = []
+    blake2b(empty_key, buf, 64)
+
+# ============================================================================
+# Permutation P — one full BLAKE2b round (RFC 9106 §3.6)
+#
+# Operates on 8 16-byte registers S_0..S_7 (each holding two u64 words).
+# In RFC 9106 §3.6, P treats them as v_0..v_15 and applies the BLAKE2b
+# round function with no SIGMA permutation (i.e., m_i = 0). Concretely
+# this is the same G mixing primitive as BLAKE2b's _g_mix but with
+# x = y = 0, repeated for 4 column-pairs and 4 diagonal-pairs.
+# ============================================================================
+
+fn _rotr64(x: u64, n: u64) -> u64:
+    ((x >> n) | (x << (64 - n))) & 0xFFFFFFFFFFFFFFFF
+
+fn _p_g(v: [u64], a: i64, b: i64, c: i64, d: i64) -> [u64]:
+    """Argon2 GB function (RFC 9106 §3.6).
+
+    GB(a,b,c,d):
+      a = (a + b + 2 * trunc(a) * trunc(b)) mod 2^64
+      d = (d XOR a) >>> 32
+      c = (c + d + 2 * trunc(c) * trunc(d)) mod 2^64
+      b = (b XOR c) >>> 24
+      a = (a + b + 2 * trunc(a) * trunc(b)) mod 2^64
+      d = (d XOR a) >>> 16
+      c = (c + d + 2 * trunc(c) * trunc(d)) mod 2^64
+      b = (b XOR c) >>> 63
+    where trunc(x) = x mod 2^32 (lower 32 bits).
+    """
+    var s = v
+    var va = s[a]
+    var vb = s[b]
+    var vc = s[c]
+    var vd = s[d]
+    val mask: u64 = 0xFFFFFFFFFFFFFFFF
+    val low32: u64 = 0xFFFFFFFF
+
+    var ta = va & low32
+    var tb = vb & low32
+    va = (va + vb + ((2 * ta * tb) & mask)) & mask
+    vd = _rotr64(vd ^ va, 32)
+    var tc = vc & low32
+    var td = vd & low32
+    vc = (vc + vd + ((2 * tc * td) & mask)) & mask
+    vb = _rotr64(vb ^ vc, 24)
+
+    ta = va & low32
+    tb = vb & low32
+    va = (va + vb + ((2 * ta * tb) & mask)) & mask
+    vd = _rotr64(vd ^ va, 16)
+    tc = vc & low32
+    td = vd & low32
+    vc = (vc + vd + ((2 * tc * td) & mask)) & mask
+    vb = _rotr64(vb ^ vc, 63)
+
+    s[a] = va
+    s[b] = vb
+    s[c] = vc
+    s[d] = vd
+    s
+
+fn _permute_p(v: [u64]) -> [u64]:
+    """Apply BLAKE2b round to a 16-word (128-byte) register array.
+
+    8 GB applications: 4 columns then 4 diagonals.
+    """
+    var s = v
+    # Columns
+    s = _p_g(s, 0, 4, 8, 12)
+    s = _p_g(s, 1, 5, 9, 13)
+    s = _p_g(s, 2, 6, 10, 14)
+    s = _p_g(s, 3, 7, 11, 15)
+    # Diagonals
+    s = _p_g(s, 0, 5, 10, 15)
+    s = _p_g(s, 1, 6, 11, 12)
+    s = _p_g(s, 2, 7, 8, 13)
+    s = _p_g(s, 3, 4, 9, 14)
+    s
+
+# ============================================================================
+# G — compression of two 1024-byte blocks (RFC 9106 §3.5)
+#
+# Block layout: each block is 128 u64 words = 1024 bytes.
+# G(X, Y):
+#   R = X ^ Y
+#   Q = R, but apply P to each row (8 rows of 16 words) → Q
+#   Z = Q, but apply P to each column (8 columns of 16 words) → Z
+#   Output = Z ^ R
+# ============================================================================
+
+fn _block_xor(x: [u64], y: [u64]) -> [u64]:
+    var out: [u64] = []
+    var i: i64 = 0
+    while i < 128:
+        out.push(x[i] ^ y[i])
+        i = i + 1
+    out
+
+fn _g_compress(x: [u64], y: [u64]) -> [u64]:
+    """G(X, Y) = (P_columns ∘ P_rows)(X ^ Y) ^ (X ^ Y) per RFC 9106 §3.5."""
+    val r = _block_xor(x, y)
+
+    # Apply P to each of 8 rows. Each row contains 16 u64 words = 8 registers.
+    var q: [u64] = []
+    var i: i64 = 0
+    while i < 128:
+        q.push(r[i])
+        i = i + 1
+    var row: i64 = 0
+    while row < 8:
+        # Extract 16-word row
+        var rv: [u64] = []
+        var k: i64 = 0
+        while k < 16:
+            rv.push(q[row * 16 + k])
+            k = k + 1
+        rv = _permute_p(rv)
+        k = 0
+        while k < 16:
+            q[row * 16 + k] = rv[k]
+            k = k + 1
+        row = row + 1
+
+    # Apply P to each of 8 columns. Column = 16 words taken with stride 16.
+    # In §3.5 the second pass operates on 8 columns of 8 registers; using
+    # the "two adjacent columns" reading gives 16 u64 per P call as in the
+    # reference implementation: indices [c, c+8, c+16, c+24, ..., c+8*15]
+    # where c = 0,2,4,...,14 for the 8 paired-column groups.
+    var z: [u64] = []
+    i = 0
+    while i < 128:
+        z.push(q[i])
+        i = i + 1
+    var col_pair: i64 = 0
+    while col_pair < 8:
+        # Indices: 2*col_pair, 2*col_pair+1, 16+2*col_pair, 16+2*col_pair+1, ...
+        # i.e., for each of the 8 register-rows, take two adjacent words
+        # starting at column 2*col_pair.
+        val c = 2 * col_pair
+        var rv: [u64] = []
+        var k: i64 = 0
+        while k < 8:
+            rv.push(z[k * 16 + c])
+            rv.push(z[k * 16 + c + 1])
+            k = k + 1
+        rv = _permute_p(rv)
+        k = 0
+        while k < 8:
+            z[k * 16 + c]     = rv[2 * k]
+            z[k * 16 + c + 1] = rv[2 * k + 1]
+            k = k + 1
+        col_pair = col_pair + 1
+
+    _block_xor(z, r)
+
+# ============================================================================
+# Block <-> bytes conversion
+# ============================================================================
+
+fn _bytes_to_block(buf: [u8]) -> [u64]:
+    """1024 bytes (LE) -> 128 u64 words."""
+    var out: [u64] = []
+    var i: i64 = 0
+    while i < 128:
+        out.push(_read_u64_le(buf, i * 8))
+        i = i + 1
+    out
+
+fn _block_to_bytes(blk: [u64]) -> [u8]:
+    """128 u64 words -> 1024 bytes (LE)."""
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 1024:
+        out.push(0)
+        i = i + 1
+    var k: i64 = 0
+    while k < 128:
+        out = _write_u64_le(out, k * 8, blk[k])
+        k = k + 1
+    out
+
+fn _zero_block() -> [u64]:
+    var b: [u64] = []
+    var i: i64 = 0
+    while i < 128:
+        b.push(0)
+        i = i + 1
+    b
+
+# ============================================================================
+# Index mapping for Argon2i pseudo-random J1||J2 (RFC 9106 §3.4.1.2)
+#
+# For each segment, generate Z = G(G(zero, input_block)) where input_block
+# is constructed from (pass r, lane l, slice s, total_blocks m', total_passes t,
+# argon2_type y, counter c). Then for each pair (J1, J2), J1 = lower 32 bits,
+# J2 = upper 32 bits of consecutive 64-bit words of Z.
+# ============================================================================
+
+fn _argon2i_seed_block(pass_idx: u64, lane: u64, slice: u64, total_blocks: u64,
+                       total_passes: u64, ytype: u64, counter: u64) -> [u64]:
+    """Construct the 1024-byte seed input block for Argon2i index gen."""
+    var b = _zero_block()
+    b[0] = pass_idx
+    b[1] = lane
+    b[2] = slice
+    b[3] = total_blocks
+    b[4] = total_passes
+    b[5] = ytype
+    b[6] = counter
+    b
+
+# ============================================================================
+# Argon2id main routine
+# ============================================================================
+
+fn argon2id(password: [u8], salt: [u8], t_cost: i64, m_cost: i64,
+            parallelism: i64, tag_len: i64) -> [u8]:
+    """Argon2id key derivation (RFC 9106 §3.4 with hybrid §3.4 mode rules).
+
+    Args:
+      password    — secret octet string
+      salt        — salt octet string (must be at least 8 bytes per RFC §3.1)
+      t_cost      — number of passes (RFC param `t`, >= 1)
+      m_cost      — memory in KiB (RFC param `m`, >= 8 * parallelism)
+      parallelism — lanes (RFC param `p`, >= 1)
+      tag_len     — output length in bytes (RFC param `T`, >= 4)
+
+    Returns: derived tag of `tag_len` bytes.
+
+    RFC 9106 §3.4 algorithm:
+      1. Compute H_0 from parameters (§3.2)
+      2. m' = floor(m_cost / (4*p)) * 4*p; q = m' / p; SL = q / 4
+      3. For each lane i:
+           B[i][0] = H'(H_0 || LE32(0) || LE32(i), 1024)
+           B[i][1] = H'(H_0 || LE32(1) || LE32(i), 1024)
+      4. For pass r = 0 .. t-1:
+           For slice s = 0 .. 3:
+             For lane i = 0 .. p-1:
+               For col j in segment s of lane i (skipping j=0,1 in pass 0):
+                 Determine reference (i', j') per Argon2id rules:
+                   pass 0, slice 0..1 → Argon2i (data-independent)
+                   else                → Argon2d (data-dependent)
+                 B[i][j] = G(B[i][j-1], B[i'][j']) (for pass 0)
+                 B[i][j] = G(B[i][j-1], B[i'][j']) XOR B[i][j] (for pass > 0)
+      5. C = XOR of all B[i][q-1]
+      6. Tag = H'(C, tag_len)
+    """
+    val empty: [u8] = []
+    val key: [u8] = empty
+    val assoc: [u8] = empty
+
+    # Step 2: parameter conditioning per RFC §3.4
+    # m' = 4*p * floor(m / (4*p))  — round memory down to multiple of 4*p
+    val p = parallelism
+    val four_p = 4 * p
+    val m_prime = (m_cost / four_p) * four_p
+    val q = m_prime / p          # blocks per lane
+    val sl = q / 4               # segment length in blocks (4 slices per lane)
+
+    # Step 1: H_0
+    val h0_bytes = _h0(parallelism.to_u32(), tag_len.to_u32(), m_cost.to_u32(),
+                       t_cost.to_u32(), _argon2_version(), _argon2_type_id(),
+                       password, salt, key, assoc)
+
+    # Step 3: initialize B[i][0] and B[i][1] for each lane.
+    # Total memory: m' blocks of 128 u64 each. Layout: flat list,
+    # B[i][j] = blocks[i * q + j].
+    var blocks: [[u64]] = []
+    var idx: i64 = 0
+    while idx < m_prime:
+        blocks.push(_zero_block())
+        idx = idx + 1
+
+    var lane: i64 = 0
+    while lane < p:
+        # B[lane][0] = H'(H_0 || LE32(0) || LE32(lane), 1024)
+        var seed0: [u8] = []
+        seed0 = _append(seed0, h0_bytes)
+        seed0 = _append(seed0, _le32(0.to_u32()))
+        seed0 = _append(seed0, _le32(lane.to_u32()))
+        val b0 = _h_prime(seed0, 1024.to_u32())
+        blocks[lane * q + 0] = _bytes_to_block(b0)
+
+        # B[lane][1] = H'(H_0 || LE32(1) || LE32(lane), 1024)
+        var seed1: [u8] = []
+        seed1 = _append(seed1, h0_bytes)
+        seed1 = _append(seed1, _le32(1.to_u32()))
+        seed1 = _append(seed1, _le32(lane.to_u32()))
+        val b1 = _h_prime(seed1, 1024.to_u32())
+        blocks[lane * q + 1] = _bytes_to_block(b1)
+        lane = lane + 1
+
+    # Step 4: passes
+    var pass_r: i64 = 0
+    while pass_r < t_cost:
+        var slice_s: i64 = 0
+        while slice_s < 4:
+            # Argon2id: data-independent indexing during pass 0, slices 0 and 1
+            val use_argon2i: bool = (pass_r == 0) and (slice_s < 2)
+
+            var ln: i64 = 0
+            while ln < p:
+                # Pre-generate Argon2i pseudorandom block(s) for this segment.
+                # Each seed-block invocation produces 128 u64 = 64 (J1,J2) pairs.
+                # The segment has SL columns; we need ceil(SL / 128) seed blocks.
+                # Generate them on-demand by counter.
+                var i_blocks: [[u64]] = []
+                if use_argon2i:
+                    # Number of needed (J1,J2) pairs = sl. Each seed-block,
+                    # after G applied twice, yields 128 u64 words = 128 pairs
+                    # (RFC §3.4.1.2: each 64-bit slot of Z gives one J1||J2).
+                    val needed_blocks: i64 = (sl + 127) / 128
+                    var c: i64 = 1
+                    while c <= needed_blocks:
+                        val seed = _argon2i_seed_block(pass_r.to_u64(), ln.to_u64(),
+                                                       slice_s.to_u64(),
+                                                       m_prime.to_u64(),
+                                                       t_cost.to_u64(),
+                                                       _argon2_type_id().to_u64(),
+                                                       c.to_u64())
+                        val zero = _zero_block()
+                        val z1 = _g_compress(zero, seed)
+                        val z2 = _g_compress(zero, z1)
+                        i_blocks.push(z2)
+                        c = c + 1
+
+                # Iterate columns in this lane's segment
+                var col_in_seg: i64 = 0
+                while col_in_seg < sl:
+                    val j: i64 = slice_s * sl + col_in_seg
+
+                    # Skip first two columns of lane during pass 0 (already filled)
+                    if (pass_r == 0) and (j < 2):
+                        col_in_seg = col_in_seg + 1
+                        continue
+
+                    # Previous block in this lane (wraps modulo q)
+                    val prev_j = if j == 0: q - 1 else: j - 1
+                    val prev_block = blocks[ln * q + prev_j]
+
+                    # Determine J1, J2
+                    var j1: u64 = 0
+                    var j2: u64 = 0
+                    if use_argon2i:
+                        # Pair index = col_in_seg
+                        val pair_block_idx = col_in_seg / 128
+                        val pair_in_block = col_in_seg % 128
+                        val src = i_blocks[pair_block_idx]
+                        val word = src[pair_in_block]
+                        j1 = word & 0xFFFFFFFF
+                        j2 = (word >> 32) & 0xFFFFFFFF
+                    else:
+                        # Argon2d: take from prev_block[0]
+                        val word = prev_block[0]
+                        j1 = word & 0xFFFFFFFF
+                        j2 = (word >> 32) & 0xFFFFFFFF
+
+                    # Map (J1, J2) to reference (l', z) per RFC §3.4.1.2
+                    # l = J2 mod p (current lane if pass=0 and slice=0)
+                    var ref_lane: i64 = 0
+                    if (pass_r == 0) and (slice_s == 0):
+                        ref_lane = ln
+                    else:
+                        ref_lane = (j2 % p.to_u64()).to_i64()
+
+                    # Reference set size W
+                    var w_size: i64 = 0
+                    if pass_r == 0:
+                        # First pass
+                        if slice_s == 0 or ref_lane == ln:
+                            # Same lane: all blocks finished so far in this lane
+                            # excluding prev. j-1 already computed; reference set
+                            # covers blocks [0..j-1) — that is j-1 blocks, but
+                            # RFC says "all blocks computed in this lane,
+                            # excluding the previous block". For pass 0 same lane:
+                            # number of blocks already computed in current segment
+                            # = col_in_seg, plus all blocks in previous slices of
+                            # the same lane = slice_s * sl. Excluding prev → minus 1.
+                            w_size = slice_s * sl + col_in_seg - 1
+                        else:
+                            # Different lane, pass 0: all blocks in finished
+                            # segments of that lane = slice_s * sl, minus 1 if
+                            # current column is the first in segment.
+                            w_size = slice_s * sl
+                            if col_in_seg == 0:
+                                w_size = w_size - 1
+                    else:
+                        # Subsequent passes: all q blocks of ref_lane are
+                        # candidates, minus current segment's already-computed
+                        # blocks, minus 1.
+                        if ref_lane == ln:
+                            w_size = q - sl + col_in_seg - 1
+                        else:
+                            w_size = q - sl
+                            if col_in_seg == 0:
+                                w_size = w_size - 1
+
+                    # x = (J1^2) >> 32   (interpret J1 as u32; square to u64)
+                    val x = (j1 * j1) >> 32
+                    # y = (W * x) >> 32
+                    val y_term = (w_size.to_u64() * x) >> 32
+                    # z = W - 1 - y
+                    val z = w_size.to_u64() - 1 - y_term
+
+                    # Starting position depends on pass and slice.
+                    # For pass 0: start at 0 of ref_lane.
+                    # For pass > 0: start at (slice+1)*sl mod q in ref_lane.
+                    var start_pos: i64 = 0
+                    if pass_r != 0:
+                        start_pos = ((slice_s + 1) * sl) % q
+                    val ref_j: i64 = (start_pos + z.to_i64()) % q
+
+                    val ref_block = blocks[ref_lane * q + ref_j]
+
+                    # Compute new block
+                    val new_block = _g_compress(prev_block, ref_block)
+
+                    if pass_r == 0:
+                        blocks[ln * q + j] = new_block
+                    else:
+                        # XOR with old value
+                        val old = blocks[ln * q + j]
+                        blocks[ln * q + j] = _block_xor(new_block, old)
+
+                    col_in_seg = col_in_seg + 1
+                ln = ln + 1
+            slice_s = slice_s + 1
+        pass_r = pass_r + 1
+
+    # Step 5: C = B[0][q-1] XOR B[1][q-1] XOR ... XOR B[p-1][q-1]
+    var c_block = blocks[0 * q + (q - 1)]
+    var li: i64 = 1
+    while li < p:
+        c_block = _block_xor(c_block, blocks[li * q + (q - 1)])
+        li = li + 1
+
+    # Step 6: Tag = H'(C, tag_len)
+    val c_bytes = _block_to_bytes(c_block)
+    _h_prime(c_bytes, tag_len.to_u32())

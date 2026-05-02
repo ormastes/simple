@@ -3,6 +3,11 @@
 # Provides fluent query interface with filtering, sorting, and limiting.
 
 use nogc_sync_mut.database.core.{SdnTable, SdnRow}
+use std.db.accel.{
+    accel_capability_report,
+    DB_ACCEL_DEFAULT_BATCH_SIZE, RowBitmap, VectorBatch,
+    make_vector_batch, row_bitmap_indices, text_equals_span
+}
 
 # ============================================================================
 # Compare Operators
@@ -18,6 +23,7 @@ enum CompareOp:
     Contains     # String contains
     StartsWith   # String starts with
     EndsWith     # String ends with
+    InSet        # Any-of equality
 
 # ============================================================================
 # Filter
@@ -27,6 +33,7 @@ struct Filter:
     field: text
     op: CompareOp
     value: text
+    any_values: [text]
 
     # Check if row matches filter
     fn matches(row: SdnRow) -> bool:
@@ -35,9 +42,12 @@ struct Filter:
             return false
 
         val fv = field_value.unwrap()
+        self.matches_value(fv)
+
+    fn matches_value(fv: text) -> bool:
         match self.op:
-            CompareOp.Eq: fv == self.value
-            CompareOp.Ne: fv != self.value
+            CompareOp.Eq: text_equals_span(fv, self.value)
+            CompareOp.Ne: not text_equals_span(fv, self.value)
             CompareOp.Gt: fv > self.value
             CompareOp.Ge: fv >= self.value
             CompareOp.Lt: fv < self.value
@@ -45,6 +55,11 @@ struct Filter:
             CompareOp.Contains: fv.contains(self.value)
             CompareOp.StartsWith: fv.starts_with(self.value)
             CompareOp.EndsWith: fv.ends_with(self.value)
+            CompareOp.InSet:
+                for candidate in self.any_values:
+                    if text_equals_span(fv, candidate):
+                        return true
+                false
 
 # ============================================================================
 # QueryBuilder
@@ -53,31 +68,32 @@ struct Filter:
 class QueryBuilder:
     table: SdnTable
     filters: [Filter]
-    sort_field: text?
+    sort_field: text
+    has_sort_field: bool
     sort_desc: bool
-    limit_count: i64?
+    limit_count: i64
+    has_limit_count: bool
 
     # Create query builder for table
     static fn for_table(table: SdnTable) -> QueryBuilder:
         QueryBuilder(
             table: table,
             filters: [],
-            sort_field: nil,
+            sort_field: "",
+            has_sort_field: false,
             sort_desc: false,
-            limit_count: nil
+            limit_count: 0,
+            has_limit_count: false
         )
 
     # Add filter condition
     me filter_by(field: text, op: CompareOp, value: text) -> QueryBuilder:
-        self.filters.push(Filter(field: field, op: op, value: value))
+        self.filters.push(Filter(field: field, op: op, value: value, any_values: []))
         self
 
     # Filter by multiple values (field IN (values))
     me filter_in(field: text, values: [text]) -> QueryBuilder:
-        # Add OR filters for each value
-        # Note: This is simplified - proper implementation would group OR conditions
-        for value in values:
-            self.filters.push(Filter(field: field, op: CompareOp.Eq, value: value))
+        self.filters.push(Filter(field: field, op: CompareOp.InSet, value: "", any_values: values))
         self
 
     # Exclude soft-deleted rows (valid=true)
@@ -86,30 +102,40 @@ class QueryBuilder:
 
     # Sort results
     me order_by(field: text, desc: bool) -> QueryBuilder:
-        self.sort_field = Some(field)
+        self.sort_field = field
+        self.has_sort_field = true
         self.sort_desc = desc
         self
 
     # Limit results
     me take(n: i64) -> QueryBuilder:
-        self.limit_count = Some(n)
+        self.limit_count = n
+        self.has_limit_count = true
         self
 
     # Execute query
     fn execute() -> [SdnRow]:
+        if self.has_limit_count and self.limit_count == 0:
+            return []
+
         var results = self.table.rows
 
-        # Apply filters
-        for filter in self.filters:
-            results = results.filter(\row: filter.matches(row))
+        if self.filters.len() > 0:
+            if accel_capability_report().simd_active:
+                val bitmap = self.execute_bitmap()
+                results = []
+                for row_idx in row_bitmap_indices(bitmap):
+                    results.push(self.table.rows[row_idx])
+            else:
+                results = self.execute_scalar_fast_path()
 
         # Apply sorting (merge sort - O(n log n) stable sort)
-        if val Some(field) = self.sort_field:
-            results = merge_sort_rows(results, field, self.sort_desc)
+        if self.has_sort_field:
+            results = merge_sort_rows(results, self.sort_field, self.sort_desc)
 
         # Apply limit
-        if val Some(limit) = self.limit_count:
-            results = results.take(limit)
+        if self.has_limit_count:
+            results = results.take(self.limit_count)
 
         results
 
@@ -120,6 +146,76 @@ class QueryBuilder:
     # Check if any match
     fn exists() -> bool:
         self.count() > 0
+
+    fn execute_scalar_fast_path() -> [SdnRow]:
+        var results: [SdnRow] = []
+        val stop_early = self.has_limit_count and not self.has_sort_field and self.limit_count > 0
+        val filter_count = self.filters.len()
+
+        if filter_count == 1:
+            val filter0 = self.filters[0]
+            val field0 = filter0.field
+            for row in self.table.rows:
+                if val Some(fv0) = row.get(field0):
+                    if value_matches_filter_fast(fv0, filter0):
+                        results.push(row)
+                        if stop_early and results.len() >= self.limit_count:
+                            break
+            return results
+
+        if filter_count == 2:
+            val filter0 = self.filters[0]
+            val filter1 = self.filters[1]
+            val field0 = filter0.field
+            val field1 = filter1.field
+            for row in self.table.rows:
+                if val Some(fv0) = row.get(field0):
+                    if value_matches_filter_fast(fv0, filter0):
+                        if val Some(fv1) = row.get(field1):
+                            if value_matches_filter_fast(fv1, filter1):
+                                results.push(row)
+                                if stop_early and results.len() >= self.limit_count:
+                                    break
+            return results
+
+        for row in self.table.rows:
+            if row_matches_all_filters_fast(row, self.filters):
+                results.push(row)
+                if stop_early and results.len() >= self.limit_count:
+                    break
+        results
+
+    fn execute_bitmap() -> RowBitmap:
+        var bitmap = RowBitmap.full(self.table.rows.len())
+        for filter in self.filters:
+            bitmap = bitmap.and_with(self.execute_filter_bitmap(filter))
+        bitmap
+
+    fn execute_filter_bitmap(filter: Filter) -> RowBitmap:
+        val total_rows = self.table.rows.len()
+        var bitmap = RowBitmap.empty(total_rows)
+        var start = 0
+        while start < total_rows:
+            val batch_len = if start + DB_ACCEL_DEFAULT_BATCH_SIZE > total_rows:
+                total_rows - start
+            else:
+                DB_ACCEL_DEFAULT_BATCH_SIZE
+            val batch = make_vector_batch(self.table.rows, start, batch_len)
+            bitmap = self.fill_batch_bitmap(filter, batch, bitmap)
+            start = start + batch_len
+        bitmap
+
+    fn fill_batch_bitmap(filter: Filter, batch: VectorBatch<SdnRow>, bitmap: RowBitmap) -> RowBitmap:
+        var updated = bitmap
+        var idx = 0
+        while idx < batch.len:
+            val row = batch.values[batch.start + idx]
+            val field_value = row.get(filter.field)
+            if val Some(fv) = field_value:
+                if filter.matches_value(fv):
+                    updated.set(batch.start + idx)
+            idx = idx + 1
+        updated
 
 # ============================================================================
 # Extension for SdnDatabase
@@ -169,3 +265,34 @@ fn merge_rows(left: [SdnRow], right: [SdnRow], field: text, desc: bool) -> [SdnR
 fn query_table(db: SdnDatabase, table_name: text) -> QueryBuilder?:
     val table = db.get_table(table_name)?
     Some(QueryBuilder.for_table(table))
+
+fn row_matches_all_filters_fast(row: SdnRow, filters: [Filter]) -> bool:
+    for filter in filters:
+        if not row_matches_filter_fast(row, filter):
+            return false
+    true
+
+fn row_matches_filter_fast(row: SdnRow, filter: Filter) -> bool:
+    val field_value = row.get(filter.field)
+    if not field_value.?:
+        return false
+
+    val fv = field_value.unwrap()
+    value_matches_filter_fast(fv, filter)
+
+fn value_matches_filter_fast(fv: text, filter: Filter) -> bool:
+    match filter.op:
+        CompareOp.Eq: text_equals_span(fv, filter.value)
+        CompareOp.Ne: not text_equals_span(fv, filter.value)
+        CompareOp.Gt: fv > filter.value
+        CompareOp.Ge: fv >= filter.value
+        CompareOp.Lt: fv < filter.value
+        CompareOp.Le: fv <= filter.value
+        CompareOp.Contains: fv.contains(filter.value)
+        CompareOp.StartsWith: fv.starts_with(filter.value)
+        CompareOp.EndsWith: fv.ends_with(filter.value)
+        CompareOp.InSet:
+            for candidate in filter.any_values:
+                if text_equals_span(fv, candidate):
+                    return true
+            false

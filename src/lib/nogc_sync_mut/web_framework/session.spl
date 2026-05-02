@@ -26,6 +26,7 @@ val decoded = SignedCookieSession.decode(cookie, "my-secret-key")
 ```
 """
 
+use std.database.{SdnDatabase, SdnTable, SdnRow}
 use std.database.sql.connection.{Database}
 use std.database.sql.types.{DbValue, DbError}
 use std.crypto.hmac.{hmac_sha256}
@@ -42,22 +43,39 @@ class SessionStore:
 
     Session data is stored as pipe-delimited key=value pairs.
     """
-    db: Database
+    backend_kind: text
+    db: Database?
+    simple_db: SdnDatabase?
+
+    static fn sqlite(db: Database) -> SessionStore:
+        SessionStore(backend_kind: "sqlite", db: Some(db), simple_db: nil)
+
+    static fn simpledb(db: SdnDatabase) -> SessionStore:
+        SessionStore(backend_kind: "simpledb", db: nil, simple_db: Some(db))
 
 impl SessionStore:
     me init() -> Result<(), text>:
         """Initialize the sessions table. Safe to call repeatedly."""
-        val sql = "CREATE TABLE IF NOT EXISTS sessions (" +
-            "session_id TEXT PRIMARY KEY, " +
-            "user_id TEXT NOT NULL, " +
-            "data TEXT DEFAULT '', " +
-            "created_at INTEGER NOT NULL, " +
-            "expires_at INTEGER NOT NULL" +
-            ")"
-        val result = self.db.exec(sql, [])
-        match result:
-            Ok(_): Ok(())
-            Err(e): Err("Failed to create sessions table")
+        if self.backend_kind == "sqlite":
+            val sql = "CREATE TABLE IF NOT EXISTS sessions (" +
+                "session_id TEXT PRIMARY KEY, " +
+                "user_id TEXT NOT NULL, " +
+                "data TEXT DEFAULT '', " +
+                "created_at INTEGER NOT NULL, " +
+                "expires_at INTEGER NOT NULL" +
+                ")"
+            val result = (self.db ?? Database.memory_unsafe()).exec(sql, [])
+            match result:
+                Ok(_): return Ok(())
+                Err(_e): return Err("Failed to create sessions table")
+
+        var db = self.require_simple_db()?
+        if not db.get_table("sessions").?:
+            db.set_table("sessions", SdnTable.new("sessions", ["id", "valid", "user_id", "data", "created_at", "expires_at"]))
+        if not db.save():
+            return Err("Failed to initialize Simple DB sessions")
+        self.simple_db = Some(db)
+        Ok(())
 
     me create(user_id: text) -> Result<text, text>:
         """Create a new session for a user.
@@ -72,19 +90,36 @@ impl SessionStore:
         """
         val sid = generate_session_id()
         val now = current_timestamp()
-        val expires = now + 86400  # 24 hours default
-        val sql = "INSERT INTO sessions (session_id, user_id, data, created_at, expires_at) VALUES (?, ?, ?, ?, ?)"
-        val params: [DbValue] = [
-            DbValue.Text(value: sid),
-            DbValue.Text(value: user_id),
-            DbValue.Text(value: ""),
-            DbValue.Integer(value: now),
-            DbValue.Integer(value: expires)
-        ]
-        val result = self.db.exec(sql, params)
-        match result:
-            Ok(_): Ok(sid)
-            Err(e): Err("Failed to create session")
+        val expires = now + 86400
+        if self.backend_kind == "sqlite":
+            val sql = "INSERT INTO sessions (session_id, user_id, data, created_at, expires_at) VALUES (?, ?, ?, ?, ?)"
+            val params: [DbValue] = [
+                DbValue.Text(value: sid),
+                DbValue.Text(value: user_id),
+                DbValue.Text(value: ""),
+                DbValue.Integer(value: now),
+                DbValue.Integer(value: expires)
+            ]
+            val result = (self.db ?? Database.memory_unsafe()).exec(sql, params)
+            match result:
+                Ok(_): return Ok(sid)
+                Err(_e): return Err("Failed to create session")
+
+        var db = self.require_simple_db()?
+        var table = self.simple_session_table(db)
+        val row = SdnRow.empty()
+        row.set("id", sid)
+        row.set("valid", "true")
+        row.set("user_id", user_id)
+        row.set("data", "")
+        row.set("created_at", "{now}")
+        row.set("expires_at", "{expires}")
+        table.add_row(row)
+        db.set_table("sessions", table)
+        if not db.save():
+            return Err("Failed to create Simple DB session")
+        self.simple_db = Some(db)
+        Ok(sid)
 
     me get(session_id: text) -> Result<Dict<text, text>, text>:
         """Retrieve session data by session ID.
@@ -98,24 +133,42 @@ impl SessionStore:
             Ok(data_dict) with session key-value pairs
         """
         val now = current_timestamp()
-        val sql = "SELECT data, user_id FROM sessions WHERE session_id = ? AND expires_at > ? LIMIT 1"
-        val params: [DbValue] = [
-            DbValue.Text(value: session_id),
-            DbValue.Integer(value: now)
-        ]
-        val result = self.db.query(sql, params)
-        match result:
-            Ok(rows):
-                if rows.len() == 0:
-                    return Ok({})
-                val row = rows[0]
-                val data_str = row.get_text("data") ?? ""
-                val user_id = row.get_text("user_id") ?? ""
-                var data = deserialize_session_data(data_str)
-                data["_user_id"] = user_id
-                Ok(data)
-            Err(e):
-                Err("Failed to get session")
+        if self.backend_kind == "sqlite":
+            val sql = "SELECT data, user_id FROM sessions WHERE session_id = ? AND expires_at > ? LIMIT 1"
+            val params: [DbValue] = [
+                DbValue.Text(value: session_id),
+                DbValue.Integer(value: now)
+            ]
+            val result = (self.db ?? Database.memory_unsafe()).query(sql, params)
+            match result:
+                Ok(rows):
+                    if rows.len() == 0:
+                        return Ok({})
+                    val row = rows[0]
+                    val data_str = row.get_text("data") ?? ""
+                    val user_id = row.get_text("user_id") ?? ""
+                    var data = deserialize_session_data(data_str)
+                    data["_user_id"] = user_id
+                    return Ok(data)
+                Err(_e):
+                    return Err("Failed to get session")
+
+        val db = self.require_simple_db()?
+        val table_opt = db.get_table("sessions")
+        if not table_opt.?:
+            return Ok({})
+        val row = table_opt.unwrap().get_row(session_id)
+        if not row.?:
+            return Ok({})
+        val session = row.unwrap()
+        if session.get("valid") == Some("false"):
+            return Ok({})
+        val expires = (session.get("expires_at") ?? "0").to_int() ?? 0
+        if expires <= now:
+            return Ok({})
+        var data = deserialize_session_data(session.get("data") ?? "")
+        data["_user_id"] = session.get("user_id") ?? ""
+        Ok(data)
 
     me set(session_id: text, key: text, value: text) -> Result<(), text>:
         """Set a key-value pair in a session.
@@ -132,15 +185,30 @@ impl SessionStore:
                 updated.remove("_user_id")
                 updated[key] = value
                 val serialized = serialize_session_data(updated)
-                val sql = "UPDATE sessions SET data = ? WHERE session_id = ?"
-                val params: [DbValue] = [
-                    DbValue.Text(value: serialized),
-                    DbValue.Text(value: session_id)
-                ]
-                val result = self.db.exec(sql, params)
-                match result:
-                    Ok(_): Ok(())
-                    Err(e): Err("Failed to update session")
+                if self.backend_kind == "sqlite":
+                    val sql = "UPDATE sessions SET data = ? WHERE session_id = ?"
+                    val params: [DbValue] = [
+                        DbValue.Text(value: serialized),
+                        DbValue.Text(value: session_id)
+                    ]
+                    val result = (self.db ?? Database.memory_unsafe()).exec(sql, params)
+                    match result:
+                        Ok(_): return Ok(())
+                        Err(_e): return Err("Failed to update session")
+
+                var db = self.require_simple_db()?
+                var table = self.simple_session_table(db)
+                val current = table.get_row(session_id)
+                if not current.?:
+                    return Err("Session not found")
+                var row = current.unwrap()
+                row.set("data", serialized)
+                table.update_row(session_id, row)
+                db.set_table("sessions", table)
+                if not db.save():
+                    return Err("Failed to update Simple DB session")
+                self.simple_db = Some(db)
+                Ok(())
             Err(e):
                 Err(e)
 
@@ -150,12 +218,23 @@ impl SessionStore:
         Args:
             session_id: Session identifier to destroy
         """
-        val sql = "DELETE FROM sessions WHERE session_id = ?"
-        val params: [DbValue] = [DbValue.Text(value: session_id)]
-        val result = self.db.exec(sql, params)
-        match result:
-            Ok(_): Ok(())
-            Err(e): Err("Failed to destroy session")
+        if self.backend_kind == "sqlite":
+            val sql = "DELETE FROM sessions WHERE session_id = ?"
+            val params: [DbValue] = [DbValue.Text(value: session_id)]
+            val result = (self.db ?? Database.memory_unsafe()).exec(sql, params)
+            match result:
+                Ok(_): return Ok(())
+                Err(_e): return Err("Failed to destroy session")
+
+        var db = self.require_simple_db()?
+        var table = self.simple_session_table(db)
+        if table.index.has(session_id):
+            table.mark_deleted(session_id)
+            db.set_table("sessions", table)
+            if not db.save():
+                return Err("Failed to destroy Simple DB session")
+            self.simple_db = Some(db)
+        Ok(())
 
     me gc() -> Result<i64, text>:
         """Garbage collect expired sessions.
@@ -164,12 +243,27 @@ impl SessionStore:
             Ok(count) of deleted sessions
         """
         val now = current_timestamp()
-        val sql = "DELETE FROM sessions WHERE expires_at <= ?"
-        val params: [DbValue] = [DbValue.Integer(value: now)]
-        val result = self.db.exec(sql, params)
-        match result:
-            Ok(count): Ok(count)
-            Err(e): Err("Failed to gc sessions")
+        if self.backend_kind == "sqlite":
+            val sql = "DELETE FROM sessions WHERE expires_at <= ?"
+            val params: [DbValue] = [DbValue.Integer(value: now)]
+            val result = (self.db ?? Database.memory_unsafe()).exec(sql, params)
+            match result:
+                Ok(count): return Ok(count)
+                Err(_e): return Err("Failed to gc sessions")
+
+        var db = self.require_simple_db()?
+        var table = self.simple_session_table(db)
+        var deleted = 0
+        for row in table.rows:
+            val expires = (row.get("expires_at") ?? "0").to_int() ?? 0
+            if row.get("valid") != Some("false") and expires <= now:
+                if table.mark_deleted(row.get("id") ?? ""):
+                    deleted = deleted + 1
+        db.set_table("sessions", table)
+        if not db.save():
+            return Err("Failed to gc Simple DB sessions")
+        self.simple_db = Some(db)
+        Ok(deleted)
 
     me touch(session_id: text, ttl: i64) -> Result<(), text>:
         """Extend a session's expiry.
@@ -180,15 +274,40 @@ impl SessionStore:
         """
         val now = current_timestamp()
         val expires = now + ttl
-        val sql = "UPDATE sessions SET expires_at = ? WHERE session_id = ?"
-        val params: [DbValue] = [
-            DbValue.Integer(value: expires),
-            DbValue.Text(value: session_id)
-        ]
-        val result = self.db.exec(sql, params)
-        match result:
-            Ok(_): Ok(())
-            Err(e): Err("Failed to touch session")
+        if self.backend_kind == "sqlite":
+            val sql = "UPDATE sessions SET expires_at = ? WHERE session_id = ?"
+            val params: [DbValue] = [
+                DbValue.Integer(value: expires),
+                DbValue.Text(value: session_id)
+            ]
+            val result = (self.db ?? Database.memory_unsafe()).exec(sql, params)
+            match result:
+                Ok(_): return Ok(())
+                Err(_e): return Err("Failed to touch session")
+
+        var db = self.require_simple_db()?
+        var table = self.simple_session_table(db)
+        val current = table.get_row(session_id)
+        if not current.?:
+            return Err("Session not found")
+        var row = current.unwrap()
+        row.set("expires_at", "{expires}")
+        table.update_row(session_id, row)
+        db.set_table("sessions", table)
+        if not db.save():
+            return Err("Failed to touch Simple DB session")
+        self.simple_db = Some(db)
+        Ok(())
+
+    fn require_simple_db() -> Result<SdnDatabase, text>:
+        if val Some(db) = self.simple_db:
+            return Ok(db)
+        Err("Simple DB session store is not configured")
+
+    fn simple_session_table(db: SdnDatabase) -> SdnTable:
+        if val Some(table) = db.get_table("sessions"):
+            return table
+        SdnTable.new("sessions", ["id", "valid", "user_id", "data", "created_at", "expires_at"])
 
 # ============================================================================
 # Signed Cookie Session

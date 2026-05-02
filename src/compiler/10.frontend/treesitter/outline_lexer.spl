@@ -127,8 +127,6 @@ fn treesitter_advance(self: TreeSitter) -> Token:
         # Accumulate doc comments
         # Guard against EOF and nil tokens before checking text
         while self.current.kind == TokenKind.Ident:
-            if not self.current.has_text:
-                break
             if not self.current.text.starts_with("##"):
                 break
             val comment = self.current.text[2:].trim()
@@ -178,9 +176,87 @@ fn treesitter_expect(self: TreeSitter, kind: TokenKind, message: text) -> bool:
 fn treesitter_is_at_end(self: TreeSitter) -> bool:
         """Check if at end of input (Eof or nil token)."""
         val kind = self.current.kind
-        if not has_kind:
-            return true
         kind == TokenKind.Eof
+
+
+fn treesitter_error(self: TreeSitter, message: text):
+        self.errors = self.errors.push(ParseError(
+            message: message,
+            span: self.current.span,
+            severity: ErrorSeverity.Error
+        ))
+
+
+fn treesitter_warning(self: TreeSitter, message: text):
+        self.errors = self.errors.push(ParseError(
+            message: message,
+            span: self.current.span,
+            severity: ErrorSeverity.Warning
+        ))
+
+
+fn treesitter_skip_newlines(self: TreeSitter):
+        while self.check(TokenKind.Newline):
+            self.advance()
+
+
+fn treesitter_take_doc_comment(self: TreeSitter) -> text?:
+        val doc = self.doc_comment
+        self.doc_comment = nil
+        doc
+
+
+fn treesitter_try_parse_body_docstring(self: TreeSitter) -> text?:
+        if self.check(TokenKind.StringLit):
+            val doc = self.current.text
+            self.advance()
+            self.skip_newlines()
+            return doc
+        nil
+
+
+fn treesitter_skip_expression(self: TreeSitter):
+        var paren_depth = 0
+        var bracket_depth = 0
+        var brace_depth = 0
+
+        while not self.is_at_end():
+            if paren_depth == 0 and bracket_depth == 0 and brace_depth == 0:
+                if self.check(TokenKind.Newline) or self.check(TokenKind.Dedent) or self.check(TokenKind.Comma):
+                    break
+
+            match self.peek():
+                case LParen:
+                    paren_depth = paren_depth + 1
+                case RParen:
+                    if paren_depth == 0 and bracket_depth == 0 and brace_depth == 0:
+                        break
+                    paren_depth = paren_depth - 1
+                case LBracket:
+                    bracket_depth = bracket_depth + 1
+                case RBracket:
+                    if bracket_depth == 0 and paren_depth == 0 and brace_depth == 0:
+                        break
+                    bracket_depth = bracket_depth - 1
+                case LBrace:
+                    brace_depth = brace_depth + 1
+                case RBrace:
+                    if brace_depth == 0 and paren_depth == 0 and bracket_depth == 0:
+                        break
+                    brace_depth = brace_depth - 1
+                case _:
+                    pass
+            self.advance()
+
+
+fn treesitter_synchronize(self: TreeSitter):
+        while not self.is_at_end():
+            if self.check(TokenKind.Newline):
+                self.advance()
+                return
+            if self.check(TokenKind.Dedent):
+                return
+            self.advance()
 
 
 # ============================================================================

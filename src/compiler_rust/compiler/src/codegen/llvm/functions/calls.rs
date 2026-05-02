@@ -26,22 +26,11 @@ fn map_ffi_name(func_name: &str) -> &str {
 
 fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
     match rt_name {
-        "rt_len"
-        | "rt_to_string"
-        | "rt_string_to_int"
-        | "rt_string_to_float"
-        | "rt_string_to_upper"
-        | "rt_string_to_lower"
-        | "rt_string_trim"
-        | "rt_array_pop"
-        | "rt_array_sort"
-        | "rt_array_reverse"
-        | "rt_array_clear"
-        | "rt_dict_keys"
-        | "rt_dict_values"
-        | "rt_is_none"
-        | "rt_is_some"
-        | "rt_enum_payload" => Some(1),
+        "rt_len" | "rt_to_string" | "rt_string_to_int" | "rt_string_to_float" | "rt_string_to_upper"
+        | "rt_string_to_lower" | "rt_string_trim" | "rt_array_pop" | "rt_array_sort" | "rt_array_reverse"
+        | "rt_array_clear" | "rt_dict_keys" | "rt_dict_values" | "rt_is_none" | "rt_is_some" | "rt_enum_payload" => {
+            Some(1)
+        }
         "rt_string_starts_with"
         | "rt_string_ends_with"
         | "rt_contains"
@@ -489,50 +478,50 @@ impl LlvmBackend {
             if let Some(rt_fn_name) = qualified_rt_redirect {
                 let expected_arity = qualified_runtime_arity(method, rt_fn_name);
                 if expected_arity == Some(args.len()) {
-                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                for arg in args.iter() {
-                    let val = self.get_vreg(arg, vreg_map)?;
-                    let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
-                    arg_vals.push(casted.into());
-                }
-                let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                    arg_vals.iter().map(|_| i64_type.into()).collect();
-                let returns_bool = matches!(
-                    rt_fn_name,
-                    "rt_array_push"
-                        | "rt_array_clear"
-                        | "rt_array_reverse"
-                        | "rt_array_sort"
-                        | "rt_index_set"
-                        | "rt_contains"
-                        | "rt_is_none"
-                        | "rt_is_some"
-                        | "rt_enum_check_discriminant"
-                );
-                let fn_type = if returns_bool {
-                    self.context.bool_type().fn_type(&param_types, false)
-                } else {
-                    i64_type.fn_type(&param_types, false)
-                };
-                let rt_func = module
-                    .get_function(rt_fn_name)
-                    .unwrap_or_else(|| module.add_function(rt_fn_name, fn_type, None));
-                let call_site = builder
-                    .build_call(rt_func, &arg_vals, "qualified_rt_redirect")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("qualified rt redirect call", &e))?;
-                if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                        let ret_val = if returns_bool {
-                            self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
-                        } else {
-                            ret_val
-                        };
-                        vreg_map.insert(d, ret_val);
-                    } else {
-                        vreg_map.insert(d, i64_type.const_int(0, false).into());
+                    let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                    for arg in args.iter() {
+                        let val = self.get_vreg(arg, vreg_map)?;
+                        let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+                        arg_vals.push(casted.into());
                     }
-                }
-                return Ok(());
+                    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                        arg_vals.iter().map(|_| i64_type.into()).collect();
+                    let returns_bool = matches!(
+                        rt_fn_name,
+                        "rt_array_push"
+                            | "rt_array_clear"
+                            | "rt_array_reverse"
+                            | "rt_array_sort"
+                            | "rt_index_set"
+                            | "rt_contains"
+                            | "rt_is_none"
+                            | "rt_is_some"
+                            | "rt_enum_check_discriminant"
+                    );
+                    let fn_type = if returns_bool {
+                        self.context.bool_type().fn_type(&param_types, false)
+                    } else {
+                        i64_type.fn_type(&param_types, false)
+                    };
+                    let rt_func = module
+                        .get_function(rt_fn_name)
+                        .unwrap_or_else(|| module.add_function(rt_fn_name, fn_type, None));
+                    let call_site = builder
+                        .build_call(rt_func, &arg_vals, "qualified_rt_redirect")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("qualified rt redirect call", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            let ret_val = if returns_bool {
+                                self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
+                            } else {
+                                ret_val
+                            };
+                            vreg_map.insert(d, ret_val);
+                        } else {
+                            vreg_map.insert(d, i64_type.const_int(0, false).into());
+                        }
+                    }
+                    return Ok(());
                 }
             }
         }
@@ -574,7 +563,10 @@ impl LlvmBackend {
 
             if matches!(method_name, "is_ok" | "is_err") && args.len() == 1 {
                 let rt_func = module.get_function("rt_enum_check_discriminant").unwrap_or_else(|| {
-                    let fn_type = self.context.bool_type().fn_type(&[i64_type.into(), i64_type.into()], false);
+                    let fn_type = self
+                        .context
+                        .bool_type()
+                        .fn_type(&[i64_type.into(), i64_type.into()], false);
                     module.add_function("rt_enum_check_discriminant", fn_type, None)
                 });
                 let recv = self.get_vreg(&args[0], vreg_map)?;

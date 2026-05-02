@@ -55,7 +55,7 @@ Inspect:
 
 Expected manifest differences for `mlk_s02_100t`:
 - board id is concrete instead of `xilinx_generic`
-- part is `xc7a100t-2ffg484i`
+- part is `xc7a100tfgg484-2`
 - downstream build directories can stay board-scoped
 - Vivado plan is emitted as a board-scoped scaffold even before constraints are verified
 

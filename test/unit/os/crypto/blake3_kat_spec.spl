@@ -1,0 +1,171 @@
+# BLAKE3 Known-Answer Test Vectors
+#
+# Tests the pure-Simple BLAKE3 implementation in src/os/crypto/blake3.spl
+# against official vectors from:
+#   https://github.com/BLAKE3-team/BLAKE3/tree/master/test_vectors
+#
+# Input pattern: repeating sequence 0,1,2,...,250,0,1,... (cycle of 251).
+# Key (for keyed_hash): 32-byte ASCII "whats the Elvish word for friend".
+# Context string (for derive_key): "BLAKE3 2019-12-27 16:29:52 test vectors context"
+#
+# Vectors chosen:
+#   V1: input_len=0  — hash, keyed_hash, derive_key (empty input, single empty block)
+#   V2: input_len=1  — hash only (single byte 0x00, single block)
+#   V3: input_len=63 — hash only (63 bytes, single partial block)
+#   V4: input_len=1024 — hash only (exactly one full chunk, 16 blocks)
+#
+# NOTE: Interpreter-mode test runner verifies file loading, NOT it-block
+# execution.  Assertions only fire under compiled/native mode.
+#
+# Source: BLAKE3 official test_vectors.json (commit-stable)
+# ============================================================================
+
+use std.spipe.*
+use os.crypto.blake3.{blake3, blake3_keyed, blake3_kdf, blake3_xof}
+
+# ============================================================================
+# Helpers — build at module level to avoid it-block var-mutation footgun
+# (see memory: feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0:  "0"
+    else if n == 1:  "1"
+    else if n == 2:  "2"
+    else if n == 3:  "3"
+    else if n == 4:  "4"
+    else if n == 5:  "5"
+    else if n == 6:  "6"
+    else if n == 7:  "7"
+    else if n == 8:  "8"
+    else if n == 9:  "9"
+    else if n == 10: "a"
+    else if n == 11: "b"
+    else if n == 12: "c"
+    else if n == 13: "d"
+    else if n == 14: "e"
+    else:            "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: i64 = 0
+    while i < b.len():
+        val byte = b[i]
+        s = s + _hex_nibble((byte >> 4) & 0x0F)
+        s = s + _hex_nibble(byte & 0x0F)
+        i = i + 1
+    s
+
+# Repeating-cycle input of `n` bytes: byte[i] = i % 251
+fn _make_input(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n:
+        out.push((i % 251).to_u8())
+        i = i + 1
+    out
+
+# Key: 32-byte ASCII "whats the Elvish word for friend"
+fn _make_key() -> [u8]:
+    var k: [u8] = []
+    # w h a t s   t h e   E l v i s h
+    k.push(119) k.push(104) k.push(97) k.push(116) k.push(115) k.push(32)
+    k.push(116) k.push(104) k.push(101) k.push(32) k.push(69) k.push(108)
+    k.push(118) k.push(105) k.push(115) k.push(104)
+    #   w o r d   f o r   f r i e n d
+    k.push(32) k.push(119) k.push(111) k.push(114) k.push(100) k.push(32)
+    k.push(102) k.push(111) k.push(114) k.push(32) k.push(102) k.push(114)
+    k.push(105) k.push(101) k.push(110) k.push(100)
+    k
+
+# Context string: "BLAKE3 2019-12-27 16:29:52 test vectors context"
+fn _make_context() -> [u8]:
+    var c: [u8] = []
+    # B L A K E 3   2 0 1 9 - 1 2 - 2 7
+    c.push(66) c.push(76) c.push(65) c.push(75) c.push(69) c.push(51) c.push(32)
+    c.push(50) c.push(48) c.push(49) c.push(57) c.push(45) c.push(49) c.push(50)
+    c.push(45) c.push(50) c.push(55)
+    # (space) 1 6 : 2 9 : 5 2
+    c.push(32) c.push(49) c.push(54) c.push(58) c.push(50) c.push(57) c.push(58)
+    c.push(53) c.push(50)
+    # (space) t e s t
+    c.push(32) c.push(116) c.push(101) c.push(115) c.push(116)
+    # (space) v e c t o r s
+    c.push(32) c.push(118) c.push(101) c.push(99) c.push(116) c.push(111)
+    c.push(114) c.push(115)
+    # (space) c o n t e x t
+    c.push(32) c.push(99) c.push(111) c.push(110) c.push(116) c.push(101)
+    c.push(120) c.push(116)
+    c
+
+# Pre-compute inputs at module level
+fn _v1_input()   -> [u8]: _make_input(0)
+fn _v2_input()   -> [u8]: _make_input(1)
+fn _v3_input()   -> [u8]: _make_input(63)
+fn _v4_input()   -> [u8]: _make_input(1024)
+
+# ============================================================================
+# V1: input_len = 0
+# Expected (first 32 bytes = default hash):
+#   hash:        af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+#   keyed_hash:  92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e783f1498a4ed60d26
+#   derive_key:  2cc39783c223154fea8dfb7c1b1660f2ac2dcbd1c1de8277b0b0dd39b7e50d7d
+# ============================================================================
+
+describe "BLAKE3 KAT — V1: input_len=0":
+
+    it "V1 hash(empty) = af1349b9...":
+        expect(_bytes_hex(blake3(_v1_input()))).to_equal(
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        )
+
+    it "V1 keyed_hash(empty) = 92b2b756...":
+        expect(_bytes_hex(blake3_keyed(_make_key(), _v1_input()))).to_equal(
+            "92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e783f1498a4ed60d26"
+        )
+
+    it "V1 derive_key(empty) = 2cc39783...":
+        expect(_bytes_hex(blake3_kdf(_make_context(), _v1_input()))).to_equal(
+            "2cc39783c223154fea8dfb7c1b1660f2ac2dcbd1c1de8277b0b0dd39b7e50d7d"
+        )
+
+# ============================================================================
+# V2: input_len = 1
+# Expected (first 32 bytes):
+#   hash: 2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213
+# ============================================================================
+
+describe "BLAKE3 KAT — V2: input_len=1":
+
+    it "V2 hash([0x00]) = 2d3adedff1...":
+        expect(_bytes_hex(blake3(_v2_input()))).to_equal(
+            "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"
+        )
+
+# ============================================================================
+# V3: input_len = 63
+# Expected (first 32 bytes):
+#   hash: e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b
+# ============================================================================
+
+describe "BLAKE3 KAT — V3: input_len=63":
+
+    it "V3 hash(63 bytes) = e9bc37a5...":
+        expect(_bytes_hex(blake3(_v3_input()))).to_equal(
+            "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b"
+        )
+
+# ============================================================================
+# V4: input_len = 1024  (exactly one full chunk: 16 × 64-byte blocks)
+# Official vector from test_vectors.json:
+#   "input_len": 1024,
+#   "hash": "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7..."
+# First 32 bytes: 42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7
+# ============================================================================
+
+describe "BLAKE3 KAT — V4: input_len=1024":
+
+    it "V4 hash(1024 bytes) = 42214739...":
+        expect(_bytes_hex(blake3(_v4_input()))).to_equal(
+            "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7"
+        )

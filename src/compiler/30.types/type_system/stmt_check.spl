@@ -12,17 +12,164 @@
 # - Verification statements (assert, assume, admit)
 # - Special statements (defer, guard, pass, skip)
 
-from inference.types import {Type, TypeVarId, UnifyError, InferError}
-from inference.infer import {InferenceEngine}
-from ast import {Node, LetStmt, ConstStmt, StaticStmt, AssignmentStmt, ReturnStmt}
-from ast import {IfStmt, MatchStmt, ForStmt, WhileStmt, LoopStmt}
-from ast import {BreakStmt, ContinueStmt, PassStmt, SkipStmt}
-from ast import {DeferStmt, GuardStmt, AssertStmt, AssumeStmt, AdmitStmt}
-from ast import {ProofHintStmt, CalcStmt, ContextStmt, WithStmt}
-from ast import {Block, Expr, Pattern, AssignOp, Mutability}
+use inference.types.{Type, TypeVarId, UnifyError, InferError}
+use inference.infer.{InferenceEngine}
+from ast import {Node}
+from ast import {ContinueStmt, PassStmt}
+from ast import {ProofHintStmt}
+use compiler.frontend.parser_types.{Const as ConstStmt}
+use compiler.frontend.parser_types_expr as parser_types_expr
+use compiler.frontend.parser_types_expr.{Expr, Pattern, AssignOp}
 from compiler.types.type_system.checker import {TypeError}
 from compiler.types.type_system.expr_infer import {infer_expr}
 from compiler.types.type_system.module_check import {ast_type_to_inference_type_engine}
+
+struct Block:
+    statements: [Node]
+
+struct LetStmt:
+    pattern: Pattern
+    ty: parser_types_expr.Type?
+    value: Expr?
+
+struct StaticStmt:
+    name: text
+    ty: parser_types_expr.Type?
+    value: Expr
+
+struct AssignmentStmt:
+    target: Expr
+    op: AssignOp
+    value: Expr
+
+struct ReturnStmt:
+    value: Expr?
+
+struct BreakStmt:
+    value: Expr?
+
+struct IfStmt:
+    condition: Expr
+    then_block: Block
+    elif_branches: [(Expr, Block)]
+    else_block: Block?
+
+struct MatchArm:
+    pattern: Pattern
+    guard: Expr?
+    body: Block
+
+struct MatchStmt:
+    subject: Expr
+    arms: [MatchArm]
+
+struct ForStmt:
+    iterable: Expr
+    pattern: Pattern
+    body: Block
+
+struct WhileStmt:
+    condition: Expr
+    body: Block
+
+struct LoopStmt:
+    body: Block
+
+enum SkipBody:
+    Standalone
+    BlockBody(Block)
+
+struct SkipStmt:
+    body: SkipBody
+
+enum DeferBody:
+    ExprBody(Expr)
+    BlockBody(Block)
+
+struct DeferStmt:
+    body: DeferBody
+
+struct GuardStmt:
+    condition: Expr?
+    result: Expr
+
+struct AssertStmt:
+    condition: Expr
+
+struct AssumeStmt:
+    condition: Expr
+
+struct AdmitStmt:
+    condition: Expr
+
+struct CalcStep:
+    expr: Expr
+
+struct CalcStmt:
+    steps: [CalcStep]
+
+struct ContextStmt:
+    expr: Expr
+    body: Block
+
+struct WithStmt:
+    resources: [Expr]
+    body: Block
+
+# ============================================================================
+# Typed AST Access Helpers
+# ============================================================================
+
+fn _let_has_value(stmt: LetStmt) -> bool:
+    stmt.value.?
+
+fn _let_value_type(engine: InferenceEngine, stmt: LetStmt,
+                   env: Dict<text, Type>) -> Result<Type, TypeError>:
+    infer_expr(engine, stmt.value.unwrap(), env)
+
+fn _let_has_annotation(stmt: LetStmt) -> bool:
+    stmt.ty.?
+
+fn _let_annotation_type(engine: InferenceEngine, stmt: LetStmt) -> Type:
+    ast_type_to_inference_type_engine(stmt.ty.unwrap(), engine)
+
+fn _const_value_type(engine: InferenceEngine, stmt: ConstStmt,
+                     env: Dict<text, Type>) -> Result<Type, TypeError>:
+    infer_expr(engine, stmt.value, env)
+
+fn _const_has_annotation(stmt: ConstStmt) -> bool:
+    stmt.has_type_
+
+fn _const_annotation_type(engine: InferenceEngine, stmt: ConstStmt) -> Type:
+    ast_type_to_inference_type_engine(stmt.type_, engine)
+
+fn _static_value_type(engine: InferenceEngine, stmt: StaticStmt,
+                      env: Dict<text, Type>) -> Result<Type, TypeError>:
+    infer_expr(engine, stmt.value, env)
+
+fn _static_has_annotation(stmt: StaticStmt) -> bool:
+    stmt.ty.?
+
+fn _static_annotation_type(engine: InferenceEngine, stmt: StaticStmt) -> Type:
+    ast_type_to_inference_type_engine(stmt.ty.unwrap(), engine)
+
+fn _assignment_value_type(engine: InferenceEngine, stmt: AssignmentStmt,
+                          env: Dict<text, Type>) -> Result<Type, TypeError>:
+    infer_expr(engine, stmt.value, env)
+
+fn _return_has_value(stmt: ReturnStmt) -> bool:
+    stmt.value.?
+
+fn _return_value_type(engine: InferenceEngine, stmt: ReturnStmt,
+                      env: Dict<text, Type>) -> Result<Type, TypeError>:
+    infer_expr(engine, stmt.value.unwrap(), env)
+
+fn _break_has_value(stmt: BreakStmt) -> bool:
+    stmt.value.?
+
+fn _break_value_type(engine: InferenceEngine, stmt: BreakStmt,
+                     env: Dict<text, Type>) -> Result<Type, TypeError>:
+    infer_expr(engine, stmt.value.unwrap(), env)
 
 # ============================================================================
 # Statement Type Checking
@@ -143,17 +290,17 @@ fn check_let(engine: InferenceEngine, stmt: LetStmt,
     """Type check a let binding: val/var x: T = expr"""
 
     # Infer the value type (if present)
-    val value_ty = if stmt.value.?:
-        infer_expr(engine, stmt.value.unwrap(), env)?
+    val value_ty = if _let_has_value(stmt):
+        _let_value_type(engine, stmt, env)?
     else:
         # No initializer - must have type annotation
-        if not stmt.ty.?:
+        if not _let_has_annotation(stmt):
             return Err(TypeError.Other("let binding requires either type annotation or initializer"))
         engine.fresh_var()
 
     # Check against type annotation (if present)
-    if stmt.ty.?:
-        val ann_ty = ast_type_to_inference_type_engine(stmt.ty.unwrap(), engine)
+    if _let_has_annotation(stmt):
+        val ann_ty = _let_annotation_type(engine, stmt)
         engine.unify(value_ty, ann_ty)?
 
     # Bind pattern variables
@@ -258,11 +405,11 @@ fn check_const(engine: InferenceEngine, stmt: ConstStmt,
     """Type check a const binding: const X: T = expr"""
 
     # Infer value type
-    val value_ty = infer_expr(engine, stmt.value, env)?
+    val value_ty = _const_value_type(engine, stmt, env)?
 
     # Check against type annotation (if present)
-    if stmt.ty.?:
-        val ann_ty = ast_type_to_inference_type_engine(stmt.ty.unwrap(), engine)
+    if _const_has_annotation(stmt):
+        val ann_ty = _const_annotation_type(engine, stmt)
         engine.unify(value_ty, ann_ty)?
 
     # Add to environment
@@ -276,11 +423,11 @@ fn check_static(engine: InferenceEngine, stmt: StaticStmt,
     """Type check a static binding: static X: T = expr"""
 
     # Infer value type
-    val value_ty = infer_expr(engine, stmt.value, env)?
+    val value_ty = _static_value_type(engine, stmt, env)?
 
     # Check against type annotation (if present)
-    if stmt.ty.?:
-        val ann_ty = ast_type_to_inference_type_engine(stmt.ty.unwrap(), engine)
+    if _static_has_annotation(stmt):
+        val ann_ty = _static_annotation_type(engine, stmt)
         engine.unify(value_ty, ann_ty)?
 
     # Add to environment
@@ -301,7 +448,7 @@ fn check_assignment(engine: InferenceEngine, stmt: AssignmentStmt,
     val target_ty = infer_expr(engine, stmt.target, env)?
 
     # Infer value type (RHS)
-    val value_ty = infer_expr(engine, stmt.value, env)?
+    val value_ty = _assignment_value_type(engine, stmt, env)?
 
     # Check assignment operator
     match stmt.op:
@@ -329,9 +476,9 @@ fn check_return(engine: InferenceEngine, stmt: ReturnStmt,
                 env: Dict<text, Type>, current_fn_ret_type: Type?) -> Result<Dict<text, Type>, TypeError>:
     """Type check a return statement."""
 
-    if stmt.value.?:
+    if _return_has_value(stmt):
         # Infer return value type
-        val ret_ty = infer_expr(engine, stmt.value.unwrap(), env)?
+        val ret_ty = _return_value_type(engine, stmt, env)?
 
         # Unify with function return type (if known)
         if current_fn_ret_type.?:
@@ -437,8 +584,8 @@ fn check_break(engine: InferenceEngine, stmt: BreakStmt,
     """Type check a break statement."""
 
     # Break can optionally carry a value
-    if stmt.value.?:
-        val _ = infer_expr(engine, stmt.value.unwrap(), env)?
+    if _break_has_value(stmt):
+        val _ = _break_value_type(engine, stmt, env)?
 
     Ok(env)
 
@@ -660,4 +807,3 @@ fn extract_element_type(engine: InferenceEngine, iterable_ty: Type) -> Result<Ty
 # ============================================================================
 # Exports
 # ============================================================================
-

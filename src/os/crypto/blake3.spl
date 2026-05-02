@@ -1,0 +1,579 @@
+# BLAKE3 — Pure Simple Implementation
+#
+# BLAKE3 is a modern cryptographic hash with SIMD-friendly design, a Merkle tree
+# structure, and a single algorithm covering streaming, keyed-hash, KDF, and XOF.
+#
+# Pure Simple language only, no externs, no SIMD.  Suitable for baremetal.
+#
+# Reference: https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf
+#            https://github.com/BLAKE3-team/BLAKE3/blob/master/reference_impl/reference_impl.rs
+#
+# u32 truncation: all arithmetic is performed in u64 and masked to 32 bits with
+# & 0xFFFFFFFF after each wrapping addition or rotation.  Rotations use the
+# helper _b3_rotr32.
+#
+# Chunk structure: each chunk is 1024 bytes (16 × 64-byte blocks), compressed
+# sequentially.  The Merkle tree merges chunk chaining values bottom-up via a
+# binary stack following trailing-zero-bits of the total chunk count.
+#
+# Domain-separation flags (bit positions in state[15]):
+#   CHUNK_START      = 1
+#   CHUNK_END        = 2
+#   PARENT           = 4
+#   ROOT             = 8
+#   KEYED_HASH       = 16
+#   DERIVE_KEY_CTX   = 32
+#   DERIVE_KEY_MAT   = 64
+#
+# Public API:
+#   blake3(msg)             -> [u8]  (32 bytes)
+#   blake3_keyed(key, msg)  -> [u8]  (32 bytes; key must be 32 bytes)
+#   blake3_kdf(context, msg)-> [u8]  (32 bytes)
+#   blake3_xof(msg, n)      -> [u8]  (n bytes)
+# ============================================================================
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+fn _b3_iv() -> [u64]:
+    """BLAKE3 IV (= SHA-256 initial hash values), stored as u64."""
+    var iv: [u64] = []
+    iv.push(0x6A09E667)
+    iv.push(0xBB67AE85)
+    iv.push(0x3C6EF372)
+    iv.push(0xA54FF53A)
+    iv.push(0x510E527F)
+    iv.push(0x9B05688C)
+    iv.push(0x1F83D9AB)
+    iv.push(0x5BE0CD19)
+    iv
+
+# Message-word permutation applied after each of 7 rounds.
+fn _b3_msg_perm(i: i64) -> i64:
+    """MSG_PERMUTATION[i]."""
+    if i == 0:  2
+    else if i == 1:  6
+    else if i == 2:  3
+    else if i == 3:  10
+    else if i == 4:  7
+    else if i == 5:  0
+    else if i == 6:  4
+    else if i == 7:  13
+    else if i == 8:  1
+    else if i == 9:  11
+    else if i == 10: 12
+    else if i == 11: 5
+    else if i == 12: 9
+    else if i == 13: 14
+    else if i == 14: 15
+    else:            8
+
+# ============================================================================
+# Bit manipulation helpers
+# ============================================================================
+
+fn _b3_rotr32(x: u64, n: u64) -> u64:
+    """32-bit right rotation on a u64-held u32 value."""
+    ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+
+fn _b3_le32_load(buf: [u8], off: i64) -> u64:
+    """Load a little-endian u32 from buf[off..off+4] into a u64."""
+    buf[off].to_u64() |
+        (buf[off + 1].to_u64() << 8) |
+        (buf[off + 2].to_u64() << 16) |
+        (buf[off + 3].to_u64() << 24)
+
+# ============================================================================
+# G mixing function — BLAKE3 §2.2 (rotation constants 16, 12, 8, 7)
+# ============================================================================
+
+fn _b3_g(v: [u64], a: i64, b: i64, c: i64, d: i64, mx: u64, my: u64) -> [u64]:
+    """G mixing function operating on state vector v at indices a,b,c,d."""
+    var va = v[a]
+    var vb = v[b]
+    var vc = v[c]
+    var vd = v[d]
+
+    va = (va + vb + mx) & 0xFFFFFFFF
+    vd = _b3_rotr32(vd ^ va, 16)
+    vc = (vc + vd) & 0xFFFFFFFF
+    vb = _b3_rotr32(vb ^ vc, 12)
+    va = (va + vb + my) & 0xFFFFFFFF
+    vd = _b3_rotr32(vd ^ va, 8)
+    vc = (vc + vd) & 0xFFFFFFFF
+    vb = _b3_rotr32(vb ^ vc, 7)
+
+    var out: [u64] = []
+    var i: i64 = 0
+    while i < 16:
+        if i == a:
+            out.push(va)
+        else if i == b:
+            out.push(vb)
+        else if i == c:
+            out.push(vc)
+        else if i == d:
+            out.push(vd)
+        else:
+            out.push(v[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# round — column + diagonal mixing
+# ============================================================================
+
+fn _b3_round(v: [u64], m: [u64]) -> [u64]:
+    """One BLAKE3 round: 4 column G calls then 4 diagonal G calls."""
+    var s = v
+    # Columns
+    s = _b3_g(s, 0, 4,  8, 12, m[0],  m[1])
+    s = _b3_g(s, 1, 5,  9, 13, m[2],  m[3])
+    s = _b3_g(s, 2, 6, 10, 14, m[4],  m[5])
+    s = _b3_g(s, 3, 7, 11, 15, m[6],  m[7])
+    # Diagonals
+    s = _b3_g(s, 0, 5, 10, 15, m[8],  m[9])
+    s = _b3_g(s, 1, 6, 11, 12, m[10], m[11])
+    s = _b3_g(s, 2, 7,  8, 13, m[12], m[13])
+    s = _b3_g(s, 3, 4,  9, 14, m[14], m[15])
+    s
+
+# ============================================================================
+# permute — apply MSG_PERMUTATION to 16 message words
+# ============================================================================
+
+fn _b3_permute(m: [u64]) -> [u64]:
+    """Permute 16 message words according to MSG_PERMUTATION."""
+    var p: [u64] = []
+    var i: i64 = 0
+    while i < 16:
+        p.push(m[_b3_msg_perm(i)])
+        i = i + 1
+    p
+
+# ============================================================================
+# compress — BLAKE3 §2.3  (7 rounds)
+#
+# Returns the full 16-word state after finalization:
+#   state[i]     ^= state[i+8]       (i < 8)
+#   state[i+8]   ^= chaining_value[i]
+# ============================================================================
+
+fn _b3_compress(cv: [u64], bw: [u64], counter: u64, block_len: u64, flags: u64) -> [u64]:
+    """BLAKE3 compress: 7 rounds on a 16-word state.
+
+    cv         — 8-word chaining value (u64 holding u32).
+    bw         — 16 message words (little-endian u32 in u64).
+    counter    — chunk counter (u64, split low/high).
+    block_len  — number of real bytes in this block (0..64).
+    flags      — domain-separation flags.
+
+    Returns 16-word full output.
+    """
+    val counter_lo = counter & 0xFFFFFFFF
+    val counter_hi = (counter >> 32) & 0xFFFFFFFF
+    val iv = _b3_iv()
+
+    var state: [u64] = []
+    # First 8 words: chaining value
+    var i: i64 = 0
+    while i < 8:
+        state.push(cv[i])
+        i = i + 1
+    # Words 8–11: IV constants
+    state.push(iv[0])
+    state.push(iv[1])
+    state.push(iv[2])
+    state.push(iv[3])
+    # Words 12–15: counter low, counter high, block_len, flags
+    state.push(counter_lo)
+    state.push(counter_hi)
+    state.push(block_len & 0xFFFFFFFF)
+    state.push(flags & 0xFFFFFFFF)
+
+    var m = bw
+
+    # 7 rounds with permutation between rounds
+    state = _b3_round(state, m)
+    m = _b3_permute(m)
+    state = _b3_round(state, m)
+    m = _b3_permute(m)
+    state = _b3_round(state, m)
+    m = _b3_permute(m)
+    state = _b3_round(state, m)
+    m = _b3_permute(m)
+    state = _b3_round(state, m)
+    m = _b3_permute(m)
+    state = _b3_round(state, m)
+    m = _b3_permute(m)
+    state = _b3_round(state, m)
+
+    # Finalize: state[i] ^= state[i+8]; state[i+8] ^= cv[i]
+    var out: [u64] = []
+    i = 0
+    while i < 8:
+        out.push((state[i] ^ state[i + 8]) & 0xFFFFFFFF)
+        i = i + 1
+    i = 0
+    while i < 8:
+        out.push((state[i + 8] ^ cv[i]) & 0xFFFFFFFF)
+        i = i + 1
+    out
+
+fn _b3_first8(state16: [u64]) -> [u64]:
+    """Extract first 8 words (chaining value) from a 16-word compress output."""
+    var out: [u64] = []
+    var i: i64 = 0
+    while i < 8:
+        out.push(state16[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# Block-word loading: 64 bytes → 16 u32 words (little-endian)
+# ============================================================================
+
+fn _b3_load_block_words(buf: [u8], off: i64, buf_len: i64) -> [u64]:
+    """Load 16 LE u32 words from buf[off..off+64], zero-padding short blocks."""
+    var words: [u64] = []
+    var k: i64 = 0
+    while k < 16:
+        val base = off + k * 4
+        # Each byte: use 0 if out of range
+        val b0: u64 = if base     < buf_len: buf[base].to_u64()     else: 0
+        val b1: u64 = if base + 1 < buf_len: buf[base + 1].to_u64() else: 0
+        val b2: u64 = if base + 2 < buf_len: buf[base + 2].to_u64() else: 0
+        val b3: u64 = if base + 3 < buf_len: buf[base + 3].to_u64() else: 0
+        words.push(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24))
+        k = k + 1
+    words
+
+# ============================================================================
+# Chunk processing: hash a 1024-byte chunk into an 8-word chaining value.
+#
+# A chunk is divided into up to 16 blocks of 64 bytes.
+# Block 0 gets CHUNK_START; the last block gets CHUNK_END.
+# All blocks in the chunk get any key-domain flags.
+# ============================================================================
+
+fn _b3_hash_chunk(data: [u8], data_off: i64, chunk_len: i64, chunk_counter: u64, key_words: [u64], domain_flags: u64) -> [u64]:
+    """Compress a single chunk (up to 1024 bytes) into a chaining value.
+
+    data         — full message buffer.
+    data_off     — byte offset of chunk start within data.
+    chunk_len    — number of real bytes in this chunk (1..1024).
+    chunk_counter— 0-based chunk index.
+    key_words    — 8-word initial chaining value (IV or key words).
+    domain_flags — KEYED_HASH, DERIVE_KEY_MATERIAL, etc. (not CHUNK_* or PARENT).
+
+    Returns 8-word chaining value.
+    """
+    val chunk_start_flag: u64 = 1
+    val chunk_end_flag: u64   = 2
+    val block_len_full: u64   = 64
+
+    var cv = key_words
+    val total_blocks: i64 = (chunk_len + 63) / 64
+    var block_idx: i64 = 0
+
+    while block_idx < total_blocks:
+        val block_off    = data_off + block_idx * 64
+        val remaining    = chunk_len - block_idx * 64
+        val this_blk_len: i64 = if remaining < 64: remaining else: 64
+
+        var flags: u64 = domain_flags
+        if block_idx == 0:
+            flags = flags | chunk_start_flag
+        if block_idx == total_blocks - 1:
+            flags = flags | chunk_end_flag
+
+        val bw   = _b3_load_block_words(data, block_off, data_off + chunk_len)
+        val full = _b3_compress(cv, bw, chunk_counter, this_blk_len.to_u64(), flags)
+        cv = _b3_first8(full)
+        block_idx = block_idx + 1
+
+    cv
+
+# ============================================================================
+# Parent node: combine two chaining values into a parent chaining value.
+# ============================================================================
+
+fn _b3_parent_cv(left: [u64], right: [u64], key_words: [u64], domain_flags: u64) -> [u64]:
+    """Produce parent chaining value from left and right child CVs."""
+    val parent_flag: u64 = 4
+    # Parent block = left || right (16 u32 words total)
+    var bw: [u64] = []
+    var i: i64 = 0
+    while i < 8:
+        bw.push(left[i])
+        i = i + 1
+    i = 0
+    while i < 8:
+        bw.push(right[i])
+        i = i + 1
+    val full = _b3_compress(key_words, bw, 0, 64, parent_flag | domain_flags)
+    _b3_first8(full)
+
+# ============================================================================
+# Output / XOF: produce N bytes from the root node.
+#
+# The root node differs from a chaining value: we call compress with ROOT flag
+# and an output_block_counter that increments every 64 output bytes.
+# Each compress call produces 16 u32 words = 64 bytes of output.
+# ============================================================================
+
+fn _b3_root_output(cv: [u64], bw: [u64], block_len: u64, domain_flags: u64, out_len: i64) -> [u8]:
+    """Produce out_len output bytes from a root Output node.
+
+    cv          — input chaining value for the root node.
+    bw          — block words for the root node.
+    block_len   — block_len used for the root compression.
+    domain_flags— mode flags (without ROOT).
+    out_len     — number of output bytes desired.
+    """
+    val root_flag: u64 = 8
+    var out: [u8] = []
+    var output_block_counter: u64 = 0
+
+    while out.len() < out_len:
+        val state16 = _b3_compress(cv, bw, output_block_counter, block_len, domain_flags | root_flag)
+        # Serialize 16 u32 words as little-endian bytes, take as many as needed
+        var wi: i64 = 0
+        while wi < 16 and out.len() < out_len:
+            val word = state16[wi]
+            var bi: u64 = 0
+            while bi < 4 and out.len() < out_len:
+                out.push(((word >> (bi * 8)) & 0xFF).to_u8())
+                bi = bi + 1
+            wi = wi + 1
+        output_block_counter = output_block_counter + 1
+
+    out
+
+# ============================================================================
+# Full tree hasher: process arbitrarily long input via Merkle tree.
+#
+# Because Simple does not have mutable struct methods, we use a functional
+# style: _b3_hash_all processes the data in a single pass.
+#
+# CV stack: at most 54 entries (log2 of max 2^54 chunks).
+# For each completed chunk (not the last), push its CV.  Apply the
+# trailing-zero-bits merging rule to keep the stack balanced.
+# At the end, finalize the last chunk as root if stack is empty; otherwise
+# merge all stack entries right-to-left and output from the final root.
+# ============================================================================
+
+fn _b3_hash_all(data: [u8], key_words: [u64], domain_flags: u64, out_len: i64) -> [u8]:
+    """Hash arbitrary-length data with given key_words and domain_flags.
+
+    Returns out_len output bytes.
+    """
+    val chunk_len: i64 = 1024
+    val data_len: i64 = data.len()
+
+    # Special case: empty input — single block, block_len=0
+    if data_len == 0:
+        val flags: u64 = domain_flags | 1 | 2   # CHUNK_START | CHUNK_END
+        var bw: [u64] = []
+        var zi: i64 = 0
+        while zi < 16:
+            bw.push(0)
+            zi = zi + 1
+        val bw_data = _b3_load_block_words(data, 0, 0)
+        val root_cv = key_words
+        val block_len_val: u64 = 0
+        return _b3_root_output(root_cv, bw_data, block_len_val, domain_flags | 1 | 2, out_len)
+
+    # Process all complete chunks + last partial/full chunk
+    val total_chunks: i64 = (data_len + chunk_len - 1) / chunk_len
+
+    # cv_stack: each entry is an 8-element [u64] list
+    var cv_stack: [[u64]] = []
+
+    var chunk_idx: i64 = 0
+    while chunk_idx < total_chunks - 1:
+        val this_off  = chunk_idx * chunk_len
+        val this_len  = chunk_len   # all but last are full 1024-byte chunks
+        val chunk_cv = _b3_hash_chunk(data, this_off, this_len, chunk_idx.to_u64(), key_words, domain_flags)
+
+        # Add to stack with trailing-zero-bits merge
+        var new_cv = chunk_cv
+        var total_done: i64 = chunk_idx + 1
+        while (total_done % 2) == 0:
+            val left = cv_stack[cv_stack.len() - 1]
+            cv_stack = cv_stack.slice(0, cv_stack.len() - 1)
+            new_cv = _b3_parent_cv(left, new_cv, key_words, domain_flags)
+            total_done = total_done / 2
+        cv_stack.push(new_cv)
+
+        chunk_idx = chunk_idx + 1
+
+    # Last chunk — compute its Output (do NOT finalize yet; need for root XOF)
+    val last_off = (total_chunks - 1) * chunk_len
+    val last_len: i64 = data_len - last_off   # 1..1024
+
+    # Compress all but the final block of the last chunk (if any)
+    val last_total_blocks: i64 = (last_len + 63) / 64
+    var last_cv = key_words
+    var blk: i64 = 0
+    while blk < last_total_blocks - 1:
+        val boff = last_off + blk * 64
+        var flags: u64 = domain_flags
+        if blk == 0:
+            flags = flags | 1   # CHUNK_START
+        val bw = _b3_load_block_words(data, boff, last_off + last_len)
+        val st = _b3_compress(last_cv, bw, (total_chunks - 1).to_u64(), 64, flags)
+        last_cv = _b3_first8(st)
+        blk = blk + 1
+
+    # The final block of the last chunk — this becomes the root block or
+    # feeds into parent nodes; we retain its CV + block data for root_output.
+    val final_blk_off = last_off + (last_total_blocks - 1) * 64
+    val final_blk_remaining = last_len - (last_total_blocks - 1) * 64
+    val final_bw = _b3_load_block_words(data, final_blk_off, last_off + last_len)
+    var final_flags: u64 = domain_flags | 2   # CHUNK_END always
+    if last_total_blocks == 1:
+        final_flags = final_flags | 1         # CHUNK_START if only block
+
+    if cv_stack.len() == 0:
+        # Single chunk: this is the root directly
+        return _b3_root_output(last_cv, final_bw, final_blk_remaining.to_u64(), final_flags, out_len)
+
+    # Multi-chunk: finalize last chunk's CV then merge up the stack
+    val last_chunk_full_cv = _b3_first8(_b3_compress(last_cv, final_bw, (total_chunks - 1).to_u64(), final_blk_remaining.to_u64(), final_flags))
+
+    # Multi-chunk root: walk stack from top toward bottom, merging right edge.
+    # The final merge uses _b3_root_output so XOF works correctly.
+    val stack_size = cv_stack.len()
+    if stack_size == 1:
+        # Exactly one stack entry: root merge is (cv_stack[0], last_chunk_full_cv)
+        val left_final = cv_stack[0]
+        var root_bw: [u64] = []
+        var ri: i64 = 0
+        while ri < 8:
+            root_bw.push(left_final[ri])
+            ri = ri + 1
+        ri = 0
+        while ri < 8:
+            root_bw.push(last_chunk_full_cv[ri])
+            ri = ri + 1
+        val parent_flag: u64 = 4
+        return _b3_root_output(key_words, root_bw, 64, parent_flag | domain_flags, out_len)
+    else:
+        # Multiple stack entries: merge all but the last two into an intermediate CV,
+        # then the last merge (between stack[0] and the rest) is the root.
+        # Walk: intermediate starts as last_chunk_full_cv; merge from stack top-1
+        # down to index 1 (non-root merges), then final root merge with stack[0].
+        var inter_cv = last_chunk_full_cv
+        var mi: i64 = stack_size - 1
+        while mi >= 1:
+            val lft = cv_stack[mi]
+            inter_cv = _b3_parent_cv(lft, inter_cv, key_words, domain_flags)
+            mi = mi - 1
+        # Now root merge: cv_stack[0] (left) + inter_cv (right)
+        val root_left = cv_stack[0]
+        var root_bw2: [u64] = []
+        var ri2: i64 = 0
+        while ri2 < 8:
+            root_bw2.push(root_left[ri2])
+            ri2 = ri2 + 1
+        ri2 = 0
+        while ri2 < 8:
+            root_bw2.push(inter_cv[ri2])
+            ri2 = ri2 + 1
+        val parent_flag2: u64 = 4
+        return _b3_root_output(key_words, root_bw2, 64, parent_flag2 | domain_flags, out_len)
+
+# ============================================================================
+# Key words helpers
+# ============================================================================
+
+fn _b3_iv_words() -> [u64]:
+    """Return the 8 BLAKE3 IV words."""
+    _b3_iv()
+
+fn _b3_key_words(key: [u8]) -> [u64]:
+    """Decode a 32-byte key into 8 LE u32 words (u64 each)."""
+    var words: [u64] = []
+    var i: i64 = 0
+    while i < 8:
+        words.push(_b3_le32_load(key, i * 4))
+        i = i + 1
+    words
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn blake3_xof(msg: [u8], out_len: i64) -> [u8]:
+    """BLAKE3 extendable output function (XOF).
+
+    Hashes msg and returns out_len bytes of output.  The default 32-byte
+    hash is blake3_xof(msg, 32).
+
+    Args:
+        msg:     input message bytes (any length).
+        out_len: desired output length in bytes.
+
+    Returns: out_len bytes.
+    """
+    _b3_hash_all(msg, _b3_iv_words(), 0, out_len)
+
+fn blake3(msg: [u8]) -> [u8]:
+    """BLAKE3 hash — returns 32 bytes.
+
+    Args:
+        msg: input message bytes.
+
+    Returns: 32-byte digest.
+
+    Example:
+        val digest = blake3([])   # hash of empty input
+    """
+    blake3_xof(msg, 32)
+
+fn blake3_keyed(key: [u8], msg: [u8]) -> [u8]:
+    """BLAKE3 keyed hash — returns 32 bytes.
+
+    key must be exactly 32 bytes.
+
+    Args:
+        key: 32-byte secret key.
+        msg: input message bytes.
+
+    Returns: 32-byte MAC.
+
+    Example:
+        val mac = blake3_keyed(key_bytes, msg_bytes)
+    """
+    val keyed_flag: u64 = 16
+    _b3_hash_all(msg, _b3_key_words(key), keyed_flag, 32)
+
+fn blake3_kdf(context: [u8], msg: [u8]) -> [u8]:
+    """BLAKE3 key derivation function — returns 32 bytes.
+
+    Derives a key from a context string and input key material (msg).
+    The context should be a unique, application-specific ASCII string.
+
+    Two-pass:
+      1. Hash context with DERIVE_KEY_CONTEXT flag → 32-byte context key.
+      2. Hash msg with those key words + DERIVE_KEY_MATERIAL flag.
+
+    Args:
+        context: ASCII context string as bytes.
+        msg:     input key material bytes.
+
+    Returns: 32-byte derived key.
+
+    Example:
+        val dk = blake3_kdf("MyApp 2024-01-01 key derivation", ikm_bytes)
+    """
+    val derive_key_ctx_flag: u64  = 32
+    val derive_key_mat_flag: u64  = 64
+
+    # Step 1: hash context string with DERIVE_KEY_CONTEXT flag and IV as key words
+    val ctx_hash = _b3_hash_all(context, _b3_iv_words(), derive_key_ctx_flag, 32)
+
+    # Step 2: decode context hash as key words, hash msg with DERIVE_KEY_MATERIAL
+    _b3_hash_all(msg, _b3_key_words(ctx_hash), derive_key_mat_flag, 32)

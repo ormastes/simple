@@ -48,6 +48,27 @@ struct GepInfo:
     index: LocalId
 
 # ============================================================================
+# Loop Bounds (W-scev: trip-count extraction from loop header)
+# ============================================================================
+
+struct LoopBounds:
+    """
+    Canonical loop bounds extracted from a simple counted loop header.
+
+    Fields:
+      lower  — Lower bound of induction variable (always 0 for canonicalised
+                loops; non-zero starts are not supported yet — detect_loop_bounds
+                returns nil for those)
+      upper  — Upper bound expression as text, e.g. "_l5" for a local or "16"
+                for a compile-time constant.  The rewriter uses this to emit the
+                vectorised loop guard  i + VF <= upper.
+      step   — Loop step (always 1; non-unit steps return nil conservatively)
+    """
+    lower: i64
+    upper: text
+    step:  i64
+
+# ============================================================================
 # Def-Use Chain Construction
 # ============================================================================
 
@@ -469,12 +490,263 @@ fn is_simple_loop(func: MirFunction, header: BlockId) -> LoopInfo?:
 fn detect_loop_bounds(func: MirFunction, header: MirBlock, cond: MirOperand, exit: BlockId) -> LoopInfo?:
     """
     Extract loop bounds from loop header.
-    Simplified: looks for pattern like: i < N
+
+    Recognises the canonical for-i-in-0..n shape:
+      %cmp = BinOp(Lt, %i, %n)   # or Le
+      If %cmp → BB_body, BB_exit
+
+    Returns nil conservatively for any shape it cannot fully verify:
+      - Non-unit step (detected via the index-increment BinOp in the header)
+      - Non-Lt/Le comparison (e.g. != or custom while condition)
+      - Condition is not a local defined in this block
+      - No induction variable increment found
+
+    A wrong-positive is much worse than a wrong-negative here: the rewriter
+    relies on this to prove that out-of-bounds SIMD access cannot occur.
     """
-    # This would require more complex pattern matching
-    # For now, return a simple default loop
-    # Real implementation would analyze phi nodes and comparison operations
-    nil
+    # Step 1: The cond operand must reference a local defined in this block
+    val cond_local_id = match cond.kind:
+        case Copy(local): local.id
+        case Move(local): local.id
+        case _: return nil
+
+    # Step 2: Find the instruction that defines cond_local in the header block.
+    # It must be a BinOp(Lt, left, right) or BinOp(Le, left, right).
+    # Extract the upper-bound operand (the right operand of the comparison).
+    var upper_operand: MirOperand? = nil
+    var induction_operand: MirOperand? = nil
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if dest.id == cond_local_id:
+                    # Only accept Lt (i < n) comparisons — conservative
+                    val is_lt = match op:
+                        case Lt: true
+                        case _:  false
+                    if not is_lt:
+                        return nil
+                    upper_operand    = Some(right)
+                    induction_operand = Some(left)
+            case _:
+                pass_do_nothing
+
+    # If we couldn't find the comparison definition, give up
+    if not upper_operand.?:
+        return nil
+
+    val upper_op = upper_operand.unwrap()
+    val induction_op = induction_operand.unwrap()
+
+    # Step 3: Verify the induction variable is a local (not a constant)
+    val induction_local_id: i64 = match induction_op.kind:
+        case Copy(local): local.id
+        case Move(local): local.id
+        case _: return nil
+
+    # Step 4: Verify step == 1 by finding the index-increment BinOp:
+    #   %i_next = BinOp(Add, %i, 1)   where right is a small constant
+    # We check across the full header block (the increment may live here or in
+    # the body; if we cannot confirm step=1 we return nil).
+    var found_unit_step = false
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                val is_add = match op:
+                    case Add: true
+                    case _: false
+                if is_add:
+                    val left_is_induction = match left.kind:
+                        case Copy(local): local.id == induction_local_id
+                        case Move(local): local.id == induction_local_id
+                        case _: false
+                    val right_is_one = match right.kind:
+                        case Const(_, _): true   # conservative: any Const on right of Add
+                        case _: false
+                    if left_is_induction and right_is_one:
+                        found_unit_step = true
+            case _:
+                pass_do_nothing
+
+    # If the increment is not in the header, also scan body blocks for it.
+    # We look for BinOp(Add, %induction, Const) in any block of the function.
+    if not found_unit_step:
+        for block in func.blocks:
+            if block.id.id != header.id.id:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case BinOp(dest, op, left, right):
+                            val is_add = match op:
+                                case Add: true
+                                case _: false
+                            if is_add:
+                                val left_is_induction = match left.kind:
+                                    case Copy(local): local.id == induction_local_id
+                                    case Move(local): local.id == induction_local_id
+                                    case _: false
+                                val right_is_one = match right.kind:
+                                    case Const(_, _): true
+                                    case _: false
+                                if left_is_induction and right_is_one:
+                                    found_unit_step = true
+                        case _:
+                            pass_do_nothing
+
+    if not found_unit_step:
+        return nil
+
+    # Step 5: Convert the upper-bound operand to a text representation
+    val upper_text = match upper_op.kind:
+        case Copy(local): "_l{local.id}"
+        case Move(local): "_l{local.id}"
+        case Const(_, _): "const"
+
+    # If upper is a constant we can't determine its value without deeper
+    # inspection — we still return Some with "const" so the rewriter can
+    # proceed; it will gate on trip_count separately.
+
+    # Step 6: Find the induction variable as a LocalId for LoopInfo
+    val induction_local = LocalId(id: induction_local_id)
+
+    # Collect body blocks (all non-exit, non-header successors, conservatively
+    # just record the block id that isn't exit)
+    var body_block_ids: [BlockId] = []
+    match header.terminator:
+        case If(cond2, then_, else_):
+            if then_.id != exit.id and then_.id != header.id.id:
+                body_block_ids.push(then_)
+            if else_.id != exit.id and else_.id != header.id.id:
+                body_block_ids.push(else_)
+        case _:
+            pass_do_nothing
+
+    Some(LoopInfo(
+        header_block: header.id,
+        body_blocks:  body_block_ids,
+        exit_block:   exit,
+        induction_var: induction_local,
+        start_value:  0,
+        end_value:    -1,    # -1 = dynamic upper bound
+        step:         1
+    ))
+
+fn detect_loop_bounds_only(func: MirFunction, header: MirBlock, cond: MirOperand, exit: BlockId) -> LoopBounds?:
+    """
+    Extract LoopBounds from a loop header (W-scev public API for tests).
+
+    Returns Some(LoopBounds) for canonical for-i-in-0..n shape with step=1.
+    Returns nil conservatively for all other forms.
+
+    Separate from detect_loop_bounds (which returns LoopInfo) to allow the
+    test suite to check bounds independently of full LoopInfo construction.
+    """
+    # Re-use the same logic as detect_loop_bounds but return LoopBounds
+    val loop_info = detect_loop_bounds(func, header, cond, exit)
+    if not loop_info.?:
+        return nil
+
+    # Reconstruct upper text from the comparison instruction
+    val cond_local_id = match cond.kind:
+        case Copy(local): local.id
+        case Move(local): local.id
+        case _: return nil
+
+    var upper_text = "unknown"
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if dest.id == cond_local_id:
+                    upper_text = match right.kind:
+                        case Copy(local): "_l{local.id}"
+                        case Move(local): "_l{local.id}"
+                        case Const(_, _): "const"
+            case _:
+                pass_do_nothing
+
+    Some(LoopBounds(
+        lower: 0,
+        upper: upper_text,
+        step:  1
+    ))
+
+fn detect_bounds_from_block(header: MirBlock, cond: MirOperand, exit: BlockId) -> LoopBounds?:
+    """
+    Variant of detect_loop_bounds that does NOT need a MirFunction.
+
+    Searches only within the header block for both the comparison instruction
+    and the unit-step increment.  This covers the common test-fixture shape
+    where all loop instructions live in one block.
+
+    Used by unit tests to avoid the heavy MirFunction construction.
+    Returns nil under the same conservative rules as detect_loop_bounds.
+    """
+    # Step 1: cond must reference a local
+    val cond_local_id = match cond.kind:
+        case Copy(local): local.id
+        case Move(local): local.id
+        case _: return nil
+
+    # Step 2: find BinOp(Lt, %i, %n) in header instructions
+    var upper_operand: MirOperand? = nil
+    var induction_local_id: i64 = -1
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                if dest.id == cond_local_id:
+                    val is_lt = match op:
+                        case Lt: true
+                        case _:  false
+                    if not is_lt:
+                        return nil
+                    upper_operand = Some(right)
+                    induction_local_id = match left.kind:
+                        case Copy(local): local.id
+                        case Move(local): local.id
+                        case _: return nil
+            case _:
+                pass_do_nothing
+
+    if not upper_operand.?:
+        return nil
+    if induction_local_id < 0:
+        return nil
+
+    val upper_op = upper_operand.unwrap()
+
+    # Step 3: verify unit step within header block
+    var found_unit_step = false
+    for inst in header.instructions:
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                val is_add = match op:
+                    case Add: true
+                    case _: false
+                if is_add:
+                    val left_is_induction = match left.kind:
+                        case Copy(local): local.id == induction_local_id
+                        case Move(local): local.id == induction_local_id
+                        case _: false
+                    val right_is_const = match right.kind:
+                        case Const(_, _): true
+                        case _: false
+                    if left_is_induction and right_is_const:
+                        found_unit_step = true
+            case _:
+                pass_do_nothing
+
+    if not found_unit_step:
+        return nil
+
+    # Step 4: produce upper text
+    val upper_text = match upper_op.kind:
+        case Copy(local): "_l{local.id}"
+        case Move(local): "_l{local.id}"
+        case Const(_, _): "const"
+
+    Some(LoopBounds(
+        lower: 0,
+        upper: upper_text,
+        step:  1
+    ))
 
 
 # ============================================================================

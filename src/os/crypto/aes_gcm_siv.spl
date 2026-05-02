@@ -1,0 +1,859 @@
+#![allow(unnamed_duplicate_typed_args)]
+# AES-GCM-SIV — Pure Simple Implementation
+#
+# Implements AEAD_AES_128_GCM_SIV and AEAD_AES_256_GCM_SIV per RFC 8452.
+# No SFFI/Rust FFI — pure Simple language, suitable for baremetal.
+#
+# Nonce-misuse-resistant AEAD: repeating a nonce leaks only whether two
+# plaintexts were equal, unlike AES-GCM which leaks the auth key.
+#
+# Reference: RFC 8452 (AES-GCM-SIV: Nonce Misuse-Resistant Authenticated
+#            Encryption, Gueron/Langley/Lindell, April 2019)
+#
+# Key differences from AES-GCM:
+#   - Authenticator is POLYVAL (not GHASH): GF(2^128) with reversed bit/byte
+#     ordering; polynomial x^128 + x^127 + x^126 + x^121 + 1 (vs GHASH's
+#     x^128 + x^7 + x^2 + x + 1)
+#   - Per-nonce key derivation: auth key + enc key derived from KGK via
+#     AES_KGK(LE32(counter) || nonce)[:8], counters 0–3 (128) or 0–5 (256)
+#   - CTR counter is 32-bit LE in bytes 0–3 of the counter block (low bytes),
+#     not big-endian in the high bytes as in GCM
+#   - Tag = AES_enc_key(POLYVAL(auth_key, pad(AAD)||pad(PT)||len) XOR nonce,
+#           with bit 127 cleared before AES encrypt
+#   - CTR initial_counter = tag with bit 127 of last byte SET (byte 15 |= 0x80)
+#
+# NOTE on interpreter `expect_byte_array` bug (W17-B):
+#   rt_aes128_encrypt_block_pure / rt_aes256_encrypt_block_pure reject arrays
+#   whose elements are Value::U8 (produced by `push(u8_val)`). They accept
+#   Value::Int (produced by `push(i64_val)`). To work around this, all arrays
+#   passed to those externs are built using `push(rt_bytes_u8_at(...))` which
+#   returns i64, keeping elements as Value::Int. Arrays built with
+#   `push(_u8_at(...))` (returns u8) would be rejected.
+#   See: doc/08_tracking/bug/aes_extern_expect_byte_array_u8_reject_2026-05-02.md
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_aes_sbox(i: i64) -> i64
+extern fn rt_aes_rcon(i: i64) -> i64
+extern fn rt_aes128_encrypt_block_pure(key: [u8], block: [u8]) -> [u8]
+extern fn rt_aes256_encrypt_block_pure(key: [u8], block: [u8]) -> [u8]
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+fn _i64_at(buf: [u8], idx: u64) -> i64:
+    rt_bytes_u8_at(buf, idx.to_i64())
+
+# ============================================================================
+# Result Type
+# ============================================================================
+
+enum AesGcmSivResult:
+    Ok(data: [u8])
+    Err(msg: text)
+
+# ============================================================================
+# Utility: append two byte arrays
+# ============================================================================
+
+fn _append_bytes(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap((a.len() + b.len()).to_i64())
+    var i: u64 = 0
+    while i < a.len():
+        out.push(_u8_at(a, i))
+        i = i + 1
+    i = 0
+    while i < b.len():
+        out.push(_u8_at(b, i))
+        i = i + 1
+    out
+
+# ============================================================================
+# AES-128 Key Expansion (FIPS 197, Section 5.2)
+# ============================================================================
+
+fn _aes_sbox(index: i64) -> u8:
+    rt_aes_sbox(index).to_u8()
+
+fn _aes_rcon(index: i64) -> u32:
+    rt_aes_rcon(index).to_u32()
+
+fn _aes128_key_expansion(key: [u8]) -> [u8]:
+    """Expand 16-byte AES-128 key into 176 round-key bytes (11 round keys)."""
+    val nk: u64 = 4
+    val nr: u64 = 10
+    val total_words: u64 = 4 * (nr + 1)
+    val total_bytes: u64 = total_words * 4
+
+    var expanded: [u8] = rt_array_new_with_cap(total_bytes.to_i64())
+
+    var i: u64 = 0
+    while i < 16:
+        expanded.push(_u8_at(key, i))
+        i = i + 1
+
+    var word_idx: u64 = nk
+    while word_idx < total_words:
+        val prev_base = (word_idx - 1) * 4
+        var t0 = _u8_at(expanded, prev_base)
+        var t1 = _u8_at(expanded, prev_base + 1)
+        var t2 = _u8_at(expanded, prev_base + 2)
+        var t3 = _u8_at(expanded, prev_base + 3)
+
+        if (word_idx % nk) == 0:
+            val rot0 = t1
+            val rot1 = t2
+            val rot2 = t3
+            val rot3 = t0
+            t0 = _aes_sbox(rot0.to_i64())
+            t1 = _aes_sbox(rot1.to_i64())
+            t2 = _aes_sbox(rot2.to_i64())
+            t3 = _aes_sbox(rot3.to_i64())
+            val rcon = _aes_rcon(((word_idx / nk) - 1).to_i64())
+            t0 = t0 ^ ((rcon >> 24) & 0xFF).to_u8()
+            t1 = t1 ^ ((rcon >> 16) & 0xFF).to_u8()
+            t2 = t2 ^ ((rcon >> 8) & 0xFF).to_u8()
+            t3 = t3 ^ (rcon & 0xFF).to_u8()
+
+        val prev_word_base = (word_idx - nk) * 4
+        expanded.push(_u8_at(expanded, prev_word_base) ^ t0)
+        expanded.push(_u8_at(expanded, prev_word_base + 1) ^ t1)
+        expanded.push(_u8_at(expanded, prev_word_base + 2) ^ t2)
+        expanded.push(_u8_at(expanded, prev_word_base + 3) ^ t3)
+        word_idx = word_idx + 1
+
+    expanded
+
+# ============================================================================
+# AES-256 Key Expansion (FIPS 197, Section 5.2 — 256-bit variant)
+# ============================================================================
+
+fn _aes256_key_expansion(key: [u8]) -> [u8]:
+    """Expand 32-byte AES-256 key into 240 round-key bytes (15 round keys)."""
+    val nk: u64 = 8
+    val nr: u64 = 14
+    val total_words: u64 = 4 * (nr + 1)
+    val total_bytes: u64 = total_words * 4
+
+    var expanded: [u8] = rt_array_new_with_cap(total_bytes.to_i64())
+
+    var i: u64 = 0
+    while i < 32:
+        expanded.push(_u8_at(key, i))
+        i = i + 1
+
+    var word_idx: u64 = nk
+    while word_idx < total_words:
+        val prev_base = (word_idx - 1) * 4
+        var t0 = _u8_at(expanded, prev_base)
+        var t1 = _u8_at(expanded, prev_base + 1)
+        var t2 = _u8_at(expanded, prev_base + 2)
+        var t3 = _u8_at(expanded, prev_base + 3)
+
+        val m = word_idx % nk
+        if m == 0:
+            val rot0 = t1
+            val rot1 = t2
+            val rot2 = t3
+            val rot3 = t0
+            t0 = _aes_sbox(rot0.to_i64())
+            t1 = _aes_sbox(rot1.to_i64())
+            t2 = _aes_sbox(rot2.to_i64())
+            t3 = _aes_sbox(rot3.to_i64())
+            val rcon = _aes_rcon(((word_idx / nk) - 1).to_i64())
+            t0 = t0 ^ ((rcon >> 24) & 0xFF).to_u8()
+            t1 = t1 ^ ((rcon >> 16) & 0xFF).to_u8()
+            t2 = t2 ^ ((rcon >> 8) & 0xFF).to_u8()
+            t3 = t3 ^ (rcon & 0xFF).to_u8()
+        else:
+            if m == 4:
+                t0 = _aes_sbox(t0.to_i64())
+                t1 = _aes_sbox(t1.to_i64())
+                t2 = _aes_sbox(t2.to_i64())
+                t3 = _aes_sbox(t3.to_i64())
+
+        val prev_word_base = (word_idx - nk) * 4
+        expanded.push(_u8_at(expanded, prev_word_base) ^ t0)
+        expanded.push(_u8_at(expanded, prev_word_base + 1) ^ t1)
+        expanded.push(_u8_at(expanded, prev_word_base + 2) ^ t2)
+        expanded.push(_u8_at(expanded, prev_word_base + 3) ^ t3)
+        word_idx = word_idx + 1
+
+    expanded
+
+# ============================================================================
+# AES single-block encrypt helpers
+#
+# IMPORTANT: arrays passed to rt_aes128_encrypt_block_pure /
+# rt_aes256_encrypt_block_pure MUST contain Value::Int elements, not Value::U8.
+# Use rt_bytes_u8_at (returns i64) + push(i64), NOT _u8_at (returns u8) +
+# push(u8). See module header note about the expect_byte_array interpreter bug.
+# ============================================================================
+
+fn _aes128_encrypt_block(key16: [u8], block16: [u8]) -> [u8]:
+    """One-shot AES-128 block encryption.
+
+    Builds a 16-byte key array with Value::Int elements (via rt_bytes_u8_at)
+    to satisfy the interpreter's expect_byte_array check. Similarly for block.
+    """
+    var k: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        k.push(_i64_at(key16, i))
+        i = i + 1
+    var b: [u8] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 16:
+        b.push(_i64_at(block16, i))
+        i = i + 1
+    rt_aes128_encrypt_block_pure(k, b)
+
+fn _aes256_encrypt_block(key32: [u8], block16: [u8]) -> [u8]:
+    """One-shot AES-256 block encryption.
+
+    Same Value::Int element convention as _aes128_encrypt_block.
+    """
+    var k: [u8] = rt_array_new_with_cap(32)
+    var i: u64 = 0
+    while i < 32:
+        k.push(_i64_at(key32, i))
+        i = i + 1
+    var b: [u8] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 16:
+        b.push(_i64_at(block16, i))
+        i = i + 1
+    rt_aes256_encrypt_block_pure(k, b)
+
+# ============================================================================
+# GCM-SIV Key Derivation (RFC 8452 §4)
+#
+# For AES-128 (kgk = 16 bytes):
+#   auth_key[0:8]  = AES_kgk(LE32(0) || nonce)[:8]
+#   auth_key[8:16] = AES_kgk(LE32(1) || nonce)[:8]
+#   enc_key[0:8]   = AES_kgk(LE32(2) || nonce)[:8]
+#   enc_key[8:16]  = AES_kgk(LE32(3) || nonce)[:8]
+#
+# For AES-256 (kgk = 32 bytes): same, plus counters 4,5 for enc_key[16:32].
+#
+# Each plaintext block = little_endian_uint32(counter) ++ nonce (16 bytes).
+# Only first 8 bytes of each AES output are used.
+# ============================================================================
+
+fn _le32_block(counter: u64, nonce: [u8]) -> [u8]:
+    """Build the 16-byte key-derivation plaintext block:
+    LE32(counter) || nonce[0:12]"""
+    var block: [u8] = rt_array_new_with_cap(16)
+    val c = counter & 0xFFFFFFFF
+    block.push((c & 0xFF).to_u8())
+    block.push(((c >> 8) & 0xFF).to_u8())
+    block.push(((c >> 16) & 0xFF).to_u8())
+    block.push(((c >> 24) & 0xFF).to_u8())
+    var i: u64 = 0
+    while i < 12:
+        block.push(_u8_at(nonce, i))
+        i = i + 1
+    block
+
+fn _derive_keys_128(kgk: [u8], nonce: [u8]) -> ([u8], [u8]):
+    """Derive 16-byte auth key and 16-byte enc key from a 16-byte KGK."""
+    val blk0 = _le32_block(0, nonce)
+    val blk1 = _le32_block(1, nonce)
+    val blk2 = _le32_block(2, nonce)
+    val blk3 = _le32_block(3, nonce)
+
+    val enc0 = _aes128_encrypt_block(kgk, blk0)
+    val enc1 = _aes128_encrypt_block(kgk, blk1)
+    val enc2 = _aes128_encrypt_block(kgk, blk2)
+    val enc3 = _aes128_encrypt_block(kgk, blk3)
+
+    var auth_key: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 8:
+        auth_key.push(_u8_at(enc0, i))
+        i = i + 1
+    i = 0
+    while i < 8:
+        auth_key.push(_u8_at(enc1, i))
+        i = i + 1
+
+    var enc_key: [u8] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 8:
+        enc_key.push(_u8_at(enc2, i))
+        i = i + 1
+    i = 0
+    while i < 8:
+        enc_key.push(_u8_at(enc3, i))
+        i = i + 1
+
+    (auth_key, enc_key)
+
+fn _derive_keys_256(kgk: [u8], nonce: [u8]) -> ([u8], [u8]):
+    """Derive 16-byte auth key and 32-byte enc key from a 32-byte KGK."""
+    val blk0 = _le32_block(0, nonce)
+    val blk1 = _le32_block(1, nonce)
+    val blk2 = _le32_block(2, nonce)
+    val blk3 = _le32_block(3, nonce)
+    val blk4 = _le32_block(4, nonce)
+    val blk5 = _le32_block(5, nonce)
+
+    val enc0 = _aes256_encrypt_block(kgk, blk0)
+    val enc1 = _aes256_encrypt_block(kgk, blk1)
+    val enc2 = _aes256_encrypt_block(kgk, blk2)
+    val enc3 = _aes256_encrypt_block(kgk, blk3)
+    val enc4 = _aes256_encrypt_block(kgk, blk4)
+    val enc5 = _aes256_encrypt_block(kgk, blk5)
+
+    var auth_key: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 8:
+        auth_key.push(_u8_at(enc0, i))
+        i = i + 1
+    i = 0
+    while i < 8:
+        auth_key.push(_u8_at(enc1, i))
+        i = i + 1
+
+    var enc_key: [u8] = rt_array_new_with_cap(32)
+    i = 0
+    while i < 8:
+        enc_key.push(_u8_at(enc2, i))
+        i = i + 1
+    i = 0
+    while i < 8:
+        enc_key.push(_u8_at(enc3, i))
+        i = i + 1
+    i = 0
+    while i < 8:
+        enc_key.push(_u8_at(enc4, i))
+        i = i + 1
+    i = 0
+    while i < 8:
+        enc_key.push(_u8_at(enc5, i))
+        i = i + 1
+
+    (auth_key, enc_key)
+
+# ============================================================================
+# POLYVAL (RFC 8452 §3)
+#
+# POLYVAL operates in GF(2^128) with polynomial x^128 + x^127 + x^126 +
+# x^121 + 1.  Bit ordering: least-significant bit of byte 0 = coefficient
+# of x^0; most-significant bit of byte 15 = coefficient of x^127.
+#
+# dot(a, b) = a * b * x^{-128}, where x^{-128} = x^127 + x^124 + x^121 +
+# x^114 + 1 in this field (RFC 8452 §3 definition).
+#
+# POLYVAL(H, X_1, ..., X_s):
+#   S_0 = 0
+#   S_j = dot(S_{j-1} + X_j, H)
+#
+# Implementation: standard GF(2^128) multiply then shift right by 128 bits.
+# For POLYVAL (bit-reversed vs GHASH), we iterate from LSB of byte 0:
+#   bit i of the multiplier = (byte[i/8] >> (i%8)) & 1
+# The reduction polynomial for x^128 term:
+#   x^128 = x^127 + x^126 + x^121 + 1  (from the irreducible poly rearranged)
+#   When the MSB of the shifted accumulator overflows, XOR with 0xC2...01
+#   (little-endian representation: byte15=0xC2 ... byte0=0x01, but in
+#   POLYVAL's LE bit convention this is:
+#     x^127 + x^126 → MSBs of byte15 = 0xC2 = 1100_0010_b
+#     x^121 → bit 1 of byte15 (bit 121 = 15*8+1)
+#     x^0   → LSB of byte0 = 0x01
+#   So the reduction constant R = 0x00...00 C2 where byte0=0x01, byte15=0xC2
+#   but we need to be careful: in LE bit order byte0 carries x^0..x^7,
+#   byte15 carries x^120..x^127.
+#   x^127 → MSB of byte15 = bit7 → 0x80
+#   x^126 → bit6 of byte15 → 0x40
+#   x^121 → bit1 of byte15 → 0x02
+#   x^0   → bit0 of byte0  → 0x01
+#   So R bytes: byte0=0x01, bytes1-14=0x00, byte15=0xC2
+# ============================================================================
+
+fn _polyval_mul(a: [u8], b: [u8]) -> [u8]:
+    """Multiply two 128-bit elements in POLYVAL's GF(2^128).
+
+    POLYVAL uses polynomial x^128 + x^127 + x^126 + x^121 + 1 with
+    little-endian bit ordering (LSB of byte 0 = coefficient of x^0).
+    Reduction constant R (byte representation, POLYVAL LE bit order):
+      byte0 = 0x01 (x^0), bytes1-14 = 0x00, byte15 = 0xC2 (x^127+x^126+x^121)
+    """
+    var z: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        z.push(0x00)
+        i = i + 1
+
+    var v: [u8] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 16:
+        v.push(_u8_at(b, i))
+        i = i + 1
+
+    # Iterate over bits of 'a' from x^0 (LSB of byte0) to x^127 (MSB of byte15)
+    i = 0
+    while i < 128:
+        val byte_idx = i / 8
+        val bit_idx = i % 8   # LSB-first within each byte
+
+        if ((_u8_at(a, byte_idx) >> bit_idx) & 0x01) != 0:
+            # z ^= v
+            var z_next: [u8] = rt_array_new_with_cap(16)
+            var j: u64 = 0
+            while j < 16:
+                z_next.push(_u8_at(z, j) ^ _u8_at(v, j))
+                j = j + 1
+            z = z_next
+
+        # Shift v right by 1 bit in LE representation (x^0 is in byte0 bit0):
+        # rightmost bit (x^0) = LSB of byte0; shifting right means byte0 carries
+        # the bit that was in byte0 bit1, etc.
+        val msb = (_u8_at(v, 15) >> 7) & 0x01   # MSB of byte15 = coefficient of x^127
+        var v_next: [u8] = rt_array_new_with_cap(16)
+        # last byte (byte15): shift right by 1 (no carry in from above)
+        v_next.push((_u8_at(v, 0).to_u32() >> 1).to_u8() | ((_u8_at(v, 1).to_u32() & 0x01) << 7).to_u8())
+        var j: u64 = 1
+        while j < 15:
+            val shifted = (_u8_at(v, j).to_u32() >> 1) | ((_u8_at(v, j + 1).to_u32() & 0x01) << 7)
+            v_next.push((shifted & 0xFF).to_u8())
+            j = j + 1
+        v_next.push((_u8_at(v, 15).to_u32() >> 1).to_u8())
+
+        if msb != 0:
+            # Reduce: XOR with polynomial constant (x^127+x^126+x^121+x^0)
+            # In POLYVAL LE bit order: byte0 ^= 0x01, byte15 ^= 0xC2
+            val b0 = _u8_at(v_next, 0) ^ 0x01
+            val b15 = _u8_at(v_next, 15) ^ 0xC2
+            var v_red: [u8] = rt_array_new_with_cap(16)
+            v_red.push(b0)
+            j = 1
+            while j < 15:
+                v_red.push(_u8_at(v_next, j))
+                j = j + 1
+            v_red.push(b15)
+            v = v_red
+        else:
+            v = v_next
+
+        i = i + 1
+
+    z
+
+fn _polyval_dot(s: [u8], x: [u8], h: [u8]) -> [u8]:
+    """Compute dot(s + x, h) = (s XOR x) * h in POLYVAL's field."""
+    var xored: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        xored.push(_u8_at(s, i) ^ _u8_at(x, i))
+        i = i + 1
+    _polyval_mul(xored, h)
+
+fn _polyval(h: [u8], input: [u8]) -> [u8]:
+    """Compute POLYVAL(H, input) where input is a multiple of 16 bytes.
+
+    S_0 = 0; S_j = dot(S_{j-1} + X_j, H) for each 16-byte block X_j.
+    """
+    var s: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        s.push(0x00)
+        i = i + 1
+
+    val num_blocks = input.len() / 16
+    i = 0
+    while i < num_blocks:
+        val base = i * 16
+        var block: [u8] = rt_array_new_with_cap(16)
+        var j: u64 = 0
+        while j < 16:
+            block.push(_u8_at(input, base + j))
+            j = j + 1
+        s = _polyval_dot(s, block, h)
+        i = i + 1
+
+    s
+
+fn _pad_to_16(data: [u8]) -> [u8]:
+    """Right-pad data to a multiple of 16 bytes with zeros."""
+    val rem = data.len() % 16
+    if rem == 0:
+        var out: [u8] = rt_array_new_with_cap(data.len().to_i64())
+        var i: u64 = 0
+        while i < data.len():
+            out.push(_u8_at(data, i))
+            i = i + 1
+        return out
+    val padded_len = data.len() + (16 - rem)
+    var out: [u8] = rt_array_new_with_cap(padded_len.to_i64())
+    var i: u64 = 0
+    while i < data.len():
+        out.push(_u8_at(data, i))
+        i = i + 1
+    while out.len() < padded_len:
+        out.push(0x00)
+    out
+
+fn _make_length_block(aad_len: u64, pt_len: u64) -> [u8]:
+    """Build the 16-byte length block: LE64(bytelen(AAD)*8) || LE64(bytelen(PT)*8)."""
+    val aad_bits = aad_len * 8
+    val pt_bits = pt_len * 8
+    var lb: [u8] = rt_array_new_with_cap(16)
+    # LE64 for AAD bits
+    lb.push((aad_bits & 0xFF).to_u8())
+    lb.push(((aad_bits >> 8) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 16) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 24) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 32) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 40) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 48) & 0xFF).to_u8())
+    lb.push(((aad_bits >> 56) & 0xFF).to_u8())
+    # LE64 for PT bits
+    lb.push((pt_bits & 0xFF).to_u8())
+    lb.push(((pt_bits >> 8) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 16) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 24) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 32) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 40) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 48) & 0xFF).to_u8())
+    lb.push(((pt_bits >> 56) & 0xFF).to_u8())
+    lb
+
+fn _compute_tag_128(auth_key: [u8], enc_key: [u8], nonce: [u8], aad: [u8], pt: [u8]) -> [u8]:
+    """Compute GCM-SIV tag for AES-128 variant.
+
+    POLYVAL(auth_key, pad(AAD) || pad(PT) || len_block) XOR nonce[0:12],
+    clear bit 127, then AES-128 encrypt with enc_key.
+    """
+    val padded_aad = _pad_to_16(aad)
+    val padded_pt = _pad_to_16(pt)
+    val len_block = _make_length_block(aad.len(), pt.len())
+
+    var polyval_input: [u8] = rt_array_new_with_cap((padded_aad.len() + padded_pt.len() + 16).to_i64())
+    var i: u64 = 0
+    while i < padded_aad.len():
+        polyval_input.push(_u8_at(padded_aad, i))
+        i = i + 1
+    i = 0
+    while i < padded_pt.len():
+        polyval_input.push(_u8_at(padded_pt, i))
+        i = i + 1
+    i = 0
+    while i < 16:
+        polyval_input.push(_u8_at(len_block, i))
+        i = i + 1
+
+    var s = _polyval(auth_key, polyval_input)
+
+    # XOR with first 12 bytes of nonce
+    i = 0
+    while i < 12:
+        var s_xored: [u8] = rt_array_new_with_cap(16)
+        var j: u64 = 0
+        while j < 16:
+            if j == i:
+                s_xored.push(_u8_at(s, j) ^ _u8_at(nonce, j))
+            else:
+                s_xored.push(_u8_at(s, j))
+            j = j + 1
+        s = s_xored
+        i = i + 1
+
+    # Clear bit 127 (MSB of byte 15)
+    var s_masked: [u8] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 15:
+        s_masked.push(_u8_at(s, i))
+        i = i + 1
+    s_masked.push(_u8_at(s, 15) & 0x7F)
+
+    _aes128_encrypt_block(enc_key, s_masked)
+
+fn _compute_tag_256(auth_key: [u8], enc_key: [u8], nonce: [u8], aad: [u8], pt: [u8]) -> [u8]:
+    """Compute GCM-SIV tag for AES-256 variant."""
+    val padded_aad = _pad_to_16(aad)
+    val padded_pt = _pad_to_16(pt)
+    val len_block = _make_length_block(aad.len(), pt.len())
+
+    var polyval_input: [u8] = rt_array_new_with_cap((padded_aad.len() + padded_pt.len() + 16).to_i64())
+    var i: u64 = 0
+    while i < padded_aad.len():
+        polyval_input.push(_u8_at(padded_aad, i))
+        i = i + 1
+    i = 0
+    while i < padded_pt.len():
+        polyval_input.push(_u8_at(padded_pt, i))
+        i = i + 1
+    i = 0
+    while i < 16:
+        polyval_input.push(_u8_at(len_block, i))
+        i = i + 1
+
+    var s = _polyval(auth_key, polyval_input)
+
+    var i2: u64 = 0
+    while i2 < 12:
+        var s_xored: [u8] = rt_array_new_with_cap(16)
+        var j: u64 = 0
+        while j < 16:
+            if j == i2:
+                s_xored.push(_u8_at(s, j) ^ _u8_at(nonce, j))
+            else:
+                s_xored.push(_u8_at(s, j))
+            j = j + 1
+        s = s_xored
+        i2 = i2 + 1
+
+    var s_masked: [u8] = rt_array_new_with_cap(16)
+    i2 = 0
+    while i2 < 15:
+        s_masked.push(_u8_at(s, i2))
+        i2 = i2 + 1
+    s_masked.push(_u8_at(s, 15) & 0x7F)
+
+    _aes256_encrypt_block(enc_key, s_masked)
+
+# ============================================================================
+# AES-GCM-SIV CTR Mode (RFC 8452 §4 AES_CTR)
+#
+# initial_counter_block = tag with bit 127 SET (byte15 |= 0x80)
+# Counter increment: 32-bit LE in bytes 0–3 (NOT the high bytes like GCM).
+# Keystream block i = AES_enc_key(counter_block_i)
+# output_i = input_i XOR keystream_i[:len(input_i)]
+# ============================================================================
+
+fn _inc_ctr32_le(counter: [u8]) -> [u8]:
+    """Increment the low 32 bits (bytes 0-3) of counter block, LE."""
+    val c = (_u8_at(counter, 3).to_u32() << 24) |
+            (_u8_at(counter, 2).to_u32() << 16) |
+            (_u8_at(counter, 1).to_u32() << 8) |
+            _u8_at(counter, 0).to_u32()
+    val c_inc = (c + 1) & 0xFFFFFFFF
+
+    var result: [u8] = rt_array_new_with_cap(16)
+    result.push((c_inc & 0xFF).to_u8())
+    result.push(((c_inc >> 8) & 0xFF).to_u8())
+    result.push(((c_inc >> 16) & 0xFF).to_u8())
+    result.push(((c_inc >> 24) & 0xFF).to_u8())
+    var i: u64 = 4
+    while i < 16:
+        result.push(_u8_at(counter, i))
+        i = i + 1
+    result
+
+fn _gcm_siv_ctr128(enc_key: [u8], tag: [u8], input: [u8]) -> [u8]:
+    """AES-128 CTR mode for GCM-SIV.
+
+    initial_counter = tag with bit 127 set (byte15 |= 0x80).
+    Counter increment is 32-bit LE in bytes 0-3.
+    """
+    if input.len() == 0:
+        return []
+
+    var cb: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 15:
+        cb.push(_u8_at(tag, i))
+        i = i + 1
+    cb.push(_u8_at(tag, 15) | 0x80)
+
+    var output: [u8] = rt_array_new_with_cap(input.len().to_i64())
+    val num_full_blocks = input.len() / 16
+
+    i = 0
+    while i < num_full_blocks:
+        val ks = _aes128_encrypt_block(enc_key, cb)
+        val offset = i * 16
+        var j: u64 = 0
+        while j < 16:
+            output.push(_u8_at(input, offset + j) ^ _u8_at(ks, j))
+            j = j + 1
+        cb = _inc_ctr32_le(cb)
+        i = i + 1
+
+    val remaining = input.len() % 16
+    if remaining > 0:
+        val ks = _aes128_encrypt_block(enc_key, cb)
+        val offset = num_full_blocks * 16
+        var j: u64 = 0
+        while j < remaining:
+            output.push(_u8_at(input, offset + j) ^ _u8_at(ks, j))
+            j = j + 1
+
+    output
+
+fn _gcm_siv_ctr256(enc_key: [u8], tag: [u8], input: [u8]) -> [u8]:
+    """AES-256 CTR mode for GCM-SIV."""
+    if input.len() == 0:
+        return []
+
+    var cb: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 15:
+        cb.push(_u8_at(tag, i))
+        i = i + 1
+    cb.push(_u8_at(tag, 15) | 0x80)
+
+    var output: [u8] = rt_array_new_with_cap(input.len().to_i64())
+    val num_full_blocks = input.len() / 16
+
+    i = 0
+    while i < num_full_blocks:
+        val ks = _aes256_encrypt_block(enc_key, cb)
+        val offset = i * 16
+        var j: u64 = 0
+        while j < 16:
+            output.push(_u8_at(input, offset + j) ^ _u8_at(ks, j))
+            j = j + 1
+        cb = _inc_ctr32_le(cb)
+        i = i + 1
+
+    val remaining = input.len() % 16
+    if remaining > 0:
+        val ks = _aes256_encrypt_block(enc_key, cb)
+        val offset = num_full_blocks * 16
+        var j: u64 = 0
+        while j < remaining:
+            output.push(_u8_at(input, offset + j) ^ _u8_at(ks, j))
+            j = j + 1
+
+    output
+
+# ============================================================================
+# Public API — AES-128-GCM-SIV (RFC 8452 AEAD_AES_128_GCM_SIV)
+# ============================================================================
+
+fn aes128_gcm_siv_encrypt(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
+    """AES-128-GCM-SIV authenticated encryption (RFC 8452).
+
+    Args:
+        key:       16-byte key-generating key.
+        nonce:     12-byte nonce.
+        aad:       Additional authenticated data (not encrypted).
+        plaintext: Plaintext to encrypt.
+
+    Returns: ciphertext || 16-byte authentication tag (concatenated).
+    """
+    val keys = _derive_keys_128(key, nonce)
+    val auth_key = keys.0
+    val enc_key = keys.1
+
+    val tag = _compute_tag_128(auth_key, enc_key, nonce, aad, plaintext)
+    val ciphertext = _gcm_siv_ctr128(enc_key, tag, plaintext)
+
+    _append_bytes(ciphertext, tag)
+
+fn aes128_gcm_siv_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_and_tag: [u8]) -> AesGcmSivResult:
+    """AES-128-GCM-SIV authenticated decryption (RFC 8452).
+
+    Args:
+        key:                16-byte key-generating key.
+        nonce:              12-byte nonce.
+        aad:                Additional authenticated data.
+        ciphertext_and_tag: Ciphertext || 16-byte tag (as returned by encrypt).
+
+    Returns: AesGcmSivResult.Ok(plaintext) or AesGcmSivResult.Err(msg).
+    """
+    val total = ciphertext_and_tag.len()
+    if total < 16:
+        return AesGcmSivResult.Err("ciphertext_and_tag too short")
+
+    val ct_len = total - 16
+    var ct: [u8] = rt_array_new_with_cap(ct_len.to_i64())
+    var i: u64 = 0
+    while i < ct_len:
+        ct.push(_u8_at(ciphertext_and_tag, i))
+        i = i + 1
+
+    var tag: [u8] = rt_array_new_with_cap(16)
+    i = ct_len
+    while i < total:
+        tag.push(_u8_at(ciphertext_and_tag, i))
+        i = i + 1
+
+    val keys = _derive_keys_128(key, nonce)
+    val auth_key = keys.0
+    val enc_key = keys.1
+
+    val plaintext = _gcm_siv_ctr128(enc_key, tag, ct)
+    val expected_tag = _compute_tag_128(auth_key, enc_key, nonce, aad, plaintext)
+
+    var diff: u8 = 0x00
+    i = 0
+    while i < 16:
+        diff = diff | (_u8_at(expected_tag, i) ^ _u8_at(tag, i))
+        i = i + 1
+
+    if diff != 0:
+        return AesGcmSivResult.Err("authentication tag mismatch")
+
+    AesGcmSivResult.Ok(data: plaintext)
+
+# ============================================================================
+# Public API — AES-256-GCM-SIV (RFC 8452 AEAD_AES_256_GCM_SIV)
+# ============================================================================
+
+fn aes256_gcm_siv_encrypt(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
+    """AES-256-GCM-SIV authenticated encryption (RFC 8452).
+
+    Args:
+        key:       32-byte key-generating key.
+        nonce:     12-byte nonce.
+        aad:       Additional authenticated data (not encrypted).
+        plaintext: Plaintext to encrypt.
+
+    Returns: ciphertext || 16-byte authentication tag (concatenated).
+    """
+    val keys = _derive_keys_256(key, nonce)
+    val auth_key = keys.0
+    val enc_key = keys.1
+
+    val tag = _compute_tag_256(auth_key, enc_key, nonce, aad, plaintext)
+    val ciphertext = _gcm_siv_ctr256(enc_key, tag, plaintext)
+
+    _append_bytes(ciphertext, tag)
+
+fn aes256_gcm_siv_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_and_tag: [u8]) -> AesGcmSivResult:
+    """AES-256-GCM-SIV authenticated decryption (RFC 8452).
+
+    Args:
+        key:                32-byte key-generating key.
+        nonce:              12-byte nonce.
+        aad:                Additional authenticated data.
+        ciphertext_and_tag: Ciphertext || 16-byte tag (as returned by encrypt).
+
+    Returns: AesGcmSivResult.Ok(plaintext) or AesGcmSivResult.Err(msg).
+    """
+    val total = ciphertext_and_tag.len()
+    if total < 16:
+        return AesGcmSivResult.Err("ciphertext_and_tag too short")
+
+    val ct_len = total - 16
+    var ct: [u8] = rt_array_new_with_cap(ct_len.to_i64())
+    var i: u64 = 0
+    while i < ct_len:
+        ct.push(_u8_at(ciphertext_and_tag, i))
+        i = i + 1
+
+    var tag: [u8] = rt_array_new_with_cap(16)
+    i = ct_len
+    while i < total:
+        tag.push(_u8_at(ciphertext_and_tag, i))
+        i = i + 1
+
+    val keys = _derive_keys_256(key, nonce)
+    val auth_key = keys.0
+    val enc_key = keys.1
+
+    val plaintext = _gcm_siv_ctr256(enc_key, tag, ct)
+    val expected_tag = _compute_tag_256(auth_key, enc_key, nonce, aad, plaintext)
+
+    var diff: u8 = 0x00
+    i = 0
+    while i < 16:
+        diff = diff | (_u8_at(expected_tag, i) ^ _u8_at(tag, i))
+        i = i + 1
+
+    if diff != 0:
+        return AesGcmSivResult.Err("authentication tag mismatch")
+
+    AesGcmSivResult.Ok(data: plaintext)

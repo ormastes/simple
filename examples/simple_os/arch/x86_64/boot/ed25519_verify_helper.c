@@ -11,6 +11,7 @@ typedef int64_t RuntimeValue;
 #define TAG_SPECIAL 0x3ULL
 
 #define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
+#define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
 #define DECODE_PTR(v)  ((void*)((uint64_t)(v) & ~TAG_MASK))
 #define DECODE_INT(v)  ((int64_t)((uint64_t)(v) >> 3))
 #define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
@@ -40,21 +41,6 @@ extern void serial_puts(const char *s);
 extern void serial_puthex(uint8_t v);
 extern int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
                                                 const uint8_t pk[32], const uint8_t sig[64]);
-
-static RuntimeValue _crypto_make_byte_array(const uint8_t *src, uint32_t len)
-{
-    size_t total = sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue);
-    RuntimeArray *arr = (RuntimeArray *)malloc(total);
-    if (!arr) return NIL_VALUE;
-    arr->hdr.type = HEAP_ARRAY;
-    arr->hdr.size = (uint32_t)total;
-    arr->len = len;
-    arr->cap = len;
-    for (uint32_t i = 0; i < len; i++) {
-        CRYPTO_ARRAY_ITEMS(arr)[i] = ENCODE_INT(src[i]);
-    }
-    return ((RuntimeValue)(uintptr_t)arr) | TAG_HEAP;
-}
 
 /*
  * Import the shared portable Ed25519 implementation under helper-local names

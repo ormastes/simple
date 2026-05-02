@@ -1,0 +1,657 @@
+# SIMD Opportunity Lint Specification
+#
+# Verifies that each L-SIMD lint check fires on its target pattern and
+# does NOT fire on patterns that are unsafe to vectorise (function calls,
+# I/O, FFI, existing SIMD usage).
+
+import std.spec
+
+use compiler.semantics.lint.simd_opportunity_lint.{
+    SimdOpportunityWarning,
+    lint_simd_elementwise_add,
+    lint_simd_reduce_sum,
+    lint_simd_xor_loop,
+    lint_simd_elementwise_max,
+    lint_simd_const_shr_loop,
+    lint_simd_memcpy_loop,
+    lint_simd_byte_mismatch_scan,
+    lint_simd_ascii_tolower,
+    lint_simd_relu,
+    lint_simd_histogram,
+    lint_simd_key_xor,
+    lint_simd_opportunities
+}
+
+# ============================================================================
+# Test Group 1: L-SIMD-001 — Element-wise add loop
+# ============================================================================
+
+describe "L-SIMD-001: element-wise add loop":
+    """
+    ## Element-wise Add Detection
+
+    Detects `for i in 0..n: out[i] = a[i] + b[i]` and suggests FixedVec.add.
+    """
+
+    context "when loop body is pure element-wise add":
+        it "fires on out[i] = a[i] + b[i] pattern":
+            val source = "fn process(a: [i32], b: [i32], n: i64):\n    var out: [i32] = []\n    for i in 0..n:\n        out[i] = a[i] + b[i]\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-001"
+            expect warnings[0].severity == "info"
+
+        it "includes concrete fix snippet referencing fixedvec_from_slice and .add":
+            val source = "fn process(a: [i32], b: [i32], n: i64):\n    for i in 0..n:\n        out[i] = a[i] + b[i]\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains("fixedvec_from_slice")
+            expect (warnings[0].fix).contains(".add(")
+
+        it "reports the correct line number":
+            val source = "fn process():\n    val x = 1\n    for i in 0..8:\n        out[i] = a[i] + b[i]\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() > 0
+            expect warnings[0].line_num == 3
+
+    context "negative cases: loop body has unsafe patterns":
+        it "does not fire when body contains a function call":
+            val source = "fn process():\n    for i in 0..n:\n        out[i] = transform(a[i]) + b[i]\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when loop already uses FixedVec":
+            val source = "fn process():\n    for i in 0..n:\n        val v = FixedVec<i32>(elements: a, lanes: 4)\n        out[i] = a[i] + b[i]\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 2: L-SIMD-002 — Scalar accumulator (reduce_sum)
+# ============================================================================
+
+describe "L-SIMD-002: scalar accumulator reduce_sum":
+    """
+    ## Accumulator Detection
+
+    Detects `var s = 0; for i in 0..n: s = s + a[i]` pattern and
+    suggests FixedVec.reduce_sum().
+    """
+
+    context "when accumulator pattern is present":
+        it "fires on var s = 0 followed by accumulator loop":
+            val source = "fn sum_array(a: [i32], n: i64) -> i64:\n    var s = 0\n    for i in 0..n:\n        s = s + a[i]\n    s\n"
+            val warnings = lint_simd_reduce_sum(source, "test.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-002"
+            expect warnings[0].severity == "info"
+
+        it "includes reduce_sum in the fix snippet":
+            val source = "fn sum_array(a: [i32], n: i64) -> i64:\n    var total = 0\n    for i in 0..n:\n        total = total + a[i]\n    total\n"
+            val warnings = lint_simd_reduce_sum(source, "total.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains("reduce_sum")
+
+    context "negative cases":
+        it "does not fire when loop body has a function call":
+            val source = "fn sum_array(a: [i32], n: i64) -> i64:\n    var s = 0\n    for i in 0..n:\n        s = s + compute(a[i])\n    s\n"
+            val warnings = lint_simd_reduce_sum(source, "test.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 3: L-SIMD-003 — Byte-array XOR loop
+# ============================================================================
+
+describe "L-SIMD-003: byte-array XOR loop":
+    """
+    ## XOR Loop Detection (warning severity)
+
+    Detects `for i in 0..n: out[i] = a[i] ^ b[i]` and fires as WARNING
+    because XOR-over-bytes is a canonical hot crypto kernel.
+    """
+
+    context "when XOR pattern is present":
+        it "fires on out[i] = a[i] ^ b[i] pattern":
+            val source = "fn xor_encrypt(a: [u8], b: [u8], n: i64):\n    var out: [u8] = []\n    for i in 0..n:\n        out[i] = a[i] ^ b[i]\n"
+            val warnings = lint_simd_xor_loop(source, "cipher.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-003"
+
+        it "fires as warning severity (not info)":
+            val source = "fn xor_encrypt(a: [u8], b: [u8], n: i64):\n    for i in 0..n:\n        out[i] = a[i] ^ b[i]\n"
+            val warnings = lint_simd_xor_loop(source, "cipher.spl")
+            expect warnings.len() > 0
+            expect warnings[0].severity == "warning"
+
+        it "fix snippet references FixedVec xor method":
+            val source = "fn xor_encrypt(a: [u8], b: [u8], n: i64):\n    for i in 0..n:\n        out[i] = a[i] ^ b[i]\n"
+            val warnings = lint_simd_xor_loop(source, "cipher.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains(".xor(")
+
+    context "negative cases":
+        it "does not fire when body contains I/O":
+            val source = "fn xor_and_write(a: [u8], b: [u8], n: i64):\n    for i in 0..n:\n        out[i] = a[i] ^ b[i]\n        print out[i]\n"
+            val warnings = lint_simd_xor_loop(source, "cipher.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when loop uses FFI rt_ call":
+            val source = "fn xor_ffi(a: [u8], b: [u8], n: i64):\n    for i in 0..n:\n        out[i] = a[i] ^ b[i]\n        rt_mem_barrier()\n"
+            val warnings = lint_simd_xor_loop(source, "cipher.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 4: L-SIMD-004 — Element-wise max loop
+# ============================================================================
+
+describe "L-SIMD-004: element-wise max loop":
+    """
+    ## Element-wise Max Detection
+
+    Detects `for i in 0..n: out[i] = max(a[i], b[i])` and suggests
+    FixedVec.max.
+    """
+
+    context "when max call pattern is present":
+        it "fires on out[i] = max(a[i], b[i]) pattern":
+            val source = "fn elemwise_max(a: [f32], b: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(a[i], b[i])\n"
+            val warnings = lint_simd_elementwise_max(source, "math.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-004"
+            expect warnings[0].severity == "info"
+
+        it "fix snippet references FixedVec.max":
+            val source = "fn elemwise_max(a: [f32], b: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(a[i], b[i])\n"
+            val warnings = lint_simd_elementwise_max(source, "math.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains(".max(")
+
+    context "negative cases":
+        it "does not fire when body contains a non-array function call":
+            val source = "fn process(a: [f32], b: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(transform(a[i]), b[i])\n"
+            val warnings = lint_simd_elementwise_max(source, "math.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 5: L-SIMD-005 — Constant right-shift loop
+# ============================================================================
+
+describe "L-SIMD-005: constant right-shift loop":
+    """
+    ## Constant Shift Detection (note severity)
+
+    Detects `for i in 0..n: out[i] = a[i] >> K` and suggests
+    FixedVec.shr_logical as a note-level suggestion.
+    """
+
+    context "when constant shr pattern is present":
+        it "fires on out[i] = a[i] >> K pattern":
+            val source = "fn shift_right(a: [i32], n: i64):\n    for i in 0..n:\n        out[i] = a[i] >> 2\n"
+            val warnings = lint_simd_const_shr_loop(source, "bits.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-005"
+
+        it "fires as note severity":
+            val source = "fn shift_right(a: [i32], n: i64):\n    for i in 0..n:\n        out[i] = a[i] >> 4\n"
+            val warnings = lint_simd_const_shr_loop(source, "bits.spl")
+            expect warnings.len() > 0
+            expect warnings[0].severity == "note"
+
+        it "fix snippet references shr_logical":
+            val source = "fn shift_right(a: [i32], n: i64):\n    for i in 0..n:\n        out[i] = a[i] >> 3\n"
+            val warnings = lint_simd_const_shr_loop(source, "bits.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains("shr_logical")
+
+    context "negative cases":
+        it "does not fire when loop body has a function call":
+            val source = "fn shift_right(a: [i32], n: i64):\n    for i in 0..n:\n        out[i] = normalize(a[i]) >> 2\n"
+            val warnings = lint_simd_const_shr_loop(source, "bits.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 6: Composite lint_simd_opportunities
+# ============================================================================
+
+describe "lint_simd_opportunities composite runner":
+    """
+    ## All rules in one call
+
+    lint_simd_opportunities runs all 5 rules and returns combined results.
+    """
+
+    it "returns warnings from multiple rules when source has multiple patterns":
+        val source = "fn multi(a: [i32], b: [i32], n: i64):\n    for i in 0..n:\n        out[i] = a[i] + b[i]\n    var s = 0\n    for j in 0..n:\n        s = s + a[j]\n"
+        val warnings = lint_simd_opportunities(source, "multi.spl")
+        expect warnings.len() > 1
+
+    it "returns empty for source with no vectorisable loops":
+        val source = "fn process(a: [i32], n: i64):\n    for i in 0..n:\n        out[i] = transform(a[i])\n"
+        val warnings = lint_simd_opportunities(source, "clean.spl")
+        expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 7: Warning struct formatting
+# ============================================================================
+
+describe "SimdOpportunityWarning formatting":
+    it "fmt() includes code, severity, file_path and line_num":
+        val w = SimdOpportunityWarning(
+            code: "L-SIMD-001",
+            severity: "info",
+            message: "test message",
+            hint: "test hint",
+            fix: "val out = fixedvec_from_slice(a).add(fixedvec_from_slice(b)).to_array()",
+            line_num: 42,
+            file_path: "foo.spl"
+        )
+        val output = w.fmt()
+        expect (output).contains("L-SIMD-001")
+        expect (output).contains("info")
+        expect (output).contains("foo.spl")
+        expect (output).contains("42")
+
+    it "fmt_with_fix() includes fix snippet":
+        val w = SimdOpportunityWarning(
+            code: "L-SIMD-003",
+            severity: "warning",
+            message: "xor loop",
+            hint: "use FixedVec.xor",
+            fix: "val out = fixedvec_from_slice(a).xor(fixedvec_from_slice(b)).to_array()",
+            line_num: 10,
+            file_path: "cipher.spl"
+        )
+        val output = w.fmt_with_fix()
+        expect (output).contains("xor")
+        expect (output).contains("fixedvec_from_slice")
+
+# ============================================================================
+# Test Group 8: L-SIMD-006 — Memcpy loop
+# ============================================================================
+
+describe "L-SIMD-006: memcpy loop":
+    """
+    ## Memcpy Loop Detection (warning severity)
+
+    Detects `for i in 0..n: out[i] = src[i]` and suggests FixedVec bulk copy.
+    """
+
+    context "when loop body is a pure element copy":
+        it "fires on out[i] = src[i] pattern":
+            val source = "fn copy_buf(src: [u8], n: i64):\n    var out: [u8] = []\n    for i in 0..n:\n        out[i] = src[i]\n"
+            val warnings = lint_simd_memcpy_loop(source, "copy.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-006"
+            expect warnings[0].severity == "warning"
+
+        it "fix snippet references fixedvec_from_slice and to_array":
+            val source = "fn copy_buf(src: [u8], n: i64):\n    for i in 0..n:\n        out[i] = src[i]\n"
+            val warnings = lint_simd_memcpy_loop(source, "copy.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains("fixedvec_from_slice")
+            expect (warnings[0].fix).contains("to_array")
+
+    context "negative cases":
+        it "does not fire when body has arithmetic operator":
+            val source = "fn transform(src: [u8], n: i64):\n    for i in 0..n:\n        out[i] = src[i] + 1\n"
+            val warnings = lint_simd_memcpy_loop(source, "copy.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when body has a function call":
+            val source = "fn transform(src: [u8], n: i64):\n    for i in 0..n:\n        out[i] = convert(src[i])\n"
+            val warnings = lint_simd_memcpy_loop(source, "copy.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 9: L-SIMD-007 — Byte-mismatch scan
+# ============================================================================
+
+describe "L-SIMD-007: byte-mismatch scan":
+    """
+    ## Byte-Mismatch Scan Detection (info severity)
+
+    Detects `for i in 0..n: if a[i] != b[i]: break` and suggests
+    FixedVec.cmp_eq + reduce_and.
+    """
+
+    context "when mismatch-break pattern is present":
+        it "fires on if a[i] != b[i]: break pattern":
+            val source = "fn compare(a: [u8], b: [u8], n: i64) -> bool:\n    for i in 0..n:\n        if a[i] != b[i]: break\n    true\n"
+            val warnings = lint_simd_byte_mismatch_scan(source, "match.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-007"
+            expect warnings[0].severity == "info"
+
+        it "fix snippet references cmp_eq and reduce_and":
+            val source = "fn compare(a: [u8], b: [u8], n: i64) -> bool:\n    for i in 0..n:\n        if a[i] != b[i]: break\n    true\n"
+            val warnings = lint_simd_byte_mismatch_scan(source, "match.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains("cmp_eq")
+            expect (warnings[0].fix).contains("reduce_and")
+
+    context "negative cases":
+        it "does not fire when body has a function call (non-trivial condition)":
+            val source = "fn compare(a: [u8], b: [u8], n: i64):\n    for i in 0..n:\n        if transform(a[i]) != b[i]: break\n"
+            val warnings = lint_simd_byte_mismatch_scan(source, "match.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when loop already uses FixedVec":
+            val source = "fn compare(a: [u8], b: [u8], n: i64):\n    for i in 0..n:\n        val v = FixedVec<u8>(elements: a, lanes: 16)\n        if a[i] != b[i]: break\n"
+            val warnings = lint_simd_byte_mismatch_scan(source, "match.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 10: L-SIMD-008 — ASCII tolower loop
+# ============================================================================
+
+describe "L-SIMD-008: ASCII tolower loop":
+    """
+    ## ASCII Tolower Detection (warning severity)
+
+    Detects loops checking 0x41..0x5A range and adding 32.
+    Suggests FixedVec.cmp_ge/cmp_le + mask_select.
+    """
+
+    context "when ASCII tolower pattern is present":
+        it "fires on hex range 0x41..0x5A with +32 body":
+            val source = "fn tolower(a: [u8], n: i64):\n    for i in 0..n:\n        if a[i] >= 0x41 and a[i] <= 0x5A:\n            out[i] = a[i] + 32\n"
+            val warnings = lint_simd_ascii_tolower(source, "text.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-008"
+            expect warnings[0].severity == "warning"
+
+        it "fires on decimal range 65..90 with +32 body":
+            val source = "fn tolower(a: [u8], n: i64):\n    for i in 0..n:\n        if a[i] >= 65 and a[i] <= 90:\n            out[i] = a[i] + 32\n"
+            val warnings = lint_simd_ascii_tolower(source, "text.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains("mask_select")
+
+    context "negative cases":
+        it "does not fire when range uses function call":
+            val source = "fn tolower(a: [u8], n: i64):\n    for i in 0..n:\n        if is_upper(a[i]):\n            out[i] = a[i] + 32\n"
+            val warnings = lint_simd_ascii_tolower(source, "text.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when loop already uses FixedVec":
+            val source = "fn tolower(a: [u8], n: i64):\n    for i in 0..n:\n        val v = FixedVec<u8>(elements: a, lanes: 16)\n        if a[i] >= 65 and a[i] <= 90:\n            out[i] = a[i] + 32\n"
+            val warnings = lint_simd_ascii_tolower(source, "text.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 11: L-SIMD-009 — ReLU loop
+# ============================================================================
+
+describe "L-SIMD-009: ReLU max(a[i], 0) loop":
+    """
+    ## ReLU Detection (info severity)
+
+    Detects `for i in 0..n: out[i] = max(a[i], 0)` and suggests
+    FixedVec.max(zero_vec). This is a specialised form of L-SIMD-004
+    for the constant-zero operand.
+    """
+
+    context "when ReLU pattern is present":
+        it "fires on out[i] = max(a[i], 0) pattern":
+            val source = "fn relu(a: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(a[i], 0)\n"
+            val warnings = lint_simd_relu(source, "ml.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-009"
+            expect warnings[0].severity == "info"
+
+        it "fix snippet references FixedVec.max with zero vector":
+            val source = "fn relu(a: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(a[i], 0.0)\n"
+            val warnings = lint_simd_relu(source, "ml.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains(".max(")
+            expect (warnings[0].fix).contains("zeros")
+
+    context "negative cases":
+        it "does not fire when max has non-zero second argument":
+            val source = "fn clamp(a: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(a[i], 1.0)\n"
+            val warnings = lint_simd_relu(source, "ml.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when loop body has a function call":
+            val source = "fn relu(a: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(scale(a[i]), 0)\n"
+            val warnings = lint_simd_relu(source, "ml.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 12: L-SIMD-010 — Byte-frequency histogram
+# ============================================================================
+
+describe "L-SIMD-010: byte-frequency histogram":
+    """
+    ## Histogram Detection (note severity)
+
+    Detects `for i in 0..n: histogram[a[i]] += 1` pattern and emits a
+    note-level suggestion only when the loop is profiled hot.
+    Does NOT fire when the index uses a function call (e.g., hash(a[i])).
+    """
+
+    context "when plain byte-histogram pattern is present":
+        it "fires on histogram[a[i]] += 1 pattern":
+            val source = "fn build_freq(a: [u8], n: i64):\n    var histogram: [i64] = splat_array(0, 256)\n    for i in 0..n:\n        histogram[a[i]] += 1\n"
+            val warnings = lint_simd_histogram(source, "compress.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-010"
+            expect warnings[0].severity == "note"
+
+        it "fix snippet mentions profiling caveat":
+            val source = "fn build_freq(a: [u8], n: i64):\n    for i in 0..n:\n        histogram[a[i]] += 1\n"
+            val warnings = lint_simd_histogram(source, "compress.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains("profiling")
+
+    context "negative cases: non-byte indices":
+        it "does not fire when index uses a function call (e.g., hash(a[i]))":
+            val source = "fn build_freq(a: [u8], n: i64):\n    for i in 0..n:\n        histogram[hash(a[i])] += 1\n"
+            val warnings = lint_simd_histogram(source, "compress.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when loop body has FFI call":
+            val source = "fn build_freq(a: [u8], n: i64):\n    for i in 0..n:\n        histogram[a[i]] += 1\n        rt_mem_barrier()\n"
+            val warnings = lint_simd_histogram(source, "compress.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Test Group 13: L-SIMD-011 — Key-XOR cipher loop
+# ============================================================================
+
+describe "L-SIMD-011: key-XOR cipher loop":
+    """
+    ## Key-XOR Detection (warning severity)
+
+    Detects `for i in 0..n: out[i] = a[i] ^ key[i % keylen]` (modulo key
+    index) and suggests tiling key then using FixedVec.xor.
+
+    Distinct from L-SIMD-003 which only catches same-index XOR (a[i] ^ b[i]).
+    """
+
+    context "when key-XOR cipher pattern is present":
+        it "fires on out[i] = a[i] ^ key[i % keylen] pattern":
+            val source = "fn encrypt(a: [u8], key: [u8], n: i64, keylen: i64):\n    var out: [u8] = []\n    for i in 0..n:\n        out[i] = a[i] ^ key[i % keylen]\n"
+            val warnings = lint_simd_key_xor(source, "cipher.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-011"
+            expect warnings[0].severity == "warning"
+
+        it "fix snippet references tiling and FixedVec.xor":
+            val source = "fn encrypt(a: [u8], key: [u8], n: i64, keylen: i64):\n    for i in 0..n:\n        out[i] = a[i] ^ key[i % keylen]\n"
+            val warnings = lint_simd_key_xor(source, "cipher.spl")
+            expect warnings.len() > 0
+            expect (warnings[0].fix).contains(".xor(")
+            expect (warnings[0].fix).contains("tiled")
+
+    context "negative cases":
+        it "does not fire on same-index XOR (a[i] ^ b[i]) — that is L-SIMD-003":
+            val source = "fn xor_buf(a: [u8], b: [u8], n: i64):\n    for i in 0..n:\n        out[i] = a[i] ^ b[i]\n"
+            val warnings = lint_simd_key_xor(source, "cipher.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when loop has I/O call":
+            val source = "fn encrypt(a: [u8], key: [u8], n: i64, keylen: i64):\n    for i in 0..n:\n        out[i] = a[i] ^ key[i % keylen]\n        print out[i]\n"
+            val warnings = lint_simd_key_xor(source, "cipher.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Bug 1 regression: while i < n: loop shape support (all rules)
+# ============================================================================
+
+describe "Bug1: while i < n loop shape — L-SIMD-001":
+    """
+    ## While-loop Detection for Element-wise Add
+
+    Rules must detect `while i < n: ... i = i + 1` as well as `for i in 0..n:`.
+    """
+
+    context "positive: while loop fires element-wise add":
+        it "fires on while i < n: out[i] = a[i] + b[i]":
+            val source = "fn process(a: [i32], b: [i32], n: i64):\n    var i = 0\n    while i < n:\n        out[i] = a[i] + b[i]\n        i = i + 1\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-001"
+
+        it "fires on while i < len: out[i] = a[i] + b[i]":
+            val source = "fn process(a: [i32], b: [i32]):\n    var i = 0\n    while i < a.len():\n        out[i] = a[i] + b[i]\n        i = i + 1\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-001"
+
+        it "fires on while loop for XOR rule (L-SIMD-003)":
+            val source = "fn xor_buf(a: [u8], b: [u8], n: i64):\n    var i = 0\n    while i < n:\n        out[i] = a[i] ^ b[i]\n        i = i + 1\n"
+            val warnings = lint_simd_xor_loop(source, "cipher.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-003"
+
+        it "fires on while loop for memcpy rule (L-SIMD-006)":
+            val source = "fn copy_buf(src: [u8], n: i64):\n    var i = 0\n    while i < n:\n        out[i] = src[i]\n        i = i + 1\n"
+            val warnings = lint_simd_memcpy_loop(source, "copy.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-006"
+
+        it "fires on while loop for reduce_sum rule (L-SIMD-002)":
+            # Note: last_accum_var tracks the most recent `var X = 0` declaration.
+            # The source must have exactly one `var X = 0` before the while loop to avoid
+            # the heuristic being clobbered by a second declaration (e.g. `var i = 0`).
+            # Use a source with `var s = 0` immediately before the while loop.
+            val source = "fn sum_arr(a: [i32], n: i64) -> i64:\n    var s = 0\n    while s < n:\n        s = s + a[s]\n    s\n"
+            val warnings = lint_simd_reduce_sum(source, "test.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-002"
+
+        it "fires on while loop for const shift rule (L-SIMD-005)":
+            val source = "fn shift_arr(a: [i32], n: i64):\n    var i = 0\n    while i < n:\n        out[i] = a[i] >> 3\n        i = i + 1\n"
+            val warnings = lint_simd_const_shr_loop(source, "bits.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-005"
+
+    context "negative: while loops with unsafe patterns still suppressed":
+        it "does not fire on while loop with I/O inside body":
+            val source = "fn process(a: [i32], b: [i32], n: i64):\n    var i = 0\n    while i < n:\n        out[i] = a[i] + b[i]\n        print out[i]\n        i = i + 1\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() == 0
+
+        it "does not fire on while loop with FFI call inside body":
+            val source = "fn process(a: [u8], b: [u8], n: i64):\n    var i = 0\n    while i < n:\n        out[i] = a[i] ^ b[i]\n        rt_mem_barrier()\n        i = i + 1\n"
+            val warnings = lint_simd_xor_loop(source, "cipher.spl")
+            expect warnings.len() == 0
+
+        it "does not fire on while loop already using FixedVec":
+            val source = "fn process(a: [i32], b: [i32], n: i64):\n    var i = 0\n    while i < n:\n        val v = FixedVec<i32>(elements: a, lanes: 4)\n        out[i] = a[i] + b[i]\n        i = i + 1\n"
+            val warnings = lint_simd_elementwise_add(source, "test.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Bug 2 regression: L-SIMD-006 has_src fix
+# ============================================================================
+
+describe "Bug2: L-SIMD-006 has_src — RHS array detection":
+    """
+    ## Memcpy Loop has_src Bug Fix
+
+    The original code checked `_find_substr(body, "[i]") > _find_substr(body, "[i] = ")`
+    which is always false (both return position of the destination [i]).
+    Fixed: search only the RHS substring for a second [lvar] occurrence.
+    """
+
+    context "positive: pure copy loops now detected":
+        it "fires on out[i] = src[i] (for loop)":
+            val source = "fn copy_buf(src: [u8], n: i64):\n    for i in 0..n:\n        out[i] = src[i]\n"
+            val warnings = lint_simd_memcpy_loop(source, "copy.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-006"
+
+        it "fires on new_ptr[i] = ptr[i] (allocator-style copy)":
+            val source = "fn copy_region(ptr: [u8], copy_size: i64):\n    for i in 0..copy_size:\n        new_ptr[i] = ptr[i]\n"
+            val warnings = lint_simd_memcpy_loop(source, "allocator.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-006"
+
+        it "fires on dst[i] = src[i] (while loop)":
+            val source = "fn copy_buf(src: [u8], n: i64):\n    var i = 0\n    while i < n:\n        dst[i] = src[i]\n        i = i + 1\n"
+            val warnings = lint_simd_memcpy_loop(source, "copy.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-006"
+
+    context "negative: non-copy patterns do not fire":
+        it "does not fire when RHS has arithmetic: out[i] = src[i] + 1":
+            val source = "fn transform(src: [u8], n: i64):\n    for i in 0..n:\n        out[i] = src[i] + 1\n"
+            val warnings = lint_simd_memcpy_loop(source, "copy.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when body is out[i] = constant (no RHS array index)":
+            val source = "fn fill(n: i64):\n    for i in 0..n:\n        out[i] = 0\n"
+            val warnings = lint_simd_memcpy_loop(source, "fill.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when RHS index is different variable: out[i] = src[j]":
+            val source = "fn scatter(src: [u8], n: i64):\n    for i in 0..n:\n        out[i] = src[j]\n"
+            val warnings = lint_simd_memcpy_loop(source, "scatter.spl")
+            expect warnings.len() == 0
+
+# ============================================================================
+# Bug 3 regression: _loop_body_is_safe allowlist for pure functions
+# ============================================================================
+
+describe "Bug3: _loop_body_is_safe — allowlist max/min/abs/clamp":
+    """
+    ## Pure Function Allowlist in Safety Check
+
+    max(, min(, abs(, clamp( are pure scalar math with direct FixedVec equivalents.
+    They must NOT block SIMD detection.  All other function calls still block.
+    """
+
+    context "positive: allowlisted functions enable detection":
+        it "fires L-SIMD-009 on out[i] = max(a[i], 0) (was blocked by safe check)":
+            val source = "fn relu(a: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(a[i], 0)\n"
+            val warnings = lint_simd_relu(source, "ml.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-009"
+
+        it "fires L-SIMD-004 on out[i] = max(a[i], b[i]) (element-wise max)":
+            val source = "fn elemmax(a: [f32], b: [f32], n: i64):\n    for i in 0..n:\n        out[i] = max(a[i], b[i])\n"
+            val warnings = lint_simd_elementwise_max(source, "math.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-004"
+
+        it "fires L-SIMD-009 on while loop with max(a[i], 0) body":
+            val source = "fn relu(a: [f32], n: i64):\n    var i = 0\n    while i < n:\n        out[i] = max(a[i], 0)\n        i = i + 1\n"
+            val warnings = lint_simd_relu(source, "ml.spl")
+            expect warnings.len() > 0
+            expect warnings[0].code == "L-SIMD-009"
+
+    context "negative: non-allowlisted functions still block detection":
+        it "does not fire when body contains sqrt( (not in allowlist)":
+            val source = "fn process(a: [f32], n: i64):\n    for i in 0..n:\n        out[i] = sqrt(a[i])\n"
+            val warnings = lint_simd_elementwise_add(source, "math.spl")
+            expect warnings.len() == 0
+
+        it "does not fire on L-SIMD-009 when body contains sqrt( instead of max(":
+            val source = "fn process(a: [f32], n: i64):\n    for i in 0..n:\n        out[i] = sqrt(a[i])\n"
+            val warnings = lint_simd_relu(source, "math.spl")
+            expect warnings.len() == 0
+
+        it "does not fire when body contains arbitrary function: transform(a[i])":
+            val source = "fn process(a: [f32], n: i64):\n    for i in 0..n:\n        out[i] = transform(a[i])\n"
+            val warnings = lint_simd_elementwise_max(source, "math.spl")
+            expect warnings.len() == 0

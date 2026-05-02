@@ -1,0 +1,426 @@
+use std.nogc_sync_mut.debug.remote.types.{Architecture}
+
+enum DebugExecutionMode:
+    Hw
+    RtlSim
+    QemuStub
+
+    fn to_string() -> text:
+        match self:
+            Hw: "hw"
+            RtlSim: "rtl_sim"
+            QemuStub: "qemu_stub"
+
+enum DebugTransportKind:
+    OpenocdJtag
+    OpenocdRemoteBitbang
+    IntelJtagd
+    Trace32Native
+    Trace32Gdb
+    GdbRemote
+
+    fn to_string() -> text:
+        match self:
+            OpenocdJtag: "openocd_jtag"
+            OpenocdRemoteBitbang: "openocd_remote_bitbang"
+            IntelJtagd: "intel_jtagd"
+            Trace32Native: "trace32_native"
+            Trace32Gdb: "trace32_gdb"
+            GdbRemote: "gdb_remote"
+
+class DebugCapabilitySet:
+    cpu_debug: bool
+    raw_scan: bool
+    virtual_jtag: bool
+    mem_bridge: bool
+    fabric_debug: bool
+    persistent_session: bool
+
+    static fn create(cpu_debug: bool, raw_scan: bool, virtual_jtag: bool,
+                     mem_bridge: bool, fabric_debug: bool,
+                     persistent_session: bool) -> DebugCapabilitySet:
+        DebugCapabilitySet(
+            cpu_debug: cpu_debug,
+            raw_scan: raw_scan,
+            virtual_jtag: virtual_jtag,
+            mem_bridge: mem_bridge,
+            fabric_debug: fabric_debug,
+            persistent_session: persistent_session
+        )
+
+impl DebugCapabilitySet:
+    fn to_list() -> [text]:
+        var result: [text] = []
+        if self.cpu_debug:
+            result.push("cpu_debug")
+        if self.raw_scan:
+            result.push("raw_scan")
+        if self.virtual_jtag:
+            result.push("virtual_jtag")
+        if self.mem_bridge:
+            result.push("mem_bridge")
+        if self.fabric_debug:
+            result.push("fabric_debug")
+        if self.persistent_session:
+            result.push("persistent_session")
+        result
+
+    fn supports(name: text) -> bool:
+        for entry in self.to_list():
+            if entry == name:
+                return true
+        false
+
+class DebugTargetDescriptor:
+    arch: Architecture
+    exec_mode: DebugExecutionMode
+    vendor: text
+    probe_kind: text
+    server_kind: text
+    transport: DebugTransportKind
+
+class DebugConnectionHints:
+    host: text
+    port: i32
+    config_path: text
+    probe_serial: text
+    bitbang_host: text
+    bitbang_port: i32
+    jtag_device: text
+
+    static fn empty() -> DebugConnectionHints:
+        DebugConnectionHints(
+            host: "localhost",
+            port: 0,
+            config_path: "",
+            probe_serial: "",
+            bitbang_host: "127.0.0.1",
+            bitbang_port: 5555,
+            jtag_device: ""
+        )
+
+class DebugBackendRegistration:
+    backend_id: text
+    session_type: text
+    display_name: text
+    transport: DebugTransportKind
+    exec_mode: DebugExecutionMode
+    vendors: [text]
+    capabilities: DebugCapabilitySet
+    default_port: i32
+    attach_semantics: text
+
+impl DebugBackendRegistration:
+    fn supports(target: DebugTargetDescriptor) -> bool:
+        if self.transport.to_string() != target.transport.to_string():
+            return false
+        if self.exec_mode.to_string() != target.exec_mode.to_string():
+            return false
+        if self.vendors.len() == 0:
+            return true
+        for vendor in self.vendors:
+            if vendor == "generic" or vendor == target.vendor:
+                return true
+        false
+
+class DebugBootstrapPlan:
+    backend_id: text
+    discovery_command: text
+    launch_command: text
+    attach_target: text
+    generated_config: text
+    notes: [text]
+
+fn debug_arch_from_text(raw: text) -> Architecture:
+    val name = raw.trim().lower()
+    if name == "arm32" or name == "arm":
+        return Architecture.Arm32
+    if name == "arm64" or name == "aarch64":
+        return Architecture.Arm64
+    if name == "riscv64" or name == "rv64":
+        return Architecture.RiscV64
+    if name == "x86":
+        return Architecture.X86
+    if name == "x86_64" or name == "amd64":
+        return Architecture.X86_64
+    Architecture.RiscV32
+
+fn debug_exec_mode_from_text(raw: text) -> DebugExecutionMode:
+    val name = raw.trim().lower()
+    if name == "rtl" or name == "rtl_sim":
+        return DebugExecutionMode.RtlSim
+    if name == "qemu" or name == "qemu_stub":
+        return DebugExecutionMode.QemuStub
+    DebugExecutionMode.Hw
+
+fn debug_transport_from_text(raw: text) -> DebugTransportKind:
+    val name = raw.trim().lower()
+    if name == "openocd_remote_bitbang" or name == "remote_bitbang":
+        return DebugTransportKind.OpenocdRemoteBitbang
+    if name == "intel_jtagd" or name == "jtagd":
+        return DebugTransportKind.IntelJtagd
+    if name == "trace32_native" or name == "t32":
+        return DebugTransportKind.Trace32Native
+    if name == "trace32_gdb" or name == "t32_gdb":
+        return DebugTransportKind.Trace32Gdb
+    if name == "gdb_remote" or name == "gdb":
+        return DebugTransportKind.GdbRemote
+    DebugTransportKind.OpenocdJtag
+
+fn debug_transport_from_target_type(target_type: text) -> DebugTransportKind:
+    val name = target_type.trim().lower()
+    if name == "t32":
+        return DebugTransportKind.Trace32Native
+    if name == "t32_gdb":
+        return DebugTransportKind.Trace32Gdb
+    if name == "openocd_rtl" or name == "rtl_sim":
+        return DebugTransportKind.OpenocdRemoteBitbang
+    if name == "intel_jtagd":
+        return DebugTransportKind.IntelJtagd
+    if name == "remote" or name == "qemu_stub":
+        return DebugTransportKind.GdbRemote
+    DebugTransportKind.OpenocdJtag
+
+fn debug_vendor_for_transport(transport: DebugTransportKind, vendor: text) -> text:
+    if vendor.trim() != "":
+        return vendor.trim().lower()
+    match transport:
+        DebugTransportKind.Trace32Native: "lauterbach"
+        DebugTransportKind.Trace32Gdb: "lauterbach"
+        DebugTransportKind.IntelJtagd: "intel"
+        _: "generic"
+
+fn debug_exec_mode_for_target_type(target_type: text, transport: DebugTransportKind, raw_exec_mode: text) -> DebugExecutionMode:
+    if raw_exec_mode.trim() != "":
+        return debug_exec_mode_from_text(raw_exec_mode)
+    val name = target_type.trim().lower()
+    if name == "rtl_sim" or name == "openocd_rtl" or transport.to_string() == "openocd_remote_bitbang":
+        return DebugExecutionMode.RtlSim
+    if name == "remote" or name == "qemu_stub" or transport.to_string() == "gdb_remote":
+        return DebugExecutionMode.QemuStub
+    DebugExecutionMode.Hw
+
+fn debug_probe_kind_default(transport: DebugTransportKind, probe_kind: text) -> text:
+    if probe_kind.trim() != "":
+        return probe_kind.trim()
+    match transport:
+        DebugTransportKind.OpenocdRemoteBitbang: "remote_bitbang_endpoint"
+        DebugTransportKind.IntelJtagd: "usb_blaster"
+        DebugTransportKind.Trace32Native: "powerdebug"
+        DebugTransportKind.Trace32Gdb: "powerdebug"
+        DebugTransportKind.GdbRemote: "gdb_stub"
+        _: "external_probe"
+
+fn debug_server_kind_default(transport: DebugTransportKind, server_kind: text) -> text:
+    if server_kind.trim() != "":
+        return server_kind.trim()
+    match transport:
+        DebugTransportKind.OpenocdJtag: "openocd"
+        DebugTransportKind.OpenocdRemoteBitbang: "openocd"
+        DebugTransportKind.IntelJtagd: "jtagd"
+        DebugTransportKind.Trace32Native: "t32rem"
+        DebugTransportKind.Trace32Gdb: "t32_gdb_bridge"
+        DebugTransportKind.GdbRemote: "gdbserver"
+
+fn debug_target_descriptor(target_type: text, transport: text, arch: text, exec_mode: text,
+                           vendor: text, probe_kind: text, server_kind: text) -> DebugTargetDescriptor:
+    var selected_transport = debug_transport_from_target_type(target_type)
+    if transport.trim() != "":
+        selected_transport = debug_transport_from_text(transport)
+    val selected_exec_mode = debug_exec_mode_for_target_type(target_type, selected_transport, exec_mode)
+    DebugTargetDescriptor(
+        arch: debug_arch_from_text(arch),
+        exec_mode: selected_exec_mode,
+        vendor: debug_vendor_for_transport(selected_transport, vendor),
+        probe_kind: debug_probe_kind_default(selected_transport, probe_kind),
+        server_kind: debug_server_kind_default(selected_transport, server_kind),
+        transport: selected_transport
+    )
+
+fn debug_extension_registry_entries() -> [text]:
+    [
+        "transport:swd",
+        "transport:xvc",
+        "transport:virtual_jtag",
+        "transport:jop",
+        "feature:extra_cores",
+        "feature:fabric_analyzers"
+    ]
+
+fn debug_backend_catalog() -> [DebugBackendRegistration]:
+    [
+        DebugBackendRegistration(
+            backend_id: "openocd_jtag",
+            session_type: "openocd",
+            display_name: "OpenOCD JTAG",
+            transport: DebugTransportKind.OpenocdJtag,
+            exec_mode: DebugExecutionMode.Hw,
+            vendors: ["generic", "intel", "xilinx"],
+            capabilities: DebugCapabilitySet.create(true, true, false, true, true, true),
+            default_port: 3333,
+            attach_semantics: "start OpenOCD, attach GDB, then halt or continue"
+        ),
+        DebugBackendRegistration(
+            backend_id: "openocd_remote_bitbang",
+            session_type: "openocd",
+            display_name: "OpenOCD Remote Bitbang",
+            transport: DebugTransportKind.OpenocdRemoteBitbang,
+            exec_mode: DebugExecutionMode.RtlSim,
+            vendors: ["generic", "intel", "xilinx"],
+            capabilities: DebugCapabilitySet.create(true, true, true, true, true, true),
+            default_port: 3333,
+            attach_semantics: "bootstrap OpenOCD against a remote_bitbang endpoint provided by the RTL simulator"
+        ),
+        DebugBackendRegistration(
+            backend_id: "intel_jtagd",
+            session_type: "intel_jtagd",
+            display_name: "Intel jtagd",
+            transport: DebugTransportKind.IntelJtagd,
+            exec_mode: DebugExecutionMode.Hw,
+            vendors: ["intel"],
+            capabilities: DebugCapabilitySet.create(true, true, true, true, true, true),
+            default_port: 1309,
+            attach_semantics: "discover cable and device through jtagd, then hand off to a server-backed debugger"
+        ),
+        DebugBackendRegistration(
+            backend_id: "trace32_native",
+            session_type: "t32",
+            display_name: "TRACE32 Native",
+            transport: DebugTransportKind.Trace32Native,
+            exec_mode: DebugExecutionMode.Hw,
+            vendors: ["lauterbach", "generic"],
+            capabilities: DebugCapabilitySet.create(true, false, false, true, true, true),
+            default_port: 20000,
+            attach_semantics: "connect to an already-running TRACE32 instance via t32rem"
+        ),
+        DebugBackendRegistration(
+            backend_id: "trace32_gdb",
+            session_type: "t32_gdb",
+            display_name: "TRACE32 GDB Bridge",
+            transport: DebugTransportKind.Trace32Gdb,
+            exec_mode: DebugExecutionMode.Hw,
+            vendors: ["lauterbach", "generic"],
+            capabilities: DebugCapabilitySet.create(true, false, false, true, true, true),
+            default_port: 20000,
+            attach_semantics: "drive TRACE32 through its GDB bridge for standard CPU debug operations"
+        ),
+        DebugBackendRegistration(
+            backend_id: "gdb_remote",
+            session_type: "remote",
+            display_name: "GDB Remote",
+            transport: DebugTransportKind.GdbRemote,
+            exec_mode: DebugExecutionMode.QemuStub,
+            vendors: ["generic"],
+            capabilities: DebugCapabilitySet.create(true, false, false, false, false, true),
+            default_port: 1234,
+            attach_semantics: "attach to a GDB stub such as QEMU for software-debug validation"
+        )
+    ]
+
+fn debug_select_backend(target: DebugTargetDescriptor) -> Result<DebugBackendRegistration, text>:
+    for backend in debug_backend_catalog():
+        if backend.supports(target):
+            return Ok(backend)
+    Err("no debug backend registered for {target.transport.to_string()} / {target.exec_mode.to_string()} / {target.vendor}")
+
+fn debug_bootstrap_plan(target: DebugTargetDescriptor, hints: DebugConnectionHints, program: text) -> Result<DebugBootstrapPlan, text>:
+    val backend = debug_select_backend(target)?
+    match backend.backend_id:
+        "openocd_jtag":
+            var cfg_path = "board/riscv_generic.cfg"
+            if hints.config_path != "":
+                cfg_path = hints.config_path
+            var gdb_port = backend.default_port
+            if hints.port > 0:
+                gdb_port = hints.port
+            val telnet_port = gdb_port + 1000
+            var config_text = "transport select jtag\n"
+            config_text = config_text + "gdb_port {gdb_port}\n"
+            config_text = config_text + "telnet_port {telnet_port}\n"
+            if hints.probe_serial != "":
+                config_text = config_text + "adapter serial {hints.probe_serial}\n"
+            Ok(DebugBootstrapPlan(
+                backend_id: backend.backend_id,
+                discovery_command: "",
+                launch_command: "openocd -f {cfg_path} -c \"gdb_port {gdb_port}\" -c \"telnet_port {telnet_port}\"",
+                attach_target: "{hints.host}:{gdb_port}",
+                generated_config: config_text,
+                notes: [
+                    "expects an external JTAG debug module or equivalent endpoint",
+                    "use the shared session for CLI, MCP, or DAP clients"
+                ]
+            ))
+        "openocd_remote_bitbang":
+            var gdb_port = backend.default_port
+            if hints.port > 0:
+                gdb_port = hints.port
+            var config_text = "interface remote_bitbang\n"
+            config_text = config_text + "remote_bitbang host {hints.bitbang_host}\n"
+            config_text = config_text + "remote_bitbang port {hints.bitbang_port}\n"
+            config_text = config_text + "transport select jtag\n"
+            config_text = config_text + "gdb_port {gdb_port}\n"
+            Ok(DebugBootstrapPlan(
+                backend_id: backend.backend_id,
+                discovery_command: "",
+                launch_command: "openocd -f interface/remote_bitbang.cfg -f target/riscv.cfg -c \"remote_bitbang host {hints.bitbang_host}\" -c \"remote_bitbang port {hints.bitbang_port}\" -c \"gdb_port {gdb_port}\"",
+                attach_target: "{hints.host}:{gdb_port}",
+                generated_config: config_text,
+                notes: [
+                    "RTL must expose an external remote_bitbang-compatible endpoint",
+                    "this phase bootstraps the contract and launcher, not new TAP or DM RTL"
+                ]
+            ))
+        "intel_jtagd":
+            var jtag_port = backend.default_port
+            if hints.port > 0:
+                jtag_port = hints.port
+            var device = "<auto>"
+            if hints.jtag_device != "":
+                device = hints.jtag_device
+            Ok(DebugBootstrapPlan(
+                backend_id: backend.backend_id,
+                discovery_command: "jtagconfig --enum",
+                launch_command: "jtagd --foreground --port {jtag_port}",
+                attach_target: "{hints.host}:{jtag_port}/{device}",
+                generated_config: "vendor=intel\nserver=jtagd\nprogram={program}\ndevice={device}\n",
+                notes: [
+                    "discover cable and device through jtagd before attaching",
+                    "pair with OpenOCD or another server-backed debugger instead of raw scan-only access"
+                ]
+            ))
+        "trace32_native":
+            var trace32_port = backend.default_port
+            if hints.port > 0:
+                trace32_port = hints.port
+            Ok(DebugBootstrapPlan(
+                backend_id: backend.backend_id,
+                discovery_command: "",
+                launch_command: "t32rem {hints.host} port={trace32_port} PING",
+                attach_target: "{hints.host}:{trace32_port}",
+                generated_config: "transport=trace32_native\nprogram={program}\n",
+                notes: ["connects to an existing TRACE32 session"]
+            ))
+        "trace32_gdb":
+            var trace32_gdb_port = backend.default_port
+            if hints.port > 0:
+                trace32_gdb_port = hints.port
+            Ok(DebugBootstrapPlan(
+                backend_id: backend.backend_id,
+                discovery_command: "",
+                launch_command: "t32rem {hints.host} port={trace32_gdb_port} PING",
+                attach_target: "{hints.host}:{trace32_gdb_port}",
+                generated_config: "transport=trace32_gdb\nprogram={program}\n",
+                notes: ["use the TRACE32 GDB bridge for DAP and shared debugger flows"]
+            ))
+        _:
+            var gdb_port = backend.default_port
+            if hints.port > 0:
+                gdb_port = hints.port
+            Ok(DebugBootstrapPlan(
+                backend_id: backend.backend_id,
+                discovery_command: "",
+                launch_command: "",
+                attach_target: "{hints.host}:{gdb_port}",
+                generated_config: "transport=gdb_remote\nprogram={program}\n",
+                notes: ["QEMU remains a software-debug validation lane"]
+            ))

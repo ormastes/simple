@@ -1,0 +1,687 @@
+#![allow(unnamed_duplicate_typed_args)]
+# PASETO v4 — Platform-Agnostic SEcurity TOkens (paseto.io)
+#
+# Implements PASETO Version 4:
+#   v4.local  — XChaCha20 + BLAKE2b-keyed-MAC (AEAD via key-splitting)
+#   v4.public — Ed25519 sign/verify over PAE-encoded message
+#
+# All payload arguments are [u8] (raw bytes) to avoid text-encoding cliffs
+# (feedback_text_only_byte_cliffs.md).
+#
+# Public API:
+#   paseto_v4_local_encrypt(payload, footer, implicit_assertion, key, nonce) -> [u8]
+#   paseto_v4_local_decrypt(token, footer, implicit_assertion, key)          -> PasetoLocalResult
+#   paseto_v4_public_sign(payload, footer, implicit_assertion, sk_seed, pk)  -> [u8]
+#   paseto_v4_public_verify(token, footer, implicit_assertion, pk)           -> PasetoPublicResult
+#
+# KAT (Known-Answer Test) API:
+#   paseto_v4_local_encrypt_with_nonce(payload, footer, implicit_assertion, key, nonce) -> [u8]
+#   (same as paseto_v4_local_encrypt — nonce is always explicit for test determinism)
+#
+# References:
+#   PASETO v4 spec: https://github.com/paseto-standard/paseto-spec
+#   Test vectors: https://github.com/paseto-standard/test-vectors/blob/master/v4.json
+#   RFC 7539 (ChaCha20), RFC 7693 (BLAKE2b), RFC 8032 (Ed25519)
+
+use os.crypto.chacha20.{chacha20_block}
+use os.crypto.blake2b.{blake2b}
+use os.crypto.ed25519.{ed25519_sign, ed25519_keypair_from_seed, ed25519_verify}
+
+# ============================================================================
+# Error / Result types
+# ============================================================================
+
+enum PasetoError:
+    InvalidHeader(msg: text)
+    AuthenticationFailure
+    InvalidEncoding(msg: text)
+    InvalidSignature
+    InvalidFooter
+
+enum PasetoLocalResult:
+    Ok(payload: [u8])
+    Err(error: PasetoError)
+
+enum PasetoPublicResult:
+    Ok(payload: [u8])
+    Err(error: PasetoError)
+
+# ============================================================================
+# Base64URL helpers (copied from jwt.spl pattern — [u8] in/out, no padding)
+# ============================================================================
+
+fn _p4_b64url_chars() -> text:
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+fn _p4_b64u_encode(data: [u8]) -> text:
+    val alphabet = _p4_b64url_chars()
+    var parts: [text] = []
+    var len = data.len()
+    var i: u64 = 0
+    while i < len:
+        var b1 = data[i].to_i64()
+        var b2: i64 = 0
+        var b3: i64 = 0
+        if i + 1 < len:
+            b2 = data[i + 1].to_i64()
+        if i + 2 < len:
+            b3 = data[i + 2].to_i64()
+        val idx1 = b1 >> 2
+        val idx2 = ((b1 & 3) << 4) | (b2 >> 4)
+        val idx3 = ((b2 & 15) << 2) | (b3 >> 6)
+        val idx4 = b3 & 63
+        parts.push(alphabet.substring(idx1, idx1 + 1))
+        parts.push(alphabet.substring(idx2, idx2 + 1))
+        if i + 1 < len:
+            parts.push(alphabet.substring(idx3, idx3 + 1))
+        if i + 2 < len:
+            parts.push(alphabet.substring(idx4, idx4 + 1))
+        i = i + 3
+    parts.join("")
+
+fn _p4_b64u_char_index(c: text) -> i64:
+    val alphabet = _p4_b64url_chars()
+    var i = 0
+    while i < 64:
+        if alphabet.substring(i, i + 1) == c:
+            return i
+        i = i + 1
+    return -1
+
+fn _p4_b64u_decode(encoded: text) -> [u8]:
+    val clean = encoded.replace("=", "")
+    val clean_len = clean.length()
+    var result: [u8] = []
+    var i = 0
+    while i < clean_len:
+        val idx1 = _p4_b64u_char_index(clean.substring(i, i + 1))
+        if i + 1 >= clean_len:
+            break
+        val idx2 = _p4_b64u_char_index(clean.substring(i + 1, i + 2))
+        val byte1 = ((idx1 << 2) | (idx2 >> 4)) & 0xFF
+        result.push(byte1.to_u8())
+        if i + 2 < clean_len:
+            val idx3 = _p4_b64u_char_index(clean.substring(i + 2, i + 3))
+            val byte2 = (((idx2 & 15) << 4) | (idx3 >> 2)) & 0xFF
+            result.push(byte2.to_u8())
+        if i + 3 < clean_len:
+            val idx4 = _p4_b64u_char_index(clean.substring(i + 3, i + 4))
+            val byte3 = (((idx3 & 3) << 6) | idx4) & 0xFF
+            result.push(byte3.to_u8())
+        i = i + 4
+    result
+
+# ============================================================================
+# Utility: constant-time [u8] comparison
+# ============================================================================
+
+fn _p4_ct_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var acc: i64 = 0
+    var i: u64 = 0
+    while i < a.len():
+        acc = acc | (a[i].to_i64() ^ b[i].to_i64())
+        i = i + 1
+    acc == 0
+
+# ============================================================================
+# Utility: concat two [u8] slices
+# ============================================================================
+
+fn _p4_concat(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < b.len():
+        out.push(b[i])
+        i = i + 1
+    out
+
+# Append ASCII text literal to a [u8] buffer
+fn _p4_push_text(buf: [u8], s: text) -> [u8]:
+    var out = buf
+    var i = 0
+    while i < s.length():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+# Convert [u8] token bytes to text (ASCII-safe)
+fn _p4_bytes_to_text(b: [u8]) -> text:
+    var s = ""
+    var i: u64 = 0
+    while i < b.len():
+        s = s + b[i].to_i64().chr()
+        i = i + 1
+    s
+
+# ============================================================================
+# PAE — Pre-Authentication Encoding (PASETO Common spec)
+#
+# PAE(pieces) = LE64(count) || for each piece: LE64(len(piece)) || piece
+# LE64(n): 8-byte little-endian with MSB of byte[7] cleared (bit 63 = 0)
+# ============================================================================
+
+fn _p4_le64(n: i64) -> [u8]:
+    var out: [u8] = []
+    var v = n
+    var i = 0
+    while i < 8:
+        if i == 7:
+            # Clear MSB of the most-significant byte
+            v = v & 127
+        out.push((v & 0xFF).to_u8())
+        v = v >> 8
+        i = i + 1
+    out
+
+fn _p4_pae(pieces: [[u8]]) -> [u8]:
+    var out: [u8] = []
+    # Prefix: LE64(count)
+    val count_bytes = _p4_le64(pieces.len().to_i64())
+    var i: u64 = 0
+    while i < count_bytes.len():
+        out.push(count_bytes[i])
+        i = i + 1
+    # For each piece: LE64(len) || piece
+    var p: u64 = 0
+    while p < pieces.len():
+        val piece = pieces[p]
+        val len_bytes = _p4_le64(piece.len().to_i64())
+        i = 0
+        while i < len_bytes.len():
+            out.push(len_bytes[i])
+            i = i + 1
+        i = 0
+        while i < piece.len():
+            out.push(piece[i])
+            i = i + 1
+        p = p + 1
+    out
+
+# ============================================================================
+# u32 helpers for HChaCha20
+# ============================================================================
+
+fn _p4_u32_mask(x: u32) -> u32:
+    x & 0xFFFFFFFF
+
+fn _p4_rotl32(x: u32, n: u32) -> u32:
+    _p4_u32_mask((x << n) | (x >> (32 - n)))
+
+fn _p4_qr(state: [u32], a: u64, b: u64, c: u64, d: u64):
+    state[a] = _p4_u32_mask(state[a] + state[b])
+    state[d] = _p4_rotl32(state[d] ^ state[a], 16)
+    state[c] = _p4_u32_mask(state[c] + state[d])
+    state[b] = _p4_rotl32(state[b] ^ state[c], 12)
+    state[a] = _p4_u32_mask(state[a] + state[b])
+    state[d] = _p4_rotl32(state[d] ^ state[a], 8)
+    state[c] = _p4_u32_mask(state[c] + state[d])
+    state[b] = _p4_rotl32(state[b] ^ state[c], 7)
+
+# Read 4 bytes little-endian from [u8] at offset → u32
+fn _p4_load32_le(b: [u8], off: u64) -> u32:
+    b[off].to_u32() |
+    (b[off + 1].to_u32() << 8) |
+    (b[off + 2].to_u32() << 16) |
+    (b[off + 3].to_u32() << 24)
+
+# Write u32 little-endian into [u8] accumulator
+fn _p4_push32_le(buf: [u8], v: u32) -> [u8]:
+    var out = buf
+    out.push((v & 0xFF).to_u8())
+    out.push(((v >> 8) & 0xFF).to_u8())
+    out.push(((v >> 16) & 0xFF).to_u8())
+    out.push(((v >> 24) & 0xFF).to_u8())
+    out
+
+# ============================================================================
+# HChaCha20 — derive 32-byte subkey from (key[32], input[16])
+#
+# Same as ChaCha20 block but: counter word [12] = input[0..4],
+# nonce words [13..15] = input[4..16], and the output is
+# state[0..4] || state[12..16] (i.e. the first and last rows),
+# WITHOUT adding the initial state (unlike ChaCha20 block).
+#
+# Reference: draft-irtf-cfrg-xchacha (RFC candidate)
+# ============================================================================
+
+fn _p4_hchacha20(key: [u8], input16: [u8]) -> [u8]:
+    # Build initial state
+    var state: [u32] = []
+    # Constants "expand 32-byte k"
+    state.push(0x61707865)
+    state.push(0x3320646e)
+    state.push(0x79622d32)
+    state.push(0x6b206574)
+    # Key (8 words, LE)
+    var i: u64 = 0
+    while i < 8:
+        state.push(_p4_load32_le(key, i * 4))
+        i = i + 1
+    # input[0..4] as counter word, input[4..16] as nonce words
+    state.push(_p4_load32_le(input16, 0))
+    state.push(_p4_load32_le(input16, 4))
+    state.push(_p4_load32_le(input16, 8))
+    state.push(_p4_load32_le(input16, 12))
+
+    # 20 rounds (10 double-rounds) — identical to ChaCha20
+    var r: u64 = 0
+    while r < 10:
+        _p4_qr(state, 0, 4, 8, 12)
+        _p4_qr(state, 1, 5, 9, 13)
+        _p4_qr(state, 2, 6, 10, 14)
+        _p4_qr(state, 3, 7, 11, 15)
+        _p4_qr(state, 0, 5, 10, 15)
+        _p4_qr(state, 1, 6, 11, 12)
+        _p4_qr(state, 2, 7, 8, 13)
+        _p4_qr(state, 3, 4, 9, 14)
+        r = r + 1
+
+    # Output = first row (words 0..3) || last row (words 12..15) — no add-back
+    var out: [u8] = []
+    out = _p4_push32_le(out, state[0])
+    out = _p4_push32_le(out, state[1])
+    out = _p4_push32_le(out, state[2])
+    out = _p4_push32_le(out, state[3])
+    out = _p4_push32_le(out, state[12])
+    out = _p4_push32_le(out, state[13])
+    out = _p4_push32_le(out, state[14])
+    out = _p4_push32_le(out, state[15])
+    out
+
+# ============================================================================
+# XChaCha20 — encrypt/decrypt with 24-byte nonce
+#
+# subkey = HChaCha20(key, nonce[0..16])
+# chacha20_nonce = [0,0,0,0] || nonce[16..24]   (12 bytes total)
+# output = ChaCha20(subkey, counter=1, chacha20_nonce, plaintext)
+#
+# Note: PASETO v4.local spec uses XChaCha20 via xchacha20_xor which
+# is a stream cipher (same bytes either way); counter starts at 0
+# per xchacha20_xor convention.
+# ============================================================================
+
+fn _p4_xchacha20(key: [u8], nonce24: [u8], plaintext: [u8]) -> [u8]:
+    # Step 1: derive subkey
+    var input16: [u8] = []
+    var i: u64 = 0
+    while i < 16:
+        input16.push(nonce24[i])
+        i = i + 1
+    val subkey = _p4_hchacha20(key, input16)
+
+    # Step 2: build 12-byte ChaCha20 nonce: 4 zero bytes || nonce24[16..24]
+    var cnonce: [u8] = []
+    cnonce.push(0)
+    cnonce.push(0)
+    cnonce.push(0)
+    cnonce.push(0)
+    i = 16
+    while i < 24:
+        cnonce.push(nonce24[i])
+        i = i + 1
+
+    # Step 3: ChaCha20 encrypt with counter=0 (xchacha20_xor starts at 0)
+    # chacha20_encrypt(key, counter, nonce, plaintext)
+    # We reuse chacha20_block directly to avoid needing to import chacha20_encrypt
+    # separately — build keystream manually via chacha20_block
+    val key_words_subkey = _p4_key_to_words(subkey)
+    val nonce_words = _p4_nonce_to_words(cnonce)
+
+    var output: [u8] = []
+    var block_counter: u32 = 0
+    var pos: u64 = 0
+    val pt_len = plaintext.len()
+
+    while pos < pt_len:
+        val block = chacha20_block(key_words_subkey, block_counter, nonce_words)
+        var j: u64 = 0
+        while j < 16 and pos < pt_len:
+            val word = block[j]
+            var b: u64 = 0
+            while b < 4 and pos < pt_len:
+                val ks_byte = ((word >> (b * 8)) & 0xFF).to_u8()
+                output.push(plaintext[pos] ^ ks_byte)
+                pos = pos + 1
+                b = b + 1
+            j = j + 1
+        block_counter = _p4_u32_mask(block_counter + 1)
+
+    output
+
+fn _p4_key_to_words(key: [u8]) -> [u32]:
+    var words: [u32] = []
+    var i: u64 = 0
+    while i < 8:
+        words.push(_p4_load32_le(key, i * 4))
+        i = i + 1
+    words
+
+fn _p4_nonce_to_words(nonce: [u8]) -> [u32]:
+    var words: [u32] = []
+    var i: u64 = 0
+    while i < 3:
+        words.push(_p4_load32_le(nonce, i * 4))
+        i = i + 1
+    words
+
+# ============================================================================
+# v4.local — Encrypt
+#
+# Inputs:
+#   payload   : [u8]   raw plaintext (typically JSON)
+#   footer    : [u8]   optional footer (empty = [])
+#   implicit  : [u8]   optional implicit assertion (empty = [])
+#   key       : [u8]   32-byte symmetric key
+#   nonce     : [u8]   32-byte random nonce (caller provides for determinism in tests;
+#                      production callers should pass random_bytes(32))
+#
+# Algorithm (PASETO v4 spec §Encrypt):
+#   h   = b"v4.local."
+#   tmp = BLAKE2b-MAC(key=key, msg="paseto-encryption-key"||n, out=56)
+#   Ek  = tmp[0..32]   — ChaCha20 encryption key
+#   n2  = tmp[32..56]  — 24-byte XChaCha20 nonce
+#   Ak  = BLAKE2b-MAC(key=key, msg="paseto-auth-key-for-aead"||n, out=32)
+#   c   = XChaCha20(key=Ek, nonce=n2, msg=payload)
+#   pre = PAE(h, n, c, f, i)
+#   t   = BLAKE2b-MAC(key=Ak, msg=pre, out=32)
+#   if footer empty: h || base64url(n||c||t)
+#   else:            h || base64url(n||c||t) || "." || base64url(f)
+# ============================================================================
+
+fn paseto_v4_local_encrypt(payload: [u8], footer: [u8], implicit_assertion: [u8], key: [u8], nonce: [u8]) -> [u8]:
+    val h_text = "v4.local."
+    var h: [u8] = []
+    h = _p4_push_text(h, h_text)
+
+    # Derive Ek (32 bytes) and n2 (24 bytes) from BLAKE2b-keyed(key, "paseto-encryption-key"||n, 56)
+    var enc_msg: [u8] = []
+    enc_msg = _p4_push_text(enc_msg, "paseto-encryption-key")
+    var ni: u64 = 0
+    while ni < nonce.len():
+        enc_msg.push(nonce[ni])
+        ni = ni + 1
+    val tmp56 = blake2b(key, enc_msg, 56)
+    var ek: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        ek.push(tmp56[i])
+        i = i + 1
+    var n2: [u8] = []
+    i = 32
+    while i < 56:
+        n2.push(tmp56[i])
+        i = i + 1
+
+    # Derive Ak (32 bytes)
+    var auth_msg: [u8] = []
+    auth_msg = _p4_push_text(auth_msg, "paseto-auth-key-for-aead")
+    ni = 0
+    while ni < nonce.len():
+        auth_msg.push(nonce[ni])
+        ni = ni + 1
+    val ak = blake2b(key, auth_msg, 32)
+
+    # Encrypt payload with XChaCha20
+    val c = _p4_xchacha20(ek, n2, payload)
+
+    # PAE(h, n, c, f, i)
+    var pieces: [[u8]] = []
+    pieces.push(h)
+    pieces.push(nonce)
+    pieces.push(c)
+    pieces.push(footer)
+    pieces.push(implicit_assertion)
+    val pre_auth = _p4_pae(pieces)
+
+    # BLAKE2b-MAC tag
+    val t = blake2b(ak, pre_auth, 32)
+
+    # Assemble: n || c || t
+    var nct: [u8] = []
+    i = 0
+    while i < nonce.len():
+        nct.push(nonce[i])
+        i = i + 1
+    i = 0
+    while i < c.len():
+        nct.push(c[i])
+        i = i + 1
+    i = 0
+    while i < t.len():
+        nct.push(t[i])
+        i = i + 1
+
+    val payload_b64 = _p4_b64u_encode(nct)
+    var token_text = h_text + payload_b64
+    if footer.len() > 0:
+        val footer_b64 = _p4_b64u_encode(footer)
+        token_text = token_text + "." + footer_b64
+
+    var result: [u8] = []
+    i = 0
+    while i < token_text.length():
+        result.push(token_text.char_code_at(i).to_u8())
+        i = i + 1
+    result
+
+# ============================================================================
+# v4.local — Decrypt
+# ============================================================================
+
+fn paseto_v4_local_decrypt(token: [u8], footer: [u8], implicit_assertion: [u8], key: [u8]) -> PasetoLocalResult:
+    val tok_text = _p4_bytes_to_text(token)
+
+    # Verify header
+    if not tok_text.starts_with("v4.local."):
+        return PasetoLocalResult.Err(PasetoError.InvalidHeader(msg: "expected v4.local. header"))
+
+    var h: [u8] = []
+    h = _p4_push_text(h, "v4.local.")
+
+    # Split: strip "v4.local." then split on "." to get payload_b64 and optional footer_b64
+    val after_header = tok_text.substring(9, tok_text.length())
+    val dot_pos = after_header.index_of(".")
+
+    var payload_b64 = after_header
+    var token_footer_b64 = ""
+    if dot_pos >= 0:
+        payload_b64 = after_header.substring(0, dot_pos)
+        token_footer_b64 = after_header.substring(dot_pos + 1, after_header.length())
+
+    # If footer provided, verify it matches (constant-time)
+    if footer.len() > 0:
+        val expected_footer_b64 = _p4_b64u_encode(footer)
+        if token_footer_b64 != expected_footer_b64:
+            return PasetoLocalResult.Err(PasetoError.InvalidFooter)
+
+    # Decode payload blob: n(32) || c(var) || t(32)
+    val blob = _p4_b64u_decode(payload_b64)
+    val blob_len: i64 = blob.len()
+    if blob_len < 64:
+        return PasetoLocalResult.Err(PasetoError.InvalidEncoding(msg: "payload too short"))
+
+    # n = blob[0..32], t = blob[blob_len-32..], c = blob[32..blob_len-32]
+    var nonce: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        nonce.push(blob[i.to_u64()])
+        i = i + 1
+
+    var t_stored: [u8] = []
+    i = blob_len - 32
+    while i < blob_len:
+        t_stored.push(blob[i.to_u64()])
+        i = i + 1
+
+    var c: [u8] = []
+    i = 32
+    while i < blob_len - 32:
+        c.push(blob[i.to_u64()])
+        i = i + 1
+
+    # Re-derive Ek, n2, Ak
+    var enc_msg: [u8] = []
+    enc_msg = _p4_push_text(enc_msg, "paseto-encryption-key")
+    var ni: i64 = 0
+    val nonce_len: i64 = nonce.len()
+    while ni < nonce_len:
+        enc_msg.push(nonce[ni.to_u64()])
+        ni = ni + 1
+    val tmp56 = blake2b(key, enc_msg, 56)
+    var ek: [u8] = []
+    i = 0
+    while i < 32:
+        ek.push(tmp56[i.to_u64()])
+        i = i + 1
+    var n2: [u8] = []
+    i = 32
+    while i < 56:
+        n2.push(tmp56[i.to_u64()])
+        i = i + 1
+
+    var auth_msg: [u8] = []
+    auth_msg = _p4_push_text(auth_msg, "paseto-auth-key-for-aead")
+    ni = 0
+    while ni < nonce_len:
+        auth_msg.push(nonce[ni.to_u64()])
+        ni = ni + 1
+    val ak = blake2b(key, auth_msg, 32)
+
+    # Re-compute PAE and MAC
+    var pieces: [[u8]] = []
+    pieces.push(h)
+    pieces.push(nonce)
+    pieces.push(c)
+    pieces.push(footer)
+    pieces.push(implicit_assertion)
+    val pre_auth = _p4_pae(pieces)
+    val t2 = blake2b(ak, pre_auth, 32)
+
+    # Constant-time tag comparison
+    if not _p4_ct_eq(t_stored, t2):
+        return PasetoLocalResult.Err(PasetoError.AuthenticationFailure)
+
+    # Decrypt
+    val plaintext = _p4_xchacha20(ek, n2, c)
+    PasetoLocalResult.Ok(payload: plaintext)
+
+# ============================================================================
+# v4.public — Sign
+#
+# Inputs:
+#   payload  : [u8]   raw message bytes (typically JSON)
+#   footer   : [u8]   optional footer
+#   implicit : [u8]   optional implicit assertion
+#   sk_seed  : [u8]   32-byte Ed25519 private seed
+#   pk       : [u8]   32-byte Ed25519 public key
+#
+# Algorithm:
+#   h   = b"v4.public."
+#   m2  = PAE(h, payload, footer, implicit)
+#   sig = Ed25519-Sign(sk_seed, pk, m2)
+#   if footer empty: h || base64url(payload || sig)
+#   else:            h || base64url(payload || sig) || "." || base64url(footer)
+# ============================================================================
+
+fn paseto_v4_public_sign(payload: [u8], footer: [u8], implicit_assertion: [u8], sk_seed: [u8], pk: [u8]) -> [u8]:
+    val h_text = "v4.public."
+    var h: [u8] = []
+    h = _p4_push_text(h, h_text)
+
+    var pieces: [[u8]] = []
+    pieces.push(h)
+    pieces.push(payload)
+    pieces.push(footer)
+    pieces.push(implicit_assertion)
+    val m2 = _p4_pae(pieces)
+
+    val sig = ed25519_sign(sk_seed, pk, m2)
+
+    # payload || sig
+    var ps: [u8] = []
+    var i: u64 = 0
+    while i < payload.len():
+        ps.push(payload[i])
+        i = i + 1
+    i = 0
+    while i < sig.len():
+        ps.push(sig[i])
+        i = i + 1
+
+    val ps_b64 = _p4_b64u_encode(ps)
+    var token_text = h_text + ps_b64
+    if footer.len() > 0:
+        val footer_b64 = _p4_b64u_encode(footer)
+        token_text = token_text + "." + footer_b64
+
+    var result: [u8] = []
+    i = 0
+    while i < token_text.length():
+        result.push(token_text.char_code_at(i).to_u8())
+        i = i + 1
+    result
+
+# ============================================================================
+# v4.public — Verify
+# ============================================================================
+
+fn paseto_v4_public_verify(token: [u8], footer: [u8], implicit_assertion: [u8], pk: [u8]) -> PasetoPublicResult:
+    val tok_text = _p4_bytes_to_text(token)
+
+    if not tok_text.starts_with("v4.public."):
+        return PasetoPublicResult.Err(PasetoError.InvalidHeader(msg: "expected v4.public. header"))
+
+    var h: [u8] = []
+    h = _p4_push_text(h, "v4.public.")
+
+    val after_header = tok_text.substring(10, tok_text.length())
+    val dot_pos = after_header.index_of(".")
+
+    var payload_b64 = after_header
+    var token_footer_b64 = ""
+    if dot_pos >= 0:
+        payload_b64 = after_header.substring(0, dot_pos)
+        token_footer_b64 = after_header.substring(dot_pos + 1, after_header.length())
+
+    # Footer check
+    if footer.len() > 0:
+        val expected_footer_b64 = _p4_b64u_encode(footer)
+        if token_footer_b64 != expected_footer_b64:
+            return PasetoPublicResult.Err(PasetoError.InvalidFooter)
+
+    # Decode: sig is rightmost 64 bytes, payload is the rest
+    val blob = _p4_b64u_decode(payload_b64)
+    val blob_len: i64 = blob.len()
+    if blob_len < 64:
+        return PasetoPublicResult.Err(PasetoError.InvalidEncoding(msg: "payload+sig too short"))
+
+    val msg_len: i64 = blob_len - 64
+    var payload: [u8] = []
+    var i: i64 = 0
+    while i < msg_len:
+        payload.push(blob[i.to_u64()])
+        i = i + 1
+    var sig: [u8] = []
+    i = msg_len
+    while i < blob_len:
+        sig.push(blob[i.to_u64()])
+        i = i + 1
+
+    # Recompute m2 = PAE(h, payload, footer, implicit)
+    var pieces: [[u8]] = []
+    pieces.push(h)
+    pieces.push(payload)
+    pieces.push(footer)
+    pieces.push(implicit_assertion)
+    val m2 = _p4_pae(pieces)
+
+    if not ed25519_verify(pk, m2, sig):
+        return PasetoPublicResult.Err(PasetoError.InvalidSignature)
+
+    PasetoPublicResult.Ok(payload: payload)

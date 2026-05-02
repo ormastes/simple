@@ -430,16 +430,9 @@ pub(crate) fn evaluate_method_call(
             // Delegate to handle_float_methods for arithmetic helpers; if it
             // returns a Float result, re-narrow to Float32 to preserve the
             // single-precision tag.
-            if let Some(result) = primitives::handle_float_methods(
-                *f as f64,
-                method,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )? {
+            if let Some(result) =
+                primitives::handle_float_methods(*f as f64, method, args, env, functions, classes, enums, impl_methods)?
+            {
                 let narrowed = match result {
                     Value::Float(v) => Value::Float32(v as f32),
                     other => other,

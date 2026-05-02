@@ -39,6 +39,7 @@ use std.http_server.types.{
 }
 use std.http_server.handler.{HandlerRegistry, create_default_registry}
 use std.http_server.response.{build_error}
+use std.database.{SdnDatabase, load_sdn_database, new_sdn_database}
 use std.database.sql.connection.{Database}
 use std.web_framework.router.{WebRouter}
 use std.web_framework.dispatcher.{AppDispatcher, register_app_handler}
@@ -57,7 +58,9 @@ class AppConfig:
     secret_key: text
     listen_addr: text
     worker_count: i64
+    backend_kind: text
     db_path: text
+    simpledb_path: text
     session_store_type: text
     session_ttl: i64
     session_cookie_name: text
@@ -72,7 +75,9 @@ fn default_app_config() -> AppConfig:
         secret_key: "change-me-in-production",
         listen_addr: "0.0.0.0:8080",
         worker_count: 4,
+        backend_kind: "sqlite",
         db_path: "data/app.db",
+        simpledb_path: "data/app.sdn",
         session_store_type: "db",
         session_ttl: 86400,
         session_cookie_name: "sid",
@@ -94,6 +99,7 @@ class WebApp:
     router: WebRouter
     dispatcher: AppDispatcher
     db: Database?
+    simple_db: SdnDatabase?
     session_store: SessionStore?
     registry: HandlerRegistry
     is_running: bool
@@ -130,7 +136,11 @@ impl WebApp:
 
         # Initialize database
         var db: Database? = nil
-        if config.db_path.len() > 0:
+        var simple_db: SdnDatabase? = nil
+        if config.backend_kind == "simpledb":
+            if config.simpledb_path.len() > 0:
+                simple_db = Some(load_sdn_database(config.simpledb_path) ?? new_sdn_database(config.simpledb_path))
+        elif config.db_path.len() > 0:
             val db_result = Database.open(config.db_path)
             match db_result:
                 Ok(d): db = Some(d)
@@ -139,18 +149,26 @@ impl WebApp:
         # Initialize session store
         var session_store: SessionStore? = nil
         if config.session_store_type == "db":
-            if db != nil:
-                var store = SessionStore(db: db ?? Database.memory_unsafe())
+            if config.backend_kind == "simpledb":
+                if simple_db != nil:
+                    var store = SessionStore.simpledb(simple_db ?? new_sdn_database(config.simpledb_path))
+                    val init_result = store.init()
+                    match init_result:
+                        Ok(_): session_store = Some(store)
+                        Err(_e): return Err("Failed to initialize session store")
+            elif db != nil:
+                var store = SessionStore.sqlite(db ?? Database.memory_unsafe())
                 val init_result = store.init()
                 match init_result:
                     Ok(_): session_store = Some(store)
-                    Err(e): return Err("Failed to initialize session store")
+                    Err(_e): return Err("Failed to initialize session store")
 
         Ok(WebApp(
             config: config,
             router: router,
             dispatcher: dispatcher,
             db: db,
+            simple_db: simple_db,
             session_store: session_store,
             registry: registry,
             is_running: false
@@ -168,6 +186,7 @@ impl WebApp:
         var config = default_app_config()
         config.listen_addr = listen_addr
         config.db_path = ""
+        config.simpledb_path = ""
         config.session_store_type = "none"
         WebApp.from_config(config)
 
@@ -307,8 +326,12 @@ fn load_app_config(path: text) -> Result<AppConfig, text>:
             config.listen_addr = extract_sdn_value(trimmed[12:])
         elif trimmed.starts_with("worker_count:"):
             config.worker_count = trimmed[13:].trim().to_i64() ?? 4
+        elif trimmed.starts_with("backend_kind:"):
+            config.backend_kind = extract_sdn_value(trimmed[13:])
         elif trimmed.starts_with("db_path:"):
             config.db_path = extract_sdn_value(trimmed[8:])
+        elif trimmed.starts_with("simpledb_path:"):
+            config.simpledb_path = extract_sdn_value(trimmed[14:])
         elif trimmed.starts_with("session_store_type:"):
             config.session_store_type = extract_sdn_value(trimmed[19:])
         elif trimmed.starts_with("session_ttl:"):

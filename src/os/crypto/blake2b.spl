@@ -1,0 +1,449 @@
+#![allow(unnamed_duplicate_typed_args)]
+# BLAKE2b — Pure Simple Implementation (RFC 7693)
+#
+# 64-bit BLAKE2 variant with output 1..64 bytes and key 0..64 bytes.
+# Pure Simple language only, no externs, suitable for baremetal.
+#
+# Reference: RFC 7693 "The BLAKE2 Cryptographic Hash and Message
+# Authentication Code (MAC)" (Saarinen, Aumasson, 2015), §2-3.
+#
+# Layout mirrors src/os/crypto/sha512.spl (FIPS 180-4); the IV equals the
+# SHA-512 IV by design (RFC 7693 §2.6). All u64 ops naturally truncate
+# in Simple's wrapping arithmetic; we still mask explicitly where the
+# RFC pseudocode masks.
+
+# ============================================================================
+# Constants — RFC 7693 §2.6 IV and §2.7 SIGMA permutation
+# ============================================================================
+
+fn _b2b_iv() -> [u64]:
+    """BLAKE2b IV (RFC 7693 §2.6) — same constants as SHA-512 IV."""
+    var iv: [u64] = []
+    iv.push(0x6a09e667f3bcc908)
+    iv.push(0xbb67ae8584caa73b)
+    iv.push(0x3c6ef372fe94f82b)
+    iv.push(0xa54ff53a5f1d36f1)
+    iv.push(0x510e527fade682d1)
+    iv.push(0x9b05688c2b3e6c1f)
+    iv.push(0x1f83d9abfb41bd6b)
+    iv.push(0x5be0cd19137e2179)
+    iv
+
+fn _sigma(round_idx: i64, j: i64) -> i64:
+    """SIGMA[round_idx][j] permutation (RFC 7693 §2.7).
+
+    BLAKE2b uses 12 rounds but SIGMA is defined for 10 rows;
+    rounds 10..11 reuse rows 0..1.
+    """
+    val r = round_idx % 10
+    if r == 0:
+        if j == 0: return 0
+        if j == 1: return 1
+        if j == 2: return 2
+        if j == 3: return 3
+        if j == 4: return 4
+        if j == 5: return 5
+        if j == 6: return 6
+        if j == 7: return 7
+        if j == 8: return 8
+        if j == 9: return 9
+        if j == 10: return 10
+        if j == 11: return 11
+        if j == 12: return 12
+        if j == 13: return 13
+        if j == 14: return 14
+        return 15
+    if r == 1:
+        if j == 0: return 14
+        if j == 1: return 10
+        if j == 2: return 4
+        if j == 3: return 8
+        if j == 4: return 9
+        if j == 5: return 15
+        if j == 6: return 13
+        if j == 7: return 6
+        if j == 8: return 1
+        if j == 9: return 12
+        if j == 10: return 0
+        if j == 11: return 2
+        if j == 12: return 11
+        if j == 13: return 7
+        if j == 14: return 5
+        return 3
+    if r == 2:
+        if j == 0: return 11
+        if j == 1: return 8
+        if j == 2: return 12
+        if j == 3: return 0
+        if j == 4: return 5
+        if j == 5: return 2
+        if j == 6: return 15
+        if j == 7: return 13
+        if j == 8: return 10
+        if j == 9: return 14
+        if j == 10: return 3
+        if j == 11: return 6
+        if j == 12: return 7
+        if j == 13: return 1
+        if j == 14: return 9
+        return 4
+    if r == 3:
+        if j == 0: return 7
+        if j == 1: return 9
+        if j == 2: return 3
+        if j == 3: return 1
+        if j == 4: return 13
+        if j == 5: return 12
+        if j == 6: return 11
+        if j == 7: return 14
+        if j == 8: return 2
+        if j == 9: return 6
+        if j == 10: return 5
+        if j == 11: return 10
+        if j == 12: return 4
+        if j == 13: return 0
+        if j == 14: return 15
+        return 8
+    if r == 4:
+        if j == 0: return 9
+        if j == 1: return 0
+        if j == 2: return 5
+        if j == 3: return 7
+        if j == 4: return 2
+        if j == 5: return 4
+        if j == 6: return 10
+        if j == 7: return 15
+        if j == 8: return 14
+        if j == 9: return 1
+        if j == 10: return 11
+        if j == 11: return 12
+        if j == 12: return 6
+        if j == 13: return 8
+        if j == 14: return 3
+        return 13
+    if r == 5:
+        if j == 0: return 2
+        if j == 1: return 12
+        if j == 2: return 6
+        if j == 3: return 10
+        if j == 4: return 0
+        if j == 5: return 11
+        if j == 6: return 8
+        if j == 7: return 3
+        if j == 8: return 4
+        if j == 9: return 13
+        if j == 10: return 7
+        if j == 11: return 5
+        if j == 12: return 15
+        if j == 13: return 14
+        if j == 14: return 1
+        return 9
+    if r == 6:
+        if j == 0: return 12
+        if j == 1: return 5
+        if j == 2: return 1
+        if j == 3: return 15
+        if j == 4: return 14
+        if j == 5: return 13
+        if j == 6: return 4
+        if j == 7: return 10
+        if j == 8: return 0
+        if j == 9: return 7
+        if j == 10: return 6
+        if j == 11: return 3
+        if j == 12: return 9
+        if j == 13: return 2
+        if j == 14: return 8
+        return 11
+    if r == 7:
+        if j == 0: return 13
+        if j == 1: return 11
+        if j == 2: return 7
+        if j == 3: return 14
+        if j == 4: return 12
+        if j == 5: return 1
+        if j == 6: return 3
+        if j == 7: return 9
+        if j == 8: return 5
+        if j == 9: return 0
+        if j == 10: return 15
+        if j == 11: return 4
+        if j == 12: return 8
+        if j == 13: return 6
+        if j == 14: return 2
+        return 10
+    if r == 8:
+        if j == 0: return 6
+        if j == 1: return 15
+        if j == 2: return 14
+        if j == 3: return 9
+        if j == 4: return 11
+        if j == 5: return 3
+        if j == 6: return 0
+        if j == 7: return 8
+        if j == 8: return 12
+        if j == 9: return 2
+        if j == 10: return 13
+        if j == 11: return 7
+        if j == 12: return 1
+        if j == 13: return 4
+        if j == 14: return 10
+        return 5
+    # r == 9
+    if j == 0: return 10
+    if j == 1: return 2
+    if j == 2: return 8
+    if j == 3: return 4
+    if j == 4: return 7
+    if j == 5: return 6
+    if j == 6: return 1
+    if j == 7: return 5
+    if j == 8: return 15
+    if j == 9: return 11
+    if j == 10: return 9
+    if j == 11: return 14
+    if j == 12: return 3
+    if j == 13: return 12
+    if j == 14: return 13
+    return 0
+
+# ============================================================================
+# Bit Manipulation Helpers (u64)
+# ============================================================================
+
+fn _rotr64(x: u64, n: u64) -> u64:
+    """64-bit right rotation."""
+    (x >> n) | (x << (64 - n))
+
+# ============================================================================
+# G mixing function — RFC 7693 §3.1 (BLAKE2b rotation constants 32,24,16,63)
+# ============================================================================
+
+fn _g_mix(v: [u64], a: i64, b: i64, c: i64, d: i64, x: u64, y: u64) -> [u64]:
+    """G mixing function for BLAKE2b. Returns updated state vector."""
+    var va = v[a]
+    var vb = v[b]
+    var vc = v[c]
+    var vd = v[d]
+
+    va = va + vb + x
+    vd = _rotr64(vd ^ va, 32)
+    vc = vc + vd
+    vb = _rotr64(vb ^ vc, 24)
+    va = va + vb + y
+    vd = _rotr64(vd ^ va, 16)
+    vc = vc + vd
+    vb = _rotr64(vb ^ vc, 63)
+
+    var out: [u64] = []
+    var i: i64 = 0
+    while i < 16:
+        if i == a:
+            out.push(va)
+        else:
+            if i == b:
+                out.push(vb)
+            else:
+                if i == c:
+                    out.push(vc)
+                else:
+                    if i == d:
+                        out.push(vd)
+                    else:
+                        out.push(v[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# F compression function — RFC 7693 §3.2
+# ============================================================================
+
+fn _f_compress(h: [u64], block: [u8], offset: i64, t0: u64, t1: u64, last: bool) -> [u64]:
+    """F compression: 12 rounds over a 128-byte block.
+
+    Args:
+        h: chaining state (8 x u64).
+        block: padded message bytes (must contain a 128-byte slice at offset).
+        offset: byte offset where the 128-byte chunk starts.
+        t0,t1: 128-bit total bytes processed counter (low/high).
+        last: True if this is the final block (sets f0 = 0xFF...FF).
+
+    Returns: updated chaining state.
+    """
+    val iv = _b2b_iv()
+
+    # Initialize work vector v[0..15]
+    var v: [u64] = []
+    var i: i64 = 0
+    while i < 8:
+        v.push(h[i])
+        i = i + 1
+    i = 0
+    while i < 8:
+        v.push(iv[i])
+        i = i + 1
+
+    # XOR offset counter into v[12], v[13]
+    v[12] = v[12] ^ t0
+    v[13] = v[13] ^ t1
+
+    # If last block, invert v[14] (f0 = 0xFFFFFFFFFFFFFFFF)
+    if last:
+        v[14] = v[14] ^ 0xFFFFFFFFFFFFFFFF
+
+    # Decode 16 little-endian 64-bit message words m[0..15]
+    var m: [u64] = []
+    var k: i64 = 0
+    while k < 16:
+        val base = offset + k * 8
+        val w: u64 = block[base].to_u64() |
+            (block[base + 1].to_u64() << 8) |
+            (block[base + 2].to_u64() << 16) |
+            (block[base + 3].to_u64() << 24) |
+            (block[base + 4].to_u64() << 32) |
+            (block[base + 5].to_u64() << 40) |
+            (block[base + 6].to_u64() << 48) |
+            (block[base + 7].to_u64() << 56)
+        m.push(w)
+        k = k + 1
+
+    # 12 rounds
+    var r: i64 = 0
+    while r < 12:
+        # Column step: G(v, 0,4, 8,12, m[s0], m[s1])
+        v = _g_mix(v, 0, 4,  8, 12, m[_sigma(r,  0)], m[_sigma(r,  1)])
+        v = _g_mix(v, 1, 5,  9, 13, m[_sigma(r,  2)], m[_sigma(r,  3)])
+        v = _g_mix(v, 2, 6, 10, 14, m[_sigma(r,  4)], m[_sigma(r,  5)])
+        v = _g_mix(v, 3, 7, 11, 15, m[_sigma(r,  6)], m[_sigma(r,  7)])
+        # Diagonal step
+        v = _g_mix(v, 0, 5, 10, 15, m[_sigma(r,  8)], m[_sigma(r,  9)])
+        v = _g_mix(v, 1, 6, 11, 12, m[_sigma(r, 10)], m[_sigma(r, 11)])
+        v = _g_mix(v, 2, 7,  8, 13, m[_sigma(r, 12)], m[_sigma(r, 13)])
+        v = _g_mix(v, 3, 4,  9, 14, m[_sigma(r, 14)], m[_sigma(r, 15)])
+        r = r + 1
+
+    # Mix v back into h
+    var new_h: [u64] = []
+    i = 0
+    while i < 8:
+        new_h.push(h[i] ^ v[i] ^ v[i + 8])
+        i = i + 1
+    new_h
+
+# ============================================================================
+# Public API — blake2b(key, msg, out_len)
+# ============================================================================
+
+fn blake2b(key: [u8], msg: [u8], out_len: i64) -> [u8]:
+    """BLAKE2b hash with optional key and variable output length.
+
+    Args:
+        key: 0..64 byte key (empty = unkeyed).
+        msg: arbitrary message bytes.
+        out_len: 1..64 desired digest bytes.
+
+    Returns: digest of `out_len` bytes.
+
+    Reference: RFC 7693 §3.3.
+    """
+    val key_len = key.len()
+    val msg_len = msg.len()
+
+    # Initialize chaining state h = IV; mix parameter block into h[0]
+    # Parameter block (RFC 7693 §2.5): nn (digest_length) | kk (key_length) | 1 | 1
+    # h[0] ^= 0x01010000 ^ (kk << 8) ^ nn
+    var h = _b2b_iv()
+    val param: u64 = 0x01010000 ^ (key_len.to_u64() << 8) ^ out_len.to_u64()
+    h[0] = h[0] ^ param
+
+    # Build the input stream: if keyed, first 128 bytes = key padded with zeros.
+    # Then concatenate msg. We process all but the last block as non-final,
+    # and the last block (zero-padded to 128 bytes) as final.
+    var stream: [u8] = []
+    var stream_len: i64 = 0
+    if key_len > 0:
+        var i: i64 = 0
+        while i < key_len:
+            stream.push(key[i])
+            i = i + 1
+            stream_len = stream_len + 1
+        # Zero-pad key block to 128 bytes
+        while stream_len < 128:
+            stream.push(0)
+            stream_len = stream_len + 1
+    var j: i64 = 0
+    while j < msg_len:
+        stream.push(msg[j])
+        j = j + 1
+        stream_len = stream_len + 1
+
+    # If there is no input at all (empty message and no key), we still
+    # need to compress one zero-filled block as final per RFC.
+    if stream_len == 0:
+        var k: i64 = 0
+        while k < 128:
+            stream.push(0)
+            k = k + 1
+        # Counter t = 0 because no bytes were actually processed.
+        h = _f_compress(h, stream, 0, 0, 0, true)
+    else:
+        # Number of full 128-byte blocks excluding the last.
+        # The last block is whatever remains (always > 0 here since stream_len > 0),
+        # but we still need to zero-pad it to 128 bytes.
+        # Total bytes processed counter: when keyed, includes key padding (128) by
+        # convention (RFC 7693 §3.3 increments before each compression by the bytes
+        # being absorbed). For unkeyed last-block-only inputs <=128 bytes, t = msg_len.
+        # For keyed inputs with empty msg, t = 128 (only the key block).
+
+        # Count bytes the counter reflects: key_len padded to 128 if keyed,
+        # plus the actual unpadded message bytes.
+        # We process in 128-byte chunks. For each non-final chunk, t advances
+        # to (chunks_processed + 1) * 128 if it's a keyed block or full message
+        # block; for the final chunk, t advances by the *actual* unpadded
+        # bytes in that chunk (key contribution only counts as 128 when there's
+        # a non-empty msg following — see §3.3 algorithm).
+
+        # Simpler formulation matching RFC §3.3 reference impl:
+        #   bytes_so_far = 0
+        #   absorbed_key_bytes = (keyed ? 128 : 0)  [counted as input by counter]
+        #   total_input_bytes  = absorbed_key_bytes + msg_len  [excludes final pad]
+        # Process all but last 128-byte chunk as non-final with t = bytes_so_far+128.
+        # Final chunk: pad to 128, t = total_input_bytes.
+
+        val absorbed_key_bytes: i64 = if key_len > 0: 128 else: 0
+        val total_input_bytes: i64 = absorbed_key_bytes + msg_len
+
+        # Determine number of full non-final 128-byte chunks.
+        # The final chunk is always the last 128 bytes of `stream` (after pad-to-128).
+        # If stream_len % 128 != 0, pad with zeros to next multiple of 128.
+        while (stream_len % 128) != 0:
+            stream.push(0)
+            stream_len = stream_len + 1
+
+        val total_chunks: i64 = stream_len / 128
+        var chunk_idx: i64 = 0
+        var bytes_processed: i64 = 0
+
+        # Process all but the last chunk as non-final
+        while chunk_idx < total_chunks - 1:
+            bytes_processed = bytes_processed + 128
+            # t0 = low 64 bits of bytes_processed; t1 = 0 (test inputs never overflow)
+            h = _f_compress(h, stream, chunk_idx * 128, bytes_processed.to_u64(), 0, false)
+            chunk_idx = chunk_idx + 1
+
+        # Final chunk — counter equals total input bytes (excluding zero pad)
+        h = _f_compress(h, stream, chunk_idx * 128, total_input_bytes.to_u64(), 0, true)
+
+    # Serialize first out_len bytes of h as little-endian
+    var out: [u8] = []
+    var widx: i64 = 0
+    var produced: i64 = 0
+    while produced < out_len:
+        val word = h[widx]
+        var shift: u64 = 0
+        while shift < 64 and produced < out_len:
+            out.push(((word >> shift) & 0xFF).to_u8())
+            produced = produced + 1
+            shift = shift + 8
+        widx = widx + 1
+    out

@@ -5,6 +5,30 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    fn resolve_global_field_info(&mut self, field: &str) -> Option<(usize, TypeId, usize, String)> {
+        let mut best_global: Option<(usize, String, usize, String)> = None;
+        let global_defs = self.global_struct_defs.clone()?;
+        for (struct_name, fields) in global_defs.iter() {
+            for (idx, (field_name, field_type_spec)) in fields.iter().enumerate() {
+                if field_name != field {
+                    continue;
+                }
+                let count = fields.len();
+                if best_global
+                    .as_ref()
+                    .is_some_and(|(_, _, best_count, _)| count <= *best_count)
+                {
+                    continue;
+                }
+                best_global = Some((idx, field_type_spec.clone(), count, struct_name.clone()));
+            }
+        }
+
+        let (idx, field_type_spec, count, struct_name) = best_global?;
+        let field_ty = self.resolve_global_type_spec(&field_type_spec).unwrap_or(TypeId::ANY);
+        Some((idx, field_ty, count, struct_name))
+    }
+
     pub(super) fn resolve_global_type_spec(&mut self, spec: &str) -> Option<TypeId> {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -383,7 +407,7 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn get_field_info(&self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
+    pub(super) fn get_field_info(&mut self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
         // Handle built-in ANY type - search all known structs for the field
         // When ambiguous, prefer the struct with the most fields (best guess)
         if struct_ty == TypeId::ANY {
@@ -414,31 +438,17 @@ impl Lowerer {
                     available_fields: vec![],
                 });
             }
-            if let Some(ref global_defs) = self.global_struct_defs {
-                let mut best_global: Option<(usize, usize, String)> = None;
-                for (sname, fields) in global_defs.iter() {
-                    for (idx, (fname, _)) in fields.iter().enumerate() {
-                        if fname == field {
-                            let count = fields.len();
-                            if best_global.as_ref().is_none_or(|(_, c, _)| count > *c) {
-                                best_global = Some((idx, count, sname.clone()));
-                            }
-                        }
-                    }
+            if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
+                if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                    let fpath = self
+                        .current_file
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    eprintln!("[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
                 }
-                if let Some((idx, count, sname)) = best_global {
-                    if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
-                        let fpath = self
-                            .current_file
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown");
-                        eprintln!("[FIELD-TRACE] ANY/{field} -> global {sname}[{idx}] (count={count}) in {fpath}");
-                    }
-                    let _ = count;
-                    return Ok((idx, TypeId::ANY));
-                }
+                return Ok((idx, field_ty));
             }
             return Err(LowerError::CannotInferFieldType {
                 struct_name: "ANY".to_string(),
@@ -447,7 +457,7 @@ impl Lowerer {
             });
         }
 
-        if let Some(hir_ty) = self.module.types.get(struct_ty) {
+        if let Some(hir_ty) = self.module.types.get(struct_ty).cloned() {
             match hir_ty {
                 // Any type - search all known structs for the field
                 // When ambiguous, prefer the struct with the most fields
@@ -485,7 +495,7 @@ impl Lowerer {
                     // Collect available field names for suggestions
                     let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
-                        struct_name: name.clone(),
+                        struct_name: name,
                         field: field.to_string(),
                         available_fields,
                     })
@@ -498,12 +508,12 @@ impl Lowerer {
                     }
                     let available_fields = fields.iter().map(|f| f.name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
-                        struct_name: name.clone(),
+                        struct_name: name,
                         field: field.to_string(),
                         available_fields,
                     })
                 }
-                HirType::Pointer { inner, .. } => self.get_field_info(*inner, field),
+                HirType::Pointer { inner, .. } => self.get_field_info(inner, field),
                 // Enum types - field access returns ANY (dynamic variant access)
                 HirType::Enum { .. } => Ok((0, TypeId::ANY)),
                 // Tuple types — numeric field access (.0, .1, ...)
@@ -584,33 +594,19 @@ impl Lowerer {
                                 available_fields: vec![],
                             });
                         }
-                        if let Some(ref global_defs) = self.global_struct_defs {
-                            let mut best_global: Option<(usize, usize, String)> = None;
-                            for (sname, fields) in global_defs.iter() {
-                                for (idx, (fname, _)) in fields.iter().enumerate() {
-                                    if fname == field {
-                                        let count = fields.len();
-                                        if best_global.as_ref().is_none_or(|(_, c, _)| count > *c) {
-                                            best_global = Some((idx, count, sname.clone()));
-                                        }
-                                    }
-                                }
+                        if let Some((idx, field_ty, count, sname)) = self.resolve_global_field_info(field) {
+                            if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
+                                let fpath = self
+                                    .current_file
+                                    .as_ref()
+                                    .and_then(|p| p.file_name())
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown");
+                                eprintln!(
+                                    "[FIELD-TRACE] wildcard/{field} -> global {sname}[{idx}] (count={count}) in {fpath}"
+                                );
                             }
-                            if let Some((idx, count, sname)) = best_global {
-                                if std::env::var("SIMPLE_TRACE_FIELD_GET").is_ok() {
-                                    let fpath = self
-                                        .current_file
-                                        .as_ref()
-                                        .and_then(|p| p.file_name())
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or("unknown");
-                                    eprintln!(
-                                        "[FIELD-TRACE] wildcard/{field} -> global {sname}[{idx}] (count={count}) in {fpath}"
-                                    );
-                                }
-                                let _ = count;
-                                return Ok((idx, TypeId::ANY));
-                            }
+                            return Ok((idx, field_ty));
                         }
                     }
                     Err(LowerError::CannotInferFieldType {

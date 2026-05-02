@@ -135,20 +135,19 @@ class SuspensionVisitor:
 
     me visit_stmt(stmt: Stmt):
         """Visit a single statement."""
-        match stmt.kind:
+        match stmt_kind(stmt):
             case stmtkind_Expr(expr):
                 self.visit_expr(expr)
 
             case stmtkind_Val(name, type_, value):
                 # Track variable declaration
                 self.declared_variables = self.declared_variables_push(declared_variables, name)
-                if has_value:
-                    self.visit_expr(value)
+                self.visit_expr(value)
 
             case stmtkind_Var(name, type_, value):
                 # Track mutable variable declaration
                 self.declared_variables = self.declared_variables_push(declared_variables, name)
-                if has_value:
+                if value != nil:
                     self.visit_expr(value)
 
             case stmtkind_Assign(target, op, value):
@@ -172,7 +171,7 @@ class SuspensionVisitor:
                 self.current_depth = self.current_depth - 1
 
             case stmtkind_Return(value):
-                if has_value:
+                if value != nil:
                     self.visit_expr(value)
 
             case StmtKind.Break:
@@ -187,7 +186,7 @@ class SuspensionVisitor:
 
     me visit_expr(expr: Expr):
         """Visit an expression, checking for await."""
-        match expr.kind:
+        match expr_kind(expr):
             case exprkind_Await(awaited):
                 # Found a suspension point!
                 self.add_suspension_point(expr, awaited)
@@ -199,11 +198,11 @@ class SuspensionVisitor:
                 self.visit_block(block)
                 self.current_depth = self.current_depth - 1
 
-            case exprkind_If(condition, then_expr, else_expr):
+            case exprkind_If(condition, then_block, else_block):
                 self.visit_expr(condition)
-                self.visit_expr(then_expr)
-                if has_else_expr:
-                    self.visit_expr(else_expr)
+                self.visit_block(then_block)
+                if else_block != nil:
+                    self.visit_block(else_block)
 
             case exprkind_Call(func, args):
                 self.visit_expr(func)
@@ -226,27 +225,30 @@ class SuspensionVisitor:
 
             case exprkind_MatchCase(scrutinee, arms):
                 self.visit_expr(scrutinee)
-                for arm in arms:
+                var arm_idx = 0
+                while arm_idx < arms.len():
+                    val arm: MatchArm = arms[arm_idx]
                     if arm.has_guard:
                         self.visit_expr(arm.guard)
                     self.current_depth = self.current_depth + 1
                     self.visit_block(arm.body)
                     self.current_depth = self.current_depth - 1
+                    arm_idx = arm_idx + 1
 
             # Literals and simple expressions don't need recursion
             case exprkind_Ident(_):
                 ()
 
-            case exprkind_IntLiteral(_):
+            case exprkind_IntLit(_):
                 ()
 
-            case exprkind_FloatLiteral(_):
+            case exprkind_FloatLit(_):
                 ()
 
-            case exprkind_StringLiteral(_):
+            case exprkind_StringLit(_, _):
                 ()
 
-            case exprkind_BoolLiteral(_):
+            case exprkind_BoolLit(_):
                 ()
 
             case _:
@@ -266,7 +268,7 @@ class SuspensionVisitor:
             awaited_future: awaited_future,
             context_depth: self.current_depth,
             live_variables: live_vars,
-            span: await_expr.span
+            span: Span(start: 0, end: 0, line: 0, col: 0)
         )
 
         self.suspension_points = self.suspension_points_push(suspension_points, sp)
@@ -336,21 +338,20 @@ class AwaitChecker:
 
     me check_stmt(stmt: Stmt):
         """Check statement for await expressions."""
-        match stmt.kind:
+        match stmt_kind(stmt):
             case stmtkind_Expr(expr):
                 self.check_expr(expr)
             case stmtkind_Val(_, _, value):
-                if has_value:
-                    self.check_expr(value)
+                self.check_expr(value)
             case stmtkind_Var(_, _, value):
-                if has_value:
+                if value != nil:
                     self.check_expr(value)
             case _:
                 ()
 
     me check_expr(expr: Expr):
         """Check expression for await."""
-        match expr.kind:
+        match expr_kind(expr):
             case exprkind_Await(_):
                 self.has_await = true
             case _:

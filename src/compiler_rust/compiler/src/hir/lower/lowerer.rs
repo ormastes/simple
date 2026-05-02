@@ -69,6 +69,19 @@ pub struct Lowerer {
     /// byte offset (see the BeDomNode/BeLayoutBox `children` collision that
     /// originally motivated the old "single-field structs only" filter).
     pub(super) ambiguous_field_names: Option<std::sync::Arc<std::collections::HashSet<String>>>,
+    /// Global enum definitions from all compilation units, keyed by enum
+    /// name with payload arity per variant. Set by the native_project
+    /// compiler driver before `lower_module` runs and consumed by
+    /// `register_global_enums()` to eagerly seed `module.types.name_to_id`
+    /// and `globals` with real enum TypeIds. Without this, cross-module
+    /// enum receivers reached via re-export (and not via a direct `use`
+    /// chain) leave `lookup(EnumName)` returning None and the enum-variant
+    /// early-return in `expr/access.rs::lower_field_access` falls through
+    /// to the field-access fallback (W13-F class 1, fixed in W15-H).
+    #[allow(clippy::type_complexity)]
+    // reason: Arc<HashMap<String, Vec<(String, Option<usize>)>>> mirrors global_struct_defs
+    pub(super) global_enum_defs:
+        Option<std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>>,
 }
 
 impl Lowerer {
@@ -103,6 +116,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
             ambiguous_field_names: None,
+            global_enum_defs: None,
         }
     }
 
@@ -136,6 +150,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
             ambiguous_field_names: None,
+            global_enum_defs: None,
         }
     }
 
@@ -192,6 +207,7 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
             ambiguous_field_names: None,
+            global_enum_defs: None,
         }
     }
 
@@ -248,6 +264,82 @@ impl Lowerer {
     /// than one known struct).
     pub(super) fn is_ambiguous_global_field(&self, name: &str) -> bool {
         self.ambiguous_field_names.as_ref().is_some_and(|s| s.contains(name))
+    }
+
+    /// Set global enum definitions for cross-module enum receiver resolution.
+    /// W15-H: paired with `register_global_enums()`, which the
+    /// `native_project` compiler driver calls before `lower_module(&ast)`.
+    /// See the doc comment on `global_enum_defs` for the why.
+    pub fn set_global_enum_defs(
+        &mut self,
+        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    ) {
+        self.global_enum_defs = Some(defs);
+    }
+
+    /// Eagerly register every enum from `global_enum_defs` into the local
+    /// type registry as a real `HirType::Enum` and bind its name in
+    /// `self.globals` to the freshly-allocated TypeId.
+    ///
+    /// MUST be called by the compiler driver after `set_global_enum_defs`
+    /// and BEFORE `lower_module(&ast)`. The lowerer's Pass 0 placeholder
+    /// registration in `module_pass.rs::lower_module` then takes precedence
+    /// for any enum that is also locally defined in this compilation unit
+    /// (we lookup-guard with `is_none()`), so this only fills in the
+    /// cross-module gap that the per-`use_stmt` import-loader pass misses
+    /// when an enum reaches the file via re-export rather than a direct
+    /// `use` chain (W13-F class 1).
+    ///
+    /// Variant payloads are filled with `TypeId::ANY` because the imports
+    /// walker only collects payload arity, not field types — that's enough
+    /// for `expr/access.rs::lower_field_access` (which only inspects
+    /// `variant_fields.is_none()`) and is byte-symmetric with the
+    /// placeholder strategy used in `module_pass.rs` Pass 0.
+    pub fn register_global_enums(&mut self) {
+        let defs = match self.global_enum_defs.clone() {
+            Some(d) => d,
+            None => return,
+        };
+        for (enum_name, variant_summary) in defs.iter() {
+            // Skip enums that already have a real registration (locally
+            // defined in this compilation unit, or pre-registered by
+            // `preregister_imported_type_names` for a directly-imported
+            // enum). `register_named` would otherwise allocate a fresh
+            // TypeId and orphan the original.
+            if self.module.types.lookup(enum_name).is_some() {
+                continue;
+            }
+            let variants: Vec<(String, Option<Vec<super::super::types::TypeId>>)> = variant_summary
+                .iter()
+                .map(|(variant_name, payload_arity)| {
+                    let payload = payload_arity.map(|n| {
+                        // Variant has `n` payload fields with unknown types
+                        // — represent as `TypeId::ANY` placeholders. Only
+                        // the `is_none()` distinction is consumed by the
+                        // enum-variant early-return in
+                        // `expr/access.rs::lower_field_access`.
+                        vec![super::super::types::TypeId::ANY; n]
+                    });
+                    (variant_name.clone(), payload)
+                })
+                .collect();
+            let type_id = self.module.types.register_named(
+                enum_name.clone(),
+                super::super::types::HirType::Enum {
+                    name: enum_name.clone(),
+                    variants,
+                    generic_params: vec![],
+                    is_generic_template: false,
+                    type_bindings: std::collections::HashMap::new(),
+                },
+            );
+            // Bind the enum name in `self.globals` to the real TypeId.
+            // HashMap::insert overwrites — this displaces any prior binding
+            // (notably `TypeId::ANY` set by the declare_globals pass for
+            // imported enum names that lacked a registered TypeId), which
+            // is the W13-F class 1 root cause.
+            self.globals.insert(enum_name.clone(), type_id);
+        }
     }
 
     /// Take ownership of the memory warnings

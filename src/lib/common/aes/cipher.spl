@@ -7,6 +7,7 @@ import aes/utilities
 import aes/types
 import aes/sbox
 import aes/key_expansion
+use std.simd.{Vec16u8, simd_aes_round, simd_aes_round_last}
 extern fn rt_aes_encrypt_block_with_expanded(block: list, expanded_key: list, num_rounds: i64) -> list
 extern fn rt_aes_decrypt_block_with_expanded(block: list, expanded_key: list, num_rounds: i64) -> list
 
@@ -250,6 +251,86 @@ fn add_round_key(state: list, round_key: list) -> list:
     new_state
 
 # =============================================================================
+# AES SIMD HELPERS (encrypt only — no AESDEC primitive available)
+# =============================================================================
+
+# Lane-wise XOR of two Vec16u8 vectors.
+# Used for the initial AddRoundKey (plaintext XOR K0) and for loading
+# list-typed round keys into the SIMD domain.
+# reason: positional aes cipher API
+fn _xor_v16(a: Vec16u8, b: Vec16u8) -> Vec16u8:
+    Vec16u8(
+        u0:  a.u0  ^ b.u0,
+        u1:  a.u1  ^ b.u1,
+        u2:  a.u2  ^ b.u2,
+        u3:  a.u3  ^ b.u3,
+        u4:  a.u4  ^ b.u4,
+        u5:  a.u5  ^ b.u5,
+        u6:  a.u6  ^ b.u6,
+        u7:  a.u7  ^ b.u7,
+        u8_: a.u8_ ^ b.u8_,
+        u9:  a.u9  ^ b.u9,
+        u10: a.u10 ^ b.u10,
+        u11: a.u11 ^ b.u11,
+        u12: a.u12 ^ b.u12,
+        u13: a.u13 ^ b.u13,
+        u14: a.u14 ^ b.u14,
+        u15: a.u15 ^ b.u15,
+    )
+
+# Load a 16-element i64 list (a round key or block from cipher.spl's flat
+# expanded_key list) into a Vec16u8.
+# list[i] returns i64 (Value::Int) — satisfies the SIMD dispatcher's
+# requirement for Value::Int lane fields (see aes256_gcm.spl note on
+# rt_bytes_u8_at / unpack_vec16u8 in interpreter_extern/simd.rs).
+# reason: positional aes cipher API
+fn _list16_to_v16(rk: list) -> Vec16u8:
+    Vec16u8(
+        u0:  rk[0],
+        u1:  rk[1],
+        u2:  rk[2],
+        u3:  rk[3],
+        u4:  rk[4],
+        u5:  rk[5],
+        u6:  rk[6],
+        u7:  rk[7],
+        u8_: rk[8],
+        u9:  rk[9],
+        u10: rk[10],
+        u11: rk[11],
+        u12: rk[12],
+        u13: rk[13],
+        u14: rk[14],
+        u15: rk[15],
+    )
+
+# Encrypt a 16-byte block via the SIMD round chain (AES-NI).
+# AES-128: 10 rounds (Nr=10), AES-192: 12 rounds (Nr=12), AES-256: 14 rounds.
+# Protocol: initial AddRoundKey (XOR with K0), then (Nr-1) simd_aes_round
+# calls (each performs SubBytes+ShiftRows+MixColumns+AddRoundKey), then one
+# simd_aes_round_last (SubBytes+ShiftRows+AddRoundKey, no MixColumns).
+# FIPS 197 §5.1 — matches _mm_aesenc_si128 / _mm_aesenclast_si128 semantics.
+# reason: positional aes cipher API
+fn _simd_aes_encrypt_block_with_expanded(block: list, expanded_key: list, num_rounds: i64) -> list:
+    val k0 = _list16_to_v16(get_round_key(expanded_key, 0))
+    val pt = _list16_to_v16(block)
+    var state = _xor_v16(pt, k0)
+    var round = 1
+    while round < num_rounds:
+        val rk = _list16_to_v16(get_round_key(expanded_key, round))
+        state = simd_aes_round(state, rk)
+        round = round + 1
+    val final_key = _list16_to_v16(get_round_key(expanded_key, num_rounds))
+    state = simd_aes_round_last(state, final_key)
+    val out = state.to_array()
+    var result = []
+    var i = 0
+    while i < 16:
+        result.append(out[i].to_i64())
+        i = i + 1
+    result
+
+# =============================================================================
 # AES CORE ENCRYPTION/DECRYPTION (Single Block)
 # =============================================================================
 
@@ -323,7 +404,7 @@ fn aes_encrypt_block(block: list, key: list) -> list:
             rounds = 14
 
     val expanded = expand_key(key, key_size)
-    rt_aes_encrypt_block_with_expanded(block, expanded, rounds)
+    _simd_aes_encrypt_block_with_expanded(block, expanded, rounds)
 
 # Decrypt single block (determine rounds from key size)
 # reason: positional aes cipher API
@@ -344,7 +425,7 @@ fn aes_decrypt_block(block: list, key: list) -> list:
     rt_aes_decrypt_block_with_expanded(block, expanded, rounds)
 
 fn aes_encrypt_block_with_expanded(block: list, expanded_key: list, num_rounds: i64) -> list:
-    rt_aes_encrypt_block_with_expanded(block, expanded_key, num_rounds)
+    _simd_aes_encrypt_block_with_expanded(block, expanded_key, num_rounds)
 
 fn aes_decrypt_block_with_expanded(block: list, expanded_key: list, num_rounds: i64) -> list:
     rt_aes_decrypt_block_with_expanded(block, expanded_key, num_rounds)

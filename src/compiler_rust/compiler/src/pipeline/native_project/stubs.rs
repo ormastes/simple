@@ -166,18 +166,8 @@ pub(crate) fn generate_stub_object_freestanding(
     let mut unresolved = Vec::new();
     for sym in needs_stub {
         match sym.as_str() {
-            "i64.max"
-            | "i64.min"
-            | "str.repeat"
-            | "bytes_to_u16_le"
-            | "bytes_to_u16_be"
-            | "bytes_to_u32_le"
-            | "bytes_to_u32_be"
-            | "rt_str_hash"
-            | "rt_range"
-            | "rt_value_bool"
-            | "rt_unwrap_or_self"
-            | "rt_is_none"
+            "i64.max" | "i64.min" | "str.repeat" | "bytes_to_u16_le" | "bytes_to_u16_be" | "bytes_to_u32_le"
+            | "bytes_to_u32_be" | "rt_str_hash" | "rt_range" | "rt_value_bool" | "rt_unwrap_or_self" | "rt_is_none"
             | "rt_is_some" => {
                 compat_symbols.insert(sym);
             }
@@ -218,10 +208,10 @@ pub(crate) fn generate_stub_object_freestanding(
                 // Only compatibility aliases remain; emit them below rather than
                 // failing the precheck on an empty unresolved set.
             } else {
-            return Err(format!(
-                "freestanding link has unexpected unresolved symbol(s): {}",
-                unresolved.join(", ")
-            ));
+                return Err(format!(
+                    "freestanding link has unexpected unresolved symbol(s): {}",
+                    unresolved.join(", ")
+                ));
             }
         }
         FreestandingUnresolvedMode::EmitStubs => {}

@@ -440,9 +440,8 @@ fn resolve_call_target(
                 });
             if let Some(b) = best {
                 *target = target.with_name(b.clone());
-            } else if let Some(resolved) =
-                resolve_by_suffix(lookup_name, local_suffix_index)
-                    .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+            } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
+                .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
             {
                 *target = target.with_name(resolved);
             } else {
@@ -452,8 +451,8 @@ fn resolve_call_target(
                     name, func_name, prefix
                 );
             }
-        } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
-            .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+        } else if let Some(resolved) =
+            resolve_by_suffix(lookup_name, local_suffix_index).or_else(|| resolve_by_suffix(lookup_name, suffix_index))
         {
             *target = target.with_name(resolved);
         } else {
@@ -463,8 +462,8 @@ fn resolve_call_target(
                 name, func_name, prefix
             );
         }
-    } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
-        .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+    } else if let Some(resolved) =
+        resolve_by_suffix(lookup_name, local_suffix_index).or_else(|| resolve_by_suffix(lookup_name, suffix_index))
     {
         *target = target.with_name(resolved);
     } else {
@@ -552,18 +551,15 @@ fn resolve_method_call_static(
             if let Some(b) = best {
                 *func_name = b.clone();
             }
-        } else if let Some(resolved) = resolve_by_suffix(lookup_name, local_suffix_index)
-            .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+        } else if let Some(resolved) =
+            resolve_by_suffix(lookup_name, local_suffix_index).or_else(|| resolve_by_suffix(lookup_name, suffix_index))
         {
             *func_name = resolved;
         }
     }
 }
 
-fn canonicalize_equivalent_dot_name(
-    name: &mut String,
-    known_mangled: &std::collections::HashSet<String>,
-) {
+fn canonicalize_equivalent_dot_name(name: &mut String, known_mangled: &std::collections::HashSet<String>) {
     if name.contains("_dot_") {
         let dotted = name.replace("_dot_", ".");
         if known_mangled.contains(dotted.as_str()) {

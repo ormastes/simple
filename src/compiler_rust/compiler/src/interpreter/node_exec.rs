@@ -118,9 +118,7 @@ pub(crate) fn exec_node(
                     // Coerce to Value::UInt when the annotation is an unsigned integer type
                     // so subsequent arithmetic on the bound variable applies modulo-2^width
                     // wrap. See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.
-                    Some(Type::Simple(type_name))
-                        if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") =>
-                    {
+                    Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") => {
                         let width: u8 = match type_name.as_str() {
                             "u8" => 8,
                             "u16" => 16,

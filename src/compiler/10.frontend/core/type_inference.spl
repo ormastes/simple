@@ -5,7 +5,11 @@
 # Compatible with the bootstrap subset (no generics, parallel arrays only)
 
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT}
-use compiler.core.types.{TYPE_ARRAY_ANY, TYPE_STRUCT, TYPE_FN, TYPE_ANY}
+use compiler.core.types.{TYPE_ARRAY_ANY, TYPE_STRUCT, TYPE_FN, TYPE_ANY, TYPE_NAMED_BASE}
+use compiler.core.types.{named_type_find, named_type_fields, named_type_field_type_tags}
+use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT}
+use compiler.core.ast.{EXPR_IDENT, EXPR_CALL, EXPR_FIELD_ACCESS}
+use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left}
 
 # ===== Type Variables =====
 # Fresh type variables for unification (like ?T1, ?T2, etc.)
@@ -265,9 +269,58 @@ fn infer_expr_type(expr_id: i64) -> i64:
     val cached = expr_type_get(expr_id)
     if cached != -1:
         return cached
-    # For now, return fresh type variable
-    # Full implementation would walk AST and infer
-    val inferred = type_var_fresh()
+
+    if expr_id < 0:
+        return TYPE_ANY
+
+    val tag = expr_get_tag(expr_id)
+    var inferred: i64 = -1
+
+    if tag == EXPR_INT_LIT:
+        inferred = TYPE_I64
+    elif tag == EXPR_FLOAT_LIT:
+        inferred = TYPE_F64
+    elif tag == EXPR_STRING_LIT:
+        inferred = TYPE_TEXT
+    elif tag == EXPR_BOOL_LIT:
+        inferred = TYPE_BOOL
+    elif tag == EXPR_NIL_LIT:
+        inferred = TYPE_ANY
+    elif tag == EXPR_IDENT:
+        if expr_get_str(expr_id) == "shell":
+            val process_result_type_id = named_type_find("ProcessResult")
+            if process_result_type_id >= 0:
+                inferred = TYPE_NAMED_BASE + process_result_type_id
+    elif tag == EXPR_CALL:
+        val callee = expr_get_left(expr_id)
+        if callee >= 0:
+            if expr_get_tag(callee) == EXPR_IDENT and expr_get_str(callee) == "shell":
+                val process_result_type_id = named_type_find("ProcessResult")
+                if process_result_type_id >= 0:
+                    inferred = TYPE_NAMED_BASE + process_result_type_id
+    elif tag == EXPR_FIELD_ACCESS:
+        val base_expr = expr_get_left(expr_id)
+        val base_type = type_subst_apply(infer_expr_type(base_expr))
+        val field_name = expr_get_str(expr_id)
+        if base_type == TYPE_ARRAY_ANY and field_name == "first":
+            inferred = TYPE_ANY
+        elif base_type >= TYPE_NAMED_BASE:
+            val type_id = base_type - TYPE_NAMED_BASE
+            val field_names = named_type_fields(type_id)
+            val field_types = named_type_field_type_tags(type_id)
+            for i in range(0, field_names.len()):
+                if field_names[i] == field_name:
+                    inferred = field_types[i]
+                    break
+                if field_name.ends_with("_value") and field_name.len() > 6:
+                    val optional_name = field_name[0:field_name.len() - 6]
+                    if field_names[i] == optional_name:
+                        inferred = field_types[i]
+                        break
+
+    if inferred == -1:
+        # Keep the existing fallback for expressions we still do not infer.
+        inferred = type_var_fresh()
     expr_type_set(expr_id, inferred)
     inferred
 

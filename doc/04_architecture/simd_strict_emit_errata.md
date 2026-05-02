@@ -298,9 +298,61 @@ encoders are independent of `evex_encode_3op_zmm`.
 
 ---
 
+## ERR-002 — N-3 BSL fixture in part2 §10.1 had wrong Rm encoding
+
+**Corrected 2026-05-02.**
+
+### Errata index row
+
+| ID | Source doc + section | Severity | Status | Affected goldens |
+|---|---|---|---|---|
+| ERR-002 | `simd_backend_strict_emit_detail_part2.md` §10.1 Fixture N-3 | HIGH (wrong BSL bytes) | RESOLVED | N-3 BSL bytes in C3b §10.1 |
+
+### Symptom
+
+The original Fixture N-3 document entry for `BSL v2.16b, v1.16b, v3.16b` listed bytes
+`0x62 0x1C 0x33 0x6E`. H2 NEON pilot reported Rm decoded to 19, not 3.
+
+### Root cause (with field citations)
+
+ARMv8 ARM §C7.2.22 BSL, 16B form (`Q=1`) bit-pattern:
+```
+0|Q|1|01110|0|11|Rm[4:0]|000111|Rn[4:0]|Rd[4:0]
+```
+
+For `BSL v2.16b, v1.16b, v3.16b` (Rd=2, Rn=1, Rm=3):
+- `bits[20:16]` = Rm = 3 = `00011` → byte2 must have bits[4:0]=`00011`
+- `bits[22:21]` = `size` = `11` (BSL group marker) → byte2 bits[6:5] = `11`
+- Combined byte2 = `0110_0011` = `0x63`
+
+Original byte2 was `0x33` = `0011_0011`, which decodes to: `size[1:0]=01`, Rm=`10011`=19.
+Both the `size` field (bits[22:21]) and Rm (bits[20:16]) were wrong.
+Full original word `0x6E331C62` decodes: Rm=19, Rn=3, Rd=2 — Rm and Rn both incorrect.
+
+### Worked example: bad output vs corrected output
+
+```
+BAD   (original doc): BSL v2.16b, v1.16b, v3.16b → 0x62 0x1C 0x33 0x6E  (word 0x6E331C62)
+                       Rm decoded=19, Rn decoded=3, Rd decoded=2 — two field errors
+
+GOOD  (corrected):    BSL v2.16b, v1.16b, v3.16b → 0x22 0x1C 0x63 0x6E  (word 0x6E631C22)
+                       Rm=3, Rn=1, Rd=2 — all fields correct per ARMv8 ARM §C7.2.22
+
+Base opcode check (Rd=Rn=Rm=0): 0x00 0x1C 0x60 0x6E (word 0x6E601C00)
+  byte2=0x60 = 0110_0000: size=11 (bits[22:21]), Rm=0 (bits[20:16]) ✓
+```
+
+### Test impact
+
+`test/unit/compiler/backend/neon_emit_spec.spl` BSL goldens were derived from bit-field
+analysis independently (not from the doc fixture) and were already correct. The UNVERIFIED
+comment tags on those tests have been removed — they are now VERIFIED via §C7.2.22 derivation.
+
+---
+
 ## Placeholder for future errata
 
-Future bugs discovered in C3a/C3b should be added here with IDs ERR-002, ERR-003, etc.,
+Future bugs discovered in C3a/C3b should be added here with IDs ERR-003, ERR-004, etc.,
 following the same structure: errata index row, symptom, root cause (with line citations),
 worked example showing the bad output, corrected output, and test impact.
 
@@ -308,4 +360,33 @@ Candidate items not yet confirmed:
 - C3a §4 (SVE2 encoder): V-08 status remains FAILED per D1 — primary ARM spec inaccessible;
   sve2 byte claims carry [UNVERIFIED] tag; errata pending ARM ISA XML resolution.
 - C3b §10.4 Fixture N-3 (NEON FCMGT): V-25 status FAILED per D1 — operand-order question
-  unresolved; potential ERR-002 if ARM spec confirms operand reversal is wrong.
+  unresolved; potential ERR-003 if ARM spec confirms operand reversal is wrong.
+
+---
+
+## Wave I5 audit log — 2026-05-02
+
+**Scope:** All emit helper bodies in `x86_64_avx512.spl` and `arm_neon.spl` cross-referenced
+against part1/part2 doc fixtures and inline §-citations.
+
+**Opcodes audited (10 helpers):**
+
+| Helper | File | Doc fixture | Result |
+|--------|------|-------------|--------|
+| `emit_avx512_kandb_kreg_3op` | x86_64_avx512.spl | No standalone fixture in part1/part2 | AUDITED: agree (emitter `C5 ED 41 CB` matches inline comment + llvm-mc) |
+| `emit_avx512_korb_kreg_3op` | x86_64_avx512.spl | No standalone fixture | AUDITED: agree (`C5 ED 45 CB`) |
+| `emit_avx512_kxorb_kreg_3op` | x86_64_avx512.spl | No standalone fixture | AUDITED: agree (`C5 ED 47 CB`) |
+| `emit_avx512_kandnb_kreg_3op` | x86_64_avx512.spl | No standalone fixture | AUDITED: agree (`C5 ED 42 CB`) |
+| `emit_avx512_kmovw_gpr_to_k` | x86_64_avx512.spl | No standalone fixture | AUDITED: agree (`C5 F8 92 C8`) |
+| `emit_avx512_vpcmpeqd_zmm_to_k` | x86_64_avx512.spl | No standalone fixture; uses `evex_encode_zmm_to_kreg_2op` | AUDITED: covered by ERR-001 family |
+| `emit_neon_vaddq_f32` | arm_neon.spl | N/A (no doc fixture for FADD 3-same) | AUDITED: agree (docstring `0x00 0xD4 0x20 0x4E` ✓) |
+| `emit_neon_vmulq_f32` | arm_neon.spl | N/A | AUDITED: agree (docstring `0x00 0xDC 0x20 0x6E` ✓) |
+| `emit_neon_vfmaq_f32` | arm_neon.spl | Fixture N-1 is scalar-indexed (different instruction class) | AUDITED: agree (docstring `0x00 0xCC 0x20 0x4E`; N-1 uses 0F-class FMLA, not 4E-class) |
+| `emit_neon_vbslq_u8` | arm_neon.spl | Fixture N-3 | AUDITED: mismatch already filed as ERR-002 by I3 |
+
+**Additional fixture checks (no emitter counterpart):**
+
+- Fixture N-2 (FADDP `0x6E20D400`): byte-field decode confirms Q=1, U=1, opcode=11010 — plausibly correct; UNVERIFIED tag appropriate.
+- Fixtures A-1/A-2/A-3 (AVX-512 EVEX): all UNVERIFIED; structural decode consistent with Intel SDM EVEX layout; no new byte errors found.
+
+**New errata filed: none.** The only confirmed byte mismatch in scope is ERR-002 (BSL N-3), already filed by I3.

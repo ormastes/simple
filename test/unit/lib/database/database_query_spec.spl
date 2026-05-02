@@ -1,4 +1,83 @@
-describe "Database Query":
-    it "skipped":
-        val pending_reason = "function 'QueryBuilder__for_table' not found in interpreter runtime"
-        expect(pending_reason.len()).to_be_greater_than(0)
+use std.spipe.*
+use std.database.core.{SdnTable, SdnRow}
+use std.database.query.{CompareOp, QueryBuilder}
+
+fn make_row(pairs: [(text, text)]) -> SdnRow:
+    var row = SdnRow.empty()
+    for pair in pairs:
+        row.set(pair.0, pair.1)
+    row
+
+fn make_table(name: text, columns: [text], rows: [[(text, text)]]) -> SdnTable:
+    val table = SdnTable.new(name, columns)
+    for row_fields in rows:
+        table.add_row(make_row(row_fields))
+    table
+
+describe "Database Query — shared accel batching":
+    it "keeps filter_in as OR semantics":
+        val table = make_table("issues", ["id", "status"], [
+            [("id", "1"), ("status", "Open")],
+            [("id", "2"), ("status", "Closed")],
+            [("id", "3"), ("status", "Pending")],
+            [("id", "4"), ("status", "Open")]
+        ])
+
+        val results = QueryBuilder.for_table(table)
+            .filter_in("status", ["Open", "Closed"])
+            .execute()
+
+        expect(results.len()).to_equal(3)
+        expect(results[0].get("status")?).to_equal("Open")
+        expect(results[1].get("status")?).to_equal("Closed")
+
+    it "supports shared prefix and suffix filtering":
+        val table = make_table("paths", ["path"], [
+            [("path", "src/main.spl")],
+            [("path", "src/lib.rs")],
+            [("path", "doc/readme.md")],
+            [("path", "main.spl")]
+        ])
+
+        val prefix_results = QueryBuilder.for_table(table)
+            .filter_by("path", CompareOp.StartsWith, "src/")
+            .execute()
+        val suffix_results = QueryBuilder.for_table(table)
+            .filter_by("path", CompareOp.EndsWith, ".spl")
+            .execute()
+
+        expect(prefix_results.len()).to_equal(2)
+        expect(suffix_results.len()).to_equal(2)
+
+    it "sorts ascending and descending without optional-field interpreter gaps":
+        val table = make_table("scores", ["id", "score"], [
+            [("id", "a"), ("score", "30")],
+            [("id", "b"), ("score", "10")],
+            [("id", "c"), ("score", "20")]
+        ])
+
+        val asc = QueryBuilder.for_table(table).order_by("score", false).execute()
+        val desc = QueryBuilder.for_table(table).order_by("score", true).execute()
+
+        expect(asc[0].get("score")?).to_equal("10")
+        expect(asc[2].get("score")?).to_equal("30")
+        expect(desc[0].get("score")?).to_equal("30")
+        expect(desc[2].get("score")?).to_equal("10")
+
+    it "applies limit after filtering and sorting":
+        val table = make_table("items", ["id", "kind"], [
+            [("id", "1"), ("kind", "b")],
+            [("id", "2"), ("kind", "a")],
+            [("id", "3"), ("kind", "b")],
+            [("id", "4"), ("kind", "c")]
+        ])
+
+        val results = QueryBuilder.for_table(table)
+            .filter_by("kind", CompareOp.Gt, "a")
+            .order_by("id", false)
+            .take(2)
+            .execute()
+
+        expect(results.len()).to_equal(2)
+        expect(results[0].get("id")?).to_equal("1")
+        expect(results[1].get("id")?).to_equal("3")

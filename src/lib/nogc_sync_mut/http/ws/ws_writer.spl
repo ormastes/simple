@@ -1,0 +1,244 @@
+# WebSocket Frame Serializer — RFC 6455 §5
+#
+# WsFrame -> [u8]. Big-endian. RSV1-3 surfaced via the per-type structs;
+# masking key is supplied per call when masking is required (client→server
+# frames per RFC 6455 §5.3).
+#
+# Scope (W16-E):
+#   - All 6 frame variants (Text/Binary/Continuation/Close/Ping/Pong)
+#   - 7-bit, 16-bit (>= 126), and 64-bit (>= 65536) extended payload lengths
+#   - Optional masking with caller-supplied 4-byte key
+#   - Caller is responsible for control-frame size limits and FIN constraints
+#
+# Out of scope (deferred):
+#   - PRNG-driven mask key generation — caller supplies the 4-byte key
+#   - permessage-deflate / extensions
+
+use std.http.ws.ws_frame.{
+    WsFrame,
+    WS_OPCODE_CONTINUATION, WS_OPCODE_TEXT, WS_OPCODE_BINARY,
+    WS_OPCODE_CLOSE, WS_OPCODE_PING, WS_OPCODE_PONG,
+    WS_FIN_BIT, WS_RSV1_BIT, WS_RSV2_BIT, WS_RSV3_BIT,
+    WS_MASK_BIT,
+    WS_LEN_EXT_16, WS_LEN_EXT_64,
+    WS_LEN_THRESH_16, WS_LEN_THRESH_64,
+    WS_MASK_KEY_LEN
+}
+
+# ============================================================================
+# Big-endian byte emission helpers
+# ============================================================================
+
+fn _push_u16_be(out: [u8], value: i64):
+    out.push((value >> 8) & 0xff)
+    out.push(value & 0xff)
+
+fn _push_u64_be(out: [u8], value: i64):
+    out.push((value >> 56) & 0xff)
+    out.push((value >> 48) & 0xff)
+    out.push((value >> 40) & 0xff)
+    out.push((value >> 32) & 0xff)
+    out.push((value >> 24) & 0xff)
+    out.push((value >> 16) & 0xff)
+    out.push((value >> 8) & 0xff)
+    out.push(value & 0xff)
+
+fn _append_bytes(out: [u8], src: [u8]):
+    var i = 0
+    loop:
+        if i >= src.len():
+            break
+        out.push(src[i])
+        i = i + 1
+
+# ============================================================================
+# XOR helpers (RFC 6455 §5.3)
+# ============================================================================
+#
+# Simple lacks a native bytewise XOR operator, so we implement it via bit
+# decomposition. This is the same pattern that has shipped in the legacy
+# websocket/ helpers and is sufficient for an [u8] payload up to ~MTU sizes.
+
+fn _xor_u8(a: i64, b: i64) -> i64:
+    var result: i64 = 0
+    var bit_value: i64 = 1
+    var va = a & 0xff
+    var vb = b & 0xff
+    var bit = 0
+    loop:
+        if bit >= 8:
+            break
+        val bit_a = va % 2
+        val bit_b = vb % 2
+        if bit_a != bit_b:
+            result = result + bit_value
+        va = va / 2
+        vb = vb / 2
+        bit_value = bit_value * 2
+        bit = bit + 1
+    return result
+
+# Apply the 4-byte masking key starting at index `start` in `out` for `len`
+# payload bytes. Per RFC 6455 §5.3:
+#   transformed-octet-i = original-octet-i XOR masking-key-octet-(i MOD 4)
+fn _apply_mask_inplace(out: [u8], start: i64, len: i64, key: [u8]):
+    var i = 0
+    loop:
+        if i >= len:
+            break
+        val k = key[i % WS_MASK_KEY_LEN]
+        out[start + i] = _xor_u8(out[start + i], k)
+        i = i + 1
+
+# ============================================================================
+# Header writer (RFC 6455 §5.2)
+# ============================================================================
+#
+# Wire format:
+#
+#   0                   1                   2                   3
+#   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+#  +-+-+-+-+-------+-+-------------+-------------------------------+
+#  |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+#  |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+#  |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+#  | |1|2|3|       |K|             |                               |
+#  +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+#  | Extended payload length continued, if payload len == 127      |
+#  + - - - - - - - - - - - - - - - +-------------------------------+
+#  | Masking-key (if MASK==1)                                      |
+#  +---------------------------------------------------------------+
+#  | Payload data                                                  |
+#  +---------------------------------------------------------------+
+fn _write_header(
+    out: [u8],
+    fin: bool,
+    rsv1: bool,
+    rsv2: bool,
+    rsv3: bool,
+    opcode: i64,
+    masked: bool,
+    payload_len: i64,
+    mask_key: [u8]
+):
+    var b1: i64 = 0
+    if fin:
+        b1 = b1 | WS_FIN_BIT
+    if rsv1:
+        b1 = b1 | WS_RSV1_BIT
+    if rsv2:
+        b1 = b1 | WS_RSV2_BIT
+    if rsv3:
+        b1 = b1 | WS_RSV3_BIT
+    b1 = b1 | (opcode & 0x0f)
+    out.push(b1 & 0xff)
+
+    var b2: i64 = 0
+    if masked:
+        b2 = b2 | WS_MASK_BIT
+    if payload_len < WS_LEN_THRESH_16:
+        b2 = b2 | (payload_len & 0x7f)
+        out.push(b2 & 0xff)
+    elif payload_len < WS_LEN_THRESH_64:
+        b2 = b2 | WS_LEN_EXT_16
+        out.push(b2 & 0xff)
+        _push_u16_be(out, payload_len)
+    else:
+        b2 = b2 | WS_LEN_EXT_64
+        out.push(b2 & 0xff)
+        _push_u64_be(out, payload_len)
+
+    if masked:
+        # Caller must supply a 4-byte key. Defensive: if key is short, pad
+        # with zeros so the wire is still well-formed (round-trip stable).
+        var k = 0
+        loop:
+            if k >= WS_MASK_KEY_LEN:
+                break
+            if k < mask_key.len():
+                out.push(mask_key[k])
+            else:
+                out.push(0)
+            k = k + 1
+
+# ============================================================================
+# Close-frame payload encode helper (RFC 6455 §5.5.1)
+# ============================================================================
+#
+# When `has_status` is true: 2-byte big-endian status code, then reason bytes.
+# When `has_status` is false: empty payload (the "no status" form).
+fn _encode_close_payload(has_status: bool, code: i64, reason: [u8]) -> [u8]:
+    var out: [u8] = []
+    if not has_status:
+        return out
+    _push_u16_be(out, code & 0xffff)
+    _append_bytes(out, reason)
+    return out
+
+# ============================================================================
+# Top-level writer: WsFrame -> [u8]
+# ============================================================================
+#
+# `mask_key`: 4-byte masking key. If `masked` is true and key.len() < 4 the
+# missing bytes are emitted as 0 (defensive). Server→client frames MUST be
+# unmasked (RFC 6455 §5.1) — pass masked=false.
+#
+# `masked` and `mask_key` are not stored in WsFrame (the on-wire mask state
+# is a transmission-direction concern, not a frame-content concern). The
+# parser always returns the unmasked payload.
+fn ws_write_frame(frame: WsFrame, masked: bool, mask_key: [u8]) -> [u8]:
+    var out: [u8] = []
+    match frame:
+        case Text(t):
+            _write_header(out, t.fin, t.rsv1, t.rsv2, t.rsv3, WS_OPCODE_TEXT,
+                          masked, t.payload.len(), mask_key)
+            val payload_start = out.len()
+            _append_bytes(out, t.payload)
+            if masked:
+                _apply_mask_inplace(out, payload_start, t.payload.len(), mask_key)
+        case Binary(b):
+            _write_header(out, b.fin, b.rsv1, b.rsv2, b.rsv3, WS_OPCODE_BINARY,
+                          masked, b.payload.len(), mask_key)
+            val payload_start = out.len()
+            _append_bytes(out, b.payload)
+            if masked:
+                _apply_mask_inplace(out, payload_start, b.payload.len(), mask_key)
+        case Continuation(c):
+            _write_header(out, c.fin, c.rsv1, c.rsv2, c.rsv3, WS_OPCODE_CONTINUATION,
+                          masked, c.payload.len(), mask_key)
+            val payload_start = out.len()
+            _append_bytes(out, c.payload)
+            if masked:
+                _apply_mask_inplace(out, payload_start, c.payload.len(), mask_key)
+        case Close(cl):
+            val payload = _encode_close_payload(cl.has_status, cl.code, cl.reason)
+            _write_header(out, cl.fin, false, false, false, WS_OPCODE_CLOSE,
+                          masked, payload.len(), mask_key)
+            val payload_start = out.len()
+            _append_bytes(out, payload)
+            if masked:
+                _apply_mask_inplace(out, payload_start, payload.len(), mask_key)
+        case Ping(p):
+            _write_header(out, p.fin, false, false, false, WS_OPCODE_PING,
+                          masked, p.payload.len(), mask_key)
+            val payload_start = out.len()
+            _append_bytes(out, p.payload)
+            if masked:
+                _apply_mask_inplace(out, payload_start, p.payload.len(), mask_key)
+        case Pong(pg):
+            _write_header(out, pg.fin, false, false, false, WS_OPCODE_PONG,
+                          masked, pg.payload.len(), mask_key)
+            val payload_start = out.len()
+            _append_bytes(out, pg.payload)
+            if masked:
+                _apply_mask_inplace(out, payload_start, pg.payload.len(), mask_key)
+    return out
+
+# Convenience: server-side (unmasked) writer.
+fn ws_write_frame_server(frame: WsFrame) -> [u8]:
+    var empty: [u8] = []
+    return ws_write_frame(frame, false, empty)
+
+# Convenience: client-side (masked) writer.
+fn ws_write_frame_client(frame: WsFrame, mask_key: [u8]) -> [u8]:
+    return ws_write_frame(frame, true, mask_key)
