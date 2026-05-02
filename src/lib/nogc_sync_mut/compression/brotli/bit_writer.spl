@@ -61,11 +61,12 @@ fn brotli_bits_writer_finish(w: BrotliBitWriter) -> [u8]:
 # Helpers for compressed meta-block emission (literal-only tier, RFC 7932 §9.2)
 # -----------------------------------------------------------------------------
 
-# Reverse the low `nbits` of `code` so the most-significant bit of the
-# canonical Huffman codeword becomes the first (LSB) bit written.
-# Brotli §1.2 reads codewords MSB-first into a buffer that fills LSB-first;
-# emitting the canonical code bits in reversed order achieves byte-LSB-first
-# layout that the decoder reads back correctly.
+# Reverse the low `nbits` of `code`.  Used by callers that want to emit
+# MSB-first canonical Huffman codewords through the LSB-first writer.
+# Brotli simple-prefix-code decoding (RFC 7932 §3.4) consumes bits LSB-first
+# inside each byte and walks the simple-tree decision sequentially, so codes
+# already constructed in LSB-first form (see encoder._build_lit_codes) are
+# written without reversal.
 fn brotli_bit_reverse(code: i64, nbits: i64) -> i64:
     var v = code
     var r = 0
@@ -76,14 +77,16 @@ fn brotli_bit_reverse(code: i64, nbits: i64) -> i64:
         i = i + 1
     r
 
-# Write a canonical Huffman codeword (length 1..15) with bit-reverse so the
-# decoder peeks the bits and reads them MSB-first.  For length=0 (single
-# symbol in a simple prefix tree) this is a no-op — the decoder reads 0 bits.
+# Write a prefix codeword (length 0..15) in LSB-first order.  For length=0
+# (single symbol in an NSYM=1 simple prefix tree) this is a no-op — the
+# decoder reads 0 bits and returns the lone symbol.
+# The caller supplies the codeword in LSB-first bit order (i.e. the integer
+# that, emitted bit0-first, drives the decoder's sequential simple-prefix
+# decision tree along the right path).  See encoder._build_lit_codes.
 fn brotli_bits_write_huffman_code(w: BrotliBitWriter, code: i64, length: i64) -> BrotliBitWriter:
     if length <= 0:
         return w
-    val rev = brotli_bit_reverse(code, length)
-    brotli_bits_write(w, rev, length)
+    brotli_bits_write(w, code, length)
 
 # Write VarLenUint8 (RFC 7932 §9.2): used for NBLTYPESL/I/D, NTREESL/D etc.
 # Encoding:
