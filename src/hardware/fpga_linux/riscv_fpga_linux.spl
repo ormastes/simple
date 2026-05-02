@@ -15,7 +15,129 @@ use hardware.riscv_common.pkg.riscv_linux_pkg.{RiscvLinuxProfile, RiscvPlatformP
 use hardware.riscv_common.pkg.riscv_generated_core_pkg.{RiscvProofLane, GeneratedCoreShellContract, GeneratedCoreDebugMetadata, GeneratedCoreDebugSourceMapEntry, GeneratedCoreDebugRunnerTestbench}
 use hardware.rv32gc.top.rv32_machine.{qemu_virt_rv32_platform_profile, rv32_qemu_virt_linux_profile}
 use hardware.rv64gc.top.rv64_machine.{qemu_virt_rv64_platform_profile, rv64_qemu_virt_linux_profile}
-use hardware.fpga_linux.riscv_fpga_linux_vhdl_templates.{generated_rv32_support_package_template, generated_rv32_wrapper_template, generated_rv32_smoke_testbench_template, generated_rv32_strobe_testbench_template, generated_rv32_semihost_testbench_template, generated_rv32_mailbox_testbench_template, generated_rv32_linux_handoff_testbench_template, generated_rv32_boot_info_real_dtb_testbench_template, generated_rv64_smoke_testbench_template, generated_rv64_irq_testbench_template, generated_rv64_linux_handoff_testbench_template, generated_rv64_boot_banner_testbench_template, generated_rv64_fw_jump_testbench_template, generated_rv64_boot_info_real_dtb_testbench_template, generated_rv64_sv39_testbench_template, generated_rv64_sv39_fault_testbench_template}
+use hardware.fpga_linux.riscv_fpga_linux_vhdl_templates.{generated_rv32_smoke_testbench_template, generated_rv32_strobe_testbench_template, generated_rv32_semihost_testbench_template, generated_rv32_mailbox_testbench_template, generated_rv32_linux_handoff_testbench_template, generated_rv32_boot_info_real_dtb_testbench_template, generated_rv64_smoke_testbench_template, generated_rv64_irq_testbench_template, generated_rv64_linux_handoff_testbench_template, generated_rv64_boot_banner_testbench_template, generated_rv64_fw_jump_testbench_template, generated_rv64_boot_info_real_dtb_testbench_template, generated_rv64_sv39_testbench_template, generated_rv64_sv39_fault_testbench_template}
+
+fn generated_rv32_support_package_vhdl_text() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+package rv32i_pkg is
+    constant OP_LUI    : std_logic_vector(6 downto 0) := "0110111";
+    constant OP_AUIPC  : std_logic_vector(6 downto 0) := "0010111";
+    constant OP_JAL    : std_logic_vector(6 downto 0) := "1101111";
+    constant OP_JALR   : std_logic_vector(6 downto 0) := "1100111";
+    constant OP_BRANCH : std_logic_vector(6 downto 0) := "1100011";
+    constant OP_LOAD   : std_logic_vector(6 downto 0) := "0000011";
+    constant OP_STORE  : std_logic_vector(6 downto 0) := "0100011";
+    constant OP_IMMED  : std_logic_vector(6 downto 0) := "0010011";
+    constant OP_REG    : std_logic_vector(6 downto 0) := "0110011";
+    constant OP_SYSTEM : std_logic_vector(6 downto 0) := "1110011";
+
+    type alu_op_t is (
+        ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU,
+        ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND, ALU_PASS_B
+    );
+
+    constant BR_BEQ  : std_logic_vector(2 downto 0) := "000";
+    constant BR_BNE  : std_logic_vector(2 downto 0) := "001";
+    constant BR_BLT  : std_logic_vector(2 downto 0) := "100";
+    constant BR_BGE  : std_logic_vector(2 downto 0) := "101";
+    constant BR_BLTU : std_logic_vector(2 downto 0) := "110";
+    constant BR_BGEU : std_logic_vector(2 downto 0) := "111";
+
+    constant SEMI_ENTRY : std_logic_vector(31 downto 0) := x"01f01013";
+    constant SEMI_BREAK : std_logic_vector(31 downto 0) := x"00100073";
+    constant SEMI_EXIT  : std_logic_vector(31 downto 0) := x"40705013";
+
+    constant SYS_WRITEC  : std_logic_vector(31 downto 0) := x"00000003";
+    constant SYS_WRITE0  : std_logic_vector(31 downto 0) := x"00000004";
+    constant SYS_EXIT    : std_logic_vector(31 downto 0) := x"00000018";
+
+    constant MB_BASE_ADDR    : std_logic_vector(31 downto 0) := x"80FF0000";
+    constant MB_OFF_CMD      : integer := 16#00#;
+    constant MB_OFF_ARG0     : integer := 16#04#;
+    constant MB_OFF_ARG1     : integer := 16#08#;
+    constant MB_OFF_STATUS   : integer := 16#0C#;
+    constant MB_OFF_RESULT   : integer := 16#10#;
+    constant MB_OFF_SEQ_ID   : integer := 16#14#;
+    constant MB_OFF_TRIGGER  : integer := 16#18#;
+
+    constant MB_CMD_PUTC   : std_logic_vector(31 downto 0) := x"00000001";
+    constant MB_CMD_EXIT   : std_logic_vector(31 downto 0) := x"00000002";
+    constant MB_CMD_RESULT : std_logic_vector(31 downto 0) := x"00000003";
+
+    constant MB_SENTINEL_ADDR : std_logic_vector(31 downto 0) := x"80008000";
+    constant MB_SENTINEL_SUCCESS : std_logic_vector(31 downto 0) := x"CAFE0000";
+    constant MB_SENTINEL_TIMEOUT : std_logic_vector(31 downto 0) := x"DEAD0000";
+    constant MB_TRIGGER_MAGIC : std_logic_vector(31 downto 0) := x"0000DEAD";
+end package rv32i_pkg;
+"""
+
+fn generated_rv32_wrapper_vhdl_text() -> text:
+    """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use work.simple_rv32i_core_pkg.all;
+
+entity rv32i_core is
+    generic (
+        RESET_ADDR : std_logic_vector(31 downto 0) := x"80000000"
+    );
+    port (
+        clk          : in  std_logic;
+        reset_n      : in  std_logic;
+        imem_addr    : out std_logic_vector(31 downto 0);
+        imem_data    : in  std_logic_vector(31 downto 0);
+        dmem_addr    : out std_logic_vector(31 downto 0);
+        dmem_wdata   : out std_logic_vector(31 downto 0);
+        dmem_rdata   : in  std_logic_vector(31 downto 0);
+        dmem_we      : out std_logic;
+        dmem_re      : out std_logic;
+        dmem_width   : out std_logic_vector(1 downto 0);
+        halted       : out std_logic;
+        semi_trigger : out std_logic;
+        semi_op      : out std_logic_vector(31 downto 0);
+        semi_param   : out std_logic_vector(31 downto 0)
+    );
+end entity rv32i_core;
+
+architecture rtl of rv32i_core is
+    signal dmem_wstrb_i : std_logic_vector(3 downto 0);
+    signal debug_pc_i   : std_logic_vector(31 downto 0);
+    signal trap_i       : std_logic;
+    signal halt_i       : std_logic;
+begin
+    u_core : entity work.simple_rv32gc_core
+        port map (
+            clk        => clk,
+            reset_n    => reset_n,
+            imem_addr  => imem_addr,
+            imem_rdata => imem_data,
+            dmem_addr  => dmem_addr,
+            dmem_wdata => dmem_wdata,
+            dmem_rdata => dmem_rdata,
+            dmem_we    => dmem_we,
+            dmem_re    => dmem_re,
+            dmem_width => dmem_width,
+            dmem_wstrb => dmem_wstrb_i,
+            irq_software => '0',
+            irq_timer  => '0',
+            irq_external => '0',
+            mmu_dmem_l2_pte => (others => '0'),
+            mmu_dmem_l1_pte => (others => '0'),
+            mmu_dmem_l0_pte => (others => '0'),
+            debug_pc   => debug_pc_i,
+            semi_trigger => semi_trigger,
+            semi_op    => semi_op,
+            semi_param => semi_param,
+            trap       => trap_i,
+            halt       => halt_i
+        );
+
+    halted <= halt_i or trap_i;
+end architecture rtl;
+"""
 
 enum RiscvXlen:
     Rv32
@@ -288,6 +410,15 @@ impl RiscvFpgaLane:
     fn proof_lane_summary() -> text:
         val shell = self.generated_core_shell_contract()
         "{self.proof_lane().to_text()} shell={shell.shell_services_summary()}"
+
+    fn authoritative_rtl_provenance() -> text:
+        "simple-compiler-generated"
+
+    fn auxiliary_vhdl_provenance() -> text:
+        "emitted-text-vhdl"
+
+    fn runner_testbench_provenance() -> text:
+        "emitted-text-vhdl"
 
     fn validate_for_prepare() -> [text]:
         var errors: [text] = []
@@ -2906,7 +3037,7 @@ impl RiscvFpgaLane:
 
     fn support_package_vhdl() -> text:
         if self.xlen == RiscvXlen.Rv32:
-            return generated_rv32_support_package_template()
+            return generated_rv32_support_package_vhdl_text()
         ""
 
     fn wrapper_file_name() -> text:
@@ -2920,7 +3051,7 @@ impl RiscvFpgaLane:
     fn wrapper_vhdl() -> text:
         val package_name = self.package_name()
         val top = self.top_module
-        val with_package = generated_rv32_wrapper_template().replace("use work.simple_rv32i_core_pkg.all;", "use work.{package_name}.all;")
+        val with_package = generated_rv32_wrapper_vhdl_text().replace("use work.simple_rv32i_core_pkg.all;", "use work.{package_name}.all;")
         with_package.replace("entity work.simple_rv32gc_core", "entity work.{top}")
 
     fn rv32_smoke_testbench_file_name() -> text:
@@ -3104,6 +3235,7 @@ impl RiscvFpgaLane:
             "  \"scope\": \"{self.scope_note}\",\n" +
             "  \"linuxPolicy\": \"{self.linux_policy()}\",\n" +
             "  \"authoritative\": {authoritative},\n" +
+            "  \"provenance\": {\"authoritativeRtl\": \"{self.authoritative_rtl_provenance()}\", \"auxiliaryVhdl\": \"{self.auxiliary_vhdl_provenance()}\", \"runnerTestbenches\": \"{self.runner_testbench_provenance()}\", \"pureSimpleAuthoritativeRtl\": true},\n" +
             "  \"abi\": \"{self.linux_profile.abi.to_text()}\",\n" +
             "  \"mmu\": \"{self.linux_profile.mmu_mode.to_text()}\",\n" +
             "  \"firmwareMode\": \"{self.linux_profile.firmware_mode.to_text()}\",\n" +
@@ -4267,6 +4399,8 @@ impl FpgaPrepareManifest:
             out = out + "boot_script = \"{product.boot_script_path}\"\n"
             out = out + "uart_log = \"{product.uart_log_path}\"\n"
             out = out + "expected_markers = \"{product.expected_markers.join(\"|\")}\"\n"
+            out = out + "validation_kind = \"linux-uart-markers\"\n"
+            out = out + "authoritative_rtl_provenance = \"simple-compiler-generated\"\n"
         out
 
     fn rtl_manifest_text(root_dir: text) -> text:
@@ -4316,6 +4450,10 @@ impl FpgaPrepareManifest:
                 out = out + "debug_output = \"{debug_output}\"\n"
             out = out + "linux_policy = \"{lane.linux_policy()}\"\n"
             out = out + "authoritative = \"{authoritative_text}\"\n"
+            out = out + "authoritative_rtl_provenance = \"{lane.authoritative_rtl_provenance()}\"\n"
+            out = out + "auxiliary_vhdl_provenance = \"{lane.auxiliary_vhdl_provenance()}\"\n"
+            out = out + "runner_testbench_provenance = \"{lane.runner_testbench_provenance()}\"\n"
+            out = out + "pure_simple_authoritative_rtl = \"true\"\n"
             out = out + "abi = \"{lane.linux_profile.abi.to_text()}\"\n"
             out = out + "mmu = \"{lane.linux_profile.mmu_mode.to_text()}\"\n"
             out = out + "firmware_mode = \"{lane.linux_profile.firmware_mode.to_text()}\"\n"
@@ -4351,11 +4489,13 @@ fn _bundle_readme_text(manifest: FpgaPrepareManifest, root_dir: text) -> text:
         out = out + "- {lane.lane_id} generated VHDL core: `{lane.bundle_root_name()}/rtl/{lane.top_module}.vhd`\n"
         out = out + "- {lane.lane_id} debug sidecar (canonical machine-readable debug metadata): `{lane.bundle_root_name()}/rtl/{lane.debug_sidecar_file_name()}`\n"
         if lane.has_support_package():
-            out = out + "- {lane.lane_id} generated support package: `{lane.bundle_root_name()}/rtl/{lane.support_package_file_name()}`\n"
+            out = out + "- {lane.lane_id} emitted support package: `{lane.bundle_root_name()}/rtl/{lane.support_package_file_name()}`\n"
         if lane.has_wrapper():
-            out = out + "- {lane.lane_id} generated wrapper: `{lane.bundle_root_name()}/rtl/{lane.wrapper_file_name()}`\n"
+            out = out + "- {lane.lane_id} emitted wrapper: `{lane.bundle_root_name()}/rtl/{lane.wrapper_file_name()}`\n"
     out = out + "\nBoundary:\n"
     out = out + "- This bundle is the authoritative source for runner-consumed generated-core RTL.\n"
+    out = out + "- Within each lane, `authoritative_rtl_root` is marked `simple-compiler-generated` and is the pure-Simple RTL contract.\n"
+    out = out + "- Auxiliary emitted VHDL text such as wrappers, support packages, and most runner testbenches remains transitional and is labeled separately in the manifest/debug sidecar provenance.\n"
     out = out + "- Generated-core runners must compile RTL only from the emitted bundle directories `rv32/rtl` and `rv64/rtl`.\n"
     out = out + "- The emitted boot product manifest defines the stable per-arch MLK-S02-100T outputs: generated RTL bundle, bitstream, OpenSBI payload, kernel image, DTB, initramfs, boot script, and UART log.\n"
     out = out + "- This bundle proves source and RTL artifact generation. Synth/program/UART success still depends on local board files, toolchains, and hardware.\n"

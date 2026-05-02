@@ -5,7 +5,7 @@ Status: Draft
 
 ## Overview
 
-This feature establishes the original RV64 Linux-capable RTL pipeline contract that later feeds the dual-arch generated Linux board flow. RV64 hardware and compiler contracts remain part of the source of truth, but they no longer imply RV32 is parity-only or non-authoritative for generated Linux acceptance.
+This feature establishes the original RV64 Linux-capable RTL pipeline contract that later feeds the shared dual-arch generated Linux board flow. RV64 hardware and compiler contracts remain part of the source of truth, but they no longer imply RV32 is parity-only, optional, or non-authoritative for generated Linux acceptance.
 
 ## Functional Requirements
 
@@ -27,7 +27,7 @@ REQ-RV64-LINUX-RTL-004
 - `fpga-validated`
 
 REQ-RV64-LINUX-RTL-005
-Default FPGA/Linux orchestration output for this feature shall remain RV64-focused, but it must not contradict the repo-wide dual-arch generated Linux acceptance contract.
+Default FPGA/Linux orchestration output for this historical feature may remain RV64-scoped, but it shall not contradict the repo-wide dual-arch generated Linux acceptance contract where RV32 and RV64 are peer required generated Linux lanes.
 
 REQ-RV64-LINUX-RTL-006
 LLVM shall expose explicit RV64 Linux triple, ABI, and feature policy through a shared RISC-V backend target contract.
@@ -42,7 +42,7 @@ REQ-RV64-LINUX-RTL-009
 Native RV32/RV64 backend modules shall consume the shared RISC-V target contract for stack/ABI/relocation assumptions instead of drifting local constants.
 
 REQ-RV64-LINUX-RTL-010
-System and unit tests shall trace the canonical RV64 Linux platform contract across hardware/orchestration and compiler/backend layers.
+System and unit tests shall trace this historical RV64 Linux platform contract across hardware/orchestration and compiler/backend layers without presenting it as the sole current generated-Linux truth surface.
 
 REQ-RV64-LINUX-RTL-011
 The repo-native `generated_rv64_linux` lane shall remain distinct from the external `reference_external_rv64_linux` cross-check lane in manifests, summaries, and smoke results.

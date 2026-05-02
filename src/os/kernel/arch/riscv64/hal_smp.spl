@@ -21,6 +21,8 @@
 #   hal_smp_get_boot_args(ap_id)            — read ApBootArgs slot
 #   hal_smp_get_pending_ipi(target)         — read PENDING_IPI slot
 
+use os.kernel.arch.riscv64.sbi.{sbi_hart_start, sbi_call, SBI_SUCCESS}
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -145,3 +147,38 @@ fn hal_smp_ipi_broadcast_with_mock(mock: SbiMockSmp, vector: u32):
         if i != self_id:
             hal_smp_ipi_send_with_mock(mock, i, vector)
         i = i + 1u32
+
+# ============================================================================
+# Canonical trait methods — production-callable (AC-1)
+# ============================================================================
+
+# SBI IPI extension EID (v0.3+): 0x735049 = "IPI"
+val SBI_EXT_IPI: u64 = 0x735049u64
+
+fn hal_smp_cpu_start(ap_id: u32, entry: u64, stack: u64, arg: u64) -> bool:
+    """Start AP hart via SBI HSM. Populates boot args slot before calling SBI."""
+    if ap_id < MAX_HARTS:
+        HAL_SMP_BOOT_ARGS[ap_id] = ApBootArgs(stack: stack, arg: arg)
+    val ret = sbi_hart_start(ap_id as u64, entry, ap_id as u64)
+    ret.error == SBI_SUCCESS
+
+fn hal_smp_ipi_send(target: u32, vector: u32):
+    """Send IPI to target hart: write vector to PENDING_IPI slot then SBI ecall."""
+    if target < MAX_HARTS:
+        HAL_SMP_PENDING_IPI[target] = vector
+    val hart_mask = 1u64 << target as u64
+    sbi_call(SBI_EXT_IPI, 0u64, hart_mask, 0u64, 0u64, 0u64, 0u64, 0u64)
+
+fn hal_smp_ipi_broadcast(vector: u32):
+    """Broadcast IPI to all non-self harts (self = hart 0)."""
+    val self_id = 0u32
+    val count = HAL_SMP_CPU_COUNT_STATE
+    var i: u32 = 0u32
+    var mask: u64 = 0u64
+    while i < count:
+        if i != self_id:
+            HAL_SMP_PENDING_IPI[i] = vector
+            mask = mask | (1u64 << i as u64)
+        i = i + 1u32
+    if mask != 0u64:
+        sbi_call(SBI_EXT_IPI, 0u64, mask, 0u64, 0u64, 0u64, 0u64, 0u64)

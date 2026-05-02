@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # RISC-V FPGA Linux Architecture
 
-Superseded for canonical RV64 Linux truth by `doc/04_architecture/rv64_linux_rtl_pipeline.md`.
+Superseded for canonical dual-arch RISC-V Linux truth by `doc/04_architecture/rv64_linux_rtl_pipeline.md`.
 This document remains historical context for the orchestration-layer origin and the completed helper-proof milestone only, but it now reflects the strict generated-core provenance policy used by the active runners.
 
 The feature adds a small preparation layer above existing RISC-V hardware and VHDL backend work. It does not claim full Linux-capable RTL is complete; it defines the board and lane contracts required to generate, synthesize, program, and boot-test that RTL. For generated-core lanes, the authoritative runner-consumed RTL is the emitted bundle under `GEN_DIR/.../rtl`, not handwritten files under `examples/09_embedded/fpga_riscv/rtl`.

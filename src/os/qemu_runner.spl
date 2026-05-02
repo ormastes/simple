@@ -1130,6 +1130,41 @@ class QemuScenario:
     gui_mode: bool
     description: text
 
+pub fn scenario_lane_kind(scenario: QemuScenario) -> SimpleOsLaneKind:
+    """Classify a QEMU scenario into the shared lane model."""
+    if scenario.name == "riscv64-hosted":
+        return SimpleOsLaneKind.HostedCompileSmoke
+    if _is_arm_fs_exec_scenario(scenario) or _is_riscv_fs_exec_scenario(scenario) or scenario.name == "x64-nvme-fat32":
+        return SimpleOsLaneKind.FsExec
+    if scenario.name == "x64-desktop-disk" or scenario.name == "x64-desktop-uefi" or scenario.name == "x64-ssh":
+        return SimpleOsLaneKind.HostedCompileSmoke
+    SimpleOsLaneKind.Smoke
+
+fn _acceptance_lane_scenario(platform_name: text, description: text) -> QemuScenario:
+    val lane = simpleos_platform_qemu_acceptance_lane(platform_name)
+    QemuScenario(
+        name: lane.name,
+        arch: simpleos_platform_arch(platform_name),
+        machine: simpleos_platform_qemu_machine(platform_name),
+        cpu: simpleos_platform_qemu_cpu(platform_name),
+        memory: lane.qemu_memory,
+        qemu_extra: lane.qemu_extra,
+        gui_mode: false,
+        description: description
+    )
+
+fn _scenario_from_target(name: text, target: OsTarget, description: text) -> QemuScenario:
+    QemuScenario(
+        name: name,
+        arch: target.arch,
+        machine: target.qemu_machine,
+        cpu: target.qemu_cpu,
+        memory: target.qemu_memory,
+        qemu_extra: target.qemu_extra,
+        gui_mode: target.gui_mode,
+        description: description
+    )
+
 fn scenario_rv64_base() -> QemuScenario:
     """RV64 baseline — OpenSBI + virt, serial only."""
     QemuScenario(
@@ -1317,71 +1352,27 @@ fn scenario_x64_nvme_fat32() -> QemuScenario:
 
 fn scenario_arm64_virtio_fat32_smf() -> QemuScenario:
     """ARM64 QEMU virt with VirtIO block FAT32 media carrying /sys/apps/hello_world.smf."""
-    QemuScenario(
-        name: "arm64-virtio-fat32-smf",
-        arch: Architecture.Arm64,
-        machine: "virt",
-        cpu: "cortex-a72",
-        memory: "384M",
-        qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm64) + ["-semihosting-config", "enable=on,target=native"],
-        gui_mode: false,
-        description: "ARM64 virt boot with VirtIO-BLK FAT32 SMF executable media"
-    )
+    _acceptance_lane_scenario("arm64", "ARM64 virt boot with VirtIO-BLK FAT32 SMF executable media")
 
 fn scenario_arm32_virtio_fat32_smf() -> QemuScenario:
     """ARM32 QEMU virt with VirtIO block FAT32 media carrying /sys/apps/hello_world.smf."""
-    QemuScenario(
-        name: "arm32-virtio-fat32-smf",
-        arch: Architecture.Arm32,
-        machine: "virt",
-        cpu: "cortex-a15",
-        memory: "384M",
-        qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm32) + ["-semihosting-config", "enable=on,target=native"],
-        gui_mode: false,
-        description: "ARM32 virt boot with VirtIO-BLK FAT32 SMF executable media"
-    )
+    _acceptance_lane_scenario("arm32", "ARM32 virt boot with VirtIO-BLK FAT32 SMF executable media")
 
 fn scenario_riscv64_virtio_fat32_smf() -> QemuScenario:
     """RV64 QEMU virt with VirtIO block FAT32 media carrying SMF CLI and WM GUI fixtures."""
-    QemuScenario(
-        name: "riscv64-virtio-fat32-smf",
-        arch: Architecture.Riscv64,
-        machine: "virt",
-        cpu: "rv64",
-        memory: "512M",
-        qemu_extra: ["-bios", "default"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv64),
-        gui_mode: false,
-        description: "RV64 virt boot with VirtIO-BLK FAT32 SMF smoke media"
+    _scenario_from_target(
+        "riscv64-virtio-fat32-smf",
+        get_riscv64_fs_exec_target(),
+        "RV64 virt boot with VirtIO-BLK FAT32 SMF smoke media"
     )
 
 fn scenario_riscv32_virtio_fat32_smf() -> QemuScenario:
     """RV32 QEMU virt with VirtIO block FAT32 media carrying SMF CLI and WM GUI fixtures."""
-    QemuScenario(
-        name: "riscv32-virtio-fat32-smf",
-        arch: Architecture.Riscv32,
-        machine: "virt",
-        cpu: "rv32",
-        memory: "256M",
-        qemu_extra: ["-bios", "none"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv32),
-        gui_mode: false,
-        description: "RV32 virt boot with VirtIO-BLK FAT32 SMF CLI and WM GUI media"
-    )
+    _acceptance_lane_scenario("riscv32", "RV32 virt boot with VirtIO-BLK FAT32 SMF CLI and WM GUI media")
 
 fn scenario_riscv64_hosted() -> QemuScenario:
     """RV64 hosted-preflight lane with disk + net + host-forwarded SSH/HTTP probes."""
-    QemuScenario(
-        name: "riscv64-hosted",
-        arch: Architecture.Riscv64,
-        machine: "virt",
-        cpu: "rv64",
-        memory: "1024M",
-        qemu_extra: ["-bios", "default"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv64) + [
-            "-netdev", "user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80",
-            "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"
-        ],
-        gui_mode: false,
-        description: "RV64 hosted preflight lane with storage and forwarded SSH/HTTP"
-    )
+    _acceptance_lane_scenario("riscv64", "RV64 hosted preflight lane with storage and forwarded SSH/HTTP")
 
 fn scenario_x64_full_stack() -> QemuScenario:
     """x86_64 NVMe + VirtIO-net + experimental VirtIO-GPU integration lane.

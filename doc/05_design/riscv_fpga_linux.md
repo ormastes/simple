@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # RISC-V FPGA Linux Detail Design
 
-Superseded for canonical Linux-platform truth by `doc/05_design/rv64_linux_rtl_pipeline.md`.
+Superseded for canonical dual-arch Linux-platform truth by `doc/05_design/rv64_linux_rtl_pipeline.md`.
 This file records the bounded helper-proof design and the original orchestration surface in `src/hardware/fpga_linux/riscv_fpga_linux.spl`, updated to match the strict generated-core provenance policy now enforced by generated runners.
 
 Data model:
@@ -54,4 +54,4 @@ Next slices:
 - Extend the helper-proof pattern to additional decode/update families without reintroducing handwritten raw-slice reconstruction where a generated helper contract already exists.
 - Use the next milestone to add CSR/privilege/MMU/interrupt/trap completion, DTB plus firmware handoff generation, and Linux boot validation on top of this bounded helper-driven shell rather than widening this historical artifact into a second canonical Linux pipeline.
 - Until those layers are complete, treat external RV32 and RV64 Linux references as cross-checks only. They do not substitute for the repo-emitted authoritative `generated_rv32_linux` and `generated_rv64_linux` bundle roots.
-- Keep future docs aligned with `rv64_linux_rtl_pipeline` as the canonical milestone rather than restating mixed-lane Linux capability claims or restoring authority to handwritten example RTL here.
+- Keep future docs aligned with the dual-arch `rv64_linux_rtl_pipeline` milestone rather than restating mixed-lane Linux capability claims or restoring authority to handwritten example RTL here.

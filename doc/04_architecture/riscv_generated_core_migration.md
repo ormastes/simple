@@ -26,8 +26,8 @@ The public contract lives in `hardware.riscv_common.pkg.riscv_generated_core_pkg
 
 ## Proof Taxonomy
 
-- `generated_rv32_linux` is the repo-native proof target for RV32 Linux and is validated by generated GHDL/Linux handoff and DTB proof gates under the emitted `rv32/rtl` bundle root.
-- `generated_rv64_linux` is the repo-native proof target for RV64 Linux and is validated by generated GHDL UART boot markers under the emitted `rv64/rtl` bundle root.
+- `generated_rv32_linux` is the repo-native proof target for RV32 Linux; its emitted `rv32/rtl` bundle root is authoritative and its bounded generated GHDL proof gates are prerequisites to the shared Linux UART boot acceptance story.
+- `generated_rv64_linux` is the repo-native proof target for RV64 Linux; its emitted `rv64/rtl` bundle root is authoritative and its bounded generated GHDL proof gates are prerequisites to the shared Linux UART boot acceptance story.
 - `generated_rv32_baremetal` may remain as a narrower diagnostic lane, but it is not the acceptance source of truth for FPGA Linux bring-up.
 - External LiteX/CVA6 lanes never count as generated-core proof.
 

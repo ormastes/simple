@@ -1,5 +1,7 @@
 # Feature: extend SIMD surface with int bitwise / rotate / shuffle ops for crypto
 
+> **Update 2026-05-01:** SHA-256 message-schedule vectorization landed using Phase 1 int intrinsics (xor + logical shifts on Vec4i). σ0 is computed 4-at-a-time per chunk; σ1 / round function / `add_mod32` chain remain scalar. Source: `src/lib/common/crypto/sha256.spl` (`sha256_little_sigma0_x4`, `sha256_process_block_simd`). Parity spec: `test/unit/lib/common/crypto/sha256_simd_parity_spec.spl` (7/7 PASS, byte-exact vs scalar; FIPS 180-4 NIST KAT vectors still PASS in `test/unit/lib/crypto/sha2_nist_vectors_spec.spl`). Interpreter-mode bench: SIMD path is ~1–6% slower than scalar due to extern dispatch + Vec4i marshalling overhead (1 KiB×5: 930ms SIMD / 920ms scalar; 64 KiB×1: 66.0s SIMD / 62.3s scalar). Re-bench in compiled mode is a follow-up once Vec4i FFI marshalling lands per the runtime_ffi.rs note below.
+
 - **Phase 1 status: LANDED 2026-05-02** — 10 ops (xor/and/or/shl/shr × i32x4 + i32x8).
   - Pure-Simple wrappers + externs: `src/lib/nogc_sync_mut/simd.spl`
   - Runtime kernels: `src/compiler_rust/runtime/src/value/simd_int_ops.rs`

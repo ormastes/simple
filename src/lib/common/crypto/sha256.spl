@@ -4,8 +4,16 @@
 # Pure Simple implementation following FIPS 180-4 specification
 #
 # Recommended for most cryptographic applications
+#
+# Vectorization (2026-05-01): Message-schedule small-sigma0 is computed 4-at-a-time
+# via std.simd Phase-1 int intrinsics (xor + logical shifts). Round function and the
+# `+= add_mod32` chain stay scalar — round dependency makes vector parallelism
+# unprofitable, and SIMD `add_i32x4` is not yet wired in interpreter mode. See
+# `doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md`.
 
 mod crypto.types
+
+use std.simd.{Vec4i, simd_xor_i32x4, simd_shl_i32x4, simd_shr_i32x4, simd_or_i32x4}
 
 # =============================================================================
 # SHA-256 Constants and Initial Values
@@ -80,6 +88,41 @@ fn sha256_little_sigma1(x: i64) -> i64:
     val r19 = rotr32(x, 19)
     val s10 = shr32(x, 10)
     r17 ^ r19 ^ s10
+
+# =============================================================================
+# SHA-256 Vectorized small-sigma0 (Phase 1 SIMD: xor + logical shifts only)
+# =============================================================================
+
+# Compute sha256_little_sigma0 on 4 words in parallel.
+#   σ0(x) = ROTR(x,7) ^ ROTR(x,18) ^ SHR(x,3)
+# Implemented via simd_xor / simd_shl / simd_shr only — no SIMD add needed.
+# The shift count is masked to 0..31 by the runtime; bit-width is 32 per lane.
+fn sha256_little_sigma0_x4(v: Vec4i) -> Vec4i:
+    # ROTR(x,7) = (x >> 7) | (x << 25)
+    val r7_lo = simd_shr_i32x4(v, 7)
+    val r7_hi = simd_shl_i32x4(v, 25)
+    val r7 = simd_or_i32x4(r7_lo, r7_hi)
+
+    # ROTR(x,18) = (x >> 18) | (x << 14)
+    val r18_lo = simd_shr_i32x4(v, 18)
+    val r18_hi = simd_shl_i32x4(v, 14)
+    val r18 = simd_or_i32x4(r18_lo, r18_hi)
+
+    # SHR(x,3) (logical)
+    val s3 = simd_shr_i32x4(v, 3)
+
+    val xor1 = simd_xor_i32x4(r7, r18)
+    simd_xor_i32x4(xor1, s3)
+
+# Pack four scalar i64 SHA-256 words (already masked to 32 bits) into a Vec4i.
+# i64 values whose 32-bit pattern has the top bit set become negative i32 — that
+# is fine because all subsequent SIMD ops are bit-pattern preserving.
+fn _pack_v4i_words(w0: i64, w1: i64, w2: i64, w3: i64) -> Vec4i:
+    Vec4i(x: w0.to_i32(), y: w1.to_i32(), z: w2.to_i32(), w: w3.to_i32())
+
+# Unpack a Vec4i lane as a non-negative i64 word in [0, 2^32).
+fn _v4i_lane_u32(lane: i32) -> i64:
+    lane.to_i64() & 0xFFFFFFFF
 
 # =============================================================================
 # SHA-256 Core Operations
@@ -208,6 +251,132 @@ fn sha256_process_block(h: list, block: list) -> list:
 
     new_h
 
+# =============================================================================
+# SHA-256 Vectorized message-schedule block processor (2026-05-01)
+# =============================================================================
+# Identical to sha256_process_block byte-for-byte, but the message-schedule
+# expansion W[16..63] computes σ0 four-at-a-time via Vec4i. σ1 stays scalar
+# because W[i]=σ1(W[i-2])+... has a tight dependency chain on previously
+# computed W[i-1]/W[i] inside any 4-wide chunk. The round function and final
+# add-back to h[0..7] also stay scalar (no SIMD add wired in Phase 1).
+fn sha256_process_block_simd(h: list, block: list) -> list:
+    # Prepare message schedule (64 entries)
+    var w = []
+    var i = 0
+
+    # First 16 words from block (big-endian)
+    while i < 16:
+        val idx = i * 4
+        val b0 = block.get(idx)
+        val b1 = block.get(idx + 1)
+        val b2 = block.get(idx + 2)
+        val b3 = block.get(idx + 3)
+        val word = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        w.push(word)
+        i = i + 1
+
+    # Vectorized σ0 expansion. We compute σ0 on a Vec4i of {W[i-15..i-12]} per
+    # 4-word chunk so that 4 σ0 values are produced in one extern dispatch.
+    # σ1 remains scalar (W[i-2] dependency inside the chunk).
+    #
+    # i ranges over 16..64 in steps of 4. For each chunk:
+    #   sigma0_pack = σ0_x4(W[i-15], W[i-14], W[i-13], W[i-12])
+    #   For each lane k in 0..3 (sequentially, because σ1 depends on W[i+k-2]):
+    #       W[i+k] = σ1(W[i+k-2]) + W[i+k-7] + sigma0_pack.lane(k) + W[i+k-16]
+    while i < 64:
+        # i is the first lane of this 4-wide chunk. i in {16, 20, ..., 60}.
+        val v_in = _pack_v4i_words(
+            w.get(i - 15),
+            w.get(i - 14),
+            w.get(i - 13),
+            w.get(i - 12)
+        )
+        val s0_v = sha256_little_sigma0_x4(v_in)
+        val s0_0 = _v4i_lane_u32(s0_v.x)
+        val s0_1 = _v4i_lane_u32(s0_v.y)
+        val s0_2 = _v4i_lane_u32(s0_v.z)
+        val s0_3 = _v4i_lane_u32(s0_v.w)
+
+        # Lane 0
+        val w0 = add_mod32(
+            add_mod32(add_mod32(sha256_little_sigma1(w.get(i - 2)), w.get(i - 7)), s0_0),
+            w.get(i - 16)
+        )
+        w.push(w0)
+
+        # Lane 1 (uses freshly produced W[i] = w0 if i+1-2 == i-1; otherwise
+        # references a prior W. Indexing is unchanged.)
+        val w1 = add_mod32(
+            add_mod32(add_mod32(sha256_little_sigma1(w.get(i + 1 - 2)), w.get(i + 1 - 7)), s0_1),
+            w.get(i + 1 - 16)
+        )
+        w.push(w1)
+
+        # Lane 2
+        val w2 = add_mod32(
+            add_mod32(add_mod32(sha256_little_sigma1(w.get(i + 2 - 2)), w.get(i + 2 - 7)), s0_2),
+            w.get(i + 2 - 16)
+        )
+        w.push(w2)
+
+        # Lane 3
+        val w3 = add_mod32(
+            add_mod32(add_mod32(sha256_little_sigma1(w.get(i + 3 - 2)), w.get(i + 3 - 7)), s0_3),
+            w.get(i + 3 - 16)
+        )
+        w.push(w3)
+
+        i = i + 4
+
+    # Initialize working variables
+    var a = h.get(0)
+    var b = h.get(1)
+    var c = h.get(2)
+    var d = h.get(3)
+    var e = h.get(4)
+    var f = h.get(5)
+    var g = h.get(6)
+    var h_var = h.get(7)
+
+    val k = sha256_k_constants()
+
+    # 64 rounds (scalar — round function dependency chain prevents SIMD wins)
+    i = 0
+    while i < 64:
+        val S1 = sha256_sigma1(e)
+        val ch = sha256_ch(e, f, g)
+        val temp1_part1 = add_mod32(h_var, S1)
+        val temp1_part2 = add_mod32(ch, k.get(i))
+        val temp1_part3 = add_mod32(temp1_part2, w.get(i))
+        val temp1 = add_mod32(temp1_part1, temp1_part3)
+
+        val S0 = sha256_sigma0(a)
+        val maj = sha256_maj(a, b, c)
+        val temp2 = add_mod32(S0, maj)
+
+        h_var = g
+        g = f
+        f = e
+        e = add_mod32(d, temp1)
+        d = c
+        c = b
+        b = a
+        a = add_mod32(temp1, temp2)
+
+        i = i + 1
+
+    var new_h = []
+    new_h.push(add_mod32(h.get(0), a))
+    new_h.push(add_mod32(h.get(1), b))
+    new_h.push(add_mod32(h.get(2), c))
+    new_h.push(add_mod32(h.get(3), d))
+    new_h.push(add_mod32(h.get(4), e))
+    new_h.push(add_mod32(h.get(5), f))
+    new_h.push(add_mod32(h.get(6), g))
+    new_h.push(add_mod32(h.get(7), h_var))
+
+    new_h
+
 # Update SHA-256 context with new data
 fn sha256_update(ctx: tuple, data: list) -> tuple:
     val h = ctx.get(0)
@@ -232,7 +401,7 @@ fn sha256_update(ctx: tuple, data: list) -> tuple:
 
     (h, updated_data, new_datalen, new_bitlen)
 
-# Finalize SHA-256 hash
+# Finalize SHA-256 hash (SIMD message-schedule path — public default).
 fn sha256_finalize(ctx: tuple) -> list:
     val h = ctx.get(0)
     val data = ctx.get(1)
@@ -240,7 +409,39 @@ fn sha256_finalize(ctx: tuple) -> list:
     # Pad the data
     val padded = sha256_pad_message(data)
 
-    # Process all blocks
+    # Process all blocks via SIMD message-schedule path.
+    var current_h = h
+    var i = 0
+    while i < padded.len():
+        var block = []
+        var j = 0
+        while j < 64:
+            block.push(padded.get(i + j))
+            j = j + 1
+
+        current_h = sha256_process_block_simd(current_h, block)
+        i = i + 64
+
+    # Convert hash values to bytes (big-endian)
+    var result = []
+    i = 0
+    while i < 8:
+        val h_val = current_h.get(i)
+        result.push((h_val >> 24) & 0xFF)
+        result.push((h_val >> 16) & 0xFF)
+        result.push((h_val >> 8) & 0xFF)
+        result.push(h_val & 0xFF)
+        i = i + 1
+
+    result
+
+# Scalar finalize — kept callable for parity testing / fallback.
+fn sha256_finalize_scalar(ctx: tuple) -> list:
+    val h = ctx.get(0)
+    val data = ctx.get(1)
+
+    val padded = sha256_pad_message(data)
+
     var current_h = h
     var i = 0
     while i < padded.len():
@@ -253,7 +454,6 @@ fn sha256_finalize(ctx: tuple) -> list:
         current_h = sha256_process_block(current_h, block)
         i = i + 64
 
-    # Convert hash values to bytes (big-endian)
     var result = []
     i = 0
     while i < 8:
@@ -274,11 +474,17 @@ fn sha256_reset(ctx: tuple) -> tuple:
 # Public API
 # =============================================================================
 
-# SHA-256 hash of byte list (returns byte list)
+# SHA-256 hash of byte list (returns byte list) — SIMD message-schedule path.
 fn sha256_bytes(bytes: list) -> list:
     val ctx = create_sha256_context()
     val updated_ctx = sha256_update(ctx, bytes)
     sha256_finalize(updated_ctx)
+
+# SHA-256 hash of byte list — pure scalar path (parity reference / fallback).
+fn sha256_bytes_scalar(bytes: list) -> list:
+    val ctx = create_sha256_context()
+    val updated_ctx = sha256_update(ctx, bytes)
+    sha256_finalize_scalar(updated_ctx)
 
 # SHA-256 hash of text (returns byte list)
 fn sha256(text: text) -> list:

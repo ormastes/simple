@@ -110,3 +110,58 @@ describe "Portable numeric capability registry":
         expect(contract.march).to_equal("rv32imac")
         expect(contract.features.contains("+f")).to_equal(false)
         expect(contract.features.contains("+d")).to_equal(false)
+
+    # Phase 2 scenario #2: x86_64 generic preset — AVX flags NOT in LLVM features list
+    # AC-1: requires_runtime_simd_probe is the live AVX gate; features list must be empty
+    it "AC-1/P2-2: x86_64 generic preset keeps AVX flags out of LLVM features list":
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil)
+        expect(config.cpu).to_equal("x86-64-v1")
+        expect(config.features.contains("+avx")).to_equal(false)
+        expect(config.features.contains("+avx2")).to_equal(false)
+        expect(config.to_feature_string()).to_equal("")
+
+    # Phase 2 scenario #3: rv64_linux preset — +f and +d derive from registry, not hardcoded
+    # AC-2: riscv_target.spl portable_numeric variant exposes +f/+d from preset, not constant
+    it "AC-2/P2-3: rv64_linux portable plan has has_riscv_f and has_riscv_d from registry":
+        val plan = portable_numeric_default_plan_for_target(CodegenTarget.Riscv64)
+        expect(plan.capabilities.has_riscv_f).to_equal(true)
+        expect(plan.capabilities.has_riscv_d).to_equal(true)
+        expect(plan.capabilities.has_riscv_v).to_equal(false)
+
+    # Phase 2 scenario #4: rv32_baremetal int-only preset — no +f/+d/+v
+    # AC-2: integer-only preset must not expose FP or vector capabilities
+    it "AC-2/P2-4: rv32_baremetal int-only preset has no FP or vector capability flags":
+        val plan = portable_numeric_default_plan_for_target(CodegenTarget.Riscv32)
+        expect(plan.capabilities.has_riscv_f).to_equal(false)
+        expect(plan.capabilities.has_riscv_d).to_equal(false)
+        expect(plan.capabilities.has_riscv_v).to_equal(false)
+        expect(plan.capabilities.has_scalar_fp).to_equal(false)
+
+    # GAP-1 scenario #7: generic x86_64 LLVM target — cpu=="x86-64-v1" and features has no +avx/+avx2
+    # AC-4 negative: "generic-x86_64-claiming-AVX2" rejection
+    it "AC-4/GAP-1: generic x86_64 LLVM target does not claim AVX or AVX2 features":
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil)
+        expect(config.cpu).to_equal("x86-64-v1")
+        expect(config.features.contains("+avx")).to_equal(false)
+        expect(config.features.contains("+avx2")).to_equal(false)
+
+    # Zicbom cross-feature contract: Feature B reads these 4 fields; Feature A establishes false defaults
+    # All existing presets must expose the 4 new bool fields with false defaults
+    it "Feature-B-contract: Zicbom/Zicboz/Zicbop/cache-probe fields are false across all presets":
+        val x86_plan = portable_numeric_default_plan_for_target(CodegenTarget.X86_64)
+        expect(x86_plan.capabilities.has_riscv_zicbom).to_equal(false)
+        expect(x86_plan.capabilities.has_riscv_zicboz).to_equal(false)
+        expect(x86_plan.capabilities.has_riscv_zicbop).to_equal(false)
+        expect(x86_plan.capabilities.requires_runtime_cache_probe).to_equal(false)
+
+        val rv64_plan = portable_numeric_default_plan_for_target(CodegenTarget.Riscv64)
+        expect(rv64_plan.capabilities.has_riscv_zicbom).to_equal(false)
+        expect(rv64_plan.capabilities.has_riscv_zicboz).to_equal(false)
+        expect(rv64_plan.capabilities.has_riscv_zicbop).to_equal(false)
+        expect(rv64_plan.capabilities.requires_runtime_cache_probe).to_equal(false)
+
+        val rv32_plan = portable_numeric_default_plan_for_target(CodegenTarget.Riscv32)
+        expect(rv32_plan.capabilities.has_riscv_zicbom).to_equal(false)
+        expect(rv32_plan.capabilities.has_riscv_zicboz).to_equal(false)
+        expect(rv32_plan.capabilities.has_riscv_zicbop).to_equal(false)
+        expect(rv32_plan.capabilities.requires_runtime_cache_probe).to_equal(false)

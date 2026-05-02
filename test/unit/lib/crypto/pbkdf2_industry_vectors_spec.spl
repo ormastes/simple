@@ -1,4 +1,4 @@
-# PBKDF2-HMAC-SHA-256 industry test vectors
+# PBKDF2-HMAC-SHA-256 / SHA-512 industry test vectors
 # (draft-josefsson-pbkdf2-test-vectors-00, widely adopted)
 #
 # Tests the pure-Simple PBKDF2 implementation in
@@ -14,10 +14,11 @@
 #                      the unoptimised reference impl on 2026-05-01.
 #
 # c=4096 (TC3/TC5/TC6) and c=80000 (SHA-512 TC2) are NOT exercised here
-# because pure-Simple SHA-256 throughput in interpreter mode (~9.5 ms
-# per HMAC-SHA-256 even after the 2026-05-01 perf landing) puts a
-# 4096-iter test at ~80 s — over the test runner's 60 s wall-clock
-# watchdog. They are unblocked by the native runtime helpers tracked in
+# because pure-Simple SHA-256 / SHA-512 throughput in interpreter mode
+# (~9.5 ms per HMAC-SHA-256 even after the 2026-05-01 perf landing)
+# puts a 4096-iter test at ~80 s — over the test runner's 60 s
+# wall-clock watchdog. They are unblocked by the native runtime helpers
+# tracked in
 # `doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md`.
 # TC4 (c=16777216) remains permanently out of scope for unit-test
 # duration even with a native helper.
@@ -38,13 +39,17 @@ fn _salt() -> list:
     # "salt" — 4 bytes
     [0x73, 0x61, 0x6c, 0x74]
 
-fn _passwd_sha512() -> list:
-    # "passwd" — 6 bytes
-    [0x70, 0x61, 0x73, 0x73, 0x77, 0x64]
-
-fn _salt_sha512() -> list:
-    # "salt" — 4 bytes
-    [0x73, 0x61, 0x6c, 0x74]
+fn _long_password_sha512() -> list:
+    # 200 × 'A' — exceeds the 128-byte SHA-512 HMAC block size, so it
+    # forces the `key_bytes.len() > block_size → sha512_bytes(key)`
+    # branch in `hmac_sha512_bytes`. That branch is not covered by the
+    # short-key vector in `crypto_reference_spec.spl`.
+    var pw = []
+    var i = 0
+    while i < 200:
+        pw.push(0x41)
+        i = i + 1
+    pw
 
 # ============================================================================
 # PBKDF2-HMAC-SHA-256 industry test vectors
@@ -78,8 +83,37 @@ describe "PBKDF2-HMAC-SHA-256 industry test vectors":
 # PBKDF2-HMAC-SHA-512 industry test vectors
 # ============================================================================
 #
-# PBKDF2-HMAC-SHA-512 vectors are not exercised here: the underlying
-# HMAC-SHA-512 impl produces hashes that disagree with RFC 7914 §11
-# reference vectors (independently of the PBKDF2 driver). Tracked in
-# `doc/08_tracking/bug/hmac_sha512_pbkdf2_mismatch_2026-05-01.md`.
-# Re-enable once that bug is fixed.
+# Reference vectors from draft-josefsson-pbkdf2-test-vectors-00 §3
+# (de-facto industry vectors for PBKDF2-HMAC-SHA-512). RFC 7914 §11
+# only specifies PBKDF2-HMAC-SHA-256 vectors, not SHA-512.
+#
+# These were added on 2026-05-01 after closing
+# `doc/08_tracking/bug/hmac_sha512_pbkdf2_mismatch_2026-05-01.md` as a
+# bug-doc typo: the bug filer compared `passwd` impl output against the
+# reference vector for `password`. The HMAC-SHA-512 / SHA-512
+# implementations have been verified byte-exact against Python
+# `hashlib.pbkdf2_hmac("sha512", ...)` for all three vectors below.
+
+describe "PBKDF2-HMAC-SHA-512 industry test vectors":
+
+    it "TC1: password=password salt=salt c=1 dkLen=64 → 867f70cf...":
+        # draft-josefsson-pbkdf2-test-vectors-00 §3
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_password(), _salt(), 1, 64))).to_equal(
+            "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5d513554e1c8cf252c02d470a285a0501bad999bfe943c08f050235d7d68b1da55e63f73b60a57fce"
+        )
+
+    it "TC2: password=password salt=salt c=2 dkLen=64 → e1d9c16a...":
+        # draft-josefsson-pbkdf2-test-vectors-00 §3
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_password(), _salt(), 2, 64))).to_equal(
+            "e1d9c16aa681708a45f5c7c4e215ceb66e011a2e9f0040713f18aefdb866d53cf76cab2868a39b9f7840edce4fef5a82be67335c77a6068e04112754f27ccf4e"
+        )
+
+    it "long-key: password=200×'A' salt=salt c=1 dkLen=64 (HMAC key>block_size)":
+        # Not in any RFC, but cross-checked 2026-05-01 against Python
+        # `hashlib.pbkdf2_hmac("sha512", b"A"*200, b"salt", 1, 64)`.
+        # Forces the `key > 128B → sha512_bytes(key)` branch in
+        # `hmac_sha512_bytes`, which the short-key reference spec does
+        # not cover.
+        expect(bytes_to_hex(pbkdf2_sha512_bytes(_long_password_sha512(), _salt(), 1, 64))).to_equal(
+            "d4d976cd28931aa0d74fe2ea17c14c15b6321b6e69520106468a2812bfc79866058d097bd7c71e1c498512f66248928f162833dce24793d7203dc2d2eabe9429"
+        )

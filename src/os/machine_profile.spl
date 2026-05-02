@@ -9,7 +9,7 @@
 # `simple sim`.
 
 use os.kernel.arch.arch_context.{Architecture}
-use os.port.simpleos_multiplatform_build.{simpleos_platform_target_by_name}
+use os.port.simpleos_multiplatform_build.{SimpleOsFirmwareContractKind, SimpleOsLaneContract, simpleos_platform_target_by_name}
 
 struct MachineProfile:
     name: text
@@ -46,92 +46,57 @@ fn machine_arch_name(arch: Architecture) -> text:
 fn machine_profile_name(profile: MachineProfile) -> text:
     profile.name
 
+fn _boot_protocol_for_lane(lane: SimpleOsLaneContract) -> text:
+    match lane.firmware_contract:
+        SimpleOsFirmwareContractKind.OpenSbi:
+            if lane.qemu_bios == "none":
+                "dtb"
+            else:
+                "opensbi"
+        SimpleOsFirmwareContractKind.RawLoader: "raw-loader"
+        SimpleOsFirmwareContractKind.UBootDtb: "u-boot-dtb"
+        SimpleOsFirmwareContractKind.LimineBios: "limine-bios"
+        SimpleOsFirmwareContractKind.LimineUefi: "limine-uefi"
+        SimpleOsFirmwareContractKind.HostedPayload: "hosted-payload"
+
 fn _shared_machine_profile(
     platform_name: text,
     profile_name: text,
     isa_display: text,
-    boot_protocol: text,
-    qemu_memory: text,
-    qemu_bios: text,
     notes: text
 ) -> MachineProfile:
     if val platform = simpleos_platform_target_by_name(platform_name):
+        val lane = platform.qemu_smoke_lane
         return MachineProfile(
             name: profile_name,
             arch: platform.arch,
             xlen: platform.bits,
             isa: isa_display,
             abi: platform.abi,
-            boot_protocol: boot_protocol,
-            entry: platform.default_entry,
-            linker_script: platform.linker_script,
+            boot_protocol: _boot_protocol_for_lane(lane),
+            entry: lane.entry,
+            linker_script: lane.linker_script,
             target_triple: platform.native_target,
-            output: platform.kernel_output,
+            output: lane.output,
             qemu_system: platform.qemu_system,
             qemu_machine: platform.qemu_machine,
             qemu_cpu: platform.qemu_cpu,
-            qemu_memory: qemu_memory,
-            qemu_bios: qemu_bios,
-            qemu_extra: [],
+            qemu_memory: lane.qemu_memory,
+            qemu_bios: lane.qemu_bios,
+            qemu_extra: lane.qemu_extra,
             qemu_serial_kind: platform.qemu_serial_kind,
             qemu_serial_base: platform.qemu_serial_base,
             console: "serial",
             oracle_path: "simple os run --arch={platform.platform_slug}",
             notes: notes
         )
-
-    val fallback_arch = if platform_name == "riscv32": Architecture.Riscv32
-        elif platform_name == "arm64": Architecture.Arm64
-        elif platform_name == "arm32": Architecture.Arm32
-        else: Architecture.Riscv64
-    val fallback_bits: i64 = if fallback_arch == Architecture.Riscv32 or fallback_arch == Architecture.Arm32: 32 else: 64
-    val fallback_qemu_system = if fallback_arch == Architecture.Riscv32: "qemu-system-riscv32"
-        elif fallback_arch == Architecture.Riscv64: "qemu-system-riscv64"
-        elif fallback_arch == Architecture.Arm64: "qemu-system-aarch64"
-        else: "qemu-system-arm"
-    val fallback_qemu_cpu = if fallback_arch == Architecture.Riscv32: "rv32"
-        elif fallback_arch == Architecture.Riscv64: "rv64"
-        elif fallback_arch == Architecture.Arm64: "cortex-a72"
-        else: "cortex-a15"
-    val fallback_serial_kind = if fallback_arch == Architecture.Riscv32 or fallback_arch == Architecture.Riscv64: "ns16550" else: "pl011"
-    val fallback_serial_base = if fallback_arch == Architecture.Riscv32 or fallback_arch == Architecture.Riscv64: 0x10000000u64 else: 0x09000000u64
-
-    MachineProfile(
-        name: profile_name,
-        arch: fallback_arch,
-        xlen: fallback_bits,
-        isa: isa_display,
-        abi: if fallback_arch == Architecture.Riscv64: "lp64d"
-            elif fallback_arch == Architecture.Riscv32: "ilp32"
-            elif fallback_arch == Architecture.Arm64: "aapcs64"
-            else: "eabihf",
-        boot_protocol: boot_protocol,
-        entry: "src/os/kernel/arch/{platform_name}/boot.spl",
-        linker_script: "src/os/kernel/arch/{platform_name}/linker.ld",
-        target_triple: "{platform_name}-unknown-none",
-        output: "build/os/simpleos_{platform_name}.elf",
-        qemu_system: fallback_qemu_system,
-        qemu_machine: "virt",
-        qemu_cpu: fallback_qemu_cpu,
-        qemu_memory: qemu_memory,
-        qemu_bios: qemu_bios,
-        qemu_extra: [],
-        qemu_serial_kind: fallback_serial_kind,
-        qemu_serial_base: fallback_serial_base,
-        console: "serial",
-        oracle_path: "simple os run --arch={platform_name}",
-        notes: notes
-    )
+    panic("unknown SimpleOS platform for machine profile: {platform_name}")
 
 fn riscv_machine_profile(platform_name: text, profile_name: text, isa_display: text) -> MachineProfile:
-    val is_rv32 = platform_name == "riscv32"
     _shared_machine_profile(
         platform_name,
         profile_name,
         isa_display,
-        if is_rv32: "dtb" else: "opensbi",
-        "128M",
-        if is_rv32: "none" else: "default",
         "Shared baremetal RISC-V profile; repo-native simulator remains pending."
     )
 
@@ -140,9 +105,6 @@ fn arm_machine_profile(platform_name: text, profile_name: text, isa_display: tex
         platform_name,
         profile_name,
         isa_display,
-        "raw-loader",
-        "128M",
-        "",
         "Shared baremetal ARM virt profile; repo-native simulator remains pending."
     )
 

@@ -134,3 +134,44 @@ fn hal_cache_invalidate_dcache_with_log(log: CacheOpLog, caps: CmoCapSnapshot, a
             cur = cur + stride as u64
     else:
         log.diagnostic_emitted = true
+
+# ============================================================================
+# Canonical trait methods — production-callable (AC-2)
+# Delegate to _with_log helpers using module-level ZICBOM_STATE + default stride.
+# ============================================================================
+
+fn current_cmo_caps() -> CmoCapSnapshot:
+    """Snapshot of current CMO capability state from module-level ZICBOM_STATE."""
+    CmoCapSnapshot(has_zicbom: ZICBOM_STATE, has_zicboz: false, has_zicbop: false)
+
+fn current_cacheline_stride() -> u32:
+    """Default cacheline stride — 64 bytes (DTB read deferred to full boot wiring)."""
+    64u32
+
+fn hal_cache_sync_icache(addr: u64, len: u64):
+    """Sync icache: cbo.flush per-line (if Zicbom) then fence.i. Delegates to _with_log."""
+    val log = make_empty_log()
+    val caps = current_cmo_caps()
+    hal_cache_sync_icache_with_log(log, caps, addr, len)
+
+fn hal_cache_clean_dcache(addr: u64, len: u64):
+    """Clean dcache: cbo.clean per-line when Zicbom=true, else diagnostic. Delegates to _with_log."""
+    val log = make_empty_log()
+    val caps = current_cmo_caps()
+    val stride = current_cacheline_stride()
+    hal_cache_clean_dcache_with_log(log, caps, addr, len, stride)
+
+fn hal_cache_invalidate_dcache(addr: u64, len: u64):
+    """Invalidate dcache: cbo.inval per-line when Zicbom=true, else diagnostic. Delegates to _with_log."""
+    val log = make_empty_log()
+    val caps = current_cmo_caps()
+    val stride = current_cacheline_stride()
+    hal_cache_invalidate_dcache_with_log(log, caps, addr, len, stride)
+
+# ============================================================================
+# AC-3: export ZICBOM state for compiler backend registry query
+# ============================================================================
+
+fn hal_cache_export_zicbom_state() -> CmoCapSnapshot:
+    """Export current CMO capability state; used by compiler backend (AC-3)."""
+    current_cmo_caps()

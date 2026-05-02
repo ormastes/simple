@@ -10,6 +10,10 @@ The generator emits both:
 
 The generated Simple file is the source-of-truth sketch for the emitted VHDL lane. That is the current sample code generation path from Simple code to FPGA-oriented RTL artifacts in this repo.
 
+Authoritative provenance:
+- each lane manifest now marks `authoritative_rtl_root` as `simple-compiler-generated`
+- debug sidecars repeat that provenance and separately label transitional emitted VHDL wrappers/support packages/testbenches
+
 ## List Supported Boards
 
 ```bash
@@ -62,6 +66,7 @@ Current logical I/O contract status for `mlk_s02_100t`:
 - the bundle also emits `board_interface_contract.sdn`
 - this records logical names such as `clk25`, `rst_n`, `uart_tx`, `uart_rx`, `led`, and `btn`
 - it is the stable non-pin-specific interface layer for future board support
+- the bundle also emits `board_linux_boot_products.sdn`, which records the per-arch UART Linux boot markers required on the board flow
 
 ## Important Boundary
 
