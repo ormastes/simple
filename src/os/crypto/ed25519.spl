@@ -309,24 +309,77 @@ fn ed_point_double(p1: EdPoint) -> EdPoint:
         t: fe_mul(e, h)
     )
 
+fn ed_point_cselect(p0: EdPoint, p1: EdPoint, choose_p1: u64) -> EdPoint:
+    """Constant-time point select: returns p1 if choose_p1=1, else p0.
+
+    Uses the XOR-mask pattern from `fe_cswap` (curve25519.spl):
+        out = a ^ (mask & (a ^ b))
+    where mask = 0 - choose_p1 (all-ones if 1, all-zeros if 0).
+
+    No branches on `choose_p1`; the same field operations execute regardless of
+    the bit value. Matches the constant-time discipline used by the Curve25519
+    Montgomery ladder. Compiler must NOT branch-fold these XOR/AND ops — they
+    are arithmetic, not compares (per the B6 memory note on CT compares).
+    """
+    val mask: u64 = 0 - choose_p1
+    EdPoint(
+        x: Fe25519(
+            l0: p0.x.l0 ^ (mask & (p0.x.l0 ^ p1.x.l0)),
+            l1: p0.x.l1 ^ (mask & (p0.x.l1 ^ p1.x.l1)),
+            l2: p0.x.l2 ^ (mask & (p0.x.l2 ^ p1.x.l2)),
+            l3: p0.x.l3 ^ (mask & (p0.x.l3 ^ p1.x.l3)),
+            l4: p0.x.l4 ^ (mask & (p0.x.l4 ^ p1.x.l4))
+        ),
+        y: Fe25519(
+            l0: p0.y.l0 ^ (mask & (p0.y.l0 ^ p1.y.l0)),
+            l1: p0.y.l1 ^ (mask & (p0.y.l1 ^ p1.y.l1)),
+            l2: p0.y.l2 ^ (mask & (p0.y.l2 ^ p1.y.l2)),
+            l3: p0.y.l3 ^ (mask & (p0.y.l3 ^ p1.y.l3)),
+            l4: p0.y.l4 ^ (mask & (p0.y.l4 ^ p1.y.l4))
+        ),
+        z: Fe25519(
+            l0: p0.z.l0 ^ (mask & (p0.z.l0 ^ p1.z.l0)),
+            l1: p0.z.l1 ^ (mask & (p0.z.l1 ^ p1.z.l1)),
+            l2: p0.z.l2 ^ (mask & (p0.z.l2 ^ p1.z.l2)),
+            l3: p0.z.l3 ^ (mask & (p0.z.l3 ^ p1.z.l3)),
+            l4: p0.z.l4 ^ (mask & (p0.z.l4 ^ p1.z.l4))
+        ),
+        t: Fe25519(
+            l0: p0.t.l0 ^ (mask & (p0.t.l0 ^ p1.t.l0)),
+            l1: p0.t.l1 ^ (mask & (p0.t.l1 ^ p1.t.l1)),
+            l2: p0.t.l2 ^ (mask & (p0.t.l2 ^ p1.t.l2)),
+            l3: p0.t.l3 ^ (mask & (p0.t.l3 ^ p1.t.l3)),
+            l4: p0.t.l4 ^ (mask & (p0.t.l4 ^ p1.t.l4))
+        )
+    )
+
 fn ed_scalar_mul(scalar: [u8], p: EdPoint) -> EdPoint:
-    """Scalar multiplication: scalar * P using double-and-add.
+    """Constant-time scalar multiplication: scalar * P (always-add-and-select).
 
     scalar: 32-byte little-endian scalar.
-    Iterates from the highest bit down to bit 0.
+
+    For every one of the 256 bits we ALWAYS execute `ed_point_add` AND
+    `ed_point_double`. The conditional branch on the scalar bit is replaced by
+    a constant-time `ed_point_cselect`. No data-dependent branch, no early
+    exit. Wall-time is ~2x the previous branching form but independent of the
+    scalar's Hamming weight. Required because callers pass the secret scalar
+    `a` (clamped seed-derived) on the sign hot path.
+
+    Fixes `doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md`.
     """
     var result = ed_point_identity()
     var q = p
 
-    # Process all 256 bits, from bit 0 up, using double-and-add
-    # (Process low to high: for each bit, if set add current Q, then double Q)
+    # Process all 256 bits, low to high: ALWAYS add (then constant-time select),
+    # ALWAYS double. No `if` on `byte_val`/`bit`.
     var byte_idx: u64 = 0
     while byte_idx < 32:
         val byte_val = scalar[byte_idx]
         var bit: u64 = 0
         while bit < 8:
-            if ((byte_val.to_u64() >> bit) & 1) == 1:
-                result = ed_point_add(p1: result, p2: q)
+            val bit_set: u64 = (byte_val.to_u64() >> bit) & 1
+            val sum = ed_point_add(p1: result, p2: q)
+            result = ed_point_cselect(p0: result, p1: sum, choose_p1: bit_set)
             q = ed_point_double(q)
             bit = bit + 1
         byte_idx = byte_idx + 1
@@ -748,8 +801,10 @@ fn _sha512_modl(data: [u8]) -> [u8]:
 # orphaned for the public API. Baremetal Ed25519 has not been re-validated
 # post-rewire.
 #
-# Constant-time note: `ed_scalar_mul` is NOT constant-time today and the
-# sign path passes the secret scalar `a` to it. Tracked in
+# Constant-time note: `ed_scalar_mul` IS constant-time as of 2026-05-01.
+# It uses an always-add-and-select inner loop with `ed_point_cselect` (XOR-mask
+# pattern, mirrors `fe_cswap` from curve25519.spl). No data-dependent branch on
+# scalar bits; runtime is independent of scalar Hamming weight. Fix tracked in
 # `doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md`.
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -790,8 +845,9 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     """
     val h = _sha512_u8(private_seed)
     val a = _ed25519_clamp(h)
-    # NOTE(constant-time): `a` is the secret scalar. `ed_scalar_mul` below
-    # is currently variable-time (timing leaks Hamming weight of `a`). See
+    # NOTE(constant-time): `a` is the secret scalar. `ed_scalar_mul` is
+    # constant-time as of 2026-05-01 (always-add-and-select), so timing does
+    # not leak Hamming weight of `a`. See
     # doc/08_tracking/bug/ed25519_scalar_mul_not_constant_time_2026-05-01.md.
 
     # prefix = h[32..64]
