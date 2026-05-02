@@ -543,6 +543,85 @@ fn simd_aes_round_last(state: Vec16u8, key: Vec16u8) -> Vec16u8:
     rt_simd_aes_round_last_u8x16(state, key)
 
 # ============================================================================
+# u64x2 Intrinsics + PCLMUL (128-bit) — Phase 3 of SIMD int intrinsics
+# (FR: doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md)
+#
+# Vec2u64 = 2 u64 lanes; maps to __m128i (x86 SSE2) / uint64x2_t (AArch64
+# NEON). The carryless multiply (PCLMUL) primitive is the inner kernel for
+# GHASH (AES-GCM authentication tag) and Polyval. Carry does NOT propagate
+# across u64 lane boundaries.
+#
+# Two pieces needed besides the PCLMUL itself: a u64x2 XOR (used by GHASH
+# accumulation) and lo/hi accessors for round-tripping product halves back
+# into Simple-side arithmetic.
+# ============================================================================
+
+"""
+2-lane u64 vector (128-bit SSE/NEON register).
+Maps to __m128i (x86) or uint64x2_t (ARM).
+Lane 0 is the low 64 bits; lane 1 is the high 64 bits — matching the
+Intel/`_mm_set_epi64x(hi, lo)` convention so that `clmul_lo` operates on
+both inputs' lane 0 and `clmul_hi` operates on both inputs' lane 1.
+"""
+struct Vec2u64:
+    lo: u64
+    hi: u64
+
+impl Vec2u64:
+    static fn new(lo: u64, hi: u64) -> Vec2u64:
+        """Create a Vec2u64 with the given low (lane 0) and high (lane 1)
+        64-bit lanes. Mirrors `_mm_set_epi64x(hi, lo)`."""
+        Vec2u64(lo: lo, hi: hi)
+
+    static fn zero() -> Vec2u64:
+        """Zero vector."""
+        Vec2u64(lo: 0, hi: 0)
+
+    fn lane_lo() -> u64:
+        """Return the low 64-bit lane (lane 0)."""
+        self.lo
+
+    fn lane_hi() -> u64:
+        """Return the high 64-bit lane (lane 1)."""
+        self.hi
+
+extern fn rt_simd_vec2u64_new(lo: u64, hi: u64) -> Vec2u64
+extern fn rt_simd_vec2u64_lo(v: Vec2u64) -> u64
+extern fn rt_simd_vec2u64_hi(v: Vec2u64) -> u64
+
+extern fn rt_simd_clmul_lo_u64(a: Vec2u64, b: Vec2u64) -> Vec2u64
+extern fn rt_simd_clmul_hi_u64(a: Vec2u64, b: Vec2u64) -> Vec2u64
+extern fn rt_simd_xor_u64x2(a: Vec2u64, b: Vec2u64) -> Vec2u64
+
+fn simd_clmul_lo_u64(a: Vec2u64, b: Vec2u64) -> Vec2u64:
+    """Carryless multiply of `a.lo` and `b.lo` (both u64), returning the
+    128-bit product as a Vec2u64 (lane 0 = low 64 bits, lane 1 = high 64
+    bits of the product). Matches Intel `_mm_clmulepi64_si128(a, b, 0x00)`.
+
+    This is the GF(2)[x] polynomial multiplication primitive used by
+    GHASH (AES-GCM authentication) and Polyval. Carry does NOT propagate
+    in carryless multiplication — every output bit is an XOR of selected
+    AND products of input bits.
+    """
+    rt_simd_clmul_lo_u64(a, b)
+
+fn simd_clmul_hi_u64(a: Vec2u64, b: Vec2u64) -> Vec2u64:
+    """Carryless multiply of `a.hi` and `b.hi` (both u64), returning the
+    128-bit product as a Vec2u64. Matches Intel
+    `_mm_clmulepi64_si128(a, b, 0x11)`.
+
+    See `simd_clmul_lo_u64` for the GF(2)[x] semantics.
+    """
+    rt_simd_clmul_hi_u64(a, b)
+
+fn simd_xor_u64x2(a: Vec2u64, b: Vec2u64) -> Vec2u64:
+    """Bitwise XOR of two 2-lane u64 vectors. Maps to `_mm_xor_si128`
+    on x86_64 SSE2 and `veorq_u64` on AArch64 NEON. Used to accumulate
+    GHASH/Polyval products into a running 128-bit state.
+    """
+    rt_simd_xor_u64x2(a, b)
+
+# ============================================================================
 # Horizontal Operations
 # ============================================================================
 
