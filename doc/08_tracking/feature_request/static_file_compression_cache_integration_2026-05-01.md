@@ -1,5 +1,11 @@
 # Feature Request: Wire StaticCompressionCache into StaticFileHandler.handle()
 
+**Status: LANDED 2026-05-01** — `StaticFileHandler.handle()` now consults a
+default-constructed `StaticCompressionCache` for files <= 64 KiB; cache miss
+compresses + stores, cache hit serves bytes with `Content-Encoding` + `Vary:
+Accept-Encoding`, and any compression `Err` falls back to plain identity.
+Integration spec: `test/unit/lib/nogc_async_mut/http_server/static_file_compression_cache_spec.spl` (7/7 passing).
+
 **Date:** 2026-05-01
 **Status:** Pending — cache class shipped, integration deferred.
 
