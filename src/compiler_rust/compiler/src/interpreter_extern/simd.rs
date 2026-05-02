@@ -651,14 +651,18 @@ pub fn rt_simd_aes_round_last_u8x16(args: &[Value]) -> Result<Value, CompileErro
 // SIMD Phase 3 — Vec2u64 + PCLMUL (carryless multiply for GHASH/Polyval)
 // ---------------------------------------------------------------------------
 
-/// Coerce a `Value` argument into a `u64`. Accepts both `Value::UInt`
-/// (any width up to 64) and `Value::Int` (treats the i64 bit pattern as
-/// the u64 lane content for round-trip semantics with the `lane_lo` /
-/// `lane_hi` accessors).
+/// Coerce a `Value` argument into a `u64`. Accepts:
+/// - `Value::UInt { value, .. }` — direct u64 storage.
+/// - `Value::Int(i)` — treats the i64 bit pattern as the u64 lane content
+///   for round-trip semantics with the `lane_lo` / `lane_hi` accessors.
+/// - `Value::Unit { value, .. }` — Simple suffix-typed numeric literals
+///   like `0x1234u64` parse into a Unit wrapper around an inner Int/UInt;
+///   we unwrap recursively.
 fn require_u64_value(name: &str, value: &Value) -> Result<u64, CompileError> {
     match value {
         Value::UInt { value, .. } => Ok(*value),
         Value::Int(i) => Ok(*i as u64),
+        Value::Unit { value, .. } => require_u64_value(name, value.as_ref()),
         other => Err(CompileError::runtime(format!(
             "{name}: expected u64-compatible numeric value, got {:?}",
             other
