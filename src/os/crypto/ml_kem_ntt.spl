@@ -1,0 +1,338 @@
+# ML-KEM-768 — Polynomial Arithmetic + NTT (FIPS 203 Algorithms 4–10)
+#
+# Module-Lattice-Based Key-Encapsulation Mechanism Standard (NIST FIPS 203,
+# August 2024). This file provides the Z_q[X]/(X^256+1) ring arithmetic that
+# K-PKE and the ML-KEM IND-CCA wrapper build on, plus the NTT machinery,
+# coefficient compression / decompression, and serialization.
+#
+# Parameter set: ML-KEM-768 (security category 3)
+#   n  = 256       — polynomial degree
+#   q  = 3329      — prime modulus  ( = 2^8 · 13 + 1)
+#   k  = 3         — module rank (matrix A is k×k)
+#   η1 = 2, η2 = 2 — CBD width for s, e and r, e1, e2
+#   du = 10, dv = 4— ciphertext compression widths
+#
+# This file deliberately covers ONLY ring/encoding primitives — sponge,
+# matrix sampling, K-PKE, FO-transform live in ml_kem_kpke.spl and ml_kem.spl.
+#
+# Reference: NIST FIPS 203 — Module-Lattice-Based Key-Encapsulation Mechanism
+#            Standard, https://csrc.nist.gov/pubs/fips/203/final
+#
+# Related: doc/08_tracking/crypto_recovery_status.md M5 (post-quantum).
+
+mod os.crypto.ml_kem_ntt
+
+# ============================================================================
+# Parameters (FIPS 203 §2.3 Table 1)
+# ============================================================================
+
+fn ml_kem_n() -> i64:
+    256
+
+fn ml_kem_q() -> i64:
+    3329
+
+fn ml_kem_k_768() -> i64:
+    3
+
+fn ml_kem_eta1_768() -> i64:
+    2
+
+fn ml_kem_eta2_768() -> i64:
+    2
+
+fn ml_kem_du_768() -> i64:
+    10
+
+fn ml_kem_dv_768() -> i64:
+    4
+
+# ============================================================================
+# Modular reduction helpers (Z_q with q = 3329)
+# ============================================================================
+
+# Reduce x to [0, q). Handles negative x. Caller-side discipline keeps
+# intermediates within ±2^31, so a simple `((x % q) + q) % q` is safe.
+fn modq(x: i64) -> i64:
+    val q = ml_kem_q()
+    val r = x % q
+    if r < 0:
+        r + q
+    else:
+        r
+
+# ============================================================================
+# Zeta tables for NTT — primitive 256th root of unity mod q (FIPS 203 §4.3)
+# ============================================================================
+#
+# ζ = 17 is a primitive 256-th root of unity mod q = 3329.
+# zetas_ntt[i] = ζ^(BitRev7(i)) mod q, for i in 1..127, used by forward NTT
+# (Algorithm 9). The conventional FIPS 203 table is reproduced below.
+# zetas_ntt[0] is unused (loop starts at i=1).
+
+fn _ntt_zetas() -> list:
+    [
+           1, 1729, 2580, 3289, 2642,  630, 1897,  848,
+        1062, 1919,  193,  797, 2786, 3260,  569, 1746,
+         296, 2447, 1339, 1476, 3046,   56, 2240, 1333,
+        1426, 2094,  535, 2882, 2393, 2879, 1974,  821,
+         289,  331, 3253, 1756, 1197, 2304, 2277, 2055,
+         650, 1977, 2513,  632, 2865,   33, 1320, 1915,
+        2319, 1435,  807,  452, 1438, 2868, 1534, 2402,
+        2647, 2617, 1481,  648, 2474, 3110, 1227,  910,
+          17, 2761,  583, 2649, 1637,  723, 2288, 1100,
+        1409, 2662, 3281,  233,  756, 2156, 3015, 3050,
+        1703, 1651, 2789, 1789, 1847,  952, 1461, 2687,
+         939, 2308, 2437, 2388,  733, 2337,  268,  641,
+        1584, 2298, 2037, 3220,  375, 2549, 2090, 1645,
+        1063,  319, 2773,  757, 2099,  561, 2466, 2594,
+        2804, 1092,  403, 1026, 1143, 2150, 2775,  886,
+        1722, 1212, 1874, 1029, 2110, 2935,  885, 2154
+    ]
+
+# ============================================================================
+# Forward NTT — FIPS 203 Algorithm 9 (NTT)
+# ============================================================================
+#
+# Input: f in Z_q^256 (a list of 256 coefficients).
+# Output: f̂ in NTT domain (256 coefficients, but interpreted as 128 pairs of
+#         degree-1 polys mod (X^2 - ζ^(2·BitRev7(i)+1))).
+#
+# In-place butterfly with ascending power-of-two layers; uses the precomputed
+# zetas table indexed by `k` which advances 1..128.
+
+fn ntt(f_in: list) -> list:
+    val q = ml_kem_q()
+    val zetas = _ntt_zetas()
+    var f = []
+    var i = 0
+    while i < 256:
+        f.push(f_in.get(i))
+        i = i + 1
+
+    var k = 1
+    var len = 128
+    while len >= 2:
+        var start = 0
+        while start < 256:
+            val zeta = zetas.get(k)
+            k = k + 1
+            var j = start
+            while j < start + len:
+                val t = (zeta * f.get(j + len)) % q
+                val fj = f.get(j)
+                f[j + len] = modq(fj - t)
+                f[j] = modq(fj + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    f
+
+# ============================================================================
+# Inverse NTT — FIPS 203 Algorithm 10 (NTT⁻¹)
+# ============================================================================
+#
+# Input: f̂ in NTT domain. Output: f in coefficient domain.
+# Walks zetas in reverse and finishes with the multiplicative scale 3303
+# (= n^{-1} mod q for n=256).
+
+fn intt(f_in: list) -> list:
+    val q = ml_kem_q()
+    val zetas = _ntt_zetas()
+    var f = []
+    var i = 0
+    while i < 256:
+        f.push(f_in.get(i))
+        i = i + 1
+
+    var k = 127
+    var len = 2
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            val zeta = zetas.get(k)
+            k = k - 1
+            var j = start
+            while j < start + len:
+                val t = f.get(j)
+                val fjl = f.get(j + len)
+                f[j] = modq(t + fjl)
+                # Multiply (fjl - t) by zeta in Z_q.
+                f[j + len] = modq((zeta * modq(fjl - t)))
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+
+    # Multiplicative scale by n^{-1} mod q. n = 256, n^{-1} mod 3329 = 3303.
+    var idx = 0
+    while idx < 256:
+        f[idx] = (f.get(idx) * 3303) % q
+        idx = idx + 1
+    f
+
+# ============================================================================
+# Pointwise multiplication in NTT domain — FIPS 203 Algorithm 11
+# ============================================================================
+#
+# In NTT domain, ML-KEM polynomials live mod (X^2 - γ_i) for 128 values of γ.
+# γ_i = ζ^(2·BitRev7(i)+1). The product of (a0 + a1·X) and (b0 + b1·X) mod
+# (X^2 - γ_i) is c0 + c1·X with:
+#   c0 = a0·b0 + γ_i·a1·b1
+#   c1 = a0·b1 + a1·b0
+# γ table is the ζ^(odd-BitRev7-index) values; we reuse the NTT zeta table at
+# offsets 64..127 (these are exactly the γ_i needed).
+
+fn _ntt_gammas() -> list:
+    # γ_i = ζ^(2·BitRev7(i)+1) mod q for i in 0..127. From FIPS 203 §4.3.4.
+    [
+          17, 3312, 2761,  568,  583, 2746, 2649,  680,
+        1637, 1692,  723, 2606, 2288, 1041, 1100, 2229,
+        1409, 1920, 2662,  667, 3281,   48,  233, 3096,
+         756, 2573, 2156, 1173, 3015,  314, 3050,  279,
+        1703, 1626, 1651, 1678, 2789,  540, 1789, 1540,
+        1847, 1482,  952, 2377, 1461, 1868, 2687,  642,
+         939, 2390, 2308, 1021, 2437,  892, 2388,  941,
+         733, 2596, 2337,  992,  268, 3061,  641, 2688,
+        1584, 1745, 2298, 1031, 2037, 1292, 3220,  109,
+         375, 2954, 2549,  780, 2090, 1239, 1645, 1684,
+        1063, 2266,  319, 3010, 2773,  556,  757, 2572,
+        2099, 1230,  561, 2768, 2466,  863, 2594,  735,
+        2804,  525, 1092, 2237,  403, 2926, 1026, 2303,
+        1143, 2186, 2150, 1179, 2775,  554,  886, 2443,
+        1722, 1607, 1212, 2117, 1874, 1455, 1029, 2300,
+        2110, 1219, 2935,  394,  885, 2444, 2154, 1175
+    ]
+
+fn ntt_multiply(a: list, b: list) -> list:
+    val q = ml_kem_q()
+    val gammas = _ntt_gammas()
+    var c = []
+    var i = 0
+    while i < 256:
+        c.push(0)
+        i = i + 1
+
+    var k = 0
+    while k < 128:
+        val a0 = a.get(2 * k)
+        val a1 = a.get(2 * k + 1)
+        val b0 = b.get(2 * k)
+        val b1 = b.get(2 * k + 1)
+        val gamma = gammas.get(k)
+        val c0 = ((a0 * b0) % q + (gamma * ((a1 * b1) % q)) % q) % q
+        val c1 = ((a0 * b1) % q + (a1 * b0) % q) % q
+        c[2 * k] = modq(c0)
+        c[2 * k + 1] = modq(c1)
+        k = k + 1
+    c
+
+# Add two NTT-domain (or coefficient-domain — same op) polys.
+fn poly_add(a: list, b: list) -> list:
+    val q = ml_kem_q()
+    var c = []
+    var i = 0
+    while i < 256:
+        c.push((a.get(i) + b.get(i)) % q)
+        i = i + 1
+    c
+
+# Subtract a - b mod q.
+fn poly_sub(a: list, b: list) -> list:
+    val q = ml_kem_q()
+    var c = []
+    var i = 0
+    while i < 256:
+        c.push(modq(a.get(i) - b.get(i)))
+        i = i + 1
+    c
+
+# ============================================================================
+# Compress_d / Decompress_d — FIPS 203 Algorithms 4 & 5
+# ============================================================================
+#
+# Compress_d(x) = round((2^d / q) · x) mod 2^d
+#               = floor((2^d · x + q/2) / q) mod 2^d
+# Decompress_d(y) = round((q / 2^d) · y)
+#                 = floor((q · y + 2^(d-1)) / 2^d)
+#
+# Both operate coefficient-wise on a polynomial.
+
+fn compress_coeff(x: i64, d: i64) -> i64:
+    val q = ml_kem_q()
+    val two_d = 1 << d
+    # (x · 2^d + q/2) / q  with x already in [0, q).
+    val num = x * two_d + (q / 2)
+    (num / q) % two_d
+
+fn decompress_coeff(y: i64, d: i64) -> i64:
+    val q = ml_kem_q()
+    val two_d = 1 << d
+    val half = 1 << (d - 1)
+    (q * y + half) / two_d
+
+fn compress_poly(p: list, d: i64) -> list:
+    var out = []
+    var i = 0
+    while i < 256:
+        out.push(compress_coeff(p.get(i), d))
+        i = i + 1
+    out
+
+fn decompress_poly(p: list, d: i64) -> list:
+    var out = []
+    var i = 0
+    while i < 256:
+        out.push(decompress_coeff(p.get(i), d))
+        i = i + 1
+    out
+
+# ============================================================================
+# ByteEncode_d / ByteDecode_d — FIPS 203 Algorithms 6 & 7
+# ============================================================================
+#
+# ByteEncode_d packs 256 coefficients (each in [0, 2^d)) into 32·d bytes by
+# writing each coefficient little-endian into a bit stream, low bit first.
+# ByteDecode_d is the inverse.
+#
+# Used in three contexts in ML-KEM:
+#   d = 12 — uncompressed mod-q values (NTT-domain polys in ek/dk)
+#   d = du — compressed u (10 for ML-KEM-768)
+#   d = dv — compressed v (4  for ML-KEM-768)
+# d = 1 also valid (compressed message bit).
+
+fn byte_encode(p: list, d: i64) -> list:
+    var out = []
+    var bit_buf = 0
+    var bit_count = 0
+    var i = 0
+    while i < 256:
+        val coeff = p.get(i)
+        bit_buf = bit_buf | ((coeff & ((1 << d) - 1)) << bit_count)
+        bit_count = bit_count + d
+        while bit_count >= 8:
+            out.push(bit_buf & 0xFF)
+            bit_buf = bit_buf >> 8
+            bit_count = bit_count - 8
+        i = i + 1
+    # 256·d is a multiple of 8 for all d in {1,4,5,10,11,12}, so bit_count is 0
+    # at the end. (For d not a multiple-friendly value we'd flush a partial.)
+    out
+
+fn byte_decode(bytes: list, d: i64) -> list:
+    var out = []
+    var bit_buf = 0
+    var bit_count = 0
+    var byte_i = 0
+    var coeff_count = 0
+    val mask_d = (1 << d) - 1
+    while coeff_count < 256:
+        while bit_count < d:
+            val b = bytes.get(byte_i) & 0xFF
+            bit_buf = bit_buf | (b << bit_count)
+            bit_count = bit_count + 8
+            byte_i = byte_i + 1
+        out.push(bit_buf & mask_d)
+        bit_buf = bit_buf >> d
+        bit_count = bit_count - d
+        coeff_count = coeff_count + 1
+    out
