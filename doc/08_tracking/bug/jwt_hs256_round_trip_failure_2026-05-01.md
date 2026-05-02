@@ -1,8 +1,10 @@
 # Bug: JWT HS256 sign-then-verify round-trip fails despite RFC 7515 A.1 byte-match passing
 
-- **Date:** 2026-05-01
-- **Status:** Open
-- **Module:** `src/lib/common/jwt/sign.spl` + `src/lib/common/jwt/encode.spl` + `src/lib/common/jwt/mod.spl`
+**Status: ROOT CAUSE IDENTIFIED 2026-05-01 — interpreter bug in cross-module `Result<text, text>` Ok-arm pattern dispatch; tracked in [`interpreter_match_ok_arm_text_type_lookup_2026-05-01.md`](interpreter_match_ok_arm_text_type_lookup_2026-05-01.md). JWT crypto is correct.**
+
+- **Date filed:** 2026-05-01
+- **Status:** Re-routed to interpreter bug (not a JWT bug). See root-cause section at bottom.
+- **Module:** ~~`src/lib/common/jwt/sign.spl` + `src/lib/common/jwt/encode.spl` + `src/lib/common/jwt/mod.spl`~~ — JWT sources are correct; root cause is in `src/compiler_rust/compiler/src/interpreter/`.
 - **Found by:** Agent AA's JWT spec — `test/unit/lib/common/jwt_spec.spl` — uncommitted
 
 ## Symptom
@@ -70,11 +72,71 @@ Should produce 10 pass + 2 fail (REQ-JWT-005 and REQ-JWT-006).
 
 ## Resolution path
 
-1. Read `src/lib/common/jwt/sign.spl::jwt_sign_hs256` and `jwt_verify_hs256` side-by-side.
-2. Trace what `signing_input` each function produces for the same JWT.
-3. Verify that the HMAC the verify function computes matches the HMAC the sign function would compute on the same input.
-4. The bug is almost certainly in `jwt_verify_hs256` — REQ-JWT-007 proves the verify function does *something* sensible with HMAC; the bug is a self-recompute mismatch.
-5. Fix and re-run; expected 12/12 green.
+~~1. Read `src/lib/common/jwt/sign.spl::jwt_sign_hs256` and `jwt_verify_hs256` side-by-side.~~ — done; sign and verify are byte-correct.
+~~2. Trace what `signing_input` each function produces for the same JWT.~~ — done; identical.
+~~3. Verify that the HMAC the verify function computes matches the HMAC the sign function would compute on the same input.~~ — done; `verify1.spl` standalone reproducer (see root-cause section) proves verify reaches the `Ok(payload)` return; the post-return `match` in the consumer is what raises.
+~~4. The bug is almost certainly in `jwt_verify_hs256`~~ — disproved.
+~~5. Fix and re-run; expected 12/12 green.~~ — depends on interpreter fix.
+
+## Root cause (added 2026-05-01)
+
+The "round-trip failure" is a surface symptom of an interpreter bug, not a JWT bug. JWT signing and verification are correct.
+
+### Evidence
+
+1. **`jwt_verify_hs256` returns `Ok(payload)` for a freshly-signed token.** Standalone reproducer `/tmp/jwt_diag/verify1.spl`:
+
+   ```spl
+   use std.common.jwt.sign.{jwt_sign_hs256, jwt_verify_hs256}
+   fn main():
+       var key: [u8] = []
+       var i = 0
+       while i < 32:
+           key.push(((i * 7 + 13) % 256).to_u8())
+           i = i + 1
+       val payload = "{\"sub\":\"1234\",\"role\":\"admin\"}"
+       val compact = jwt_sign_hs256(payload, key)
+       print("compact=" + compact)
+       val r = jwt_verify_hs256(compact, key)
+       match r:
+           Ok(p): print("OK payload=" + p)
+           Err(e): print("ERR " + e)
+   ```
+
+   Output:
+   ```
+   compact=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0Iiwicm9sZSI6ImFkbWluIn0.i3mghMwve4RRGqvEkGHsWdIwCtLObOUytunnGd8li-E
+   error: semantic: variable `text` not found
+   ```
+
+   The compact JWT prints — i.e., sign succeeded. The error is raised when the `match` dispatches the `Ok` arm.
+
+2. **The `Err` arm of the same match works fine.** Forcing verify to return `Err` (tampered token) — the existing REQ-JWT-007 — passes. Confirmed in fresh repro `/tmp/jwt_diag/diag4_spec.spl`.
+
+3. **`Ok(_)` vs `Ok(p)` is irrelevant — both fail.** Repro `/tmp/jwt_diag/diag5_spec.spl` (no binding) also raises `variable 'text' not found`.
+
+4. **Same-module `Result<text, text>` works.** `/tmp/jwt_diag/verify2.spl` defines `fn _t(r: Result<text, text>) -> text` and matches `Ok(p) -> return p` successfully.
+
+5. **REQ-JWT-009 (RS256) and REQ-JWT-010 (ES256) "pass" only because they hit the Err arm** — both pass `empty_pkcs8: [u8] = []` so the sign returns `Err(...)`. The Ok arm's body (`expect(true).to_equal(true)`) is never executed. They do not actually exercise round-trips.
+
+### Why this looked like a JWT bug
+
+- The failure surfaces inside the test framework around a JWT call, with the test labelled "HS256 sign-then-verify round-trip."
+- `Ok(...)` is selected only when the JWT is valid, so the bug correlates 1:1 with a successful verify — looking exactly like a verify-rejects-valid-tokens bug.
+- REQ-JWT-007 (tampered) and REQ-JWT-012 (non-JWT) pass because they're guaranteed to take the `Err` arm.
+
+### Tracking
+
+Filed as: [`interpreter_match_ok_arm_text_type_lookup_2026-05-01.md`](interpreter_match_ok_arm_text_type_lookup_2026-05-01.md).
+
+Suspected interpreter sites:
+- `src/compiler_rust/compiler/src/interpreter/expr/literals.rs:327` — the only `format!("variable \`{}\` not found", ...)` site reachable from identifier evaluation in `literals.rs`.
+- `src/compiler_rust/compiler/src/interpreter/expr/control.rs::exec_match_expr` — the variant pattern-match path likely evaluates the type argument `text` of the `Ok<text>` constructor as an identifier in the consumer scope.
+
+### What this changes for `test/unit/lib/common/jwt_spec.spl`
+
+- The spec is **diagnostically correct** — REQ-JWT-005 and REQ-JWT-006 surface a real bug, just not the one named in the test. Do not modify the spec to mask the failure.
+- The spec cannot land 12/12 green until the interpreter bug is fixed. Per "NEVER skip failing tests without approval," the spec is being held until then. Do not add `skip()`. Do not change `jwt_verify_hs256`'s return type to `bool` or `(bool, text)` to dodge the interpreter bug — that's the monkey-patch the project rules forbid.
 
 ## Cross-references
 
