@@ -1,5 +1,7 @@
 # Agent Task Breakdown — `common_compression_framework`
 
+**Encoder seed (uncompressed-only) LANDED 2026-05-01** — full LZ77+Huffman compressed encoder deferred. `brotli_encode_uncompressed([u8]) -> [u8]` lives in `src/lib/nogc_sync_mut/compression/brotli/encoder.spl` with `bit_writer.spl` mirror; round-trip verified through existing decoder via `test/unit/lib/nogc_sync_mut/compression/brotli_encoder_seed_spec.spl` (5/5 specs).
+
 This task split assumes multiple spawned workers operating in parallel while preserving the pure-Simple constraint. Each worker owns code/tests in its lane, rebases frequently, and does not fork new Rust/runtime feature work.
 
 ## Current Status (2026-05-01)
