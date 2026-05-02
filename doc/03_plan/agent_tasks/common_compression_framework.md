@@ -18,7 +18,7 @@ Latest verify report (`doc/09_report/verify_common_compression_framework.md`) is
 ### Outstanding FAIL/WARN surface (5/5)
 
 - **FAIL** `src/lib/common/compress/mod.spl:49` — façade still rejects Zstd encode levels other than `3`, dictionaries for all codecs, and `checksum=false` for XZ/LZMA2 encode.
-- **FAIL** `src/lib/common/compress/zstd.spl:324` — compressed-block decode still rejects non-RLE sequence tables.
+- **FAIL** `src/lib/common/compress/zstd.spl:324` — compressed-block decode still rejects non-RLE sequence tables. **[2026-05-01 W6 audit: cited line is stale — `_zstd_parse_single_sequence_table` (zstd.spl:367) already handles modes 0/1/2/3; the original line-324 stub `_zstd_parse_rle_sequence_tables` (zstd.spl:352) is unreachable dead code. The deeper FAIL on the live FSE-state path could not be empirically re-measured because of a brand-new compiler regression — `Value::UInt` missing method dispatch — that broke EVERY zstd spec including W5-E's previously 6/6 PASS `zstd_fse_weights_spec.spl`. Tracked at `doc/08_tracking/bug/interpreter_uint_method_dispatch_2026-05-01.md`. Status remains FAIL conservatively.]**
 - **FAIL** `src/lib/common/compress/zstd.spl:704` — FSE-compressed Huffman-weight decode mis-decodes real-world fixtures (M's Kraft bug, OPEN multi-day).
 - **FAIL** `doc/02_requirements/feature/common_compression_framework.md:30` — REQ-030 still overstates forced-tier parity closure.
 - **FAIL** `doc/02_requirements/nfr/common_compression_framework.md:11` — NFR-011 still overstates end-to-end verification closure.

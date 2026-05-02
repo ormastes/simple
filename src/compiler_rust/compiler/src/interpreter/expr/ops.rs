@@ -667,7 +667,18 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::Div => {
-                    if use_float {
+                    if use_f32 {
+                        let r = as_f32(&right_val)?;
+                        if r == 0.0 {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::DIVISION_BY_ZERO)
+                                .with_help("cannot divide by zero")
+                                .with_note("check that the divisor is not zero before division");
+                            Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
+                        } else {
+                            Ok(Value::Float32(as_f32(&left_val)? / r))
+                        }
+                    } else if use_float {
                         let r = right_val.as_float()?;
                         if r == 0.0 {
                             // E3001 - Division By Zero
@@ -705,7 +716,18 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 BinOp::Mod => {
-                    if use_float {
+                    if use_f32 {
+                        let r = as_f32(&right_val)?;
+                        if r == 0.0 {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::DIVISION_BY_ZERO)
+                                .with_help("cannot perform modulo by zero")
+                                .with_note("check that the divisor is not zero before modulo operation");
+                            Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
+                        } else {
+                            Ok(Value::Float32(as_f32(&left_val)? % r))
+                        }
+                    } else if use_float {
                         let r = right_val.as_float()?;
                         if r == 0.0 {
                             // E3001 - Division By Zero (includes modulo)
@@ -914,7 +936,9 @@ pub(super) fn eval_op_expr(
                     Ok(Value::Bool(combined))
                 }
                 BinOp::Pow => {
-                    if use_float {
+                    if use_f32 {
+                        Ok(Value::Float32(as_f32(&left_val)?.powf(as_f32(&right_val)?)))
+                    } else if use_float {
                         Ok(Value::Float(left_val.as_float()?.powf(right_val.as_float()?)))
                     } else {
                         let base = left_val.as_int()?;
@@ -1277,8 +1301,10 @@ pub(super) fn eval_op_expr(
 
             let result = match op {
                 UnaryOp::Neg => {
-                    // Preserve float type for negation
-                    if matches!(val, Value::Float(_)) {
+                    // Preserve float type for negation (Float32 stays f32)
+                    if let Value::Float32(f) = val {
+                        Value::Float32(-f)
+                    } else if matches!(val, Value::Float(_)) {
                         Value::Float(-val.as_float()?)
                     } else if let Some(result) =
                         try_dunder_unaryop("__neg__", &val, env, functions, classes, enums, impl_methods)
