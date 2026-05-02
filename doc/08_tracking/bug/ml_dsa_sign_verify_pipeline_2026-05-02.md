@@ -10,22 +10,28 @@ omega + k = 32 + 5*640 + 55 + 6 = 3293 bytes), but the corresponding
 `ml_dsa_verify_65` rejects the signature on a ~80s smoke run with
 `xi = [0..31]`, `msg = [0x42; 16]`, `rnd = [0; 32]`.
 
-## Root-cause hypotheses (in decreasing likelihood)
+## Root-cause hypotheses (in decreasing likelihood, post-review 2026-05-02)
 
-1. **Hint pack/unpack ordering** — `_hint_pack` writes nonzero indices into a
-   single shared `omega`-byte buffer with cumulative-count bytes; the unpack
-   loop assumes the same convention but may be reading the cumulative byte off
-   by one. The FIPS 204 §B encoding writes per-poly-segment cumulative counts;
-   sign and verify must agree on whether `counts[k]` is the index of the
-   *next* free slot or the index of the *last filled* slot.
+1. **`sample_in_ball` byte-stream refresh** — when the initial 264-byte
+   SHAKE-256 output runs out of usable indices, the implementation calls
+   `shake256(seed, 512)` again with the *same* seed, which re-emits the same
+   first 264 bytes plus 248 new ones.  This means the loop sees the same
+   already-rejected bytes a second time before reaching genuinely new data.
+   For the rare case where the seed yields many high-byte values, this can
+   loop or pick a different distribution than the FIPS 204 reference.  Fix:
+   advance the SHAKE-256 sponge state across refresh, or generate a single
+   long stream up front (e.g., 8 + 1024 bytes) and never refresh.
 2. **`make_hint_poly` polarity on negative-z input** — the per-coefficient
-   round-trip is unit-tested green, but the signed `-c·t0` first argument may
-   be wrapping into Z_q before MakeHint, breaking `r0 > 0` vs `r0 ≤ 0` arm
-   selection in UseHint.
-3. **w1 encoding bit width** — sign and verify both pack `w1` at 4 bits per
-   coefficient via `simple_bit_pack(w1, 4)`. r1 ∈ [0, 16) per the validated
-   `Decompose r1 lies in [0, 16)` invariant in ml_dsa_65_spec.spl, so 4 bits
-   suffices. Verified.
+   round-trip is unit-tested green for centred z, but the signed `-c·t0`
+   first argument is reduced via `_vec_sub(_poly_vec_zero(k), ct0_coeff)`
+   which lands in [0, q).  MakeHint then receives it as a positive Z_q
+   element rather than a centred negative.  Verify whether MakeHint's
+   `HighBits(r) != HighBits(r+z)` test agrees with sign's intent.
+
+**Eliminated as hypotheses**: hint pack/unpack ordering (cross-checked
+against FIPS 204 §B.4 HintBitPack/Unpack — sign and verify use matching
+cumulative-count semantics); w1 encoding bit width (r1 ∈ [0, 16) under
+validated `Decompose r1 lies in [0, 16)` invariant, 4 bits suffices).
 
 ## What works (validated by `test/unit/lib/crypto/ml_dsa_65_spec.spl`)
 

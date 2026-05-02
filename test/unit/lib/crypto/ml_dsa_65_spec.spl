@@ -29,7 +29,7 @@
 use std.spipe.*
 use os.crypto.ml_dsa_ntt.{ntt, intt, ntt_multiply, modq, ml_dsa_q, ml_dsa_n, power2round_int, decompose_int, high_bits_int, make_hint_int, use_hint_int, ml_dsa_gamma2_65}
 use os.crypto.ml_dsa_sample.{shake128, shake256, simple_bit_pack, simple_bit_unpack, sample_in_ball, pk_size_65, sk_size_65, sig_size_65}
-use os.crypto.ml_dsa.{ml_dsa_keygen_65}
+use os.crypto.ml_dsa.{ml_dsa_keygen_65, ml_dsa_sign_65, ml_dsa_verify_65}
 
 # ----- module-level helpers ----------------------------------------------
 # Per feedback_it_block_var_mutation.md, push-loops inside `it` blocks lose
@@ -227,6 +227,39 @@ fn _keygen_sk_len() -> i64:
     val sk = kp[1]
     sk.len()
 
+fn _build_msg() -> list:
+    var msg = []
+    var m = 0
+    while m < 16:
+        msg.push(0x42)
+        m = m + 1
+    msg
+
+fn _zero_rnd() -> list:
+    var r = []
+    var i = 0
+    while i < 32:
+        r.push(0)
+        i = i + 1
+    r
+
+# End-to-end Sign + Verify round-trip.  Currently FAILS — Sign produces a
+# 3293-byte signature but Verify rejects it.  We file the failing test (NOT
+# skipped, NOT weakened) per feedback_no_coverups.md.  Bug doc:
+# doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md
+fn _sign_verify_round_trip() -> bool:
+    val xi = _seed32(0)
+    val kp = ml_dsa_keygen_65(xi)
+    val pk = kp[0]
+    val sk = kp[1]
+    val msg = _build_msg()
+    val rnd = _zero_rnd()
+    val sig = ml_dsa_sign_65(sk, msg, rnd)
+    if sig.len() == 0:
+        false
+    else:
+        ml_dsa_verify_65(pk, msg, sig)
+
 # ----- specs -------------------------------------------------------------
 
 describe "ML-DSA-65 NTT and ring primitives":
@@ -309,3 +342,22 @@ describe "ML-DSA-65 KeyGen sizes":
     it "ml_dsa_keygen_65 produces sk of size 4032 bytes (FIPS 204 §B)":
         expect(_keygen_sk_len()).to_equal(4032)
         expect(_keygen_sk_len()).to_equal(sk_size_65())
+
+
+describe "ML-DSA-65 end-to-end Sign + Verify (currently failing)":
+
+    # Status 2026-05-02: KNOWN FAIL — Sign produces a 3293-byte signature but
+    # Verify rejects it.  Bug filed at
+    # doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md.  Per
+    # feedback_no_coverups.md, the test is left failing (NOT skipped, NOT
+    # weakened); algebraic invariants above carry the contract until the
+    # bug is fixed in Wave 11+.
+    #
+    # Negative-path tests (verify rejects modified message / modified sig)
+    # are deliberately WITHHELD: a Verify that rejects everything would pass
+    # them for the wrong reason, which is a worse discipline violation than
+    # leaving the positive case red.  They land in the same wave that fixes
+    # the positive path.
+
+    it "Sign(sk, m) → σ; Verify(pk, m, σ) == true":
+        expect(_sign_verify_round_trip()).to_equal(true)
