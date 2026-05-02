@@ -29,7 +29,7 @@ pub fn handle_int_methods(
         "is_even" => Value::Bool(n % 2 == 0),
         "is_odd" => Value::Bool(n % 2 != 0),
         "to_float" | "to_f64" => Value::Float(n as f64),
-        "to_f32" => Value::Float(n as f32 as f64),
+        "to_f32" => Value::Float32(n as f32),
         "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
             // Strip "to_" prefix -> numeric type name. Reuse the same cast
             // rules as `expr as <T>` so behavior is consistent.
@@ -267,7 +267,7 @@ pub fn handle_float_methods(
         "is_finite" => Value::Bool(f.is_finite()),
         "to_int" | "truncate" => Value::Int(f.trunc() as i64),
         "to_f64" => Value::Float(f),
-        "to_f32" => Value::Float(f as f32 as f64),
+        "to_f32" => Value::Float32(f as f32),
         "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
             let tname = &method[3..];
             let nt = NumericType::from_name(tname).expect("handled by match arm above");
