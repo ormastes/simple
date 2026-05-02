@@ -1,7 +1,7 @@
 # Bug: HMAC-SHA-512 disagrees with RFC reference vectors
 
 - **Date filed:** 2026-05-01
-- **Status:** Open (pre-existing — surfaced while wiring PBKDF2 unit tests)
+- **Status: FIXED 2026-05-01 — root cause: bug-doc typo (compared `"passwd"` impl output against the reference vector for `"password"`); HMAC-SHA-512 / SHA-512 implementations verified correct against draft-josefsson-pbkdf2-test-vectors-00 §3 and Python `hashlib.pbkdf2_hmac("sha512", ...)`.**
 - **Module:** `src/lib/common/crypto/hmac.spl::hmac_sha512_bytes`
 - **Surfaced by:** `test/unit/lib/crypto/pbkdf2_industry_vectors_spec.spl`
   (PBKDF2-HMAC-SHA-512 TC1 was added today and fails).
@@ -64,3 +64,40 @@ fn main():
 - `src/lib/common/crypto/hmac.spl::hmac_sha512_bytes` — wrapper.
 - `doc/08_tracking/bug/pbkdf2_interpreter_perf_2026-05-01.md` — the
   perf bug whose fix exposed this.
+
+## Resolution (2026-05-01)
+
+The "expected" value in the **Symptom** section (`867f70cf…0a57fce`) is
+the PBKDF2-HMAC-SHA-512 reference output for `password="password"`
+(8 bytes, draft-josefsson-pbkdf2-test-vectors-00 §3 TC1), NOT for
+`password="passwd"` (6 bytes) as written. The Simple HMAC-SHA-512 impl
+in fact produces `c74319d9…51a04e` for `("passwd", "salt"||0x00000001)`,
+which matches Python `hmac.new(b"passwd", b"salt"+b"\x00\x00\x00\x01",
+hashlib.sha512).hexdigest()` exactly.
+
+There is no SHA-512 / HMAC / PBKDF2 implementation defect. The bug
+report was a test-vector typo: a 6-byte password was paired with the
+reference value for the 8-byte password.
+
+Confirming evidence:
+
+1. `test/unit/lib/crypto/crypto_reference_spec.spl` already exercises
+   `pbkdf2_sha512("password", "salt", 1) → 867f70cf…0a57fce` and PASSES
+   in interpreter mode (re-verified 2026-05-01 with cache invalidated).
+2. `test/unit/lib/crypto/pbkdf2_industry_vectors_spec.spl` now adds
+   three PBKDF2-HMAC-SHA-512 byte-input vectors:
+   - TC1 `("password","salt",1,64) → 867f70cf…0a57fce`
+   - TC2 `("password","salt",2,64) → e1d9c16a…f27ccf4e`
+   - long-key `(200×'A',"salt",1,64) → d4d976cd…eabe9429` (forces the
+     `key_bytes.len() > block_size → sha512_bytes(key)` branch in
+     `hmac_sha512_bytes` that the short-key reference vector does not
+     reach).
+   All three PASS in interpreter mode and match Python
+   `hashlib.pbkdf2_hmac("sha512", …)` byte-exact.
+
+Note on RFC numbering: the original bug doc cites "RFC 7914 §11" as the
+source of the SHA-512 vector. RFC 7914 §11 only specifies PBKDF2-HMAC-
+SHA-**256** vectors (used internally by scrypt); there is no SHA-512
+PBKDF2 vector in RFC 7914. The de-facto SHA-512 reference vectors come
+from `draft-josefsson-pbkdf2-test-vectors-00 §3`, which is the source
+the new spec cites.
