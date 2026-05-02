@@ -847,6 +847,13 @@ impl SpecialEnumKind {
 #[derive(Debug)]
 pub enum Value {
     Int(i64),
+    /// Unsigned integer with explicit bit width (8/16/32/64).
+    /// Carries width so arithmetic ops can apply modulo-2^width wrap.
+    /// `value` stores the unsigned value zero-extended into u64.
+    UInt {
+        value: u64,
+        width: u8, // 8, 16, 32, or 64
+    },
     Float(f64),
     Bool(bool),
     Str(String),

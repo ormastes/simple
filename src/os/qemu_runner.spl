@@ -1130,17 +1130,13 @@ class QemuScenario:
 
 pub fn scenario_lane_kind(scenario: QemuScenario) -> SimpleOsLaneKind:
     """Classify a QEMU scenario into the shared lane model."""
+    if val lane = _catalog_lane_for_scenario(scenario):
+        return lane.lane_kind
     if _is_arm_fs_exec_scenario(scenario):
-        if val lane = simpleos_platform_qemu_lane(_arm_fs_exec_platform_name(scenario.arch), scenario.name):
-            return lane.lane_kind
         return simpleos_platform_qemu_acceptance_lane(_arm_fs_exec_platform_name(scenario.arch)).lane_kind
     if scenario.name == "riscv64-hosted":
-        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
-            return lane.lane_kind
         return simpleos_platform_qemu_acceptance_lane("riscv64").lane_kind
     if _is_riscv_fs_exec_scenario(scenario):
-        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
-            return lane.lane_kind
         return SimpleOsLaneKind.FsExec
     if scenario.name == "x64-nvme-fat32":
         return SimpleOsLaneKind.FsExec
@@ -1646,10 +1642,23 @@ fn _catalog_lane_for_scenario(scenario: QemuScenario) -> SimpleOsLaneContract?:
         return simpleos_platform_qemu_lane(platform_name, scenario.name)
     nil
 
+fn _ensure_catalog_scenario_media(scenario: QemuScenario) -> bool?:
+    if _catalog_lane_for_scenario(scenario) == nil:
+        return nil
+    if scenario.arch == Architecture.Arm64 or scenario.arch == Architecture.Arm32:
+        return ensure_arm_fs_exec_disk_image(scenario.arch)
+    if scenario.arch == Architecture.Riscv64 or scenario.arch == Architecture.Riscv32:
+        return ensure_riscv_fs_exec_disk_image(scenario.arch)
+    nil
+
 fn scenario_target(scenario: QemuScenario) -> OsTarget:
     """Resolve which kernel target should be built for a named scenario."""
     if scenario.name == "x64-nvme-fat32":
         return get_fs_test_target()
+    val platform_name = _catalog_platform_name_for_scenario(scenario)
+    if platform_name != "":
+        if val lane = simpleos_platform_qemu_lane(platform_name, scenario.name):
+            return _lane_to_target(platform_name, lane)
     if _is_arm_fs_exec_scenario(scenario):
         if val lane = simpleos_platform_qemu_lane(_arm_fs_exec_platform_name(scenario.arch), scenario.name):
             return _lane_to_target(_arm_fs_exec_platform_name(scenario.arch), lane)
@@ -2491,7 +2500,7 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     print "[test] serial output:\n{serial_output}"
     val accepted = if scenario.name == "x64-desktop-uefi":
         desktop_uefi_serial_accepts_completion(serial_output)
-    else if _is_arm_fs_exec_scenario(scenario) or _is_riscv_fs_exec_scenario(scenario) or scenario.name == "riscv64-hosted":
+    else if _scenario_uses_catalog_completion_contract(scenario):
         _scenario_serial_accepts_completion(scenario, serial_output)
     else:
         serial_output.contains("TEST PASSED")
@@ -2500,7 +2509,7 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
         if scenario.name == "x64-desktop-uefi":
             print "[test] FAILED: scenario {scenario.name} did not satisfy desktop driver completion markers"
             print_desktop_uefi_missing_markers(serial_output)
-        else if _is_arm_fs_exec_scenario(scenario) or _is_riscv_fs_exec_scenario(scenario) or scenario.name == "riscv64-hosted":
+        else if _scenario_uses_catalog_completion_contract(scenario):
             print "[test] FAILED: scenario {scenario.name} did not satisfy catalog lane completion markers"
             _print_scenario_missing_markers(scenario, serial_output)
         else:
@@ -2524,19 +2533,19 @@ fn print_arm_fs_exec_missing_markers(scenario: QemuScenario, serial_output: text
             print "[test] missing marker fragment: {marker}"
 
 fn riscv64_hosted_required_marker_fragments() -> [text]:
-    if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted"):
+    if val lane = _catalog_lane_for_scenario(scenario_riscv64_hosted()):
         return lane.required_serial_markers
     []
 
 fn _scenario_required_marker_fragments(scenario: QemuScenario) -> [text]:
-    if _is_arm_fs_exec_scenario(scenario):
-        return arm_fs_exec_required_marker_fragments(scenario)
-    if scenario.name == "riscv64-hosted":
-        return riscv64_hosted_required_marker_fragments()
-    if _is_riscv_fs_exec_scenario(scenario):
-        if val lane = simpleos_platform_qemu_lane(_riscv_fs_exec_platform_name(scenario.arch), scenario.name):
-            return lane.required_serial_markers
+    if val lane = _catalog_lane_for_scenario(scenario):
+        return lane.required_serial_markers
     []
+
+fn _scenario_uses_catalog_completion_contract(scenario: QemuScenario) -> bool:
+    if val _lane = _catalog_lane_for_scenario(scenario):
+        return true
+    false
 
 fn _scenario_serial_accepts_completion(scenario: QemuScenario, serial_output: text) -> bool:
     for marker in _scenario_required_marker_fragments(scenario):
@@ -2659,10 +2668,8 @@ fn ensure_scenario_media(scenario: QemuScenario) -> bool:
     """Materialize required host-side disk media for scenarios that attach storage."""
     if val ready = _ensure_desktop_scenario_media(scenario.name):
         return ready
-    if _is_arm_fs_exec_scenario(scenario):
-        return ensure_arm_fs_exec_disk_image(scenario.arch)
-    if _is_riscv_fs_exec_scenario(scenario) or scenario.name == "riscv64-hosted":
-        return ensure_riscv_fs_exec_disk_image(scenario.arch)
+    if val ready = _ensure_catalog_scenario_media(scenario):
+        return ready
     true
 
 fn boot_disk_image_serial(image: text, timeout_ms: i64) -> (text, text, i32):

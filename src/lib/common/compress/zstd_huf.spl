@@ -82,6 +82,7 @@ fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], Co
     var max_weight = 0
     var non_zero = 0
     var has_weight_one = false
+    var weight_sum = 0
     var i = 0
     while i < weights.len():
         val weight = weights[i]
@@ -92,6 +93,7 @@ fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], Co
             max_weight = weight
         if weight > 0:
             non_zero = non_zero + 1
+            weight_sum = weight_sum + (1 << (weight - 1))
         if weight == 1:
             has_weight_one = true
         i = i + 1
@@ -101,21 +103,27 @@ fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], Co
         return Err(CompressionError.CorruptStream("zstd huf needs at least two present symbols"))
     if not has_weight_one:
         return Err(CompressionError.CorruptStream("zstd huf requires at least one weight of 1"))
-    var remaining = 1 << max_weight
+    # Per RFC 8478 §4.2.1.1, Max_Number_of_Bits is the smallest L such that
+    # sum(2^(w-1)) == 2^L. This is generally L >= max_weight (with equality
+    # only when at least one symbol has the maximum codeword length); when
+    # the weights complete to a strictly larger power of two, max_bits
+    # exceeds max_weight and `bits = max_bits + 1 - w`, not max_weight + 1 - w.
+    if not _zstd_huf_is_power_of_two(weight_sum):
+        return Err(CompressionError.CorruptStream("zstd huf weight sum is not a power of two"))
+    val max_bits = _zstd_huf_log2_exact(weight_sum)
+    if max_bits < max_weight:
+        return Err(CompressionError.CorruptStream("zstd huf weight sum below max weight"))
+    if max_bits > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf tree depth exceeds 11 bits"))
     var symbols: [ZstdHufSymbolInfo] = []
     i = 0
     while i < weights.len():
         val weight = weights[i]
         var bits = 0
         if weight > 0:
-            bits = max_weight + 1 - weight
-            remaining = remaining - (1 << (weight - 1))
+            bits = max_bits + 1 - weight
         symbols.push(ZstdHufSymbolInfo(symbol: i, weight: weight, bits: bits))
         i = i + 1
-    if remaining < 0:
-        return Err(CompressionError.CorruptStream("zstd huf weights oversubscribed"))
-    if remaining > 0:
-        return Err(CompressionError.CorruptStream("zstd huf weights incomplete"))
     Ok(symbols)
 
 fn _zstd_huf_sort_for_canonical(symbols: [ZstdHufSymbolInfo]) -> [ZstdHufSymbolInfo]:

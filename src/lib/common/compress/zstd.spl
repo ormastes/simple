@@ -1,6 +1,6 @@
 use compress.types.{CompressionOptions, CompressionError}
 use compress.utilities.{write_u32_le, write_u64_le, read_u32_le, CompressionSimdTier, compression_simd_tier_detect, append_bytes, append_self_overlap_copy}
-use compress.zstd_bits.{ZstdBackwardBits, zstd_bits_init, zstd_bits_peek, zstd_bits_consume, zstd_bits_remaining, zstd_bits_read}
+use compress.zstd_bits.{ZstdBackwardBits, zstd_bits_init, zstd_bits_peek, zstd_bits_consume, zstd_bits_remaining, zstd_bits_read, ZstdMsbBackwardBits, zstd_msb_bits_init, zstd_msb_bits_read, zstd_msb_bits_remaining}
 use compress.zstd_huf.{ZstdHufCanonicalEntry, ZstdHufDecodeEntry, zstd_huf_complete_weights, zstd_huf_build_canonical_entries, zstd_huf_expand_decode_table}
 use compress.zstd_fse.{ZstdFseDecodeTable, ZstdFseState, zstd_fse_parse_normalized_counts, zstd_fse_build_decode_table, zstd_fse_init_state, zstd_fse_get_entry}
 
@@ -750,26 +750,33 @@ fn _zstd_parse_fse_compressed_weights(input: [u8], pos: i64, payload_end: i64) -
     val bitstream_start = weights_start + counts.bytes_used
     if bitstream_start >= weights_end:
         return Err(CompressionError.TruncatedInput("zstd compressed Huffman weights bitstream"))
-    val reader_res = zstd_bits_init(input, bitstream_start, weights_end)
+    # Per RFC 8478 Annex A the FSE state stream is a backward bitstream read
+    # MSB-first within each byte. The shared `ZstdBackwardBits` reader is
+    # LSB-first (with `zstd_huf_reverse_bits` compensating in the Huffman
+    # literal table); use the dedicated MSB-first reader here instead so the
+    # state-machine bit values are sampled in the canonical zstd C order.
+    val reader_res = zstd_msb_bits_init(input, bitstream_start, weights_end)
     if reader_res.is_err():
         return Err(reader_res.unwrap_err())
     var reader = reader_res.unwrap()
-    val state1_res = zstd_bits_read(reader, table.table_log)
+    val state1_res = zstd_msb_bits_read(reader, table.table_log)
     if state1_res.is_err():
         return Err(state1_res.unwrap_err())
-    val state1_init_res = zstd_fse_init_state(state1_res.unwrap().0.to_i64(), table)
+    val (state1_raw, after_s1, _s1_padded) = state1_res.unwrap()
+    val state1_init_res = zstd_fse_init_state(state1_raw, table)
     if state1_init_res.is_err():
         return Err(state1_init_res.unwrap_err())
     var state1 = state1_init_res.unwrap()
-    reader = state1_res.unwrap().1
-    val state2_res = zstd_bits_read(reader, table.table_log)
+    reader = after_s1
+    val state2_res = zstd_msb_bits_read(reader, table.table_log)
     if state2_res.is_err():
         return Err(state2_res.unwrap_err())
-    val state2_init_res = zstd_fse_init_state(state2_res.unwrap().0.to_i64(), table)
+    val (state2_raw, after_s2, _s2_padded) = state2_res.unwrap()
+    val state2_init_res = zstd_fse_init_state(state2_raw, table)
     if state2_init_res.is_err():
         return Err(state2_init_res.unwrap_err())
     var state2 = state2_init_res.unwrap()
-    reader = state2_res.unwrap().1
+    reader = after_s2
     var weights: [i64] = []
     while true:
         val entry1_res = zstd_fse_get_entry(table, state1)
@@ -779,7 +786,7 @@ fn _zstd_parse_fse_compressed_weights(input: [u8], pos: i64, payload_end: i64) -
         weights.push(entry1.symbol)
         if weights.len() > 255:
             return Err(CompressionError.CorruptStream("zstd Huffman weights exceed 255 symbols"))
-        val bits1_res = _zstd_read_bits_zero_padded(reader, entry1.bits)
+        val bits1_res = zstd_msb_bits_read(reader, entry1.bits)
         if bits1_res.is_err():
             return Err(bits1_res.unwrap_err())
         val (state1_low_bits, after_bits1, state1_padded) = bits1_res.unwrap()
@@ -804,7 +811,7 @@ fn _zstd_parse_fse_compressed_weights(input: [u8], pos: i64, payload_end: i64) -
         weights.push(entry2.symbol)
         if weights.len() > 255:
             return Err(CompressionError.CorruptStream("zstd Huffman weights exceed 255 symbols"))
-        val bits2_res = _zstd_read_bits_zero_padded(reader, entry2.bits)
+        val bits2_res = zstd_msb_bits_read(reader, entry2.bits)
         if bits2_res.is_err():
             return Err(bits2_res.unwrap_err())
         val (state2_low_bits, after_bits2, state2_padded) = bits2_res.unwrap()

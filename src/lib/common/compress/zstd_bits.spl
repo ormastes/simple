@@ -116,3 +116,87 @@ fn zstd_bits_read(state: ZstdBackwardBits, count: i64) -> Result<(u32, ZstdBackw
     if next.is_err():
         return Err(next.unwrap_err())
     Ok((peeked.unwrap(), next.unwrap()))
+
+# MSB-first backward bit reader, matching RFC 8478 Annex A: bytes are read
+# from end to start, and within each byte from highest bit to lowest. Used for
+# the FSE state stream of FSE-compressed Huffman tree descriptions and for any
+# other consumer that has not been written to compensate for the LSB-first
+# `ZstdBackwardBits` reader via `zstd_huf_reverse_bits`-style table mirroring.
+struct ZstdMsbBackwardBits:
+    data: [u8]
+    start: i64
+    byte_idx: i64
+    next_bit: i64
+    eof: bool
+
+fn zstd_msb_bits_init(data: [u8], start: i64, end: i64) -> Result<ZstdMsbBackwardBits, CompressionError>:
+    if start < 0 or end < start or end > data.len():
+        return Err(CompressionError.CorruptStream("zstd msb bitstream range"))
+    if start == end:
+        return Err(CompressionError.TruncatedInput("zstd msb bitstream tail"))
+    val tail = data[end - 1]
+    if tail == 0u8:
+        return Err(CompressionError.CorruptStream("zstd msb bitstream end mark"))
+    val marker = _zstd_highbit_index(tail)
+    var byte_idx = end - 1
+    var next_bit = marker - 1
+    var eof = false
+    if next_bit < 0:
+        byte_idx = byte_idx - 1
+        next_bit = 7
+        if byte_idx < start:
+            eof = true
+    Ok(ZstdMsbBackwardBits(
+        data: data,
+        start: start,
+        byte_idx: byte_idx,
+        next_bit: next_bit,
+        eof: eof
+    ))
+
+fn zstd_msb_bits_remaining(state: ZstdMsbBackwardBits) -> i64:
+    if state.eof:
+        return 0
+    val whole_bytes_left = state.byte_idx - state.start
+    (state.next_bit + 1) + 8 * whole_bytes_left
+
+# Read up to `count` bits MSB-first; if the stream ends mid-read, the partial
+# value is left-aligned to `count` bits (missing low bits are zero) and `padded`
+# is true. This mirrors zstd C's `BIT_reloadDStream`-driven overflow semantics
+# without requiring an explicit refill-to-overflow probe.
+fn zstd_msb_bits_read(state: ZstdMsbBackwardBits, count: i64) -> Result<(i64, ZstdMsbBackwardBits, bool), CompressionError>:
+    if count < 0:
+        return Err(CompressionError.CorruptStream("zstd msb negative bit count"))
+    if count > 32:
+        return Err(CompressionError.UnsupportedFeature("zstd msb bit read wider than 32 bits"))
+    if count == 0:
+        return Ok((0, state, false))
+    var value: i64 = 0
+    var consumed_real = 0
+    var i = 0
+    var byte_idx = state.byte_idx
+    var next_bit = state.next_bit
+    var eof = state.eof
+    while i < count:
+        if eof:
+            value = value << 1
+        else:
+            val bit = ((state.data[byte_idx] >> next_bit.to_u8()) & 1u8).to_i64()
+            value = (value << 1) | bit
+            next_bit = next_bit - 1
+            consumed_real = consumed_real + 1
+            if next_bit < 0:
+                byte_idx = byte_idx - 1
+                next_bit = 7
+                if byte_idx < state.start:
+                    eof = true
+        i = i + 1
+    val advanced_state = ZstdMsbBackwardBits(
+        data: state.data,
+        start: state.start,
+        byte_idx: byte_idx,
+        next_bit: next_bit,
+        eof: eof
+    )
+    val padded = consumed_real < count
+    Ok((value, advanced_state, padded))
