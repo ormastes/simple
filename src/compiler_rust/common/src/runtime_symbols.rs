@@ -497,6 +497,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simd_shr_i32x8",
     // Phase 2 seed — Vec16u8 byte ops.
     "rt_simd_add_u8x16",
+    // Phase 2 — AES-NI / NEON / scalar AES round intrinsics.
+    "rt_simd_aes_round_u8x16",
+    "rt_simd_aes_round_last_u8x16",
     "rt_numeric_active_simd_tier",
     "rt_numeric_add_f32",
     "rt_numeric_mul_f32",
@@ -705,6 +708,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_rsa_sha512_sign",
     "rt_ed25519_sign",
     "rt_ecdsa_p256_sign",
+    // PBKDF2-HMAC-SHA-2 native helpers (FR pbkdf2_native_runtime_helpers_2026-05-01)
+    "rt_pbkdf2_hmac_sha256",
+    "rt_pbkdf2_hmac_sha384",
+    "rt_pbkdf2_hmac_sha512",
     // Curve25519 DH key exchange for SSH KEX
     "rt_dh_curve25519_keypair",
     "rt_dh_curve25519_public_key",

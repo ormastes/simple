@@ -4,6 +4,7 @@ impl Value {
             Value::Int(i) => Ok(*i),
             Value::UInt { value, .. } => Ok(*value as i64),
             Value::Float(f) => Ok(*f as i64),
+            Value::Float32(f) => Ok(*f as i64),
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
             Value::Unit { value, .. } => value.as_int(),
             Value::Unique(u) => u.inner().as_int(),
@@ -51,6 +52,7 @@ impl Value {
     pub fn as_float(&self) -> Result<f64, CompileError> {
         match self {
             Value::Float(f) => Ok(*f),
+            Value::Float32(f) => Ok(*f as f64),
             Value::Int(i) => Ok(*i as f64),
             Value::UInt { value, .. } => Ok(*value as f64),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
@@ -84,6 +86,7 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::UInt { value, .. } => value.to_string(),
             Value::Float(f) => f.to_string(),
+            Value::Float32(f) => f.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Str(s) => s.clone(),
             Value::Symbol(s) => s.clone(),
@@ -106,6 +109,7 @@ impl Value {
             Value::Int(i) => *i != 0,
             Value::UInt { value, .. } => *value != 0,
             Value::Float(f) => *f != 0.0,
+            Value::Float32(f) => *f != 0.0,
             Value::Str(s) => !s.is_empty(),
             Value::Symbol(_) => true,
             Value::Array(a) => !a.is_empty(),
@@ -153,6 +157,7 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::UInt { value, .. } => value.to_string(),
             Value::Float(f) => f.to_string(),
+            Value::Float32(f) => f.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Array(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
@@ -265,6 +270,7 @@ impl Value {
             Value::Str(s) => format!("{:?}", s),
             Value::Int(i) => format!("{}i64", i),
             Value::Float(f) => format!("{}f64", f),
+            Value::Float32(f) => format!("{}f32", f),
             Value::Bool(b) => format!("{}", b),
             Value::Symbol(s) => format!(":{}", s),
             Value::Nil => "nil".into(),
@@ -330,6 +336,7 @@ impl Value {
                 _ => "uint",
             },
             Value::Float(_) => "f64",
+            Value::Float32(_) => "f32",
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
             Value::Symbol(_) => "symbol",
@@ -379,6 +386,7 @@ impl Value {
             Value::Int(_) => ValueKind::Int,
             Value::UInt { .. } => ValueKind::Int,
             Value::Float(_) => ValueKind::Float,
+            Value::Float32(_) => ValueKind::Float,
             Value::Bool(_) => ValueKind::Bool,
             Value::Str(_) => ValueKind::String,
             Value::Symbol(_) => ValueKind::Symbol,
@@ -429,9 +437,9 @@ impl Value {
                 matches!(self, Value::Int(_))
             }
             // Float types
-            "f32" | "f64" | "float" | "Float" => {
-                matches!(self, Value::Float(_))
-            }
+            "f64" => matches!(self, Value::Float(_)),
+            "f32" => matches!(self, Value::Float32(_)),
+            "float" | "Float" => matches!(self, Value::Float(_) | Value::Float32(_)),
             // Boolean
             "bool" | "Bool" => matches!(self, Value::Bool(_)),
             // String types

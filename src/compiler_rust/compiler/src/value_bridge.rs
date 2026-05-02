@@ -287,6 +287,8 @@ impl From<&Value> for BridgeValue {
             Value::Int(i) => BridgeValue::int(*i),
             Value::UInt { value, .. } => BridgeValue::int(*value as i64),
             Value::Float(f) => BridgeValue::float(*f),
+            // Float32 widens to f64 at the FFI boundary; bridge tag set has no f32 slot.
+            Value::Float32(f) => BridgeValue::float(*f as f64),
             Value::Bool(b) => BridgeValue::bool(*b),
             Value::Str(s) => BridgeValue::string(s),
             Value::Symbol(s) => BridgeValue::symbol(s),

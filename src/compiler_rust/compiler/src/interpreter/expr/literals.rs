@@ -81,6 +81,11 @@ pub(super) fn eval_literal_expr(
                     family,
                 }
             }
+            // f32 literal: round once at parse time so storage matches IEEE 754
+            // single-precision representation. Without this, `0.1f32` would store
+            // the f64-rounded value of 0.1, and arithmetic would never wrap to
+            // the correct f32 result (the W5-I-style precision bug).
+            NumericSuffix::F32 => Value::Float32(*value as f32),
             _ => Value::Float(*value),
         })),
         Expr::Bool(b) => Ok(Some(Value::Bool(*b))),

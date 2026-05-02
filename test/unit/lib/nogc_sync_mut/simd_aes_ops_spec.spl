@@ -1,0 +1,261 @@
+# Tests for Phase 2 SIMD AES round intrinsics.
+#
+# Feature: doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md
+# Scope: simd_aes_round + simd_aes_round_last (matches Intel _mm_aesenc_si128 /
+# _mm_aesenclast_si128 ordering: state -> ShiftRows -> SubBytes ->
+# MixColumns (regular only) -> XOR key).
+#
+# Known-answer test: FIPS 197 Appendix B (AES-128 cipher example).
+#   plaintext  = 32 43 f6 a8 88 5a 30 8d 31 31 98 a2 e0 37 07 34
+#   key        = 2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
+#   ciphertext = 39 25 84 1d 02 dc 09 fb dc 11 85 97 19 6a 0b 32
+#
+# Round-key schedule from FIPS 197 §A.1 (hardcoded — we don't call key
+# expansion here, this spec validates the ROUND step in isolation):
+#   K0  = 2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
+#   K1  = a0 fa fe 17 88 54 2c b1 23 a3 39 39 2a 6c 76 05
+#   K2  = f2 c2 95 f2 7a 96 b9 43 59 35 80 7a 73 59 f6 7f
+#   K3  = 3d 80 47 7d 47 16 fe 3e 1e 23 7e 44 6d 7a 88 3b
+#   K4  = ef 44 a5 41 a8 52 5b 7f b6 71 25 3b db 0b ad 00
+#   K5  = d4 d1 c6 f8 7c 83 9d 87 ca f2 b8 bc 11 f9 15 bc
+#   K6  = 6d 88 a3 7a 11 0b 3e fd db f9 86 41 ca 00 93 fd
+#   K7  = 4e 54 f7 0e 5f 5f c9 f3 84 a6 4f b2 4e a6 dc 4f
+#   K8  = ea d2 73 21 b5 8d ba d2 31 2b f5 60 7f 8d 29 2f
+#   K9  = ac 77 66 f3 19 fa dc 21 28 d1 29 41 57 5c 00 6e
+#   K10 = d0 14 f9 a8 c9 ee 25 89 e1 3f 0c c8 b6 63 0c a6
+#
+# Expected round-output states (from FIPS 197 Appendix B "Output of round"
+# rows, which is the state AFTER the full round including AddRoundKey):
+#   R1 -> a4 9c 7f f2 68 9f 35 2b 6b 5b ea 43 02 6a 50 49
+#   R2 -> aa 61 82 68 8f dd d2 32 5f e3 4a 46 03 ef d2 9a
+#   R9 -> e9 f7 4e ec 02 30 20 f6 1b f2 cc f2 35 3c 21 c7
+#   R10 (final, last round) -> 39 25 84 1d 02 dc 09 fb dc 11 85 97 19 6a 0b 32
+#
+# Each `it` block walks the cipher forward step-by-step and asserts at the
+# four checkpoints, exercising both `simd_aes_round` (rounds 1..9) and
+# `simd_aes_round_last` (round 10).
+
+use std.spec.{describe, it, expect}
+use std.simd.{Vec16u8, simd_aes_round, simd_aes_round_last}
+
+# ----------------------------------------------------------------------------
+# Helpers — pure-Simple, no extra runtime ops added (XOR is the only thing
+# we need outside the two new round primitives, and it's a 16-line ctor).
+# ----------------------------------------------------------------------------
+
+fn xor_v(a: Vec16u8, b: Vec16u8) -> Vec16u8:
+    """Lane-wise XOR. Used for the initial AddRoundKey (PT XOR K0) and for
+    the test scaffolding only — no new runtime op is added for this.
+    """
+    Vec16u8(
+        u0:  a.u0  ^ b.u0,
+        u1:  a.u1  ^ b.u1,
+        u2:  a.u2  ^ b.u2,
+        u3:  a.u3  ^ b.u3,
+        u4:  a.u4  ^ b.u4,
+        u5:  a.u5  ^ b.u5,
+        u6:  a.u6  ^ b.u6,
+        u7:  a.u7  ^ b.u7,
+        u8_: a.u8_ ^ b.u8_,
+        u9:  a.u9  ^ b.u9,
+        u10: a.u10 ^ b.u10,
+        u11: a.u11 ^ b.u11,
+        u12: a.u12 ^ b.u12,
+        u13: a.u13 ^ b.u13,
+        u14: a.u14 ^ b.u14,
+        u15: a.u15 ^ b.u15,
+    )
+
+# Plaintext, key, and round keys as 16-byte arrays (later folded into Vec16u8).
+fn pt() -> Vec16u8:
+    Vec16u8.from_array([
+        0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d,
+        0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34,
+    ])
+
+fn k0() -> Vec16u8:
+    Vec16u8.from_array([
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+        0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+    ])
+
+fn k1() -> Vec16u8:
+    Vec16u8.from_array([
+        0xa0, 0xfa, 0xfe, 0x17, 0x88, 0x54, 0x2c, 0xb1,
+        0x23, 0xa3, 0x39, 0x39, 0x2a, 0x6c, 0x76, 0x05,
+    ])
+
+fn k2() -> Vec16u8:
+    Vec16u8.from_array([
+        0xf2, 0xc2, 0x95, 0xf2, 0x7a, 0x96, 0xb9, 0x43,
+        0x59, 0x35, 0x80, 0x7a, 0x73, 0x59, 0xf6, 0x7f,
+    ])
+
+fn k3() -> Vec16u8:
+    Vec16u8.from_array([
+        0x3d, 0x80, 0x47, 0x7d, 0x47, 0x16, 0xfe, 0x3e,
+        0x1e, 0x23, 0x7e, 0x44, 0x6d, 0x7a, 0x88, 0x3b,
+    ])
+
+fn k4() -> Vec16u8:
+    Vec16u8.from_array([
+        0xef, 0x44, 0xa5, 0x41, 0xa8, 0x52, 0x5b, 0x7f,
+        0xb6, 0x71, 0x25, 0x3b, 0xdb, 0x0b, 0xad, 0x00,
+    ])
+
+fn k5() -> Vec16u8:
+    Vec16u8.from_array([
+        0xd4, 0xd1, 0xc6, 0xf8, 0x7c, 0x83, 0x9d, 0x87,
+        0xca, 0xf2, 0xb8, 0xbc, 0x11, 0xf9, 0x15, 0xbc,
+    ])
+
+fn k6() -> Vec16u8:
+    Vec16u8.from_array([
+        0x6d, 0x88, 0xa3, 0x7a, 0x11, 0x0b, 0x3e, 0xfd,
+        0xdb, 0xf9, 0x86, 0x41, 0xca, 0x00, 0x93, 0xfd,
+    ])
+
+fn k7() -> Vec16u8:
+    Vec16u8.from_array([
+        0x4e, 0x54, 0xf7, 0x0e, 0x5f, 0x5f, 0xc9, 0xf3,
+        0x84, 0xa6, 0x4f, 0xb2, 0x4e, 0xa6, 0xdc, 0x4f,
+    ])
+
+fn k8() -> Vec16u8:
+    Vec16u8.from_array([
+        0xea, 0xd2, 0x73, 0x21, 0xb5, 0x8d, 0xba, 0xd2,
+        0x31, 0x2b, 0xf5, 0x60, 0x7f, 0x8d, 0x29, 0x2f,
+    ])
+
+fn k9() -> Vec16u8:
+    Vec16u8.from_array([
+        0xac, 0x77, 0x66, 0xf3, 0x19, 0xfa, 0xdc, 0x21,
+        0x28, 0xd1, 0x29, 0x41, 0x57, 0x5c, 0x00, 0x6e,
+    ])
+
+fn k10() -> Vec16u8:
+    Vec16u8.from_array([
+        0xd0, 0x14, 0xf9, 0xa8, 0xc9, 0xee, 0x25, 0x89,
+        0xe1, 0x3f, 0x0c, 0xc8, 0xb6, 0x63, 0x0c, 0xa6,
+    ])
+
+describe "std.simd AES round intrinsics (FIPS 197 Appendix B AES-128 KAT)":
+
+    describe "simd_aes_round (rounds 1..9)":
+        it "round 1 matches FIPS 197 §B output":
+            # Round 0 = AddRoundKey(PT, K0). Round 1 = aesenc(R0, K1).
+            val r0 = xor_v(pt(), k0())
+            val r1 = simd_aes_round(r0, k1())
+            # FIPS 197 Appendix B "Output of round 1":
+            # a4 9c 7f f2 68 9f 35 2b 6b 5b ea 43 02 6a 50 49
+            expect r1.u0  == 0xa4
+            expect r1.u1  == 0x9c
+            expect r1.u2  == 0x7f
+            expect r1.u3  == 0xf2
+            expect r1.u4  == 0x68
+            expect r1.u5  == 0x9f
+            expect r1.u6  == 0x35
+            expect r1.u7  == 0x2b
+            expect r1.u8_ == 0x6b
+            expect r1.u9  == 0x5b
+            expect r1.u10 == 0xea
+            expect r1.u11 == 0x43
+            expect r1.u12 == 0x02
+            expect r1.u13 == 0x6a
+            expect r1.u14 == 0x50
+            expect r1.u15 == 0x49
+
+        it "round 2 matches FIPS 197 §B output":
+            val r0 = xor_v(pt(), k0())
+            val r1 = simd_aes_round(r0, k1())
+            val r2 = simd_aes_round(r1, k2())
+            # FIPS 197 Appendix B "Output of round 2":
+            # aa 61 82 68 8f dd d2 32 5f e3 4a 46 03 ef d2 9a
+            expect r2.u0  == 0xaa
+            expect r2.u1  == 0x61
+            expect r2.u2  == 0x82
+            expect r2.u3  == 0x68
+            expect r2.u4  == 0x8f
+            expect r2.u5  == 0xdd
+            expect r2.u6  == 0xd2
+            expect r2.u7  == 0x32
+            expect r2.u8_ == 0x5f
+            expect r2.u9  == 0xe3
+            expect r2.u10 == 0x4a
+            expect r2.u11 == 0x46
+            expect r2.u12 == 0x03
+            expect r2.u13 == 0xef
+            expect r2.u14 == 0xd2
+            expect r2.u15 == 0x9a
+
+        it "round 9 matches FIPS 197 §B output (after full chain R1..R9)":
+            val r0 = xor_v(pt(), k0())
+            val r1 = simd_aes_round(r0, k1())
+            val r2 = simd_aes_round(r1, k2())
+            val r3 = simd_aes_round(r2, k3())
+            val r4 = simd_aes_round(r3, k4())
+            val r5 = simd_aes_round(r4, k5())
+            val r6 = simd_aes_round(r5, k6())
+            val r7 = simd_aes_round(r6, k7())
+            val r8 = simd_aes_round(r7, k8())
+            val r9 = simd_aes_round(r8, k9())
+            # FIPS 197 Appendix B "Output of round 9":
+            # e9 f7 4e ec 02 30 20 f6 1b f2 cc f2 35 3c 21 c7
+            expect r9.u0  == 0xe9
+            expect r9.u1  == 0xf7
+            expect r9.u2  == 0x4e
+            expect r9.u3  == 0xec
+            expect r9.u4  == 0x02
+            expect r9.u5  == 0x30
+            expect r9.u6  == 0x20
+            expect r9.u7  == 0xf6
+            expect r9.u8_ == 0x1b
+            expect r9.u9  == 0xf2
+            expect r9.u10 == 0xcc
+            expect r9.u11 == 0xf2
+            expect r9.u12 == 0x35
+            expect r9.u13 == 0x3c
+            expect r9.u14 == 0x21
+            expect r9.u15 == 0xc7
+
+    describe "simd_aes_round_last (round 10 / final)":
+        it "produces FIPS 197 §B AES-128 ciphertext byte-exact":
+            val r0 = xor_v(pt(), k0())
+            val r1 = simd_aes_round(r0, k1())
+            val r2 = simd_aes_round(r1, k2())
+            val r3 = simd_aes_round(r2, k3())
+            val r4 = simd_aes_round(r3, k4())
+            val r5 = simd_aes_round(r4, k5())
+            val r6 = simd_aes_round(r5, k6())
+            val r7 = simd_aes_round(r6, k7())
+            val r8 = simd_aes_round(r7, k8())
+            val r9 = simd_aes_round(r8, k9())
+            val ct = simd_aes_round_last(r9, k10())
+            # FIPS 197 Appendix B AES-128 ciphertext:
+            # 39 25 84 1d 02 dc 09 fb dc 11 85 97 19 6a 0b 32
+            expect ct.u0  == 0x39
+            expect ct.u1  == 0x25
+            expect ct.u2  == 0x84
+            expect ct.u3  == 0x1d
+            expect ct.u4  == 0x02
+            expect ct.u5  == 0xdc
+            expect ct.u6  == 0x09
+            expect ct.u7  == 0xfb
+            expect ct.u8_ == 0xdc
+            expect ct.u9  == 0x11
+            expect ct.u10 == 0x85
+            expect ct.u11 == 0x97
+            expect ct.u12 == 0x19
+            expect ct.u13 == 0x6a
+            expect ct.u14 == 0x0b
+            expect ct.u15 == 0x32
+
+        it "last round on zero state with zero key returns S-box(0)=0x63 in every lane":
+            # SubBytes(ShiftRows(0)) XOR 0 = SBOX[0] in every lane = 0x63.
+            val z = Vec16u8.zero()
+            val r = simd_aes_round_last(z, z)
+            expect r.u0  == 0x63
+            expect r.u1  == 0x63
+            expect r.u7  == 0x63
+            expect r.u8_ == 0x63
+            expect r.u15 == 0x63

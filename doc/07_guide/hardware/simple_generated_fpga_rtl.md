@@ -11,8 +11,9 @@ The generator emits both:
 The generated Simple file is the source-of-truth sketch for the emitted VHDL lane. That is the current sample code generation path from Simple code to FPGA-oriented RTL artifacts in this repo.
 
 Authoritative provenance:
-- each lane manifest now marks `authoritative_rtl_root` as `simple-compiler-generated`
-- debug sidecars repeat that provenance and separately label transitional emitted VHDL wrappers/support packages/testbenches
+- each lane manifest now records `authoritative_rtl_root` as the emitted lane bundle directory, not as the exact authoritative file set
+- the precise authoritative generated-core subset is listed by repeated `authoritative_file` entries in the manifest and `provenance.authoritativeFiles` in the debug sidecar
+- debug sidecars separately label transitional emitted VHDL wrappers/support packages/testbenches
 
 ## List Supported Boards
 
@@ -74,11 +75,13 @@ This generation path proves:
 - the Simple hardware source can be materialized
 - the VHDL package/core artifacts can be materialized
 - the board profile can be selected structurally
+- generated RV64 acceptance is stronger than bounded proof-only status: the current repo-native RV64 smoke flow also builds and runs the local generated Linux payload lane after its proof gates
 
 This does not prove:
 - constraints are complete
 - synthesis passes
 - bitstream programming passes
 - hardware runtime behavior passes
+- the remaining runner/testbench surface is template-free end-to-end; some emitted benches are still transitional template-backed artifacts
 
 Use this as the source generation step before board-specific XDC, Vivado, and runtime validation.

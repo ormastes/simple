@@ -44,6 +44,41 @@ fn wrap_uint(value: u64, width: u8) -> Value {
     Value::UInt { value: masked, width }
 }
 
+/// Determine the float-precision dispatch for a binary op:
+///   - `Some(true)` => use `f32` (both sides float-kind, neither is `f64`)
+///   - `Some(false)` => use `f64` (at least one side is `Value::Float`)
+///   - `None` => not float-dispatch (caller falls through to int/uint path)
+///
+/// Mirrors the W5-I `uint_wrap_width` helper. Without this, `f32` arithmetic
+/// silently widened to `f64` and produced wrong precision (e.g. the LZMA-style
+/// `0.1f32 + 0.2f32 - 0.3f32` returned the f64 error 5.55e-17 instead of `0.0`).
+fn float_kind(left: &Value, right: &Value) -> Option<bool> {
+    let l_f64 = matches!(left, Value::Float(_));
+    let r_f64 = matches!(right, Value::Float(_));
+    let l_f32 = matches!(left, Value::Float32(_));
+    let r_f32 = matches!(right, Value::Float32(_));
+    if l_f64 || r_f64 {
+        Some(false) // f64 dispatch
+    } else if l_f32 || r_f32 {
+        Some(true) // f32 dispatch
+    } else {
+        None
+    }
+}
+
+/// Read a value as `f32`, widening from `Float32` natively or from int kinds.
+/// Used for `f32`-precision arithmetic; never widens through f64.
+fn as_f32(v: &Value) -> Result<f32, CompileError> {
+    match v {
+        Value::Float32(f) => Ok(*f),
+        Value::Int(i) => Ok(*i as f32),
+        Value::UInt { value, .. } => Ok(*value as f32),
+        Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
+        Value::Float(f) => Ok(*f as f32),
+        _ => v.as_float().map(|x| x as f32),
+    }
+}
+
 /// Try to dispatch a binary operator to a dunder method on an Object value.
 /// Returns None if the left value is not an Object or doesn't have the method.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
@@ -523,8 +558,12 @@ pub(super) fn eval_op_expr(
             }
 
             // Standard binary operation handling (for non-unit operations)
-            // Helper to determine if we should use float arithmetic
-            let use_float = matches!(&left_val, Value::Float(_)) || matches!(&right_val, Value::Float(_));
+            // Helper to determine if we should use float arithmetic.
+            // `use_f32` is true when both sides are f32-kind (neither is f64);
+            // `use_float` covers both — true if any side is float-kind.
+            let f_kind = float_kind(&left_val, &right_val);
+            let use_f32 = matches!(f_kind, Some(true));
+            let use_float = f_kind.is_some();
 
             let result = match op {
                 BinOp::Add => match (&left_val, &right_val) {
@@ -537,6 +576,7 @@ pub(super) fn eval_op_expr(
                         Arc::make_mut(&mut arc).extend(b.iter().cloned());
                         Ok(Value::Array(arc))
                     }
+                    _ if use_f32 => Ok(Value::Float32(as_f32(&left_val)? + as_f32(&right_val)?)),
                     _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
                     _ => {
                         if let Some(result) = try_dunder_binop(
@@ -561,7 +601,9 @@ pub(super) fn eval_op_expr(
                     }
                 },
                 BinOp::Sub => {
-                    if use_float {
+                    if use_f32 {
+                        Ok(Value::Float32(as_f32(&left_val)? - as_f32(&right_val)?))
+                    } else if use_float {
                         Ok(Value::Float(left_val.as_float()? - right_val.as_float()?))
                     } else if let Some(result) = try_dunder_binop(
                         "__sub__",
@@ -600,6 +642,7 @@ pub(super) fn eval_op_expr(
                                 Ok(Value::Str(s.repeat(*n as usize)))
                             }
                         }
+                        _ if use_f32 => Ok(Value::Float32(as_f32(&left_val)? * as_f32(&right_val)?)),
                         _ if use_float => Ok(Value::Float(left_val.as_float()? * right_val.as_float()?)),
                         _ => {
                             if let Some(result) = try_dunder_binop(

@@ -31,7 +31,7 @@ use os.tls13.cert_verify.{
     CertVerifyResult, CertChainResult
 }
 use os.crypto.curve25519.{x25519}
-use os.crypto.ecdh_p256.{p256_keypair_pub}
+use os.crypto.ecdh_p256.{p256_keypair_pub, p256_ecdh_shared_x}
 use os.crypto.random.{random_bytes}
 use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
@@ -628,18 +628,66 @@ fn tls13_connect_io_with_config(io: Tls13Io, hostname: text, config: Tls13Client
         if val HrrFlowResult.Reject(reason) = flow:
             return Tls13ConnectResult.Failed(reason: reason)
         if val HrrFlowResult.Ok(value) = flow:
-            # AC-7: full P-256 ECDHE + key_schedule integration deferred.
-            # We send CH2 to exercise the wire, then surface a typed
-            # error so callers can see the deferral. The transcript is
-            # already replaced in `value.transcript_seed` for when the
-            # deferral lifts.
+            # W5-A AC-7 closure: P-256 ECDHE → handshake_secret integration.
+            # On the GROUP_SECP256R1 branch we send CH2, receive SH2, run
+            # P-256 ECDHE on the server's key_share, derive the
+            # handshake_secret + handshake-traffic secrets + traffic keys,
+            # then return Failed at the Finished-MAC-verify boundary
+            # (deferred per AC-5). Constant-time hardening of P-256 scalar
+            # mult is tracked in
+            # `doc/08_tracking/feature_request/p256_scalar_mult_constant_time_2026-05-01.md`
+            # — the fixed-bootstrap scalar above keeps no real key on the
+            # wire until that lands.
             if value.selected_group == GROUP_SECP256R1:
-                # Send CH2 with the (empty) P-256 share so wire-level
-                # transcripts in interop tests still see the second leg.
-                val ch2_record = _build_plaintext_record(0x16, value.client_hello2_bytes)
-                if not _io_send(io, ch2_record):
+                # Send CH2 with the P-256 share.
+                val ch2_record_p = _build_plaintext_record(0x16, value.client_hello2_bytes)
+                if not _io_send(io, ch2_record_p):
                     return Tls13ConnectResult.Failed(reason: "ClientHello2 send failed")
-                return Tls13ConnectResult.Failed(reason: "HRR P-256 ECDHE deferred — see crypto_recovery_status.md M3")
+                # §4.4.1 transcript replacement: synthetic message_hash
+                # || HRR-handshake-bytes || CH2.
+                transcript = transcript_new()
+                transcript = transcript_add(transcript, value.transcript_seed)
+                transcript = transcript_add(transcript, value.client_hello2_bytes)
+                # Receive SH2 (the real ServerHello after HRR).
+                val sh2_raw = _io_recv_record(io)
+                if sh2_raw.len() < 5:
+                    return Tls13ConnectResult.Failed(reason: "ServerHello2: short read")
+                val sh2_pay_len_i = rt_tls13_record_payload_len(sh2_raw)
+                if sh2_pay_len_i <= 0:
+                    return Tls13ConnectResult.Failed(reason: "ServerHello2: invalid record length")
+                val sh2_pay_len = sh2_pay_len_i.to_u64()
+                val sh2_hs_bytes = _copy_range(sh2_raw, 5, sh2_pay_len)
+                val sh2_body_bytes = _copy_range(sh2_hs_bytes, 4, sh2_pay_len - 4)
+                val sh2: ServerHello13 = parse_server_hello(sh2_body_bytes)
+                # §4.1.4: a second HRR is illegal.
+                if is_hello_retry_request(sh2):
+                    return Tls13ConnectResult.Failed(reason: "unexpected_message: second HRR in connection")
+                # Cipher-suite scope: connect flow only advertises 0x1301
+                # (TLS_AES_128_GCM_SHA256). Reject anything else — SHA-384
+                # (0x1302) wiring is a follow-up.
+                if sh2.cipher_suite != 0x1301u16:
+                    return Tls13ConnectResult.Failed(reason: "ServerHello2: unsupported cipher_suite for P-256 path")
+                # Server MUST send a P-256 key_share since HRR picked it.
+                val server_p256_pub = sh2.p256_pub
+                if server_p256_pub.len() != 65:
+                    return Tls13ConnectResult.Failed(reason: "ServerHello2: missing or malformed P-256 key_share")
+                # Add SH2 handshake bytes to the transcript.
+                transcript = transcript_add_with_len(transcript, sh2_hs_bytes, sh2_pay_len)
+                # P-256 ECDHE → 32-byte shared X (RFC 8446 §7.4.2 / RFC 8422
+                # §5.4: shared secret is the X-coordinate of scalar*peer).
+                val p256_shared = p256_ecdh_shared_x(p256_scalar, server_p256_pub)
+                if p256_shared.len() != 32:
+                    return Tls13ConnectResult.Failed(reason: "P-256 ECDHE: shared_x compute failed")
+                # Drive the SHA-256 key schedule with the P-256 shared X.
+                val secrets_p = tls13_compute_handshake_secrets(p256_shared, transcript)
+                # Derive AES-128 traffic key + IV for both directions.
+                # Deferred (AC-5): server Finished MAC verify, client
+                # Finished, application traffic secrets. Surfaced as a
+                # typed Failed so callers see the milestone.
+                val client_hs_tk_p = tls13_traffic_keys(secrets_p.client_hs_traffic)
+                val server_hs_tk_p = tls13_traffic_keys(secrets_p.server_hs_traffic)
+                _tls_debug("P-256 ECDHE done shared={p256_shared.len()} hs={secrets_p.handshake_secret.len()} c_key={client_hs_tk_p.key.len()} s_key={server_hs_tk_p.key.len()}")
+                return Tls13ConnectResult.Failed(reason: "HRR P-256 handshake-secret derived; Finished MAC verify deferred — see crypto_recovery_status.md Wave 6")
             # GROUP_X25519 path is unreachable from live connect today
             # (CH1 already offers X25519 → rejected as same-group above).
             # Retained so that, when CH1 starts advertising P-256-only

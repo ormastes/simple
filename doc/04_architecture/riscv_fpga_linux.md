@@ -11,12 +11,12 @@ Core architecture:
 - `XilinxBoardProfile` owns board-specific data and separates prepare-time validation from hardware-boot validation.
 - `RiscvFpgaLane` owns the strict lane contract: both RV32 and RV64 are repo-native generated-core Linux lanes, with generated RTL consumed only from emitted bundle roots.
 - `FpgaPrepareManifest` combines one board profile with one or more lanes and emits deterministic Vivado project intent.
-- `FpgaPrepareManifest` records both the stable `build/.../rtl` contract path and the emitted `authoritative_rtl_root` consumed by generated runners from `GEN_DIR/.../rtl`.
+- `FpgaPrepareManifest` records both the stable `build/.../rtl` contract path and the emitted lane bundle directory `authoritative_rtl_root` consumed by generated runners from `GEN_DIR/.../rtl`.
 - MIR bitfield lowering owns the first compiler hook for RISC-V instruction field extraction. It must preserve width, offset, signedness, and source span metadata as structured MIR facts rather than as VHDL strings.
 
 Future implementation layers should consume this historical contract shape without over-claiming platform readiness:
 
-- RTL generator: emits bounded lane artifacts and helper-proof RTL scaffolding from Simple hardware modules, including the authoritative wrapper/package/testbench set required by generated runners.
+- RTL generator: emits bounded lane artifacts and helper-proof RTL scaffolding from Simple hardware modules. The current authoritative subset is listed explicitly by `authoritative_file` in the manifest and `provenance.authoritativeFiles` in the debug sidecar, while wrappers/support packages/testbenches remain transitional emitted runner assets.
 - VHDL slice emitter: consumes the MIR bitfield extraction facts and emits deterministic `std_logic_vector` slices for opcode, register, funct, immediate, and CSR decode fields, with source-map entries tied back to the Simple hardware source.
 - Firmware packager: emits boot ROM, DTB, OpenSBI/U-Boot payload metadata.
 - Vivado adapter: materializes TCL/project/bitstream from `FpgaPrepareManifest`.
@@ -27,7 +27,9 @@ Traceability handoff:
 - REQ-RFL-010 is satisfied for the implemented helper set: generated RISC-V hardware source now parses and lowers through the real frontend -> HIR -> MIR path, and bounded specs prove typed bitfield reads and dedicated writeback/branch/store/I-type/upper/execute-control/execute-datapath/branch-datapath/control-flow-datapath/memory-access/jump/dispatch/trap-halt helper recomposition.
 - REQ-RFL-011 is satisfied for the same helper set: specs show those typed MIR extracts lower to stable slices, exact guard structure, concat/update expressions, and source-map records without re-parsing facade source strings, including execute-datapath, branch-datapath, control-flow-datapath, dispatch-class, and trap-halt contracts.
 - Generated-core provenance now has an explicit architectural rule: generated runners may compile only the bundle-emitted RTL rooted at `GEN_DIR/.../rtl`, and `examples/09_embedded/fpga_riscv/rtl` is non-authoritative for repo-native generated-core lanes.
+- Within each emitted lane directory, `authoritative_rtl_root` names the bundle root that contains both the authoritative generated-core files and transitional emitted assets. The precise machine-readable authoritative set is the repeated `authoritative_file` entries in the manifest plus `provenance.authoritativeFiles` in the debug sidecar.
 - `generated_rv32_linux` and `generated_rv64_linux` are both authoritative generated-core proof lanes. The emitted `rv32/rtl` and `rv64/rtl` bundle roots are the only accepted runner inputs for those lanes.
+- Remaining transitional dependency is still real: several runner benches are still emitted from the template-backed helper module rather than from fully local Simple-owned bench generators, so the active acceptance path is generated-core authoritative but not yet template-free end-to-end.
 - Future decode families should extend the same contract rather than bypass it with handwritten bit slicing or backend-specific special cases.
 - MIR JSON export is the trace boundary between compiler lowering and RTL/VHDL tests. It must expose enough structured module shape for specs to identify functions, basic blocks, emitted instructions, and terminators without depending on raw debug logs.
 - The handwritten VHDL shell is now internally separated into decode staging, execute/load-store behavior, and control-flow/trap-halt orchestration regions so bounded follow-on cleanup can land without re-editing one monolithic string block.

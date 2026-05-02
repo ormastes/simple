@@ -55,6 +55,7 @@ pub mod monoio_future;
 pub mod net;
 mod numeric_kernels;
 mod objects;
+pub mod pbkdf2_native;
 mod process;
 pub mod primitive_sort;
 mod pty;
@@ -63,6 +64,7 @@ pub mod serial;
 pub mod ratatui_tui;
 pub mod screenshot_ffi;
 pub mod simd;
+pub mod simd_aes_ops;
 pub mod simd_byte_ops;
 pub mod simd_int_ops;
 mod sync;
@@ -917,6 +919,9 @@ pub use simd_int_ops::{
 
 // Re-export Phase 2 (seed) SIMD byte FFI symbol.
 pub use simd_byte_ops::rt_simd_add_u8x16;
+
+// Re-export Phase 2 SIMD AES round FFI symbols.
+pub use simd_aes_ops::{rt_simd_aes_round_last_u8x16, rt_simd_aes_round_u8x16};
 
 // Re-export regex FFI functions
 pub use ffi::regex::{

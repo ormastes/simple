@@ -93,7 +93,14 @@ fn finalize_numeric_cast(result: CastNumericResult, target: NumericType) -> Valu
             },
             _ => Value::Int(v),
         },
-        CastNumericResult::Float(v) => Value::Float(v),
+        CastNumericResult::Float(v) => match target {
+            // f32 cast must round once to single precision so subsequent
+            // arithmetic preserves IEEE 754 f32 semantics. Without this,
+            // `1.5_f64.to_f32()` would still hold f64 precision and
+            // `(1.0e30_f32).to_f32() * (1.0e30_f32).to_f32()` wouldn't overflow.
+            NumericType::F32 => Value::Float32(v as f32),
+            _ => Value::Float(v),
+        },
     }
 }
 
@@ -106,6 +113,7 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             target,
         )),
         Value::Float(f) => Ok(finalize_numeric_cast(cast_float_to_numeric(f, target), target)),
+        Value::Float32(f) => Ok(finalize_numeric_cast(cast_float_to_numeric(f as f64, target), target)),
         Value::Bool(b) => Ok(finalize_numeric_cast(cast_bool_to_numeric(b, target), target)),
         // Single-character string to numeric (char code point)
         Value::Str(ref s) if s.chars().count() == 1 => {
@@ -148,6 +156,7 @@ fn cast_to_bool(val: Value) -> Result<Value, CompileError> {
         Value::Int(i) => Ok(Value::Bool(bool_cast::from_int(i))),
         Value::UInt { value, .. } => Ok(Value::Bool(value != 0)),
         Value::Float(f) => Ok(Value::Bool(bool_cast::from_float(f))),
+        Value::Float32(f) => Ok(Value::Bool(bool_cast::from_float(f as f64))),
         Value::Bool(b) => Ok(Value::Bool(b)),
         Value::Str(ref s) => Ok(Value::Bool(bool_cast::from_str(s))),
         Value::Nil => Ok(Value::Bool(false)),
@@ -168,6 +177,7 @@ fn cast_to_string(val: Value) -> Result<Value, CompileError> {
         Value::Int(i) => Ok(Value::Str(string_cast::from_int(i))),
         Value::UInt { value, .. } => Ok(Value::Str(value.to_string())),
         Value::Float(f) => Ok(Value::Str(string_cast::from_float(f))),
+        Value::Float32(f) => Ok(Value::Str(string_cast::from_float(f as f64))),
         Value::Bool(b) => Ok(Value::Str(string_cast::from_bool(b))),
         Value::Str(s) => Ok(Value::Str(s)),
         Value::Symbol(s) => Ok(Value::Str(s)),

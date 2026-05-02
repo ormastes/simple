@@ -74,6 +74,7 @@ pub mod ffi_value;
 pub mod ffi_array;
 pub mod ffi_dict;
 pub mod signatures;
+pub mod pbkdf2;
 pub mod ffi_string;
 pub mod collections;
 pub mod lexer_ffi;
@@ -450,6 +451,12 @@ pub(crate) fn call_extern_function(
         "rt_rsa_pss_sha256_verify" => signatures::rt_rsa_pss_sha256_verify(&evaluated),
         "rt_rsa_pss_sha384_verify" => signatures::rt_rsa_pss_sha384_verify(&evaluated),
         "rt_rsa_pss_sha512_verify" => signatures::rt_rsa_pss_sha512_verify(&evaluated),
+
+        // PBKDF2-HMAC-SHA-2 native helpers (FR pbkdf2_native_runtime_helpers_2026-05-01)
+        // Dispatched here for the same [u8]-return reason as the signature externs.
+        "rt_pbkdf2_hmac_sha256" => pbkdf2::rt_pbkdf2_hmac_sha256(&evaluated),
+        "rt_pbkdf2_hmac_sha384" => pbkdf2::rt_pbkdf2_hmac_sha384(&evaluated),
+        "rt_pbkdf2_hmac_sha512" => pbkdf2::rt_pbkdf2_hmac_sha512(&evaluated),
 
         // ====================================================================
         // Process Control (3 functions)
@@ -850,6 +857,12 @@ pub(crate) fn call_extern_function(
         // SIMD Byte (u8x16) Intrinsics — Phase 2 seed
         // ====================================================================
         "rt_simd_add_u8x16" => simd::rt_simd_add_u8x16(&evaluated),
+
+        // ====================================================================
+        // SIMD AES Round Intrinsics — Phase 2 (AES-NI / NEON / scalar)
+        // ====================================================================
+        "rt_simd_aes_round_u8x16" => simd::rt_simd_aes_round_u8x16(&evaluated),
+        "rt_simd_aes_round_last_u8x16" => simd::rt_simd_aes_round_last_u8x16(&evaluated),
 
         // ====================================================================
         // Diagram FFI Functions (12 functions)

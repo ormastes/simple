@@ -855,6 +855,17 @@ pub enum Value {
         width: u8, // 8, 16, 32, or 64
     },
     Float(f64),
+    /// Single-precision float (`f32`).
+    ///
+    /// Carries native `f32` storage so arithmetic preserves IEEE 754 single-precision
+    /// rounding. Without this variant, values typed `f32` were silently promoted to
+    /// `f64`, producing wrong results like `0.1f32 + 0.2f32 - 0.3f32 == 5.55e-17`
+    /// (the f64 error) instead of the correct `0.0f32`.
+    ///
+    /// Mirrors the W5-I `Value::UInt { value, width }` width-tag pattern — but uses a
+    /// dedicated variant rather than a width tag because storing an `f32` value in an
+    /// `f64` slot would introduce double rounding at literal parse time.
+    Float32(f32),
     Bool(bool),
     Str(String),
     Symbol(String),

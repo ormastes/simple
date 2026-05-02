@@ -17,6 +17,9 @@ use simple_runtime::value::simd::{
     rt_simd_has_neon as ffi_has_neon, rt_simd_has_rvv as ffi_has_rvv, rt_simd_has_sse as ffi_has_sse,
     rt_simd_profile_name as ffi_profile_name,
 };
+use simple_runtime::value::simd_aes_ops::{
+    aes_round_last_u8x16 as ffi_aes_round_last_u8x16, aes_round_u8x16 as ffi_aes_round_u8x16,
+};
 use simple_runtime::value::simd_byte_ops::add_u8x16 as ffi_add_u8x16;
 use simple_runtime::value::simd_int_ops::{
     add_i32x4 as ffi_add_i32x4, add_i32x8 as ffi_add_i32x8, and_i32x4 as ffi_and_i32x4, and_i32x8 as ffi_and_i32x8,
@@ -631,4 +634,12 @@ where
 
 pub fn rt_simd_add_u8x16(args: &[Value]) -> Result<Value, CompileError> {
     binop_u8x16("rt_simd_add_u8x16", args, ffi_add_u8x16)
+}
+
+pub fn rt_simd_aes_round_u8x16(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u8x16("rt_simd_aes_round_u8x16", args, ffi_aes_round_u8x16)
+}
+
+pub fn rt_simd_aes_round_last_u8x16(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u8x16("rt_simd_aes_round_last_u8x16", args, ffi_aes_round_last_u8x16)
 }
