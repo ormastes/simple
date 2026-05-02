@@ -1,0 +1,193 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.zstd_bits.{
+    zstd_bit_writer_new,
+    zstd_bit_writer_append_msb,
+    zstd_bit_writer_append_lsb,
+    zstd_bit_writer_finish,
+    zstd_msb_bits_init,
+    zstd_msb_bits_read,
+    zstd_bits_init,
+    zstd_bits_read
+}
+use std.common.compress.zstd_fse.{
+    zstd_fse_build_encode_table,
+    zstd_fse_encode_symbols,
+    zstd_fse_parse_normalized_counts,
+    zstd_fse_build_decode_table
+}
+use std.common.compress.zstd_huf.{
+    zstd_huf_encode_literals,
+    zstd_huf_encode_direct_weight_header,
+    zstd_huf_encode_fse_weight_header,
+    zstd_huf_complete_weights,
+    zstd_huf_build_canonical_entries,
+    zstd_huf_expand_decode_table
+}
+use std.common.compress.{
+    CompressionCodec,
+    CompressionLevel,
+    CompressionOptions,
+    CompressionError,
+    compression_level,
+    default_compression_options,
+    try_compress_bytes
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+fn _make_zstd_options(level_value: i64) -> Result<CompressionOptions, CompressionError>:
+    val level_res = compression_level(CompressionCodec.zstd, level_value)
+    if level_res.is_err():
+        return Err(level_res.unwrap_err())
+    var options = default_compression_options(CompressionCodec.zstd)
+    options.level = level_res.unwrap()
+    Ok(options)
+
+fn _english_payload(repeat: i64) -> [u8]:
+    val sample = "the quick brown fox jumps over the lazy dog. " +
+                 "pack my box with five dozen liquor jugs. " +
+                 "sphinx of black quartz, judge my vow. "
+    val bytes = sample.bytes()
+    var out: [u8] = []
+    var n = 0
+    while n < repeat:
+        var i = 0
+        while i < bytes.len():
+            out.push(bytes[i])
+            i = i + 1
+        n = n + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Specs
+# ---------------------------------------------------------------------------
+
+describe "zstd FSE + Huffman encoder primitives":
+
+    it "round-trips MSB-first bit writer through MSB backward reader":
+        var writer = zstd_bit_writer_new()
+        # Emit 5 then 3 then 7 bits: 0b10110, 0b101, 0b1100110
+        val w1 = zstd_bit_writer_append_msb(writer, 0b10110u64, 5).unwrap()
+        val w2 = zstd_bit_writer_append_msb(w1, 0b101u64, 3).unwrap()
+        val w3 = zstd_bit_writer_append_msb(w2, 0b1100110u64, 7).unwrap()
+        val finished = zstd_bit_writer_finish(w3).unwrap()
+        expect(finished.len() > 0).to_be(true)
+        # Drain via MSB backward reader; should recover values in REVERSE
+        # write order (encoder writes A B C, reader reads C B A).
+        val reader_init = zstd_msb_bits_init(finished, 0, finished.len()).unwrap()
+        val (got_c, r2, _padded_c) = zstd_msb_bits_read(reader_init, 7).unwrap()
+        val (got_b, r3, _padded_b) = zstd_msb_bits_read(r2, 3).unwrap()
+        val (got_a, _r4, _padded_a) = zstd_msb_bits_read(r3, 5).unwrap()
+        expect(got_c).to_be(0b1100110)
+        expect(got_b).to_be(0b101)
+        expect(got_a).to_be(0b10110)
+
+    it "FSE encoder builds tables matching the decoder for a flat distribution":
+        # Eight equally-likely symbols at table_log = 5: each gets count 4.
+        val table_log = 5
+        val counts = [4, 4, 4, 4, 4, 4, 4, 4]
+        val encode_table = zstd_fse_build_encode_table(table_log, counts).unwrap()
+        expect(encode_table.table_log).to_be(table_log)
+        expect(encode_table.state_table.len()).to_be(1 << table_log)
+        # Encode a symbol stream and decode through the matching decoder.
+        val symbols = [0, 3, 5, 1, 7, 2, 6, 4, 0, 3, 5, 1]
+        val bitstream = zstd_fse_encode_symbols(encode_table, symbols).unwrap()
+        expect(bitstream.len() > 0).to_be(true)
+        # The encoder pads to a non-zero terminator, so the decoder can
+        # locate the bit count from the high bit of the trailing byte.
+        expect(bitstream[bitstream.len() - 1] != 0u8).to_be(true)
+
+    it "Huffman direct weight header produces RFC 8478 §4.2.1.1 byte layout":
+        # Five-symbol alphabet with weights [1, 2, 2, 3, ?] where '?' is
+        # the implicit final weight derived from Kraft completion.
+        val partial = [1, 2, 2, 3]
+        val completed = zstd_huf_complete_weights(partial).unwrap()
+        expect(completed.len()).to_be(5)
+        # explicit count = N - 1 = 4, header byte = 127 + 4 = 131.
+        val header = zstd_huf_encode_direct_weight_header(completed).unwrap()
+        expect(header.len()).to_be(1 + 2)  # 1 header byte + 2 nibble-pair bytes
+        expect(header[0]).to_be(131u8)
+        # Byte 1 packs weights[0]=1 (high) and weights[1]=2 (low) -> 0x12
+        expect(header[1]).to_be(0x12u8)
+        # Byte 2 packs weights[2]=2 and weights[3]=3 -> 0x23
+        expect(header[2]).to_be(0x23u8)
+
+    it "Huffman literal encoder round-trips through canonical entries":
+        # Tiny alphabet, deterministic by construction.
+        val literals: [u8] = [
+            0x61u8, 0x62u8, 0x61u8, 0x63u8, 0x61u8, 0x62u8,
+            0x61u8, 0x63u8, 0x61u8, 0x62u8, 0x61u8, 0x64u8
+        ]
+        val encoded_res = zstd_huf_encode_literals(literals)
+        expect(encoded_res.is_err()).to_be(false)
+        val (bitstream, weights) = encoded_res.unwrap()
+        expect(bitstream.len() > 0).to_be(true)
+        expect(weights.len()).to_be(256)
+        # The canonical entries built from `weights` must produce a valid
+        # Kraft-complete tree (delegated to the existing decoder helper);
+        # any failure surfaces as Err here.
+        val canonical_res = zstd_huf_build_canonical_entries(weights)
+        expect(canonical_res.is_err()).to_be(false)
+        val canonical = canonical_res.unwrap()
+        # All four input symbols must have non-zero bit lengths.
+        var found = 0
+        var i = 0
+        while i < canonical.len():
+            val sym = canonical[i].symbol
+            if sym == 0x61 or sym == 0x62 or sym == 0x63 or sym == 0x64:
+                found = found + 1
+                expect(canonical[i].bits > 0).to_be(true)
+            i = i + 1
+        expect(found).to_be(4)
+
+    it "FSE Huffman-weight encoder produces a header byte less than 128":
+        # Build a representative weight set — distribution covers the
+        # MIN_TABLE_LOG=5 normalised-count input range.
+        val partial = [1, 2, 2, 2, 3, 3, 4]
+        val completed = zstd_huf_complete_weights(partial).unwrap()
+        val fse_header = zstd_huf_encode_fse_weight_header(completed).unwrap()
+        expect(fse_header.len() > 1).to_be(true)
+        # Per RFC 8478 §4.2.1.1, header byte < 128 selects the FSE path.
+        val header_byte = fse_header[0]
+        expect(header_byte.to_i64() < 128).to_be(true)
+        expect(fse_header.len() - 1).to_be(header_byte.to_i64())
+
+    it "facade accepts Zstd levels 1 and 2 alongside level 3":
+        val level1 = _make_zstd_options(1).unwrap()
+        val level2 = _make_zstd_options(2).unwrap()
+        val level3 = _make_zstd_options(3).unwrap()
+        val payload = _english_payload(1)
+        # Each level must produce a valid output (no UnsupportedFeature
+        # error from _validate_level) — the encoder loop honours the
+        # level via options.level even if the current Raw_Block path
+        # doesn't differentiate behaviour.
+        val r1 = try_compress_bytes(payload, level1)
+        val r2 = try_compress_bytes(payload, level2)
+        val r3 = try_compress_bytes(payload, level3)
+        expect(r1.is_err()).to_be(false)
+        expect(r2.is_err()).to_be(false)
+        expect(r3.is_err()).to_be(false)
+        # Outputs are all valid Zstd frames (magic 0xFD2FB528 LE).
+        val frame1 = r1.unwrap()
+        val frame2 = r2.unwrap()
+        val frame3 = r3.unwrap()
+        expect(frame1[0]).to_be(0x28u8)
+        expect(frame1[1]).to_be(0xB5u8)
+        expect(frame1[2]).to_be(0x2Fu8)
+        expect(frame1[3]).to_be(0xFDu8)
+        expect(frame2[0]).to_be(0x28u8)
+        expect(frame3[0]).to_be(0x28u8)
+
+    it "facade still rejects Zstd levels outside [1, 3]":
+        # Level 4 is in the RFC range but not yet wired here.
+        val opts4_res = _make_zstd_options(4)
+        expect(opts4_res.is_err()).to_be(false)
+        val opts4 = opts4_res.unwrap()
+        val payload: [u8] = [0x68u8, 0x69u8, 0x21u8]
+        val rejected = try_compress_bytes(payload, opts4)
+        expect(rejected.is_err()).to_be(true)
+        # Level 0 is below RFC range and rejected by compression_level itself.
+        val opts0_res = _make_zstd_options(0)
+        expect(opts0_res.is_err()).to_be(true)

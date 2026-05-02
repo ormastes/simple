@@ -1,0 +1,319 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+# ============================================================================
+# AES-128-CCM — Pure Simple Implementation
+#
+# AES-128 in Counter-with-CBC-MAC mode per RFC 3610.
+# IoT-favored AEAD used in TLS 1.2 (RFC 6655) and IPsec/802.15.4.
+#
+# No SFFI/Rust FFI in the CCM layer itself — pure Simple language. The single
+# AES block primitive is reused from src/os/crypto/aes128_gcm.spl
+# (aes128_encrypt_block / aes128_key_expansion); we do NOT redefine it here.
+#
+# Reference: RFC 3610 — Counter with CBC-MAC (CCM)
+#   https://datatracker.ietf.org/doc/html/rfc3610
+#   §2  CTR mode counter formatting (A_i blocks)
+#   §3  CBC-MAC over header + payload (B_0 .. B_n blocks)
+#   §4  CCM Encrypt / CCM Decrypt
+#   §8  Reference test vectors (M=8 and M=10 only)
+#
+# Parameter ranges (RFC 3610 §2):
+#   nonce_len N ∈ {7..13};  L = 15 - N;  max payload = 2^(8L) - 1.
+#   tag_len   M ∈ {4, 6, 8, 10, 12, 14, 16}.
+#
+# This module fixes N=13 (L=2, max payload = 65535 bytes) which matches
+# RFC 3610 §8 vectors and is the most common deployment profile.
+# Variable M is supported for the full set {4..16 even}.
+# ============================================================================
+
+# AES block primitive — reused from aes128_gcm.spl (read-only dependency)
+use os.crypto.aes128_gcm.{aes128_encrypt_block, aes128_key_expansion}
+
+# Runtime extern: byte-indexed read for [u8].  Same one aes128_gcm.spl uses.
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# ============================================================================
+# Result type for AES-128-CCM decryption.
+# Pattern matches Aes128GcmResult in aes128_gcm.spl, but is a distinct enum
+# so callers don't need to import the GCM type.
+# ============================================================================
+
+enum Aes128CcmResult:
+    Ok(data: [u8])
+    Err(msg: text)
+
+# ============================================================================
+# B_0 / A_i / flag-byte construction (RFC 3610 §2.2 + §2.3)
+# ============================================================================
+
+fn _flag_b0(adata_present: bool, tag_len: u32, nonce_len: u32) -> u8:
+    """Build the flag byte for B_0 (CBC-MAC IV).
+
+    Layout (RFC 3610 §2.2):
+        bit 7  : Reserved (0)
+        bit 6  : Adata    (1 if AAD present)
+        bits 5..3 : (M-2)/2  where M = tag_len
+        bits 2..0 : L-1      where L = 15 - nonce_len
+    """
+    val l_field: u32 = (15 - nonce_len) - 1
+    val m_field: u32 = (tag_len - 2) / 2
+    var flag: u32 = (m_field << 3) | (l_field & 0x07)
+    if adata_present:
+        flag = flag | 0x40
+    (flag & 0xFF).to_u8()
+
+fn _flag_a0(nonce_len: u32) -> u8:
+    """Flag byte for A_i counter blocks (RFC 3610 §2.3).
+
+    Only the L-1 nibble is set; Adata and M bits are 0.
+    """
+    val l_field: u32 = (15 - nonce_len) - 1
+    (l_field & 0x07).to_u8()
+
+fn _build_b0(nonce: [u8], tag_len: u32, payload_len: u64, adata_present: bool) -> [u8]:
+    """Construct B_0: flag || nonce || payload-length (big-endian, L bytes).
+
+    nonce length must equal 15 - L; we encode payload_len in L bytes BE.
+    """
+    val nonce_len: u32 = nonce.len().to_u32()
+    val l: u32 = 15 - nonce_len
+
+    var b0: [u8] = rt_array_new_with_cap(16)
+    b0.push(_flag_b0(adata_present, tag_len, nonce_len))
+
+    var i: u64 = 0
+    while i < nonce_len.to_u64():
+        b0.push(_u8_at(nonce, i))
+        i = i + 1
+
+    # Payload length in big-endian, L bytes.
+    var pl: u64 = payload_len
+    var len_bytes: [u8] = rt_array_new_with_cap(l.to_i64())
+    var k: u32 = 0
+    while k < l:
+        len_bytes.push((pl & 0xFF).to_u8())
+        pl = pl >> 8
+        k = k + 1
+    # Reverse to big-endian.
+    var j: u32 = l
+    while j > 0:
+        j = j - 1
+        b0.push(_u8_at(len_bytes, j.to_u64()))
+
+    b0
+
+fn _build_a_i(nonce: [u8], counter: u64) -> [u8]:
+    """Construct counter block A_i (RFC 3610 §2.3): flag || nonce || ctr_BE_L.
+
+    counter is encoded big-endian in L = 15 - nonce_len bytes.
+    """
+    val nonce_len: u32 = nonce.len().to_u32()
+    val l: u32 = 15 - nonce_len
+
+    var a: [u8] = rt_array_new_with_cap(16)
+    a.push(_flag_a0(nonce_len))
+
+    var i: u64 = 0
+    while i < nonce_len.to_u64():
+        a.push(_u8_at(nonce, i))
+        i = i + 1
+
+    # counter in big-endian, L bytes.
+    var ctr: u64 = counter
+    var ctr_bytes: [u8] = rt_array_new_with_cap(l.to_i64())
+    var k: u32 = 0
+    while k < l:
+        ctr_bytes.push((ctr & 0xFF).to_u8())
+        ctr = ctr >> 8
+        k = k + 1
+    var j: u32 = l
+    while j > 0:
+        j = j - 1
+        a.push(_u8_at(ctr_bytes, j.to_u64()))
+
+    a
+
+# ============================================================================
+# AAD length encoding (RFC 3610 §2.2)
+#
+# If 0 < a < 2^16 - 2^8       : 2 bytes BE             (most common)
+# If 2^16 - 2^8 ≤ a < 2^32     : 0xFF || 0xFE || 4 bytes BE
+# If 2^32 ≤ a < 2^64           : 0xFF || 0xFF || 8 bytes BE
+# (a == 0 → no encoded length and no AAD blocks at all)
+# ============================================================================
+
+fn _encode_aad_len(a: u64) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(10)
+    if a == 0:
+        return out
+    if a < (0x10000 - 0x100):
+        # 2 bytes BE
+        out.push(((a >> 8) & 0xFF).to_u8())
+        out.push((a & 0xFF).to_u8())
+        return out
+    if a < 0x100000000:
+        # 0xFF 0xFE || 4 bytes BE
+        out.push(0xFF)
+        out.push(0xFE)
+        out.push(((a >> 24) & 0xFF).to_u8())
+        out.push(((a >> 16) & 0xFF).to_u8())
+        out.push(((a >> 8) & 0xFF).to_u8())
+        out.push((a & 0xFF).to_u8())
+        return out
+    # 0xFF 0xFF || 8 bytes BE
+    out.push(0xFF)
+    out.push(0xFF)
+    out.push(((a >> 56) & 0xFF).to_u8())
+    out.push(((a >> 48) & 0xFF).to_u8())
+    out.push(((a >> 40) & 0xFF).to_u8())
+    out.push(((a >> 32) & 0xFF).to_u8())
+    out.push(((a >> 24) & 0xFF).to_u8())
+    out.push(((a >> 16) & 0xFF).to_u8())
+    out.push(((a >> 8) & 0xFF).to_u8())
+    out.push((a & 0xFF).to_u8())
+    out
+
+# ============================================================================
+# CBC-MAC chain (RFC 3610 §3)
+#
+# X_1 = AES_K(B_0)
+# X_{i+1} = AES_K(X_i XOR B_i)   for i = 1..n
+# T = first M bytes of X_{n+1}
+# ============================================================================
+
+fn _xor_block(a: [u8], b: [u8]) -> [u8]:
+    """XOR two 16-byte blocks."""
+    var out: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        out.push(_u8_at(a, i) ^ _u8_at(b, i))
+        i = i + 1
+    out
+
+fn _cbc_mac_absorb(state: [u8], block: [u8], round_keys: [u8]) -> [u8]:
+    """One CBC-MAC step: X_{i+1} = AES_K(X_i XOR B_i)."""
+    val xored = _xor_block(state, block)
+    aes128_encrypt_block(xored, round_keys)
+
+fn _cbc_mac(round_keys: [u8],
+            nonce: [u8],
+            aad: [u8],
+            payload: [u8],
+            tag_len: u32) -> [u8]:
+    """Compute T = first M bytes of CBC-MAC over (B_0 || B_aad || B_payload).
+
+    Each B_i is 16 bytes; AAD and payload are zero-padded to a multiple of 16.
+    """
+    val adata_present: bool = aad.len() > 0
+    val b0 = _build_b0(nonce, tag_len, payload.len(), adata_present)
+
+    # X_1 = AES_K(B_0)
+    var x: [u8] = aes128_encrypt_block(b0, round_keys)
+
+    # AAD blocks: encoded-length || aad, zero-padded to 16-byte multiple.
+    if adata_present:
+        val aad_len_enc = _encode_aad_len(aad.len())
+        # Concatenate aad_len_enc || aad into one stream, then process in
+        # 16-byte chunks with zero padding on the final partial block.
+        var aad_stream: [u8] = rt_array_new_with_cap((aad_len_enc.len() + aad.len()).to_i64())
+        var i: u64 = 0
+        while i < aad_len_enc.len():
+            aad_stream.push(_u8_at(aad_len_enc, i))
+            i = i + 1
+        var j: u64 = 0
+        while j < aad.len():
+            aad_stream.push(_u8_at(aad, j))
+            j = j + 1
+
+        # Process aad_stream in 16-byte CBC-MAC blocks (zero-pad last).
+        var pos: u64 = 0
+        val total = aad_stream.len()
+        while pos < total:
+            var blk: [u8] = rt_array_new_with_cap(16)
+            var k: u64 = 0
+            while k < 16:
+                if (pos + k) < total:
+                    blk.push(_u8_at(aad_stream, pos + k))
+                else:
+                    blk.push(0x00)
+                k = k + 1
+            x = _cbc_mac_absorb(x, blk, round_keys)
+            pos = pos + 16
+
+    # Payload blocks: zero-padded to 16-byte multiple.
+    if payload.len() > 0:
+        var pos: u64 = 0
+        val total = payload.len()
+        while pos < total:
+            var blk: [u8] = rt_array_new_with_cap(16)
+            var k: u64 = 0
+            while k < 16:
+                if (pos + k) < total:
+                    blk.push(_u8_at(payload, pos + k))
+                else:
+                    blk.push(0x00)
+                k = k + 1
+            x = _cbc_mac_absorb(x, blk, round_keys)
+            pos = pos + 16
+
+    # T = first M bytes of X_{n+1}
+    var t: [u8] = rt_array_new_with_cap(tag_len.to_i64())
+    var i: u64 = 0
+    while i < tag_len.to_u64():
+        t.push(_u8_at(x, i))
+        i = i + 1
+    t
+
+# ============================================================================
+# CTR-mode encrypt/decrypt over payload (RFC 3610 §2.3)
+#
+# S_i = AES_K(A_i)  for i = 0, 1, 2, ...
+# Payload bytes are XORed with S_1, S_2, ... (S_0 reserved for tag masking).
+# ============================================================================
+
+fn _ctr_xor_payload(round_keys: [u8], nonce: [u8], data: [u8]) -> [u8]:
+    """XOR data with the CCM keystream starting at counter=1 (A_1, A_2, ...).
+
+    Used for both encrypt and decrypt (CTR is its own inverse).
+    """
+    if data.len() == 0:
+        return []
+
+    var out: [u8] = rt_array_new_with_cap(data.len().to_i64())
+    var i: u64 = 0
+    var ctr: u64 = 1  # S_0 reserved for tag mask; payload starts at S_1
+    val total = data.len()
+    while i < total:
+        val a_i = _build_a_i(nonce, ctr)
+        val s_i = aes128_encrypt_block(a_i, round_keys)
+        var k: u64 = 0
+        while k < 16 and (i + k) < total:
+            out.push(_u8_at(data, i + k) ^ _u8_at(s_i, k))
+            k = k + 1
+        i = i + 16
+        ctr = ctr + 1
+    out
+
+fn _s0_tag_mask(round_keys: [u8], nonce: [u8], tag_len: u32) -> [u8]:
+    """Compute first M bytes of S_0 = AES_K(A_0) for tag masking."""
+    val a0 = _build_a_i(nonce, 0)
+    val s0 = aes128_encrypt_block(a0, round_keys)
+    var mask: [u8] = rt_array_new_with_cap(tag_len.to_i64())
+    var i: u64 = 0
+    while i < tag_len.to_u64():
+        mask.push(_u8_at(s0, i))
+        i = i + 1
+    mask
+
+fn _xor_bytes(a: [u8], b: [u8]) -> [u8]:
+    """XOR two byte arrays of equal length."""
+    var out: [u8] = rt_array_new_with_cap(a.len().to_i64())
+    var i: u64 = 0
+    while i < a.len():
+        out.push(_u8_at(a, i) ^ _u8_at(b, i))
+        i = i + 1
+    out
