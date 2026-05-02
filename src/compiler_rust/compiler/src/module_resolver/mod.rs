@@ -157,6 +157,32 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_compiler_alias_import_from_symlinked_frontend_file() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let compiler_root = src.join("compiler");
+        let numbered_frontend = compiler_root.join("10.frontend");
+        let alias_frontend = compiler_root.join("frontend");
+        let frontend_core = numbered_frontend.join("core");
+
+        fs::create_dir_all(&frontend_core).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("10.frontend", &alias_frontend).unwrap();
+
+        fs::write(frontend_core.join("tokens.spl"), "struct Token:").unwrap();
+        fs::write(frontend_core.join("lexer.spl"), "use compiler.core.tokens.{Token}").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), compiler_root.clone())
+            .with_extra_source_roots(vec![src.clone(), compiler_root.clone()]);
+
+        let path = ModulePath::new(vec!["compiler".into(), "core".into(), "tokens".into()]);
+        let from_file = alias_frontend.join("core").join("lexer.spl");
+        let resolved = resolver.resolve(&path, &from_file).unwrap();
+
+        assert_eq!(resolved.path, frontend_core.join("tokens.spl"));
+    }
+
+    #[test]
     fn test_resolve_module_not_found() {
         let dir = create_test_project();
         let src = dir.path().join("src");

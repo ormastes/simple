@@ -16,6 +16,9 @@ TIMEOUT_SEC="${RTL_LINUX_TIMEOUT_SEC:-120}"
 CHECK_TOOLS=0
 SKIP_PROOFS=0
 PAYLOAD_ELF="${GENERATED_RV32_LINUX_PAYLOAD_ELF:-$LOG_DIR/generated_rv32_linux_acceptance.elf}"
+SIMPLE_BIN=""
+SIMPLE_CANDIDATES=""
+SIMPLE_ATTEMPTS=""
 
 can_run_simple_bin() {
     candidate="$1"
@@ -26,25 +29,93 @@ can_run_simple_bin() {
     [ "$code" -ne 124 ] && [ "$code" -ne 126 ] && [ "$code" -ne 127 ]
 }
 
-pick_simple_bin() {
-    for candidate in \
-        "${SIMPLE_BINARY:-}" \
-        "$REPO_ROOT/src/compiler_rust/target/debug/simple" \
-        "$REPO_ROOT/src/compiler_rust/target/bootstrap/simple" \
-        "$REPO_ROOT/src/compiler_rust/target/release/simple" \
-        "$REPO_ROOT/bin/simple"
-    do
-        if can_run_simple_bin "$candidate"; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-    return 1
+append_simple_candidate() {
+    candidate="$1"
+    [ -n "$candidate" ] || return 0
+    case "
+$SIMPLE_CANDIDATES
+" in
+        *"
+$candidate
+"*) return 0 ;;
+    esac
+    if [ -n "$SIMPLE_CANDIDATES" ]; then
+        SIMPLE_CANDIDATES="$SIMPLE_CANDIDATES
+$candidate"
+    else
+        SIMPLE_CANDIDATES="$candidate"
+    fi
 }
 
-SIMPLE_BIN="$(pick_simple_bin)" || {
-    echo "FAIL: no runnable Simple compiler found; set SIMPLE_BINARY to a working host runtime" >&2
-    exit 1
+append_existing_simple_matches() {
+    for pattern in "$@"; do
+        for candidate in $pattern; do
+            [ -e "$candidate" ] || continue
+            append_simple_candidate "$candidate"
+        done
+    done
+}
+
+build_simple_candidate_list() {
+    SIMPLE_CANDIDATES=""
+    host_os="$(uname -s 2>/dev/null || echo unknown)"
+    host_arch="$(uname -m 2>/dev/null || echo unknown)"
+    case "$host_arch" in
+        arm64|aarch64) norm_arch="aarch64" ;;
+        x86_64|amd64) norm_arch="x86_64" ;;
+        *) norm_arch="$host_arch" ;;
+    esac
+
+    append_simple_candidate "${SIMPLE_BINARY:-}"
+    case "$host_os:$norm_arch" in
+        Linux:x86_64)
+            append_simple_candidate "$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple"
+            append_simple_candidate "$REPO_ROOT/bin/release/linux-x86_64/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/full/x86_64-unknown-linux-gnu/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/stage3/x86_64-unknown-linux-gnu/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple"
+            ;;
+        Linux:aarch64)
+            append_simple_candidate "$REPO_ROOT/bin/release/aarch64-unknown-linux-gnu/simple"
+            append_simple_candidate "$REPO_ROOT/bin/release/linux-aarch64/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/full/aarch64-unknown-linux-gnu/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple"
+            ;;
+        FreeBSD:x86_64)
+            append_simple_candidate "$REPO_ROOT/bin/release/x86_64-unknown-freebsd/simple"
+            append_simple_candidate "$REPO_ROOT/bin/release/freebsd-x86_64/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/full/x86_64-unknown-freebsd/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"
+            append_simple_candidate "$REPO_ROOT/build/bootstrap/stage2/x86_64-unknown-freebsd/simple"
+            ;;
+    esac
+    append_simple_candidate "$REPO_ROOT/bin/release/simple"
+    append_existing_simple_matches \
+        "$REPO_ROOT/build/bootstrap/full/*/simple" \
+        "$REPO_ROOT/build/bootstrap/stage3/*/simple" \
+        "$REPO_ROOT/build/bootstrap/stage2/*/simple"
+    append_simple_candidate "$REPO_ROOT/src/compiler_rust/target/release/simple"
+    append_simple_candidate "$REPO_ROOT/src/compiler_rust/target/release-opt/simple"
+    append_simple_candidate "$REPO_ROOT/src/compiler_rust/target/bootstrap/simple"
+    append_simple_candidate "$REPO_ROOT/src/compiler_rust/target/bootstrap/debug/simple"
+    append_simple_candidate "$REPO_ROOT/src/compiler_rust/target/debug/simple"
+    append_simple_candidate "$REPO_ROOT/bin/simple"
+}
+
+record_simple_attempt() {
+    candidate="$1"
+    status="$2"
+    if [ -n "$SIMPLE_ATTEMPTS" ]; then
+        SIMPLE_ATTEMPTS="$SIMPLE_ATTEMPTS
+- $candidate :: $status"
+    else
+        SIMPLE_ATTEMPTS="- $candidate :: $status"
+    fi
+}
+
+sanitize_log_label() {
+    printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
 }
 
 while [ $# -gt 0 ]; do
@@ -77,16 +148,70 @@ check_tools() {
 
 prepare_payload() {
     mkdir -p "$LOG_DIR"
-    "$SIMPLE_BIN" native-build \
-        --verbose \
-        --backend llvm \
-        --timeout 120 \
-        --entry-closure \
-        --source "$REPO_ROOT/examples/simple_os/arch/riscv32" \
-        --entry "$REPO_ROOT/examples/simple_os/arch/riscv32/ghdl_linux_acceptance_entry.spl" \
-        --target riscv32-unknown-none \
-        -o "$PAYLOAD_ELF" \
-        --linker-script "$REPO_ROOT/examples/simple_os/arch/riscv32/linker.ld"
+    rm -f "$PAYLOAD_ELF"
+    SIMPLE_ATTEMPTS=""
+    build_simple_candidate_list
+    [ -n "$SIMPLE_CANDIDATES" ] || {
+        echo "FAIL: no Simple compiler candidates found; set SIMPLE_BINARY to an LLVM-enabled runtime" >&2
+        return 1
+    }
+
+    attempt_dir="$(mktemp -d "${TMPDIR:-/tmp}/generated_rv32_linux_llvm_probe_XXXXXX")"
+    while IFS= read -r candidate; do
+        [ -n "$candidate" ] || continue
+        if ! can_run_simple_bin "$candidate"; then
+            record_simple_attempt "$candidate" "not runnable"
+            continue
+        fi
+
+        candidate_label="$(sanitize_log_label "$candidate")"
+        attempt_log="$LOG_DIR/generated_rv32_linux_build_${candidate_label}.log"
+        attempt_payload="$attempt_dir/${candidate_label}.elf"
+
+        if "$candidate" native-build \
+            --verbose \
+            --backend llvm \
+            --timeout 120 \
+            --entry-closure \
+            --source "$REPO_ROOT/examples/simple_os/arch/riscv32" \
+            --entry "$REPO_ROOT/examples/simple_os/arch/riscv32/ghdl_linux_acceptance_entry.spl" \
+            --target riscv32-unknown-none \
+            -o "$attempt_payload" \
+            --linker-script "$REPO_ROOT/examples/simple_os/arch/riscv32/linker.ld" \
+            >"$attempt_log" 2>&1
+        then
+            rc=0
+        else
+            rc=$?
+        fi
+
+        if [ "$rc" -eq 0 ] && [ -f "$attempt_payload" ]; then
+            mv "$attempt_payload" "$PAYLOAD_ELF"
+            SIMPLE_BIN="$candidate"
+            rm -rf "$attempt_dir"
+            echo "[$LANE_ID] using LLVM-capable Simple compiler: $SIMPLE_BIN"
+            echo "[$LANE_ID] payload build log: $attempt_log"
+            return 0
+        fi
+
+        if grep -q "LLVM backend requested but 'llvm' feature not enabled" "$attempt_log"; then
+            record_simple_attempt "$candidate" "missing llvm feature (log: $attempt_log)"
+            continue
+        fi
+
+        summary="$(sed -n '/./{p;q;}' "$attempt_log")"
+        [ -n "$summary" ] || summary="no compiler output"
+        record_simple_attempt "$candidate" "native-build failed rc=$rc ($summary; log: $attempt_log)"
+    done <<EOF
+$SIMPLE_CANDIDATES
+EOF
+
+    rm -rf "$attempt_dir"
+    echo "FAIL: unable to build $LANE_ID payload with an LLVM-capable Simple compiler" >&2
+    echo "tried candidates:" >&2
+    printf '%s\n' "$SIMPLE_ATTEMPTS" >&2
+    echo "prerequisite: set SIMPLE_BINARY to an LLVM-enabled simple binary, or build one with 'cd $REPO_ROOT/src/compiler_rust && cargo build --features llvm -p simple-driver'" >&2
+    return 1
 }
 
 run_proof() {

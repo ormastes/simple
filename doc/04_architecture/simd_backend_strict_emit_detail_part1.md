@@ -483,9 +483,10 @@ Byte P2 [7:0]:
 ### 3.2 Core Helper: `fn evex_encode_3op_zmm`
 
 ```
+# Pattern: see simd_strict_emit_errata.md ERR-001 for the bug history. M1 emitter MUST mirror this corrected sequence.
 # Encode a 3-operand ZMM instruction with optional k-mask and zeroing.
 # Returns [u8; 6] = [0x62, P0, P1, P2, opcode, ModRM]
-# C1 §1.2 — [UNVERIFIED hex values; verify vs Intel SDM §2.6.1]
+# C1 §1.2 — corrected per Intel SDM Vol 2A §2.6.1 (see ERR-001a + ERR-001b in simd_strict_emit_errata.md)
 fn evex_encode_3op_zmm(
     dest: i32,   # ZMM dest register index 0-31
     src1: i32,   # ZMM src1 (vvvv field) index 0-31
@@ -507,15 +508,14 @@ fn evex_encode_3op_zmm(
        | ((~x_bit   & 1) << 6)
        | ((~b_bit   & 1) << 5)
        | ((~r_prime & 1) << 4)
-       | ((mm & 3)       << 2)
+       | ((mm & 7)       << 0)   # mm bits[2:0] per Intel SDM Vol 2A §2.6.1 Table 2-36
        | (0              << 1)   # reserved 0
-       | (w & 1)
 
     # P1 construction
     vvvv_lo4 = src1 & 0xF        # bits[3:0] of src1
-    p1 = (1              << 7)   # must-1
+    p1 = ((w & 1)        << 7)   # W at bit[7] per Intel SDM Vol 2A §2.6.1 Table 2-36
        | ((~vvvv_lo4 & 0xF) << 3)
-       | (1              << 2)   # must-1
+       | (1              << 2)   # must-1 (EVEX distinguisher)
        | (pp & 3)
 
     # P2 construction
@@ -550,6 +550,62 @@ When `b=1` on a register-register operand, P2[6:5] (L'L) encodes rounding mode:
 In `evex_encode_3op_zmm_sae`, set `b_p2=1` and `ll=rounding_mode_bits`.
 
 ### 3.4 Worked Examples (C1 §1, [UNVERIFIED] — verify vs Intel SDM)
+
+**Canonical Example A: `vfmadd213ps zmm0{k1}{z}, zmm1, zmm2` (W=0, f32) — VERIFIED**
+```
+# Intel SDM Vol 2A §2.6.1 + Vol 2B §4 VFMADD132/213/231PS entry
+# Parameters: dest=0, src1=1, src2=2, k=1, z=true, mm=2(0F38), w=0, pp=1(0x66), opc=0xA8
+Byte0: 0x62  mandatory EVEX escape
+
+Byte1 (P0 = 0xF2 = 1111_0010b):
+  [7]=1  ~R=1  R=0   dest=zmm0 (idx<8)
+  [6]=1  ~X=1  X=0   no SIB index
+  [5]=1  ~B=1  B=0   src2=zmm2 (idx<8)
+  [4]=1  ~R'=1 R'=0  dest<zmm16
+  [3]=0  reserved=0
+  [2:0]=010  mm=2 = MAP2 (0F38)   # bits[2:0] per Intel SDM Vol 2A §2.6.1
+
+Byte2 (P1 = 0x75 = 0111_0101b):
+  [7]=0  W=0   single-precision f32   # W at bit[7] per Intel SDM Vol 2A §2.6.1
+  [6:3]=1110  ~vvvv=1110 → vvvv=0001 = zmm1
+  [2]=1  must-1 (EVEX distinguisher)
+  [1:0]=01  pp=01 = 0x66 prefix
+
+Byte3 (P2 = 0xC9 = 1100_1001b):
+  [7]=1  z=1   zeroing masking
+  [6:5]=10  L'L=10 = 512-bit ZMM
+  [4]=0  b=0   no broadcast/SAE
+  [3]=1  ~V'=1 V'=0  src1<zmm16
+  [2:0]=001  aaa=001 = k1 opmask
+
+Byte4: 0xA8  opcode VFMADD213PS in MAP2
+Byte5: 0xC2  ModRM: mod=11 reg=0(zmm0) rm=2(zmm2)
+
+RESULT: 62 F2 75 C9 A8 C2  (Intel SDM Vol 2B §4 VFMADD132/213/231PS, EVEX.512.66.0F38.W0 A8 /r)
+```
+
+**Canonical Example B: `vfmadd213pd zmm0{k1}{z}, zmm1, zmm2` (W=1, f64) — VERIFIED**
+```
+# Intel SDM Vol 2A §2.6.1 + Vol 2B §4 VFMADD132/213/231PD entry
+# Parameters: dest=0, src1=1, src2=2, k=1, z=true, mm=2(0F38), w=1, pp=1(0x66), opc=0xA8
+Byte0: 0x62
+
+Byte1 (P0 = 0xF2 = 1111_0010b):
+  Same as f32: R/X/B/R' all clear, mm=010=MAP2
+  Note: W does NOT appear in Byte1 — identical for W=0 and W=1
+
+Byte2 (P1 = 0xF5 = 1111_0101b):
+  [7]=1  W=1   double-precision f64   # W at bit[7] per Intel SDM Vol 2A §2.6.1
+  [6:3]=1110  ~vvvv=1110 → vvvv=0001 = zmm1
+  [2]=1  must-1
+  [1:0]=01  pp=01 = 0x66 prefix
+
+Byte3: 0xC9  (same as f32)
+Byte4: 0xA8  (same opcode; W in prefix selects pd variant)
+Byte5: 0xC2  (same ModRM)
+
+RESULT: 62 F2 F5 C9 A8 C2  (Intel SDM Vol 2B §4 VFMADD132/213/231PD, EVEX.512.66.0F38.W1 A8 /r)
+```
 
 **Example 1: `vaddps zmm0, zmm1, zmm2` (no mask)**
 ```

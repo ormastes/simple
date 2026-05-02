@@ -19,9 +19,25 @@ corrected construction shown in ERR-001 §"Corrected byte-construction sequence"
 
 | ID | Source doc + section | Severity | Status | Affected goldens |
 |---|---|---|---|---|
-| ERR-001a | `simd_backend_strict_emit_detail_part1.md` §3.2 line 510 | CRITICAL (all EVEX goldens wrong) | OPEN | All AVX-512 EVEX goldens in C3b §10.3 |
-| ERR-001b | `simd_backend_strict_emit_detail_part1.md` §3.2 lines 512, 516 | HIGH (W=1 f64 instructions decode as wrong map) | OPEN | All AVX-512 W=1 (f64/i64) EVEX goldens |
+| ERR-001a | `simd_backend_strict_emit_detail_part1.md` §3.2 line 510 | CRITICAL (all EVEX goldens wrong) | RESOLVED | All AVX-512 EVEX goldens in C3b §10.3 |
+| ERR-001b | `simd_backend_strict_emit_detail_part1.md` §3.2 lines 512, 516 | HIGH (W=1 f64 instructions decode as wrong map) | RESOLVED | All AVX-512 W=1 (f64/i64) EVEX goldens |
 | ERR-001c | `simd_spec_verification_2026-05-02.md` §V-06 | LOW (doc error, not code) | OPEN | D1 V-06 "byte sequence confirmed correct" claim is wrong |
+
+## Resolution log
+
+| ERR | Resolved-in commit | Status | Notes |
+|---|---|---|---|
+| ERR-001a | (this commit) | RESOLVED in C3a §3 | Buggy `(mm & 3) << 2` mm-shift replaced with `(mm & 7) << 0`; mm bits[2:0] now land at correct P0 positions per Intel SDM Vol 2A §2.6.1 Table 2-36 |
+| ERR-001b | (this commit) | RESOLVED in C3a §3 | Misplaced `w & 1` removed from P0; P1 bit[7] changed from hard-coded `1 << 7` to `(w & 1) << 7`; W now in correct Byte2 position per Intel SDM Vol 2A §2.6.1 |
+| ERR-001c | — | OPEN | D1 V-06 doc claim not modified; requires separate doc errata in simd_spec_verification_2026-05-02.md |
+
+Verified corrected output (canonical worked examples added to C3a §3.4):
+- VFMADD213PS (f32, W=0): `62 F2 75 C9 A8 C2` — matches Intel SDM Vol 2B §4 VFMADD132/213/231PS
+- VFMADD213PD (f64, W=1): `62 F2 F5 C9 A8 C2` — matches Intel SDM Vol 2B §4 VFMADD132/213/231PD
+
+M1 emitter contract now references the post-fix pseudocode in C3a §3.2. ERR-001c (D1 V-06 doc claim) remains OPEN — it is a separate documentation correction outside F4's scope.
+
+---
 
 ERR-001a and ERR-001b are two independent bugs within the same function; both must be fixed
 together. They are listed separately because they have different scope: 001a corrupts every

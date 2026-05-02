@@ -45,6 +45,30 @@ fn find_numbered_dir(parent: &Path, segment: &str) -> Option<PathBuf> {
     None
 }
 
+fn find_segment_within_numbered_dirs(parent: &Path, segment: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let Some(after_dot) = name_str.find('.') else {
+            continue;
+        };
+        let prefix = &name_str[..after_dot];
+        if prefix.is_empty() || prefix.len() > 3 || !prefix.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let nested = path.join(segment);
+        if nested.is_dir() {
+            return Some(nested);
+        }
+    }
+    None
+}
+
 fn find_dotted_dir(current: &Path, segment: &str) -> Option<PathBuf> {
     let parent = current.parent()?;
     let current_name = current.file_name()?.to_str()?;
@@ -54,6 +78,91 @@ fn find_dotted_dir(current: &Path, segment: &str) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn layered_dir_alias_name(current: &Path) -> Option<String> {
+    let name = current.file_name()?.to_str()?;
+    if let Some(after_dot) = name.find('.') {
+        let prefix = &name[..after_dot];
+        let suffix = &name[after_dot + 1..];
+        if !prefix.is_empty() && prefix.len() <= 3 && prefix.chars().all(|c| c.is_ascii_digit()) {
+            return Some(suffix.to_string());
+        }
+    }
+    Some(name.to_string())
+}
+
+fn resolve_module_in_dir(
+    dir: &Path,
+    last: &str,
+    original_path: &ModulePath,
+) -> Option<ResolvedModule> {
+    let dir_path = dir.join(last);
+    let init_path = dir_path.join("__init__.spl");
+    if init_path.exists() && init_path.is_file() {
+        return Some(ResolvedModule {
+            path: init_path,
+            module_path: original_path.clone(),
+            is_directory: true,
+            manifest: None,
+        });
+    }
+
+    let mod_path = dir_path.join("mod.spl");
+    if mod_path.exists() && mod_path.is_file() {
+        return Some(ResolvedModule {
+            path: mod_path,
+            module_path: original_path.clone(),
+            is_directory: true,
+            manifest: None,
+        });
+    }
+
+    let file_path = dir.join(format!("{}.spl", last));
+    if file_path.exists() && file_path.is_file() {
+        return Some(ResolvedModule {
+            path: file_path,
+            module_path: original_path.clone(),
+            is_directory: false,
+            manifest: None,
+        });
+    }
+
+    let shs_path = dir.join(format!("{}.shs", last));
+    if shs_path.exists() && shs_path.is_file() {
+        return Some(ResolvedModule {
+            path: shs_path,
+            module_path: original_path.clone(),
+            is_directory: false,
+            manifest: None,
+        });
+    }
+
+    None
+}
+
+fn resolve_exact_directory_module(dir: &Path, original_path: &ModulePath) -> Option<ResolvedModule> {
+    let init_path = dir.join("__init__.spl");
+    if init_path.exists() && init_path.is_file() {
+        return Some(ResolvedModule {
+            path: init_path,
+            module_path: original_path.clone(),
+            is_directory: true,
+            manifest: None,
+        });
+    }
+
+    let mod_path = dir.join("mod.spl");
+    if mod_path.exists() && mod_path.is_file() {
+        return Some(ResolvedModule {
+            path: mod_path,
+            module_path: original_path.clone(),
+            is_directory: true,
+            manifest: None,
+        });
+    }
+
+    None
 }
 
 fn domain_to_dir(domain: &str) -> String {
@@ -141,6 +250,29 @@ impl ModuleResolver {
                 "empty module path".to_string(),
                 ctx,
             ));
+        }
+
+        // Treat `compiler.*` as an absolute namespace import.
+        // Compiler sources mix numbered layer directories (e.g. `10.frontend`)
+        // with symlink aliases (e.g. `frontend`), and routing these imports
+        // through the current file's parent first can strand resolution inside
+        // alias directories like `src/compiler/frontend/core/compiler`.
+        if (segments[0] == "compiler" || segments[0] == "compiler_shared") && segments.len() > 1 {
+            for root in ordered_source_roots(self) {
+                let namespace_dir = root.join(&segments[0]);
+                if namespace_dir.is_dir() {
+                    if let Ok(resolved) = self.resolve_from_base(&namespace_dir, &segments[1..], path) {
+                        return Ok(resolved);
+                    }
+                }
+            }
+
+            let alt_namespace_dir = self.project_root.join("src").join(&segments[0]);
+            if alt_namespace_dir.is_dir() {
+                if let Ok(resolved) = self.resolve_from_base(&alt_namespace_dir, &segments[1..], path) {
+                    return Ok(resolved);
+                }
+            }
         }
 
         // Determine base directory
@@ -296,6 +428,10 @@ impl ModuleResolver {
             } else if let Some(numbered) = find_numbered_dir(&current, segment) {
                 // Found numbered directory (e.g., 10.frontend for segment "frontend")
                 current = numbered;
+            } else if let Some(nested_numbered) = find_segment_within_numbered_dirs(&current, segment) {
+                // Found the segment as a child of a numbered layer directory
+                // (e.g. src/compiler/10.frontend/core for import compiler.core.*).
+                current = nested_numbered;
             } else if let Some(dotted) = find_dotted_dir(&current, segment) {
                 // Supports dotted backend directories such as src/app/ui.web/
                 current = dotted;
@@ -316,116 +452,49 @@ impl ModuleResolver {
         // Resolve the last segment
         let last = &segments[segments.len() - 1];
 
-        // Try directory with __init__.spl first
-        let dir_path = current.join(last);
-        let init_path = dir_path.join("__init__.spl");
-        if init_path.exists() && init_path.is_file() {
-            return Ok(ResolvedModule {
-                path: init_path,
-                module_path: original_path.clone(),
-                is_directory: true,
-                manifest: None, // Will be loaded on demand
-            });
-        }
-        let mod_path = dir_path.join("mod.spl");
-        if mod_path.exists() && mod_path.is_file() {
-            return Ok(ResolvedModule {
-                path: mod_path,
-                module_path: original_path.clone(),
-                is_directory: true,
-                manifest: None,
-            });
-        }
-
-        // Try .spl file
-        let file_path = current.join(format!("{}.spl", last));
-        if file_path.exists() && file_path.is_file() {
-            return Ok(ResolvedModule {
-                path: file_path,
-                module_path: original_path.clone(),
-                is_directory: false,
-                manifest: None,
-            });
-        }
-
-        // Try .shs file (Simple shell scripts)
-        let shs_path = current.join(format!("{}.shs", last));
-        if shs_path.exists() && shs_path.is_file() {
-            return Ok(ResolvedModule {
-                path: shs_path,
-                module_path: original_path.clone(),
-                is_directory: false,
-                manifest: None,
-            });
+        if let Some(resolved) = resolve_module_in_dir(&current, last, original_path) {
+            return Ok(resolved);
         }
 
         // Try numbered directory fallback for the last segment
         // e.g., "backend" → "70.backend/__init__.spl" or "70.backend/backend.spl"
         if let Some(numbered_dir) = find_numbered_dir(&current, last) {
-            let numbered_init = numbered_dir.join("__init__.spl");
-            if numbered_init.exists() && numbered_init.is_file() {
-                return Ok(ResolvedModule {
-                    path: numbered_init,
-                    module_path: original_path.clone(),
-                    is_directory: true,
-                    manifest: None,
-                });
+            if let Some(resolved) = resolve_module_in_dir(&numbered_dir, last, original_path) {
+                return Ok(resolved);
             }
-            let numbered_mod = numbered_dir.join("mod.spl");
-            if numbered_mod.exists() && numbered_mod.is_file() {
-                return Ok(ResolvedModule {
-                    path: numbered_mod,
-                    module_path: original_path.clone(),
-                    is_directory: true,
-                    manifest: None,
-                });
-            }
-            // Try NN.name/name.spl (e.g., 70.backend/backend.spl)
-            let numbered_file = numbered_dir.join(format!("{}.spl", last));
-            if numbered_file.exists() && numbered_file.is_file() {
-                return Ok(ResolvedModule {
-                    path: numbered_file,
-                    module_path: original_path.clone(),
-                    is_directory: false,
-                    manifest: None,
-                });
+        }
+
+        // Try nested child directories under numbered layers for the last segment
+        // e.g. compiler.core -> src/compiler/10.frontend/core/__init__.spl
+        if let Some(nested_numbered_dir) = find_segment_within_numbered_dirs(&current, last) {
+            if let Some(resolved) = resolve_exact_directory_module(&nested_numbered_dir, original_path) {
+                return Ok(resolved);
             }
         }
 
         // Try dotted directory fallback for the last segment
         // e.g. app.ui.web -> src/app/ui.web/__init__.spl
         if let Some(dotted_dir) = find_dotted_dir(&current, last) {
-            let dotted_init = dotted_dir.join("__init__.spl");
-            if dotted_init.exists() && dotted_init.is_file() {
-                return Ok(ResolvedModule {
-                    path: dotted_init,
-                    module_path: original_path.clone(),
-                    is_directory: true,
-                    manifest: None,
-                });
+            if let Some(resolved) = resolve_module_in_dir(&dotted_dir, last, original_path) {
+                return Ok(resolved);
             }
-            let dotted_mod = dotted_dir.join("mod.spl");
-            if dotted_mod.exists() && dotted_mod.is_file() {
-                return Ok(ResolvedModule {
-                    path: dotted_mod,
-                    module_path: original_path.clone(),
-                    is_directory: true,
-                    manifest: None,
-                });
-            }
+        }
 
-            let dotted_file = dotted_dir.join(format!("{}.spl", last));
-            if dotted_file.exists() && dotted_file.is_file() {
-                return Ok(ResolvedModule {
-                    path: dotted_file,
-                    module_path: original_path.clone(),
-                    is_directory: false,
-                    manifest: None,
-                });
+        // Support layered aliases that contain a same-name child directory,
+        // e.g. src/compiler/blocks -> 15.blocks and modules under blocks/value.spl.
+        if let Some(alias_name) = layered_dir_alias_name(&current) {
+            let nested_alias_dir = current.join(alias_name);
+            if nested_alias_dir.is_dir() {
+                if let Some(resolved) = resolve_module_in_dir(&nested_alias_dir, last, original_path) {
+                    return Ok(resolved);
+                }
             }
         }
 
         // E1034 - Unresolved Import
+        let dir_path = current.join(last);
+        let init_path = dir_path.join("__init__.spl");
+        let file_path = current.join(format!("{}.spl", last));
         let ctx = ErrorContext::new()
             .with_code(codes::UNRESOLVED_IMPORT)
             .with_help(format!("create either {:?} or {:?}", file_path, init_path))

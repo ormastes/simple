@@ -1,0 +1,208 @@
+# @cover src/lib/nogc_sync_mut/simd/aliases.spl 80%
+"""
+# SIMD Alias Back-Compat Regression Tests (F2)
+
+**Feature IDs:** #SIMD-ALIASES
+**Category:** Stdlib
+**Difficulty:** 1/5
+**Status:** In Progress
+**Design:** doc/04_architecture/simd_unified_architecture_detail.md §11.3
+
+## Overview
+
+Regression tests for `src/lib/nogc_sync_mut/simd/aliases.spl`:
+
+1. **Function-wrapper round-trips (work today):** `vec2f_splat`, `vec4f_splat`,
+   `vec8f_splat`, `vec4d_splat`, `vec4i_splat`, `vec4u_splat`, and the
+   corresponding `*_from_array` variants.  These were shipped by D4 and must
+   not regress.
+
+2. **Type-alias smoke test (A-07):** Verifies that the `type VecXy = FixedVec<T>`
+   declarations in aliases.spl do not cause a parse/lint error.  Resolution
+   is currently inert (parser_decls.spl:1086 skips type-alias bindings), so
+   no import of `{Vec4f}` is attempted here — that would fail until E2 raises
+   the import priority.
+
+## Status of Vec4f::splat(1.0) form
+
+The aspirational `Vec4f.splat(1.0)` call requires three prerequisites that
+are not yet landed:
+  - **F1:** parser fix for `Foo<T>.method()` static dispatch on type-alias names
+  - **E2:** import-priority change so `use std.simd.{Vec4f}` resolves to
+    aliases.spl rather than the legacy struct in simd_vector_types.spl
+  - **D3:** type-alias expansion in resolve_strategies.spl + eval_ops.spl so
+    `Vec4f__add` correctly falls through to `FixedVec__add`
+
+Until those land, `Vec4f.splat(1.0)` is NOT tested here.  See
+doc/08_tracking/bug/simd_alias_shadow_e2.md for the full fix sequence.
+
+All tests run in interpreter mode using the function-wrapper API only.
+"""
+
+use std.spipe.*
+use std.simd.fixed.{FixedVec, fixedvec_splat, fixedvec_from_slice}
+use std.simd.aliases.{
+    vec2f_splat, vec4f_splat, vec8f_splat, vec16f_splat,
+    vec2f_from_array, vec4f_from_array, vec8f_from_array, vec16f_from_array,
+    vec2d_splat, vec4d_splat, vec8d_splat,
+    vec2d_from_array, vec4d_from_array, vec8d_from_array,
+    vec4i_splat, vec8i_splat,
+    vec4i_from_array, vec8i_from_array,
+    vec4u_splat, vec8u_splat,
+    vec4u_from_array, vec8u_from_array
+}
+
+
+# ============================================================================
+# Helper functions — avoid var-rebind in it blocks (feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn make_alias_f32x4_1234() -> FixedVec<f32>:
+    return vec4f_from_array([1.0, 2.0, 3.0, 4.0])
+
+fn make_alias_f64x4_1234() -> FixedVec<f64>:
+    return vec4d_from_array([1.0, 2.0, 3.0, 4.0])
+
+fn make_alias_i32x4_5678() -> FixedVec<i32>:
+    return vec4i_from_array([5, 6, 7, 8])
+
+fn make_alias_u32x4_1234() -> FixedVec<u32>:
+    return vec4u_from_array([1, 2, 3, 4])
+
+
+# ============================================================================
+# f32 alias wrapper tests
+# ============================================================================
+
+describe "SIMD back-compat alias wrappers — f32":
+    """
+    ## f32 alias function wrappers (C2 §11.3)
+
+    Tests A-01..A-03: vec2f_splat, vec4f_splat, vec8f_splat produce FixedVec
+    with the correct lane count and splat value; from_array round-trips correctly.
+    """
+
+    # A-01: vec4f_splat produces a 4-lane FixedVec<f32> filled with the given value
+    it "A-01: vec4f_splat produces 4-lane f32 vector with correct value":
+        val v = vec4f_splat(3.14)
+        val n = v.lanes()
+        expect n == 4
+        val arr = v.to_array()
+        expect arr[0] == 3.14
+        expect arr[3] == 3.14
+
+    # A-02: vec2f_splat produces a 2-lane vector; vec8f_splat produces 8 lanes
+    it "A-02: vec2f_splat and vec8f_splat produce correct lane counts":
+        val v2 = vec2f_splat(1.0)
+        expect v2.lanes() == 2
+
+        val v8 = vec8f_splat(2.0)
+        expect v8.lanes() == 8
+
+    # A-03: vec4f_from_array round-trips through to_array
+    it "A-03: vec4f_from_array to_array round-trip preserves all lane values":
+        val v = make_alias_f32x4_1234()
+        val arr = v.to_array()
+        expect arr[0] == 1.0
+        expect arr[1] == 2.0
+        expect arr[2] == 3.0
+        expect arr[3] == 4.0
+
+
+# ============================================================================
+# f64 alias wrapper tests
+# ============================================================================
+
+describe "SIMD back-compat alias wrappers — f64":
+    """
+    ## f64 alias function wrappers (C2 §11.3)
+
+    Tests A-04: vec4d_splat, vec4d_from_array round-trip.
+    """
+
+    # A-04: vec4d_splat produces a 4-lane FixedVec<f64>; from_array round-trips
+    it "A-04: vec4d_splat and vec4d_from_array work correctly":
+        val v = vec4d_splat(2.718)
+        expect v.lanes() == 4
+        val arr_s = v.to_array()
+        expect arr_s[0] == 2.718
+
+        val v2 = make_alias_f64x4_1234()
+        val arr2 = v2.to_array()
+        expect arr2[0] == 1.0
+        expect arr2[3] == 4.0
+
+
+# ============================================================================
+# i32 alias wrapper tests
+# ============================================================================
+
+describe "SIMD back-compat alias wrappers — i32":
+    """
+    ## i32 alias function wrappers (C2 §11.3)
+
+    Tests A-05: vec4i_splat, vec4i_from_array.
+    """
+
+    # A-05: vec4i_splat and vec4i_from_array
+    it "A-05: vec4i_splat produces 4-lane i32 vector; from_array round-trips":
+        val v = vec4i_splat(7)
+        expect v.lanes() == 4
+        val arr_s = v.to_array()
+        expect arr_s[0] == 7
+        expect arr_s[3] == 7
+
+        val v2 = make_alias_i32x4_5678()
+        val arr2 = v2.to_array()
+        expect arr2[0] == 5
+        expect arr2[3] == 8
+
+
+# ============================================================================
+# u32 alias wrapper tests
+# ============================================================================
+
+describe "SIMD back-compat alias wrappers — u32":
+    """
+    ## u32 alias function wrappers (C2 §11.3)
+
+    Tests A-06: vec4u_splat, vec4u_from_array.
+    """
+
+    # A-06: vec4u_splat and vec4u_from_array
+    it "A-06: vec4u_splat produces 4-lane u32 vector; from_array round-trips":
+        val v = vec4u_splat(42)
+        expect v.lanes() == 4
+        val arr_s = v.to_array()
+        expect arr_s[0] == 42
+
+        val v2 = make_alias_u32x4_1234()
+        val arr2 = v2.to_array()
+        expect arr2[0] == 1
+        expect arr2[3] == 4
+
+
+# ============================================================================
+# Type-alias declaration smoke test
+# ============================================================================
+
+describe "SIMD type-alias declarations — parse smoke test":
+    """
+    ## Type alias declarations (F2 §1)
+
+    Test A-07: The `type VecXy = FixedVec<T>` declarations in aliases.spl
+    must not break file loading or cause a parse error.  Resolution is
+    currently inert (parser skips type-alias bindings until D3/E2 land).
+
+    This test passes by construction: if the file imports above succeed
+    (which they must for this describe block to run), the declarations
+    parsed without error.
+    """
+
+    # A-07: aliases.spl loads without parse error despite type alias declarations
+    it "A-07: aliases.spl loads without parse error (type alias declarations are inert)":
+        # Verify function wrappers still work after type aliases were added above them.
+        # If the type declarations caused a parse error, this block would not execute.
+        val v = vec4f_splat(1.0)
+        val n = v.lanes()
+        expect n == 4

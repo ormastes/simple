@@ -88,6 +88,20 @@ impl<'a> Parser<'a> {
         // Track indents consumed for multi-line method chaining
         let mut consumed_indents: usize = 0;
 
+        // Lookahead disambiguation: Foo<Int>.bar() and Foo<Int>::bar()
+        //
+        // After parsing a bare Identifier as primary, if the next token is `<`, we
+        // speculatively try to consume a generic-arg list `<TypeArgs>`.  We commit only
+        // if the token *after* the closing `>` is `.`, `::`, or `(` — i.e. the `<...>`
+        // is clearly a type-argument list, not a comparison.  On failure we backtrack
+        // transparently and `<` is handled as `BinOp::Lt` by the binary-expression layer.
+        //
+        // The parsed generic args are discarded in the seed; the identifier is kept as-is
+        // so that the postfix loop can continue with `.bar()` or `::bar()`.
+        if matches!(&expr, Expr::Identifier(_)) && self.check(&TokenKind::Lt) {
+            self.try_skip_ident_generic_args();
+        }
+
         loop {
             match &self.current.kind {
                 TokenKind::LParen => {
@@ -613,6 +627,57 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 }
+                TokenKind::DoubleColon => {
+                    // Handle `Foo<Int>::bar()` where generic args were consumed above and
+                    // `expr` is still `Identifier("Foo")`.  Build a Path from the segments
+                    // exactly like `parse_identifier_or_struct` does for bare `Foo::bar`.
+                    // Emit the same deprecation hint that the primary path already emits for
+                    // plain `Foo::bar`, so the behaviour is consistent.
+                    if let Expr::Identifier(ref base) = expr.clone() {
+                        use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+                        let colon_span = self.current.span;
+                        let warning = ErrorHint {
+                            level: ErrorHintLevel::Warning,
+                            message: "Deprecated syntax for static method/variant access".to_string(),
+                            span: colon_span,
+                            suggestion: Some("Use dot syntax (.) instead of double colon (::)".to_string()),
+                            help: Some("Example: Type.new() instead of Type::new()".to_string()),
+                        };
+                        self.error_hints.push(warning);
+
+                        let mut segments = vec![base.clone()];
+                        while self.check(&TokenKind::DoubleColon) {
+                            self.advance(); // consume '::'
+
+                            // Skip turbofish ::<T> if present (already deprecated)
+                            if self.check(&TokenKind::Lt) {
+                                self.advance(); // consume '<'
+                                let mut depth = 1u32;
+                                while depth > 0 && !self.is_at_end() {
+                                    match &self.current.kind {
+                                        TokenKind::Lt => { depth += 1; self.advance(); }
+                                        TokenKind::Gt => {
+                                            depth -= 1;
+                                            self.advance();
+                                        }
+                                        TokenKind::ShiftRight => {
+                                            if depth >= 2 { depth -= 2; } else { depth = 0; }
+                                            self.advance();
+                                        }
+                                        _ => { self.advance(); }
+                                    }
+                                }
+                                break;
+                            }
+
+                            let segment = self.expect_method_name()?;
+                            segments.push(segment);
+                        }
+                        expr = Expr::Path(segments);
+                    } else {
+                        break;
+                    }
+                }
                 TokenKind::Newline => {
                     // Multi-line method chaining: obj.method()\n    .another()
                     // Check if a dot follows after newlines/indents
@@ -905,5 +970,119 @@ impl<'a> Parser<'a> {
             self.lexer = saved_lexer;
             Vec::new()
         }
+    }
+
+    /// Lookahead disambiguation for `Foo<Int>.bar()` and `Foo<Int>::bar()`.
+    ///
+    /// Called when the just-parsed primary is a bare `Identifier` and the current token is `<`.
+    /// Speculatively consumes `<TypeArgs>` (using `parse_type` for each arg, with `>>` splitting).
+    /// **Commits** (leaves the parser after the `>`) only if the token after `>` is `.`, `::`,
+    /// or `(` — clear evidence that `<...>` is a type-argument list, not a comparison.
+    /// **Backtracks** otherwise, leaving `<` as `TokenKind::Lt` for the binary-expression layer.
+    ///
+    /// The parsed type args are discarded in the seed; the caller's `expr` (Identifier) is
+    /// unchanged so that the postfix loop can continue with `.bar()` or `::bar()`.
+    fn try_skip_ident_generic_args(&mut self) {
+        // Save state for backtracking
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+        let saved_pending = self.pending_tokens.clone();
+        let saved_lexer = self.lexer.clone();
+
+        self.advance(); // consume '<'
+
+        let mut depth: u32 = 1;
+        let mut ok = false;
+
+        // Consume the generic arg list, tracking nesting depth to handle `Foo<Bar<T>>`.
+        // We use `parse_type` calls (with backtrack-on-error) to validate the contents —
+        // if any token inside cannot start a type we abort immediately.
+        loop {
+            // Handle >> as two >
+            if self.check(&TokenKind::ShiftRight) {
+                if depth >= 2 {
+                    depth -= 2;
+                    self.advance();
+                    if depth == 0 {
+                        // After closing all nested levels, check if continuation follows
+                        ok = self.check(&TokenKind::Dot)
+                            || self.check(&TokenKind::DoubleColon)
+                            || self.check(&TokenKind::LParen);
+                        break;
+                    }
+                    continue;
+                } else {
+                    // depth == 1: >> closes the outer and yields a stray >
+                    // Split: consume one > and push the other back
+                    let shift_span = self.current.span;
+                    use crate::token::{Span, Token};
+                    let second_gt = Token::new(
+                        TokenKind::Gt,
+                        Span::new(
+                            shift_span.start + 1,
+                            shift_span.end,
+                            shift_span.line,
+                            shift_span.column + 1,
+                        ),
+                        ">".to_string(),
+                    );
+                    self.current = Token::new(
+                        TokenKind::Gt,
+                        Span::new(
+                            shift_span.start,
+                            shift_span.start + 1,
+                            shift_span.line,
+                            shift_span.column,
+                        ),
+                        ">".to_string(),
+                    );
+                    self.pending_tokens.push_front(second_gt);
+                    // fall through to Gt handling below
+                }
+            }
+
+            if self.check(&TokenKind::Gt) {
+                depth -= 1;
+                self.advance();
+                if depth == 0 {
+                    ok = self.check(&TokenKind::Dot)
+                        || self.check(&TokenKind::DoubleColon)
+                        || self.check(&TokenKind::LParen);
+                    break;
+                }
+                continue;
+            }
+
+            if self.check(&TokenKind::Lt) {
+                depth += 1;
+                self.advance();
+                continue;
+            }
+
+            if self.is_at_end() {
+                break;
+            }
+
+            // Try to parse a type arg; if that fails this is not a valid generic list
+            match self.parse_type() {
+                Ok(_) => {}
+                Err(_) => break,
+            }
+
+            // After a type arg expect comma or closing >
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            }
+            // continue loop — next iteration checks for > or more types
+        }
+
+        if !ok {
+            // Backtrack: this was a comparison, not a generic arg list
+            self.current = saved_current;
+            self.previous = saved_previous;
+            self.pending_tokens = saved_pending;
+            self.lexer = saved_lexer;
+        }
+        // If ok: the generic args were consumed and discarded; caller's expr is unchanged.
     }
 }
