@@ -663,6 +663,11 @@ fn require_u64_value(name: &str, value: &Value) -> Result<u64, CompileError> {
         Value::UInt { value, .. } => Ok(*value),
         Value::Int(i) => Ok(*i as u64),
         Value::Unit { value, .. } => require_u64_value(name, value.as_ref()),
+        // Untyped `0` literals assigned to u64 fields surface as Nil in
+        // the interpreter (e.g. `Vec2u64(lo: 0, hi: 0)` from
+        // `Vec2u64.zero()`); treat them as 0 here so callers don't have
+        // to write `0_u64` everywhere.
+        Value::Nil => Ok(0),
         other => Err(CompileError::runtime(format!(
             "{name}: expected u64-compatible numeric value, got {:?}",
             other
