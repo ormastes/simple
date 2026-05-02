@@ -13,6 +13,7 @@ extern fn rt_aes_sbox(i: i64) -> i64
 extern fn rt_aes_rcon(i: i64) -> i64
 extern fn rt_aes128_encrypt_block_into(key: [u8], block: [u8], out: [u8]) -> i64
 extern fn rt_tls13_aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
+extern fn rt_tls13_aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
@@ -535,7 +536,27 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
 
     Returns: Aes128GcmResult.Ok with plaintext on success,
              Aes128GcmResult.Err on tag mismatch.
+
+    Interpreter-mode fast-path: rt_tls13_aes128_gcm_decrypt sidesteps the
+    interpreter Arc-clone out-param dropping that affects the pure-Simple
+    aes128_encrypt_block path (see history: T21 / aes128_gcm_decrypt
+    string-to-int 2026-05-01).  Encoding:
+        []          = invalid input -> fall back to pure-Simple
+        [0x00]      = tag mismatch
+        [0x01,...]  = success; trailing bytes are the plaintext
     """
+    val fast = rt_tls13_aes128_gcm_decrypt(key, nonce, ciphertext, aad, tag)
+    if fast.len() != 0:
+        val status = _u8_at(fast, 0)
+        if status == 0x00:
+            return Aes128GcmResult.Err("authentication tag mismatch")
+        var pt: [u8] = rt_array_new_with_cap((fast.len() - 1).to_i64())
+        var fi: u64 = 1
+        while fi < fast.len():
+            pt.push(_u8_at(fast, fi))
+            fi = fi + 1
+        return Aes128GcmResult.Ok(data: pt)
+
     val round_keys = aes128_key_expansion(key)
 
     # Compute hash subkey H = AES_K(0^128)

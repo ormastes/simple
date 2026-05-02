@@ -770,6 +770,98 @@ pub extern "C" fn rt_tls13_aes128_gcm_encrypt(
     runtime_array_from_bytes(&result)
 }
 
+/// Result of an AES-GCM decrypt fast-path: tag-checked, returning plaintext.
+/// `Ok(None)` is reserved for "input invalid" (caller-visible failure).
+/// `Ok(Some(pt))` = tag verified and plaintext recovered (pt may be empty).
+/// `Err(())` = tag mismatch (auth failure).
+pub enum AesGcmDecryptOutcome {
+    InvalidInput,
+    TagMismatch,
+    Plaintext(Vec<u8>),
+}
+
+pub fn aes128_gcm_decrypt_bytes(
+    key: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+    aad: &[u8],
+    tag: &[u8],
+) -> AesGcmDecryptOutcome {
+    if key.len() != AES_BLOCK_LEN || nonce.len() != 12 || tag.len() != AES_BLOCK_LEN {
+        return AesGcmDecryptOutcome::InvalidInput;
+    }
+    let mut k = [0u8; AES_BLOCK_LEN];
+    k.copy_from_slice(key);
+    let expanded = expand_key_aes128(&k);
+
+    // H = AES_K(0^128)
+    let zero = [0u8; AES_BLOCK_LEN];
+    let Some(h) = encrypt_block_with_expanded_bytes(&zero, &expanded, 10) else {
+        return AesGcmDecryptOutcome::InvalidInput;
+    };
+
+    // J0 = nonce || 0x00000001 (12-byte nonce path).
+    let mut j0 = [0u8; AES_BLOCK_LEN];
+    j0[..12].copy_from_slice(nonce);
+    j0[15] = 1;
+
+    // Compute expected tag: GHASH(H, AAD || pad || C || pad || lens) XOR AES_K(J0).
+    let mut y = [0u8; AES_BLOCK_LEN];
+    ghash_update(&mut y, &h, aad);
+    ghash_update(&mut y, &h, ciphertext);
+    let mut len_block = [0u8; AES_BLOCK_LEN];
+    let aad_bits = (aad.len() as u64).wrapping_mul(8);
+    let ct_bits = (ciphertext.len() as u64).wrapping_mul(8);
+    len_block[..8].copy_from_slice(&aad_bits.to_be_bytes());
+    len_block[8..].copy_from_slice(&ct_bits.to_be_bytes());
+    xor_block_in_place(&mut y, &len_block);
+    y = gf128_mul(&y, &h);
+
+    let Some(ek_j0) = encrypt_block_with_expanded_bytes(&j0, &expanded, 10) else {
+        return AesGcmDecryptOutcome::InvalidInput;
+    };
+    let mut expected_tag = [0u8; AES_BLOCK_LEN];
+    for i in 0..AES_BLOCK_LEN {
+        expected_tag[i] = y[i] ^ ek_j0[i];
+    }
+
+    // Constant-time tag compare.
+    let mut diff: u8 = 0;
+    for i in 0..AES_BLOCK_LEN {
+        diff |= expected_tag[i] ^ tag[i];
+    }
+    if diff != 0 {
+        return AesGcmDecryptOutcome::TagMismatch;
+    }
+
+    // Decrypt: P = GCTR_K(inc32(J0), C).
+    let mut counter = j0;
+    inc32(&mut counter);
+    let mut plaintext = vec![0u8; ciphertext.len()];
+    let full = ciphertext.len() / AES_BLOCK_LEN;
+    let rem = ciphertext.len() % AES_BLOCK_LEN;
+    for i in 0..full {
+        let Some(stream) = encrypt_block_with_expanded_bytes(&counter, &expanded, 10) else {
+            return AesGcmDecryptOutcome::InvalidInput;
+        };
+        let off = i * AES_BLOCK_LEN;
+        for j in 0..AES_BLOCK_LEN {
+            plaintext[off + j] = ciphertext[off + j] ^ stream[j];
+        }
+        inc32(&mut counter);
+    }
+    if rem > 0 {
+        let Some(stream) = encrypt_block_with_expanded_bytes(&counter, &expanded, 10) else {
+            return AesGcmDecryptOutcome::InvalidInput;
+        };
+        let off = full * AES_BLOCK_LEN;
+        for j in 0..rem {
+            plaintext[off + j] = ciphertext[off + j] ^ stream[j];
+        }
+    }
+    AesGcmDecryptOutcome::Plaintext(plaintext)
+}
+
 // ============================================================================
 // AES-256 key expansion (FIPS 197 §5.2): 32-byte key -> 240-byte expanded
 // schedule (15 round keys, 14 rounds).  The expansion has TWO special cases:
@@ -958,6 +1050,155 @@ pub extern "C" fn rt_tls13_aes256_gcm_encrypt(
         return empty_runtime_array();
     };
     runtime_array_from_bytes(&result)
+}
+
+pub fn aes256_gcm_decrypt_bytes(
+    key: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+    aad: &[u8],
+    tag: &[u8],
+) -> AesGcmDecryptOutcome {
+    if key.len() != AES256_KEY_LEN || nonce.len() != 12 || tag.len() != AES_BLOCK_LEN {
+        return AesGcmDecryptOutcome::InvalidInput;
+    }
+    let mut k = [0u8; AES256_KEY_LEN];
+    k.copy_from_slice(key);
+    let expanded = expand_key_aes256(&k);
+
+    let zero = [0u8; AES_BLOCK_LEN];
+    let Some(h) = encrypt_block_with_expanded_bytes(&zero, &expanded, AES256_ROUNDS) else {
+        return AesGcmDecryptOutcome::InvalidInput;
+    };
+
+    let mut j0 = [0u8; AES_BLOCK_LEN];
+    j0[..12].copy_from_slice(nonce);
+    j0[15] = 1;
+
+    let mut y = [0u8; AES_BLOCK_LEN];
+    ghash_update(&mut y, &h, aad);
+    ghash_update(&mut y, &h, ciphertext);
+    let mut len_block = [0u8; AES_BLOCK_LEN];
+    let aad_bits = (aad.len() as u64).wrapping_mul(8);
+    let ct_bits = (ciphertext.len() as u64).wrapping_mul(8);
+    len_block[..8].copy_from_slice(&aad_bits.to_be_bytes());
+    len_block[8..].copy_from_slice(&ct_bits.to_be_bytes());
+    xor_block_in_place(&mut y, &len_block);
+    y = gf128_mul(&y, &h);
+
+    let Some(ek_j0) = encrypt_block_with_expanded_bytes(&j0, &expanded, AES256_ROUNDS) else {
+        return AesGcmDecryptOutcome::InvalidInput;
+    };
+    let mut expected_tag = [0u8; AES_BLOCK_LEN];
+    for i in 0..AES_BLOCK_LEN {
+        expected_tag[i] = y[i] ^ ek_j0[i];
+    }
+
+    let mut diff: u8 = 0;
+    for i in 0..AES_BLOCK_LEN {
+        diff |= expected_tag[i] ^ tag[i];
+    }
+    if diff != 0 {
+        return AesGcmDecryptOutcome::TagMismatch;
+    }
+
+    let mut counter = j0;
+    inc32(&mut counter);
+    let mut plaintext = vec![0u8; ciphertext.len()];
+    let full = ciphertext.len() / AES_BLOCK_LEN;
+    let rem = ciphertext.len() % AES_BLOCK_LEN;
+    for i in 0..full {
+        let Some(stream) = encrypt_block_with_expanded_bytes(&counter, &expanded, AES256_ROUNDS) else {
+            return AesGcmDecryptOutcome::InvalidInput;
+        };
+        let off = i * AES_BLOCK_LEN;
+        for j in 0..AES_BLOCK_LEN {
+            plaintext[off + j] = ciphertext[off + j] ^ stream[j];
+        }
+        inc32(&mut counter);
+    }
+    if rem > 0 {
+        let Some(stream) = encrypt_block_with_expanded_bytes(&counter, &expanded, AES256_ROUNDS) else {
+            return AesGcmDecryptOutcome::InvalidInput;
+        };
+        let off = full * AES_BLOCK_LEN;
+        for j in 0..rem {
+            plaintext[off + j] = ciphertext[off + j] ^ stream[j];
+        }
+    }
+    AesGcmDecryptOutcome::Plaintext(plaintext)
+}
+
+/// Encode an `AesGcmDecryptOutcome` into the status-prefixed `[u8]` shape used
+/// by the runtime decrypt fast-path:
+///   - `[]`        -> invalid input (caller falls back)
+///   - `[0x00]`    -> tag mismatch (auth failure)
+///   - `[0x01,..]` -> success; trailing bytes are recovered plaintext.
+fn encode_decrypt_outcome(outcome: AesGcmDecryptOutcome) -> Vec<u8> {
+    match outcome {
+        AesGcmDecryptOutcome::InvalidInput => Vec::new(),
+        AesGcmDecryptOutcome::TagMismatch => vec![0x00],
+        AesGcmDecryptOutcome::Plaintext(pt) => {
+            let mut out = Vec::with_capacity(1 + pt.len());
+            out.push(0x01);
+            out.extend_from_slice(&pt);
+            out
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls13_aes128_gcm_decrypt(
+    key: RuntimeValue,
+    nonce: RuntimeValue,
+    ciphertext: RuntimeValue,
+    aad: RuntimeValue,
+    tag: RuntimeValue,
+) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return empty_runtime_array();
+    };
+    let Some(nonce_bytes) = runtime_array_to_bytes(nonce) else {
+        return empty_runtime_array();
+    };
+    let Some(ct_bytes) = runtime_array_to_bytes(ciphertext) else {
+        return empty_runtime_array();
+    };
+    let Some(aad_bytes) = runtime_array_to_bytes(aad) else {
+        return empty_runtime_array();
+    };
+    let Some(tag_bytes) = runtime_array_to_bytes(tag) else {
+        return empty_runtime_array();
+    };
+    let outcome = aes128_gcm_decrypt_bytes(&key_bytes, &nonce_bytes, &ct_bytes, &aad_bytes, &tag_bytes);
+    runtime_array_from_bytes(&encode_decrypt_outcome(outcome))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls13_aes256_gcm_decrypt(
+    key: RuntimeValue,
+    nonce: RuntimeValue,
+    ciphertext: RuntimeValue,
+    aad: RuntimeValue,
+    tag: RuntimeValue,
+) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return empty_runtime_array();
+    };
+    let Some(nonce_bytes) = runtime_array_to_bytes(nonce) else {
+        return empty_runtime_array();
+    };
+    let Some(ct_bytes) = runtime_array_to_bytes(ciphertext) else {
+        return empty_runtime_array();
+    };
+    let Some(aad_bytes) = runtime_array_to_bytes(aad) else {
+        return empty_runtime_array();
+    };
+    let Some(tag_bytes) = runtime_array_to_bytes(tag) else {
+        return empty_runtime_array();
+    };
+    let outcome = aes256_gcm_decrypt_bytes(&key_bytes, &nonce_bytes, &ct_bytes, &aad_bytes, &tag_bytes);
+    runtime_array_from_bytes(&encode_decrypt_outcome(outcome))
 }
 
 #[cfg(test)]
