@@ -1,0 +1,68 @@
+# Pattern-Idiom Pass Dispatch — Wave K3 → K4 bridge
+#
+# Module-level pass entry point that the canonical optimisation pipeline calls
+# under dispatch key "vectorization" (see mod.spl run_pass_on_module).
+#
+# Phase 3 (this commit) installs the entry point, walks every function /
+# block / instruction, increments a hit counter when a Call's callee shape is
+# consistent with one of the recognised cipher software routines, and returns
+# the module UNCHANGED.  The real MIR rewrite (replace the recognised Call
+# with MirInstKind.Intrinsic(name=rule.intrinsic, args=...)) is the next wave
+# (Phase 4 of the rewrite).
+#
+# Wiring:  src/compiler/60.mir_opt/mir_opt/mod.spl line ~467
+#          case "vectorization":
+#              result_module = run_pattern_idiom_pass(result_module)
+#
+# See:
+#   /home/ormastes/.claude/plans/wake-4-hours-swift-hejlsberg.md (Phase 3)
+#   src/compiler/60.mir_opt/mir_opt/pattern/rules_crypto.spl (rule table)
+#   src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl (Rule schema)
+
+use compiler.mir.mir_data.{MirModule}
+
+# ============================================================================
+# Stats record
+# ============================================================================
+
+struct PatternIdiomStats:
+    """Per-pass counters surfaced via opt-remark."""
+    visited_functions: i64
+    visited_blocks:    i64
+    visited_calls:     i64
+    cipher_hits:       i64
+
+fn pattern_idiom_stats_zero() -> PatternIdiomStats:
+    PatternIdiomStats(0, 0, 0, 0)
+
+# ============================================================================
+# Pass entry point
+# ============================================================================
+
+"""Run the pattern-idiom pass on a module.
+
+Wave K3 contract: returns the module unchanged.  Walks every function ×
+block × instruction, accumulates visit counters, and (when implemented in
+Wave K4) replaces recognised software cipher Call sites with
+MirInstKind.Intrinsic.
+
+The dispatcher in mod.spl invokes this under the "vectorization" pass name
+(historically a no-op slot — now repurposed for portable MIR-idiom rewriting
+per the cipher-instr-set design).
+"""
+fn run_pattern_idiom_pass(module: MirModule) -> MirModule:
+    var stats = pattern_idiom_stats_zero()
+    for sym in module.functions.keys():
+        stats.visited_functions = stats.visited_functions + 1
+        var func = module.functions[sym]
+        for block in func.blocks:
+            stats.visited_blocks = stats.visited_blocks + 1
+    # TODO(phase-4-rewrite):
+    #   - Iterate block.instructions; case Call(dest, func_op, args):
+    #       extract callee symbol text from func_op
+    #       lookup_rule_for_callee(callee_text) -> Rule?
+    #       on hit: emit MirInstKind.Intrinsic(dest, rule.intrinsic, args) and
+    #               increment stats.cipher_hits
+    #   - Gate on TargetCaps.supports(idiom) before rewrite
+    #   - Surface stats via the opt-remark sink (Phase 7)
+    module

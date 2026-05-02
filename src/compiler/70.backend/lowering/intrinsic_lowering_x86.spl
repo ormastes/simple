@@ -1,0 +1,200 @@
+# x86_64 Cipher Intrinsic Lowering — Pure Simple
+#
+# Maps canonical MirInstKind.Intrinsic `name` strings to x86_64 byte sequences
+# via the emit_* helpers in encode_x86_64_crypto.spl, gated by X86Caps.supports.
+#
+# Arity contract (positional args list):
+#   crypto_aes_round          args=[dst, src]             -> 2
+#   crypto_aes_round_last     args=[dst, src]             -> 2
+#   crypto_aes_inv_round      args=[dst, src]             -> 2
+#   crypto_aes_inv_round_last args=[dst, src]             -> 2
+#   crypto_aes_imc            args=[dst, src]             -> 2
+#   crypto_aes_keygen_assist  args=[dst, src, rcon_u8]   -> 3
+#   crypto_sha256_rounds2     args=[dst, src, _implicit]  -> 3
+#     (third arg is implicit XMM0 in hardware; encoder takes dst+src only)
+#   crypto_sha256_msg1        args=[dst, src]             -> 2
+#   crypto_sha256_msg2        args=[dst, src]             -> 2
+#   crc32_u8                  args=[dst, src]             -> 2
+#   crc32_u32                 args=[dst, src]             -> 2
+#   crc32_u64                 args=[dst, src]             -> 2
+#   clmul_lo                  args=[dst, src]  imm8=0x00  -> 2
+#   clmul_hi                  args=[dst, src]  imm8=0x11  -> 2
+
+use compiler.mir.intrinsics.{
+    CRYPTO_AES_ROUND, CRYPTO_AES_ROUND_LAST,
+    CRYPTO_AES_INV_ROUND, CRYPTO_AES_INV_ROUND_LAST,
+    CRYPTO_AES_IMC, CRYPTO_AES_KEYGEN_ASSIST,
+    CRYPTO_SHA256_RNDS2, CRYPTO_SHA256_MSG1, CRYPTO_SHA256_MSG2,
+    CRC32_U8, CRC32_U32, CRC32_U64,
+    CLMUL_LO, CLMUL_HI
+}
+use compiler.backend.feature_caps.{TargetIdiom, X86Caps}
+use compiler.backend.backend.native.encode_x86_64_crypto.{
+    emit_aesenc, emit_aesenclast, emit_aesdec, emit_aesdeclast,
+    emit_aesimc, emit_aeskeygenassist,
+    emit_sha256rnds2, emit_sha256msg1, emit_sha256msg2,
+    emit_crc32_r32_r8, emit_crc32_r32_r32, emit_crc32_r64_r64,
+    emit_pclmulqdq
+}
+
+# ============================================================================
+# LoweringResult — outcome of lowering one MirInstKind.Intrinsic
+# ============================================================================
+
+"""Outcome of lowering one MirInstKind.Intrinsic to x86_64 bytes.
+
+bytes   — emitted byte sequence; empty when not lowered.
+lowered — true iff a real byte sequence was produced.
+reason  — empty string on success; "unknown", "no-cap", or "bad-arity" on miss.
+"""
+struct LoweringResult:
+    bytes: [i64]
+    lowered: bool
+    reason: text
+
+# ============================================================================
+# intrinsic_to_target_idiom — name -> TargetIdiom?
+# ============================================================================
+
+"""Map a canonical intrinsic name to its TargetIdiom tag.
+
+Returns nil for unrecognised names.  Use this to gate capability checks
+before dispatching to an emit_* helper.
+"""
+fn intrinsic_to_target_idiom(name: text) -> TargetIdiom?:
+    match name:
+        case "crypto_aes_round":            Some(TargetIdiom.AesEnc)
+        case "crypto_aes_round_last":       Some(TargetIdiom.AesEncLast)
+        case "crypto_aes_inv_round":        Some(TargetIdiom.AesDec)
+        case "crypto_aes_inv_round_last":   Some(TargetIdiom.AesDecLast)
+        case "crypto_aes_imc":              Some(TargetIdiom.AesImc)
+        case "crypto_aes_keygen_assist":    Some(TargetIdiom.AesKeygenAssist)
+        case "crypto_sha256_rounds2":       Some(TargetIdiom.Sha256Rounds2)
+        case "crypto_sha256_msg1":          Some(TargetIdiom.Sha256Msg1)
+        case "crypto_sha256_msg2":          Some(TargetIdiom.Sha256Msg2)
+        case "crc32_u8":                    Some(TargetIdiom.Crc32U8)
+        case "crc32_u32":                   Some(TargetIdiom.Crc32U32)
+        case "crc32_u64":                   Some(TargetIdiom.Crc32U64)
+        case "clmul_lo":                    Some(TargetIdiom.ClmulLo)
+        case "clmul_hi":                    Some(TargetIdiom.ClmulHi)
+        case _:                             nil
+
+# ============================================================================
+# lower_cipher_intrinsic_x86 — main lowering entry point
+# ============================================================================
+
+"""Lower a canonical cipher intrinsic to an x86_64 byte sequence.
+
+Steps:
+  1. Resolve name -> TargetIdiom; unknown names return reason="unknown".
+  2. Check caps.supports(idiom); unsupported targets return reason="no-cap".
+  3. Validate args arity; mismatches return reason="bad-arity".
+  4. Dispatch to the matching emit_* helper and return the bytes.
+
+See top-of-file comment for the full arity table per intrinsic name.
+"""
+fn lower_cipher_intrinsic_x86(name: text, args: [i64], caps: X86Caps) -> LoweringResult:
+    var empty: [i64] = []
+
+    # Step 1: name -> idiom
+    var maybe_idiom = intrinsic_to_target_idiom(name)
+    match maybe_idiom:
+        case Some(idiom):
+            # Step 2: capability gate
+            if not caps.supports(idiom):
+                return LoweringResult(empty, false, "no-cap")
+
+            # Step 3 + 4: arity check then emit
+            match name:
+                case "crypto_aes_round":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_aesenc(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_round_last":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_aesenclast(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_inv_round":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_aesdec(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_inv_round_last":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_aesdeclast(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_imc":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_aesimc(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_keygen_assist":
+                    if args.length != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var rcon = args[2]
+                    var bytes = emit_aeskeygenassist(args[0], args[1], rcon)
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_sha256_rounds2":
+                    # args[2] is the implicit XMM0 operand in hardware; encoder
+                    # takes dst+src only (XMM0 is always the third implicit reg).
+                    if args.length != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_sha256rnds2(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_sha256_msg1":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_sha256msg1(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_sha256_msg2":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_sha256msg2(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crc32_u8":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_crc32_r32_r8(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crc32_u32":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_crc32_r32_r32(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crc32_u64":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_crc32_r64_r64(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "clmul_lo":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_pclmulqdq(args[0], args[1], 0x00)
+                    LoweringResult(bytes, true, "")
+
+                case "clmul_hi":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_pclmulqdq(args[0], args[1], 0x11)
+                    LoweringResult(bytes, true, "")
+
+                case _:
+                    LoweringResult(empty, false, "unknown")
+
+        case _:
+            LoweringResult(empty, false, "unknown")

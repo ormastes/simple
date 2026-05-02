@@ -1,0 +1,123 @@
+# x86_64 Cipher Intrinsic Lowering — Spec Tests (Phase 5)
+#
+# Feature ID: #COMPILER-BACKEND-LOWERING-CIPHER-X86-PHASE5
+# Category:   Compiler | Backend | Cipher Lowering | x86_64
+#
+# Maps canonical MirInstKind.Intrinsic names (text) to x86_64 byte sequences
+# via TargetCaps gating.  When the target lacks the cipher feature, the
+# lowering returns LoweringResult(lowered=false, reason="no-cap") so the
+# pattern engine can leave the original Call in place.
+#
+# Plan ref: /home/ormastes/.claude/plans/wake-4-hours-swift-hejlsberg.md (Phase 5)
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  Assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+
+use compiler.backend.lowering.intrinsic_lowering_x86.{
+    LoweringResult, lower_cipher_intrinsic_x86
+}
+use compiler.backend.feature_caps.{X86Caps}
+
+# ============================================================================
+# Helpers — fully-featured caps + bare caps fixtures
+# ============================================================================
+
+fn caps_aes_only() -> X86Caps:
+    X86Caps(true, false, false, false, false, false)
+
+fn caps_full_v3() -> X86Caps:
+    X86Caps(true, true, true, true, true, false)
+
+fn caps_bare() -> X86Caps:
+    X86Caps(false, false, false, false, false, false)
+
+# ============================================================================
+# AES family — supported path emits non-empty bytes
+# ============================================================================
+
+describe "lower_cipher_intrinsic_x86 — AES-NI lowering when has_aes":
+    it "crypto_aes_round emits a non-empty byte sequence":
+        var r = lower_cipher_intrinsic_x86("crypto_aes_round", [0, 0], caps_aes_only())
+        expect(r.lowered).to_equal(true)
+        expect(r.bytes.len() > 0).to_equal(true)
+
+    it "crypto_aes_round_last lowers to non-empty bytes":
+        var r = lower_cipher_intrinsic_x86("crypto_aes_round_last", [0, 0], caps_aes_only())
+        expect(r.lowered).to_equal(true)
+
+    it "crypto_aes_inv_round lowers":
+        var r = lower_cipher_intrinsic_x86("crypto_aes_inv_round", [0, 0], caps_aes_only())
+        expect(r.lowered).to_equal(true)
+
+    it "crypto_aes_imc lowers":
+        var r = lower_cipher_intrinsic_x86("crypto_aes_imc", [0, 0], caps_aes_only())
+        expect(r.lowered).to_equal(true)
+
+    it "crypto_aes_keygen_assist lowers with rcon arg":
+        var r = lower_cipher_intrinsic_x86("crypto_aes_keygen_assist", [0, 0, 16], caps_aes_only())
+        expect(r.lowered).to_equal(true)
+
+# ============================================================================
+# Capability gating — bare caps refuses everything with reason "no-cap"
+# ============================================================================
+
+describe "lower_cipher_intrinsic_x86 — bare X86Caps refuses cipher idioms":
+    it "AES round on bare caps returns lowered=false, reason='no-cap'":
+        var r = lower_cipher_intrinsic_x86("crypto_aes_round", [0, 0], caps_bare())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("no-cap")
+
+    it "SHA256 rounds2 on bare caps refuses":
+        var r = lower_cipher_intrinsic_x86("crypto_sha256_rounds2", [0, 0], caps_bare())
+        expect(r.lowered).to_equal(false)
+
+    it "CRC32_U8 on bare caps refuses":
+        var r = lower_cipher_intrinsic_x86("crc32_u8", [0, 0], caps_bare())
+        expect(r.lowered).to_equal(false)
+
+    it "CLMUL_LO on bare caps refuses":
+        var r = lower_cipher_intrinsic_x86("clmul_lo", [0, 0], caps_bare())
+        expect(r.lowered).to_equal(false)
+
+# ============================================================================
+# Unknown intrinsic name → reason="unknown"
+# ============================================================================
+
+describe "lower_cipher_intrinsic_x86 — unknown name handling":
+    it "unrecognised intrinsic returns lowered=false, reason='unknown'":
+        var r = lower_cipher_intrinsic_x86("not_a_real_intrinsic", [0, 0], caps_full_v3())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("unknown")
+
+    it "empty name returns unknown":
+        var r = lower_cipher_intrinsic_x86("", [], caps_full_v3())
+        expect(r.lowered).to_equal(false)
+
+# ============================================================================
+# SHA-NI / CRC32 / PCLMUL on full v3 caps
+# ============================================================================
+
+describe "lower_cipher_intrinsic_x86 — SHA / CRC32 / CLMUL on full caps":
+    it "crypto_sha256_rounds2 lowers when has_sha_ni":
+        # Arity is 3 per intrinsics.spl: [a_state, b_state, w_k] (third operand
+        # is the implicit XMM0 hardware operand on x86, not encoded in bytes).
+        var r = lower_cipher_intrinsic_x86("crypto_sha256_rounds2", [0, 0, 0], caps_full_v3())
+        expect(r.lowered).to_equal(true)
+
+    it "crc32_u8 lowers when has_sse42":
+        var r = lower_cipher_intrinsic_x86("crc32_u8", [0, 0], caps_full_v3())
+        expect(r.lowered).to_equal(true)
+
+    it "crc32_u64 lowers when has_sse42":
+        var r = lower_cipher_intrinsic_x86("crc32_u64", [0, 0], caps_full_v3())
+        expect(r.lowered).to_equal(true)
+
+    it "clmul_lo lowers when has_pclmul":
+        var r = lower_cipher_intrinsic_x86("clmul_lo", [0, 0], caps_full_v3())
+        expect(r.lowered).to_equal(true)
+
+    it "clmul_hi lowers when has_pclmul":
+        var r = lower_cipher_intrinsic_x86("clmul_hi", [0, 0], caps_full_v3())
+        expect(r.lowered).to_equal(true)
