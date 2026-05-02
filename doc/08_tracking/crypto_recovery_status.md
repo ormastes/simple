@@ -119,6 +119,7 @@ TLS 1.3 / M3 narrow-surface gaps (still): no ECDSA TLS-side verification, Encryp
 
 - **EncryptedExtensions parser — LANDED** (Agent H): full RFC 8446 §4.3.1 parse with ALPN + supported-version enforcement; 11/11 specs PASS.
 - **HelloRetryRequest detection + ClientHello2 + synthetic message_hash — LANDED** (Agent I): RFC 8446 §4.1.4 + §4.4.1; 17/17 specs PASS in `test/unit/os/tls13/hello_retry_request_spec.spl`. Connect-flow integration of HRR is **DEFERRED until a 2nd NamedGroup lands** (P-256 candidate) — HRR has no second group to retry with on the wire today.
+- **P-256 NamedGroup advertise + keypair gen LANDED 2026-05-01** — connect-flow integration + ECDHE deferred. `secp256r1` (0x0017) is now in `supported_groups` and a P-256 KeyShareEntry can ride alongside the X25519 entry in `key_share`. 13/13 specs PASS in `test/unit/os/tls13/p256_named_group_spec.spl`. Pure-Simple Jacobian scalar-mult (`src/os/crypto/ecdh_p256.spl`) verified by `k=1 ⇒ G` byte-equality against the SEC2 generator. Deferred follow-ups: server-side P-256 key_share consumption, ECDHE shared-secret derivation, handshake_secret integration, HRR connect-flow wiring (now unblocked). Constant-time hardening of P-256 scalar-mult MUST land before any caller exposes the ephemeral private key through the handshake_secret schedule.
 - **TLS-side ECDSA-P256 CertificateVerify — already supported** (audit correction): the M3 audit findings list ECDSA TLS-side verify as "missing"; that line is stale. `cert_verify` already accepts ECDSA-P256. The narrow-surface gap is the ClientHello *advertisement* set, not the verifier.
 
 ### Crypto primitive fixes
@@ -142,3 +143,15 @@ TLS 1.3 / M3 narrow-surface gaps (still): no ECDSA TLS-side verification, Encryp
 - `doc/08_tracking/feature_request/pbkdf2_native_runtime_helpers_2026-05-01.md` — native HMAC inner-loop helpers for PBKDF2.
 - `doc/08_tracking/feature_request/static_file_compression_cache_integration_2026-05-01.md` — **LANDED** in Wave 1 by Agent C.
 - `doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md` — Phase 1 (10 int intrinsics) **LANDED**; Phase 2 (`Vec16u8` + AES-NI) and Phase 3 (`Vec2u64` + PCLMUL) **OPEN**.
+
+## Wave 4 In Flight (2026-05-01 evening)
+
+- **T20** — backfill missing interpreter dispatch arms for `rt_simd_{add,sub,mul}_i32x{4,8}`. T1 (Wave 3) surfaced these as declared-extern-but-undispatched during ChaCha20 vectorization; downstream consumers currently trap when the FFI table is hit directly.
+- **T21** — implement `TLS_AES_256_GCM_SHA384` (cipher suite 0x1302). Closes the M3 narrow-surface gap "only `TLS_AES_128_GCM_SHA256` cipher suite advertised" carried over from Wave 1.
+- **T24** — Zstd dict-frame end-to-end test that round-trips a host `zstd --train --dict` payload. If green, flips `verify_common_compression_framework.md`'s `zstd.spl:1265` line from WARN to PASS (status would become `FAIL (5 failures, 4 warnings)`).
+- **T25** (this entry, doc-only) — Wave 1–3 cleanup sweep + history disambiguation. Audit landed at `doc/09_report/verify/wave_1to3_audit_2026-05-01.md`; verify report status counts re-verified; SIMD plan annotated with Phase 1 dispatch gap.
+
+### Wave 4+ deferred
+
+- HRR connect-flow integration is **UNBLOCKED** by Wave 3 T7's P-256 NamedGroup advertise + ephemeral keypair gen (`xqxspqnmyyqk`, `vovnmzmknppp`, `onllvytpzmkt`, `voqupwqqwzxt`). Wiring HRR through `tls13_client_connect` was not owned by any in-flight Wave 4 agent; defer to Wave 5 / future session.
+- P-256 scalar multiplication is **not constant-time** on the secret path; FR `p256_scalar_mult_constant_time_2026-05-01` filed; no Wave 4 owner.
