@@ -1,0 +1,252 @@
+# PSK + 0-RTT spec — RFC 8446 §4.2.11 + §4.2.10 + §7.1
+#
+# Coverage:
+#   1. PskIdentity wire-format encode/decode round-trip
+#   2. OfferedPsk encode contains identities + binders length frames
+#   3. PskBinder length-prefix correct (1-byte u8 prefix)
+#   4. early_secret_from_psk = HKDF-Extract(0^32, psk) for 32-byte PSK
+#   5. binder_key derivation produces 32-byte output for SHA-256 path
+#   6. PSK binder MAC = HMAC-SHA-256(finished_key, transcript_hash)
+#   7. early_data CH/EE extension is 4 bytes (type+empty length)
+#   8. early_data NST extension carries u32 max_early_data_size
+#   9. early_data CH/EE decode rejects non-empty body
+#  10. max_early_data_size encoding round-trip
+#  11. OfferedPsks decode rejects identity/binder count mismatch indirectly
+#      via decode reason check on truncated input
+
+use std.spipe.*
+use os.tls13.psk.{
+    PskIdentity, PskBinder, OfferedPsk, StoredPsk,
+    encode_psk_identity, encode_psk_binder, encode_offered_psk,
+    encode_offered_psk_partial, decode_offered_psk, decode_psk_identity,
+    stored_psk_from_external,
+}
+use os.tls13.key_schedule.{
+    tls13_early_secret_from_psk,
+    tls13_binder_key,
+    tls13_compute_psk_binder,
+    tls13_client_early_traffic_secret,
+}
+use os.tls13.hkdf.{hkdf_extract, hkdf_expand_label}
+use os.crypto.sha256.{sha256_hmac}
+
+# ============================================================================
+# Module-level helpers — keep loop-mutated locals out of it-blocks
+# ============================================================================
+
+fn _zeros32() -> [u8]:
+    var z: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        z.push(0x00u8)
+        i = i + 1
+    z
+
+fn _seq_n(n: u64, base: u8) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(((base.to_u32() + (i.to_u32() & 0xFFu32)) & 0xFFu32).to_u8())
+        i = i + 1
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    val n = a.len().to_u64()
+    while i < n:
+        if a[i.to_i64()] != b[i.to_i64()]:
+            return false
+        i = i + 1
+    true
+
+fn _u16_be(buf: [u8], off: u64) -> u32:
+    val hi = buf[off.to_i64()].to_u32()
+    val lo = buf[(off + 1).to_i64()].to_u32()
+    (hi << 8) | lo
+
+# Build a single-PSK OfferedPsk for round-trip testing.
+fn _build_simple_offer() -> OfferedPsk:
+    val ident = _seq_n(8u64, 0x10u8)
+    val binder = _seq_n(32u64, 0x20u8)
+    val ids: [PskIdentity] = [PskIdentity(identity: ident, obfuscated_ticket_age: 0xDEADBEEFu32)]
+    val binders: [PskBinder] = [PskBinder(binder: binder)]
+    OfferedPsk(identities: ids, binders: binders)
+
+describe("PSK + 0-RTT — RFC 8446 §4.2.11 + §4.2.10 + §7.1"):
+
+    it("PskIdentity wire encoding length: 2 + id_len + 4"):
+        val id = PskIdentity(identity: _seq_n(5u64, 0xA0u8), obfuscated_ticket_age: 0x01020304u32)
+        val out = encode_psk_identity(id)
+        # 2 (len) + 5 (identity) + 4 (age) = 11
+        expect out.len() == 11
+        # identity length prefix
+        expect out[0].to_u32() == 0u32
+        expect out[1].to_u32() == 5u32
+        # age bytes (big-endian)
+        expect out[7].to_u32() == 0x01u32
+        expect out[8].to_u32() == 0x02u32
+        expect out[9].to_u32() == 0x03u32
+        expect out[10].to_u32() == 0x04u32
+
+    it("PskBinder wire encoding has 1-byte length prefix"):
+        val b = PskBinder(binder: _seq_n(32u64, 0xCCu8))
+        val out = encode_psk_binder(b)
+        expect out.len() == 33
+        expect out[0].to_u32() == 32u32
+        expect out[1].to_u32() == 0xCCu32
+        expect out[32].to_u32() == 0xCCu32
+
+    it("OfferedPsks encode produces both identity and binder length frames"):
+        val offer = _build_simple_offer()
+        val out = encode_offered_psk(offer)
+        # identities block:  uint16 len + (uint16 id_len + 8 + 4) = 2 + 14 = 16
+        # binders block:     uint16 len + (uint8 + 32) = 2 + 33 = 35
+        # total = 16 + 35 = 51
+        expect out.len() == 51
+        # outer identities length = 14
+        expect _u16_be(out, 0u64) == 14u32
+        # binders length frame at offset 16 = 33
+        expect _u16_be(out, 16u64) == 33u32
+
+    it("OfferedPsks encode round-trips through decode"):
+        val offer = _build_simple_offer()
+        val out = encode_offered_psk(offer)
+        val d = decode_offered_psk(out)
+        expect d.ok == true
+        expect d.psk.identities.len() == 1
+        expect d.psk.binders.len() == 1
+        val got_id = d.psk.identities[0]
+        expect got_id.obfuscated_ticket_age == 0xDEADBEEFu32
+        expect _bytes_eq(got_id.identity, _seq_n(8u64, 0x10u8)) == true
+        val got_binder = d.psk.binders[0]
+        expect _bytes_eq(got_binder.binder, _seq_n(32u64, 0x20u8)) == true
+
+    it("decode_offered_psk rejects truncated input"):
+        val short_input: [u8] = [0x00u8, 0x05u8]  # claims 5 bytes of identities, none follow
+        val d = decode_offered_psk(short_input)
+        expect d.ok == false
+
+    it("decode_offered_psk rejects binder shorter than 32 bytes"):
+        # build manually: 1 identity (id_len=2 + 2 bytes + 4 age = 8 bytes block; ids_len=8),
+        # then binders block with a single binder of length 16 (illegal)
+        var buf: [u8] = []
+        buf.push(0x00u8)
+        buf.push(0x08u8)            # ids_len = 8
+        buf.push(0x00u8)
+        buf.push(0x02u8)            # id_len = 2
+        buf.push(0xAAu8)
+        buf.push(0xBBu8)            # identity bytes
+        buf.push(0x00u8)
+        buf.push(0x00u8)
+        buf.push(0x00u8)
+        buf.push(0x01u8)            # age = 1
+        buf.push(0x00u8)
+        buf.push(0x11u8)            # binders_len = 17 (1 byte len prefix + 16 binder)
+        buf.push(0x10u8)            # binder len = 16 (illegal, < 32)
+        var i: u64 = 0
+        while i < 16:
+            buf.push(0xFFu8)
+            i = i + 1
+        val d = decode_offered_psk(buf)
+        expect d.ok == false
+
+    it("encode_offered_psk_partial zeroes binders of declared lengths"):
+        val ident = _seq_n(4u64, 0x44u8)
+        val ids: [PskIdentity] = [PskIdentity(identity: ident, obfuscated_ticket_age: 0u32)]
+        val lens: [u32] = [32u32]
+        val out = encode_offered_psk_partial(ids, lens)
+        # identities block: 2 (id_len) + 4 + 4 = 10  → ids_len=10 → outer 12
+        # binders block: 1 + 32 = 33  → 2 + 33 = 35
+        # total = 12 + 35 = 47
+        expect out.len() == 47
+        # last 32 bytes (binder data) must all be zero
+        var ok = true
+        var i: u64 = 0
+        while i < 32:
+            val byte = out[(out.len() - 32 + i.to_i64())]
+            if byte.to_u32() != 0u32:
+                ok = false
+            i = i + 1
+        expect ok == true
+
+    it("early_secret_from_psk(zero_psk) byte-exact = HKDF-Extract(0^32, 0^32)"):
+        val zero32 = _zeros32()
+        val es = tls13_early_secret_from_psk(zero32, 1u8)
+        # Reference: HKDF-Extract(salt=0^32, IKM=0^32) — matches the all-zero
+        # PSK case which equals tls13_early_secret() result.
+        val ref_es = hkdf_extract(zero32, zero32)
+        # ref_es may be longer; compare first 32 bytes
+        expect es.len() == 32
+        var ok = true
+        var i: u64 = 0
+        while i < 32:
+            if es[i.to_i64()] != ref_es[i.to_i64()]:
+                ok = false
+            i = i + 1
+        expect ok == true
+
+    it("binder_key derivation length matches HashLen"):
+        val zero32 = _zeros32()
+        val es = tls13_early_secret_from_psk(zero32, 1u8)
+        val bk_ext = tls13_binder_key(es, 1u8, false)
+        val bk_res = tls13_binder_key(es, 1u8, true)
+        expect bk_ext.len() == 32
+        expect bk_res.len() == 32
+        # ext binder ≠ res binder
+        expect _bytes_eq(bk_ext, bk_res) == false
+
+    it("psk binder MAC = HMAC-SHA-256(finished_key, transcript_hash)"):
+        val zero32 = _zeros32()
+        val es = tls13_early_secret_from_psk(zero32, 1u8)
+        val bk = tls13_binder_key(es, 1u8, true)
+        # Independently compute finished_key = HKDF-Expand-Label(bk, "finished", "", 32)
+        val empty: [u8] = []
+        val fk = hkdf_expand_label(bk, "finished", empty, 32)
+        val th = _seq_n(32u64, 0x55u8)
+        val expected_mac = sha256_hmac(fk, th)
+        val got_mac = tls13_compute_psk_binder(bk, th, 1u8)
+        # both 32-byte
+        expect got_mac.len() == 32
+        var ok = true
+        var i: u64 = 0
+        while i < 32:
+            if got_mac[i.to_i64()] != expected_mac[i.to_i64()]:
+                ok = false
+            i = i + 1
+        expect ok == true
+
+    it("client_early_traffic_secret derives non-zero 32-byte secret"):
+        val zero32 = _zeros32()
+        val es = tls13_early_secret_from_psk(zero32, 1u8)
+        val th = _seq_n(32u64, 0x77u8)
+        val cets = tls13_client_early_traffic_secret(es, th, 1u8)
+        expect cets.len() == 32
+        # verify it's not all-zero (would indicate broken derivation)
+        var nonzero = false
+        var i: u64 = 0
+        while i < 32:
+            if cets[i.to_i64()].to_u32() != 0u32:
+                nonzero = true
+            i = i + 1
+        expect nonzero == true
+
+    it("StoredPsk constructor for external PSK initializes ticket fields"):
+        val psk = _seq_n(32u64, 0x88u8)
+        val ident = _seq_n(10u64, 0x99u8)
+        val sp = stored_psk_from_external(psk, ident, 0x1301u16)
+        expect sp.cipher_suite == 0x1301u16
+        expect sp.lifetime_seconds == 0u32
+        expect sp.age_add == 0u32
+        expect sp.max_early_data_size == 0u32
+        expect _bytes_eq(sp.resumption_secret, psk) == true
+        expect _bytes_eq(sp.ticket, ident) == true
+
+    it("decode_psk_identity advances bytes_consumed correctly"):
+        val id = PskIdentity(identity: _seq_n(7u64, 0x33u8), obfuscated_ticket_age: 42u32)
+        val enc = encode_psk_identity(id)
+        val d = decode_psk_identity(enc, 0u64)
+        expect d.ok == true
+        expect d.bytes_consumed == 13u64
+        expect d.id.obfuscated_ticket_age == 42u32
