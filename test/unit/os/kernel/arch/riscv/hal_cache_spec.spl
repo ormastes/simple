@@ -1,4 +1,19 @@
 use std.spec
+use os.kernel.arch.riscv64.hal_cache.{
+    CmoCapSnapshot,
+    CacheOpLog,
+    make_empty_log,
+    hal_cache_probe_with_isa,
+    hal_cache_probe_with_trap_fires,
+    hal_cache_probe_with_trap_succeeds,
+    hal_cache_probe_with_cmo_disabled,
+    hal_cache_init_with_isa,
+    portable_numeric_capabilities_has_riscv_zicbom,
+    portable_numeric_capabilities_has_riscv_zicbom_default,
+    hal_cache_sync_icache_with_log,
+    hal_cache_clean_dcache_with_log,
+    hal_cache_invalidate_dcache_with_log
+}
 
 # SA-3 scope: HalCache impl — sync_icache emits fence.i; clean_dcache emits cbo.clean
 #             per-line when Zicbom advertised; fallback emits diagnostic; cacheline size
@@ -8,119 +23,13 @@ use std.spec
 # AC-3: Zicbom/Zicboz/Zicbop CMO probing via PortableNumericCapabilities
 # AC-5: fence.i ordering after code-load; Zicbom available-vs-fallback
 #
-# NOTE (interpreter-mode discipline): Interpreter mode only verifies file loading.
-# These it-blocks are TDD red — HalCache impl does not exist yet.
-# Phase 5 SA-3 implements riscv64/cache.spl and riscv32/cache.spl.
+# Production module: src/os/kernel/arch/riscv64/hal_cache.spl
+# The spec imports CmoCapSnapshot, CacheOpLog, make_empty_log, the probe helpers,
+# hal_cache_init_with_isa, and the _with_log test-seam functions from the module.
 #
 # NOTE on negative-path tests: No to_raise is available. For illegal-instruction-probe
-# tests, the impl returns a result sentinel (CmoProbeResult enum). Tests assert on the
-# returned value, not on trap firing. See D4 in Phase 4 state for details.
-
-# ---------------------------------------------------------------------------
-# CMO probe result sentinel — expected values from hal_cache_init
-# ---------------------------------------------------------------------------
-
-class CmoCapSnapshot:
-    has_zicbom: bool
-    has_zicboz: bool
-    has_zicbop: bool
-
-class CacheOpLog:
-    # Records what instructions were logically emitted, for test observability.
-    # Phase 5 SA-3 populates via test-only hal_cache_*_with_log() entry points.
-    var fence_i_count: u32
-    var cbo_clean_count: u32
-    var cbo_inval_count: u32
-    var cbo_flush_count: u32
-    var cbo_zero_count: u32
-    var diagnostic_emitted: bool
-
-fn make_empty_log() -> CacheOpLog:
-    CacheOpLog(
-        fence_i_count: 0u32,
-        cbo_clean_count: 0u32,
-        cbo_inval_count: 0u32,
-        cbo_flush_count: 0u32,
-        cbo_zero_count: 0u32,
-        diagnostic_emitted: false
-    )
-
-# ---------------------------------------------------------------------------
-# Module-level state for PortableNumericCapabilities handshake tests
-# ---------------------------------------------------------------------------
-
-var ZICBOM_STATE: bool = false
-
-# ---------------------------------------------------------------------------
-# Test-only entry points — implement the logic that production hal_cache.spl
-# would contain, but driven by explicit CmoCapSnapshot/CacheOpLog parameters
-# for full observability without real hardware or inline asm.
-# ---------------------------------------------------------------------------
-
-fn hal_cache_sync_icache_with_log(log: CacheOpLog, caps: CmoCapSnapshot, addr: u64, len: u64):
-    """Simulate hal_cache_sync_icache: flush per-line if Zicbom, always fence.i."""
-    val stride: u32 = 64u32
-    if caps.has_zicbom:
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            log.cbo_flush_count = log.cbo_flush_count + 1u32
-            cur = cur + stride as u64
-    log.fence_i_count = log.fence_i_count + 1u32
-
-fn hal_cache_clean_dcache_with_log(log: CacheOpLog, caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32):
-    """Simulate hal_cache_clean_dcache: cbo.clean per-line when Zicbom=true, else diagnostic."""
-    if caps.has_zicbom:
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            log.cbo_clean_count = log.cbo_clean_count + 1u32
-            cur = cur + stride as u64
-    else:
-        log.diagnostic_emitted = true
-
-fn hal_cache_invalidate_dcache_with_log(log: CacheOpLog, caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32):
-    """Simulate hal_cache_invalidate_dcache: cbo.inval per-line when Zicbom=true, else diagnostic."""
-    if caps.has_zicbom:
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            log.cbo_inval_count = log.cbo_inval_count + 1u32
-            cur = cur + stride as u64
-    else:
-        log.diagnostic_emitted = true
-
-fn hal_cache_probe_with_isa(isa: text) -> CmoCapSnapshot:
-    """Parse ISA string for Zicbom/Zicboz/Zicbop extensions (DTB method 1)."""
-    val has_zicbom = isa.contains("zicbom")
-    val has_zicboz = isa.contains("zicboz")
-    val has_zicbop = isa.contains("zicbop")
-    CmoCapSnapshot(has_zicbom: has_zicbom, has_zicboz: has_zicboz, has_zicbop: has_zicbop)
-
-fn hal_cache_probe_with_trap_fires() -> CmoCapSnapshot:
-    """Simulate DTB-silent probe where illegal-instruction trap fires => not supported."""
-    CmoCapSnapshot(has_zicbom: false, has_zicboz: false, has_zicbop: false)
-
-fn hal_cache_probe_with_trap_succeeds() -> CmoCapSnapshot:
-    """Simulate DTB-silent probe where no trap fires => CMO supported."""
-    CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
-
-fn hal_cache_probe_with_cmo_disabled() -> CmoCapSnapshot:
-    """Config flag disables CMO probing unconditionally."""
-    CmoCapSnapshot(has_zicbom: false, has_zicboz: false, has_zicbop: false)
-
-fn hal_cache_init_with_isa(isa: text):
-    """Initialize cache caps from ISA string and write to module-level state."""
-    val caps = hal_cache_probe_with_isa(isa)
-    ZICBOM_STATE = caps.has_zicbom
-
-fn portable_numeric_capabilities_has_riscv_zicbom() -> bool:
-    """Return the Zicbom capability as set by hal_cache_init_with_isa."""
-    ZICBOM_STATE
-
-fn portable_numeric_capabilities_has_riscv_zicbom_default() -> bool:
-    """Return the default (pre-init) Zicbom capability value — always false."""
-    false
+# tests, the impl returns a result sentinel (CmoCapSnapshot). Tests assert on the
+# returned value, not on trap firing.
 
 # ---------------------------------------------------------------------------
 # Specs
@@ -142,9 +51,6 @@ describe "HalCache":
             expect(log.fence_i_count).to_be_greater_than(0u32)
 
         it "AC-5: fence.i ordering — emitted after cbo.flush when Zicbom available":
-            # fence.i must come AFTER cbo.flush operations (ordering invariant)
-            # The log records last-fence-i index; if cbo_flush_count > 0 and fence_i > 0,
-            # ordering is satisfied for test purposes.
             val log = make_empty_log()
             val caps = CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
             hal_cache_sync_icache_with_log(log, caps, 0x80200000u64, 128u64)
@@ -155,14 +61,12 @@ describe "HalCache":
         it "AC-2: emits cbo.clean for each cacheline in range when Zicbom=true":
             val log = make_empty_log()
             val caps = CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
-            # 2 cachelines at 64-byte stride = 2 cbo.clean calls
             hal_cache_clean_dcache_with_log(log, caps, 0x80300000u64, 128u64, 64u32)
             expect(log.cbo_clean_count).to_equal(2u32)
 
         it "AC-2: cacheline count scales with range/stride":
             val log = make_empty_log()
             val caps = CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
-            # 4 cachelines at 64-byte stride
             hal_cache_clean_dcache_with_log(log, caps, 0x80300000u64, 256u64, 64u32)
             expect(log.cbo_clean_count).to_equal(4u32)
 
@@ -176,7 +80,6 @@ describe "HalCache":
         it "AC-2: cacheline size from DTB cbom-block-size (not hardcoded 64)":
             val log = make_empty_log()
             val caps = CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
-            # 128-byte cacheline; 256-byte range = 2 cbo.clean calls
             hal_cache_clean_dcache_with_log(log, caps, 0x80400000u64, 256u64, 128u32)
             expect(log.cbo_clean_count).to_equal(2u32)
 
@@ -196,24 +99,18 @@ describe "HalCache":
 
     describe "CMO probe ladder — 4 cases (AC-3, AC-5)":
         it "AC-3: DTB advertises Zicbom — probe returns true; cbo.clean emitted":
-            # Case 1: DTB isa string contains _zicbom
             val caps = hal_cache_probe_with_isa("rv64gc_zicbom_zicboz")
             expect(caps.has_zicbom).to_equal(true)
 
         it "AC-3: DTB silent + illegal-instr probe fires — probe returns false; fallback no-op + diagnostic":
-            # Case 2: DTB has no isa string; trap-guarded probe fires illegal instruction.
-            # Impl returns CmoCapSnapshot with has_zicbom=false.
-            # The probe return value (not a panic/trap) is what we assert on.
             val caps = hal_cache_probe_with_trap_fires()
             expect(caps.has_zicbom).to_equal(false)
 
         it "AC-3: DTB silent + illegal-instr probe succeeds — probe returns true":
-            # Case 3: DTB has no isa string; trap-guarded probe does NOT fire.
             val caps = hal_cache_probe_with_trap_succeeds()
             expect(caps.has_zicbom).to_equal(true)
 
         it "AC-3: config flag disables CMO — probe returns false unconditionally":
-            # Case 4: compile-time or runtime config disables Zicbom probing.
             val caps = hal_cache_probe_with_cmo_disabled()
             expect(caps.has_zicbom).to_equal(false)
 
@@ -227,6 +124,5 @@ describe "HalCache":
             expect(cap_value).to_equal(true)
 
         it "AC-3: before any hal_cache_init, has_riscv_zicbom defaults to false":
-            # Pre-init state must be false (safe default)
             val cap_value = portable_numeric_capabilities_has_riscv_zicbom_default()
             expect(cap_value).to_equal(false)

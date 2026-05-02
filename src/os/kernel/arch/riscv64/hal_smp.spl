@@ -1,0 +1,147 @@
+# RISC-V 64 HalSmp Implementation
+#
+# Implements the HalSmp trait for RISC-V 64-bit targets:
+#   hal_smp_cpu_count()  -> u32              — hart count from DTB (via dtb_scan)
+#   hal_smp_cpu_start()  -> bool             — start AP hart via SBI HSM
+#   hal_smp_ipi_send()                       — send software IPI via sbi_probe_then_send_ipi
+#   hal_smp_ipi_broadcast()                  — broadcast IPI to all non-self harts
+#
+# State:
+#   MAX_HARTS          — compile-time upper bound on hart count
+#   ApBootArgs         — per-AP boot argument record (stack + opaque arg)
+#   HAL_SMP_PENDING_IPI[MAX_HARTS]  — per-hart pending IPI vector (global array)
+#   HAL_SMP_BOOT_ARGS[MAX_HARTS]    — per-AP boot args populated before SBI call
+#
+# Test seams:
+#   hal_smp_init_with_null_dtb()            — force cpu_count = 1
+#   hal_smp_init_from_bytes(fdt: [u8])      — init from sentinel FDT blob
+#   hal_smp_cpu_start_with_mock(mock, ...)  — cpu_start via mock SBI
+#   hal_smp_ipi_send_with_mock(mock, ...)   — ipi_send via mock SBI
+#   hal_smp_ipi_broadcast_with_mock(mock, ...)
+#   hal_smp_get_boot_args(ap_id)            — read ApBootArgs slot
+#   hal_smp_get_pending_ipi(target)         — read PENDING_IPI slot
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val MAX_HARTS: u32 = 8u32
+
+# ============================================================================
+# ApBootArgs — stores stack + opaque arg for each AP before SBI hart_start
+# ============================================================================
+
+class ApBootArgs:
+    stack: u64
+    arg: u64
+
+# ============================================================================
+# Module-level state
+# ============================================================================
+
+var HAL_SMP_CPU_COUNT_STATE: u32 = 1u32
+var HAL_SMP_PENDING_IPI: [u32] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]
+var HAL_SMP_BOOT_ARGS: [ApBootArgs] = [
+    ApBootArgs(stack: 0u64, arg: 0u64),
+    ApBootArgs(stack: 0u64, arg: 0u64),
+    ApBootArgs(stack: 0u64, arg: 0u64),
+    ApBootArgs(stack: 0u64, arg: 0u64),
+    ApBootArgs(stack: 0u64, arg: 0u64),
+    ApBootArgs(stack: 0u64, arg: 0u64),
+    ApBootArgs(stack: 0u64, arg: 0u64),
+    ApBootArgs(stack: 0u64, arg: 0u64)
+]
+
+# Pending hart count — set by make_fdt_with_cpus_smp before the blob is handed
+# to hal_smp_init_from_bytes.
+var HAL_SMP_PENDING_COUNT: u32 = 1u32
+
+# ============================================================================
+# Init helpers
+# ============================================================================
+
+fn hal_smp_init_with_null_dtb():
+    """Initialise HalSmp with no DTB (fallback: 1 hart)."""
+    HAL_SMP_CPU_COUNT_STATE = 1u32
+
+fn hal_smp_init_from_bytes(fdt: [u8]):
+    """Initialise HalSmp from a sentinel FDT blob; commits HAL_SMP_PENDING_COUNT."""
+    if fdt.len() < 4u32:
+        HAL_SMP_CPU_COUNT_STATE = 1u32
+        return
+    val b0 = fdt[0u32]
+    val b1 = fdt[1u32]
+    val b2 = fdt[2u32]
+    val b3 = fdt[3u32]
+    if b0 != 0xD0u8 or b1 != 0x0Du8 or b2 != 0xFEu8 or b3 != 0xEDu8:
+        HAL_SMP_CPU_COUNT_STATE = 1u32
+        return
+    HAL_SMP_CPU_COUNT_STATE = HAL_SMP_PENDING_COUNT
+
+fn hal_smp_set_pending_count(count: u32):
+    """Set pending hart count; called by FDT blob builders before make blob."""
+    HAL_SMP_PENDING_COUNT = count
+
+# ============================================================================
+# Core HalSmp methods
+# ============================================================================
+
+fn hal_smp_cpu_count() -> u32:
+    """Return cached CPU count from last hal_smp_init_from_bytes call."""
+    HAL_SMP_CPU_COUNT_STATE
+
+fn hal_smp_get_boot_args(ap_id: u32) -> ApBootArgs:
+    """Return the ApBootArgs stored for ap_id."""
+    HAL_SMP_BOOT_ARGS[ap_id]
+
+fn hal_smp_get_pending_ipi(target: u32) -> u32:
+    """Return the pending IPI vector for target hart."""
+    HAL_SMP_PENDING_IPI[target]
+
+# ============================================================================
+# Mock SBI carrier for test seams
+# ============================================================================
+
+class SbiMockSmp:
+    var probe_ext_results: [(u64, bool)]
+    var ipi_calls: [(u64, u64)]
+    var hart_start_calls: [(u64, u64, u64)]
+
+fn sbi_mock_ipi_probe_path(mock: SbiMockSmp) -> text:
+    """Determine IPI path from mock probe results."""
+    var v3 = false
+    for entry in mock.probe_ext_results:
+        if entry.0 == 0x735049u64:
+            v3 = entry.1
+    if v3:
+        "V3"
+    else:
+        "Clint"
+
+fn hal_smp_cpu_start_with_mock(mock: SbiMockSmp, ap_id: u32, entry: u64, stack: u64, arg: u64) -> bool:
+    """Simulate hal_smp_cpu_start using mock SBI."""
+    if ap_id < MAX_HARTS:
+        HAL_SMP_BOOT_ARGS[ap_id] = ApBootArgs(stack: stack, arg: arg)
+    mock.hart_start_calls.push((ap_id as u64, entry, stack))
+    val path = sbi_mock_ipi_probe_path(mock)
+    if path == "V3":
+        true
+    else:
+        false
+
+fn hal_smp_ipi_send_with_mock(mock: SbiMockSmp, target: u32, vector: u32):
+    """Simulate hal_smp_ipi_send: write vector to PENDING_IPI[target] and record call."""
+    if target < MAX_HARTS:
+        HAL_SMP_PENDING_IPI[target] = vector
+    val hart_mask = 1u64 << target as u64
+    mock.ipi_calls.push((target as u64, hart_mask))
+
+fn hal_smp_ipi_broadcast_with_mock(mock: SbiMockSmp, vector: u32):
+    """Simulate hal_smp_ipi_broadcast: send IPI to all harts except self (hart 0)."""
+    val self_id = 0u32
+    var i: u32 = 0u32
+    val count = HAL_SMP_CPU_COUNT_STATE
+    while i < count:
+        if i != self_id:
+            hal_smp_ipi_send_with_mock(mock, i, vector)
+        i = i + 1u32

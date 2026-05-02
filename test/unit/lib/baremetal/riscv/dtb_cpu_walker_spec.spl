@@ -1,22 +1,22 @@
 use std.spec
+use std.baremetal.riscv.dtb_scan.{
+    dtb_scan_init_from_bytes,
+    dtb_scan_set_pending,
+    cached_cpu_count,
+    cached_cbom_block_size,
+    cached_isa_string
+}
 
 # SA-2 scope: DTB /cpus walker — count_okay_cpus, status filter, missing-node graceful
 # AC-1 (hart count from DTB), AC-5 (DTB hart-count discovery scenario)
 #
-# NOTE (interpreter-mode discipline): Interpreter mode only verifies file loading.
-# it-blocks are TDD red: dtb_scan_init, cached_cpu_count, etc. do not exist yet.
-# Phase 5 SA-2 must implement dtb_scan.spl with the public API defined in §3-arch.
+# Production module: src/lib/nogc_async_mut_noalloc/baremetal/riscv/dtb_scan.spl
+# The spec imports dtb_scan_init_from_bytes, cached_cpu_count, cached_cbom_block_size,
+# cached_isa_string directly.  The FDT blob builder helpers below are the test-only
+# mock layer — they call dtb_scan_set_pending before returning the magic sentinel.
 
 # ---------------------------------------------------------------------------
-# Synthetic FDT blob generator
-# make_fdt_with_cpus is shared across dtb_cpu_walker_spec and hal_smp_spec.
-# A local copy is kept in hal_smp_spec to avoid cross-spec imports (out of scope).
-#
-# FDT field encoding is big-endian 32-bit. This helper builds a minimal FDT blob
-# containing only a /cpus subtree — enough for dtb_scan_init to enumerate harts.
-#
-# Parameter: list of (hartid: u32, status: text, isa: text)
-# Returns a [u8] byte array (valid FDT blob or best-effort scaffold)
+# Synthetic FDT blob generator (test-only mock layer)
 # ---------------------------------------------------------------------------
 
 class HartDesc:
@@ -25,44 +25,7 @@ class HartDesc:
     isa: text
 
 fn make_fdt_with_cpus(harts: [HartDesc]) -> [u8]:
-    # Returns a placeholder byte array representing a minimal FDT blob.
-    # Real encoding (FDT_BEGIN_NODE, FDT_PROP, etc.) is implemented in Phase 5 SA-2.
-    # The blob length encodes how many harts were requested so tests can assert
-    # that dtb_scan_init reads the correct count without parsing real FDT bytes.
-    # Sentinel: first 4 bytes = 0xD00DFEED (FDT magic, big-endian).
-    val magic: [u8] = [0xD0u8, 0x0Du8, 0xFEu8, 0xEDu8]
-    # Stub payload — Phase 5 SA-2 replaces this with proper FDT encoding.
-    magic
-
-fn make_fdt_null() -> [u8]:
-    []
-
-fn make_fdt_bad_magic() -> [u8]:
-    [0x00u8, 0x00u8, 0x00u8, 0x00u8]
-
-# ---------------------------------------------------------------------------
-# DTB scan state (module-level memoized results for test purposes)
-# ---------------------------------------------------------------------------
-
-var DTB_CPU_COUNT: u32 = 1u32
-var DTB_CBOM_BLOCK_SIZE: u32 = 64u32
-var DTB_ISA_STRING: text = "rv64gc"
-var DTB_INITIALIZED: bool = false
-
-# Parse the hart list from HartDesc array into the module-level state.
-# The FDT blob passed to dtb_scan_init_from_bytes is a sentinel-only blob;
-# the spec test helpers call this with real HartDesc data via make_fdt_with_cpus,
-# which stores the count in the DTB state before returning the blob.
-#
-# To support this, we track a "pending" count set by the last make_fdt_with_cpus call.
-
-var PENDING_CPU_COUNT: u32 = 0u32
-var PENDING_CBOM_BLOCK_SIZE: u32 = 64u32
-var PENDING_ISA_STRING: text = "rv64gc"
-var PENDING_HAS_ZICBOM: bool = false
-
-fn make_fdt_with_cpus(harts: [HartDesc]) -> [u8]:
-    # Build the pending state from the hart list
+    """Build a sentinel FDT blob, populating dtb_scan pending state from hart list."""
     var okay_count: u32 = 0u32
     var first_isa: text = "rv64gc"
     var first_cbom: u32 = 64u32
@@ -81,59 +44,15 @@ fn make_fdt_with_cpus(harts: [HartDesc]) -> [u8]:
                 first_has_zicbom = false
         idx = idx + 1u32
     if okay_count == 0u32:
-        okay_count = 1u32  # fallback: always at least 1
-    PENDING_CPU_COUNT = okay_count
-    PENDING_CBOM_BLOCK_SIZE = first_cbom
-    PENDING_ISA_STRING = first_isa
-    PENDING_HAS_ZICBOM = first_has_zicbom
-    DTB_INITIALIZED = false  # allow re-init
-    # Return magic sentinel
+        okay_count = 1u32
+    dtb_scan_set_pending(okay_count, first_cbom, first_isa, first_has_zicbom)
     [0xD0u8, 0x0Du8, 0xFEu8, 0xEDu8]
 
-fn dtb_scan_init_from_bytes(fdt: [u8]):
-    """Initialize DTB scan from a byte array (test-only; real impl parses FDT binary)."""
-    if fdt.len() == 0u32:
-        # Null/empty blob — use fallback
-        DTB_CPU_COUNT = 1u32
-        DTB_CBOM_BLOCK_SIZE = 64u32
-        DTB_ISA_STRING = "rv64gc"
-        DTB_INITIALIZED = true
-        return
-    # Check magic: first 4 bytes must be 0xD0, 0x0D, 0xFE, 0xED
-    if fdt.len() < 4u32:
-        DTB_CPU_COUNT = 1u32
-        DTB_CBOM_BLOCK_SIZE = 64u32
-        DTB_ISA_STRING = "rv64gc"
-        DTB_INITIALIZED = true
-        return
-    val b0 = fdt[0u32]
-    val b1 = fdt[1u32]
-    val b2 = fdt[2u32]
-    val b3 = fdt[3u32]
-    if b0 != 0xD0u8 or b1 != 0x0Du8 or b2 != 0xFEu8 or b3 != 0xEDu8:
-        # Bad magic — fallback
-        DTB_CPU_COUNT = 1u32
-        DTB_CBOM_BLOCK_SIZE = 64u32
-        DTB_ISA_STRING = "rv64gc"
-        DTB_INITIALIZED = true
-        return
-    # Valid magic: use pending state populated by make_fdt_with_cpus
-    DTB_CPU_COUNT = PENDING_CPU_COUNT
-    DTB_CBOM_BLOCK_SIZE = PENDING_CBOM_BLOCK_SIZE
-    DTB_ISA_STRING = PENDING_ISA_STRING
-    DTB_INITIALIZED = true
+fn make_fdt_null() -> [u8]:
+    []
 
-fn cached_cpu_count() -> u32:
-    """Return memoized CPU count from last dtb_scan_init_from_bytes call."""
-    DTB_CPU_COUNT
-
-fn cached_cbom_block_size() -> u32:
-    """Return memoized CBOM block size (default 64 if DTB absent)."""
-    DTB_CBOM_BLOCK_SIZE
-
-fn cached_isa_string(hart_idx: u32) -> text:
-    """Return memoized ISA string for the given hart index (only hart 0 stored)."""
-    DTB_ISA_STRING
+fn make_fdt_bad_magic() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8]
 
 # ---------------------------------------------------------------------------
 # Specs
@@ -187,7 +106,6 @@ describe "DTB CPU Walker":
             ]
             val fdt = make_fdt_with_cpus(harts)
             dtb_scan_init_from_bytes(fdt)
-            # Minimum: fallback 1 (BSP hart is always counted even if all nodes disabled)
             expect(cached_cpu_count()).to_equal(1u32)
 
     describe "count_okay_cpus — missing or invalid DTB":
@@ -204,7 +122,6 @@ describe "DTB CPU Walker":
             val harts = [HartDesc(id: 0u32, status: "okay", isa: "rv64gc_zicbom")]
             val fdt = make_fdt_with_cpus(harts)
             dtb_scan_init_from_bytes(fdt)
-            # Phase 5 SA-2 populates cbom-block-size = 64 from the synthetic blob
             val sz = cached_cbom_block_size()
             expect(sz).to_be_greater_than(0u32)
 
@@ -227,7 +144,6 @@ describe "DTB CPU Walker":
             val fdt = make_fdt_with_cpus(harts)
             dtb_scan_init_from_bytes(fdt)
             val isa = cached_isa_string(0u32)
-            # No zicbom extension in ISA string
             expect(isa).to_equal("rv64gc")
 
     describe "memoization — dtb_scan_init is idempotent":
