@@ -4,8 +4,15 @@
 ## Current Status (2026-05-01)
 
 - Startup/RSS evidence: PASS (`doc/09_report/verify/simd_startup_rss_evidence_2026-04-30.md`).
-- Runtime perf evidence: WARN (`doc/09_report/verify/simd_runtime_perf_evidence_2026-04-30.md`).
-- FR `simd_int_intrinsics_for_crypto_2026-05-01` Phase 1 IN PROGRESS (separate sstack agent — adds 10 bitwise/shift int intrinsics).
+- Runtime perf evidence: superseded by Phase 1 (the 2026-04-30 WARN report measured the pre-intrinsic baseline; Wave 2 T1/T2 will re-measure with vectorized ChaCha20+SHA-256 against the same fixtures).
+- FR `simd_int_intrinsics_for_crypto_2026-05-01` **Phase 1 LANDED** via Agent A (Wave 1, 2026-05-01): 10 bitwise/shift int intrinsics (xor / and / or / shl / shr × i32x4 + i32x8) implemented in `src/runtime/.../simd_int_ops.rs`, dispatched through the interpreter, spec-PASSed, and cross-referenced from the FR. Phase 2 (`Vec16u8` + AES-NI/PCLMUL one-shot block ops) and Phase 3 (`Vec2u64` + carry-less multiply for GHASH) remain **PROPOSED** — no agent assigned this wave.
+
+### Wave 2 (in flight 2026-05-01 evening)
+
+- **T1** vectorizing ChaCha20 quarter-round with Phase 1 ops — validates that the int intrinsics buy real perf in a pure-Simple AEAD.
+- **T2** vectorizing SHA-256 message-schedule expansion (`σ0`/`σ1` over W[16..64]) with Phase 1 ops — validates the same for hashing.
+
+These two are the empirical justification for unlocking Phase 2/3; if T1/T2 land measurable speedup against the 2026-04-30 baseline, that becomes the Phase-2 funding case.
 
 ## Assumed Selection
 
