@@ -1,10 +1,56 @@
 # Bug: Interpreter — match `Ok(_)` arm on cross-module `Result<text, text>` fails with "variable `text` not found"
 
+**Status: FIXED 2026-05-01.** Root cause was NOT a match/pattern bug — see "Real root cause" section below. The user-visible symptom (`variable 'text' not found` after `Ok(...)` arm dispatch) was caused by the `text.from_char_code(n)` idiom inside `base64url_decode` (and three sibling sites). That idiom is grammatically accepted but has no interpreter (or codegen) support; the interpreter's method-call dispatch evaluates the receiver `text` as a value-identifier and fails. Fixed by rewriting the four call sites to use the supported `n.chr()` idiom.
+
 - **Date:** 2026-05-01
-- **Status:** Open
-- **Module:** `src/compiler_rust/compiler/src/interpreter/` (suspected: `expr/control.rs` `exec_match_expr` and/or `expr/literals.rs:327` identifier resolution)
-- **Severity:** Blocks any positive-path consumer of a cross-module function that returns `Result<text, text>` in interpreter mode.
-- **Found by:** Diagnosis of `jwt_hs256_round_trip_failure_2026-05-01` — the JWT crypto is correct; the test failure was the surface symptom of this interpreter bug.
+- **Status:** FIXED 2026-05-01
+- **Module:** `src/lib/common/jwt/encode.spl`, `src/lib/common/cert/pem.spl`, `src/lib/nogc_sync_mut/http/utilities.spl` (caller-side fix, not interpreter-internals).
+- **Severity:** Blocked the JWT HS256 round-trip and any caller of `base64url_decode` / PEM decode / HTTP base64 decode in interpreter or compiled mode.
+- **Found by:** Diagnosis of `jwt_hs256_round_trip_failure_2026-05-01` — the JWT crypto is correct; the test failure was the surface symptom of the broken `text.from_char_code` idiom in `base64url_decode`.
+
+## Real root cause (added 2026-05-01)
+
+K's original framing ("cross-module `Result<text,text>` Ok arm") was a coincidental routing artifact. The actual trigger has nothing to do with match, Ok, Err, or generics. The chain:
+
+1. `jwt_verify_hs256` calls `base64url_decode(payload_b64)` immediately before `Ok(payload_json)`.
+2. `base64url_decode` calls `base64_decode` which uses `text.from_char_code(b1)` to convert an `i64` byte value to a 1-char text.
+3. The parser builds `MethodCall { receiver: Expr::Identifier("text"), method: "from_char_code", args: [b1] }`.
+4. `evaluate_method_call_with_self_update` (and `evaluate_method_call`) evaluate the receiver as a value via `evaluate_expr(receiver)`. There is no static-method dispatch for primitive type-name receivers (`text`, `int`, etc.).
+5. `text` is not in the variable env → `literals.rs:327` raises `variable 'text' not found`.
+6. The Err arm of K's repro avoided this because `if not constant_time_compare(...): return Err(...)` short-circuits BEFORE the `base64url_decode(payload_b64)` call. Only the Ok path reached the broken decode.
+
+**Fails identically in compiled mode** (`bin/simple compile probe.spl` → `Undefined("undefined identifier: text")`) — confirming the idiom was never supported at any layer; it just compiled by accident in modules that were never exercised.
+
+### The four broken callers
+
+```
+src/lib/common/jwt/encode.spl:97,103,109            # base64_decode
+src/lib/common/cert/pem.spl:64,68,72                 # PEM base64 decode
+src/lib/nogc_sync_mut/http/utilities.spl:127,132,137 # HTTP base64 decode
+```
+
+### Fix
+
+Each `text.from_char_code(N)` was rewritten to `N.chr()`, which is the supported idiom for `i64 → 1-char text` (already used in encoding_base, kafka, mqtt, svllm, http_client/types, smtp/utilities). `.chr()` dispatches correctly in both interpreter and compiled mode.
+
+### Discriminating tests run during diagnosis
+
+| variant | result | notes |
+|---|---|---|
+| Same-module `Result<text,text>` Ok arm | PASS | rules out match/pattern/scope |
+| Cross-module `Result<int,int>` Ok arm | PASS (when payload is a literal) | rules out generics |
+| Cross-module fn returning literal `text` in `Ok` | PASS | rules out cross-module Result-text |
+| Cross-module fn calling `text.from_char_code(n)` directly | FAIL | trigger isolated |
+| Same-module call to `text.from_char_code(n)` | FAIL | NOT cross-module-specific |
+| `bin/simple compile <text.from_char_code script>` | FAIL | NOT interpreter-specific |
+| Same fn rewritten to `n.chr()` | PASS | confirms fix |
+
+### Future work (not part of this fix)
+
+- Either implement primitive-type-name static-method dispatch in the interpreter and codegen, or have the parser/lint reject `<primitive_type>.<ident>(...)` so authors don't get a misleading "variable not found" error. Tracked as a follow-up; no in-tree caller remains as of this commit.
+- The `_hs256_verify_ok` helper return-from-match in REQ-JWT-006 surfaces a separate pre-existing interpreter limitation (helper returns from spec it-block context returning wrong value); not caused by this fix and not in scope. Standalone reproducer (`/tmp/jwt_diag/helper_test.spl`) returns the correct value.
+
+## Original framing (preserved for reference)
 
 ## Symptom
 

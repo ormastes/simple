@@ -1,10 +1,10 @@
 # Bug: JWT HS256 sign-then-verify round-trip fails despite RFC 7515 A.1 byte-match passing
 
-**Status: ROOT CAUSE IDENTIFIED 2026-05-01 — interpreter bug in cross-module `Result<text, text>` Ok-arm pattern dispatch; tracked in [`interpreter_match_ok_arm_text_type_lookup_2026-05-01.md`](interpreter_match_ok_arm_text_type_lookup_2026-05-01.md). JWT crypto is correct.**
+**Status: REQ-JWT-005 (round-trip) FIXED 2026-05-01.** Real root cause was the `text.from_char_code(n)` idiom in `base64url_decode` (and three sibling sites in cert/pem and http/utilities), not a match/Result interpreter bug. See `interpreter_match_ok_arm_text_type_lookup_2026-05-01.md` for full diagnosis. Fixed by rewriting the four call sites to `n.chr()`. REQ-JWT-006 still fails for an unrelated pre-existing interpreter limitation (helper-fn return-from-match in spec it-block context returns wrong value); standalone reproducer works correctly.
 
 - **Date filed:** 2026-05-01
-- **Status:** Re-routed to interpreter bug (not a JWT bug). See root-cause section at bottom.
-- **Module:** ~~`src/lib/common/jwt/sign.spl` + `src/lib/common/jwt/encode.spl` + `src/lib/common/jwt/mod.spl`~~ — JWT sources are correct; root cause is in `src/compiler_rust/compiler/src/interpreter/`.
+- **Status:** REQ-JWT-005 FIXED 2026-05-01; REQ-JWT-006 unrelated pre-existing issue (separate)
+- **Module:** ~~interpreter~~ → `src/lib/common/jwt/encode.spl` (caller-side fix). JWT sources were correct; the broken idiom was inside `base64_decode` from line 97/103/109.
 - **Found by:** Agent AA's JWT spec — `test/unit/lib/common/jwt_spec.spl` — uncommitted
 
 ## Symptom
