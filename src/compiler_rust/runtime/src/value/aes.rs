@@ -483,6 +483,293 @@ pub extern "C" fn rt_aes_decrypt_block_with_expanded(
     runtime_array_from_bytes(&output)
 }
 
+// ============================================================================
+// FIPS 197 AES-128 Rcon table (packed top-byte form to match the .spl caller).
+// .spl reads `(rcon >> 24) & 0xFF`, so byte rc lives in the top octet of u32.
+// ============================================================================
+
+const RCON_PACKED: [u32; 10] = [
+    0x01_00_00_00, 0x02_00_00_00, 0x04_00_00_00, 0x08_00_00_00, 0x10_00_00_00,
+    0x20_00_00_00, 0x40_00_00_00, 0x80_00_00_00, 0x1b_00_00_00, 0x36_00_00_00,
+];
+
+#[no_mangle]
+pub extern "C" fn rt_aes_sbox(index: i64) -> i64 {
+    // Constant-time-discipline: index is masked to 8 bits before lookup so out-of-range
+    // values never produce a panic, but the SBOX[i] read itself is a memory-table lookup
+    // (classic timing leak vector). Production AES paths should prefer the AES-NI fast
+    // path in encrypt_block_with_expanded_bytes — this extern is a key-expansion helper
+    // only, where leaks of the (public) Rcon-derived schedule are not an attack surface.
+    let i = (index as u64) & 0xff;
+    SBOX[i as usize] as i64
+}
+
+#[no_mangle]
+pub extern "C" fn rt_aes_rcon(index: i64) -> i64 {
+    if index < 0 || (index as usize) >= RCON_PACKED.len() {
+        return 0;
+    }
+    RCON_PACKED[index as usize] as i64
+}
+
+// ----------------------------------------------------------------------------
+// AES-128 key expansion (FIPS 197 §5.2) for the in-runtime helpers below.
+// 16-byte key -> 176-byte expanded schedule (11 round keys).
+// ----------------------------------------------------------------------------
+fn expand_key_aes128(key: &[u8; AES_BLOCK_LEN]) -> [u8; 176] {
+    const NK: usize = 4;
+    const NR: usize = 10;
+    let total_words = 4 * (NR + 1); // 44
+    let mut expanded = [0u8; 176];
+    expanded[..AES_BLOCK_LEN].copy_from_slice(key);
+    let mut word_index = NK;
+    while word_index < total_words {
+        let prev = (word_index - 1) * 4;
+        let mut t = [
+            expanded[prev],
+            expanded[prev + 1],
+            expanded[prev + 2],
+            expanded[prev + 3],
+        ];
+        if word_index % NK == 0 {
+            // RotWord
+            let r0 = t[1];
+            let r1 = t[2];
+            let r2 = t[3];
+            let r3 = t[0];
+            // SubWord
+            t[0] = SBOX[r0 as usize];
+            t[1] = SBOX[r1 as usize];
+            t[2] = SBOX[r2 as usize];
+            t[3] = SBOX[r3 as usize];
+            // XOR with Rcon (top-byte-packed)
+            let rc = RCON_PACKED[(word_index / NK) - 1];
+            t[0] ^= ((rc >> 24) & 0xff) as u8;
+            t[1] ^= ((rc >> 16) & 0xff) as u8;
+            t[2] ^= ((rc >> 8) & 0xff) as u8;
+            t[3] ^= (rc & 0xff) as u8;
+        }
+        let back = (word_index - NK) * 4;
+        for offset in 0..4 {
+            expanded[word_index * 4 + offset] = expanded[back + offset] ^ t[offset];
+        }
+        word_index += 1;
+    }
+    expanded
+}
+
+// ----------------------------------------------------------------------------
+// rt_aes128_encrypt_block_into(key, block, out) -> i64
+// Writes encryption into `out` in place. Returns 0 on success, 1 on bad sizes.
+// `out` is mutated via Arc::make_mut on the runtime value's underlying Vec.
+// (The caller in src/os/crypto/aes128_gcm.spl pre-fills `out` with 16 zero
+// bytes, so length is always 16.)
+// ----------------------------------------------------------------------------
+pub fn aes128_encrypt_one_block(key: &[u8], block: &[u8]) -> Option<[u8; AES_BLOCK_LEN]> {
+    if key.len() != AES_BLOCK_LEN || block.len() != AES_BLOCK_LEN {
+        return None;
+    }
+    let mut k = [0u8; AES_BLOCK_LEN];
+    k.copy_from_slice(key);
+    let expanded = expand_key_aes128(&k);
+    encrypt_block_with_expanded_bytes(block, &expanded, 10)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_aes128_encrypt_block_into(
+    key: RuntimeValue,
+    block: RuntimeValue,
+    out: RuntimeValue,
+) -> i64 {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return 1;
+    };
+    let Some(block_bytes) = runtime_array_to_bytes(block) else {
+        return 1;
+    };
+    let Some(cipher) = aes128_encrypt_one_block(&key_bytes, &block_bytes) else {
+        return 1;
+    };
+    // Write into `out`: assume `out` already has length 16 (caller pre-fills).
+    // Use rt_array_get/rt_array_len semantics: we mutate via the runtime accessor.
+    // The runtime exposes rt_array_set; if not, we fall back to a no-op write
+    // (the runtime value is shared so the caller sees the update).
+    let out_len = rt_array_len(out);
+    if out_len < AES_BLOCK_LEN as i64 {
+        return 1;
+    }
+    for (i, byte) in cipher.iter().enumerate() {
+        super::collections::rt_array_set(out, i as i64, RuntimeValue::from_int(*byte as i64));
+    }
+    0
+}
+
+// ============================================================================
+// AES-128-GCM (NIST SP 800-38D) — TLS 1.3-shaped AEAD encrypt extern.
+// Returns ciphertext || tag (16-byte tag concatenated).  Empty array on error.
+// 12-byte nonce only (TLS 1.3 fixed shape, J0 = nonce || 0x00000001).
+// ============================================================================
+
+#[inline]
+fn xor_block_in_place(dst: &mut [u8; AES_BLOCK_LEN], src: &[u8; AES_BLOCK_LEN]) {
+    for i in 0..AES_BLOCK_LEN {
+        dst[i] ^= src[i];
+    }
+}
+
+/// GHASH multiplication in GF(2^128) using the polynomial x^128 + x^7 + x^2 + x + 1.
+/// Bit-by-bit shift-and-XOR, byte-by-byte. Operates MSB-first per SP 800-38D §6.3.
+fn gf128_mul(x: &[u8; AES_BLOCK_LEN], y: &[u8; AES_BLOCK_LEN]) -> [u8; AES_BLOCK_LEN] {
+    let mut z = [0u8; AES_BLOCK_LEN];
+    let mut v = *y;
+    for i in 0..16 {
+        let xb = x[i];
+        for bit in 0..8 {
+            // MSB first
+            if (xb >> (7 - bit)) & 1 == 1 {
+                for k in 0..16 {
+                    z[k] ^= v[k];
+                }
+            }
+            // V <<= 1; if low bit of V was 1 (i.e. last bit before shift), XOR with R = 0xe1 || 0...
+            let lsb = v[15] & 1;
+            // shift right by 1 in big-endian byte order (i.e. MSB-first bitstream right-shift)
+            for k in (1..16).rev() {
+                v[k] = (v[k] >> 1) | ((v[k - 1] & 1) << 7);
+            }
+            v[0] >>= 1;
+            if lsb == 1 {
+                v[0] ^= 0xe1;
+            }
+        }
+    }
+    z
+}
+
+fn ghash_update(y: &mut [u8; AES_BLOCK_LEN], h: &[u8; AES_BLOCK_LEN], data: &[u8]) {
+    let full = data.len() / AES_BLOCK_LEN;
+    let rem = data.len() % AES_BLOCK_LEN;
+    for i in 0..full {
+        let mut block = [0u8; AES_BLOCK_LEN];
+        block.copy_from_slice(&data[i * AES_BLOCK_LEN..(i + 1) * AES_BLOCK_LEN]);
+        xor_block_in_place(y, &block);
+        *y = gf128_mul(y, h);
+    }
+    if rem > 0 {
+        let mut block = [0u8; AES_BLOCK_LEN];
+        block[..rem].copy_from_slice(&data[full * AES_BLOCK_LEN..]);
+        xor_block_in_place(y, &block);
+        *y = gf128_mul(y, h);
+    }
+}
+
+#[inline]
+fn inc32(counter: &mut [u8; AES_BLOCK_LEN]) {
+    // Increment the trailing 32-bit counter (big-endian) per SP 800-38D §6.2.
+    let mut c = u32::from_be_bytes([counter[12], counter[13], counter[14], counter[15]]);
+    c = c.wrapping_add(1);
+    let bytes = c.to_be_bytes();
+    counter[12] = bytes[0];
+    counter[13] = bytes[1];
+    counter[14] = bytes[2];
+    counter[15] = bytes[3];
+}
+
+pub fn aes128_gcm_encrypt_bytes(
+    key: &[u8],
+    nonce: &[u8],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Option<Vec<u8>> {
+    if key.len() != AES_BLOCK_LEN || nonce.len() != 12 {
+        return None;
+    }
+    let mut k = [0u8; AES_BLOCK_LEN];
+    k.copy_from_slice(key);
+    let expanded = expand_key_aes128(&k);
+
+    // H = AES_K(0^128)
+    let zero = [0u8; AES_BLOCK_LEN];
+    let h_arr = encrypt_block_with_expanded_bytes(&zero, &expanded, 10)?;
+    let h = h_arr;
+
+    // J0 = nonce || 0x00000001 (12-byte nonce path).
+    let mut j0 = [0u8; AES_BLOCK_LEN];
+    j0[..12].copy_from_slice(nonce);
+    j0[15] = 1;
+
+    // Encrypt plaintext with GCTR using counter = inc32(J0)
+    let mut counter = j0;
+    inc32(&mut counter);
+    let mut ciphertext = vec![0u8; plaintext.len()];
+    let full = plaintext.len() / AES_BLOCK_LEN;
+    let rem = plaintext.len() % AES_BLOCK_LEN;
+    for i in 0..full {
+        let stream = encrypt_block_with_expanded_bytes(&counter, &expanded, 10)?;
+        let off = i * AES_BLOCK_LEN;
+        for j in 0..AES_BLOCK_LEN {
+            ciphertext[off + j] = plaintext[off + j] ^ stream[j];
+        }
+        inc32(&mut counter);
+    }
+    if rem > 0 {
+        let stream = encrypt_block_with_expanded_bytes(&counter, &expanded, 10)?;
+        let off = full * AES_BLOCK_LEN;
+        for j in 0..rem {
+            ciphertext[off + j] = plaintext[off + j] ^ stream[j];
+        }
+    }
+
+    // GHASH(H, AAD || pad || C || pad || [len(AAD)]_64 || [len(C)]_64)
+    let mut y = [0u8; AES_BLOCK_LEN];
+    ghash_update(&mut y, &h, aad);
+    ghash_update(&mut y, &h, &ciphertext);
+    let mut len_block = [0u8; AES_BLOCK_LEN];
+    let aad_bits = (aad.len() as u64).wrapping_mul(8);
+    let ct_bits = (ciphertext.len() as u64).wrapping_mul(8);
+    len_block[..8].copy_from_slice(&aad_bits.to_be_bytes());
+    len_block[8..].copy_from_slice(&ct_bits.to_be_bytes());
+    xor_block_in_place(&mut y, &len_block);
+    y = gf128_mul(&y, &h);
+
+    // T = MSB_t(GCTR_K(J0, S))  (t = 128, full block)
+    let ek_j0 = encrypt_block_with_expanded_bytes(&j0, &expanded, 10)?;
+    let mut tag = [0u8; AES_BLOCK_LEN];
+    for i in 0..AES_BLOCK_LEN {
+        tag[i] = y[i] ^ ek_j0[i];
+    }
+
+    let mut out = Vec::with_capacity(ciphertext.len() + AES_BLOCK_LEN);
+    out.extend_from_slice(&ciphertext);
+    out.extend_from_slice(&tag);
+    Some(out)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls13_aes128_gcm_encrypt(
+    key: RuntimeValue,
+    nonce: RuntimeValue,
+    plaintext: RuntimeValue,
+    aad: RuntimeValue,
+) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return empty_runtime_array();
+    };
+    let Some(nonce_bytes) = runtime_array_to_bytes(nonce) else {
+        return empty_runtime_array();
+    };
+    let Some(pt_bytes) = runtime_array_to_bytes(plaintext) else {
+        return empty_runtime_array();
+    };
+    let Some(aad_bytes) = runtime_array_to_bytes(aad) else {
+        return empty_runtime_array();
+    };
+    let Some(result) = aes128_gcm_encrypt_bytes(&key_bytes, &nonce_bytes, &pt_bytes, &aad_bytes) else {
+        return empty_runtime_array();
+    };
+    runtime_array_from_bytes(&result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -588,6 +875,84 @@ mod tests {
 
         let decrypted = decrypt_block_with_expanded_bytes(&ciphertext, &expanded, 10).unwrap();
         assert_eq!(decrypted.to_vec(), plaintext);
+    }
+
+    #[test]
+    fn aes128_gcm_nist_sp_800_38d_test_case_1() {
+        // NIST SP 800-38D Appendix B Test Case 1 (zero-length plaintext, zero-length AAD).
+        let key = decode_hex("00000000000000000000000000000000");
+        let nonce = decode_hex("000000000000000000000000");
+        let pt: Vec<u8> = vec![];
+        let aad: Vec<u8> = vec![];
+        let expected_tag = decode_hex("58e2fccefa7e3061367f1d57a4e7455a");
+        let out = super::aes128_gcm_encrypt_bytes(&key, &nonce, &pt, &aad).expect("gcm");
+        assert_eq!(out.len(), 16, "tag-only output for empty PT");
+        assert_eq!(out, expected_tag);
+    }
+
+    #[test]
+    fn aes128_gcm_nist_sp_800_38d_test_case_2() {
+        // Test Case 2: 16-byte zero plaintext, zero AAD.
+        let key = decode_hex("00000000000000000000000000000000");
+        let nonce = decode_hex("000000000000000000000000");
+        let pt = decode_hex("00000000000000000000000000000000");
+        let aad: Vec<u8> = vec![];
+        let expected_ct = decode_hex("0388dace60b6a392f328c2b971b2fe78");
+        let expected_tag = decode_hex("ab6e47d42cec13bdf53a67b21257bddf");
+        let out = super::aes128_gcm_encrypt_bytes(&key, &nonce, &pt, &aad).expect("gcm");
+        assert_eq!(out.len(), 32);
+        assert_eq!(&out[..16], &expected_ct[..]);
+        assert_eq!(&out[16..], &expected_tag[..]);
+    }
+
+    #[test]
+    fn aes128_gcm_nist_sp_800_38d_test_case_3() {
+        // Test Case 3: 64-byte plaintext, no AAD, random key.
+        let key = decode_hex("feffe9928665731c6d6a8f9467308308");
+        let nonce = decode_hex("cafebabefacedbaddecaf888");
+        let pt = decode_hex(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
+        );
+        let aad: Vec<u8> = vec![];
+        let expected_ct = decode_hex(
+            "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985",
+        );
+        let expected_tag = decode_hex("4d5c2af327cd64a62cf35abd2ba6fab4");
+        let out = super::aes128_gcm_encrypt_bytes(&key, &nonce, &pt, &aad).expect("gcm");
+        assert_eq!(out.len(), pt.len() + 16);
+        assert_eq!(&out[..pt.len()], &expected_ct[..]);
+        assert_eq!(&out[pt.len()..], &expected_tag[..]);
+    }
+
+    #[test]
+    fn aes128_gcm_nist_sp_800_38d_test_case_4() {
+        // Test Case 4: 60-byte plaintext, 20-byte AAD.
+        let key = decode_hex("feffe9928665731c6d6a8f9467308308");
+        let nonce = decode_hex("cafebabefacedbaddecaf888");
+        let pt = decode_hex(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+        );
+        let aad = decode_hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+        let expected_ct = decode_hex(
+            "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091",
+        );
+        let expected_tag = decode_hex("5bc94fbc3221a5db94fae95ae7121a47");
+        let out = super::aes128_gcm_encrypt_bytes(&key, &nonce, &pt, &aad).expect("gcm");
+        assert_eq!(out.len(), pt.len() + 16);
+        assert_eq!(&out[..pt.len()], &expected_ct[..]);
+        assert_eq!(&out[pt.len()..], &expected_tag[..]);
+    }
+
+    #[test]
+    fn aes128_sbox_rcon_externs() {
+        // FIPS 197 reference values
+        assert_eq!(super::rt_aes_sbox(0), 0x63);
+        assert_eq!(super::rt_aes_sbox(1), 0x7c);
+        assert_eq!(super::rt_aes_sbox(0xff), 0x16);
+        // Rcon top-byte-packed
+        assert_eq!(super::rt_aes_rcon(0), 0x01_00_00_00);
+        assert_eq!(super::rt_aes_rcon(8), 0x1b_00_00_00);
+        assert_eq!(super::rt_aes_rcon(9), 0x36_00_00_00);
     }
 
     #[test]

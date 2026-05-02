@@ -81,7 +81,10 @@ pub use heap::{HeapHeader, HeapObjectType};
 // Re-export collection types
 pub use collections::{RuntimeArray, RuntimeString, RuntimeTuple};
 pub use dict::RuntimeDict;
-pub use aes::{rt_aes_decrypt_block_with_expanded, rt_aes_encrypt_block_with_expanded};
+pub use aes::{
+    rt_aes128_encrypt_block_into, rt_aes_decrypt_block_with_expanded, rt_aes_encrypt_block_with_expanded,
+    rt_aes_rcon, rt_aes_sbox, rt_tls13_aes128_gcm_encrypt,
+};
 
 // Re-export object types
 pub use objects::{RuntimeClosure, RuntimeEnum, RuntimeObject, RuntimeShared, RuntimeUnique, RuntimeWeak};

@@ -113,6 +113,8 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_simd_")
         || name.starts_with("rt_numeric_")
         || name.starts_with("rt_aes_")
+        || name.starts_with("rt_aes128_")
+        || name.starts_with("rt_tls13_")
         || name.starts_with("rt_neighbor_load")
         || name.starts_with("rt_gpu_")
         || name.starts_with("rt_vk_")
@@ -508,6 +510,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_numeric_dot_f64",
     "rt_aes_encrypt_block_with_expanded",
     "rt_aes_decrypt_block_with_expanded",
+    "rt_aes_sbox",
+    "rt_aes_rcon",
+    "rt_aes128_encrypt_block_into",
+    "rt_tls13_aes128_gcm_encrypt",
     // Runtime configuration
     "rt_set_macro_trace",
     "rt_is_macro_trace_enabled",
