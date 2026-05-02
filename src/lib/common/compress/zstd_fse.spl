@@ -243,3 +243,218 @@ fn zstd_fse_get_entry(table: ZstdFseDecodeTable, state: ZstdFseState) -> Result<
     if state.state < 0 or state.state >= table.entries.len():
         return Err(CompressionError.CorruptStream("zstd fse state"))
     Ok(table.entries[state.state])
+
+# ---------------------------------------------------------------------------
+# FSE encoder primitives (pure-Simple, RFC 8478 §4.1.1).
+#
+# The encoder builds the *symbol*-indexed transition table from the same
+# normalized counts the decoder uses, then encodes symbols in REVERSE order
+# (an FSE encoder property: the decoder reads forward, so the encoder writes
+# the bitstream LIFO and the consumer recovers it via a backward bit reader).
+# ---------------------------------------------------------------------------
+
+# Per-symbol entry of the encoder transition table. `delta_find_state` and
+# `delta_nb_bits` follow the zstd reference encoder layout: given the
+# in-flight `state`, the number of bits to flush is
+# `(state + delta_nb_bits) >> 16`, and the next state is
+# `state_table[(state >> nb_bits) + delta_find_state]`.
+struct ZstdFseEncodeSymbolEntry:
+    nb_bits: i64
+    state_offset: i64
+    base: i64
+    has_count: bool
+
+struct ZstdFseEncodeTable:
+    table_log: i64
+    counts: [i64]
+    state_table: [i64]
+    symbols: [ZstdFseEncodeSymbolEntry]
+
+fn _zstd_fse_spread_positions(counts: [i64], table_log: i64) -> Result<[i64], CompressionError>:
+    val table_size = 1 << table_log
+    val mask = table_size - 1
+    val step = (table_size >> 1) + (table_size >> 3) + 3
+    var positions: [i64] = []
+    var slot = 0
+    while slot < table_size:
+        positions.push(-1)
+        slot = slot + 1
+    var high_threshold = table_size - 1
+    var i = 0
+    # Symbols with normalized count == -1 (probability 1/table_size) take the
+    # high slots, exactly mirroring the decoder.
+    while i < counts.len():
+        if counts[i] == -1:
+            positions[high_threshold] = i
+            high_threshold = high_threshold - 1
+        i = i + 1
+    var position = 0
+    i = 0
+    while i < counts.len():
+        val count = counts[i]
+        if count > 0:
+            var remaining = count
+            while remaining > 0:
+                while positions[position] >= 0:
+                    position = (position + step) & mask
+                positions[position] = i
+                position = (position + step) & mask
+                remaining = remaining - 1
+            while position > high_threshold and positions[position] >= 0:
+                position = (position + step) & mask
+        i = i + 1
+    var slot2 = 0
+    while slot2 < positions.len():
+        if positions[slot2] < 0:
+            return Err(CompressionError.CorruptStream("zstd fse encode spread incomplete"))
+        slot2 = slot2 + 1
+    Ok(positions)
+
+# Build a symbol-indexed encoder table from normalized counts. The
+# `state_table` maps "state >> nb_bits + delta_find_state" -> next state, and
+# `symbols` records per-symbol nb_bits / state_offset so that
+# `encode_symbol(state, sym) -> (bits_to_emit, nb_bits, next_state)` works
+# without re-walking the spread table.
+fn zstd_fse_build_encode_table(table_log: i64, counts: [i64]) -> Result<ZstdFseEncodeTable, CompressionError>:
+    val table_ok = zstd_fse_validate_table_log(table_log, table_log)
+    if table_ok.is_err():
+        return Err(table_ok.unwrap_err())
+    val table_size = 1 << table_log
+    var share_total = 0
+    var i = 0
+    while i < counts.len():
+        share_total = share_total + _zstd_fse_abs(counts[i])
+        i = i + 1
+    if share_total != table_size:
+        return Err(CompressionError.CorruptStream("zstd fse encode counts must sum to table size"))
+    val positions_res = _zstd_fse_spread_positions(counts, table_log)
+    if positions_res.is_err():
+        return Err(positions_res.unwrap_err())
+    val positions = positions_res.unwrap()
+    # cumulative[s] = first state-table slot for symbol s; symbols with
+    # count == -1 occupy the top of the cumulative range (a single slot
+    # each with nb_bits == table_log).
+    var cumulative: [i64] = []
+    var symbols: [ZstdFseEncodeSymbolEntry] = []
+    var running = 0
+    i = 0
+    while i < counts.len():
+        cumulative.push(running)
+        val count = counts[i]
+        var nb_bits = 0
+        var state_offset = 0
+        var has_count = count != 0
+        if count > 0:
+            val log = _zstd_fse_highbit(count)
+            val sub_threshold = 1 << log
+            nb_bits = if count == sub_threshold: log else: log + 1
+            state_offset = (count << nb_bits) - table_size
+            running = running + count
+        elif count == -1:
+            nb_bits = table_log
+            state_offset = -1
+            running = running + 1
+        symbols.push(ZstdFseEncodeSymbolEntry(
+            nb_bits: nb_bits,
+            state_offset: state_offset,
+            base: 0,
+            has_count: has_count
+        ))
+        i = i + 1
+    if running != table_size:
+        return Err(CompressionError.CorruptStream("zstd fse encode running total mismatch"))
+    var state_table: [i64] = []
+    var slot = 0
+    while slot < table_size:
+        state_table.push(0)
+        slot = slot + 1
+    # For each spread slot, the slot's symbol records its assigned next
+    # state at index `cumulative[symbol] + symbol_seen_count`. The next
+    # state is `slot + table_size` so that after `nb_bits` are emitted the
+    # state lies in [table_size, 2*table_size).
+    var seen: [i64] = []
+    i = 0
+    while i < counts.len():
+        seen.push(0)
+        i = i + 1
+    var p = 0
+    while p < positions.len():
+        val sym = positions[p]
+        val idx = cumulative[sym] + seen[sym]
+        state_table[idx] = p + table_size
+        seen[sym] = seen[sym] + 1
+        p = p + 1
+    Ok(ZstdFseEncodeTable(
+        table_log: table_log,
+        counts: counts,
+        state_table: state_table,
+        symbols: symbols
+    ))
+
+fn _zstd_fse_pick_initial_state(table: ZstdFseEncodeTable) -> Result<i64, CompressionError>:
+    var sym = 0
+    while sym < table.symbols.len():
+        if table.symbols[sym].has_count:
+            val nb_bits = table.symbols[sym].nb_bits
+            val s = (1 << nb_bits) + table.symbols[sym].state_offset
+            if s >= 0 and s < table.state_table.len():
+                return Ok(table.state_table[s] - (1 << table.table_log))
+        sym = sym + 1
+    Err(CompressionError.CorruptStream("zstd fse encode no present symbol"))
+
+fn _zstd_fse_encode_one_symbol(table: ZstdFseEncodeTable, state: i64, symbol: i64, writer: ZstdBitWriter) -> Result<(i64, ZstdBitWriter), CompressionError>:
+    if symbol < 0 or symbol >= table.symbols.len():
+        return Err(CompressionError.CorruptStream("zstd fse encode symbol oor"))
+    val entry = table.symbols[symbol]
+    if not entry.has_count:
+        return Err(CompressionError.CorruptStream("zstd fse encode symbol absent from table"))
+    var nb_bits = entry.nb_bits
+    if state + entry.state_offset >= 0 and ((state + entry.state_offset) >> table.table_log) > 0:
+        nb_bits = entry.nb_bits - 1
+    val emit_mask = (1 << nb_bits) - 1
+    val emit_bits = state & emit_mask
+    val out_writer_res = zstd_bit_writer_append_msb(writer, emit_bits.to_u64(), nb_bits)
+    if out_writer_res.is_err():
+        return Err(out_writer_res.unwrap_err())
+    val next_writer = out_writer_res.unwrap()
+    val table_size = 1 << table.table_log
+    val cum_idx = (state >> nb_bits.to_u32()).to_i64()
+    var sym_seen_idx = 0
+    var idx_lookup_sym = 0
+    while idx_lookup_sym < symbol:
+        sym_seen_idx = sym_seen_idx + _zstd_fse_abs(table.counts[idx_lookup_sym])
+        idx_lookup_sym = idx_lookup_sym + 1
+    val target_idx = sym_seen_idx + cum_idx
+    if target_idx < 0 or target_idx >= table.state_table.len():
+        return Err(CompressionError.CorruptStream("zstd fse encode state index oor"))
+    val next_state = table.state_table[target_idx] - table_size
+    Ok((next_state, next_writer))
+
+# Encode a full symbol stream. Symbols are processed in *reverse* order; the
+# initial state is captured from the seed symbol per RFC 8478 §4.1.1. The
+# returned bytes are the concatenation of zero or more flushed bytes plus a
+# terminator byte; the matching reader is `ZstdMsbBackwardBits`.
+fn zstd_fse_encode_symbols(table: ZstdFseEncodeTable, symbols: [i64]) -> Result<[u8], CompressionError>:
+    if symbols.len() == 0:
+        return Err(CompressionError.CorruptStream("zstd fse encode empty symbol stream"))
+    val seed_state_res = _zstd_fse_pick_initial_state(table)
+    if seed_state_res.is_err():
+        return Err(seed_state_res.unwrap_err())
+    var state = seed_state_res.unwrap()
+    var writer = zstd_bit_writer_new()
+    # Emit the table_log low bits of the initial state first; the decoder
+    # reads them last (after consuming the symbol-emitting bits in reverse).
+    val init_bits_res = zstd_bit_writer_append_msb(writer, state.to_u64(), table.table_log)
+    if init_bits_res.is_err():
+        return Err(init_bits_res.unwrap_err())
+    writer = init_bits_res.unwrap()
+    var idx = symbols.len() - 1
+    while idx >= 0:
+        val emit_res = _zstd_fse_encode_one_symbol(table, state, symbols[idx], writer)
+        if emit_res.is_err():
+            return Err(emit_res.unwrap_err())
+        val (next_state, next_writer) = emit_res.unwrap()
+        state = next_state
+        writer = next_writer
+        idx = idx - 1
+    zstd_bit_writer_finish(writer)
