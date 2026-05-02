@@ -32,7 +32,7 @@ Latest verify report (`doc/09_report/verify_common_compression_framework.md`) is
 
 - Zstd encoder levels `!=3`, dictionaries for all codecs, `checksum=false` XZ/LZMA2 (façade option enforcement at mod.spl:49).
 - FSE Huffman-weight Kraft completion (M's bug — multi-day, blocks zstd:704 FAIL flip + N's end-to-end dict spec).
-- Non-RLE sequence-table compressed-block decode (zstd.spl:324).
+- Non-RLE sequence-table compressed-block decode (zstd.spl:324). **[2026-05-01 W6: dead-code stub at the cited line; live-path verification blocked by `interpreter_uint_method_dispatch_2026-05-01` compiler regression. Real next step once compiler is fixed: empirically re-run existing `zstd_sequence_fse_*_spec.spl` to learn the live-path behaviour, then likely swap `ZstdBackwardBits` → `ZstdMsbBackwardBits` in `_zstd_decode_fse_sequences` to mirror W5-E's MSB-first fix.]**
 - Full-LCLPPB LZMA2 (FR).
 - REQ-030 / NFR-011 doc closure once the codec gaps above land.
 
