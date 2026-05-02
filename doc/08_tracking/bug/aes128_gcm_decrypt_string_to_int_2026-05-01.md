@@ -1,4 +1,4 @@
-# Bug: aes128_gcm_decrypt — `type mismatch: cannot convert string to int`
+# Bug: aes128_gcm_decrypt — `type mismatch: cannot convert string to int` (refined: interpreter Arc-clone out-param drop)
 
 **Date:** 2026-05-01
 **Status: FIXED 2026-05-01 (refined fix). Two distinct root causes, fixed in two waves:**
