@@ -49,7 +49,22 @@ val EXT_SIG_ALGS: u16               = 13
 val EXT_ALPN: u16                   = 16
 val EXT_SUPPORTED_VERSIONS: u16     = 43
 val EXT_EARLY_DATA: u16             = 42
+val EXT_COOKIE: u16                 = 44
 val EXT_KEY_SHARE: u16              = 51
+
+# ============================================================================
+# HelloRetryRequest magic random (RFC 8446 §4.1.3)
+# Equals SHA-256("HelloRetryRequest"). A ServerHello whose `random` field
+# matches this constant is actually a HelloRetryRequest re-using ServerHello
+# wire format — clients MUST treat it as HRR per §4.1.4.
+# ============================================================================
+
+val HRR_MAGIC: [u8] = [
+    0xCFu8, 0x21u8, 0xADu8, 0x74u8, 0xE5u8, 0x9Au8, 0x61u8, 0x11u8,
+    0xBEu8, 0x1Du8, 0x8Cu8, 0x02u8, 0x1Eu8, 0x65u8, 0xB8u8, 0x91u8,
+    0xC2u8, 0xA2u8, 0x11u8, 0x16u8, 0x7Au8, 0xBBu8, 0x8Cu8, 0x5Eu8,
+    0x07u8, 0x9Eu8, 0x09u8, 0xE2u8, 0xC8u8, 0xA8u8, 0x33u8, 0x9Cu8
+]
 
 # ============================================================================
 # Cipher Suites and Groups
@@ -103,6 +118,25 @@ class EncryptedExtensions13:
 
 enum EncryptedExtensionsResult:
     Ok(value: EncryptedExtensions13)
+    Err(reason: text)
+
+class HelloRetryRequest13:
+    """Decoded TLS 1.3 HelloRetryRequest (RFC 8446 §4.1.4).
+
+    HRR re-uses ServerHello wire format but signals retry by setting `random`
+    to the canonical HRR_MAGIC constant. The body the client cares about:
+      - cipher_suite: server's chosen suite (must match in CH2).
+      - selected_group: NamedGroup the server picked from the key_share extension;
+        the client MUST send a fresh key_share for this group in CH2.
+      - cookie: opaque server-supplied cookie that must be echoed verbatim in CH2,
+        empty if absent.
+    """
+    cipher_suite: u16
+    selected_group: u16
+    cookie: [u8]
+
+enum HrrResult:
+    Ok(value: HelloRetryRequest13)
     Err(reason: text)
 
 # ============================================================================
@@ -580,6 +614,264 @@ fn parse_encrypted_extensions(body: [u8]) -> EncryptedExtensionsResult:
         max_fragment_length: mfl,
         selected_alpn: alpn,
         supported_groups: groups))
+
+# ============================================================================
+# Public: HelloRetryRequest detection + parse (RFC 8446 §4.1.4)
+# ============================================================================
+#
+# HelloRetryRequest is wire-format-identical to ServerHello, but the `random`
+# field equals SHA-256("HelloRetryRequest") = HRR_MAGIC. Client behaviour
+# (§4.1.4):
+#   - Validate supported_versions == 0x0304 (TLS 1.3).
+#   - Honour the server's chosen group via the key_share extension.
+#   - Echo the cookie extension verbatim if present.
+#   - MUST abort if it has already received an HRR in this handshake.
+#   - MUST abort if the chosen group equals one we already sent in CH1.
+#   - MUST abort if legacy_compression_method != 0x00.
+# Transcript hash gets a synthetic message_hash replacement per §4.4.1 — that
+# helper lives in a follow-up commit (build_hrr_synthetic_message_hash).
+
+fn is_hello_retry_request(sh: ServerHello13) -> bool:
+    """Return true if the parsed ServerHello is actually a HelloRetryRequest.
+
+    A HRR is signalled by the ServerHello.random field equalling the canonical
+    SHA-256("HelloRetryRequest") constant (HRR_MAGIC). 32-byte memcmp.
+    """
+    if sh.random.len() != 32:
+        return false
+    var i: u64 = 0
+    while i < 32:
+        if _u8_at(sh.random, i) != _u8_at(HRR_MAGIC, i):
+            return false
+        i = i + 1
+    true
+
+fn _hrr_find_selected_group(extensions: [u8]) -> u16:
+    """Locate the key_share extension and return its `selected_group` u16.
+
+    In HRR, the key_share extension carries only `selected_group` (2 bytes),
+    NOT a full KeyShareEntry — RFC 8446 §4.2.8. Returns 0 if absent.
+    """
+    var offset: u64 = 0
+    val end = extensions.len().to_u64()
+    while offset + 4 <= end:
+        val ext_type = _u16_be(extensions, offset)
+        val ext_len = _u16_be(extensions, offset + 2).to_u64()
+        val data_start = offset + 4
+        if data_start + ext_len > end:
+            return 0u16
+        if ext_type == EXT_KEY_SHARE and ext_len == 2:
+            return _u16_be(extensions, data_start)
+        offset = data_start + ext_len
+    0u16
+
+fn _hrr_extract_cookie(extensions: [u8]) -> [u8]:
+    """Return the cookie extension's opaque cookie field, or empty if absent.
+
+    Cookie wire format (RFC 8446 §4.2.2):
+      struct { opaque cookie<1..2^16-1>; } Cookie;
+    so extension_data is u16 length prefix + cookie bytes.
+    """
+    var offset: u64 = 0
+    val end = extensions.len().to_u64()
+    while offset + 4 <= end:
+        val ext_type = _u16_be(extensions, offset)
+        val ext_len = _u16_be(extensions, offset + 2).to_u64()
+        val data_start = offset + 4
+        if data_start + ext_len > end:
+            return []
+        if ext_type == EXT_COOKIE and ext_len >= 2:
+            val cookie_len = _u16_be(extensions, data_start).to_u64()
+            if cookie_len + 2 != ext_len:
+                return []
+            var out: [u8] = _byte_buf(cookie_len)
+            var i: u64 = 0
+            while i < cookie_len:
+                out = _push_byte(out, _u8_at(extensions, data_start + 2 + i).to_u64().to_i64())
+                i = i + 1
+            return out
+        offset = data_start + ext_len
+    []
+
+fn _hrr_supported_versions_is_tls13(extensions: [u8]) -> bool:
+    """Check that supported_versions extension is present and equals 0x0304.
+
+    In HRR/ServerHello, supported_versions extension_data is exactly the 2-byte
+    selected_version (RFC 8446 §4.2.1).
+    """
+    var offset: u64 = 0
+    val end = extensions.len().to_u64()
+    while offset + 4 <= end:
+        val ext_type = _u16_be(extensions, offset)
+        val ext_len = _u16_be(extensions, offset + 2).to_u64()
+        val data_start = offset + 4
+        if data_start + ext_len > end:
+            return false
+        if ext_type == EXT_SUPPORTED_VERSIONS:
+            if ext_len != 2:
+                return false
+            return _u16_be(extensions, data_start) == 0x0304u16
+        offset = data_start + ext_len
+    false
+
+fn parse_hello_retry_request(body: [u8]) -> HrrResult:
+    """Parse a HelloRetryRequest body (after the 4-byte handshake header).
+
+    Wire format mirrors ServerHello:
+      legacy_version(2) + random(32) + session_id_len(1) + session_id(...) +
+      cipher_suite(2) + legacy_compression_method(1) +
+      extensions_len(2) + extensions(...)
+
+    Validates per RFC 8446 §4.1.4:
+      - random == HRR_MAGIC.
+      - legacy_compression_method == 0x00.
+      - supported_versions extension present and == 0x0304.
+      - key_share extension present (yields selected_group).
+
+    Returns HrrResult.Ok(HelloRetryRequest13) or HrrResult.Err(reason).
+    """
+    if body.len() < 38:
+        return HrrResult.Err(reason: "decode_error: HRR truncated")
+
+    # Confirm the magic random — defensive check, callers normally already
+    # gated via is_hello_retry_request().
+    var i: u64 = 0
+    while i < 32:
+        if _u8_at(body, 2 + i) != _u8_at(HRR_MAGIC, i):
+            return HrrResult.Err(reason: "illegal_parameter: HRR random mismatch")
+        i = i + 1
+
+    val session_id_len = _u8_at(body, 34).to_u64()
+    if 35u64 + session_id_len + 3u64 > body.len().to_u64():
+        return HrrResult.Err(reason: "decode_error: HRR truncated session_id")
+
+    val cipher_suite = _u16_be(body, 35u64 + session_id_len)
+    val compression = _u8_at(body, 35u64 + session_id_len + 2u64)
+    if compression != 0x00u8:
+        return HrrResult.Err(reason: "illegal_parameter: HRR compression must be 0x00")
+
+    var ext_offset = 35u64 + session_id_len + 3u64
+    if ext_offset + 2 > body.len().to_u64():
+        return HrrResult.Err(reason: "decode_error: HRR missing extensions length")
+    val extensions_len = _u16_be(body, ext_offset).to_u64()
+    ext_offset = ext_offset + 2
+    if ext_offset + extensions_len > body.len().to_u64():
+        return HrrResult.Err(reason: "decode_error: HRR extensions truncated")
+
+    # Slice extensions block out for sub-parsers.
+    var extensions: [u8] = _byte_buf(extensions_len)
+    var k: u64 = 0
+    while k < extensions_len:
+        extensions = _push_byte(extensions, _u8_at(body, ext_offset + k).to_u64().to_i64())
+        k = k + 1
+
+    if not _hrr_supported_versions_is_tls13(extensions):
+        return HrrResult.Err(reason: "illegal_parameter: HRR supported_versions must be TLS 1.3")
+
+    val selected_group = _hrr_find_selected_group(extensions)
+    if selected_group == 0u16:
+        return HrrResult.Err(reason: "missing_extension: HRR key_share absent")
+
+    val cookie = _hrr_extract_cookie(extensions)
+
+    HrrResult.Ok(value: HelloRetryRequest13(
+        cipher_suite: cipher_suite,
+        selected_group: selected_group,
+        cookie: cookie))
+
+# ============================================================================
+# Public: Build ClientHello2 (RFC 8446 §4.1.2 after HRR)
+# ============================================================================
+#
+# CH2 differs from CH1 in:
+#   - Same client_random (carried by the client across the retry).
+#   - key_share contains a fresh ephemeral keypair for the group HRR picked.
+#   - Echo HRR's cookie extension verbatim if present.
+#   - Drop pre_shared_key if it was incompatible (caller's responsibility;
+#     this module never emits PSK extensions yet).
+
+fn _build_ext_cookie(cookie: [u8]) -> [u8]:
+    """Build the cookie extension echoing HRR's cookie verbatim.
+
+    Wire (RFC 8446 §4.2.2): opaque cookie<1..2^16-1>; — i.e. u16 length + bytes.
+    Returns an empty array if cookie is empty (caller should skip emission).
+    """
+    if cookie.len() == 0:
+        return []
+    val ext_type = _put_u16_be(EXT_COOKIE)
+    val cookie_len = _put_u16_be(cookie.len().to_u16())
+    # extension_data = u16 length + cookie
+    var ext_data: [u8] = _byte_buf(cookie.len() + 2)
+    _append_into(ext_data, cookie_len)
+    _append_into(ext_data, cookie)
+    val ext_len = _put_u16_be(ext_data.len().to_u16())
+    var out: [u8] = _byte_buf(ext_data.len() + 4)
+    _append_into(out, ext_type)
+    _append_into(out, ext_len)
+    _append_into(out, ext_data)
+    out
+
+fn build_client_hello2_bytes(random: [u8], x25519_pub: [u8], sni_host: text, cookie: [u8]) -> [u8]:
+    """Build a TLS 1.3 ClientHello2 retrying after a HelloRetryRequest.
+
+    Mirrors build_client_hello_bytes but additionally emits the cookie
+    extension if `cookie` is non-empty. The caller is responsible for:
+      - Reusing the SAME `random` value sent in CH1 (RFC 8446 §4.1.2).
+      - Generating a FRESH ephemeral keypair for the HRR-selected group
+        (passed in here as `x25519_pub` for the X25519 path).
+
+    Args:
+        random: 32 bytes of client random — MUST equal CH1's random.
+        x25519_pub: 32 bytes X25519 public key for the new ephemeral.
+        sni_host: SNI hostname (echoed unchanged from CH1).
+        cookie: HRR cookie to echo verbatim, or empty if HRR omitted it.
+
+    Returns: Complete handshake-layer ClientHello2 bytes (type + 3-byte length + body).
+    """
+    var body: [u8] = _byte_buf(192)
+    body = _push_byte(body, 0x03)
+    body = _push_byte(body, 0x03)
+    _append_into(body, random)
+
+    body = _push_byte(body, 0x20)
+    var i: u64 = 0
+    while i < 32:
+        body = _push_byte(body, 0x00)
+        i = i + 1
+
+    body = _push_byte(body, 0x00)
+    body = _push_byte(body, 0x02)
+    body = _push_byte(body, 0x13)
+    body = _push_byte(body, 0x01)
+
+    body = _push_byte(body, 0x01)
+    body = _push_byte(body, 0x00)
+
+    var exts: [u8] = _byte_buf(96)
+    val ext_sv = _build_ext_supported_versions()
+    val ext_ks = _build_ext_key_share(x25519_pub)
+    val ext_sni = _build_ext_sni(sni_host)
+    val ext_sa = _build_ext_sig_algs()
+    val ext_sg = _build_ext_supported_groups()
+    _append_into(exts, ext_sv)
+    _append_into(exts, ext_ks)
+    _append_into(exts, ext_sni)
+    _append_into(exts, ext_sa)
+    _append_into(exts, ext_sg)
+    if cookie.len() > 0:
+        val ext_cookie = _build_ext_cookie(cookie)
+        _append_into(exts, ext_cookie)
+
+    val exts_len_bytes = _put_u16_be(exts.len().to_u16())
+    _append_into(body, exts_len_bytes)
+    _append_into(body, exts)
+
+    val body_len = _put_u24_be(body.len().to_u64())
+    var out: [u8] = _byte_buf(body.len() + 4)
+    out = _push_byte(out, HS_CLIENT_HELLO)
+    _append_into(out, body_len)
+    _append_into(out, body)
+    out
 
 # ============================================================================
 # Public: Parse Certificate Body
