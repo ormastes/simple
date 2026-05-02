@@ -7,8 +7,9 @@ use crate::error::CompileError;
 use crate::value::Value;
 use crate::value_bridge::{runtime_to_value, value_to_runtime};
 use simple_runtime::value::aes::{
-    aes128_encrypt_one_block, aes128_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
-    encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon, rt_aes_sbox as ffi_aes_sbox,
+    aes128_encrypt_one_block, aes128_gcm_encrypt_bytes, aes256_encrypt_one_block, aes256_gcm_encrypt_bytes,
+    decrypt_block_with_expanded_bytes, encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon,
+    rt_aes_sbox as ffi_aes_sbox,
 };
 use simple_runtime::value::simd::{
     rt_simd_detect_profile as ffi_detect_profile, rt_simd_has_avx as ffi_has_avx, rt_simd_has_avx2 as ffi_has_avx2,
@@ -16,9 +17,10 @@ use simple_runtime::value::simd::{
     rt_simd_profile_name as ffi_profile_name,
 };
 use simple_runtime::value::simd_int_ops::{
-    and_i32x4 as ffi_and_i32x4, and_i32x8 as ffi_and_i32x8, or_i32x4 as ffi_or_i32x4, or_i32x8 as ffi_or_i32x8,
+    add_i32x4 as ffi_add_i32x4, add_i32x8 as ffi_add_i32x8, and_i32x4 as ffi_and_i32x4, and_i32x8 as ffi_and_i32x8,
+    mul_i32x4 as ffi_mul_i32x4, mul_i32x8 as ffi_mul_i32x8, or_i32x4 as ffi_or_i32x4, or_i32x8 as ffi_or_i32x8,
     shl_i32x4 as ffi_shl_i32x4, shl_i32x8 as ffi_shl_i32x8, shr_i32x4 as ffi_shr_i32x4, shr_i32x8 as ffi_shr_i32x8,
-    xor_i32x4 as ffi_xor_i32x4, xor_i32x8 as ffi_xor_i32x8,
+    sub_i32x4 as ffi_sub_i32x4, sub_i32x8 as ffi_sub_i32x8, xor_i32x4 as ffi_xor_i32x4, xor_i32x8 as ffi_xor_i32x8,
 };
 use simple_runtime::value::{
     rt_text_count_codepoints as ffi_text_count_codepoints, rt_utf8_count_codepoints as ffi_utf8_count_codepoints,
@@ -234,6 +236,45 @@ pub fn rt_tls13_aes128_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError
     ))
 }
 
+// rt_aes256_encrypt_block_into(key: [u8] (32B), block: [u8] (16B), out: [u8]) -> i64
+// Returns 0 on success, 1 on bad input. Same Arc-clone caveat as AES-128.
+pub fn rt_aes256_encrypt_block_into(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_aes256_encrypt_block_into expects 3 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_aes256_encrypt_block_into", &args[0])?;
+    let block = expect_byte_array("rt_aes256_encrypt_block_into", &args[1])?;
+    let _out = expect_byte_array("rt_aes256_encrypt_block_into", &args[2])?;
+    if key.len() != 32 || block.len() != 16 {
+        return Ok(Value::Int(1));
+    }
+    if aes256_encrypt_one_block(&key, &block).is_some() {
+        Ok(Value::Int(0))
+    } else {
+        Ok(Value::Int(1))
+    }
+}
+
+// rt_tls13_aes256_gcm_encrypt(key: [u8] (32B), nonce: [u8] (12B), plaintext: [u8], aad: [u8]) -> [u8]
+// AES-256-GCM AEAD encrypt for TLS_AES_256_GCM_SHA384. Returns ciphertext || 16-byte tag.
+pub fn rt_tls13_aes256_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_tls13_aes256_gcm_encrypt expects 4 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[0])?;
+    let nonce = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[1])?;
+    let plaintext = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[2])?;
+    let aad = expect_byte_array("rt_tls13_aes256_gcm_encrypt", &args[3])?;
+    let result = aes256_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad).unwrap_or_default();
+    Ok(Value::array(
+        result.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
+    ))
+}
+
 // ============================================================================
 // Phase 1 SIMD int bitwise / shift externs (i32x4 + i32x8).
 //
@@ -385,6 +426,18 @@ where
     Ok(pack_vec8i(op(a, n)))
 }
 
+pub fn rt_simd_add_i32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x4("rt_simd_add_i32x4", args, ffi_add_i32x4)
+}
+
+pub fn rt_simd_sub_i32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x4("rt_simd_sub_i32x4", args, ffi_sub_i32x4)
+}
+
+pub fn rt_simd_mul_i32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x4("rt_simd_mul_i32x4", args, ffi_mul_i32x4)
+}
+
 pub fn rt_simd_xor_i32x4(args: &[Value]) -> Result<Value, CompileError> {
     binop_i32x4("rt_simd_xor_i32x4", args, ffi_xor_i32x4)
 }
@@ -403,6 +456,18 @@ pub fn rt_simd_shl_i32x4(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_simd_shr_i32x4(args: &[Value]) -> Result<Value, CompileError> {
     shift_i32x4("rt_simd_shr_i32x4", args, ffi_shr_i32x4)
+}
+
+pub fn rt_simd_add_i32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x8("rt_simd_add_i32x8", args, ffi_add_i32x8)
+}
+
+pub fn rt_simd_sub_i32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x8("rt_simd_sub_i32x8", args, ffi_sub_i32x8)
+}
+
+pub fn rt_simd_mul_i32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x8("rt_simd_mul_i32x8", args, ffi_mul_i32x8)
 }
 
 pub fn rt_simd_xor_i32x8(args: &[Value]) -> Result<Value, CompileError> {
