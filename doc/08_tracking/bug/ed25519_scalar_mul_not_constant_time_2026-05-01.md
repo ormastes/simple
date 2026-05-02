@@ -1,7 +1,41 @@
 # Bug: `ed_scalar_mul` is not constant-time (Ed25519 timing leak)
 
+**Status: FIXED 2026-05-01 — replaced naive double-and-add with always-add-and-select on the secret-scalar path.**
+
+Resolution: Added `ed_point_cselect(p0, p1, choose_p1: u64)` in
+`src/os/crypto/ed25519.spl` using the same XOR-mask discipline as
+`fe_cswap` in `curve25519.spl` (`mask = 0 - choose_p1`,
+`out = a ^ (mask & (a ^ b))`). Rewrote the inner loop of `ed_scalar_mul`
+to ALWAYS execute `ed_point_add` and `ed_point_double` on every one of the
+256 scalar bits, with the conditional add replaced by a constant-time point
+select keyed on the bit value. No data-dependent branch on scalar bits, no
+early exit, no `if`-on-scalar inside the function body. Compiler cannot
+branch-fold the XOR/AND arithmetic (per the B6 memory note on CT compares;
+verified empirically — `fe_cswap` uses the identical pattern in the
+Curve25519 Montgomery ladder and works under the seed compiler today).
+
+Verification:
+- All 15 examples in `test/unit/lib/crypto/ed25519_rfc8032_spec.spl` still
+  PASS byte-exact in interpreter mode (~8.1s, ~2× the previous leaky form,
+  matching the bug doc's prediction for option 1).
+- New spec `test/unit/lib/crypto/ed25519_ct_property_spec.spl` (5/5 PASS,
+  ~4.8s) covers determinism, sign+verify under low-Hamming-weight (seed
+  `0x00 * 32`) and high-Hamming-weight (seed `0xFF * 32`) seeds, and a
+  structural CT inspection that reads the live source of
+  `src/os/crypto/ed25519.spl`, locates the body of `fn ed_scalar_mul`, and
+  asserts none of the leaky-form fingerprints (`if ((byte_val`,
+  `if scalar[`, `) & 1) == 1`) survive AND that the body MUST contain
+  `ed_point_cselect`.
+
+Approach picked (option 1, always-add-and-select) over option 2 (Montgomery
+ladder): one CT path covers all four call sites — including the variable-
+base `ed_scalar_mul(k, big_a)` in `ed25519_verify` — without forcing two
+parallel implementations or a different point representation. Verify is on
+public data so doesn't strictly need CT, but a uniform CT path is fewer
+moving parts.
+
 - **Date:** 2026-05-01
-- **Status:** Open
+- **Status:** FIXED 2026-05-01
 - **Module:** `src/os/crypto/ed25519.spl`
 - **Severity:** Side-channel (timing)
 - **Surfaced by:** Pure-Simple rewire of the Ed25519 public API
@@ -57,6 +91,8 @@ be checked by re-running `test/unit/lib/crypto/ed25519_rfc8032_spec.spl`
 secrets all derive the same public keys.
 
 ## Workaround until fixed
+
+(No longer applicable — the fix landed 2026-05-01. Historical text below.)
 
 None for the sign path. Verify path is unaffected (scalars are public).
 Callers of `ed25519_sign` on adversary-observable timing channels (e.g.
