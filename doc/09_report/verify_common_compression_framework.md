@@ -11,7 +11,7 @@
 
 [FAIL] src/lib/common/compress/mod.spl:49 — the facade still rejects Zstd encode levels other than `3`, dictionaries for all codecs, and `checksum=false` for XZ/LZMA2 encode, so docs cannot claim wider option support.
 [FAIL] src/lib/common/compress/zstd.spl:324 — compressed-block decode still rejects non-RLE sequence tables.
-[FAIL] src/lib/common/compress/zstd.spl:704 — verification still cannot claim support for the missing FSE-compressed Huffman-weight path.
+[FAIL] src/lib/common/compress/zstd.spl:704 — FSE-compressed Huffman-weight decode is wired and dispatched (header_byte<128 -> `_zstd_parse_fse_compressed_weights`), and `test/unit/lib/common/zstd_fse_weights_spec.spl` (5 cases, PASS 2026-05-01) pins the typed-error surface (truncated bitstream, out-of-range accuracy_log, zero compressed_size, empty input) -- but the decoder mis-decodes every real-world host-zstd FSE Huffman tree (Kraft completion fails on 5/5 fixtures); see `doc/08_tracking/bug/bug_zstd_fse_huffman_weight_kraft_2026-05-01.md`.
 [FAIL] src/lib/common/compress/zstd.spl:1265 — dictionary-backed Zstd frames remain explicitly unsupported on decode.
 [WARN] src/lib/common/compress/lzma2.spl:330 — Status: LANDED 2026-05-01 (LCLPPB=3/0/2 only). Pure-Simple LZMA range decoder + LZMA2 chunk decoder now interoperate with host `xz -z --check=crc32` output at the default LCLPPB tuple (props 0x5D); other LCLPPB values are rejected explicitly via `UnsupportedFeature("LZMA2 LCLPPB other than 3/0/2")`. Full-LCLPPB closure tracked in `doc/08_tracking/feature_request/lzma2_full_lclppb_2026-05-01.md`.
 [FAIL] doc/02_requirements/feature/common_compression_framework.md:30 — REQ-030 still overstates forced-tier parity closure relative to the focused verified surface.
