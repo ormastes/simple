@@ -880,6 +880,16 @@ pub(crate) fn call_extern_function(
         "rt_simd_aes_round_last_u8x16" => simd::rt_simd_aes_round_last_u8x16(&evaluated),
 
         // ====================================================================
+        // SIMD Phase 3 — Vec2u64 + PCLMUL (PCLMULQDQ / PMULL / scalar)
+        // ====================================================================
+        "rt_simd_vec2u64_new" => simd::rt_simd_vec2u64_new(&evaluated),
+        "rt_simd_vec2u64_lo" => simd::rt_simd_vec2u64_lo(&evaluated),
+        "rt_simd_vec2u64_hi" => simd::rt_simd_vec2u64_hi(&evaluated),
+        "rt_simd_clmul_lo_u64" => simd::rt_simd_clmul_lo_u64(&evaluated),
+        "rt_simd_clmul_hi_u64" => simd::rt_simd_clmul_hi_u64(&evaluated),
+        "rt_simd_xor_u64x2" => simd::rt_simd_xor_u64x2(&evaluated),
+
+        // ====================================================================
         // Diagram FFI Functions (12 functions)
         // ====================================================================
         "rt_diagram_enable" => diagram::rt_diagram_enable(&evaluated),

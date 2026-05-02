@@ -16,13 +16,17 @@
 # For the default cipher suites, hash = SHA-256. Cipher suites that bind to
 # SHA-384 (e.g. TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) use SHA-384 instead.
 #
-# This module exports P_hash for SHA-256 and SHA-384 (Commit 1).
-# Higher-level PRF wrapper, master_secret / key_block / finished_verify_data
-# helpers (RFC 5246 §8.1, §6.3, §7.4.9) are added in Commit 2.
+# This module exports:
+#   - p_hash_sha256 / p_hash_sha384 (low-level RFC 5246 §5 P_hash)
+#   - tls12_prf (label-aware PRF wrapper)
+#   - tls12_master_secret    (RFC 5246 §8.1)
+#   - tls12_key_block        (RFC 5246 §6.3)
+#   - tls12_finished_verify_data (RFC 5246 §7.4.9)
 
 mod crypto.types
 mod crypto.hmac
 
+use std.crypto.types.{text_to_bytes}
 use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha384_bytes}
 
 # =============================================================================
@@ -120,3 +124,123 @@ fn p_hash_sha384(secret: list, seed: list, output_len: i64) -> list:
             result.push(output.get(i))
             i = i + 1
         result
+
+# =============================================================================
+# TLS 1.2 PRF wrapper — RFC 5246 §5
+#
+#     PRF(secret, label, seed) = P_hash(secret, label || seed)
+#
+# `label` is an ASCII string per RFC 5246 (e.g. "master secret", "key
+# expansion", "client finished", "server finished"). `seed` is concatenated
+# after the label bytes before being fed to P_hash.
+#
+# `use_sha384=true` selects P_SHA384 for cipher suites such as
+# TLS_ECDHE_*_WITH_*_GCM_SHA384. Default (`false`) selects P_SHA256, which
+# is the TLS 1.2 baseline PRF for all suites that don't explicitly bind to
+# a different hash.
+# =============================================================================
+
+# Internal: build (label || seed) byte list once for P_hash.
+fn _label_seed(label: text, seed: list) -> list:
+    val label_bytes = text_to_bytes(label)
+    var combined = []
+    var i = 0
+    while i < label_bytes.len():
+        combined.push(label_bytes.get(i))
+        i = i + 1
+    i = 0
+    while i < seed.len():
+        combined.push(seed.get(i))
+        i = i + 1
+    combined
+
+# RFC 5246 §5 PRF wrapper.
+# reason: positional crypto tls12 prf API
+fn tls12_prf(secret: list, label: text, seed: list, output_len: i64, use_sha384: bool) -> list:
+    val combined = _label_seed(label, seed)
+    if use_sha384:
+        p_hash_sha384(secret, combined, output_len)
+    else:
+        p_hash_sha256(secret, combined, output_len)
+
+# Convenience: TLS 1.2 PRF defaulting to SHA-256.
+# reason: positional crypto tls12 prf API
+fn tls12_prf_sha256(secret: list, label: text, seed: list, output_len: i64) -> list:
+    p_hash_sha256(secret, _label_seed(label, seed), output_len)
+
+# Convenience: TLS 1.2 PRF using SHA-384 (for *_SHA384 cipher suites).
+# reason: positional crypto tls12 prf API
+fn tls12_prf_sha384(secret: list, label: text, seed: list, output_len: i64) -> list:
+    p_hash_sha384(secret, _label_seed(label, seed), output_len)
+
+# =============================================================================
+# TLS 1.2 master_secret derivation — RFC 5246 §8.1
+#
+#     master_secret = PRF(pre_master_secret, "master secret",
+#                         ClientHello.random || ServerHello.random)
+#                     [0..47]
+#
+# Always 48 bytes regardless of cipher suite. Cipher suites that negotiate
+# the SHA-384 PRF use P_SHA384; default is P_SHA256.
+# =============================================================================
+
+# reason: positional crypto tls12 prf API
+fn tls12_master_secret(pre_master: list, client_random: list, server_random: list, use_sha384: bool) -> list:
+    var seed = []
+    var i = 0
+    while i < client_random.len():
+        seed.push(client_random.get(i))
+        i = i + 1
+    i = 0
+    while i < server_random.len():
+        seed.push(server_random.get(i))
+        i = i + 1
+    tls12_prf(pre_master, "master secret", seed, 48, use_sha384)
+
+# =============================================================================
+# TLS 1.2 key_block derivation — RFC 5246 §6.3
+#
+#     key_block = PRF(master_secret, "key expansion",
+#                     SecurityParameters.server_random ||
+#                     SecurityParameters.client_random)
+#
+# Note the order is server_random || client_random for "key expansion"
+# (opposite of "master secret"). The caller specifies output_len based on
+# the negotiated MAC + cipher key + IV sizes.
+# =============================================================================
+
+# reason: positional crypto tls12 prf API
+fn tls12_key_block(master_secret: list, server_random: list, client_random: list, output_len: i64, use_sha384: bool) -> list:
+    var seed = []
+    var i = 0
+    while i < server_random.len():
+        seed.push(server_random.get(i))
+        i = i + 1
+    i = 0
+    while i < client_random.len():
+        seed.push(client_random.get(i))
+        i = i + 1
+    tls12_prf(master_secret, "key expansion", seed, output_len, use_sha384)
+
+# =============================================================================
+# TLS 1.2 Finished verify_data — RFC 5246 §7.4.9
+#
+#     verify_data = PRF(master_secret, finished_label,
+#                       Hash(handshake_messages))[0..verify_data_length-1]
+#
+# verify_data_length is 12 octets for all RFC 5246 cipher suites unless a
+# cipher-suite-specific length is specified. Caller passes the precomputed
+# transcript hash (NOT the handshake bytes) — for the SHA-256 PRF the
+# transcript hash is SHA-256(handshake_messages); for the SHA-384 PRF it is
+# SHA-384(handshake_messages).
+#
+# `is_client=true` uses the "client finished" label, `false` uses
+# "server finished".
+# =============================================================================
+
+# reason: positional crypto tls12 prf API
+fn tls12_finished_verify_data(master_secret: list, transcript_hash: list, is_client: bool, use_sha384: bool) -> list:
+    var label = "server finished"
+    if is_client:
+        label = "client finished"
+    tls12_prf(master_secret, label, transcript_hash, 12, use_sha384)

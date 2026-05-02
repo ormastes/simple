@@ -21,6 +21,9 @@ use simple_runtime::value::simd_aes_ops::{
     aes_round_last_u8x16 as ffi_aes_round_last_u8x16, aes_round_u8x16 as ffi_aes_round_u8x16,
 };
 use simple_runtime::value::simd_byte_ops::add_u8x16 as ffi_add_u8x16;
+use simple_runtime::value::simd_clmul_ops::{
+    clmul_hi_u64 as ffi_clmul_hi_u64, clmul_lo_u64 as ffi_clmul_lo_u64, xor_u64x2 as ffi_xor_u64x2,
+};
 use simple_runtime::value::simd_int_ops::{
     add_i32x4 as ffi_add_i32x4, add_i32x8 as ffi_add_i32x8, and_i32x4 as ffi_and_i32x4, and_i32x8 as ffi_and_i32x8,
     mul_i32x4 as ffi_mul_i32x4, mul_i32x8 as ffi_mul_i32x8, or_i32x4 as ffi_or_i32x4, or_i32x8 as ffi_or_i32x8,
@@ -642,4 +645,114 @@ pub fn rt_simd_aes_round_u8x16(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_simd_aes_round_last_u8x16(args: &[Value]) -> Result<Value, CompileError> {
     binop_u8x16("rt_simd_aes_round_last_u8x16", args, ffi_aes_round_last_u8x16)
+}
+
+// ---------------------------------------------------------------------------
+// SIMD Phase 3 — Vec2u64 + PCLMUL (carryless multiply for GHASH/Polyval)
+// ---------------------------------------------------------------------------
+
+/// Coerce a `Value` argument into a `u64`. Accepts both `Value::UInt`
+/// (any width up to 64) and `Value::Int` (treats the i64 bit pattern as
+/// the u64 lane content for round-trip semantics with the `lane_lo` /
+/// `lane_hi` accessors).
+fn require_u64_value(name: &str, value: &Value) -> Result<u64, CompileError> {
+    match value {
+        Value::UInt { value, .. } => Ok(*value),
+        Value::Int(i) => Ok(*i as u64),
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected u64-compatible numeric value, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn require_u64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<u64, CompileError> {
+    match fields.get(field) {
+        Some(value) => require_u64_value(&format!("{name}: field {field}"), value),
+        None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
+    }
+}
+
+fn unpack_vec2u64(name: &str, value: &Value) -> Result<[u64; 2], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec2u64" {
+                return Err(CompileError::runtime(format!(
+                    "{name}: expected Vec2u64, got {class}"
+                )));
+            }
+            let lo = require_u64_field(name, fields, "lo")?;
+            let hi = require_u64_field(name, fields, "hi")?;
+            Ok([lo, hi])
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec2u64 Object, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn pack_vec2u64(lanes: [u64; 2]) -> Value {
+    let mut fields = HashMap::with_capacity(2);
+    fields.insert("lo".to_string(), Value::UInt { value: lanes[0], width: 64 });
+    fields.insert("hi".to_string(), Value::UInt { value: lanes[1], width: 64 });
+    Value::Object {
+        class: "Vec2u64".to_string(),
+        fields: Arc::new(fields),
+    }
+}
+
+fn binop_u64x2<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([u64; 2], [u64; 2]) -> [u64; 2],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec2u64(name, &args[0])?;
+    let b = unpack_vec2u64(name, &args[1])?;
+    Ok(pack_vec2u64(op(a, b)))
+}
+
+pub fn rt_simd_vec2u64_new(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_simd_vec2u64_new expects 2 arguments (lo, hi)".to_string(),
+        ));
+    }
+    let lo = require_u64_value("rt_simd_vec2u64_new(lo)", &args[0])?;
+    let hi = require_u64_value("rt_simd_vec2u64_new(hi)", &args[1])?;
+    Ok(pack_vec2u64([lo, hi]))
+}
+
+pub fn rt_simd_vec2u64_lo(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_simd_vec2u64_lo expects 1 argument".to_string(),
+        ));
+    }
+    let lanes = unpack_vec2u64("rt_simd_vec2u64_lo", &args[0])?;
+    Ok(Value::UInt { value: lanes[0], width: 64 })
+}
+
+pub fn rt_simd_vec2u64_hi(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_simd_vec2u64_hi expects 1 argument".to_string(),
+        ));
+    }
+    let lanes = unpack_vec2u64("rt_simd_vec2u64_hi", &args[0])?;
+    Ok(Value::UInt { value: lanes[1], width: 64 })
+}
+
+pub fn rt_simd_clmul_lo_u64(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u64x2("rt_simd_clmul_lo_u64", args, ffi_clmul_lo_u64)
+}
+
+pub fn rt_simd_clmul_hi_u64(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u64x2("rt_simd_clmul_hi_u64", args, ffi_clmul_hi_u64)
+}
+
+pub fn rt_simd_xor_u64x2(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u64x2("rt_simd_xor_u64x2", args, ffi_xor_u64x2)
 }

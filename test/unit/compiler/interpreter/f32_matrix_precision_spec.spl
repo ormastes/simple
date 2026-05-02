@@ -1,0 +1,194 @@
+"""
+# f32 Matrix / Matmul Precision Specification
+
+**Feature IDs:** #INTERP-F32-MATMUL-PRECISION
+**Category:** Interpreter (matmul + dot-product)
+**Difficulty:** 2/5
+**Status:** Regression
+
+## Overview
+
+Regression test for the f32 widening fix in the matrix-multiplication paths
+(`@` operator) of the Rust seed interpreter. Companion to W6-D's
+`f32_precision_spec.spl` which pinned the scalar Add/Sub/Mul/Div/Mod/Pow/Neg
+fix.
+
+Before this fix, `BinOp::MatMul` and the four `matmul_*` helpers in
+`src/compiler_rust/compiler/src/interpreter/expr/ops.rs` only recognised
+`Value::Float` (f64) — Float32 array elements either errored out
+("cannot multiply f32 and f32") or were silently widened to f64, defeating
+W6-D's scalar Float32 plumbing.
+
+The fix adds Float32 arms to the five sites:
+
+  1. BinOp::MatMul scalar arm (line 1040 area) — `f32 @ f32` -> `Float32`
+  2. matmul_dot_product_1d (line 1389 area) — vector dot product
+  3. matmul_matrix_multiply_2d (line 1470 area) — 2D x 2D
+  4. matmul_matrix_vector (line 1607 area) — 2D x 1D
+  5. matmul_vector_matrix (line 1713 area) — 1D x 2D
+
+Mixed Float32 x Float64 widens to Float64 (Float64 wins) — matching scalar
+Mul behaviour. Pure Float32 inputs produce Float32 outputs that observe IEEE
+754 single-precision rounding (e.g. `0.1f32 + 0.2f32 - 0.3f32 == 0.0f32`,
+not the f64 5.55e-17 cancellation residue).
+
+These pins guard against regression in any of the five sites.
+"""
+
+use std.spipe.*
+
+# ============================================================================
+# Site 1: BinOp::MatMul scalar arm  (ops.rs ~line 1040)
+# ============================================================================
+
+describe "f32 matmul scalar arm preserves Float32":
+    it "f32 @ f32 produces Float32 (not Float64) - cancellation pin":
+        # 0.1f32 * 1.0f32 then subtract — at f32 precision 0.1 * 1 == 0.1f32 exactly,
+        # but if the result widens to f64 the f32 -> f64 conversion exposes the
+        # f32 representation error.  Use the IEEE-754 cancellation pin.
+        val a: f32 = 0.1f32 + 0.2f32
+        val b: f32 = 1.0f32
+        val r = a @ b
+        # If preserved at f32: r == 0.30000001f32, and r - 0.3f32 == 0.0f32
+        # because in f32 the product round-trips back to the same value.
+        val zero: f32 = r - 0.3f32
+        expect(zero == 0.0f32).to_equal(true)
+
+    it "f32 @ f32 mantissa boundary stays in f32":
+        # 2^24 = 16777216 — f32 cannot represent 16777216 + 1.
+        # Compute a @ b at f32 precision then check +1f32 rounds back.
+        val a: f32 = 16777216.0f32
+        val b: f32 = 1.0f32
+        val product: f32 = a @ b
+        val r: f32 = product + 1.0f32
+        expect(r == 16777216.0f32).to_equal(true)
+
+    it "Float64 wins over Float32: f64 @ f32 produces Float64":
+        # Mixed scalar matmul widens to f64 — the f32 input lifts losslessly,
+        # so the f64 cancellation residue (~5.55e-17) is observable.
+        val a: f64 = 0.1f64 + 0.2f64
+        val b: f32 = 1.0f32
+        val r = a @ b
+        # f64 cancellation residue, > 0 and < 1e-15.
+        expect(r > 0.3f64).to_equal(true)
+        expect(r < 0.300000001f64).to_equal(true)
+
+# ============================================================================
+# Site 2: matmul_dot_product_1d  (ops.rs ~line 1389)
+# ============================================================================
+
+describe "f32 1D dot-product preserves Float32":
+    it "[f32] @ [f32] cancellation pin":
+        # dot([0.1f32, 0.2f32], [1.0f32, 1.0f32]) == 0.1f32 + 0.2f32
+        # Then subtract 0.3f32 — at f32 precision the cancellation is exact 0.0.
+        val a = [0.1f32, 0.2f32]
+        val b = [1.0f32, 1.0f32]
+        val s = a @ b
+        val zero: f32 = s - 0.3f32
+        expect(zero == 0.0f32).to_equal(true)
+
+    it "[f32] @ [f32] non-trivial result is Float32 typed":
+        # [1.0f32, 2.0f32] . [3.0f32, 4.0f32] = 11.0f32
+        val a = [1.0f32, 2.0f32]
+        val b = [3.0f32, 4.0f32]
+        val r = a @ b
+        expect(r == 11.0f32).to_equal(true)
+
+    it "[i64] @ [f32] -> Float32 (Int x Float32 promotion)":
+        # is_f32 latches; sum starts Int(0), final convert promotes Int -> Float32.
+        val a = [1, 2]
+        val b = [3.0f32, 4.0f32]
+        val r = a @ b
+        expect(r == 11.0f32).to_equal(true)
+
+    it "[f64] @ [f32] -> Float64 (Float64 wins over Float32)":
+        # Mixed Float and Float32 widens to Float64 — observable via f64
+        # cancellation residue using doubled precision.
+        val a = [0.1f64, 0.2f64]
+        val b = [1.0f32, 1.0f32]
+        val s = a @ b
+        # In f64: 0.1 + 0.2 = 0.30000000000000004; subtract 0.3 yields 5.55e-17.
+        val resid: f64 = s - 0.3f64
+        expect(resid > 0.0f64).to_equal(true)
+        expect(resid < 1.0e-15f64).to_equal(true)
+
+# ============================================================================
+# Site 3: matmul_matrix_multiply_2d  (ops.rs ~line 1470)
+# ============================================================================
+
+describe "f32 2D x 2D matrix multiply preserves Float32":
+    it "[[f32]] @ [[f32]] keeps Float32 entries":
+        # Identity matmul: [[1,0],[0,1]] @ [[a,b],[c,d]] = [[a,b],[c,d]].
+        val a = [[1.0f32, 0.0f32], [0.0f32, 1.0f32]]
+        val b = [[0.1f32, 0.2f32], [0.3f32, 0.4f32]]
+        val r = a @ b
+        # r[0][0] should be 0.1f32 exactly (passes through identity).
+        expect(r[0][0] == 0.1f32).to_equal(true)
+
+    it "[[f32]] @ [[f32]] cancellation pin in dot-sum":
+        # row dot col = 0.1f32 + 0.2f32, then subtract 0.3f32 -> 0.0f32 in f32.
+        val a = [[0.1f32, 0.2f32]]
+        val b = [[1.0f32], [1.0f32]]
+        val r = a @ b
+        # r[0][0] == 0.30000001f32; subtract 0.3f32 cancels exactly in f32.
+        val zero: f32 = r[0][0] - 0.3f32
+        expect(zero == 0.0f32).to_equal(true)
+
+    it "[[f64]] @ [[f32]] widens to Float64":
+        # Mixed: f64 wins.  Non-trivial cancellation residue in result.
+        val a = [[0.1f64, 0.2f64]]
+        val b = [[1.0f32], [1.0f32]]
+        val r = a @ b
+        val resid: f64 = r[0][0] - 0.3f64
+        expect(resid > 0.0f64).to_equal(true)
+        expect(resid < 1.0e-15f64).to_equal(true)
+
+# ============================================================================
+# Site 4: matmul_matrix_vector  (ops.rs ~line 1607) -- 2D @ 1D
+# ============================================================================
+
+describe "f32 matrix x vector preserves Float32":
+    it "[[f32]] @ [f32] cancellation pin":
+        # row . [1f32, 1f32] = 0.1f32 + 0.2f32; subtract 0.3f32 cancels in f32.
+        val m = [[0.1f32, 0.2f32], [0.5f32, 0.5f32]]
+        val v = [1.0f32, 1.0f32]
+        val r = m @ v
+        val zero: f32 = r[0] - 0.3f32
+        expect(zero == 0.0f32).to_equal(true)
+
+    it "[[f32]] @ [f32] second-row entry is f32 mantissa boundary":
+        # [[2^24, 0], [0, 2^24]] @ [1, 1] = [2^24, 2^24] but +1.0f32 cancels.
+        val m = [[16777216.0f32, 0.0f32], [0.0f32, 16777216.0f32]]
+        val v = [1.0f32, 1.0f32]
+        val r = m @ v
+        # Each entry == 16777216f32; +1.0f32 still rounds to same value in f32.
+        val sum: f32 = r[0] + 1.0f32
+        expect(sum == 16777216.0f32).to_equal(true)
+
+# ============================================================================
+# Site 5: matmul_vector_matrix  (ops.rs ~line 1713) -- 1D @ 2D
+# ============================================================================
+
+describe "f32 vector x matrix preserves Float32":
+    it "[f32] @ [[f32]] cancellation pin":
+        # [0.1f32, 0.2f32] @ [[1f32, 0f32], [1f32, 0f32]] = [0.3f32, 0f32].
+        val v = [0.1f32, 0.2f32]
+        val m = [[1.0f32, 0.0f32], [1.0f32, 0.0f32]]
+        val r = v @ m
+        val zero: f32 = r[0] - 0.3f32
+        expect(zero == 0.0f32).to_equal(true)
+
+    it "[f32] @ [[f32]] mantissa boundary preserved":
+        val v = [16777216.0f32, 0.0f32]
+        val m = [[1.0f32, 0.0f32], [0.0f32, 1.0f32]]
+        val r = v @ m
+        # r[0] == 16777216f32; +1f32 rounds back to 16777216f32 in single precision.
+        val sum: f32 = r[0] + 1.0f32
+        expect(sum == 16777216.0f32).to_equal(true)
+
+    it "[i64] @ [[f32]] -> [Float32] (Int x Float32 promotion)":
+        val v = [2, 3]
+        val m = [[1.0f32, 0.0f32], [0.0f32, 1.0f32]]
+        val r = v @ m
+        expect(r[0] == 2.0f32).to_equal(true)
+        expect(r[1] == 3.0f32).to_equal(true)

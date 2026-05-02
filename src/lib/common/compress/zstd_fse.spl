@@ -392,13 +392,16 @@ fn zstd_fse_build_encode_table(table_log: i64, counts: [i64]) -> Result<ZstdFseE
     ))
 
 fn _zstd_fse_pick_initial_state(table: ZstdFseEncodeTable) -> Result<i64, CompressionError>:
+    # Pick the state-table entry assigned to the first symbol that has
+    # any spread slot. The cumulative starting index is the running total
+    # of |count| over all earlier symbols (matching the build loop above).
+    var cum = 0
     var sym = 0
     while sym < table.symbols.len():
         if table.symbols[sym].has_count:
-            val nb_bits = table.symbols[sym].nb_bits
-            val s = (1 << nb_bits) + table.symbols[sym].state_offset
-            if s >= 0 and s < table.state_table.len():
-                return Ok(table.state_table[s] - (1 << table.table_log))
+            if cum < 0 or cum >= table.state_table.len():
+                return Err(CompressionError.CorruptStream("zstd fse encode initial cum oor"))
+            return Ok(table.state_table[cum] - (1 << table.table_log))
         sym = sym + 1
     Err(CompressionError.CorruptStream("zstd fse encode no present symbol"))
 
