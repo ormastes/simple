@@ -8,14 +8,18 @@
 
 use os.kernel.arch.arch_context.{Architecture}
 use os.packages.os_packages.{os_version}
-use os.machine_profile.{MachineProfile, get_machine_profile}
 use os.port.simpleos_multiplatform_build.{
+    SimpleOsLaneContract,
     simpleos_platform_default_entry,
     simpleos_platform_disk_image_output,
     simpleos_platform_linker_script,
     simpleos_platform_native_target,
+    simpleos_platform_qemu_acceptance_lane,
+    simpleos_platform_qemu_acceptance_required_markers,
+    simpleos_platform_qemu_acceptance_timeout_ms,
     simpleos_platform_qemu_cpu,
     simpleos_platform_qemu_machine,
+    simpleos_platform_qemu_smoke_lane,
     simpleos_platform_qemu_system,
     simpleos_platform_kernel_output,
     simpleos_platform_target_by_name
@@ -180,19 +184,19 @@ fn qemu_run_options_default() -> QemuRunOptions:
 fn qemu_run_options_debug_gui() -> QemuRunOptions:
     QemuRunOptions(debug_gui_serial: true)
 
-fn profile_to_target(profile: MachineProfile) -> OsTarget:
+fn _lane_to_target(platform_name: text, lane: SimpleOsLaneContract) -> OsTarget:
     OsTarget(
-        arch: profile.arch,
-        entry: profile.entry,
-        linker_script: profile.linker_script,
-        target_triple: profile.target_triple,
-        output: profile.output,
-        qemu_system: profile.qemu_system,
-        qemu_machine: profile.qemu_machine,
-        qemu_cpu: profile.qemu_cpu,
-        qemu_memory: profile.qemu_memory,
-        qemu_bios: profile.qemu_bios,
-        qemu_extra: profile.qemu_extra,
+        arch: simpleos_platform_arch(platform_name),
+        entry: lane.entry,
+        linker_script: lane.linker_script,
+        target_triple: simpleos_platform_native_target(platform_name),
+        output: lane.output,
+        qemu_system: simpleos_platform_qemu_system(platform_name),
+        qemu_machine: simpleos_platform_qemu_machine(platform_name),
+        qemu_cpu: simpleos_platform_qemu_cpu(platform_name),
+        qemu_memory: lane.qemu_memory,
+        qemu_bios: lane.qemu_bios,
+        qemu_extra: lane.qemu_extra,
         gui_mode: false
     )
 
@@ -224,19 +228,8 @@ fn simpleos_platform_arch(platform_name: text) -> Architecture:
 
 fn get_target(arch: Architecture) -> OsTarget:
     """Returns hardcoded target config for the given architecture."""
-    match arch:
-        Architecture.X86_64:
-            catalog_os_target("x86_64", "512M", ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"], false)
-        Architecture.X86:
-            catalog_os_target("x86_32", "128M", ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"], false)
-        Architecture.Riscv64:
-            profile_to_target(get_machine_profile(Architecture.Riscv64).unwrap())
-        Architecture.Riscv32:
-            profile_to_target(get_machine_profile(Architecture.Riscv32).unwrap())
-        Architecture.Arm64:
-            profile_to_target(get_machine_profile(Architecture.Arm64).unwrap())
-        Architecture.Arm32:
-            profile_to_target(get_machine_profile(Architecture.Arm32).unwrap())
+    val platform_name = arch_display_name(arch)
+    _lane_to_target(platform_name, simpleos_platform_qemu_smoke_lane(platform_name))
 
 fn get_qemu_target(arch: Architecture) -> OsTarget:
     """Return the default QEMU/run target for an architecture.
@@ -1617,37 +1610,11 @@ fn scenario_target(scenario: QemuScenario) -> OsTarget:
 
 fn get_arm64_fs_exec_target() -> OsTarget:
     """ARM64 filesystem executable acceptance target."""
-    OsTarget(
-        arch: Architecture.Arm64,
-        entry: "examples/simple_os/arch/arm64/fs_exec_entry.spl",
-        linker_script: "examples/simple_os/arch/arm64/fs_exec_linker.ld",
-        target_triple: "aarch64-unknown-none",
-        output: "build/os/simpleos_arm64_fs_exec.elf",
-        qemu_system: "qemu-system-aarch64",
-        qemu_machine: "virt",
-        qemu_cpu: "cortex-a72",
-        qemu_memory: "384M",
-        qemu_bios: "",
-        qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm64) + ["-semihosting-config", "enable=on,target=native"],
-        gui_mode: false
-    )
+    _lane_to_target("arm64", simpleos_platform_qemu_acceptance_lane("arm64"))
 
 fn get_arm32_fs_exec_target() -> OsTarget:
     """ARM32 filesystem executable acceptance target."""
-    OsTarget(
-        arch: Architecture.Arm32,
-        entry: "examples/simple_os/arch/arm32/fs_exec_entry.spl",
-        linker_script: "examples/simple_os/arch/arm32/fs_exec_linker.ld",
-        target_triple: "armv7-unknown-none-eabihf",
-        output: "build/os/simpleos_arm32_fs_exec.elf",
-        qemu_system: "qemu-system-arm",
-        qemu_machine: "virt",
-        qemu_cpu: "cortex-a15",
-        qemu_memory: "384M",
-        qemu_bios: "",
-        qemu_extra: _arm_virtio_blk_exec_disk_args(Architecture.Arm32) + ["-semihosting-config", "enable=on,target=native"],
-        gui_mode: false
-    )
+    _lane_to_target("arm32", simpleos_platform_qemu_acceptance_lane("arm32"))
 
 fn get_riscv64_fs_exec_target() -> OsTarget:
     """RV64 filesystem SMF acceptance target."""
@@ -1685,23 +1652,7 @@ fn get_riscv32_fs_exec_target() -> OsTarget:
 
 fn get_riscv64_hosted_target() -> OsTarget:
     """RV64 hosted-preflight target."""
-    OsTarget(
-        arch: Architecture.Riscv64,
-        entry: "examples/simple_os/arch/riscv64/hosted_entry.spl",
-        linker_script: "examples/simple_os/arch/riscv64/linker.ld",
-        target_triple: "riscv64-unknown-none",
-        output: "build/os/simpleos_riscv64_hosted.elf",
-        qemu_system: "qemu-system-riscv64",
-        qemu_machine: "virt",
-        qemu_cpu: "rv64",
-        qemu_memory: "1024M",
-        qemu_bios: "default",
-        qemu_extra: ["-bios", "default"] + _riscv_virtio_blk_exec_disk_args(Architecture.Riscv64) + [
-            "-netdev", "user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80",
-            "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"
-        ],
-        gui_mode: false
-    )
+    _lane_to_target("riscv64", simpleos_platform_qemu_acceptance_lane("riscv64"))
 fn _desktop_release_version() -> text:
     os_version().to_text()
 
@@ -1989,6 +1940,54 @@ fn ensure_desktop_uefi_boot_image(kernel_path: text) -> bool:
         return false
     if not _desktop_uefi_disk_image_has_required_tool_apps(img_path):
         print "[ensure_desktop_uefi_boot_image] UEFI disk image missing seeded tool app payloads or SMF wrappers"
+        return false
+    true
+
+pub fn board_bundle_command(platform_name: text, kernel_path: text, output_path: text) -> [text]:
+    """Build the host-side command for a representative board packaging lane."""
+    if platform_name == "x86_64":
+        return ["/bin/sh"] + desktop_uefi_disk_make_script_args(output_path, kernel_path)
+    if platform_name == "arm64":
+        return ["/bin/sh", "scripts/make_os_disk.shs", "64", output_path, "", "arm64"]
+    if platform_name == "riscv64":
+        return ["bin/simple", "run", "src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl", "--", "--board=mlk_s02_100t", output_path]
+    []
+
+fn _board_bundle_expected_artifact(platform_name: text, output_path: text) -> text:
+    if platform_name == "riscv64":
+        return output_path + "/board_linux_boot_products.sdn"
+    output_path
+
+pub fn ensure_board_bundle(platform_name: text, kernel_path: text, output_path: text) -> bool:
+    """Materialize the representative board bundle for a first-class platform."""
+    if simpleos_platform_board_lane(platform_name) == nil:
+        print "[ensure_board_bundle] no representative board lane declared for {platform_name}"
+        return false
+    if platform_name == "x86_64":
+        if output_path == "" or output_path == desktop_uefi_disk_image_path():
+            return ensure_desktop_uefi_boot_image(kernel_path)
+    val cmd = board_bundle_command(platform_name, kernel_path, output_path)
+    if cmd.len() == 0:
+        print "[ensure_board_bundle] unsupported board bundle platform: {platform_name}"
+        return false
+    val timeout_ms = if platform_name == "riscv64": 120000 else: 60000
+    val exec_cmd = cmd[0]
+    var exec_args: [text] = []
+    var i: i64 = 1
+    while i < cmd.len() as i64:
+        exec_args.push(cmd[i as i32])
+        i = i + 1
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(exec_cmd, exec_args, timeout_ms)
+    if stdout != "":
+        print "[ensure_board_bundle] stdout:\n{stdout}"
+    if stderr != "":
+        print "[ensure_board_bundle] stderr:\n{stderr}"
+    if exit_code != 0:
+        print "[ensure_board_bundle] command exited {exit_code}"
+        return false
+    val expected = _board_bundle_expected_artifact(platform_name, output_path)
+    if not rt_file_exists(expected):
+        print "[ensure_board_bundle] expected artifact missing: {expected}"
         return false
     true
 
@@ -2404,18 +2403,8 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
     success
 
 fn arm_fs_exec_required_marker_fragments(scenario: QemuScenario) -> [text]:
-    val _lane = _arm_fs_exec_scenario_name(scenario.arch)
-    [
-        "[desktop-e2e] process-backed:ok app=simple_compiler pid=",
-        "[desktop-e2e] process-backed:ok app=simple_loader pid=",
-        "[desktop-e2e] process-backed:ok app=clang pid=",
-        "[desktop-e2e] process-backed:ok app=rust pid=",
-        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_compiler bytes=",
-        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_loader bytes=",
-        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/clang bytes=",
-        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/rust bytes=",
-        "TEST PASSED"
-    ]
+    val platform_name = if scenario.arch == Architecture.Arm64: "arm64" else: "arm32"
+    simpleos_platform_qemu_acceptance_required_markers(platform_name)
 
 fn arm_fs_exec_serial_accepts_completion(scenario: QemuScenario, serial_output: text) -> bool:
     for marker in arm_fs_exec_required_marker_fragments(scenario):
@@ -2429,21 +2418,7 @@ fn print_arm_fs_exec_missing_markers(scenario: QemuScenario, serial_output: text
             print "[test] missing marker fragment: {marker}"
 
 fn riscv64_hosted_required_marker_fragments() -> [text]:
-    [
-        "[desktop-e2e] process-backed:ok app=simple_compiler pid=",
-        "[desktop-e2e] process-backed:ok app=simple_loader pid=",
-        "[desktop-e2e] process-backed:ok app=llvm pid=",
-        "[desktop-e2e] process-backed:ok app=clang pid=",
-        "[desktop-e2e] process-backed:ok app=rust pid=",
-        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/llvm bytes=",
-        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/clang bytes=",
-        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/rust bytes=",
-        "[desktop-e2e] native-toolchain-launch:ok app=llvm lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/llvm manifest=/SYS/LLVMMAN.TXT",
-        "[desktop-e2e] native-toolchain-launch:ok app=clang lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT",
-        "[desktop-e2e] native-toolchain-launch:ok app=rust lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/rust manifest=/SYS/RUSTMAN.TXT",
-        "HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust",
-        "TEST PASSED"
-    ]
+    simpleos_platform_qemu_acceptance_required_markers("riscv64")
 
 fn riscv64_hosted_serial_accepts_completion(serial_output: text) -> bool:
     for marker in riscv64_hosted_required_marker_fragments():
@@ -2536,9 +2511,9 @@ fn scenario_test_timeout_ms(scenario: QemuScenario) -> u64:
     if scenario.name == "x64-nvme-fat32":
         return 60000
     if _is_arm_fs_exec_scenario(scenario):
-        return 60000
+        return simpleos_platform_qemu_acceptance_timeout_ms(if scenario.arch == Architecture.Arm64: "arm64" else: "arm32") as u64
     if scenario.name == "riscv64-hosted":
-        return 120000
+        return simpleos_platform_qemu_acceptance_timeout_ms("riscv64") as u64
     if _is_riscv_fs_exec_scenario(scenario):
         return 60000
     if scenario.name == "x64-desktop-test":

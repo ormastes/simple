@@ -818,6 +818,21 @@ pub(crate) fn call_extern_function(
         "rt_text_count_codepoints" => simd::rt_text_count_codepoints(&evaluated),
 
         // ====================================================================
+        // SIMD Int Bitwise / Shift Intrinsics — Phase 1
+        // (FR: doc/08_tracking/feature_request/simd_int_intrinsics_for_crypto_2026-05-01.md)
+        // ====================================================================
+        "rt_simd_xor_i32x4" => simd::rt_simd_xor_i32x4(&evaluated),
+        "rt_simd_and_i32x4" => simd::rt_simd_and_i32x4(&evaluated),
+        "rt_simd_or_i32x4" => simd::rt_simd_or_i32x4(&evaluated),
+        "rt_simd_shl_i32x4" => simd::rt_simd_shl_i32x4(&evaluated),
+        "rt_simd_shr_i32x4" => simd::rt_simd_shr_i32x4(&evaluated),
+        "rt_simd_xor_i32x8" => simd::rt_simd_xor_i32x8(&evaluated),
+        "rt_simd_and_i32x8" => simd::rt_simd_and_i32x8(&evaluated),
+        "rt_simd_or_i32x8" => simd::rt_simd_or_i32x8(&evaluated),
+        "rt_simd_shl_i32x8" => simd::rt_simd_shl_i32x8(&evaluated),
+        "rt_simd_shr_i32x8" => simd::rt_simd_shr_i32x8(&evaluated),
+
+        // ====================================================================
         // Diagram FFI Functions (12 functions)
         // ====================================================================
         "rt_diagram_enable" => diagram::rt_diagram_enable(&evaluated),

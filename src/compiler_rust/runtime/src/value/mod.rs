@@ -63,6 +63,7 @@ pub mod serial;
 pub mod ratatui_tui;
 pub mod screenshot_ffi;
 pub mod simd;
+pub mod simd_int_ops;
 mod sync;
 pub mod tags;
 mod utf8_kernels;
@@ -900,6 +901,12 @@ pub use numeric_kernels::{
     rt_numeric_active_simd_tier, rt_numeric_add_f32, rt_numeric_add_f64, rt_numeric_dot_f32, rt_numeric_dot_f64,
     rt_numeric_fma_f32, rt_numeric_fma_f64, rt_numeric_max_f32, rt_numeric_min_f32, rt_numeric_mul_f32,
     rt_numeric_mul_f64, rt_numeric_sum_f32, rt_numeric_sum_f64,
+};
+
+// Re-export Phase 1 SIMD int bitwise / shift FFI symbols.
+pub use simd_int_ops::{
+    rt_simd_and_i32x4, rt_simd_and_i32x8, rt_simd_or_i32x4, rt_simd_or_i32x8, rt_simd_shl_i32x4, rt_simd_shl_i32x8,
+    rt_simd_shr_i32x4, rt_simd_shr_i32x8, rt_simd_xor_i32x4, rt_simd_xor_i32x8,
 };
 
 // Re-export regex FFI functions

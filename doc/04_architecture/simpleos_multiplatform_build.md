@@ -16,6 +16,9 @@ The catalog owns:
 - canonical target name and aliases
 - `Architecture` enum value and bit width
 - Simple native target triple and clang C/ASM target triple
+- boot firmware contract and default image layout
+- staged filesystem toolchain app contract
+- smoke, QEMU-acceptance, and optional representative board lanes
 - entrypoint, linker script, output path, source roots
 - C boot sources and assembly boot sources
 - freestanding C flags, freestanding ASM flags, and target link hints
@@ -50,6 +53,19 @@ Hosted Simple compiler binaries remain 64-bit host artifacts. SimpleOS guest tar
 ## Follow-Up
 
 The catalog is now ready for a future object pipeline that compiles `boot_c_sources` and `boot_asm_sources` into per-target objects before final native link. The current change exposes the metadata and validates it through unit tests; it does not replace the lower-level linker or native backend.
+
+## Lane Contracts
+
+Each first-class target now carries three lane-level contracts:
+
+- `qemu_smoke_lane`: the lean kernel boot lane used by `simple os build/run` when the repo wants the smallest truthful boot path.
+- `qemu_acceptance_lane`: the filesystem-backed acceptance lane that records staged toolchain apps, required serial markers, timeout, media path, and the real entry/linker/output tuple for that lane.
+- `board_lane`: an optional representative real-hardware package lane for one board per ISA family. Current cataloged representatives are:
+  - `x86_pc_bios_uefi`
+  - `arm64_u_boot_dtb_sbc`
+  - `mlk_s02_100t`
+
+`src/os/qemu_runner.spl` now derives the ARM64, ARM32, and RV64 hosted acceptance targets directly from these lane records instead of maintaining separate hardcoded target tables. The catalog also owns the shared staged-toolchain app set and the canonical serial markers for the ARM fs-exec and RV64 hosted compile-smoke lanes.
 
 ## RISC-V Soft-Float Update
 
@@ -108,3 +124,5 @@ Primary reduction targets are pinned as follows:
 Legacy x86_32 and ARM lanes remain catalogued as broader native-surface targets for now so the migration can land incrementally without lying about current boot dependencies. The x86_64 lane additionally records its current boot backlog explicitly in `grandfathered_native_sources` so enforcement can distinguish true entry stubs from temporary debt.
 
 Enforcement is handled by `src/os/port/native_surface_policy_verify.spl`. The verifier now derives the x86_64 approved boot set from the platform catalog (`boot_c_sources`, `boot_asm_sources`, and `grandfathered_native_sources`), prints a live libc migration inventory, and fails if new native C or standalone asm sources appear outside the approved exception manifest.
+
+The verifier now also covers the first-class ARM, x86_32, and RISC-V example/kernel boot trees. Approved native leaves are derived from the platform catalog for every target so the audit stays aligned with the shared build metadata instead of drifting into a separate allowlist.

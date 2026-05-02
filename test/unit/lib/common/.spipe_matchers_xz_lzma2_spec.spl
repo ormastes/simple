@@ -231,6 +231,9 @@ describe "xz lzma2 codec":
         _expect_compression_error(decoded.unwrap_err(), "CorruptStream", "range decoder init")
 
     it "parses compressed lzma2 chunk headers before falling back on body decode":
+        # The fabricated chunk uses an unsupported props byte (0x00 -> LCLPPB
+        # 0/0/0) that the new range decoder rejects with the explicit
+        # LCLPPB-other-than-3/0/2 error string per the partial-LANDED scope.
         val options = default_compression_options(CompressionCodec.lzma2)
         val encoded = _replace_first_chunk_prefix(
             lzma2_compress_xz(_payload(128), options),
@@ -238,7 +241,7 @@ describe "xz lzma2 codec":
         )
         val decoded = lzma2_decompress_xz(encoded)
         expect decoded.is_err() == true
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "range-coded compressed chunks")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "LZMA2 LCLPPB other than 3/0/2")
 
     it "reports footer crc corruption as a checksum mismatch":
         val options = default_compression_options(CompressionCodec.lzma2)
@@ -285,18 +288,22 @@ describe "xz lzma2 codec":
         expect decoded.is_err() == true
         _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "xz block check")
 
-    it "rejects host-generated compressed xz streams with an explicit unsupported-feature error":
+    it "decodes host-generated compressed xz streams via the pure-Simple range decoder":
+        # The pure-Simple decoder only accepts XZ streams that use CRC32 as
+        # their integrity check (default `xz` emits CRC64). Force CRC32 here
+        # so the round-trip exercises the new range decoder rather than
+        # bouncing on `_xz_check_size`.
         _ensure_tmp_root()
-        val input = _payload(1024)
+        val input = _payload(256)
         val input_path = TMP_ROOT + "/host-generated-input.bin"
         val compressed_path = TMP_ROOT + "/host-generated.xz"
         _write_bytes(input_path, input)
-        val run = shell("xz -q -z -f -c '" + input_path + "' > '" + compressed_path + "'")
+        val run = shell("xz -q -z -f --check=crc32 -c '" + input_path + "' > '" + compressed_path + "'")
         if run.exit_code != 0:
             print(run.stdout)
             print(run.stderr)
         expect run.exit_code == 0
         val encoded = _read_bytes(compressed_path)
         val decoded = lzma2_decompress_xz(encoded)
-        expect decoded.is_err() == true
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "range-coded compressed chunks")
+        expect decoded.is_err() == false
+        expect decoded.unwrap() == input

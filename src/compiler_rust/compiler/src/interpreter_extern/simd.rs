@@ -12,10 +12,17 @@ use simple_runtime::value::simd::{
     rt_simd_has_neon as ffi_has_neon, rt_simd_has_rvv as ffi_has_rvv, rt_simd_has_sse as ffi_has_sse,
     rt_simd_profile_name as ffi_profile_name,
 };
+use simple_runtime::value::simd_int_ops::{
+    and_i32x4 as ffi_and_i32x4, and_i32x8 as ffi_and_i32x8, or_i32x4 as ffi_or_i32x4, or_i32x8 as ffi_or_i32x8,
+    shl_i32x4 as ffi_shl_i32x4, shl_i32x8 as ffi_shl_i32x8, shr_i32x4 as ffi_shr_i32x4, shr_i32x8 as ffi_shr_i32x8,
+    xor_i32x4 as ffi_xor_i32x4, xor_i32x8 as ffi_xor_i32x8,
+};
 use simple_runtime::value::{
     rt_text_count_codepoints as ffi_text_count_codepoints, rt_utf8_count_codepoints as ffi_utf8_count_codepoints,
     rt_utf8_find_invalid as ffi_utf8_find_invalid, rt_utf8_validate as ffi_utf8_validate,
 };
+use std::collections::HashMap;
+use std::sync::Arc;
 
 fn expect_no_args(name: &str, args: &[Value]) -> Result<(), CompileError> {
     if args.is_empty() {
@@ -152,4 +159,195 @@ pub fn rt_aes_decrypt_block_with_expanded(args: &[Value]) -> Result<Value, Compi
     Ok(Value::array(
         output.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
     ))
+}
+
+// ============================================================================
+// Phase 1 SIMD int bitwise / shift externs (i32x4 + i32x8).
+//
+// Vec4i is a Simple record `struct Vec4i { x, y, z, w: i32 }`; Vec8i is
+// `struct Vec8i { e0..e7: i32 }`. In interpreter mode they arrive as
+// `Value::Object { class, fields }`. We unpack to lane arrays, run the kernel,
+// and repack.
+// ============================================================================
+
+fn require_i32_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<i32, CompileError> {
+    match fields.get(field) {
+        Some(Value::Int(n)) => Ok(*n as i32),
+        Some(other) => Err(CompileError::runtime(format!(
+            "{name}: field {field} must be an integer, got {:?}",
+            other
+        ))),
+        None => Err(CompileError::runtime(format!(
+            "{name}: missing field {field}"
+        ))),
+    }
+}
+
+fn unpack_vec4i(name: &str, value: &Value) -> Result<[i32; 4], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec4i" {
+                return Err(CompileError::runtime(format!(
+                    "{name}: expected Vec4i, got {class}"
+                )));
+            }
+            Ok([
+                require_i32_field(name, fields, "x")?,
+                require_i32_field(name, fields, "y")?,
+                require_i32_field(name, fields, "z")?,
+                require_i32_field(name, fields, "w")?,
+            ])
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec4i Object, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn pack_vec4i(lanes: [i32; 4]) -> Value {
+    let mut fields = HashMap::with_capacity(4);
+    fields.insert("x".to_string(), Value::Int(lanes[0] as i64));
+    fields.insert("y".to_string(), Value::Int(lanes[1] as i64));
+    fields.insert("z".to_string(), Value::Int(lanes[2] as i64));
+    fields.insert("w".to_string(), Value::Int(lanes[3] as i64));
+    Value::Object {
+        class: "Vec4i".to_string(),
+        fields: Arc::new(fields),
+    }
+}
+
+fn unpack_vec8i(name: &str, value: &Value) -> Result<[i32; 8], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec8i" {
+                return Err(CompileError::runtime(format!(
+                    "{name}: expected Vec8i, got {class}"
+                )));
+            }
+            Ok([
+                require_i32_field(name, fields, "e0")?,
+                require_i32_field(name, fields, "e1")?,
+                require_i32_field(name, fields, "e2")?,
+                require_i32_field(name, fields, "e3")?,
+                require_i32_field(name, fields, "e4")?,
+                require_i32_field(name, fields, "e5")?,
+                require_i32_field(name, fields, "e6")?,
+                require_i32_field(name, fields, "e7")?,
+            ])
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec8i Object, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn pack_vec8i(lanes: [i32; 8]) -> Value {
+    let mut fields = HashMap::with_capacity(8);
+    for (i, lane) in lanes.iter().enumerate() {
+        fields.insert(format!("e{}", i), Value::Int(*lane as i64));
+    }
+    Value::Object {
+        class: "Vec8i".to_string(),
+        fields: Arc::new(fields),
+    }
+}
+
+fn require_int_arg(name: &str, value: &Value) -> Result<i64, CompileError> {
+    match value {
+        Value::Int(n) => Ok(*n),
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected integer shift count, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn binop_i32x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([i32; 4], [i32; 4]) -> [i32; 4],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec4i(name, &args[0])?;
+    let b = unpack_vec4i(name, &args[1])?;
+    Ok(pack_vec4i(op(a, b)))
+}
+
+fn binop_i32x8<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([i32; 8], [i32; 8]) -> [i32; 8],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec8i(name, &args[0])?;
+    let b = unpack_vec8i(name, &args[1])?;
+    Ok(pack_vec8i(op(a, b)))
+}
+
+fn shift_i32x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([i32; 4], i64) -> [i32; 4],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec4i(name, &args[0])?;
+    let n = require_int_arg(name, &args[1])?;
+    Ok(pack_vec4i(op(a, n)))
+}
+
+fn shift_i32x8<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn([i32; 8], i64) -> [i32; 8],
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec8i(name, &args[0])?;
+    let n = require_int_arg(name, &args[1])?;
+    Ok(pack_vec8i(op(a, n)))
+}
+
+pub fn rt_simd_xor_i32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x4("rt_simd_xor_i32x4", args, ffi_xor_i32x4)
+}
+
+pub fn rt_simd_and_i32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x4("rt_simd_and_i32x4", args, ffi_and_i32x4)
+}
+
+pub fn rt_simd_or_i32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x4("rt_simd_or_i32x4", args, ffi_or_i32x4)
+}
+
+pub fn rt_simd_shl_i32x4(args: &[Value]) -> Result<Value, CompileError> {
+    shift_i32x4("rt_simd_shl_i32x4", args, ffi_shl_i32x4)
+}
+
+pub fn rt_simd_shr_i32x4(args: &[Value]) -> Result<Value, CompileError> {
+    shift_i32x4("rt_simd_shr_i32x4", args, ffi_shr_i32x4)
+}
+
+pub fn rt_simd_xor_i32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x8("rt_simd_xor_i32x8", args, ffi_xor_i32x8)
+}
+
+pub fn rt_simd_and_i32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x8("rt_simd_and_i32x8", args, ffi_and_i32x8)
+}
+
+pub fn rt_simd_or_i32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_i32x8("rt_simd_or_i32x8", args, ffi_or_i32x8)
+}
+
+pub fn rt_simd_shl_i32x8(args: &[Value]) -> Result<Value, CompileError> {
+    shift_i32x8("rt_simd_shl_i32x8", args, ffi_shl_i32x8)
+}
+
+pub fn rt_simd_shr_i32x8(args: &[Value]) -> Result<Value, CompileError> {
+    shift_i32x8("rt_simd_shr_i32x8", args, ffi_shr_i32x8)
 }

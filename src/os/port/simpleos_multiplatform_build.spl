@@ -17,6 +17,54 @@ enum SimpleOsStandaloneAsmPolicy:
     EntryStubsOnly
     BroadNativeSurface
 
+enum SimpleOsFirmwareContractKind:
+    LimineBios
+    LimineUefi
+    UBootDtb
+    OpenSbi
+    RawLoader
+    HostedPayload
+
+enum SimpleOsImageLayoutKind:
+    KernelOnly
+    Fat32Disk
+    VirtioFat32
+    HostedVirtioFat32
+    UefiNvmeFat32
+    BoardBundle
+
+enum SimpleOsLaneKind:
+    Smoke
+    FsExec
+    HostedCompileSmoke
+    BoardCompileSmoke
+
+class SimpleOsStagedToolchainAppContract:
+    app_name: text
+    app_path: text
+    manifest_path: text
+    require_process_backed_launch: bool
+    require_vfs_read: bool
+    native_launch_mode: text
+    native_launch_status: text
+
+class SimpleOsLaneContract:
+    name: text
+    lane_kind: SimpleOsLaneKind
+    firmware_contract: SimpleOsFirmwareContractKind
+    image_layout: SimpleOsImageLayoutKind
+    entry: text
+    linker_script: text
+    output: text
+    qemu_memory: text
+    qemu_bios: text
+    qemu_extra: [text]
+    timeout_ms: i64
+    staged_apps: [SimpleOsStagedToolchainAppContract]
+    required_serial_markers: [text]
+    board_adapter_id: text
+    media_path_hint: text
+
 class SimpleOsPlatformBuildTarget:
     name: text
     aliases: [text]
@@ -33,12 +81,19 @@ class SimpleOsPlatformBuildTarget:
     qemu_cpu: text
     qemu_serial_kind: text
     qemu_serial_base: u64
+    boot_firmware_contract: SimpleOsFirmwareContractKind
+    default_image_layout: SimpleOsImageLayoutKind
+    board_adapter_id: text
     linker_script: text
     default_entry: text
     output: text
     platform_slug: text
     kernel_output: text
     disk_image_output: text
+    staged_toolchain_apps: [SimpleOsStagedToolchainAppContract]
+    qemu_smoke_lane: SimpleOsLaneContract
+    qemu_acceptance_lane: SimpleOsLaneContract
+    board_lane: SimpleOsLaneContract?
     source_roots: [text]
     boot_c_sources: [text]
     boot_asm_sources: [text]
@@ -116,6 +171,111 @@ fn _riscv32_c_flags() -> [text]:
     flags.push("-DSIMPLEOS_ARCH_RISCV32=1")
     flags
 
+fn _tool_app_contract(
+    app_name: text,
+    manifest_path: text,
+    require_process_backed_launch: bool,
+    require_vfs_read: bool,
+    native_launch_mode: text,
+    native_launch_status: text
+) -> SimpleOsStagedToolchainAppContract:
+    SimpleOsStagedToolchainAppContract(
+        app_name: app_name,
+        app_path: "/sys/apps/{app_name}",
+        manifest_path: manifest_path,
+        require_process_backed_launch: require_process_backed_launch,
+        require_vfs_read: require_vfs_read,
+        native_launch_mode: native_launch_mode,
+        native_launch_status: native_launch_status
+    )
+
+fn _process_vfs_tool_app(app_name: text) -> SimpleOsStagedToolchainAppContract:
+    _tool_app_contract(app_name, "", true, true, "", "")
+
+fn _native_toolchain_app(app_name: text, manifest_path: text) -> SimpleOsStagedToolchainAppContract:
+    _tool_app_contract(app_name, manifest_path, true, true, "native-filesystem-app", "standalone-required")
+
+fn _arm_toolchain_apps() -> [SimpleOsStagedToolchainAppContract]:
+    [
+        _process_vfs_tool_app("simple_compiler"),
+        _process_vfs_tool_app("simple_loader"),
+        _process_vfs_tool_app("clang"),
+        _process_vfs_tool_app("rust")
+    ]
+
+fn _riscv_toolchain_apps() -> [SimpleOsStagedToolchainAppContract]:
+    [
+        _process_vfs_tool_app("simple_compiler"),
+        _process_vfs_tool_app("simple_loader"),
+        _native_toolchain_app("llvm", "/SYS/LLVMMAN.TXT"),
+        _native_toolchain_app("clang", "/SYS/CLANGMAN.TXT"),
+        _native_toolchain_app("rust", "/SYS/RUSTMAN.TXT")
+    ]
+
+fn _x86_toolchain_apps() -> [SimpleOsStagedToolchainAppContract]:
+    [
+        _process_vfs_tool_app("simple_compiler"),
+        _process_vfs_tool_app("simple_loader"),
+        _native_toolchain_app("llvm", "/SYS/LLVMMAN.TXT"),
+        _native_toolchain_app("clang", "/SYS/CLANGMAN.TXT"),
+        _native_toolchain_app("rust", "/SYS/RUSTMAN.TXT")
+    ]
+
+fn _toolchain_lane_markers(
+    lane_name: text,
+    staged_apps: [SimpleOsStagedToolchainAppContract],
+    extra_markers: [text]
+) -> [text]:
+    var markers: [text] = []
+    for app in staged_apps:
+        if app.require_process_backed_launch:
+            markers.push("[desktop-e2e] process-backed:ok app={app.app_name} pid=")
+        if app.require_vfs_read:
+            markers.push("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={app.app_path} bytes=")
+        if app.native_launch_mode != "" and app.manifest_path != "":
+            markers.push(
+                "[desktop-e2e] native-toolchain-launch:ok app={app.app_name} lane={lane_name} mode={app.native_launch_mode} status={app.native_launch_status} tool={app.app_path} manifest={app.manifest_path}"
+            )
+    for marker in extra_markers:
+        markers.push(marker)
+    markers.push("TEST PASSED")
+    markers
+
+fn _lane_contract(
+    name: text,
+    lane_kind: SimpleOsLaneKind,
+    firmware_contract: SimpleOsFirmwareContractKind,
+    image_layout: SimpleOsImageLayoutKind,
+    entry: text,
+    linker_script: text,
+    output: text,
+    qemu_memory: text,
+    qemu_bios: text,
+    qemu_extra: [text],
+    timeout_ms: i64,
+    staged_apps: [SimpleOsStagedToolchainAppContract],
+    extra_markers: [text],
+    board_adapter_id: text,
+    media_path_hint: text
+) -> SimpleOsLaneContract:
+    SimpleOsLaneContract(
+        name: name,
+        lane_kind: lane_kind,
+        firmware_contract: firmware_contract,
+        image_layout: image_layout,
+        entry: entry,
+        linker_script: linker_script,
+        output: output,
+        qemu_memory: qemu_memory,
+        qemu_bios: qemu_bios,
+        qemu_extra: qemu_extra,
+        timeout_ms: timeout_ms,
+        staged_apps: staged_apps,
+        required_serial_markers: _toolchain_lane_markers(name, staged_apps, extra_markers),
+        board_adapter_id: board_adapter_id,
+        media_path_hint: media_path_hint
+    )
+
 fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
     """Return all first-class SimpleOS binary build targets."""
     [
@@ -135,12 +295,67 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             qemu_cpu: "qemu64",
             qemu_serial_kind: "com1",
             qemu_serial_base: 0x3F8u64,
+            boot_firmware_contract: SimpleOsFirmwareContractKind.LimineBios,
+            default_image_layout: SimpleOsImageLayoutKind.Fat32Disk,
+            board_adapter_id: "x86_pc_bios_uefi",
             linker_script: "examples/simple_os/arch/x86_64/linker.ld",
             default_entry: "examples/simple_os/arch/x86_64/os_entry.spl",
             output: "build/os/simpleos_x86_64.elf",
             platform_slug: "x86_64",
             kernel_output: "build/os/simpleos_x86_64.elf",
             disk_image_output: "build/os/fat32-x86_64.img",
+            staged_toolchain_apps: _x86_toolchain_apps(),
+            qemu_smoke_lane: _lane_contract(
+                "x86_64-smoke",
+                SimpleOsLaneKind.Smoke,
+                SimpleOsFirmwareContractKind.LimineBios,
+                SimpleOsImageLayoutKind.KernelOnly,
+                "examples/simple_os/arch/x86_64/os_entry.spl",
+                "examples/simple_os/arch/x86_64/linker.ld",
+                "build/os/simpleos_x86_64.elf",
+                "512M",
+                "",
+                ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"],
+                10000,
+                [],
+                [],
+                "",
+                "build/os/simpleos_x86_64.elf"
+            ),
+            qemu_acceptance_lane: _lane_contract(
+                "x86_64-smoke",
+                SimpleOsLaneKind.Smoke,
+                SimpleOsFirmwareContractKind.LimineBios,
+                SimpleOsImageLayoutKind.KernelOnly,
+                "examples/simple_os/arch/x86_64/os_entry.spl",
+                "examples/simple_os/arch/x86_64/linker.ld",
+                "build/os/simpleos_x86_64.elf",
+                "512M",
+                "",
+                ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"],
+                10000,
+                [],
+                [],
+                "",
+                "build/os/simpleos_x86_64.elf"
+            ),
+            board_lane: _lane_contract(
+                "x86_64-pc-bios-uefi",
+                SimpleOsLaneKind.BoardCompileSmoke,
+                SimpleOsFirmwareContractKind.LimineUefi,
+                SimpleOsImageLayoutKind.BoardBundle,
+                "examples/simple_os/arch/x86_64/os_entry.spl",
+                "examples/simple_os/arch/x86_64/linker.ld",
+                "build/os/simpleos_x86_64.elf",
+                "",
+                "",
+                [],
+                0,
+                _x86_toolchain_apps(),
+                [],
+                "x86_pc_bios_uefi",
+                "build/os/fat32-x86_64.img"
+            ),
             source_roots: ["src", "examples"],
             boot_c_sources: ["examples/simple_os/arch/x86_64/boot/baremetal_stubs.c"],
             boot_asm_sources: ["examples/simple_os/arch/x86_64/boot/crt0.s"],
@@ -183,12 +398,51 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             qemu_cpu: "qemu32",
             qemu_serial_kind: "com1",
             qemu_serial_base: 0x3F8u64,
+            boot_firmware_contract: SimpleOsFirmwareContractKind.LimineBios,
+            default_image_layout: SimpleOsImageLayoutKind.Fat32Disk,
+            board_adapter_id: "",
             linker_script: "src/os/kernel/arch/x86_32/linker.ld",
             default_entry: "src/os/kernel/arch/x86_32/boot.spl",
             output: "build/os/simpleos_x86_32.elf",
             platform_slug: "x86_32",
             kernel_output: "build/os/simpleos_x86_32.elf",
             disk_image_output: "build/os/fat32-x86_32.img",
+            staged_toolchain_apps: _x86_toolchain_apps(),
+            qemu_smoke_lane: _lane_contract(
+                "x86_32-smoke",
+                SimpleOsLaneKind.Smoke,
+                SimpleOsFirmwareContractKind.LimineBios,
+                SimpleOsImageLayoutKind.KernelOnly,
+                "src/os/kernel/arch/x86_32/boot.spl",
+                "src/os/kernel/arch/x86_32/linker.ld",
+                "build/os/simpleos_x86_32.elf",
+                "128M",
+                "",
+                ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+                10000,
+                [],
+                [],
+                "",
+                "build/os/simpleos_x86_32.elf"
+            ),
+            qemu_acceptance_lane: _lane_contract(
+                "x86_32-smoke",
+                SimpleOsLaneKind.Smoke,
+                SimpleOsFirmwareContractKind.LimineBios,
+                SimpleOsImageLayoutKind.KernelOnly,
+                "src/os/kernel/arch/x86_32/boot.spl",
+                "src/os/kernel/arch/x86_32/linker.ld",
+                "build/os/simpleos_x86_32.elf",
+                "128M",
+                "",
+                ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+                10000,
+                [],
+                [],
+                "",
+                "build/os/simpleos_x86_32.elf"
+            ),
+            board_lane: nil,
             source_roots: ["src", "examples"],
             boot_c_sources: ["examples/simple_os/arch/x86_32/boot/baremetal_stubs.c"],
             boot_asm_sources: ["examples/simple_os/arch/x86_32/boot/crt0.s"],
@@ -217,15 +471,78 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             qemu_cpu: "cortex-a72",
             qemu_serial_kind: "pl011",
             qemu_serial_base: 0x09000000u64,
+            boot_firmware_contract: SimpleOsFirmwareContractKind.RawLoader,
+            default_image_layout: SimpleOsImageLayoutKind.VirtioFat32,
+            board_adapter_id: "arm64_u_boot_dtb_sbc",
             linker_script: "src/os/kernel/arch/arm64/linker.ld",
             default_entry: "src/os/kernel/arch/arm64/boot.spl",
             output: "build/os/simpleos_aarch64.elf",
             platform_slug: "arm64",
             kernel_output: "build/os/simpleos_aarch64.elf",
             disk_image_output: "build/os/fat32-arm64.img",
+            staged_toolchain_apps: _arm_toolchain_apps(),
+            qemu_smoke_lane: _lane_contract(
+                "arm64-smoke",
+                SimpleOsLaneKind.Smoke,
+                SimpleOsFirmwareContractKind.RawLoader,
+                SimpleOsImageLayoutKind.KernelOnly,
+                "src/os/kernel/arch/arm64/boot.spl",
+                "src/os/kernel/arch/arm64/linker.ld",
+                "build/os/simpleos_aarch64.elf",
+                "128M",
+                "",
+                [],
+                10000,
+                [],
+                [],
+                "",
+                "build/os/simpleos_aarch64.elf"
+            ),
+            qemu_acceptance_lane: _lane_contract(
+                "arm64-virtio-fat32-smf",
+                SimpleOsLaneKind.FsExec,
+                SimpleOsFirmwareContractKind.RawLoader,
+                SimpleOsImageLayoutKind.VirtioFat32,
+                "examples/simple_os/arch/arm64/fs_exec_entry.spl",
+                "examples/simple_os/arch/arm64/fs_exec_linker.ld",
+                "build/os/simpleos_arm64_fs_exec.elf",
+                "384M",
+                "",
+                [
+                    "-global", "virtio-mmio.force-legacy=false",
+                    "-drive", "file=build/os/fat32-arm64.img,if=none,id=armdisk,format=raw",
+                    "-device", "virtio-blk-device,drive=armdisk",
+                    "-semihosting-config", "enable=on,target=native"
+                ],
+                60000,
+                _arm_toolchain_apps(),
+                [],
+                "",
+                "build/os/fat32-arm64.img"
+            ),
+            board_lane: _lane_contract(
+                "arm64-u-boot-dtb-board",
+                SimpleOsLaneKind.BoardCompileSmoke,
+                SimpleOsFirmwareContractKind.UBootDtb,
+                SimpleOsImageLayoutKind.BoardBundle,
+                "examples/simple_os/arch/arm64/fs_exec_entry.spl",
+                "examples/simple_os/arch/arm64/fs_exec_linker.ld",
+                "build/os/simpleos_arm64_fs_exec.elf",
+                "",
+                "",
+                [],
+                0,
+                _arm_toolchain_apps(),
+                [],
+                "arm64_u_boot_dtb_sbc",
+                "build/os/fat32-arm64.img"
+            ),
             source_roots: ["src", "examples"],
             boot_c_sources: ["examples/simple_os/arch/arm64/boot/baremetal_stubs.c"],
-            boot_asm_sources: ["examples/simple_os/arch/arm64/boot/crt0.S"],
+            boot_asm_sources: [
+                "examples/simple_os/arch/arm64/boot/crt0.S",
+                "src/os/kernel/arch/arm64/boot/crt0.S"
+            ],
             grandfathered_native_sources: [],
             boot_impl_kind: SimpleOsNativeImplementationKind.NativeC,
             runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
@@ -251,12 +568,56 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             qemu_cpu: "cortex-a15",
             qemu_serial_kind: "pl011",
             qemu_serial_base: 0x09000000u64,
+            boot_firmware_contract: SimpleOsFirmwareContractKind.RawLoader,
+            default_image_layout: SimpleOsImageLayoutKind.VirtioFat32,
+            board_adapter_id: "",
             linker_script: "src/os/kernel/arch/arm32/linker.ld",
             default_entry: "src/os/kernel/arch/arm32/boot.spl",
             output: "build/os/simpleos_arm32.elf",
             platform_slug: "arm32",
             kernel_output: "build/os/simpleos_arm32.elf",
             disk_image_output: "build/os/fat32-arm32.img",
+            staged_toolchain_apps: _arm_toolchain_apps(),
+            qemu_smoke_lane: _lane_contract(
+                "arm32-smoke",
+                SimpleOsLaneKind.Smoke,
+                SimpleOsFirmwareContractKind.RawLoader,
+                SimpleOsImageLayoutKind.KernelOnly,
+                "src/os/kernel/arch/arm32/boot.spl",
+                "src/os/kernel/arch/arm32/linker.ld",
+                "build/os/simpleos_arm32.elf",
+                "128M",
+                "",
+                [],
+                10000,
+                [],
+                [],
+                "",
+                "build/os/simpleos_arm32.elf"
+            ),
+            qemu_acceptance_lane: _lane_contract(
+                "arm32-virtio-fat32-smf",
+                SimpleOsLaneKind.FsExec,
+                SimpleOsFirmwareContractKind.RawLoader,
+                SimpleOsImageLayoutKind.VirtioFat32,
+                "examples/simple_os/arch/arm32/fs_exec_entry.spl",
+                "examples/simple_os/arch/arm32/fs_exec_linker.ld",
+                "build/os/simpleos_arm32_fs_exec.elf",
+                "384M",
+                "",
+                [
+                    "-global", "virtio-mmio.force-legacy=false",
+                    "-drive", "file=build/os/fat32-arm32.img,if=none,id=armdisk,format=raw",
+                    "-device", "virtio-blk-device,drive=armdisk",
+                    "-semihosting-config", "enable=on,target=native"
+                ],
+                60000,
+                _arm_toolchain_apps(),
+                [],
+                "",
+                "build/os/fat32-arm32.img"
+            ),
+            board_lane: nil,
             source_roots: ["src", "examples"],
             boot_c_sources: ["examples/simple_os/arch/arm32/boot/baremetal_stubs.c"],
             boot_asm_sources: ["examples/simple_os/arch/arm32/boot/crt0.s"],
@@ -285,16 +646,81 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             qemu_cpu: "rv64",
             qemu_serial_kind: "ns16550",
             qemu_serial_base: 0x10000000u64,
+            boot_firmware_contract: SimpleOsFirmwareContractKind.OpenSbi,
+            default_image_layout: SimpleOsImageLayoutKind.HostedVirtioFat32,
+            board_adapter_id: "mlk_s02_100t",
             linker_script: "src/os/kernel/arch/riscv64/linker.ld",
             default_entry: "src/os/kernel/arch/riscv64/boot.spl",
             output: "build/os/simpleos_riscv64.elf",
             platform_slug: "riscv64",
             kernel_output: "build/os/simpleos_riscv64.elf",
             disk_image_output: "build/os/fat32-riscv64.img",
+            staged_toolchain_apps: _riscv_toolchain_apps(),
+            qemu_smoke_lane: _lane_contract(
+                "riscv64-smoke",
+                SimpleOsLaneKind.Smoke,
+                SimpleOsFirmwareContractKind.OpenSbi,
+                SimpleOsImageLayoutKind.KernelOnly,
+                "src/os/kernel/arch/riscv64/boot.spl",
+                "src/os/kernel/arch/riscv64/linker.ld",
+                "build/os/simpleos_riscv64.elf",
+                "128M",
+                "default",
+                [],
+                10000,
+                [],
+                [],
+                "",
+                "build/os/simpleos_riscv64.elf"
+            ),
+            qemu_acceptance_lane: _lane_contract(
+                "riscv64-hosted",
+                SimpleOsLaneKind.HostedCompileSmoke,
+                SimpleOsFirmwareContractKind.OpenSbi,
+                SimpleOsImageLayoutKind.HostedVirtioFat32,
+                "examples/simple_os/arch/riscv64/hosted_entry.spl",
+                "examples/simple_os/arch/riscv64/linker.ld",
+                "build/os/simpleos_riscv64_hosted.elf",
+                "1024M",
+                "default",
+                [
+                    "-bios", "default",
+                    "-global", "virtio-mmio.force-legacy=false",
+                    "-drive", "file=build/os/fat32-riscv64.img,if=none,id=rvdisk,format=raw",
+                    "-device", "virtio-blk-device,drive=rvdisk",
+                    "-netdev", "user,id=n0,hostfwd=tcp::2222-:22,hostfwd=tcp::8080-:80",
+                    "-device", "virtio-net-pci,netdev=n0,disable-legacy=on"
+                ],
+                120000,
+                _riscv_toolchain_apps(),
+                ["HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust"],
+                "",
+                "build/os/fat32-riscv64.img"
+            ),
+            board_lane: _lane_contract(
+                "riscv64-mlk-s02-100t",
+                SimpleOsLaneKind.BoardCompileSmoke,
+                SimpleOsFirmwareContractKind.HostedPayload,
+                SimpleOsImageLayoutKind.BoardBundle,
+                "examples/simple_os/arch/riscv64/hosted_entry.spl",
+                "examples/simple_os/arch/riscv64/linker.ld",
+                "build/os/simpleos_riscv64_hosted.elf",
+                "",
+                "",
+                [],
+                0,
+                _riscv_toolchain_apps(),
+                ["HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust"],
+                "mlk_s02_100t",
+                "bin/simple run src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl -- --board=mlk_s02_100t <out-dir>"
+            ),
             source_roots: ["src", "examples"],
             boot_c_sources: [],
             boot_asm_sources: [],
-            grandfathered_native_sources: [],
+            grandfathered_native_sources: [
+                "examples/simple_os/arch/riscv64/boot/baremetal_stubs.c",
+                "examples/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c"
+            ],
             boot_impl_kind: SimpleOsNativeImplementationKind.EmbeddedAsm,
             runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
             standalone_asm_policy: SimpleOsStandaloneAsmPolicy.EntryStubsOnly,
@@ -319,16 +745,62 @@ fn simpleos_platform_targets() -> [SimpleOsPlatformBuildTarget]:
             qemu_cpu: "rv32",
             qemu_serial_kind: "ns16550",
             qemu_serial_base: 0x10000000u64,
+            boot_firmware_contract: SimpleOsFirmwareContractKind.OpenSbi,
+            default_image_layout: SimpleOsImageLayoutKind.VirtioFat32,
+            board_adapter_id: "",
             linker_script: "src/os/kernel/arch/riscv32/linker.ld",
             default_entry: "src/os/kernel/arch/riscv32/boot.spl",
             output: "build/os/simpleos_riscv32.elf",
             platform_slug: "riscv32",
             kernel_output: "build/os/simpleos_riscv32.elf",
             disk_image_output: "build/os/fat32-riscv32.img",
+            staged_toolchain_apps: _riscv_toolchain_apps(),
+            qemu_smoke_lane: _lane_contract(
+                "riscv32-smoke",
+                SimpleOsLaneKind.Smoke,
+                SimpleOsFirmwareContractKind.OpenSbi,
+                SimpleOsImageLayoutKind.KernelOnly,
+                "src/os/kernel/arch/riscv32/boot.spl",
+                "src/os/kernel/arch/riscv32/linker.ld",
+                "build/os/simpleos_riscv32.elf",
+                "128M",
+                "none",
+                [],
+                10000,
+                [],
+                [],
+                "",
+                "build/os/simpleos_riscv32.elf"
+            ),
+            qemu_acceptance_lane: _lane_contract(
+                "riscv32-virtio-fat32-smf",
+                SimpleOsLaneKind.FsExec,
+                SimpleOsFirmwareContractKind.OpenSbi,
+                SimpleOsImageLayoutKind.VirtioFat32,
+                "examples/simple_os/arch/riscv32/smoke_entry.spl",
+                "examples/simple_os/arch/riscv32/linker.ld",
+                "build/os/simpleos_riscv32_smf_fs.elf",
+                "256M",
+                "none",
+                [
+                    "-bios", "none",
+                    "-global", "virtio-mmio.force-legacy=false",
+                    "-drive", "file=build/os/fat32-riscv32.img,if=none,id=rvdisk,format=raw",
+                    "-device", "virtio-blk-device,drive=rvdisk"
+                ],
+                60000,
+                _riscv_toolchain_apps(),
+                [],
+                "",
+                "build/os/fat32-riscv32.img"
+            ),
+            board_lane: nil,
             source_roots: ["src", "examples"],
             boot_c_sources: [],
             boot_asm_sources: [],
-            grandfathered_native_sources: [],
+            grandfathered_native_sources: [
+                "examples/simple_os/arch/riscv32/boot/baremetal_stubs.c"
+            ],
             boot_impl_kind: SimpleOsNativeImplementationKind.EmbeddedAsm,
             runtime_impl_kind: SimpleOsNativeImplementationKind.Simple,
             standalone_asm_policy: SimpleOsStandaloneAsmPolicy.EntryStubsOnly,
@@ -479,3 +951,63 @@ fn simpleos_platform_standalone_asm_policy(name: text) -> SimpleOsStandaloneAsmP
     if val target = simpleos_platform_target_by_name(name):
         return target.standalone_asm_policy
     SimpleOsStandaloneAsmPolicy.BroadNativeSurface
+
+fn simpleos_platform_firmware_contract(name: text) -> SimpleOsFirmwareContractKind:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.boot_firmware_contract
+    SimpleOsFirmwareContractKind.LimineBios
+
+fn simpleos_platform_image_layout(name: text) -> SimpleOsImageLayoutKind:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.default_image_layout
+    SimpleOsImageLayoutKind.KernelOnly
+
+fn simpleos_platform_board_adapter_id(name: text) -> text:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.board_adapter_id
+    ""
+
+fn simpleos_platform_staged_toolchain_app_names(name: text) -> [text]:
+    if val target = simpleos_platform_target_by_name(name):
+        var names: [text] = []
+        for app in target.staged_toolchain_apps:
+            names.push(app.app_name)
+        return names
+    []
+
+fn simpleos_platform_qemu_smoke_lane(name: text) -> SimpleOsLaneContract:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.qemu_smoke_lane
+    _lane_contract(
+        "unknown-smoke",
+        SimpleOsLaneKind.Smoke,
+        SimpleOsFirmwareContractKind.LimineBios,
+        SimpleOsImageLayoutKind.KernelOnly,
+        "src/os/kernel/arch/x86_64/boot.spl",
+        "src/os/kernel/arch/x86_64/linker.ld",
+        "build/os/simpleos_unknown.elf",
+        "128M",
+        "",
+        [],
+        10000,
+        [],
+        [],
+        "",
+        "build/os/simpleos_unknown.elf"
+    )
+
+fn simpleos_platform_qemu_acceptance_lane(name: text) -> SimpleOsLaneContract:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.qemu_acceptance_lane
+    simpleos_platform_qemu_smoke_lane(name)
+
+fn simpleos_platform_qemu_acceptance_required_markers(name: text) -> [text]:
+    simpleos_platform_qemu_acceptance_lane(name).required_serial_markers
+
+fn simpleos_platform_qemu_acceptance_timeout_ms(name: text) -> i64:
+    simpleos_platform_qemu_acceptance_lane(name).timeout_ms
+
+fn simpleos_platform_board_lane(name: text) -> SimpleOsLaneContract?:
+    if val target = simpleos_platform_target_by_name(name):
+        return target.board_lane
+    nil

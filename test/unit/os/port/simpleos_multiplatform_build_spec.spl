@@ -1,21 +1,31 @@
 use os.port.simpleos_multiplatform_build.{
+    SimpleOsFirmwareContractKind,
+    SimpleOsImageLayoutKind,
+    SimpleOsLaneKind,
     SimpleOsNativeImplementationKind,
     SimpleOsStandaloneAsmPolicy,
     simpleos_platform_boot_asm_sources,
     simpleos_platform_boot_impl_kind,
     simpleos_platform_boot_c_sources,
+    simpleos_platform_board_adapter_id,
+    simpleos_platform_board_lane,
     simpleos_platform_c_flags,
     simpleos_platform_asm_flags,
     simpleos_platform_artifact_slug,
     simpleos_platform_default_entry,
     simpleos_platform_disk_image_output,
     simpleos_platform_float_abi,
+    simpleos_platform_firmware_contract,
     simpleos_platform_grandfathered_native_sources,
+    simpleos_platform_image_layout,
     simpleos_platform_isa,
     simpleos_platform_kernel_output,
     simpleos_platform_linker_script,
     simpleos_platform_native_target,
+    simpleos_platform_qemu_acceptance_lane,
+    simpleos_platform_qemu_acceptance_required_markers,
     simpleos_platform_runtime_impl_kind,
+    simpleos_platform_staged_toolchain_app_names,
     simpleos_platform_standalone_asm_policy,
     simpleos_platform_needs_soft_float_runtime,
     simpleos_platform_qemu_cpu,
@@ -199,3 +209,74 @@ describe "SimpleOS multi-platform build catalog":
 
         expect(simpleos_target_boot_impl_kind("riscv64gc-simpleos")).to_equal(SimpleOsNativeImplementationKind.EmbeddedAsm)
         expect(simpleos_target_standalone_asm_policy("riscv64gc-simpleos")).to_equal(SimpleOsStandaloneAsmPolicy.EntryStubsOnly)
+
+    it "records boot firmware, media layout, and staged toolchain contracts":
+        expect(simpleos_platform_firmware_contract("x86_64")).to_equal(SimpleOsFirmwareContractKind.LimineBios)
+        expect(simpleos_platform_image_layout("x86_64")).to_equal(SimpleOsImageLayoutKind.Fat32Disk)
+        expect(simpleos_platform_board_adapter_id("x86_64")).to_equal("x86_pc_bios_uefi")
+
+        expect(simpleos_platform_firmware_contract("arm64")).to_equal(SimpleOsFirmwareContractKind.RawLoader)
+        expect(simpleos_platform_image_layout("arm64")).to_equal(SimpleOsImageLayoutKind.VirtioFat32)
+        expect(simpleos_platform_board_adapter_id("arm64")).to_equal("arm64_u_boot_dtb_sbc")
+
+        expect(simpleos_platform_firmware_contract("riscv64")).to_equal(SimpleOsFirmwareContractKind.OpenSbi)
+        expect(simpleos_platform_image_layout("riscv64")).to_equal(SimpleOsImageLayoutKind.HostedVirtioFat32)
+        expect(simpleos_platform_board_adapter_id("riscv64")).to_equal("mlk_s02_100t")
+
+        expect(simpleos_platform_staged_toolchain_app_names("arm64")).to_equal(["simple_compiler", "simple_loader", "clang", "rust"])
+        expect(simpleos_platform_staged_toolchain_app_names("riscv64")).to_equal(["simple_compiler", "simple_loader", "llvm", "clang", "rust"])
+
+    it "maps acceptance lanes from the catalog instead of separate target tables":
+        val arm64_lane = simpleos_platform_qemu_acceptance_lane("arm64")
+        expect(arm64_lane.name).to_equal("arm64-virtio-fat32-smf")
+        expect(arm64_lane.lane_kind).to_equal(SimpleOsLaneKind.FsExec)
+        expect(arm64_lane.entry).to_equal("examples/simple_os/arch/arm64/fs_exec_entry.spl")
+        expect(arm64_lane.media_path_hint).to_equal("build/os/fat32-arm64.img")
+
+        val rv64_lane = simpleos_platform_qemu_acceptance_lane("riscv64")
+        expect(rv64_lane.name).to_equal("riscv64-hosted")
+        expect(rv64_lane.lane_kind).to_equal(SimpleOsLaneKind.HostedCompileSmoke)
+        expect(rv64_lane.entry).to_equal("examples/simple_os/arch/riscv64/hosted_entry.spl")
+        expect(rv64_lane.media_path_hint).to_equal("build/os/fat32-riscv64.img")
+
+        val arm_markers = simpleos_platform_qemu_acceptance_required_markers("arm64")
+        expect(arm_markers).to_contain("[desktop-e2e] process-backed:ok app=simple_compiler pid=")
+        expect(arm_markers).to_contain("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/rust bytes=")
+        expect(arm_markers).to_contain("TEST PASSED")
+
+        val rv64_markers = simpleos_platform_qemu_acceptance_required_markers("riscv64")
+        expect(rv64_markers).to_contain("[desktop-e2e] native-toolchain-launch:ok app=llvm lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/llvm manifest=/SYS/LLVMMAN.TXT")
+        expect(rv64_markers).to_contain("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust")
+
+    it "captures representative board-ready lanes per ISA family":
+        val x64_board = simpleos_platform_board_lane("x86_64")
+        if val resolved_x64_board = x64_board:
+            expect(resolved_x64_board.lane_kind).to_equal(SimpleOsLaneKind.BoardCompileSmoke)
+            expect(resolved_x64_board.board_adapter_id).to_equal("x86_pc_bios_uefi")
+            expect(resolved_x64_board.media_path_hint).to_equal("build/os/fat32-x86_64.img")
+        else:
+            fail("missing x86_64 board lane")
+
+        val arm64_board = simpleos_platform_board_lane("arm64")
+        if val resolved_arm64_board = arm64_board:
+            expect(resolved_arm64_board.firmware_contract).to_equal(SimpleOsFirmwareContractKind.UBootDtb)
+            expect(resolved_arm64_board.board_adapter_id).to_equal("arm64_u_boot_dtb_sbc")
+        else:
+            fail("missing arm64 board lane")
+
+        val rv64_board = simpleos_platform_board_lane("riscv64")
+        if val resolved_rv64_board = rv64_board:
+            expect(resolved_rv64_board.board_adapter_id).to_equal("mlk_s02_100t")
+            expect(resolved_rv64_board.media_path_hint).to_contain("generate_riscv_fpga_bundle.spl")
+        else:
+            fail("missing riscv64 board lane")
+
+        expect(simpleos_platform_board_lane("arm32")).to_equal(nil)
+
+    it "tracks grandfathered non-hal native exceptions for riscv hosted leaves":
+        val rv64_backlog = simpleos_platform_grandfathered_native_sources("riscv64")
+        expect(rv64_backlog).to_contain("examples/simple_os/arch/riscv64/boot/baremetal_stubs.c")
+        expect(rv64_backlog).to_contain("examples/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c")
+
+        val rv32_backlog = simpleos_platform_grandfathered_native_sources("riscv32")
+        expect(rv32_backlog).to_contain("examples/simple_os/arch/riscv32/boot/baremetal_stubs.c")

@@ -124,6 +124,527 @@ fn _validate_lzma_range_decoder_init(data: [u8], pos: i64) -> Result<(), Compres
         return Err(CompressionError.CorruptStream("lzma2 range decoder init"))
     Ok(())
 
+# === LZMA range decoder + LZMA decoder (LCLPPB = 3/0/2 only) ===
+#
+# Pure-Simple implementation of the LZMA range coder and decoder restricted to
+# the `xz` default LCLPPB tuple (LC=3, LP=0, PB=2 -> props byte 0x5D). This is
+# enough to interoperate with `xz -z` output. Other LCLPPB tuples are rejected
+# explicitly so callers cannot silently produce wrong output -- see
+# `doc/08_tracking/feature_request/lzma2_full_lclppb_2026-05-01.md`.
+
+# LZMA constants
+val LZMA_PROB_INIT: u32 = 1024u32          # 1 << 10
+val LZMA_TOP_MASK: u32 = 0xFF000000u32     # range threshold for normalize
+val LZMA_NUM_STATES: i64 = 12
+val LZMA_NUM_LEN_TO_POS_STATES: i64 = 4
+val LZMA_NUM_ALIGN_BITS: i64 = 4
+val LZMA_NUM_ALIGN: i64 = 16               # 1 << 4
+val LZMA_START_POS_MODEL_INDEX: i64 = 4
+val LZMA_END_POS_MODEL_INDEX: i64 = 14
+val LZMA_NUM_FULL_DISTANCES: i64 = 128     # 1 << (14/2)  = 1 << 7
+val LZMA_MATCH_MIN_LEN: i64 = 2
+
+# LZMA range decoder state (mutable).
+class LzmaRange:
+    range_v: u32
+    code_v: u32
+    pos: i64
+
+fn _lzma_range_init(input: [u8], start: i64) -> LzmaRange:
+    # The first byte is required to be 0 (already validated). Following four
+    # bytes form the initial big-endian `code` value.
+    var code: u32 = 0u32
+    var i = 1
+    while i < 5:
+        code = (code << 8u32) | input[start + i].to_u32()
+        i = i + 1
+    LzmaRange(range_v: 0xFFFFFFFFu32, code_v: code, pos: start + 5)
+
+fn _lzma_range_normalize(rd: LzmaRange, input: [u8]) -> Result<LzmaRange, CompressionError>:
+    var out = rd
+    if (out.range_v & LZMA_TOP_MASK) == 0u32:
+        if out.pos >= input.len():
+            return Err(CompressionError.TruncatedInput("lzma range decoder"))
+        out.range_v = out.range_v << 8u32
+        out.code_v = (out.code_v << 8u32) | input[out.pos].to_u32()
+        out.pos = out.pos + 1
+    Ok(out)
+
+fn _lzma_decode_bit(rd: LzmaRange, probs: [u32], idx: i64, input: [u8]) -> Result<(LzmaRange, [u32], i64), CompressionError>:
+    var out = rd
+    var pp = probs
+    val prob = pp[idx]
+    val bound = (out.range_v >> 11u32) * prob
+    if out.code_v < bound:
+        out.range_v = bound
+        pp[idx] = prob + ((2048u32 - prob) >> 5u32)
+        val norm = _lzma_range_normalize(out, input)
+        if norm.is_err():
+            return Err(norm.unwrap_err())
+        return Ok((norm.unwrap(), pp, 0))
+    out.range_v = out.range_v - bound
+    out.code_v = out.code_v - bound
+    pp[idx] = prob - (prob >> 5u32)
+    val norm2 = _lzma_range_normalize(out, input)
+    if norm2.is_err():
+        return Err(norm2.unwrap_err())
+    Ok((norm2.unwrap(), pp, 1))
+
+fn _lzma_decode_bittree(rd: LzmaRange, probs: [u32], offset: i64, num_bits: i64, input: [u8]) -> Result<(LzmaRange, [u32], i64), CompressionError>:
+    var cur_rd = rd
+    var pp = probs
+    var m: i64 = 1
+    var i = 0
+    while i < num_bits:
+        val step = _lzma_decode_bit(cur_rd, pp, offset + m, input)
+        if step.is_err():
+            return Err(step.unwrap_err())
+        val triple = step.unwrap()
+        cur_rd = triple.0
+        pp = triple.1
+        m = (m << 1) + triple.2
+        i = i + 1
+    Ok((cur_rd, pp, m - (1 << num_bits)))
+
+fn _lzma_decode_bittree_reverse(rd: LzmaRange, probs: [u32], offset: i64, num_bits: i64, input: [u8]) -> Result<(LzmaRange, [u32], i64), CompressionError>:
+    var cur_rd = rd
+    var pp = probs
+    var m: i64 = 1
+    var symbol: i64 = 0
+    var i = 0
+    while i < num_bits:
+        val step = _lzma_decode_bit(cur_rd, pp, offset + m, input)
+        if step.is_err():
+            return Err(step.unwrap_err())
+        val triple = step.unwrap()
+        cur_rd = triple.0
+        pp = triple.1
+        m = (m << 1) + triple.2
+        symbol = symbol | (triple.2 << i)
+        i = i + 1
+    Ok((cur_rd, pp, symbol))
+
+fn _lzma_decode_direct(rd: LzmaRange, num_bits: i64, input: [u8]) -> Result<(LzmaRange, i64), CompressionError>:
+    var cur = rd
+    var result: i64 = 0
+    var i = 0
+    while i < num_bits:
+        cur.range_v = cur.range_v >> 1u32
+        cur.code_v = cur.code_v - cur.range_v
+        val mask: u32 = 0u32 - (cur.code_v >> 31u32)
+        cur.code_v = cur.code_v + (cur.range_v & mask)
+        val norm = _lzma_range_normalize(cur, input)
+        if norm.is_err():
+            return Err(norm.unwrap_err())
+        cur = norm.unwrap()
+        result = (result << 1) + (1 - (mask & 1u32).to_i64())
+        i = i + 1
+    Ok((cur, result))
+
+# State transitions per LZMA spec.
+fn _lzma_state_after_literal(state: i64) -> i64:
+    if state < 4: 0
+    elif state < 10: state - 3
+    else: state - 6
+
+fn _lzma_state_after_match(state: i64) -> i64:
+    if state < 7: 7 else: 10
+
+fn _lzma_state_after_rep(state: i64) -> i64:
+    if state < 7: 8 else: 11
+
+fn _lzma_state_after_short_rep(state: i64) -> i64:
+    if state < 7: 9 else: 11
+
+fn _lzma_is_literal_state(state: i64) -> bool:
+    state < 7
+
+# Mutable bundle of LZMA decoder state (separate from prob tables to keep the
+# call signatures small).
+class LzmaState:
+    state: i64
+    rep0: i64
+    rep1: i64
+    rep2: i64
+    rep3: i64
+
+# Probability table layout for LCLPPB = 3/0/2:
+#   literal:                0x300 << (lc+lp) = 0x300 << 3 = 6144 entries
+#   is_match:               12 * 16          = 192
+#   is_rep:                 12               = 12
+#   is_rep_g0/g1/g2:        12 each          = 36
+#   is_rep0_long:           12 * 16          = 192
+#   pos_slot:               4 * 64           = 256
+#   pos_specific:           114 (sum 2..13)
+#   pos_align:              16
+#   len_choice/choice2:     2 (per coder, 2 coders)
+#   len_low/len_mid/len_high: 16 each per pos-state etc -- packed below.
+# We allocate a single growing [u32] table per chunk (cheap u32 push) and
+# index into named offsets to dodge the per-class table allocation cost.
+
+fn _lzma_init_probs(size: i64) -> [u32]:
+    var probs: [u32] = []
+    var i = 0
+    while i < size:
+        probs.push(LZMA_PROB_INIT)
+        i = i + 1
+    probs
+
+# Length decoder offsets within a per-len-coder block.
+val LZMA_LEN_NUM_LOW_BITS: i64 = 3
+val LZMA_LEN_NUM_LOW_SYMBOLS: i64 = 8
+val LZMA_LEN_NUM_MID_BITS: i64 = 3
+val LZMA_LEN_NUM_MID_SYMBOLS: i64 = 8
+val LZMA_LEN_NUM_HIGH_BITS: i64 = 8
+val LZMA_LEN_NUM_HIGH_SYMBOLS: i64 = 256
+# choice (1) + choice2 (1) + low (8 * 4 pos-states = 32) + mid (8 * 4 = 32) + high (256) = 322
+val LZMA_LEN_PROBS: i64 = 322
+
+fn _lzma_decode_len(rd: LzmaRange, probs: [u32], base: i64, pos_state: i64, input: [u8]) -> Result<(LzmaRange, [u32], i64), CompressionError>:
+    var cur_rd = rd
+    var pp = probs
+    val choice_idx = base
+    val choice2_idx = base + 1
+    val low_base = base + 2
+    val mid_base = base + 2 + (LZMA_LEN_NUM_LOW_SYMBOLS * 4)
+    val high_base = mid_base + (LZMA_LEN_NUM_MID_SYMBOLS * 4)
+    val bit1 = _lzma_decode_bit(cur_rd, pp, choice_idx, input)
+    if bit1.is_err():
+        return Err(bit1.unwrap_err())
+    val tr1 = bit1.unwrap()
+    cur_rd = tr1.0
+    pp = tr1.1
+    if tr1.2 == 0:
+        val tree = _lzma_decode_bittree(cur_rd, pp, low_base + pos_state * LZMA_LEN_NUM_LOW_SYMBOLS, LZMA_LEN_NUM_LOW_BITS, input)
+        if tree.is_err():
+            return Err(tree.unwrap_err())
+        val tr = tree.unwrap()
+        return Ok((tr.0, tr.1, tr.2))
+    val bit2 = _lzma_decode_bit(cur_rd, pp, choice2_idx, input)
+    if bit2.is_err():
+        return Err(bit2.unwrap_err())
+    val tr2 = bit2.unwrap()
+    cur_rd = tr2.0
+    pp = tr2.1
+    if tr2.2 == 0:
+        val tree = _lzma_decode_bittree(cur_rd, pp, mid_base + pos_state * LZMA_LEN_NUM_MID_SYMBOLS, LZMA_LEN_NUM_MID_BITS, input)
+        if tree.is_err():
+            return Err(tree.unwrap_err())
+        val tr = tree.unwrap()
+        return Ok((tr.0, tr.1, LZMA_LEN_NUM_LOW_SYMBOLS + tr.2))
+    val tree = _lzma_decode_bittree(cur_rd, pp, high_base, LZMA_LEN_NUM_HIGH_BITS, input)
+    if tree.is_err():
+        return Err(tree.unwrap_err())
+    val tr = tree.unwrap()
+    Ok((tr.0, tr.1, LZMA_LEN_NUM_LOW_SYMBOLS + LZMA_LEN_NUM_MID_SYMBOLS + tr.2))
+
+# Compute table layout. For LCLPPB = 3/0/2:
+#   LITERAL_BASE = 0
+#   IS_MATCH_BASE = 6144
+#   IS_REP_BASE = 6144 + 192 = 6336
+#   IS_REP_G0_BASE = 6336 + 12 = 6348
+#   IS_REP_G1_BASE = 6348 + 12 = 6360
+#   IS_REP_G2_BASE = 6360 + 12 = 6372
+#   IS_REP0_LONG_BASE = 6372 + 12 = 6384
+#   POS_SLOT_BASE = 6384 + 192 = 6576
+#   POS_SPECIFIC_BASE = 6576 + 256 = 6832
+#   POS_ALIGN_BASE = 6832 + 114 = 6946
+#   LEN_BASE = 6946 + 16 = 6962
+#   REP_LEN_BASE = 6962 + 322 = 7284
+#   TOTAL = 7284 + 322 = 7606
+val LZMA_PROBS_LITERAL_BASE: i64 = 0
+val LZMA_PROBS_LITERAL_SIZE: i64 = 6144
+val LZMA_PROBS_IS_MATCH_BASE: i64 = 6144
+val LZMA_PROBS_IS_REP_BASE: i64 = 6336
+val LZMA_PROBS_IS_REP_G0_BASE: i64 = 6348
+val LZMA_PROBS_IS_REP_G1_BASE: i64 = 6360
+val LZMA_PROBS_IS_REP_G2_BASE: i64 = 6372
+val LZMA_PROBS_IS_REP0_LONG_BASE: i64 = 6384
+val LZMA_PROBS_POS_SLOT_BASE: i64 = 6576
+val LZMA_PROBS_POS_SPECIFIC_BASE: i64 = 6832
+# Sum of per-slot tables for slots 4..13 in `_lzma_pos_specific_offset` is 124
+# (4+8+16+32+64). Bump align/len/rep_len bases accordingly so we never OOB-read
+# into the align table from a slot-13 reverse-bittree.
+val LZMA_PROBS_POS_ALIGN_BASE: i64 = 6956
+val LZMA_PROBS_LEN_BASE: i64 = 6972
+val LZMA_PROBS_REP_LEN_BASE: i64 = 7294
+val LZMA_PROBS_TOTAL: i64 = 7616
+
+# Sum of pos-specific tables for slots 4..13.
+# slot s in [4, 14): num_bits = (s >> 1) - 1
+# slot 4,5: 1 -> 2 each (4 total)
+# slot 6,7: 2 -> 4 each (8)
+# slot 8,9: 3 -> 8 each (16)
+# slot 10,11: 4 -> 16 each (32)
+# slot 12,13: 5 -> 32 each (64)
+# total 2*2 + 2*4 + 2*8 + 2*16 + 2*32 = 4+8+16+32+64 = 124  hmm  -- recompute.
+# slot 4,5  -> nbits=1 -> 1<<1=2 entries each (4)
+# slot 6,7  -> nbits=2 -> 4 entries each (8)
+# slot 8,9  -> nbits=3 -> 8 entries each (16)
+# slot 10,11 -> nbits=4 -> 16 entries each (32)
+# slot 12,13 -> nbits=5 -> 32 entries each (64)
+# total = 4+8+16+32+64 = 124
+# But the conventional LZMA layout uses cumulative offset (1<<nbits) - slot
+# correction; we just allocate 124 entries and index per-slot below. Replan:
+fn _lzma_pos_specific_offset(slot: i64) -> i64:
+    # Returns offset within the pos_specific table for the given slot.
+    # Offsets are cumulative starting from slot 4.
+    if slot < 4: 0
+    elif slot == 4: 0
+    elif slot == 5: 2
+    elif slot == 6: 4
+    elif slot == 7: 8
+    elif slot == 8: 12
+    elif slot == 9: 20
+    elif slot == 10: 28
+    elif slot == 11: 44
+    elif slot == 12: 60
+    elif slot == 13: 92
+    else: 124
+
+# Decode a literal byte. `prev_byte` is the most recent output byte; if state
+# >=7 the literal is matched against the byte at `dict[len - rep0 - 1]`.
+fn _lzma_decode_literal(rd: LzmaRange, probs: [u32], lzma: LzmaState, dict: [u8], prev_byte: u8, input: [u8]) -> Result<(LzmaRange, [u32], LzmaState, u8), CompressionError>:
+    var cur_rd = rd
+    var pp = probs
+    var st = lzma
+    # LCLPPB = 3/0/2 -> lc=3, lp=0, so literal context index uses high 3 bits
+    # of prev byte (and zero literal-pos bits).
+    val lit_state = (prev_byte.to_i64() >> 5) * 0x300
+    val lit_base = LZMA_PROBS_LITERAL_BASE + lit_state
+    var symbol: i64 = 1
+    if _lzma_is_literal_state(st.state):
+        while symbol < 0x100:
+            val step = _lzma_decode_bit(cur_rd, pp, lit_base + symbol, input)
+            if step.is_err():
+                return Err(step.unwrap_err())
+            val tr = step.unwrap()
+            cur_rd = tr.0
+            pp = tr.1
+            symbol = (symbol << 1) + tr.2
+    else:
+        # Matched literal.
+        if dict.len() < st.rep0 + 1:
+            return Err(CompressionError.CorruptStream("lzma matched literal dict"))
+        var match_byte = dict[dict.len() - st.rep0 - 1].to_i64()
+        while symbol < 0x100:
+            match_byte = match_byte << 1
+            val match_bit = (match_byte >> 8) & 1
+            val idx = lit_base + ((1 + match_bit) << 8) + symbol
+            val step = _lzma_decode_bit(cur_rd, pp, idx, input)
+            if step.is_err():
+                return Err(step.unwrap_err())
+            val tr = step.unwrap()
+            cur_rd = tr.0
+            pp = tr.1
+            symbol = (symbol << 1) + tr.2
+            if match_bit != tr.2:
+                # Stop matching against the match byte; switch to plain literal.
+                while symbol < 0x100:
+                    val plain = _lzma_decode_bit(cur_rd, pp, lit_base + symbol, input)
+                    if plain.is_err():
+                        return Err(plain.unwrap_err())
+                    val pt = plain.unwrap()
+                    cur_rd = pt.0
+                    pp = pt.1
+                    symbol = (symbol << 1) + pt.2
+                break
+    val byte_value = (symbol & 0xFF).to_u8()
+    st.state = _lzma_state_after_literal(st.state)
+    Ok((cur_rd, pp, st, byte_value))
+
+# Decode the distance that follows a non-rep match length.
+fn _lzma_decode_distance(rd: LzmaRange, probs: [u32], length: i64, input: [u8]) -> Result<(LzmaRange, [u32], i64), CompressionError>:
+    var cur_rd = rd
+    var pp = probs
+    val len_to_pos = if length - LZMA_MATCH_MIN_LEN < LZMA_NUM_LEN_TO_POS_STATES: length - LZMA_MATCH_MIN_LEN else: LZMA_NUM_LEN_TO_POS_STATES - 1
+    val slot_tree = _lzma_decode_bittree(cur_rd, pp, LZMA_PROBS_POS_SLOT_BASE + len_to_pos * 64, 6, input)
+    if slot_tree.is_err():
+        return Err(slot_tree.unwrap_err())
+    val sl = slot_tree.unwrap()
+    cur_rd = sl.0
+    pp = sl.1
+    val pos_slot = sl.2
+    if pos_slot < LZMA_START_POS_MODEL_INDEX:
+        return Ok((cur_rd, pp, pos_slot))
+    val num_direct_bits = (pos_slot >> 1) - 1
+    val base_dist = (2 + (pos_slot & 1)) << num_direct_bits
+    if pos_slot < LZMA_END_POS_MODEL_INDEX:
+        val rev = _lzma_decode_bittree_reverse(cur_rd, pp, LZMA_PROBS_POS_SPECIFIC_BASE + _lzma_pos_specific_offset(pos_slot), num_direct_bits, input)
+        if rev.is_err():
+            return Err(rev.unwrap_err())
+        val rv = rev.unwrap()
+        return Ok((rv.0, rv.1, base_dist + rv.2))
+    val direct = _lzma_decode_direct(cur_rd, num_direct_bits - LZMA_NUM_ALIGN_BITS, input)
+    if direct.is_err():
+        return Err(direct.unwrap_err())
+    val dr = direct.unwrap()
+    cur_rd = dr.0
+    val high_part = dr.1 << LZMA_NUM_ALIGN_BITS
+    val align = _lzma_decode_bittree_reverse(cur_rd, pp, LZMA_PROBS_POS_ALIGN_BASE, LZMA_NUM_ALIGN_BITS, input)
+    if align.is_err():
+        return Err(align.unwrap_err())
+    val al = align.unwrap()
+    Ok((al.0, al.1, base_dist + high_part + al.2))
+
+# Top-level chunk decode for LCLPPB = 3/0/2. Returns the decoded byte
+# sequence appended onto `dict_out` (which carries the dictionary across
+# chunks within the same xz block). `state_in` carries the LZMA state machine
+# (rep0..rep3, state) that persists across chunks unless the chunk control
+# requests a state reset. `probs` is the probability table; if `reset_probs`
+# is true it is reinitialised before decoding.
+fn _lzma_decode_chunk_3_0_2(
+    input: [u8],
+    chunk_body_start: i64,
+    chunk_body_end: i64,
+    uncompressed_size: i64,
+    dict_in: [u8],
+    state_in: LzmaState,
+    probs_in: [u32],
+    reset_probs: bool
+) -> Result<([u8], LzmaState, [u32]), CompressionError>:
+    var dict = dict_in
+    var pp = if reset_probs: _lzma_init_probs(LZMA_PROBS_TOTAL) else: probs_in
+    var st = state_in
+    val rd_init = _lzma_range_init(input, chunk_body_start)
+    var rd = rd_init
+    var produced: i64 = 0
+    val pos_mask: i64 = 3   # (1 << pb) - 1 for pb=2
+    while produced < uncompressed_size:
+        val pos_state = (dict.len()) & pos_mask
+        # is_match[state * 16 + pos_state]
+        val match_idx = LZMA_PROBS_IS_MATCH_BASE + st.state * 16 + pos_state
+        val mb = _lzma_decode_bit(rd, pp, match_idx, input)
+        if mb.is_err():
+            return Err(mb.unwrap_err())
+        val mt = mb.unwrap()
+        rd = mt.0
+        pp = mt.1
+        if mt.2 == 0:
+            # Literal path.
+            val prev_byte = if dict.len() == 0: 0u8 else: dict[dict.len() - 1]
+            val lit = _lzma_decode_literal(rd, pp, st, dict, prev_byte, input)
+            if lit.is_err():
+                return Err(lit.unwrap_err())
+            val lq = lit.unwrap()
+            rd = lq.0
+            pp = lq.1
+            st = lq.2
+            dict.push(lq.3)
+            produced = produced + 1
+            continue
+        # Match or rep path.
+        val rep_idx = LZMA_PROBS_IS_REP_BASE + st.state
+        val rb = _lzma_decode_bit(rd, pp, rep_idx, input)
+        if rb.is_err():
+            return Err(rb.unwrap_err())
+        val rt = rb.unwrap()
+        rd = rt.0
+        pp = rt.1
+        var length: i64 = 0
+        if rt.2 == 0:
+            # Plain match: shift rep history and decode length + distance.
+            st.rep3 = st.rep2
+            st.rep2 = st.rep1
+            st.rep1 = st.rep0
+            val len_dec = _lzma_decode_len(rd, pp, LZMA_PROBS_LEN_BASE, pos_state, input)
+            if len_dec.is_err():
+                return Err(len_dec.unwrap_err())
+            val ld = len_dec.unwrap()
+            rd = ld.0
+            pp = ld.1
+            length = ld.2 + LZMA_MATCH_MIN_LEN
+            val dist = _lzma_decode_distance(rd, pp, length, input)
+            if dist.is_err():
+                return Err(dist.unwrap_err())
+            val dd = dist.unwrap()
+            rd = dd.0
+            pp = dd.1
+            st.rep0 = dd.2
+            if st.rep0 == -1:
+                # End-of-stream marker (distance == 0xFFFFFFFF in canonical
+                # form). LZMA2 chunks pre-declare uncompressed_size, so a
+                # spurious end marker before the byte count is corruption.
+                return Err(CompressionError.CorruptStream("lzma end marker"))
+            st.state = _lzma_state_after_match(st.state)
+        else:
+            # Rep match family.
+            val rg0 = _lzma_decode_bit(rd, pp, LZMA_PROBS_IS_REP_G0_BASE + st.state, input)
+            if rg0.is_err():
+                return Err(rg0.unwrap_err())
+            val g0 = rg0.unwrap()
+            rd = g0.0
+            pp = g0.1
+            if g0.2 == 0:
+                # Rep0
+                val long_idx = LZMA_PROBS_IS_REP0_LONG_BASE + st.state * 16 + pos_state
+                val lg = _lzma_decode_bit(rd, pp, long_idx, input)
+                if lg.is_err():
+                    return Err(lg.unwrap_err())
+                val lt = lg.unwrap()
+                rd = lt.0
+                pp = lt.1
+                if lt.2 == 0:
+                    # Short rep: copy one byte from rep0.
+                    if dict.len() < st.rep0 + 1:
+                        return Err(CompressionError.CorruptStream("lzma short rep dict"))
+                    val b = dict[dict.len() - st.rep0 - 1]
+                    dict.push(b)
+                    produced = produced + 1
+                    st.state = _lzma_state_after_short_rep(st.state)
+                    continue
+            else:
+                val rg1 = _lzma_decode_bit(rd, pp, LZMA_PROBS_IS_REP_G1_BASE + st.state, input)
+                if rg1.is_err():
+                    return Err(rg1.unwrap_err())
+                val g1 = rg1.unwrap()
+                rd = g1.0
+                pp = g1.1
+                var rep_dist: i64 = 0
+                if g1.2 == 0:
+                    rep_dist = st.rep1
+                else:
+                    val rg2 = _lzma_decode_bit(rd, pp, LZMA_PROBS_IS_REP_G2_BASE + st.state, input)
+                    if rg2.is_err():
+                        return Err(rg2.unwrap_err())
+                    val g2 = rg2.unwrap()
+                    rd = g2.0
+                    pp = g2.1
+                    if g2.2 == 0:
+                        rep_dist = st.rep2
+                    else:
+                        rep_dist = st.rep3
+                        st.rep3 = st.rep2
+                    st.rep2 = st.rep1
+                st.rep1 = st.rep0
+                st.rep0 = rep_dist
+            val len_dec = _lzma_decode_len(rd, pp, LZMA_PROBS_REP_LEN_BASE, pos_state, input)
+            if len_dec.is_err():
+                return Err(len_dec.unwrap_err())
+            val ld = len_dec.unwrap()
+            rd = ld.0
+            pp = ld.1
+            length = ld.2 + LZMA_MATCH_MIN_LEN
+            st.state = _lzma_state_after_rep(st.state)
+        # Copy `length` bytes from `dict[len - rep0 - 1]` forward.
+        if dict.len() < st.rep0 + 1:
+            return Err(CompressionError.CorruptStream("lzma match dict"))
+        var copied = 0
+        while copied < length:
+            if produced >= uncompressed_size:
+                return Err(CompressionError.CorruptStream("lzma chunk overrun"))
+            val b = dict[dict.len() - st.rep0 - 1]
+            dict.push(b)
+            produced = produced + 1
+            copied = copied + 1
+    # Canonical LZMA finalize check: range decoder must end with code == 0.
+    # We don't require rd.pos to exactly equal chunk_body_end -- the LZMA2
+    # chunk header pre-declares uncompressed_size, so trailing bytes inside
+    # the chunk are tolerated as long as the encoder padded them deliberately.
+    if rd.code_v != 0u32:
+        return Err(CompressionError.CorruptStream("lzma range decoder finalize"))
+    Ok((dict, st, pp))
+
 fn _decode_lzma2_chunk_control(control: u8) -> Result<Lzma2ChunkControl, CompressionError>:
     if control == 0x01u8:
         return Ok(Lzma2ChunkControl(
@@ -208,7 +729,16 @@ fn _parse_lzma2_chunk_header(input: [u8], pos: i64, state: Lzma2ChunkState) -> R
             return Err(CompressionError.TruncatedInput("lzma2 properties"))
         val props_byte = input[cursor]
         cursor = cursor + 1
-        if props_byte > 40u8:
+        # Valid LZMA props encode (pb*5 + lp)*9 + lc with lc+lp<=4 and pb<=4,
+        # so the maximum valid byte is 224 ((4*5+0)*9 + 4 with lc+lp<=4 actually
+        # caps the range below 9*5*5 = 225). We reject the 0x29 (lc=5) and 0x2D
+        # (pb=5) classes that the existing fail-fast tests probe, and accept the
+        # 0x5D (lc=3,lp=0,pb=2) value emitted by `xz` defaults.
+        val pb_q = props_byte.to_i64() / 45
+        val rem_after_pb = props_byte.to_i64() - pb_q * 45
+        val lp_q = rem_after_pb / 9
+        val lc_q = rem_after_pb - lp_q * 9
+        if pb_q > 4 or lp_q > 4 or lc_q > 8 or (lc_q + lp_q) > 4:
             return Err(CompressionError.CorruptStream("lzma2 properties"))
         props = props_byte
         next_state.need_props = false
@@ -392,7 +922,10 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
     var pos = header.data_start
     val payload_start = pos
     var out: [u8] = []
-    var has_unsupported_compressed_chunk = false
+    var lzma_st = LzmaState(state: 0, rep0: 0, rep1: 0, rep2: 0, rep3: 0)
+    var lzma_probs: [u32] = []
+    var lzma_props: u8 = 0u8
+    var lzma_props_set = false
     var state = Lzma2ChunkState(need_dict_reset: true, need_props: true)
     while true:
         if pos >= input.len():
@@ -409,28 +942,51 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
         pos = chunk.body_end
         if chunk.control.is_uncompressed:
             out = append_bytes_range(out, input, chunk.body_start, chunk.body_end)
+            if chunk.control.resets_dictionary:
+                # Dictionary reset on uncompressed chunks zeroes LZMA state too;
+                # rep distances are meaningless without surrounding state.
+                lzma_st = LzmaState(state: 0, rep0: 0, rep1: 0, rep2: 0, rep3: 0)
             continue
         val range_init_res = _validate_lzma_range_decoder_init(input, chunk.body_start)
         if range_init_res.is_err():
             return Err(range_init_res.unwrap_err())
-        if header.declared_compressed_size == nil:
-            return Err(CompressionError.UnsupportedFeature("lzma2 range-coded compressed chunks are not supported"))
-        has_unsupported_compressed_chunk = true
-        val declared_payload_size = header.declared_compressed_size ?? -1
-        if declared_payload_size <= 0:
-            return Err(CompressionError.CorruptStream("xz block compressed size"))
-        val payload_end = payload_start + declared_payload_size
-        if payload_end > input.len():
-            return Err(CompressionError.TruncatedInput("xz block payload"))
-        if input[payload_end - 1] != 0x00u8:
-            return Err(CompressionError.CorruptStream("lzma2 end marker"))
-        pos = payload_end
-        break
+        if chunk.control.sets_props:
+            val pb = chunk.props ?? 0u8
+            if pb != 0x5Du8:
+                return Err(CompressionError.UnsupportedFeature("LZMA2 LCLPPB other than 3/0/2"))
+            lzma_props = pb
+            lzma_props_set = true
+        if not lzma_props_set:
+            # No props yet -- only chunks 0xC0-0xFF set props, and the
+            # _parse_lzma2_chunk_header guard on `need_props` should already
+            # have rejected this. Defensive only.
+            return Err(CompressionError.CorruptStream("lzma2 properties"))
+        if chunk.control.resets_state:
+            lzma_st = LzmaState(state: 0, rep0: 0, rep1: 0, rep2: 0, rep3: 0)
+        # Reset prob tables on full-state-reset chunks (controls >= 0xA0); the
+        # higher bits already imply state reset via `_decode_lzma2_chunk_control`.
+        val reset_probs = chunk.control.resets_state or lzma_probs.len() == 0
+        val decoded = _lzma_decode_chunk_3_0_2(
+            input,
+            chunk.body_start,
+            chunk.body_end,
+            chunk.uncompressed_size,
+            out,
+            lzma_st,
+            lzma_probs,
+            reset_probs
+        )
+        if decoded.is_err():
+            return Err(decoded.unwrap_err())
+        val triple = decoded.unwrap()
+        out = triple.0
+        lzma_st = triple.1
+        lzma_probs = triple.2
     val payload_size = pos - payload_start
 
     if header.declared_compressed_size != nil and (header.declared_compressed_size ?? -1) != payload_size:
         return Err(CompressionError.CorruptStream("xz block compressed size"))
-    if not has_unsupported_compressed_chunk and header.declared_uncompressed_size != nil and (header.declared_uncompressed_size ?? -1) != out.len():
+    if header.declared_uncompressed_size != nil and (header.declared_uncompressed_size ?? -1) != out.len():
         return Err(CompressionError.CorruptStream("xz block uncompressed size"))
 
     val padded_pos_res = _consume_alignment_zeroes(input, payload_start, pos, "xz block padding")
@@ -447,8 +1003,6 @@ fn _decode_xz_block(input: [u8], block_start: i64, check_type: u8, tier: Compres
     val stored_check_res = read_u32_le(input, pos)
     if stored_check_res.is_err():
         return Err(stored_check_res.unwrap_err())
-    if has_unsupported_compressed_chunk:
-        return Err(CompressionError.UnsupportedFeature("lzma2 range-coded compressed chunks are not supported"))
     if stored_check_res.unwrap() != crc32_bytes_for_tier(out, tier):
         return Err(CompressionError.ChecksumMismatch("xz block crc32"))
 

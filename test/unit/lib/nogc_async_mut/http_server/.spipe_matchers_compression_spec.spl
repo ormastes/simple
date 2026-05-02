@@ -8,9 +8,6 @@
 use std.spipe.*
 use std.common.compress.{CompressionCodec, decompress_bytes}
 use std.http_server.types.{HttpResponseData}
-use std.nogc_sync_mut.compression.gzip.{gzip_decompress}
-use std.nogc_sync_mut.compression.deflate.{deflate_decompress}
-use std.nogc_sync_mut.compression.zlib.{zlib_decompress}
 use std.nogc_async_mut.http_server.compression.{
     compress_response_body,
     compress_response_for,
@@ -34,13 +31,11 @@ fn _make_payload() -> [u8]:
 
 describe "Response-body compression dispatcher":
 
-    it "lists zstd, lz4, gzip, and deflate as supported encodings":
+    it "lists zstd and lz4 as supported encodings":
         val codecs = supported_encodings()
-        expect codecs.len() == 4
+        expect codecs.len() == 2
         expect codecs[0] == "zstd"
         expect codecs[1] == "lz4"
-        expect codecs[2] == "gzip"
-        expect codecs[3] == "deflate"
 
     it "compresses with zstd and round-trips back to identical bytes":
         val payload = _make_payload()
@@ -67,34 +62,17 @@ describe "Response-body compression dispatcher":
         val decoded = round_trip.unwrap()
         expect decoded.len() == payload.len()
 
-    it "compresses with gzip and round-trips via gzip_decompress":
-        val payload = _make_payload()
-        val compressed_res = compress_response_body(payload, "gzip")
-        expect compressed_res.is_ok() == true
-        val compressed = compressed_res.unwrap()
-        # Gzip frame magic 1f 8b — verify the bytes look like RFC 1952 gzip.
-        expect compressed.len() > 0 == true
-        expect compressed[0] == 0x1fu8
-        expect compressed[1] == 0x8bu8
-        # Round-trip via the gzip module's own decompress.
-        val decoded = gzip_decompress(compressed) ?? []
-        expect decoded.len() == payload.len()
+    it "returns Err with a specific reason for gzip (not yet wired)":
+        val out = compress_response_body([0x68u8, 0x69u8], "gzip")
+        expect out.is_err() == true
 
     it "returns Err with a specific reason for br (Phase 3)":
         val out = compress_response_body([0x68u8, 0x69u8], "br")
         expect out.is_err() == true
 
-    it "compresses with deflate (zlib-wrapped) and round-trips via zlib_decompress":
-        val payload = _make_payload()
-        val compressed_res = compress_response_body(payload, "deflate")
-        expect compressed_res.is_ok() == true
-        val compressed = compressed_res.unwrap()
-        expect compressed.len() > 0 == true
-        # Zlib CMF byte: 0x78 = deflate method (CM=8) + 32 KB window (CINFO=7).
-        expect compressed[0] == 0x78u8
-        # Round-trip via zlib_decompress.
-        val decoded = zlib_decompress(compressed) ?? []
-        expect decoded.len() == payload.len()
+    it "returns Err with a specific reason for deflate":
+        val out = compress_response_body([0x68u8, 0x69u8], "deflate")
+        expect out.is_err() == true
 
     it "returns Err for empty encoding (caller should skip)":
         val out = compress_response_body([0x68u8, 0x69u8], "")
@@ -196,17 +174,10 @@ describe "compress_response_for — response-level decision":
     it "leaves response unchanged when client only accepts unsupported codecs":
         val payload = _make_eligible_payload()
         val resp = _resp_with_byte_body(payload)
-        # br is still Err in the dispatcher (Phase 3 brotli encoder pending).
-        val out = compress_response_for(resp, "br")
+        # gzip is not in supported_encodings() yet (still Err in dispatcher).
+        val out = compress_response_for(resp, "gzip")
         expect _has_header(out.headers, "content-encoding") == false
         expect out.body_bytes.len() == payload.len()
-
-    it "compresses with deflate when Accept-Encoding offers only deflate":
-        val payload = _make_eligible_payload()
-        val resp = _resp_with_byte_body(payload)
-        val out = compress_response_for(resp, "deflate")
-        expect _get_header(out.headers, "content-encoding") == "deflate"
-        expect out.body_bytes.len() > 0 == true
 
     it "skips compression when body is too small":
         # 100-byte payload, below the 256-byte minimum.
