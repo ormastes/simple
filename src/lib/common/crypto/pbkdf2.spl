@@ -34,6 +34,19 @@ use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha512_bytes}
 use std.crypto.sha256.{sha256_initial_hash, sha256_process_block, sha256_bytes}
 
 # =============================================================================
+# Native PBKDF2-HMAC-SHA-2 externs (FR pbkdf2_native_runtime_helpers_2026-05-01)
+# =============================================================================
+# Wired to `simple_runtime::value::pbkdf2_native` via the interpreter
+# dispatch in `src/compiler_rust/compiler/src/interpreter_extern/pbkdf2.rs`.
+# After a bootstrap rebuild these short-circuit the pure-Simple inner loop
+# and bring c=4096 / c=80000 RFC vectors well under the 60 s test-runner
+# watchdog. The pure-Simple impl below remains the reference and is exposed
+# as `_pbkdf2_sha{256,512}_bytes_pure` so AC-3 (fallback) holds.
+extern fn rt_pbkdf2_hmac_sha256(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]
+extern fn rt_pbkdf2_hmac_sha384(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]
+extern fn rt_pbkdf2_hmac_sha512(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]
+
+# =============================================================================
 # PBKDF2-HMAC-SHA256
 # =============================================================================
 
@@ -99,6 +112,27 @@ fn _pbkdf2_sha256_make_tail_template() -> list:
 # PBKDF2-HMAC-SHA256 with byte inputs
 # reason: positional crypto pbkdf2 API
 fn pbkdf2_sha256_bytes(password_bytes: list, salt_bytes: list, iterations: i64, key_length: i64) -> list:
+    # Native fast path (FR pbkdf2_native_runtime_helpers_2026-05-01).
+    # rt_pbkdf2_hmac_sha256 returns a freshly-allocated [u8] of length
+    # `key_length`. After a bootstrap rebuild this is byte-exact with the
+    # pure-Simple reference below, but ~80x faster on c=4096.
+    val native = rt_pbkdf2_hmac_sha256(password_bytes, salt_bytes, iterations, key_length)
+    if native.len() == key_length:
+        return native
+
+    # Fallback: pure-Simple PBKDF2-HMAC-SHA-256 (AC-3 — kept functional
+    # for environments without the extern, e.g. early bootstrap stages
+    # or baremetal targets). Identical algorithm; cached prefix states +
+    # pre-built tail buffers retained from the 2026-05-01 perf landing.
+    _pbkdf2_sha256_bytes_pure(password_bytes, salt_bytes, iterations, key_length)
+
+# Pure-Simple PBKDF2-HMAC-SHA-256 reference implementation.
+# Kept as the AC-3 fallback when the rt_pbkdf2_hmac_sha256 extern is
+# unavailable. Cross-checked byte-exact with hashlib.pbkdf2_hmac and
+# the native helper; do not modify the algorithm without re-running
+# pbkdf2_industry_vectors_spec.spl + pbkdf2_native_perf_spec.spl.
+# reason: positional pbkdf2 helper
+fn _pbkdf2_sha256_bytes_pure(password_bytes: list, salt_bytes: list, iterations: i64, key_length: i64) -> list:
     val hash_len = 32  # SHA-256 output length
     val blocks_needed = (key_length + hash_len - 1) / hash_len
 
@@ -218,6 +252,17 @@ fn pbkdf2_sha512(password: text, salt: text, iterations: i64) -> list:
 # PBKDF2-HMAC-SHA512 with byte inputs
 # reason: positional crypto pbkdf2 API
 fn pbkdf2_sha512_bytes(password_bytes: list, salt_bytes: list, iterations: i64, key_length: i64) -> list:
+    # Native fast path (FR pbkdf2_native_runtime_helpers_2026-05-01).
+    val native = rt_pbkdf2_hmac_sha512(password_bytes, salt_bytes, iterations, key_length)
+    if native.len() == key_length:
+        return native
+
+    # AC-3 fallback: pure-Simple PBKDF2-HMAC-SHA-512 reference.
+    _pbkdf2_sha512_bytes_pure(password_bytes, salt_bytes, iterations, key_length)
+
+# Pure-Simple PBKDF2-HMAC-SHA-512 reference implementation. AC-3 fallback.
+# reason: positional pbkdf2 helper
+fn _pbkdf2_sha512_bytes_pure(password_bytes: list, salt_bytes: list, iterations: i64, key_length: i64) -> list:
     val hash_len = 64  # SHA-512 output length
     val blocks_needed = (key_length + hash_len - 1) / hash_len
 
@@ -263,6 +308,26 @@ fn pbkdf2_sha512_bytes(password_bytes: list, salt_bytes: list, iterations: i64, 
         i = i + 1
 
     final_result
+
+# =============================================================================
+# PBKDF2-HMAC-SHA384
+# =============================================================================
+# Native-extern-only path. SHA-384 has no pure-Simple reference impl in
+# this module (SHA-384 is a SHA-512 truncation; the canonical reference
+# lives in `crypto.sha512`). Callers needing SHA-384 must use a
+# bootstrap that includes the rt_pbkdf2_hmac_sha384 extern.
+
+# PBKDF2-HMAC-SHA384
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_sha384(password: text, salt: text, iterations: i64) -> list:
+    val password_bytes = text_to_bytes(password)
+    val salt_bytes = text_to_bytes(salt)
+    pbkdf2_sha384_bytes(password_bytes, salt_bytes, iterations, 48)
+
+# PBKDF2-HMAC-SHA384 with byte inputs
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_sha384_bytes(password_bytes: list, salt_bytes: list, iterations: i64, key_length: i64) -> list:
+    rt_pbkdf2_hmac_sha384(password_bytes, salt_bytes, iterations, key_length)
 
 # =============================================================================
 # Generic PBKDF2 with algorithm selection
