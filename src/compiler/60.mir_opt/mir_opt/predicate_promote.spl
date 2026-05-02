@@ -1,0 +1,101 @@
+# src/compiler/60.mir_opt/mir_opt/predicate_promote.spl
+#
+# Predicate-mode promotion pass (zero-fill _z -> don't-care _x via liveness)
+#
+# Pattern: src/compiler/60.mir_opt/mir_opt/simd_lowering.spl
+# Phase:   M2 (this is a no-op scaffold; Wave F implements liveness analysis)
+# Spec:    simd_unified_architecture_detail.md C2 §1 (predication); M2 rollout
+#
+# When complete (Wave F), this pass will:
+#   - Walk every MirSimdMaskOp whose destination has SimdMaskMode.Zero (_z)
+#   - Perform liveness analysis to determine if inactive lanes are observed
+#   - Replace Zero with Undef (_x) when inactive lanes are never read
+#     (AVX-512 no-{z} default; SVE _x; RVV .tu — cheaper than zero-fill)
+#
+# Right now the pass is a TRUE no-op: it returns the module untransformed.
+# The function-level scaffold (promote_function_predicate) walks blocks and
+# logs MirSimdMaskOp counts so Wave F can drop in the analysis body.
+
+use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, LocalId, BlockId}
+
+# ============================================================================
+# Predicate-mode promotion pass entry point
+# ============================================================================
+
+fn run_predicate_promote(module: MirModule) -> MirModule:
+    """
+    Run predicate-mode promotion pass on entire module.
+
+    No-op scaffold for Wave F / M2.
+    When Wave F lands, this body gains liveness-driven _z -> _x substitution.
+    See: simd_unified_architecture_detail.md C2 §1 (Mask + predication, §1.5).
+
+    TODO(M2): drive liveness analysis on MirSimdMaskOp destination operands
+    TODO(M2): when all uses of a _z destination are overwritten before being
+              read, replace SimdMaskMode.Zero with SimdMaskMode.Undef
+    """
+    var new_functions: Dict<SymbolId, MirFunction> = {}
+
+    for symbol_id in module.functions.keys():
+        val func = module.functions[symbol_id]
+        val promoted_func = promote_function_predicate(func)
+        new_functions[symbol_id] = promoted_func
+
+    MirModule(..module, functions: new_functions)
+
+# ============================================================================
+# Function-level walk
+# ============================================================================
+
+fn promote_function_predicate(func: MirFunction) -> MirFunction:
+    """
+    Walk all blocks in a function, counting MirSimdMaskOp occurrences.
+
+    Scaffold: returns function unchanged.
+    Wave F: replace return-unchanged with liveness-driven substitution.
+
+    TODO(M2): collect def-use chains for MirSimdMaskOp destinations
+    TODO(M2): call liveness_promotes_z_to_x(dest, func) per MirSimdMaskOp
+    """
+    var new_blocks: [MirBlock] = []
+
+    for block in func.blocks:
+        val promoted_block = promote_block_predicate(block)
+        new_blocks.push(promoted_block)
+
+    MirFunction(..func, blocks: new_blocks)
+
+# ============================================================================
+# Block-level walk
+# ============================================================================
+
+fn promote_block_predicate(block: MirBlock) -> MirBlock:
+    """
+    Walk instructions in a block, identifying MirSimdMaskOp for future
+    _z -> _x promotion.
+
+    Scaffold: all instructions returned unchanged.
+    Wave F: apply the substitution when liveness confirms safety.
+
+    TODO(M2): match MirInstKind.MirSimdMaskOp; check mask mode; promote if safe
+    """
+    var new_insts: [MirInst] = []
+
+    for inst in block.instructions:
+        match inst.kind:
+            case MirSimdMaskOp(dest, lhs, rhs, op):
+                # TODO(M2): liveness check — if dest _z lanes are never observed,
+                #   emit MirSimdMaskOp(dest, lhs, rhs, op) with Undef mask mode
+                #   For now: pass through unchanged
+                new_insts.push(inst)
+
+            case _:
+                # Non-mask instruction — keep as-is
+                new_insts.push(inst)
+
+    MirBlock(
+        id: block.id,
+        label: block.label,
+        instructions: new_insts,
+        terminator: block.terminator
+    )

@@ -1,0 +1,165 @@
+# SLH-DSA — Hypertree (HT) Composition (FIPS 205 §7)
+#
+# Composes d successive XMSS subtrees of height h_prime each into a
+# total hypertree of height h = d * h_prime. The bottom-most subtree
+# signs the FORS public key; each higher subtree signs the root of the
+# subtree immediately below it. The HT signature is the concatenation
+# of d XMSS signatures, one per layer.
+#
+# Parameter set wired in: SLH-DSA-SHA2-128s
+#   d        = 7
+#   h_prime  = 9    (so h = 63)
+#
+# All functions accept (d, h_prime) explicitly so spec coverage can run
+# at reduced parameters; the public API in slh_dsa.spl freezes them
+# per FIPS 205 §11 Table 2.
+#
+# Reference: NIST FIPS 205 — §7 (Algorithms 12–13), §11.2.
+
+mod os.crypto.slh_dsa_hypertree
+
+use os.crypto.slh_dsa_wots.{
+    adrs_new, adrs_set_layer, adrs_set_tree_address,
+}
+use os.crypto.slh_dsa_xmss.{xmss_sign, xmss_pk_from_sig, xmss_node}
+
+fn _slh_n_128s() -> u64:
+    16u64
+
+fn _xmss_sig_bytes_128s(h_prime: i64) -> u64:
+    ((35 + h_prime).to_u64()) * _slh_n_128s()
+
+# ============================================================================
+# ht_sign (FIPS 205 Algorithm 12)
+# ============================================================================
+#
+# Inputs:
+#   message_n_bytes  — n-byte FORS public key (the "message" the HT signs)
+#   sk_seed, pk_seed — secret / public seeds
+#   idx_tree         — XMSS subtree index for the bottom layer (h - h_prime
+#                      bits)
+#   idx_leaf         — leaf index within the bottom XMSS subtree (h_prime
+#                      bits)
+#   d, h_prime       — hypertree shape parameters
+#
+# Output: HT signature = concat over j in 0..d-1 of XMSS_sig_j, where
+# XMSS_sig_j signs the previous layer's recovered root (or the FORS PK
+# at j=0). At each layer j>0, idx_leaf is the bottom h_prime bits of
+# idx_tree, and idx_tree shifts right by h_prime.
+
+fn ht_sign(message_n_bytes: [u8], sk_seed: [u8], pk_seed: [u8],
+           idx_tree_in: i64, idx_leaf_in: i64,
+           d: i64, h_prime: i64) -> [u8]:
+    var sig: [u8] = [0u8; 0]
+
+    # Layer 0: sign the FORS PK with the lowest XMSS subtree.
+    var adrs0 = adrs_new()
+    adrs0 = adrs_set_layer(adrs0, 0)
+    adrs0 = adrs_set_tree_address(adrs0, idx_tree_in)
+    val sig_xmss_0 = xmss_sign(message_n_bytes, sk_seed, idx_leaf_in,
+                                h_prime, pk_seed, adrs0)
+    var i: u64 = 0u64
+    while i < sig_xmss_0.len():
+        sig.push(sig_xmss_0[i])
+        i = i + 1
+
+    # Recover the root of layer 0 to use as the message for layer 1.
+    var current_root = xmss_pk_from_sig(idx_leaf_in, sig_xmss_0,
+                                         message_n_bytes, h_prime,
+                                         pk_seed, adrs0)
+    var idx_tree = idx_tree_in
+    var idx_leaf = idx_leaf_in
+
+    var j = 1
+    while j < d:
+        idx_leaf = idx_tree & ((1 << h_prime) - 1)
+        idx_tree = idx_tree >> h_prime
+        var adrs_j = adrs_new()
+        adrs_j = adrs_set_layer(adrs_j, j)
+        adrs_j = adrs_set_tree_address(adrs_j, idx_tree)
+        val sig_xmss_j = xmss_sign(current_root, sk_seed, idx_leaf,
+                                    h_prime, pk_seed, adrs_j)
+        var k: u64 = 0u64
+        while k < sig_xmss_j.len():
+            sig.push(sig_xmss_j[k])
+            k = k + 1
+        # Recover this layer's root to feed the next layer.
+        current_root = xmss_pk_from_sig(idx_leaf, sig_xmss_j, current_root,
+                                         h_prime, pk_seed, adrs_j)
+        j = j + 1
+    sig
+
+# ============================================================================
+# ht_verify (FIPS 205 Algorithm 13)
+# ============================================================================
+#
+# Walks the same chain forwards: recovers the layer-0 root from the
+# bottom XMSS sig + FORS PK, then iteratively recovers higher-layer
+# roots, returning true iff the top-layer root matches `pk_root`.
+
+fn ht_verify(message_n_bytes: [u8], signature: [u8], pk_seed: [u8],
+             idx_tree_in: i64, idx_leaf_in: i64, pk_root: [u8],
+             d: i64, h_prime: i64) -> bool:
+    val per_xmss = _xmss_sig_bytes_128s(h_prime)
+
+    # Slice layer-0 XMSS signature.
+    var sig_xmss_0: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < per_xmss:
+        sig_xmss_0.push(signature[i])
+        i = i + 1
+
+    var adrs0 = adrs_new()
+    adrs0 = adrs_set_layer(adrs0, 0)
+    adrs0 = adrs_set_tree_address(adrs0, idx_tree_in)
+    var node = xmss_pk_from_sig(idx_leaf_in, sig_xmss_0, message_n_bytes,
+                                 h_prime, pk_seed, adrs0)
+    var idx_tree = idx_tree_in
+    var idx_leaf = idx_leaf_in
+
+    var j = 1
+    while j < d:
+        idx_leaf = idx_tree & ((1 << h_prime) - 1)
+        idx_tree = idx_tree >> h_prime
+        val off: u64 = (j.to_u64()) * per_xmss
+        var sig_xmss_j: [u8] = [0u8; 0]
+        var k: u64 = 0u64
+        while k < per_xmss:
+            sig_xmss_j.push(signature[off + k])
+            k = k + 1
+        var adrs_j = adrs_new()
+        adrs_j = adrs_set_layer(adrs_j, j)
+        adrs_j = adrs_set_tree_address(adrs_j, idx_tree)
+        node = xmss_pk_from_sig(idx_leaf, sig_xmss_j, node, h_prime,
+                                 pk_seed, adrs_j)
+        j = j + 1
+
+    # node now holds the top-layer recovered root; compare with pk_root.
+    if node.len() != pk_root.len(): return false
+    var c: u64 = 0u64
+    while c < node.len():
+        if node[c] != pk_root[c]: return false
+        c = c + 1
+    true
+
+# ============================================================================
+# ht_pk_root — derive the top-layer XMSS root directly from sk_seed
+# ============================================================================
+#
+# Used by KeyGen: builds the layer-(d-1) XMSS subtree root from
+# sk_seed/pk_seed without any signature. Equivalent to xmss_node at
+# layer = d-1, tree_address = 0, height = h_prime.
+
+fn ht_pk_root(sk_seed: [u8], pk_seed: [u8],
+              d: i64, h_prime: i64) -> [u8]:
+    var adrs_top = adrs_new()
+    adrs_top = adrs_set_layer(adrs_top, d - 1)
+    adrs_top = adrs_set_tree_address(adrs_top, 0)
+    xmss_node(sk_seed, 0, h_prime, pk_seed, adrs_top)
+
+# ============================================================================
+# Convenience: total HT signature length (d * (35 + h_prime) * n)
+# ============================================================================
+
+fn ht_sig_len_128s(d: i64, h_prime: i64) -> i64:
+    d * (35 + h_prime) * 16

@@ -1,0 +1,387 @@
+# SLH-DSA — Top-level Keygen / Sign / Verify (FIPS 205 §10)
+#
+# Wires the WOTS+ / XMSS / HT / FORS primitives in slh_dsa_wots,
+# slh_dsa_xmss, slh_dsa_hypertree, slh_dsa_fors into the FIPS 205
+# stateless many-time signature for the SLH-DSA-SHA2-128s parameter set.
+#
+# Parameter set (SLH-DSA-SHA2-128s, FIPS 205 §11 Table 2):
+#   n  = 16            output bytes
+#   h  = 63            total hypertree height
+#   d  = 7             number of XMSS subtree layers
+#   h' = h / d = 9     subtree height
+#   a  = 12            FORS tree height
+#   k  = 14            FORS trees
+#   |sig| = (1 + k(a+1) + d(35 + h'))*n + n =
+#         16 + 14*13*16 + 7*44*16 = 16 + 2912 + 4928 = 7856 bytes
+#
+# Internal algorithms (parameterised) follow FIPS 205 §10:
+#   slh_keygen_internal (Alg 18)
+#   slh_sign_internal   (Alg 19)
+#   slh_verify_internal (Alg 20)
+#
+# The public API freezes the internal algorithms to the SHA2-128s
+# parameter set with a deterministic-randomizer mode (opt_rand =
+# PK.seed) per FIPS 205 §9.2 — pure-deterministic until the random
+# variant is added in a follow-up wave.
+#
+# PERFORMANCE NOTE (interpreter mode, 2026-05-02):
+#   Each slh_dsa_128s_sign call performs ~2.18M SHA-256 invocations.
+#   At ~0.12 ms / call through the rt_tls13_sha256 fast path, that is
+#   on the order of 4 minutes of interpreter time per sign. Full-set
+#   round-trips are deferred from the pre-commit unit spec to a manual
+#   one-shot run; the spec exercises:
+#     - WOTS+ at full SHA2-128s parameters
+#     - XMSS subtree at h'=2
+#     - FORS at (k=2, a=4)
+#     - HT at (d=2, h'=2)
+#     - end-to-end slh_*_internal at reduced (d=2, h'=2, k=2, a=4)
+#   See test/unit/lib/crypto/slh_dsa_128s_spec.spl for the perf
+#   header and the SLH_DSA_FULL_KAT one-shot gate.
+
+mod os.crypto.slh_dsa
+
+use os.crypto.slh_dsa_wots.{
+    adrs_new, adrs_set_layer, adrs_set_tree_address,
+    adrs_set_keypair_address,
+}
+use os.crypto.slh_dsa_xmss.{xmss_node}
+use os.crypto.slh_dsa_fors.{
+    fors_pk_gen, fors_sign, fors_pk_from_sig,
+}
+use os.crypto.slh_dsa_hypertree.{ht_sign, ht_verify, ht_pk_root}
+use os.crypto.sha256.{sha256, sha256_hmac}
+
+fn _slh_n_128s() -> u64:
+    16u64
+
+# ============================================================================
+# Tweakable hash family — message-digest helpers (FIPS 205 §11.2.1)
+# ============================================================================
+#
+# PRF_msg(SK.prf, opt_rand, M)  = HMAC-SHA-256(SK.prf, opt_rand || M) [trunc n]
+# H_msg(R, PK.seed, PK.root, M) = MGF1-SHA-256(R || PK.seed || PK.root || M, m)
+#
+# For SHA2-128s, m = 30 bytes (see §11.2.1 Table 4).
+
+fn _slh_m_128s() -> i64:
+    30
+
+fn _trunc_n(b: [u8], n: u64) -> [u8]:
+    var out: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        out.push(b[i])
+        i = i + 1
+    out
+
+fn _concat(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    var j: u64 = 0u64
+    while j < b.len():
+        out.push(b[j])
+        j = j + 1
+    out
+
+# PRF_msg: HMAC-SHA-256 truncated to n bytes.
+fn slh_prf_msg(sk_prf: [u8], opt_rand: [u8], message: [u8]) -> [u8]:
+    val full_msg = _concat(opt_rand, message)
+    val mac = sha256_hmac(sk_prf, full_msg)
+    _trunc_n(mac, _slh_n_128s())
+
+# MGF1-SHA-256 (PKCS#1 §B.2.1): produce `out_len` bytes from seed by
+# hashing seed || I2OSP(counter, 4) for counter = 0, 1, 2, ... and
+# concatenating the digests until out_len bytes are produced.
+fn _mgf1_sha256(seed: [u8], out_len: i64) -> [u8]:
+    var out: [u8] = [0u8; 0]
+    var counter: i64 = 0
+    while out.len() < out_len.to_u64():
+        var seeded: [u8] = [0u8; 0]
+        var s: u64 = 0u64
+        while s < seed.len():
+            seeded.push(seed[s])
+            s = s + 1
+        # I2OSP(counter, 4) big-endian
+        seeded.push(((counter >> 24) & 0xff).to_u8())
+        seeded.push(((counter >> 16) & 0xff).to_u8())
+        seeded.push(((counter >> 8) & 0xff).to_u8())
+        seeded.push((counter & 0xff).to_u8())
+        val block = sha256(seeded)
+        var b: u64 = 0u64
+        while b < block.len() and out.len() < out_len.to_u64():
+            out.push(block[b])
+            b = b + 1
+        counter = counter + 1
+    out
+
+# H_msg: MGF1-SHA-256 over (R || PK.seed || PK.root || M), m bytes out.
+fn slh_h_msg(r: [u8], pk_seed: [u8], pk_root: [u8], message: [u8], m: i64) -> [u8]:
+    var seed: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < r.len():
+        seed.push(r[i])
+        i = i + 1
+    var j: u64 = 0u64
+    while j < pk_seed.len():
+        seed.push(pk_seed[j])
+        j = j + 1
+    var k: u64 = 0u64
+    while k < pk_root.len():
+        seed.push(pk_root[k])
+        k = k + 1
+    var l: u64 = 0u64
+    while l < message.len():
+        seed.push(message[l])
+        l = l + 1
+    _mgf1_sha256(seed, m)
+
+# ============================================================================
+# Digest splitting (FIPS 205 §10.2)
+# ============================================================================
+#
+# digest = md (ceil(ka/8) bytes) || tmp_idx_tree (ceil((h-h')/8) bytes)
+#                                || tmp_idx_leaf (ceil(h'/8) bytes)
+# idx_tree = bytes-to-int(tmp_idx_tree) mod 2^(h - h')
+# idx_leaf = bytes-to-int(tmp_idx_leaf) mod 2^h'
+#
+# For SHA2-128s: ceil(168/8)=21, ceil(54/8)=7, ceil(9/8)=2; total m=30.
+
+fn _bytes_to_int_be(b: [u8], offset: u64, length: u64) -> i64:
+    var out: i64 = 0
+    var i: u64 = 0u64
+    while i < length:
+        out = (out << 8) | b[offset + i].to_i64()
+        i = i + 1
+    out
+
+# Split the digest produced by slh_h_msg into md (ka-bit prefix), idx_tree,
+# and idx_leaf. Caller-supplied parameters control all widths, allowing
+# the spec to use reduced (h, d, a, k).
+fn slh_split_digest(digest: [u8], h: i64, d: i64, a: i64, k: i64) -> tuple:
+    val h_prime = h / d
+    val md_bytes: u64 = ((a * k + 7) / 8).to_u64()
+    val tree_bits = h - h_prime
+    val tree_bytes: u64 = ((tree_bits + 7) / 8).to_u64()
+    val leaf_bytes: u64 = ((h_prime + 7) / 8).to_u64()
+
+    var md: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < md_bytes:
+        md.push(digest[i])
+        i = i + 1
+    val tree_off = md_bytes
+    val raw_tree = _bytes_to_int_be(digest, tree_off, tree_bytes)
+    val tree_mask = if tree_bits >= 63: -1 else: (1 << tree_bits) - 1
+    val idx_tree = raw_tree & tree_mask
+
+    val leaf_off = tree_off + tree_bytes
+    val raw_leaf = _bytes_to_int_be(digest, leaf_off, leaf_bytes)
+    val leaf_mask = (1 << h_prime) - 1
+    val idx_leaf = raw_leaf & leaf_mask
+    (md, idx_tree, idx_leaf)
+
+# ============================================================================
+# slh_keygen_internal (FIPS 205 Algorithm 18) — parameterised
+# ============================================================================
+#
+# Inputs:  SK.seed (n bytes), SK.prf (n bytes), PK.seed (n bytes)
+# Outputs: PK = (PK.seed || PK.root)  -- 2n bytes
+#          SK = (SK.seed || SK.prf || PK.seed || PK.root)  -- 4n bytes
+#
+# PK.root = root of the top XMSS subtree (layer d-1, tree address 0)
+# computed via xmss_node at height h_prime.
+
+fn slh_keygen_internal(sk_seed: [u8], sk_prf: [u8], pk_seed: [u8],
+                        d: i64, h_prime: i64) -> tuple:
+    val pk_root = ht_pk_root(sk_seed, pk_seed, d, h_prime)
+    var pk: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < pk_seed.len():
+        pk.push(pk_seed[i])
+        i = i + 1
+    var j: u64 = 0u64
+    while j < pk_root.len():
+        pk.push(pk_root[j])
+        j = j + 1
+
+    var sk: [u8] = [0u8; 0]
+    var k: u64 = 0u64
+    while k < sk_seed.len():
+        sk.push(sk_seed[k])
+        k = k + 1
+    var l: u64 = 0u64
+    while l < sk_prf.len():
+        sk.push(sk_prf[l])
+        l = l + 1
+    var m: u64 = 0u64
+    while m < pk_seed.len():
+        sk.push(pk_seed[m])
+        m = m + 1
+    var p: u64 = 0u64
+    while p < pk_root.len():
+        sk.push(pk_root[p])
+        p = p + 1
+    (pk, sk)
+
+# ============================================================================
+# slh_sign_internal (FIPS 205 Algorithm 19) — parameterised
+# ============================================================================
+#
+# Inputs:  M (message bytes), SK = (sk_seed || sk_prf || pk_seed || pk_root),
+#          opt_rand (n bytes)
+# Output:  signature = R || sig_FORS || sig_HT
+#
+# Steps:
+#   R = PRF_msg(sk_prf, opt_rand, M)
+#   digest = H_msg(R, pk_seed, pk_root, M, m)
+#   (md, idx_tree, idx_leaf) = split_digest(digest, h, d, a, k)
+#   ADRS = layer 0, tree_address = idx_tree, key-pair = idx_leaf, type = FORS
+#   sig_FORS = fors_sign(md, sk_seed, pk_seed, ADRS, k, a)
+#   PK_FORS  = fors_pkFromSig(sig_FORS, md, pk_seed, ADRS, k, a)
+#   sig_HT   = ht_sign(PK_FORS, sk_seed, pk_seed, idx_tree, idx_leaf, d, h_prime)
+
+fn slh_sign_internal(message: [u8], sk: [u8], opt_rand: [u8],
+                      d: i64, h_prime: i64, a: i64, k: i64) -> [u8]:
+    val n = _slh_n_128s()
+    val m = _slh_m_128s()
+    # Slice SK fields.
+    var sk_seed: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        sk_seed.push(sk[i])
+        i = i + 1
+    var sk_prf: [u8] = [0u8; 0]
+    var j: u64 = 0u64
+    while j < n:
+        sk_prf.push(sk[n + j])
+        j = j + 1
+    var pk_seed: [u8] = [0u8; 0]
+    var p: u64 = 0u64
+    while p < n:
+        pk_seed.push(sk[2u64 * n + p])
+        p = p + 1
+    var pk_root: [u8] = [0u8; 0]
+    var q: u64 = 0u64
+    while q < n:
+        pk_root.push(sk[3u64 * n + q])
+        q = q + 1
+
+    val r = slh_prf_msg(sk_prf, opt_rand, message)
+    val digest = slh_h_msg(r, pk_seed, pk_root, message, m)
+    val h = d * h_prime
+    val parts = slh_split_digest(digest, h, d, a, k)
+    val md = parts.0
+    val idx_tree = parts.1
+    val idx_leaf = parts.2
+
+    # Build FORS ADRS at layer 0 with the chosen tree/key-pair.
+    var adrs_fors = adrs_new()
+    adrs_fors = adrs_set_layer(adrs_fors, 0)
+    adrs_fors = adrs_set_tree_address(adrs_fors, idx_tree)
+    adrs_fors = adrs_set_keypair_address(adrs_fors, idx_leaf)
+
+    val sig_fors = fors_sign(md, sk_seed, pk_seed, adrs_fors, k, a)
+    val pk_fors = fors_pk_from_sig(sig_fors, md, pk_seed, adrs_fors, k, a)
+    val sig_ht = ht_sign(pk_fors, sk_seed, pk_seed, idx_tree, idx_leaf, d, h_prime)
+
+    # Concatenate R || sig_FORS || sig_HT.
+    var out: [u8] = [0u8; 0]
+    var c: u64 = 0u64
+    while c < r.len():
+        out.push(r[c])
+        c = c + 1
+    var f: u64 = 0u64
+    while f < sig_fors.len():
+        out.push(sig_fors[f])
+        f = f + 1
+    var hbb: u64 = 0u64
+    while hbb < sig_ht.len():
+        out.push(sig_ht[hbb])
+        hbb = hbb + 1
+    out
+
+# ============================================================================
+# slh_verify_internal (FIPS 205 Algorithm 20) — parameterised
+# ============================================================================
+
+fn slh_verify_internal(message: [u8], signature: [u8], pk: [u8],
+                        d: i64, h_prime: i64, a: i64, k: i64) -> bool:
+    val n = _slh_n_128s()
+    val m = _slh_m_128s()
+    val fors_bytes: u64 = (k.to_u64()) * (1u64 + a.to_u64()) * n
+    val ht_bytes: u64 = (d.to_u64()) * ((35 + h_prime).to_u64()) * n
+    val expected_sig_len: u64 = n + fors_bytes + ht_bytes
+    if signature.len() != expected_sig_len: return false
+
+    # Slice PK fields.
+    var pk_seed: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        pk_seed.push(pk[i])
+        i = i + 1
+    var pk_root: [u8] = [0u8; 0]
+    var j: u64 = 0u64
+    while j < n:
+        pk_root.push(pk[n + j])
+        j = j + 1
+
+    # Slice sig fields.
+    var r: [u8] = [0u8; 0]
+    var p: u64 = 0u64
+    while p < n:
+        r.push(signature[p])
+        p = p + 1
+    var sig_fors: [u8] = [0u8; 0]
+    var q: u64 = 0u64
+    while q < fors_bytes:
+        sig_fors.push(signature[n + q])
+        q = q + 1
+    var sig_ht: [u8] = [0u8; 0]
+    var s: u64 = 0u64
+    while s < ht_bytes:
+        sig_ht.push(signature[n + fors_bytes + s])
+        s = s + 1
+
+    val digest = slh_h_msg(r, pk_seed, pk_root, message, m)
+    val h = d * h_prime
+    val parts = slh_split_digest(digest, h, d, a, k)
+    val md = parts.0
+    val idx_tree = parts.1
+    val idx_leaf = parts.2
+
+    var adrs_fors = adrs_new()
+    adrs_fors = adrs_set_layer(adrs_fors, 0)
+    adrs_fors = adrs_set_tree_address(adrs_fors, idx_tree)
+    adrs_fors = adrs_set_keypair_address(adrs_fors, idx_leaf)
+    val pk_fors = fors_pk_from_sig(sig_fors, md, pk_seed, adrs_fors, k, a)
+
+    ht_verify(pk_fors, sig_ht, pk_seed, idx_tree, idx_leaf, pk_root,
+              d, h_prime)
+
+# ============================================================================
+# Public API — SLH-DSA-SHA2-128s with frozen FIPS 205 §11 Table 2 params
+# ============================================================================
+#
+# slh_dsa_128s_keygen(sk_seed, sk_prf, pk_seed) — deterministic from seeds;
+#   callers source the three n-byte seeds from a CSPRNG.
+# slh_dsa_128s_sign(sk, message)               — opt_rand = pk_seed
+#   (deterministic variant, FIPS 205 §9.2 default-deterministic).
+# slh_dsa_128s_verify(pk, message, signature) — boolean accept.
+
+fn slh_dsa_128s_keygen(sk_seed: [u8], sk_prf: [u8], pk_seed: [u8]) -> tuple:
+    slh_keygen_internal(sk_seed, sk_prf, pk_seed, 7, 9)
+
+fn slh_dsa_128s_sign(sk: [u8], message: [u8]) -> [u8]:
+    val n = _slh_n_128s()
+    var pk_seed: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        pk_seed.push(sk[2u64 * n + i])
+        i = i + 1
+    slh_sign_internal(message, sk, pk_seed, 7, 9, 12, 14)
+
+fn slh_dsa_128s_verify(pk: [u8], message: [u8], signature: [u8]) -> bool:
+    slh_verify_internal(message, signature, pk, 7, 9, 12, 14)
