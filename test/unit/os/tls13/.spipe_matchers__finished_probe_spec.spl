@@ -1,0 +1,69 @@
+# Probe spec — does interpreter mode reach tls13_finished_key /
+# tls13_verify_data / tls13_compute_app_secrets without the
+# unwired `rt_tls13_hkdf_extract_into` extern?
+#
+# If this probe passes, the W6-G follow-up spec
+# (`finished_app_traffic_spec.spl`) is safe to write against the same
+# helpers. If it fails the same way the W6-C `p256_ecdhe_handshake_secret_spec`
+# AC-3/AC-4 did, we stop and report a runtime block instead of writing a
+# spec that fails by design.
+#
+# Reference: RFC 8446 §4.4.4 (Finished MAC), §7.1 (key schedule).
+
+use std.spec
+use os.tls13.transcript.{Transcript, transcript_new, transcript_add, transcript_hash}
+use os.tls13.key_schedule.{tls13_finished_key, tls13_verify_data, tls13_compute_app_secrets, Tls13Secrets}
+
+describe "tls13_finished_key reaches interpreter":
+    it "32-byte HKDF-derived key from a known traffic secret":
+        var ts: [u8] = []
+        var i: u64 = 0u64
+        while i < 32u64:
+            ts.push(0x42u8)
+            i = i + 1u64
+        val k = tls13_finished_key(ts)
+        expect k.len().to_u64() == 32u64
+
+describe "tls13_verify_data reaches interpreter":
+    it "32-byte HMAC over an empty transcript":
+        var fk: [u8] = []
+        var i: u64 = 0u64
+        while i < 32u64:
+            fk.push(0x33u8)
+            i = i + 1u64
+        var t: Transcript = transcript_new()
+        val vd = tls13_verify_data(fk, t)
+        expect vd.len().to_u64() == 32u64
+
+describe "tls13_compute_app_secrets reaches interpreter":
+    it "fills master_secret + c/s ap traffic from a known handshake_secret":
+        var hs: [u8] = []
+        var i: u64 = 0u64
+        while i < 32u64:
+            hs.push(0x55u8)
+            i = i + 1u64
+        var chs: [u8] = []
+        var j: u64 = 0u64
+        while j < 32u64:
+            chs.push(0x66u8)
+            j = j + 1u64
+        var shs: [u8] = []
+        var k: u64 = 0u64
+        while k < 32u64:
+            shs.push(0x77u8)
+            k = k + 1u64
+        val empty: [u8] = []
+        var t: Transcript = transcript_new()
+        val pre = Tls13Secrets(
+            early_secret: empty,
+            handshake_secret: hs,
+            master_secret: empty,
+            client_hs_traffic: chs,
+            server_hs_traffic: shs,
+            client_app_traffic: empty,
+            server_app_traffic: empty,
+        )
+        val post = tls13_compute_app_secrets(pre, t)
+        expect post.master_secret.len().to_u64() == 32u64
+        expect post.client_app_traffic.len().to_u64() == 32u64
+        expect post.server_app_traffic.len().to_u64() == 32u64

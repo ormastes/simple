@@ -1,19 +1,424 @@
-# SIMD Element Types
+# SIMD Element Types and Vector IR Types
 #
 # Core SIMD data types used by both semantics and MIR layers.
 # Placed in 00.common to avoid backward dependency from 35.semantics -> 50.mir.
+#
+# Design locked per C2 §1:
+#   - Two-type model: FixedVecType (compile-time N) + ScalableVecType (runtime VL)
+#   - MaskType parameterized by full vector type (C2 §1 §5)
+#   - LMUL hidden as backend MIR pass, never user-facing
+#   - AVX-512 k0 reserved as all-ones, unallocatable (C2 §8 note)
+
+# ============================================================================
+# SimdElementType — element type in a SIMD vector
+# C2 §1.1: full 12-variant set required for cross-ISA type checking
+# ============================================================================
 
 enum SimdElementType:
     """Element type in a SIMD vector."""
+    # Signed integers
     I8
     I16
     I32
     I64
+    # Unsigned integers
+    U8
+    U16
+    U32
+    U64
+    # Floating point — C2 §1.1: F16/BF16 gated by capability check at use sites
+    F16
+    BF16
     F32
     F64
 
+impl SimdElementType:
+    fn bit_width() -> i64:
+        """Return element width in bits."""
+        match self:
+            case I8:  8
+            case I16: 16
+            case I32: 32
+            case I64: 64
+            case U8:  8
+            case U16: 16
+            case U32: 32
+            case U64: 64
+            case F16: 16
+            case BF16: 16
+            case F32: 32
+            case F64: 64
+
+    fn is_float() -> bool:
+        """True for F16, BF16, F32, F64."""
+        match self:
+            case F16:  true
+            case BF16: true
+            case F32:  true
+            case F64:  true
+            case _:    false
+
+    fn is_signed_int() -> bool:
+        """True for I8, I16, I32, I64."""
+        match self:
+            case I8:  true
+            case I16: true
+            case I32: true
+            case I64: true
+            case _:   false
+
+    fn is_integer() -> bool:
+        """True for all integer variants (signed and unsigned)."""
+        not self.is_float()
+
+    fn to_text() -> text:
+        """String representation for diagnostics."""
+        match self:
+            case I8:   "i8"
+            case I16:  "i16"
+            case I32:  "i32"
+            case I64:  "i64"
+            case U8:   "u8"
+            case U16:  "u16"
+            case U32:  "u32"
+            case U64:  "u64"
+            case F16:  "f16"
+            case BF16: "bf16"
+            case F32:  "f32"
+            case F64:  "f64"
+
+# ============================================================================
+# SimdVectorType — legacy fixed-width type (kept for backward compat)
+# ============================================================================
+
 struct SimdVectorType:
-    """A SIMD vector type."""
+    """A SIMD vector type (legacy — prefer FixedVecType or ScalableVecType)."""
     element: SimdElementType
     lanes: i32
 
+# ============================================================================
+# FixedVecType — compile-time-fixed lane count
+# C2 §1.2: N must be power-of-two, >= 2; validated by simd_validate_lanes.
+# Note: Simple does not yet parse `const N: usize` generics, so lanes is a
+# runtime field with invariant: must be power-of-two >= 2.
+# ============================================================================
+
+struct FixedVecType:
+    """
+    Type descriptor for FixedVec<T, N>.
+
+    Invariant: lanes must be a power-of-two >= 2 (see simd_validate_lanes).
+    Optional align_hint: 0 = natural (lanes * elem_bits / 8), otherwise bytes.
+
+    C2 §1.2: no implicit cast between FixedVecType instances; N is structural.
+    """
+    elem: SimdElementType
+    lanes: i32          # must be power-of-two >= 2
+    align_hint: i32     # 0 = natural alignment
+
+impl FixedVecType:
+    fn byte_width() -> i64:
+        """Total byte size of the vector register."""
+        self.elem.bit_width() * self.lanes / 8
+
+    fn to_text() -> text:
+        "FixedVec<{self.elem.to_text()}, {self.lanes}>"
+
+# ============================================================================
+# ScalableVecType — runtime-determined lane count (SVE2 / RVV)
+# C2 §1.3: VL known only at runtime; vscale_min gives compile-time lower bound
+# for unroll decisions. LMUL is hidden in the backend MIR pass.
+# ============================================================================
+
+struct ScalableVecType:
+    """
+    Type descriptor for ScalableVec<T>.
+
+    vscale_min: minimum VL / 128 ratio, used for compile-time unroll bounds.
+    0 means unknown. C2 §4: LMUL is never user-facing.
+    """
+    elem: SimdElementType
+    vscale_min: i32     # 0 = unknown; >= 1 = min VL factor
+
+impl ScalableVecType:
+    fn to_text() -> text:
+        "ScalableVec<{self.elem.to_text()}>"
+
+# ============================================================================
+# SimdVecKind — discriminated union over the two vector shapes
+# Used where code must handle both FixedVecType and ScalableVecType.
+# ============================================================================
+
+enum SimdVecKind:
+    """Discriminated union for the two SIMD vector IR types."""
+    Fixed(v: FixedVecType)
+    Scalable(v: ScalableVecType)
+
+impl SimdVecKind:
+    fn elem() -> SimdElementType:
+        match self:
+            case Fixed(v):    v.elem
+            case Scalable(v): v.elem
+
+    fn to_text() -> text:
+        match self:
+            case Fixed(v):    v.to_text()
+            case Scalable(v): v.to_text()
+
+# ============================================================================
+# MaskType — mask parameterized by its associated vector type
+# C2 §1 §5: Mask<V> is the ONLY mask form; parameterized by full vector type
+# so that lane-count and element-type are both preserved in the IR.
+# ============================================================================
+
+struct MaskType:
+    """
+    Type descriptor for Mask<V>.
+
+    C2 §5: MaskType is always linked to a specific vector type so that
+    lane-count and element-type constraints can be verified at type-check.
+    """
+    vec: SimdVecKind    # the vector type this mask corresponds to
+
+impl MaskType:
+    fn lane_count() -> i32:
+        """Returns -1 for scalable (runtime-determined) masks."""
+        match self.vec:
+            case Fixed(v):    v.lanes
+            case Scalable(_): -1
+
+    fn to_text() -> text:
+        "Mask<{self.vec.to_text()}>"
+
+# ============================================================================
+# SimdBinop — binary SIMD operations
+# C2 §8: full set required; Fma is a binop at IR level; the 3rd operand is
+# carried by MirSimdTernop (see mir_instructions.spl).
+# ============================================================================
+
+enum SimdBinop:
+    """Binary SIMD operation kind. C2 §8.1."""
+    Add
+    Sub
+    Mul
+    # C2 §8: Fma at binop level maps to MirSimdTernop for the 3-arg form
+    Fma
+    Fnmadd
+    Min
+    Max
+    # Bitwise — integer only (E_SIMD_INT_ONLY at use site)
+    And
+    Or
+    Xor
+    Andnot
+    # Shifts — integer only; count validated at use site
+    Shl
+    ShrLogical
+    ShrArith    # signed only
+    # Comparisons — result is MaskType
+    CmpEq
+    CmpLt
+    CmpLe
+
+# ============================================================================
+# SimdUnop — unary SIMD operations
+# C2 §8.2
+# ============================================================================
+
+enum SimdUnop:
+    """Unary SIMD operation kind. C2 §8.2."""
+    Abs
+    Neg
+    Recip
+    Sqrt
+    RecipSqrt
+
+# ============================================================================
+# SimdReduceOp — horizontal reduction operations
+# C2 §8.3
+# ============================================================================
+
+enum SimdReduceOp:
+    """Horizontal reduction operation. C2 §8.3."""
+    Sum
+    Min
+    Max
+    And
+    Or
+    Xor
+
+# ============================================================================
+# SimdShuffleKind — permutation / interleave operations
+# C2 §8.4
+# ============================================================================
+
+enum SimdShuffleKind:
+    """Shuffle / permute sub-kind. C2 §8.4."""
+    Permute             # general permute by index vector
+    BroadcastLane       # duplicate one lane to all lanes
+    InterleaveLo        # zip lower halves of two vectors
+    InterleaveHi        # zip upper halves of two vectors
+
+# ============================================================================
+# SimdMaskMode — predication mode for masked instructions
+# C2 §1: three modes matching ARM SVE and RVV conventions.
+# ============================================================================
+
+enum SimdMaskMode:
+    """
+    Predication mode for masked SIMD instructions. C2 §1.
+
+    Zero  (_z): inactive lanes written as 0.
+    Merge (_m): inactive lanes keep their previous value.
+    Undef (_x): inactive lanes undefined (best performance on AVX-512 {z} form).
+    """
+    Zero    # _z form (AVX-512 {z}, SVE /z, RVV .mu with zero-init)
+    Merge   # _m form (SVE /m, RVV .mu)
+    Undef   # _x form (AVX-512 default no-mask, RVV .tu)
+
+# ============================================================================
+# SimdCmpKind — comparison predicates for MirSimdCmp
+# C2 §8 (implied by CmpEq/CmpLt/CmpLe in SimdBinop and the Cmp opcode)
+# ============================================================================
+
+enum SimdCmpKind:
+    """SIMD comparison predicate. C2 §8."""
+    Eq
+    Ne
+    Lt
+    Le
+    Gt
+    Ge
+
+# ============================================================================
+# SimdMaskOpKind — mask-to-mask operations
+# C2 §8
+# ============================================================================
+
+enum SimdMaskOpKind:
+    """Mask binary operation kind for MirSimdMaskOp. C2 §8."""
+    And
+    Or
+    Xor
+    Not     # unary; rhs ignored in MirSimdMaskOp
+
+# ============================================================================
+# WarpShflKind, WarpReduceOp — GPU warp operations
+# C2 §6: warp opcodes are separate from SimdBinop to enforce trait separation
+# ============================================================================
+
+enum WarpShflKind:
+    """Warp shuffle sub-kind. C2 §6."""
+    Up
+    Down
+    Xor
+    Idx
+
+enum WarpReduceOp:
+    """Warp reduction operation. C2 §6."""
+    Sum
+    Min
+    Max
+    Any
+    All
+
+# ============================================================================
+# SimdTargetArch — local arch enum for simd_lanes_preferred
+# Using a local enum avoids a layering violation (TargetArch lives in 70.backend).
+# ============================================================================
+
+enum SimdTargetArch:
+    """
+    Architecture selector for SIMD preferred-lane queries.
+    Mirrors TargetArch (70.backend) without creating a layering violation.
+    """
+    X86Sse          # SSE / SSE2 (128-bit)
+    X86Avx          # AVX / AVX2 (256-bit)
+    X86Avx512       # AVX-512 (512-bit)
+    AArch64Neon     # ARM NEON (128-bit)
+    AArch64Sve2     # ARM SVE2 (scalable; preferred N is minimum VL)
+    RiscVRvv        # RISC-V V extension (scalable)
+    Unknown         # fallback / scalar
+
+# ============================================================================
+# SimdLaneError — errors from simd_validate_lanes
+# C2 §2
+# ============================================================================
+
+enum SimdLaneError:
+    """Error from simd_validate_lanes. Diagnostic code: E_SIMD_BAD_LANES. C2 §2."""
+    ZeroLanes                # N = 0
+    SingleLane               # N = 1 (not a vector)
+    NonPowerOfTwo(n: i32)    # N not a power of two
+
+impl SimdLaneError:
+    fn to_text() -> text:
+        match self:
+            case ZeroLanes:           "E_SIMD_BAD_LANES: lane count must be >= 2"
+            case SingleLane:          "E_SIMD_BAD_LANES: lane count 1 is not a vector; use scalar type"
+            case NonPowerOfTwo(n):    "E_SIMD_BAD_LANES: lane count {n} is not a power of two"
+
+# ============================================================================
+# simd_validate_lanes — validate FixedVec lane count
+# C2 §2: N=0, N=1, and non-power-of-two are rejected with E_SIMD_BAD_LANES.
+# ============================================================================
+
+fn simd_validate_lanes(elem: SimdElementType, n: i32) -> bool:
+    """
+    Returns true if n is a valid FixedVec lane count (power-of-two >= 2).
+    Callers should emit E_SIMD_BAD_LANES when this returns false.
+    C2 §2.
+    """
+    if n <= 1:
+        return false
+    # Power-of-two check: n & (n-1) == 0
+    (n & (n - 1)) == 0
+
+fn simd_lane_error(n: i32) -> SimdLaneError:
+    """
+    Return the appropriate SimdLaneError for a rejected lane count.
+    C2 §2.
+    """
+    if n == 0:
+        return SimdLaneError.ZeroLanes
+    if n == 1:
+        return SimdLaneError.SingleLane
+    SimdLaneError.NonPowerOfTwo(n: n)
+
+# ============================================================================
+# simd_lanes_preferred — per-target preferred N for a given element type
+# C2 §3: returns the natural register width / elem width for fixed-width ISAs.
+# For scalable ISAs (SVE2, RVV) returns the minimum useful N (4 for f32).
+# ============================================================================
+
+fn simd_lanes_preferred(arch: SimdTargetArch, elem: SimdElementType) -> i32:
+    """
+    Return the preferred lane count N for FixedVec<elem, N> on the given arch.
+    C2 §3.
+
+    For scalable ISAs this returns the minimum VL-aligned N, not the maximum.
+    Use ScalableVecType for VL-agnostic code.
+    """
+    var bits = elem.bit_width()
+    match arch:
+        case X86Sse:
+            # SSE: 128-bit registers
+            128 / bits
+        case X86Avx:
+            # AVX / AVX2: 256-bit registers
+            256 / bits
+        case X86Avx512:
+            # AVX-512: 512-bit registers (k0 reserved all-ones; C2 §8 note)
+            512 / bits
+        case AArch64Neon:
+            # NEON: 128-bit Q registers
+            128 / bits
+        case AArch64Sve2:
+            # SVE2: preferred minimum = 128-bit equivalent (prefer ScalableVec)
+            128 / bits
+        case RiscVRvv:
+            # RVV: preferred at VLEN=128, LMUL=1 (prefer ScalableVec)
+            128 / bits
+        case Unknown:
+            # scalar fallback: lane count 1 is invalid, return minimum useful
+            4

@@ -1,0 +1,167 @@
+# SIMD Vector Trait — Unified surface for FixedVec and ScalableVec
+#
+# C2 §1.1: Vector trait method catalog (39 core methods).
+# All implementors must provide `type Elem` and `type Mask`.
+#
+# Constraint conventions (C2 §1.0):
+#   T: Numeric  — any of u8 u16 u32 u64 i8 i16 i32 i64 f32 f64
+#   T: Float    — f32 f64
+#   T: Integer  — u8 u16 u32 u64 i8 i16 i32 i64
+#   T: SignedInt — i8 i16 i32 i64
+#
+# Interpreter-mode bodies live in FixedVec/ScalableVec impls (element-wise
+# scalar loops).  Backend lowering (MIR opcodes) is added in M1+.
+#
+# @tag:stdlib
+# @tag:simd
+# @tag:api
+
+# ============================================================================
+# Marker traits for element-type constraints (C2 §1.0)
+# ============================================================================
+
+trait Numeric:
+    pass_dn
+
+trait Float: Numeric:
+    pass_dn
+
+trait Integer: Numeric:
+    pass_dn
+
+trait SignedInt: Integer:
+    pass_dn
+
+# Blanket implementations for primitive types are resolved by the compiler
+# via its built-in numeric-type table; no explicit impl blocks needed here.
+
+# ============================================================================
+# SimdElementType — required bound on T for all SIMD generics
+# ============================================================================
+
+# @alias for the union constraint used throughout this module.
+# Concrete types: u8 u16 u32 u64 i8 i16 i32 i64 f32 f64
+trait SimdElementType: Numeric:
+    pass_dn
+
+# ============================================================================
+# LaneIter — iteration over SIMD lanes (C2 §1.1)
+# ============================================================================
+
+class LaneIter<E>:
+    data: [E]
+    pos: usize
+
+impl<E> LaneIter<E>:
+    static fn new(data: [E]) -> LaneIter<E>:
+        LaneIter(data: data, pos: 0)
+
+    fn has_next(self) -> bool:
+        self.pos < self.data.len()
+
+    fn next(self) -> E:
+        val v = self.data[self.pos]
+        self.pos = self.pos + 1
+        v
+
+# ============================================================================
+# Vector trait — C2 §1.1
+# ============================================================================
+
+trait Vector:
+    """Unified contract for all SIMD vector types.
+
+    Associated types:
+      Elem — the scalar element type (e.g. f32, i32)
+      Mask — the per-lane boolean mask type (e.g. Mask<FixedVec<f32,4>>)
+
+    No constructors here — splat/from_array/zero live on FixedVec/ScalableVec
+    because ScalableVec needs a runtime lane-count argument.
+
+    C2 §1.1
+    """
+
+    # — Associated types —
+    type Elem        # element scalar type; must be SimdElementType
+    type Mask        # associated mask — Mask<Self>
+
+    # — Lane count — (C2 §1.1)
+    # For FixedVec: const-folded to N at compile time.
+    # For ScalableVec: runtime query via svcntw/vlenb ABI.
+    fn lanes(self) -> usize
+    fn len(self) -> usize     # alias for lanes()
+
+    # — Lane access — (C2 §1.1; bounds-check in interpreter)
+    fn lane(self, i: usize) -> Self.Elem
+    fn set_lane(self, i: usize, v: Self.Elem) -> Self
+
+    # — Arithmetic — (C2 §1.1; T: Numeric)
+    fn add(self, rhs: Self) -> Self
+    fn sub(self, rhs: Self) -> Self
+    fn mul(self, rhs: Self) -> Self
+    fn div(self, rhs: Self) -> Self
+    fn neg(self) -> Self
+    fn min(self, rhs: Self) -> Self
+    fn max(self, rhs: Self) -> Self
+
+    # — Float-only arithmetic — (C2 §1.1; T: Float; E_SIMD_FLOAT_ONLY on int)
+    fn fma(self, b: Self, c: Self) -> Self          # self*b + c
+    fn fnmadd(self, b: Self, c: Self) -> Self       # -(self*b) + c
+    fn abs(self) -> Self
+    fn recip(self) -> Self                          # 1/self (approx on hardware)
+    fn sqrt(self) -> Self
+    fn recip_sqrt(self) -> Self                     # 1/sqrt(self) (approx)
+
+    # — Integer-only bitwise — (C2 §1.1; T: Integer; E_SIMD_INT_ONLY on float)
+    fn and(self, rhs: Self) -> Self
+    fn or(self, rhs: Self) -> Self
+    fn xor(self, rhs: Self) -> Self
+    fn andnot(self, rhs: Self) -> Self              # ~self & rhs
+    fn shl(self, count: u32) -> Self                # left-shift each lane
+    fn shr_logical(self, count: u32) -> Self        # zero-fill right-shift
+    fn shr_arith(self, count: u32) -> Self          # arithmetic (T: SignedInt)
+
+    # — Comparison → Mask — (C2 §1.1; T: Numeric)
+    fn cmp_eq(self, rhs: Self) -> Self.Mask
+    fn cmp_ne(self, rhs: Self) -> Self.Mask
+    fn cmp_lt(self, rhs: Self) -> Self.Mask
+    fn cmp_le(self, rhs: Self) -> Self.Mask
+    fn cmp_gt(self, rhs: Self) -> Self.Mask
+    fn cmp_ge(self, rhs: Self) -> Self.Mask
+
+    # — Selection / blend — (C2 §1.1)
+    # Returns t[i] if mask[i] else f[i].
+    fn mask_select(mask: Self.Mask, t: Self, f: Self) -> Self
+
+    # — Reductions → scalar — (C2 §1.1)
+    fn reduce_sum(self) -> Self.Elem
+    fn reduce_min(self) -> Self.Elem
+    fn reduce_max(self) -> Self.Elem
+    fn reduce_and(self) -> Self.Elem     # T: Integer; E_SIMD_INT_ONLY otherwise
+    fn reduce_or(self) -> Self.Elem      # T: Integer; E_SIMD_INT_ONLY otherwise
+
+    # — Permutation / shuffle — (C2 §1.1)
+    fn shuffle(self, indices: Self) -> Self         # indices T must be Integer
+    fn permute(self, ctrl: Self) -> Self            # compile-time ctrl preferred
+    fn broadcast_lane(self, lane: u32) -> Self      # splat lane[lane] to all
+    fn interleave_lo(self, rhs: Self) -> Self       # zip low halves
+    fn interleave_hi(self, rhs: Self) -> Self       # zip high halves
+
+    # — Memory — (C2 §1.1)
+    # load_*/store_* take raw pointers; alignment enforced by caller in compiled.
+    # Interpreter performs bounds-safe scalar element loads.
+    fn load_unaligned(ptr: *Self.Elem) -> Self
+    fn store_unaligned(self, ptr: *mut Self.Elem)
+    fn load_aligned(ptr: *Self.Elem) -> Self        # ptr must be N*sizeof(T)-aligned
+    fn store_aligned(self, ptr: *mut Self.Elem)
+    fn gather(base: *Self.Elem, indices: Self) -> Self   # indices T: Integer
+    fn scatter(self, base: *mut Self.Elem, indices: Self) # indices T: Integer
+
+    # — Conversion — (C2 §1.1)
+    fn from_array(arr: [Self.Elem]) -> Self         # arr.len() must == lanes
+    fn to_array(self) -> [Self.Elem]
+
+    # — Debug / iteration — (C2 §1.1)
+    fn fmt(self) -> text
+    fn to_string(self) -> text
+    fn iter(self) -> LaneIter<Self.Elem>

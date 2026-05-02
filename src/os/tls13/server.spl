@@ -1,0 +1,611 @@
+#![allow(unnamed_duplicate_typed_args)]
+# ============================================================================
+# TLS 1.3 Server-side handshake skeleton — RFC 8446
+# ============================================================================
+#
+# Provides the server-side counterpart to the client state machine in tls13.spl.
+# This file seeds the happy-path server flow:
+#
+#   ClientHello -> [HRR-not-implemented] -> ServerHello -> EncryptedExtensions
+#                  -> Certificate -> CertificateVerify -> Finished
+#
+# I/O wiring (record encrypt/decrypt loop, transcript hashing across the wire)
+# is left as a follow-up — `tls13_accept` returns `Failed("not_implemented")`
+# until the server-side record loop lands. The pure builders + selectors below
+# are bytes-only and exercised by test/unit/os/tls13/server_accept_spec.spl.
+#
+# Out of scope (Wave 9+):
+#   - Session tickets / 0-RTT / PSK
+#   - HRR FROM the server side (we currently only accept ClientHellos that
+#     already include a key_share for X25519 or P-256; a CH that needs HRR
+#     fast-fails with reason "hrr_not_implemented_server_side").
+#   - Multiple key_share entries in CH
+#   - CertificateRequest (mTLS server side)
+#
+# Reference: RFC 8446 §4.1.2 (ClientHello), §4.1.3 (ServerHello),
+#            §4.3.1 (EncryptedExtensions), §4.4.2 (Certificate),
+#            §4.4.3 (CertificateVerify), §4.4.4 (Finished).
+
+use os.tls13.handshake13.{
+    parse_handshake_header, parse_certificate_body,
+    build_certificate_bytes, build_certificate_verify_bytes, build_finished_bytes,
+    ParsedHandshake,
+    GROUP_X25519, GROUP_SECP256R1, SIG_ED25519
+}
+use os.tls13.key_schedule.{tls13_finished_key}
+use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign, ecdsa_p256_sign}
+
+# ============================================================================
+# Constants — TLS 1.3 cipher suites and named groups (RFC 8446 §B.4, §4.2.7)
+# ============================================================================
+
+val CIPHER_AES_128_GCM_SHA256: u16       = 0x1301
+val CIPHER_AES_256_GCM_SHA384: u16       = 0x1302
+val CIPHER_CHACHA20_POLY1305_SHA256: u16 = 0x1303
+
+# HandshakeType bytes (local copies — handshake13 keeps the canonical defs).
+val HS_SERVER_HELLO: u8         = 2
+val HS_ENCRYPTED_EXTENSIONS: u8 = 8
+
+# ServerHello extension type bytes (RFC 8446 §4.2)
+val EXT_SUPPORTED_VERSIONS: u16 = 43
+val EXT_KEY_SHARE: u16          = 51
+
+# RFC 8446 §4.4.3 signing context — repeated 0x20 byte (64 times) ||
+# "TLS 1.3, server CertificateVerify" || 0x00 || transcript_hash. The
+# string runs exactly 33 ASCII chars; we use the same construction the
+# client uses in cert_verify.verify_certificate_verify_msg_scheme.
+
+# ============================================================================
+# Data classes
+# ============================================================================
+
+class ClientHello13:
+    """Decoded ClientHello fields needed to drive the server flow.
+
+    RFC 8446 §4.1.2 — fields populated only when present:
+      - random: 32-byte ClientHello.random
+      - cipher_suites: u16 list, in offered order
+      - named_groups: u16 list (from supported_groups, ext 10), informational
+      - key_share_groups: u16 list (groups for which CH carried a key_share)
+      - x25519_key_share: 32-byte CH X25519 share, empty if absent
+      - p256_key_share: 65-byte uncompressed CH P-256 share, empty if absent
+      - sni_host: server_name from SNI ext, empty text if absent
+      - has_supported_versions_tls13: true if 0x0304 was advertised
+    """
+    random: [u8]
+    cipher_suites: [u16]
+    named_groups: [u16]
+    key_share_groups: [u16]
+    x25519_key_share: [u8]
+    p256_key_share: [u8]
+    sni_host: text
+    has_supported_versions_tls13: bool
+
+class Tls13ServerConfig:
+    """Minimum server-side configuration to drive the happy-path flow.
+
+    Fields:
+      - cert_chain: server certificate chain in DER, leaf first.
+      - server_pkcs8: PKCS#8 v1 DER of the leaf signing key.
+      - server_sig_scheme: SignatureScheme code (e.g. 0x0807 = ed25519,
+        0x0403 = ecdsa_secp256r1_sha256). Must match cert leaf algorithm.
+      - alpn_protocols: ALPN protocol list (informational; minimal EE
+        builder leaves the extension list empty per §4.3.1 for now).
+    """
+    cert_chain: [[u8]]
+    server_pkcs8: [u8]
+    server_sig_scheme: u16
+    alpn_protocols: [text]
+
+class Tls13ServerContext:
+    """Output of a successful tls13_accept.
+
+    Mirrors the shape of Tls13Context on the client side; populated only
+    once the full server-side record loop is wired (Wave 9+).
+    """
+    cipher_suite: u16
+    named_group: u16
+    server_random: [u8]
+    server_keyshare_pub: [u8]
+
+enum Tls13AcceptResult:
+    Accepted(ctx: Tls13ServerContext)
+    Failed(reason: text)
+
+# ============================================================================
+# Private byte helpers (do not reach into handshake13 internals)
+# ============================================================================
+
+fn _u8_at(data: [u8], offset: u64) -> u8:
+    if offset >= data.len():
+        return 0u8
+    data[offset]
+
+fn _u16_be_at(data: [u8], offset: u64) -> u16:
+    if offset + 2 > data.len():
+        return 0u16
+    ((_u8_at(data, offset).to_u16() << 8) | _u8_at(data, offset + 1).to_u16()).to_u16()
+
+fn _put_u16_be(val: u16) -> [u8]:
+    var out: [u8] = []
+    out.push(((val.to_u32() >> 8) & 0xFF).to_u8())
+    out.push((val.to_u32() & 0xFF).to_u8())
+    out
+
+fn _put_u24_be(val: u64) -> [u8]:
+    var out: [u8] = []
+    out.push(((val >> 16) & 0xFF).to_u8())
+    out.push(((val >> 8) & 0xFF).to_u8())
+    out.push((val & 0xFF).to_u8())
+    out
+
+fn _append(out: [u8], src: [u8]) -> [u8]:
+    var i: u64 = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn _slice(data: [u8], offset: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length and offset + i < data.len():
+        out.push(data[offset + i])
+        i = i + 1
+    out
+
+fn _empty_ch() -> ClientHello13:
+    ClientHello13(
+        random: [],
+        cipher_suites: [],
+        named_groups: [],
+        key_share_groups: [],
+        x25519_key_share: [],
+        p256_key_share: [],
+        sni_host: "",
+        has_supported_versions_tls13: false
+    )
+
+fn _u16_list_contains(xs: [u16], v: u16) -> bool:
+    var i: u64 = 0
+    while i < xs.len():
+        if xs[i] == v:
+            return true
+        i = i + 1
+    false
+
+# ============================================================================
+# Public: process_client_hello — RFC 8446 §4.1.2
+# ============================================================================
+
+fn process_client_hello(body: [u8]) -> ClientHello13:
+    """Parse a ClientHello body (i.e. `parse_handshake_header(...).body`).
+
+    Wire format (RFC 8446 §4.1.2):
+      legacy_version(2) + random(32) +
+      legacy_session_id_len(1) + legacy_session_id(<=32) +
+      cipher_suites_len(2) + cipher_suites +
+      legacy_compression_methods_len(1) + legacy_compression_methods +
+      extensions_len(2) + extensions
+
+    Returns an empty ClientHello13 if the body is malformed; the caller
+    is expected to detect this via `random.len() == 0`.
+    """
+    if body.len() < 39:
+        return _empty_ch()
+
+    # legacy_version (2 bytes) is at offset 0; we accept 0x0303 only.
+    if _u8_at(body, 0) != 0x03u8 or _u8_at(body, 1) != 0x03u8:
+        return _empty_ch()
+
+    # random (32 bytes) at offset 2..34
+    var random: [u8] = _slice(body, 2u64, 32u64)
+
+    # legacy_session_id at offset 34
+    val sid_len = _u8_at(body, 34u64).to_u64()
+    if sid_len > 32u64:
+        return _empty_ch()
+    var off: u64 = 35u64 + sid_len
+
+    # cipher_suites
+    if off + 2 > body.len():
+        return _empty_ch()
+    val cs_len = _u16_be_at(body, off).to_u64()
+    off = off + 2u64
+    if off + cs_len > body.len() or (cs_len & 1u64) != 0u64:
+        return _empty_ch()
+    var cipher_suites: [u16] = []
+    var ci: u64 = 0
+    while ci < cs_len:
+        cipher_suites.push(_u16_be_at(body, off + ci))
+        ci = ci + 2u64
+    off = off + cs_len
+
+    # legacy_compression_methods
+    if off + 1 > body.len():
+        return _empty_ch()
+    val cm_len = _u8_at(body, off).to_u64()
+    off = off + 1u64 + cm_len
+    if off > body.len():
+        return _empty_ch()
+
+    # extensions
+    if off + 2 > body.len():
+        return _empty_ch()
+    val ext_total = _u16_be_at(body, off).to_u64()
+    off = off + 2u64
+    val ext_end = off + ext_total
+    if ext_end > body.len():
+        return _empty_ch()
+
+    var named_groups: [u16] = []
+    var ks_groups: [u16] = []
+    var x25519_share: [u8] = []
+    var p256_share: [u8] = []
+    var sni: text = ""
+    var has_tls13 = false
+
+    while off + 4 <= ext_end:
+        val ext_type = _u16_be_at(body, off)
+        off = off + 2u64
+        val ext_len = _u16_be_at(body, off).to_u64()
+        off = off + 2u64
+        if off + ext_len > ext_end:
+            return _empty_ch()
+        val ext_end_inner = off + ext_len
+
+        if ext_type == 10u16:
+            # supported_groups: 2-byte list_len + u16 entries
+            if ext_len >= 2u64:
+                val gl = _u16_be_at(body, off).to_u64()
+                var gp = off + 2u64
+                while gp + 2 <= off + 2u64 + gl and gp + 2 <= ext_end_inner:
+                    named_groups.push(_u16_be_at(body, gp))
+                    gp = gp + 2u64
+
+        if ext_type == 43u16:
+            # supported_versions: 1-byte list_len + u16 entries
+            if ext_len >= 1u64:
+                val vl = _u8_at(body, off).to_u64()
+                var vp = off + 1u64
+                while vp + 2 <= off + 1u64 + vl and vp + 2 <= ext_end_inner:
+                    if _u16_be_at(body, vp) == 0x0304u16:
+                        has_tls13 = true
+                    vp = vp + 2u64
+
+        if ext_type == 51u16:
+            # key_share (CH): 2-byte client_shares_len + entries of {group(2), key_len(2), key}
+            if ext_len >= 2u64:
+                val ksl = _u16_be_at(body, off).to_u64()
+                var kp = off + 2u64
+                val ks_end = kp + ksl
+                while kp + 4 <= ks_end and kp + 4 <= ext_end_inner:
+                    val grp = _u16_be_at(body, kp)
+                    val klen = _u16_be_at(body, kp + 2u64).to_u64()
+                    val key_start = kp + 4u64
+                    if key_start + klen > ks_end:
+                        return _empty_ch()
+                    ks_groups.push(grp)
+                    if grp == GROUP_X25519 and klen == 32u64:
+                        x25519_share = _slice(body, key_start, klen)
+                    if grp == GROUP_SECP256R1 and klen == 65u64:
+                        p256_share = _slice(body, key_start, klen)
+                    kp = key_start + klen
+
+        if ext_type == 0u16:
+            # server_name: list_len(2) + (name_type(1) + name_len(2) + name)*
+            if ext_len >= 5u64:
+                var sp = off + 2u64
+                if _u8_at(body, sp) == 0u8:
+                    val nl = _u16_be_at(body, sp + 1u64).to_u64()
+                    val name_start = sp + 3u64
+                    if name_start + nl <= ext_end_inner:
+                        var name_bytes: [u8] = _slice(body, name_start, nl)
+                        # SNI is ASCII per RFC 6066; build a text accumulator.
+                        var bi: u64 = 0
+                        while bi < name_bytes.len():
+                            sni = sni + name_bytes[bi].to_text()
+                            bi = bi + 1u64
+
+        off = ext_end_inner
+
+    ClientHello13(
+        random: random,
+        cipher_suites: cipher_suites,
+        named_groups: named_groups,
+        key_share_groups: ks_groups,
+        x25519_key_share: x25519_share,
+        p256_key_share: p256_share,
+        sni_host: sni,
+        has_supported_versions_tls13: has_tls13
+    )
+
+# ============================================================================
+# Public: select_cipher_suite — RFC 8446 §4.1.1 server preference
+# ============================================================================
+
+fn select_cipher_suite(client_suites: [u16], supported: [u16]) -> u16:
+    """Pick the server's most-preferred suite that the client offered.
+
+    Match-key on the three TLS 1.3 mandatory cipher suites:
+      0x1301 TLS_AES_128_GCM_SHA256
+      0x1302 TLS_AES_256_GCM_SHA384
+      0x1303 TLS_CHACHA20_POLY1305_SHA256
+    Returns 0u16 if no match.
+    """
+    var i: u64 = 0
+    while i < supported.len():
+        val s = supported[i]
+        var j: u64 = 0
+        while j < client_suites.len():
+            if client_suites[j] == s:
+                if s == CIPHER_AES_128_GCM_SHA256
+                   or s == CIPHER_AES_256_GCM_SHA384
+                   or s == CIPHER_CHACHA20_POLY1305_SHA256:
+                    return s
+            j = j + 1u64
+        i = i + 1u64
+    0u16
+
+# ============================================================================
+# Public: select_named_group — RFC 8446 §4.2.7 / §4.2.8 server preference
+# ============================================================================
+
+fn select_named_group(client_key_share_groups: [u16], supported: [u16]) -> u16:
+    """Pick the server's most-preferred group present in CH key_shares.
+
+    `client_key_share_groups` is the list of groups for which the CH
+    actually carried a key_share entry — only those allow a single-flight
+    ServerHello (no HRR). Returns 0u16 if no overlap exists; the caller
+    should treat that as "HRR-needed", which we don't yet implement.
+    """
+    var i: u64 = 0
+    while i < supported.len():
+        val g = supported[i]
+        if g == GROUP_X25519 or g == GROUP_SECP256R1:
+            if _u16_list_contains(client_key_share_groups, g):
+                return g
+        i = i + 1u64
+    0u16
+
+# ============================================================================
+# Public: build_server_hello — RFC 8446 §4.1.3
+# ============================================================================
+
+fn _build_sh_ext_supported_versions() -> [u8]:
+    """ServerHello supported_versions: TLS 1.3 single u16 (no list_len)."""
+    var out: [u8] = []
+    out = _append(out, _put_u16_be(EXT_SUPPORTED_VERSIONS))
+    out = _append(out, _put_u16_be(2u16))
+    out = _append(out, _put_u16_be(0x0304u16))
+    out
+
+fn _build_sh_ext_key_share(group: u16, key: [u8]) -> [u8]:
+    """ServerHello key_share: single KeyShareEntry (group(2) + key_len(2) + key)."""
+    var entry: [u8] = []
+    entry = _append(entry, _put_u16_be(group))
+    entry = _append(entry, _put_u16_be(key.len().to_u16()))
+    entry = _append(entry, key)
+    var out: [u8] = []
+    out = _append(out, _put_u16_be(EXT_KEY_SHARE))
+    out = _append(out, _put_u16_be(entry.len().to_u16()))
+    out = _append(out, entry)
+    out
+
+fn build_server_hello(
+    server_random: [u8],
+    cipher_suite: u16,
+    named_group: u16,
+    server_keyshare: [u8]
+) -> [u8]:
+    """Build a TLS 1.3 ServerHello handshake message (with handshake header).
+
+    Wire format (RFC 8446 §4.1.3):
+      HandshakeType(1)=2 + length(3) + legacy_version(2)=0x0303 +
+      random(32) + legacy_session_id_len(1)=0 +
+      cipher_suite(2) + legacy_compression_method(1)=0x00 +
+      extensions_len(2) + extensions(supported_versions, key_share)
+    """
+    # Body
+    var body: [u8] = []
+    body.push(0x03u8)
+    body.push(0x03u8)
+    body = _append(body, server_random)
+    body.push(0x00u8)
+    body = _append(body, _put_u16_be(cipher_suite))
+    body.push(0x00u8)
+
+    var exts: [u8] = []
+    exts = _append(exts, _build_sh_ext_supported_versions())
+    exts = _append(exts, _build_sh_ext_key_share(named_group, server_keyshare))
+    body = _append(body, _put_u16_be(exts.len().to_u16()))
+    body = _append(body, exts)
+
+    # Wrap with handshake header (type + 3-byte length).
+    var out: [u8] = []
+    out.push(HS_SERVER_HELLO)
+    out = _append(out, _put_u24_be(body.len().to_u64()))
+    out = _append(out, body)
+    out
+
+# ============================================================================
+# Public: build_encrypted_extensions_server_side — RFC 8446 §4.3.1
+# ============================================================================
+
+fn build_encrypted_extensions_server_side(server_config: Tls13ServerConfig) -> [u8]:
+    """Build a minimal EncryptedExtensions handshake message.
+
+    Wire format (RFC 8446 §4.3.1):
+      HandshakeType(1)=8 + length(3) + extensions_len(2) + extensions
+
+    An empty extension list (extensions_len = 0) is valid per §4.3.1; a
+    server-side EE may omit any optional extensions. We currently always
+    emit an empty list; ALPN/SNI ack/etc. land with the I/O wiring.
+    """
+    var body: [u8] = []
+    body = _append(body, _put_u16_be(0u16))
+    var out: [u8] = []
+    out.push(HS_ENCRYPTED_EXTENSIONS)
+    out = _append(out, _put_u24_be(body.len().to_u64()))
+    out = _append(out, body)
+    out
+
+# ============================================================================
+# Public: build_certificate — RFC 8446 §4.4.2 (delegated to handshake13)
+# ============================================================================
+
+fn build_certificate(cert_chain: [[u8]]) -> [u8]:
+    """Build the Certificate handshake message for a server-side flow.
+
+    request_context MUST be empty for a non-mTLS server (RFC 8446 §4.4.2).
+    """
+    val empty: [u8] = []
+    build_certificate_bytes(empty, cert_chain)
+
+# ============================================================================
+# Public: build_certificate_verify — RFC 8446 §4.4.3
+# ============================================================================
+
+fn _signing_context_server() -> [u8]:
+    """Return the 64x0x20 || "TLS 1.3, server CertificateVerify" || 0x00 prefix."""
+    var ctx: [u8] = []
+    var i: u64 = 0
+    while i < 64u64:
+        ctx.push(0x20u8)
+        i = i + 1u64
+    # "TLS 1.3, server CertificateVerify" — 33 ASCII bytes.
+    ctx.push(0x54u8)  # T
+    ctx.push(0x4Cu8)  # L
+    ctx.push(0x53u8)  # S
+    ctx.push(0x20u8)  # space
+    ctx.push(0x31u8)  # 1
+    ctx.push(0x2Eu8)  # .
+    ctx.push(0x33u8)  # 3
+    ctx.push(0x2Cu8)  # ,
+    ctx.push(0x20u8)  # space
+    ctx.push(0x73u8)  # s
+    ctx.push(0x65u8)  # e
+    ctx.push(0x72u8)  # r
+    ctx.push(0x76u8)  # v
+    ctx.push(0x65u8)  # e
+    ctx.push(0x72u8)  # r
+    ctx.push(0x20u8)  # space
+    ctx.push(0x43u8)  # C
+    ctx.push(0x65u8)  # e
+    ctx.push(0x72u8)  # r
+    ctx.push(0x74u8)  # t
+    ctx.push(0x69u8)  # i
+    ctx.push(0x66u8)  # f
+    ctx.push(0x69u8)  # i
+    ctx.push(0x63u8)  # c
+    ctx.push(0x61u8)  # a
+    ctx.push(0x74u8)  # t
+    ctx.push(0x65u8)  # e
+    ctx.push(0x56u8)  # V
+    ctx.push(0x65u8)  # e
+    ctx.push(0x72u8)  # r
+    ctx.push(0x69u8)  # i
+    ctx.push(0x66u8)  # f
+    ctx.push(0x79u8)  # y
+    ctx.push(0x00u8)  # separator
+    ctx
+
+fn build_certificate_verify_signing_input(transcript_hash: [u8]) -> [u8]:
+    """Build the message to feed the signature primitive (RFC 8446 §4.4.3)."""
+    var msg: [u8] = _signing_context_server()
+    msg = _append(msg, transcript_hash)
+    msg
+
+fn build_certificate_verify(transcript_hash: [u8], server_signing_key_pkcs8: [u8], sig_scheme: u16) -> [u8]:
+    """Build a TLS 1.3 server-side CertificateVerify handshake message.
+
+    Args:
+        transcript_hash: Hash(CH || SH || EE || Certificate) in the negotiated
+            hash (32 bytes for SHA-256, 48 for SHA-384).
+        server_signing_key_pkcs8: PKCS#8 v1 DER of the server's signing key.
+        sig_scheme: SignatureScheme code (e.g. 0x0807, 0x0403).
+
+    Returns: complete handshake-layer CertificateVerify bytes.
+    """
+    val signing_input = build_certificate_verify_signing_input(transcript_hash)
+    var sig: [u8] = []
+    if sig_scheme == SIG_ED25519:
+        sig = ed25519_sign(server_signing_key_pkcs8, signing_input)
+    elif sig_scheme == 0x0403u16:
+        sig = ecdsa_p256_sign(server_signing_key_pkcs8, signing_input)
+    else:
+        # Unsupported scheme — return empty signature wrapped in CV. The
+        # caller is expected to validate against the cert leaf algorithm
+        # before invoking.
+        sig = []
+    build_certificate_verify_bytes(sig_scheme, sig)
+
+# ============================================================================
+# Public: build_server_finished — RFC 8446 §4.4.4
+# ============================================================================
+
+fn build_server_finished(server_finished_key: [u8], transcript_hash: [u8]) -> [u8]:
+    """Build a TLS 1.3 server Finished handshake message.
+
+    verify_data = HMAC-SHA-256(server_finished_key, transcript_hash) for
+    SHA-256-based suites. SHA-384 path lives in key_schedule and is
+    delegated by the caller — this server skeleton runs the SHA-256 path.
+
+    Args:
+        server_finished_key: Output of tls13_finished_key(server_hs_secret).
+        transcript_hash: Hash(CH..server CV) or appropriate transcript prefix.
+
+    Returns: complete handshake-layer Finished message bytes.
+    """
+    # We don't pull os.crypto.sha2 here to avoid a heavy import — leverage
+    # the rt_tls13_verify_data_hmac extern that tls13.spl already wires up
+    # for the client side. To keep this skeleton dependency-light, callers
+    # can either pass verify_data directly via build_finished_bytes or use
+    # this helper which delegates to the same sha256_hmac path.
+    val verify_data = _server_verify_data_sha256(server_finished_key, transcript_hash)
+    build_finished_bytes(verify_data)
+
+extern fn rt_tls13_verify_data_hmac(finished_key: [u8], transcript_hash: [u8]) -> [u8]
+
+fn _server_verify_data_sha256(finished_key: [u8], transcript_hash: [u8]) -> [u8]:
+    """SHA-256 verify_data via the same FFI the client uses."""
+    rt_tls13_verify_data_hmac(finished_key, transcript_hash)
+
+# ============================================================================
+# Public: tls13_accept — top-level entry stub
+# ============================================================================
+
+fn tls13_accept(socket_fd: i64, server_config: Tls13ServerConfig) -> Tls13AcceptResult:
+    """Top-level server-side handshake entry point.
+
+    Currently returns Failed("not_implemented") — the byte-level builders
+    + selectors below are exercised standalone. The full server-side
+    record I/O loop (read CH record, derive secrets, write SH+EE+Cert+CV+
+    Finished records, read client Finished, verify) lands in Wave 9+.
+
+    Documented behaviour for the full flow:
+      1. Read ClientHello record from `socket_fd`.
+      2. process_client_hello -> ClientHello13.
+      3. If !ch.has_supported_versions_tls13 → Failed("not_tls13").
+      4. cipher = select_cipher_suite(ch.cipher_suites, [0x1301,0x1302,0x1303])
+         -> Failed("no_shared_cipher_suite") if 0.
+      5. group  = select_named_group(ch.key_share_groups, [X25519, P256])
+         -> Failed("hrr_not_implemented_server_side") if 0.
+      6. Generate server keyshare for `group` and ECDH-derive shared secret.
+      7. build_server_hello + send.
+      8. Derive handshake secrets, switch record layer to encrypted.
+      9. send build_encrypted_extensions_server_side, build_certificate,
+         build_certificate_verify, build_server_finished.
+     10. Read client Finished, verify, derive app secrets, return Accepted.
+    """
+    Tls13AcceptResult.Failed("not_implemented")
+
+# ============================================================================
+# Helper used by tls13_accept and re-exported for tests: derive
+# server_finished_key from a server_hs_secret. Thin wrapper so the spec
+# can name `tls13_finished_key` from key_schedule directly.
+# ============================================================================
+
+fn server_finished_key(server_hs_secret: [u8]) -> [u8]:
+    tls13_finished_key(server_hs_secret)
