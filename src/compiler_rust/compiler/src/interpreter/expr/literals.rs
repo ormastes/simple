@@ -43,6 +43,25 @@ pub(super) fn eval_literal_expr(
                     family,
                 }
             }
+            // Unsigned integer suffixes carry width through the Value layer so
+            // arithmetic ops (Add/Sub/Mul/Neg) in ops.rs apply modulo-2^width wrap.
+            // See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.
+            NumericSuffix::U8 => Value::UInt {
+                value: (*value as u8) as u64,
+                width: 8,
+            },
+            NumericSuffix::U16 => Value::UInt {
+                value: (*value as u16) as u64,
+                width: 16,
+            },
+            NumericSuffix::U32 => Value::UInt {
+                value: (*value as u32) as u64,
+                width: 32,
+            },
+            NumericSuffix::U64 => Value::UInt {
+                value: *value as u64,
+                width: 64,
+            },
             _ => Value::Int(*value),
         })),
         Expr::Float(value) => Ok(Some(Value::Float(*value))),

@@ -15,6 +15,35 @@ use super::super::core_types::get_identifier_name;
 use super::super::interpreter_state::{CONST_NAMES, IMMUTABLE_VARS};
 use std::sync::Arc;
 
+/// Detect the wrap-width of a binary unsigned-arithmetic op.
+///
+/// If at least one operand is `Value::UInt`, returns `Some(width)` so the caller
+/// can apply modulo-2^width wrap to produce a `Value::UInt` result. When both
+/// sides are UInt with different widths, the wider one wins (i.e., the result
+/// uses the maximum width). When neither side is UInt, returns `None` so the
+/// caller falls through to signed `Value::Int` semantics.
+///
+/// See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.
+fn uint_wrap_width(left: &Value, right: &Value) -> Option<u8> {
+    match (left, right) {
+        (Value::UInt { width: a, .. }, Value::UInt { width: b, .. }) => Some(*a.max(b)),
+        (Value::UInt { width, .. }, _) | (_, Value::UInt { width, .. }) => Some(*width),
+        _ => None,
+    }
+}
+
+/// Apply modulo-2^width wrap to a u64 result and produce `Value::UInt`.
+fn wrap_uint(value: u64, width: u8) -> Value {
+    let masked = match width {
+        8 => (value as u8) as u64,
+        16 => (value as u16) as u64,
+        32 => (value as u32) as u64,
+        64 => value,
+        _ => value, // unknown width — pass through unchanged
+    };
+    Value::UInt { value: masked, width }
+}
+
 /// Try to dispatch a binary operator to a dunder method on an Object value.
 /// Returns None if the left value is not an Object or doesn't have the method.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
@@ -521,6 +550,11 @@ pub(super) fn eval_op_expr(
                             impl_methods,
                         ) {
                             result
+                        } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                            // Unsigned wrap: u32/u16/u8/u64 + ... applies modulo-2^width.
+                            let lhs = left_val.as_int()? as u64;
+                            let rhs = right_val.as_int()? as u64;
+                            Ok(wrap_uint(lhs.wrapping_add(rhs), width))
                         } else {
                             Ok(Value::Int(left_val.as_int()? + right_val.as_int()?))
                         }
@@ -540,6 +574,11 @@ pub(super) fn eval_op_expr(
                         impl_methods,
                     ) {
                         result
+                    } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                        // Unsigned wrap: 0u32 - 1u32 yields 0xFFFFFFFF, not -1.
+                        let lhs = left_val.as_int()? as u64;
+                        let rhs = right_val.as_int()? as u64;
+                        Ok(wrap_uint(lhs.wrapping_sub(rhs), width))
                     } else {
                         Ok(Value::Int(left_val.as_int()? - right_val.as_int()?))
                     }
@@ -574,6 +613,10 @@ pub(super) fn eval_op_expr(
                                 impl_methods,
                             ) {
                                 result
+                            } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                                let lhs = left_val.as_int()? as u64;
+                                let rhs = right_val.as_int()? as u64;
+                                Ok(wrap_uint(lhs.wrapping_mul(rhs), width))
                             } else {
                                 Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
                             }
@@ -846,11 +889,53 @@ pub(super) fn eval_op_expr(
                         }
                     }
                 }
-                BinOp::BitAnd => Ok(Value::Int(left_val.as_int()? & right_val.as_int()?)),
-                BinOp::BitOr => Ok(Value::Int(left_val.as_int()? | right_val.as_int()?)),
-                BinOp::BitXor => Ok(Value::Int(left_val.as_int()? ^ right_val.as_int()?)),
-                BinOp::ShiftLeft => Ok(Value::Int(left_val.as_int()? << right_val.as_int()?)),
-                BinOp::ShiftRight => Ok(Value::Int(left_val.as_int()? >> right_val.as_int()?)),
+                BinOp::BitAnd => {
+                    if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                        let lhs = left_val.as_int()? as u64;
+                        let rhs = right_val.as_int()? as u64;
+                        Ok(wrap_uint(lhs & rhs, width))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? & right_val.as_int()?))
+                    }
+                }
+                BinOp::BitOr => {
+                    if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                        let lhs = left_val.as_int()? as u64;
+                        let rhs = right_val.as_int()? as u64;
+                        Ok(wrap_uint(lhs | rhs, width))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? | right_val.as_int()?))
+                    }
+                }
+                BinOp::BitXor => {
+                    if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                        let lhs = left_val.as_int()? as u64;
+                        let rhs = right_val.as_int()? as u64;
+                        Ok(wrap_uint(lhs ^ rhs, width))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? ^ right_val.as_int()?))
+                    }
+                }
+                BinOp::ShiftLeft => {
+                    // Shift width is always derived from LHS (the value being shifted).
+                    if let Value::UInt { value: lv, width } = &left_val {
+                        let rhs = right_val.as_int()? as u64;
+                        Ok(wrap_uint(lv.wrapping_shl(rhs as u32), *width))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? << right_val.as_int()?))
+                    }
+                }
+                BinOp::ShiftRight => {
+                    // For unsigned LHS, perform a logical (zero-fill) shift to preserve
+                    // unsigned semantics — `0x80000000u32 >> 31u32` should be `1`, not
+                    // `-1` from signed sign-extension.
+                    if let Value::UInt { value: lv, width } = &left_val {
+                        let rhs = right_val.as_int()? as u64;
+                        Ok(wrap_uint(lv.wrapping_shr(rhs as u32), *width))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? >> right_val.as_int()?))
+                    }
+                }
                 BinOp::In | BinOp::NotIn => {
                     // Membership test: check if left is in right (array, tuple, dict, or string)
                     let negate = matches!(op, BinOp::NotIn);
@@ -1156,6 +1241,18 @@ pub(super) fn eval_op_expr(
                         try_dunder_unaryop("__neg__", &val, env, functions, classes, enums, impl_methods)
                     {
                         result?
+                    } else if let Value::UInt { value, width } = &val {
+                        // Unsigned negation: 0u32.wrapping_sub(x) wraps modulo-2^width.
+                        Value::UInt {
+                            value: match *width {
+                                8 => (0u8.wrapping_sub(*value as u8)) as u64,
+                                16 => (0u16.wrapping_sub(*value as u16)) as u64,
+                                32 => (0u32.wrapping_sub(*value as u32)) as u64,
+                                64 => 0u64.wrapping_sub(*value),
+                                _ => 0u64.wrapping_sub(*value),
+                            },
+                            width: *width,
+                        }
                     } else {
                         Value::Int(-val.as_int()?)
                     }

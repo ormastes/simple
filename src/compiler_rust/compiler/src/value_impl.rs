@@ -104,6 +104,7 @@ impl Value {
         match self {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
+            Value::UInt { value, .. } => *value != 0,
             Value::Float(f) => *f != 0.0,
             Value::Str(s) => !s.is_empty(),
             Value::Symbol(_) => true,
@@ -376,6 +377,7 @@ impl Value {
         use simple_runtime::hir_core::ValueKind;
         match self {
             Value::Int(_) => ValueKind::Int,
+            Value::UInt { .. } => ValueKind::Int,
             Value::Float(_) => ValueKind::Float,
             Value::Bool(_) => ValueKind::Bool,
             Value::Str(_) => ValueKind::String,

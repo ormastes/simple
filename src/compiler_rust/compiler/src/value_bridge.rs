@@ -285,6 +285,7 @@ impl From<&Value> for BridgeValue {
         match v {
             Value::Nil => BridgeValue::nil(),
             Value::Int(i) => BridgeValue::int(*i),
+            Value::UInt { value, .. } => BridgeValue::int(*value as i64),
             Value::Float(f) => BridgeValue::float(*f),
             Value::Bool(b) => BridgeValue::bool(*b),
             Value::Str(s) => BridgeValue::string(s),

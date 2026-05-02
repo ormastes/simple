@@ -115,6 +115,37 @@ pub(crate) fn exec_node(
 
                 // Validate and constrain value based on type annotation
                 let value = match &type_annotation {
+                    // Coerce to Value::UInt when the annotation is an unsigned integer type
+                    // so subsequent arithmetic on the bound variable applies modulo-2^width
+                    // wrap. See doc/08_tracking/bug/interpreter_u32_wrap_subtraction_2026-05-01.md.
+                    Some(Type::Simple(type_name))
+                        if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") =>
+                    {
+                        let width: u8 = match type_name.as_str() {
+                            "u8" => 8,
+                            "u16" => 16,
+                            "u32" => 32,
+                            "u64" => 64,
+                            _ => unreachable!(),
+                        };
+                        match value {
+                            // Already-typed UInt: keep as-is (literal-suffix path).
+                            Value::UInt { .. } => value,
+                            // Plain Int: wrap into UInt at the annotated width.
+                            Value::Int(i) => {
+                                let masked: u64 = match width {
+                                    8 => (i as u8) as u64,
+                                    16 => (i as u16) as u64,
+                                    32 => (i as u32) as u64,
+                                    64 => i as u64,
+                                    _ => i as u64,
+                                };
+                                Value::UInt { value: masked, width }
+                            }
+                            // Other types pass through (e.g. Object newtypes around u32).
+                            other => other,
+                        }
+                    }
                     Some(Type::Simple(type_name)) if is_unit_type(type_name) => {
                         if let Err(e) = validate_unit_type(&value, type_name) {
                             let var_name = get_var_name(&let_stmt.pattern);

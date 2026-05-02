@@ -70,28 +70,47 @@ fn cast_to_simple_type(val: Value, type_name: &str) -> Result<Value, CompileErro
     }
 }
 
+/// Map a CastNumericResult into the right Value variant, preserving u8/u16/u32/u64 width
+/// so subsequent arithmetic in ops.rs can apply modulo wrap semantics.
+fn finalize_numeric_cast(result: CastNumericResult, target: NumericType) -> Value {
+    match result {
+        CastNumericResult::Int(v) => match target {
+            NumericType::U8 => Value::UInt {
+                value: (v as u8) as u64,
+                width: 8,
+            },
+            NumericType::U16 => Value::UInt {
+                value: (v as u16) as u64,
+                width: 16,
+            },
+            NumericType::U32 => Value::UInt {
+                value: (v as u32) as u64,
+                width: 32,
+            },
+            NumericType::U64 => Value::UInt {
+                value: v as u64,
+                width: 64,
+            },
+            _ => Value::Int(v),
+        },
+        CastNumericResult::Float(v) => Value::Float(v),
+    }
+}
+
 /// Cast a value to a numeric type using unified cast rules.
 fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileError> {
     match val {
-        Value::Int(i) => match cast_int_to_numeric(i, target) {
-            CastNumericResult::Int(v) => Ok(Value::Int(v)),
-            CastNumericResult::Float(v) => Ok(Value::Float(v)),
-        },
-        Value::Float(f) => match cast_float_to_numeric(f, target) {
-            CastNumericResult::Int(v) => Ok(Value::Int(v)),
-            CastNumericResult::Float(v) => Ok(Value::Float(v)),
-        },
-        Value::Bool(b) => match cast_bool_to_numeric(b, target) {
-            CastNumericResult::Int(v) => Ok(Value::Int(v)),
-            CastNumericResult::Float(v) => Ok(Value::Float(v)),
-        },
+        Value::Int(i) => Ok(finalize_numeric_cast(cast_int_to_numeric(i, target), target)),
+        Value::UInt { value, .. } => Ok(finalize_numeric_cast(
+            cast_int_to_numeric(value as i64, target),
+            target,
+        )),
+        Value::Float(f) => Ok(finalize_numeric_cast(cast_float_to_numeric(f, target), target)),
+        Value::Bool(b) => Ok(finalize_numeric_cast(cast_bool_to_numeric(b, target), target)),
         // Single-character string to numeric (char code point)
         Value::Str(ref s) if s.chars().count() == 1 => {
             let code_point = s.chars().next().unwrap() as i64;
-            match cast_int_to_numeric(code_point, target) {
-                CastNumericResult::Int(v) => Ok(Value::Int(v)),
-                CastNumericResult::Float(v) => Ok(Value::Float(v)),
-            }
+            Ok(finalize_numeric_cast(cast_int_to_numeric(code_point, target), target))
         }
         // Enum variant to numeric (ordinal position)
         Value::Enum {
@@ -110,10 +129,7 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
                     0
                 }
             });
-            match cast_int_to_numeric(ordinal, target) {
-                CastNumericResult::Int(v) => Ok(Value::Int(v)),
-                CastNumericResult::Float(v) => Ok(Value::Float(v)),
-            }
+            Ok(finalize_numeric_cast(cast_int_to_numeric(ordinal, target), target))
         }
         _ => {
             let ctx = ErrorContext::new()
@@ -130,6 +146,7 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
 fn cast_to_bool(val: Value) -> Result<Value, CompileError> {
     match val {
         Value::Int(i) => Ok(Value::Bool(bool_cast::from_int(i))),
+        Value::UInt { value, .. } => Ok(Value::Bool(value != 0)),
         Value::Float(f) => Ok(Value::Bool(bool_cast::from_float(f))),
         Value::Bool(b) => Ok(Value::Bool(b)),
         Value::Str(ref s) => Ok(Value::Bool(bool_cast::from_str(s))),
@@ -149,6 +166,7 @@ fn cast_to_bool(val: Value) -> Result<Value, CompileError> {
 fn cast_to_string(val: Value) -> Result<Value, CompileError> {
     match val {
         Value::Int(i) => Ok(Value::Str(string_cast::from_int(i))),
+        Value::UInt { value, .. } => Ok(Value::Str(value.to_string())),
         Value::Float(f) => Ok(Value::Str(string_cast::from_float(f))),
         Value::Bool(b) => Ok(Value::Str(string_cast::from_bool(b))),
         Value::Str(s) => Ok(Value::Str(s)),
