@@ -243,3 +243,54 @@ Out of scope (Wave 10+): hybrid X25519+ML-KEM-768 TLS 1.3 wiring,
 ML-KEM-512, ML-KEM-1024, ML-DSA (signatures), SLH-DSA (hash-based
 signatures), NIST CCTV KAT vector injection (1184 B+ ek and 2400 B+ dk
 fixtures need a bytes-from-file helper).
+
+## Wave 7-8 Closure (2026-05-02) — TLS 1.3 HKDF runtime externs deployed via bootstrap rebuild
+
+**W6-C / W7-B byte-exact path UNBLOCKED.**
+
+`rt_tls13_sha256` and the full `rt_tls13_hkdf_*` family
+(`rt_tls13_hkdf_extract`, `rt_tls13_hkdf_extract_into`,
+`rt_tls13_hkdf_expand_into`, `rt_tls13_hkdf_expand_label`,
+`rt_tls13_hkdf_expand_label_into`, `rt_tls13_hkdf_expand_label_derived`,
+`rt_tls13_hkdf_expand_label_key`, `rt_tls13_hkdf_expand_label_iv`,
+`rt_tls13_hkdf_expand_label_finished`,
+`rt_tls13_hkdf_expand_label_client_hs`,
+`rt_tls13_hkdf_expand_label_server_hs`,
+`rt_tls13_hkdf_expand_label_client_app`,
+`rt_tls13_hkdf_expand_label_server_app`) are registered in
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs:461-474`
+referencing the `tls13::*` module at
+`src/compiler_rust/compiler/src/interpreter_extern/tls13.rs`. These
+entries had been added during W6-C source work but were not present in
+the deployed `bin/simple` runtime, so W6-C/W7-B specs failed with
+`unknown extern function: rt_tls13_hkdf_extract_into` per
+`feedback_extern_bootstrap_rebuild.md`.
+
+Resolution: ran `bash scripts/bootstrap/bootstrap-from-scratch.sh
+--deploy`. Stages 2 and 3 self-host verification passed (stage2 sha256
+== stage3 sha256
+`e14ed1c7bb5a49ce7dd45bc38fa61ee29b28d1566e2353b148518aa3f11f1f67`).
+Stage 4 full-CLI compile failed with 67 pre-existing
+`hir: Cannot infer field type` errors in unrelated parallel-agent
+edits (compiler/types/type_infer/, app/cli/, lib/common/crypto/sha256.spl,
+lib/nogc_sync_mut/path.spl, etc.) — not regressions from this wave.
+The bootstrap-staged seed binary at
+`src/compiler_rust/target/bootstrap/simple` (which `bin/simple` wraps)
+was rebuilt with the new extern table prior to the Stage 4 failure, so
+the interpreter-driven TLS 1.3 path is unblocked.
+
+Verification (`test/unit/os/tls13/`, interpreter mode per
+`feedback_compile_mode_false_greens.md`):
+
+- 12 spec files / 136 PASS / 3 FAIL
+- 0 `unknown extern function` errors anywhere in the run (was the
+  blocking signature for W6-C / W7-B)
+- `p256_ecdhe_handshake_secret_spec.spl` — 11/11 PASS (was failing
+  pre-rebuild with `unknown extern function: rt_tls13_hkdf_extract_into`)
+- Remaining 3 failures all in `aes256_gcm_sha384_cipher_suite_spec.spl`
+  (W8-3 `aes256_gcm.spl` work-in-progress AES path; unrelated to HKDF
+  externs)
+
+This closes the W6-C / W7-B byte-exact-handshake-secret blocker.
+Stage 4 full-CLI compile failure is owned by other in-flight tracks and
+is independent of TLS 1.3.
