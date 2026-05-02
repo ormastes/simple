@@ -386,11 +386,65 @@ pub(crate) fn evaluate_method_call(
                 return Ok(result);
             }
         }
+        // W5-I follow-up (regression from 2ec2342969): `data[i]` on `[u8]` now yields
+        // `Value::UInt { width: 8 }`, so `byte.to_u32() / .to_i64() / .to_u64()` and
+        // the rest of the int-method family must dispatch through the same handler.
+        // Treat the unsigned bit-pattern as i64 — same trick as `value_bridge.rs:288`
+        // and `value_impl.rs::as_int`. cast_int_to_numeric in handle_int_methods
+        // already wraps to the target width, so semantics match a real u8/u16/u32/u64
+        // receiver.
+        Value::UInt { value, .. } => {
+            if let Some(result) = primitives::handle_int_methods(
+                *value as i64,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                return Ok(result);
+            }
+        }
         Value::Float(f) => {
             if let Some(result) =
                 primitives::handle_float_methods(*f, method, args, env, functions, classes, enums, impl_methods)?
             {
                 return Ok(result);
+            }
+        }
+        // Float32 dispatch: f32-precision-preserving methods. For unary methods
+        // like abs/floor/ceil/round, f32 -> f64 -> f32 is bit-exact, so we
+        // delegate to handle_float_methods and re-narrow on the way out for
+        // float-typed results. `to_f32` and `to_f64` are handled directly to
+        // emit the right Value variant.
+        Value::Float32(f) => {
+            // Direct cases that need explicit Float32/Float boundaries.
+            match method {
+                "to_f32" => return Ok(Value::Float32(*f)),
+                "to_f64" | "to_float" => return Ok(Value::Float(*f as f64)),
+                "to_string" | "to_text" => return Ok(Value::Str(f.to_string())),
+                _ => {}
+            }
+            // Delegate to handle_float_methods for arithmetic helpers; if it
+            // returns a Float result, re-narrow to Float32 to preserve the
+            // single-precision tag.
+            if let Some(result) = primitives::handle_float_methods(
+                *f as f64,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                let narrowed = match result {
+                    Value::Float(v) => Value::Float32(v as f32),
+                    other => other,
+                };
+                return Ok(narrowed);
             }
         }
         Value::Bool(b) => {
@@ -905,7 +959,8 @@ pub(crate) fn evaluate_method_call(
         let type_names: &[&str] = match &recv_val {
             Value::Str(_) => &["text", "str", "String"],
             Value::Int(_) => &["i64", "i32", "int"],
-            Value::Float(_) => &["f64", "f32", "float"],
+            Value::Float(_) => &["f64", "float"],
+            Value::Float32(_) => &["f32", "float"],
             Value::Bool(_) => &["bool"],
             Value::Array(_) | Value::FrozenArray(_) | Value::FixedSizeArray { .. } => &["array", "Array"],
             Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],

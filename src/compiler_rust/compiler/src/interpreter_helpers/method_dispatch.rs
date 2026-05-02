@@ -233,6 +233,9 @@ pub(crate) fn call_method_on_value(
                 let mut sorted = arr.to_vec();
                 sorted.sort_by(|a, b| match (a, b) {
                     (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                    (Value::UInt { value: x, .. }, Value::UInt { value: y, .. }) => x.cmp(y),
+                    (Value::Int(x), Value::UInt { value: y, .. }) => x.cmp(&(*y as i64)),
+                    (Value::UInt { value: x, .. }, Value::Int(y)) => (*x as i64).cmp(y),
                     (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
@@ -248,6 +251,10 @@ pub(crate) fn call_method_on_value(
                         Value::Int(n) => {
                             total += *n;
                             ftotal += *n as f64;
+                        }
+                        Value::UInt { value, .. } => {
+                            total += *value as i64;
+                            ftotal += *value as f64;
                         }
                         Value::Float(f) => {
                             is_float = true;
@@ -339,11 +346,32 @@ pub(crate) fn call_method_on_value(
             "abs" => return Ok(Value::Int(n.abs())),
             "to_string" | "to_text" => return Ok(Value::Str(n.to_string())),
             "to_float" | "to_f64" => return Ok(Value::Float(*n as f64)),
-            "to_f32" => return Ok(Value::Float(*n as f32 as f64)),
+            "to_f32" => return Ok(Value::Float32(*n as f32)),
             "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
                 let tname = &method[3..];
                 let nt = NumericType::from_name(tname).expect("handled above");
                 return Ok(match cast_int_to_numeric(*n, nt) {
+                    CastNumericResult::Int(v) => Value::Int(v),
+                    CastNumericResult::Float(v) => Value::Float(v),
+                });
+            }
+            _ => {}
+        },
+
+        // UInt methods (regression from W5-I commit 2ec2342969 — u8/u16/u32/u64
+        // values from `[u8]` indexing, casts, or width-typed annotations now
+        // produce `Value::UInt { value, width }`. Mirror the Int arm: feed the
+        // unsigned bit-pattern through cast_int_to_numeric as i64 — same view
+        // used by `value_impl.rs::as_int` and `value_bridge.rs:288`.
+        Value::UInt { value, .. } => match method {
+            "abs" => return Ok(recv_val.clone()), // unsigned: identity
+            "to_string" | "to_text" => return Ok(Value::Str(value.to_string())),
+            "to_float" | "to_f64" => return Ok(Value::Float(*value as f64)),
+            "to_f32" => return Ok(Value::Float32(*value as f32)),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+                let tname = &method[3..];
+                let nt = NumericType::from_name(tname).expect("handled above");
+                return Ok(match cast_int_to_numeric(*value as i64, nt) {
                     CastNumericResult::Int(v) => Value::Int(v),
                     CastNumericResult::Float(v) => Value::Float(v),
                 });
@@ -360,11 +388,33 @@ pub(crate) fn call_method_on_value(
             "to_string" | "to_text" => return Ok(Value::Str(f.to_string())),
             "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
             "to_f64" => return Ok(Value::Float(*f)),
-            "to_f32" => return Ok(Value::Float(*f as f32 as f64)),
+            "to_f32" => return Ok(Value::Float32(*f as f32)),
             "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
                 let tname = &method[3..];
                 let nt = NumericType::from_name(tname).expect("handled above");
                 return Ok(match cast_float_to_numeric(*f, nt) {
+                    CastNumericResult::Int(v) => Value::Int(v),
+                    CastNumericResult::Float(v) => Value::Float(v),
+                });
+            }
+            _ => {}
+        },
+
+        // Float32 methods (mirror W5-I UInt arm — preserve f32 precision through
+        // unary methods; widen to f64 only for explicit `.to_f64()` cast).
+        Value::Float32(f) => match method {
+            "abs" => return Ok(Value::Float32(f.abs())),
+            "floor" => return Ok(Value::Float32(f.floor())),
+            "ceil" => return Ok(Value::Float32(f.ceil())),
+            "round" => return Ok(Value::Float32(f.round())),
+            "to_string" | "to_text" => return Ok(Value::Str(f.to_string())),
+            "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
+            "to_f64" => return Ok(Value::Float(*f as f64)),
+            "to_f32" => return Ok(Value::Float32(*f)),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+                let tname = &method[3..];
+                let nt = NumericType::from_name(tname).expect("handled above");
+                return Ok(match cast_float_to_numeric(*f as f64, nt) {
                     CastNumericResult::Int(v) => Value::Int(v),
                     CastNumericResult::Float(v) => Value::Float(v),
                 });
@@ -419,7 +469,8 @@ pub(crate) fn call_method_on_value(
         let type_names: &[&str] = match &recv_val {
             Value::Str(_) => &["text", "str", "String"],
             Value::Int(_) => &["i64", "i32", "int"],
-            Value::Float(_) => &["f64", "f32", "float"],
+            Value::Float(_) => &["f64", "float"],
+            Value::Float32(_) => &["f32", "float"],
             Value::Bool(_) => &["bool"],
             Value::Array(_) | Value::FrozenArray(_) | Value::FixedSizeArray { .. } => &["array", "Array"],
             Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],
