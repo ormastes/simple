@@ -628,8 +628,8 @@ fn parse_encrypted_extensions(body: [u8]) -> EncryptedExtensionsResult:
 #   - MUST abort if it has already received an HRR in this handshake.
 #   - MUST abort if the chosen group equals one we already sent in CH1.
 #   - MUST abort if legacy_compression_method != 0x00.
-# Transcript hash gets a synthetic message_hash replacement per §4.4.1 — that
-# helper lives in a follow-up commit (build_hrr_synthetic_message_hash).
+# Transcript hash gets a synthetic message_hash replacement per §4.4.1 — see
+# build_hrr_synthetic_message_hash() below.
 
 fn is_hello_retry_request(sh: ServerHello13) -> bool:
     """Return true if the parsed ServerHello is actually a HelloRetryRequest.
@@ -778,6 +778,56 @@ fn parse_hello_retry_request(body: [u8]) -> HrrResult:
         cipher_suite: cipher_suite,
         selected_group: selected_group,
         cookie: cookie))
+
+# ============================================================================
+# Public: Synthetic message_hash for HRR transcript replacement (RFC 8446 §4.4.1)
+# ============================================================================
+#
+# When HRR is received, the running transcript hash MUST be replaced by:
+#
+#     Hash(message_hash || 0x00 0x00 Hash.length || Hash(ClientHello1)) ||
+#     HelloRetryRequest || ... || Mn
+#
+# The synthetic prefix injected into the transcript is the bytes:
+#
+#     handshake_type=message_hash(254) || length(3 bytes BE) || Hash(CH1)
+#
+# For SHA-256, length = 32 = 0x000020 → final prefix is 36 bytes:
+#     0xfe 0x00 0x00 0x20 || Hash(CH1)
+#
+# Callers replace the existing CH1 transcript with this synthetic message_hash
+# and then continue appending HRR + CH2 + ... normally.
+
+val HS_MESSAGE_HASH: u8 = 254  # 0xfe — RFC 8446 §4.4.1
+
+fn build_hrr_synthetic_message_hash(ch1_hash: [u8]) -> [u8]:
+    """Build the synthetic message_hash bytes for HRR transcript replacement.
+
+    Layout (RFC 8446 §4.4.1):
+      type(1=0xfe) + length(3, big-endian) + Hash(ClientHello1)
+
+    For SHA-256 the result is exactly 36 bytes (4-byte handshake header +
+    32-byte hash). For other hashes the length is hash-size dependent.
+
+    Args:
+        ch1_hash: Hash(ClientHello1), must equal the negotiated hash output
+            length (32 bytes for SHA-256).
+
+    Returns: Synthetic message_hash bytes ready to feed back into a fresh
+        Transcript via transcript_add().
+    """
+    val hash_len = ch1_hash.len().to_u64()
+    var out: [u8] = _byte_buf(hash_len + 4)
+    out = _push_byte(out, HS_MESSAGE_HASH.to_i64())
+    # 3-byte big-endian length
+    out = _push_byte(out, ((hash_len >> 16) & 0xFF).to_i64())
+    out = _push_byte(out, ((hash_len >> 8) & 0xFF).to_i64())
+    out = _push_byte(out, (hash_len & 0xFF).to_i64())
+    var i: u64 = 0
+    while i < hash_len:
+        out = _push_byte(out, _u8_at(ch1_hash, i).to_u64().to_i64())
+        i = i + 1
+    out
 
 # ============================================================================
 # Public: Build ClientHello2 (RFC 8446 §4.1.2 after HRR)
