@@ -1,11 +1,16 @@
-# Zstd Huffman literal encoder bit-layout: encoder output not decodable
+# Zstd Huffman + FSE encoder primitives: encoder output not decodable
 
 Date: 2026-05-02
-Status: **OPEN — known limitation in pure-Simple encoder; decoder side untouched.**
+Status: **OPEN — both encoder primitives shipped under W9-C are
+unverified-broken when fed back through their matching decoders.
+Discovered 2026-05-02 via discriminating round-trip checks the
+W9-C spec did not (and could not at parallel-clobber time) include.**
 
 ## Symptom
 
-`zstd_huf_encode_literals` (added in commit `a5d2699f3e` /
+### A. `zstd_huf_encode_literals` (commit `a248ebff0a` / `a5d2699f3e`)
+
+`zstd_huf_encode_literals` (added in
 "feat(zstd_huf): Huffman literal encoder + direct/FSE weight header
 emitters") produces a bitstream whose direct round-trip through the
 existing pure-Simple decoder fails:
@@ -20,6 +25,34 @@ fed by `_zstd_huf_build_table_from_weights`. The error originates from
 before all `regenerated_size` literals have been emitted — meaning the
 encoder did not leave the decoder with enough trailing bits per
 codeword peek.
+
+### B. `zstd_fse_encode_symbols` (commit `d7e46403c2` / `09979b67e4`)
+
+The FSE encoder fails its OWN round-trip on a flat-distribution test
+(`counts = [4, 4, 4, 4, 4, 4, 4, 4]`, `table_log = 5`,
+`syms = [0, 3, 5, 1, 7, 2, 6, 4]`):
+
+```
+called unwrap on Err: CompressionError::CorruptStream(zstd fse encode state index oor)
+```
+
+The error originates from `_zstd_fse_encode_one_symbol` computing
+`target_idx` (sym-cumulative-base + state-shift) outside
+`state_table.len()`. Likely root cause: the per-symbol `nb_bits` test
+`if state + entry.state_offset >= 0 and ((state + entry.state_offset)
+>> table.table_log) > 0: nb_bits = entry.nb_bits - 1` does not match
+the zstd reference encoder's `(state + delta_nb_bits) >> 16` test,
+so the wrong number of state bits is shifted out and the cumulative-
+table lookup overflows.
+
+`zstd_huf_encode_fse_weight_header` indirectly inherits this defect
+because it calls `zstd_fse_encode_symbols` — its current PASS in
+`test/unit/lib/common/zstd_fse_huffman_weight_encode_spec.spl` only
+asserts header byte format (`< 128`) and bitstream length consistency
+with the header byte, never that the bitstream decodes back to the
+input weight stream. A wider weight distribution may bypass the failing
+state-index path; the spec's `[2, 1, 1]` partial happens to land in a
+cumulative-state region the broken formula handles correctly.
 
 ## Reproduce
 
