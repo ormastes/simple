@@ -1,0 +1,174 @@
+# HMAC-DRBG — NIST SP 800-90A §10.1.2
+#
+# Deterministic random bit generator built on HMAC-SHA-256, suitable for
+# FIPS-aligned protocol use (TLS keying material, PQC nonces, etc.).
+#
+# State per §10.1.2.1:
+#   K              — 32-byte HMAC key
+#   V              — 32-byte working value
+#   reseed_counter — number of Generate calls since instantiate/reseed
+#
+# Algorithms implemented (this file, commit 1):
+#   §10.1.2.2 HMAC_DRBG_Update
+#   §10.1.2.3 HMAC_DRBG_Instantiate
+#   §10.1.2.4 HMAC_DRBG_Reseed
+#
+# Generate (§10.1.2.5) lands in commit 2.
+#
+# NIST limits per Table 2 (HMAC-SHA-256):
+#   reseed_interval ≤ 2^48 Generate calls (NOT bits, NOT bytes — NIST-specified)
+#   max bits per single Generate request ≤ 2^19 bits = 65536 bytes
+#
+# Uses pure-Simple HMAC-SHA-256 from std.crypto.hmac (read-only dependency).
+
+mod crypto.types
+mod crypto.hmac
+
+use std.crypto.hmac.{hmac_sha256_bytes}
+
+# =============================================================================
+# Constants — HMAC-SHA-256 DRBG profile
+# =============================================================================
+
+# Output length of HMAC-SHA-256 in bytes (also the K and V length per §10.1.2)
+fn _hmac_drbg_outlen() -> i64:
+    32
+
+# Maximum Generate calls between reseeds (NIST SP 800-90A Table 2)
+# 2^48 — represented as i64 literal
+fn _hmac_drbg_reseed_interval() -> i64:
+    281474976710656
+
+# =============================================================================
+# State type
+# =============================================================================
+
+# HMAC-DRBG state per §10.1.2.1
+class HmacDrbgState:
+    var k: list
+    var v: list
+    var reseed_counter: i64
+
+# =============================================================================
+# Internal byte helpers
+# =============================================================================
+
+# Concat three byte lists: a || b || c
+fn _concat3(a: list, b: list, c: list) -> list:
+    var out = []
+    var i = 0
+    while i < a.len():
+        out.push(a.get(i))
+        i = i + 1
+    i = 0
+    while i < b.len():
+        out.push(b.get(i))
+        i = i + 1
+    i = 0
+    while i < c.len():
+        out.push(c.get(i))
+        i = i + 1
+    out
+
+# Concat two byte lists: a || b
+fn _concat2(a: list, b: list) -> list:
+    var out = []
+    var i = 0
+    while i < a.len():
+        out.push(a.get(i))
+        i = i + 1
+    i = 0
+    while i < b.len():
+        out.push(b.get(i))
+        i = i + 1
+    out
+
+# Build a list of `n` bytes equal to `value`
+fn _byte_fill(n: i64, value: i64) -> list:
+    var out = []
+    var i = 0
+    while i < n:
+        out.push(value & 0xFF)
+        i = i + 1
+    out
+
+# Single-byte list [b]
+fn _byte_one(b: i64) -> list:
+    var out = []
+    out.push(b & 0xFF)
+    out
+
+# =============================================================================
+# §10.1.2.2 HMAC_DRBG_Update
+#
+# Inputs: provided_data (may be empty), K, V
+# Outputs: new K, new V
+#
+# 1. K = HMAC(K, V || 0x00 || provided_data)
+# 2. V = HMAC(K, V)                            -- uses the NEW K from step 1
+# 3. If provided_data is empty: return (K, V)
+# 4. K = HMAC(K, V || 0x01 || provided_data)   -- chain: uses NEW K and NEW V
+# 5. V = HMAC(K, V)                            -- uses NEWEST K
+# 6. Return (K, V)
+# =============================================================================
+
+# reason: positional crypto drbg API
+fn hmac_drbg_update(state: HmacDrbgState, provided_data: list) -> HmacDrbgState:
+    # Step 1: K = HMAC(K, V || 0x00 || provided_data)
+    val msg1 = _concat3(state.v, _byte_one(0x00), provided_data)
+    val k1 = hmac_sha256_bytes(state.k, msg1)
+    # Step 2: V = HMAC(K, V) using new K
+    val v1 = hmac_sha256_bytes(k1, state.v)
+
+    if provided_data.len() == 0:
+        # Step 3: empty provided_data → return after first pass
+        HmacDrbgState(k: k1, v: v1, reseed_counter: state.reseed_counter)
+    else:
+        # Step 4: K = HMAC(K, V || 0x01 || provided_data) using updated K and V
+        val msg2 = _concat3(v1, _byte_one(0x01), provided_data)
+        val k2 = hmac_sha256_bytes(k1, msg2)
+        # Step 5: V = HMAC(K, V) using newest K
+        val v2 = hmac_sha256_bytes(k2, v1)
+        HmacDrbgState(k: k2, v: v2, reseed_counter: state.reseed_counter)
+
+# =============================================================================
+# §10.1.2.3 HMAC_DRBG_Instantiate
+#
+# Inputs: entropy_input, nonce, personalization_string
+# Outputs: initial state (K=0x00*32, V=0x01*32) processed through Update with
+#          seed_material = entropy_input || nonce || personalization_string
+#
+# 1. seed_material = entropy_input || nonce || personalization_string
+# 2. K = 0x00 0x00 ... 0x00 (outlen bytes)
+# 3. V = 0x01 0x01 ... 0x01 (outlen bytes)
+# 4. (K, V) = HMAC_DRBG_Update(seed_material, K, V)
+# 5. reseed_counter = 1
+# 6. Return state
+# =============================================================================
+
+# reason: positional crypto drbg API
+fn hmac_drbg_instantiate(entropy_input: list, nonce: list, personalization: list) -> HmacDrbgState:
+    val seed_material = _concat3(entropy_input, nonce, personalization)
+    val k0 = _byte_fill(_hmac_drbg_outlen(), 0x00)
+    val v0 = _byte_fill(_hmac_drbg_outlen(), 0x01)
+    val initial = HmacDrbgState(k: k0, v: v0, reseed_counter: 0)
+    val updated = hmac_drbg_update(initial, seed_material)
+    HmacDrbgState(k: updated.k, v: updated.v, reseed_counter: 1)
+
+# =============================================================================
+# §10.1.2.4 HMAC_DRBG_Reseed
+#
+# Inputs: state, entropy_input, additional_input
+# Outputs: new state with reseed_counter reset to 1
+#
+# 1. seed_material = entropy_input || additional_input
+# 2. (K, V) = HMAC_DRBG_Update(seed_material, K, V)
+# 3. reseed_counter = 1
+# 4. Return state
+# =============================================================================
+
+# reason: positional crypto drbg API
+fn hmac_drbg_reseed(state: HmacDrbgState, entropy_input: list, additional: list) -> HmacDrbgState:
+    val seed_material = _concat2(entropy_input, additional)
+    val updated = hmac_drbg_update(state, seed_material)
+    HmacDrbgState(k: updated.k, v: updated.v, reseed_counter: 1)

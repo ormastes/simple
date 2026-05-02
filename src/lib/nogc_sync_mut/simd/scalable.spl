@@ -12,40 +12,94 @@ use std.simd.mask.{Mask}
 use std.simd.fixed.{FixedVec}
 
 # ============================================================================
-# ScalableVec<T>
+# ScalableVec<T> — with Vector trait (C2 §1.1 + §1.3)
 # ============================================================================
 
-class ScalableVec<T: SimdElementType>:
+class ScalableVec<T: SimdElementType> with Vector:
     """Runtime-lane SIMD vector (models SVE/RVV vscale semantics).
 
     Interpreter backing: a plain [T] slice whose length is determined at
     construction time.
 
     lanes() is a runtime call (C2 §4.1).
-    min_lanes() is a compile-time const (C2 §4.2); returns 4 for f32 on
-    SVE/RVV @ VLEN=128.  In interpreter mode, always returns 4.
+    min_lanes() returns 4 (matches SVE/RVV @ VLEN=128 for f32).
 
     C2 §4.5: PTX/CUDA does NOT support ScalableVec.
     """
     elements: [T]
 
-# ============================================================================
-# Vector trait impl for ScalableVec<T>  (C2 §1.1 + §1.3)
-# ============================================================================
-
-impl<T: SimdElementType> ScalableVec<T> with Vector:
-
+    # — Associated types —
     type Elem = T
     type Mask = Mask<ScalableVec<T>>
 
-    # C2 §4.1: lanes() — runtime query
+    # — Construction (C2 §1.3) —
+
+    static fn splat(val: T) -> Self:
+        ScalableVec<T>.splat_n(val, ScalableVec<T>.min_lanes())
+
+    static fn splat_n(val: T, n: usize) -> Self:
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(val)
+            i = i + 1
+        ScalableVec(elements: out)
+
+    static fn zero() -> Self:
+        ScalableVec<T>.splat(0 as T)
+
+    # C2 §4.2: min_lanes() — compile-time architectural minimum
+    # In interpreter: returns 4 (matches SVE/RVV @ VLEN=128 for f32)
+    static fn min_lanes() -> usize:
+        4
+
+    # C2 §4.4: from_fixed
+    static fn from_fixed(v: FixedVec<T>) -> Self:
+        var out: [T] = []
+        var i = 0
+        while i < v.lanes:
+            out.push(v.elements[i as usize])
+            i = i + 1
+        ScalableVec(elements: out)
+
+    # C2 §4.4: try_to_fixed — runtime check
+    fn try_to_fixed(self, n: i32) -> Option<FixedVec<T>>:
+        if self.elements.len() != n as usize:
+            None
+        else:
+            var out: [T] = []
+            var i = 0
+            while i < n:
+                out.push(self.elements[i as usize])
+                i = i + 1
+            Some(FixedVec(elements: out, lanes: n))
+
+    # C2 §1.3: Load / store (stride-aware)
+    static fn load_strided(ptr: *T, stride: usize, n: usize) -> Self:
+        var out: [T] = []
+        var i = 0
+        while i < n:
+            out.push(rt_ptr_load(ptr, i * stride))
+            i = i + 1
+        ScalableVec(elements: out)
+
+    fn store_strided(self, ptr: *T, stride: usize):
+        val n = self.elements.len()
+        var i = 0
+        while i < n:
+            rt_ptr_store(ptr, i * stride, self.elements[i])
+            i = i + 1
+
+    # — Vector trait: lane count — (C2 §4.1)
+
     fn lanes(self) -> usize:
         self.elements.len()
 
     fn len(self) -> usize:
         self.elements.len()
 
-    # C2 §1.1: lane access
+    # — Vector trait: lane access — (C2 §1.1)
+
     fn lane(self, i: usize) -> T:
         if i >= self.elements.len():
             panic("E_SIMD_LANE_OOB: lane index {i} >= {self.elements.len()}")
@@ -55,210 +109,225 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         val n = self.elements.len()
         if i >= n:
             panic("E_SIMD_LANE_OOB: lane index {i} >= {n}")
-        var result = ScalableVec(elements: self.elements)
-        result.elements[i] = v
-        result
+        var new_elems: [T] = []
+        var j = 0
+        while j < n:
+            if j == i:
+                new_elems.push(v)
+            else:
+                new_elems.push(self.elements[j])
+            j = j + 1
+        ScalableVec(elements: new_elems)
 
-    # C2 §1.1: Arithmetic
+    # — Vector trait: Arithmetic — (C2 §1.1)
+
     fn add(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] + rhs.elements[i]
+            out.push(self.elements[i] + rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn sub(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] - rhs.elements[i]
+            out.push(self.elements[i] - rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn mul(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] * rhs.elements[i]
+            out.push(self.elements[i] * rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn div(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] / rhs.elements[i]
+            out.push(self.elements[i] / rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn neg(self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = -self.elements[i]
+            out.push(-self.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn min(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            if self.elements[i] < rhs.elements[i]:
-                out[i] = self.elements[i]
+            val a = self.elements[i]
+            val b = rhs.elements[i]
+            if a < b:
+                out.push(a)
             else:
-                out[i] = rhs.elements[i]
+                out.push(b)
             i = i + 1
         ScalableVec(elements: out)
 
     fn max(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            if self.elements[i] > rhs.elements[i]:
-                out[i] = self.elements[i]
+            val a = self.elements[i]
+            val b = rhs.elements[i]
+            if a > b:
+                out.push(a)
             else:
-                out[i] = rhs.elements[i]
+                out.push(b)
             i = i + 1
         ScalableVec(elements: out)
 
-    # C2 §1.1: Float-only arithmetic
+    # — Vector trait: Float-only arithmetic — (C2 §1.1)
+
     fn fma(self, b: Self, c: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] * b.elements[i] + c.elements[i]
+            out.push(self.elements[i] * b.elements[i] + c.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn fnmadd(self, b: Self, c: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = -(self.elements[i] * b.elements[i]) + c.elements[i]
+            out.push(-(self.elements[i] * b.elements[i]) + c.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn abs(self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            if self.elements[i] < 0.0:
-                out[i] = -self.elements[i]
+            val v = self.elements[i]
+            if v < 0 as T:
+                out.push(-v)
             else:
-                out[i] = self.elements[i]
+                out.push(v)
             i = i + 1
         ScalableVec(elements: out)
 
     fn recip(self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = 1.0 / self.elements[i]
+            out.push(1 as T / self.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn sqrt(self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = rt_sqrt(self.elements[i])
+            out.push(rt_sqrt(self.elements[i]))
             i = i + 1
         ScalableVec(elements: out)
 
     fn recip_sqrt(self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = 1.0 / rt_sqrt(self.elements[i])
+            out.push(1 as T / rt_sqrt(self.elements[i]))
             i = i + 1
         ScalableVec(elements: out)
 
-    # C2 §1.1: Integer-only bitwise
+    # — Vector trait: Integer-only bitwise — (C2 §1.1)
+
     fn and(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] & rhs.elements[i]
+            out.push(self.elements[i] & rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn or(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] | rhs.elements[i]
+            out.push(self.elements[i] | rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn xor(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] ^ rhs.elements[i]
+            out.push(self.elements[i] ^ rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn andnot(self, rhs: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = (~self.elements[i]) & rhs.elements[i]
+            out.push((~self.elements[i]) & rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn shl(self, count: u32) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] << count
+            out.push(self.elements[i] << count)
             i = i + 1
         ScalableVec(elements: out)
 
     fn shr_logical(self, count: u32) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] >> count
+            out.push(self.elements[i] >> count)
             i = i + 1
         ScalableVec(elements: out)
 
     fn shr_arith(self, count: u32) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = self.elements[i] >> count
+            out.push(self.elements[i] >> count)
             i = i + 1
         ScalableVec(elements: out)
 
-    # C2 §1.1: Comparison → Mask
+    # — Vector trait: Comparison → Mask — (C2 §1.1)
+
     fn cmp_eq(self, rhs: Self) -> Mask<ScalableVec<T>>:
         val n = self.elements.len()
         var bits: u64 = 0
         var i = 0
         while i < n:
             if self.elements[i] == rhs.elements[i]:
-                bits = bits | (1 << i)
+                bits = bits | (1 as u64 << i)
             i = i + 1
         Mask(bits: bits, lane_count: n)
 
@@ -268,7 +337,7 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         var i = 0
         while i < n:
             if self.elements[i] != rhs.elements[i]:
-                bits = bits | (1 << i)
+                bits = bits | (1 as u64 << i)
             i = i + 1
         Mask(bits: bits, lane_count: n)
 
@@ -278,7 +347,7 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         var i = 0
         while i < n:
             if self.elements[i] < rhs.elements[i]:
-                bits = bits | (1 << i)
+                bits = bits | (1 as u64 << i)
             i = i + 1
         Mask(bits: bits, lane_count: n)
 
@@ -288,7 +357,7 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         var i = 0
         while i < n:
             if self.elements[i] <= rhs.elements[i]:
-                bits = bits | (1 << i)
+                bits = bits | (1 as u64 << i)
             i = i + 1
         Mask(bits: bits, lane_count: n)
 
@@ -298,7 +367,7 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         var i = 0
         while i < n:
             if self.elements[i] > rhs.elements[i]:
-                bits = bits | (1 << i)
+                bits = bits | (1 as u64 << i)
             i = i + 1
         Mask(bits: bits, lane_count: n)
 
@@ -308,24 +377,26 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         var i = 0
         while i < n:
             if self.elements[i] >= rhs.elements[i]:
-                bits = bits | (1 << i)
+                bits = bits | (1 as u64 << i)
             i = i + 1
         Mask(bits: bits, lane_count: n)
 
-    # C2 §1.1: Selection / blend
+    # — Vector trait: Selection / blend — (C2 §1.1)
+
     fn mask_select(mask: Mask<ScalableVec<T>>, t: Self, f: Self) -> Self:
         val n = t.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
             if mask.lane_active(i):
-                out[i] = t.elements[i]
+                out.push(t.elements[i])
             else:
-                out[i] = f.elements[i]
+                out.push(f.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
-    # C2 §1.1: Reductions
+    # — Vector trait: Reductions — (C2 §1.1)
+
     fn reduce_sum(self) -> T:
         val n = self.elements.len()
         var acc = self.elements[0]
@@ -340,8 +411,9 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         var acc = self.elements[0]
         var i = 1
         while i < n:
-            if self.elements[i] < acc:
-                acc = self.elements[i]
+            val v = self.elements[i]
+            if v < acc:
+                acc = v
             i = i + 1
         acc
 
@@ -350,8 +422,9 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         var acc = self.elements[0]
         var i = 1
         while i < n:
-            if self.elements[i] > acc:
-                acc = self.elements[i]
+            val v = self.elements[i]
+            if v > acc:
+                acc = v
             i = i + 1
         acc
 
@@ -373,16 +446,17 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
             i = i + 1
         acc
 
-    # C2 §1.1: Permutation / shuffle
+    # — Vector trait: Permutation / shuffle — (C2 §1.1)
+
     fn shuffle(self, indices: Self) -> Self:
         val n = self.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
             val idx = indices.elements[i] as usize
             if idx >= n:
                 panic("E_SIMD_LANE_OOB: shuffle index {idx} >= {n}")
-            out[i] = self.elements[idx]
+            out.push(self.elements[idx])
             i = i + 1
         ScalableVec(elements: out)
 
@@ -395,37 +469,38 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         if idx >= n:
             panic("E_SIMD_LANE_OOB: broadcast_lane {lane} >= {n}")
         val v = self.elements[idx]
-        ScalableVec<T>::splat_n(v, n)
+        ScalableVec<T>.splat_n(v, n)
 
     fn interleave_lo(self, rhs: Self) -> Self:
         val n = self.elements.len()
         val half = n / 2
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < half:
-            out[2 * i]     = self.elements[i]
-            out[2 * i + 1] = rhs.elements[i]
+            out.push(self.elements[i])
+            out.push(rhs.elements[i])
             i = i + 1
         ScalableVec(elements: out)
 
     fn interleave_hi(self, rhs: Self) -> Self:
         val n = self.elements.len()
         val half = n / 2
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < half:
-            out[2 * i]     = self.elements[half + i]
-            out[2 * i + 1] = rhs.elements[half + i]
+            out.push(self.elements[half + i])
+            out.push(rhs.elements[half + i])
             i = i + 1
         ScalableVec(elements: out)
 
-    # C2 §1.1: Memory
+    # — Vector trait: Memory — (C2 §1.1)
+
     fn load_unaligned(ptr: *T) -> Self:
-        val n = ScalableVec<T>::min_lanes()
-        var out = [T; n]
+        val n = ScalableVec<T>.min_lanes()
+        var out: [T] = []
         var i = 0
         while i < n:
-            out[i] = rt_ptr_load(ptr, i)
+            out.push(rt_ptr_load(ptr, i))
             i = i + 1
         ScalableVec(elements: out)
 
@@ -437,18 +512,18 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
             i = i + 1
 
     fn load_aligned(ptr: *T) -> Self:
-        ScalableVec<T>::load_unaligned(ptr)
+        ScalableVec<T>.load_unaligned(ptr)
 
     fn store_aligned(self, ptr: *mut T):
         self.store_unaligned(ptr)
 
     fn gather(base: *T, indices: Self) -> Self:
         val n = indices.elements.len()
-        var out = [T; n]
+        var out: [T] = []
         var i = 0
         while i < n:
             val idx = indices.elements[i] as usize
-            out[i] = rt_ptr_load(base, idx)
+            out.push(rt_ptr_load(base, idx))
             i = i + 1
         ScalableVec(elements: out)
 
@@ -460,14 +535,16 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
             rt_ptr_store(base, idx, self.elements[i])
             i = i + 1
 
-    # C2 §1.1: Conversion
+    # — Vector trait: Conversion — (C2 §1.1)
+
     fn from_array(arr: [T]) -> Self:
         ScalableVec(elements: arr)
 
     fn to_array(self) -> [T]:
         self.elements
 
-    # C2 §1.1: Debug / iteration
+    # — Vector trait: Debug / iteration — (C2 §1.1)
+
     fn fmt(self) -> text:
         val n = self.elements.len()
         var s = "ScalableVec["
@@ -483,71 +560,4 @@ impl<T: SimdElementType> ScalableVec<T> with Vector:
         self.fmt()
 
     fn iter(self) -> LaneIter<T>:
-        LaneIter::new(self.elements)
-
-# ============================================================================
-# ScalableVec<T> — own impl block (C2 §1.3 additional methods)
-# ============================================================================
-
-impl<T: SimdElementType> ScalableVec<T>:
-
-    # C2 §1.3: Construction
-    static fn splat(val: T) -> Self:
-        val n = ScalableVec<T>::min_lanes()
-        ScalableVec<T>::splat_n(val, n)
-
-    static fn splat_n(val: T, n: usize) -> Self:
-        var out = [T; n]
-        var i = 0
-        while i < n:
-            out[i] = val
-            i = i + 1
-        ScalableVec(elements: out)
-
-    static fn zero() -> Self:
-        ScalableVec<T>::splat(0 as T)
-
-    # C2 §4.2: min_lanes() — compile-time architectural minimum
-    # In interpreter: returns 4 (matches SVE/RVV @ VLEN=128 for f32)
-    static const fn min_lanes() -> usize:
-        4
-
-    # C2 §4.4: from_fixed — N must be <= min_lanes()
-    static fn from_fixed<const N: usize>(v: FixedVec<T, N>) -> Self:
-        if N > ScalableVec<T>::min_lanes():
-            panic("E_SIMD_FIXED_OVERFLOWS_SCALABLE: N={N} > min_lanes()={ScalableVec<T>::min_lanes()}")
-        var out = [T; N]
-        var i = 0
-        while i < N:
-            out[i] = v.elements[i]
-            i = i + 1
-        ScalableVec(elements: out)
-
-    # C2 §4.4: try_to_fixed — runtime check
-    fn try_to_fixed<const N: usize>(self) -> Option<FixedVec<T, N>>:
-        val n = self.elements.len()
-        if n != N:
-            None
-        else:
-            var out = [T; N]
-            var i = 0
-            while i < N:
-                out[i] = self.elements[i]
-                i = i + 1
-            Some(FixedVec(elements: out))
-
-    # C2 §1.3: Load / store (stride-aware)
-    static fn load_strided(ptr: *T, stride: usize, n: usize) -> Self:
-        var out = [T; n]
-        var i = 0
-        while i < n:
-            out[i] = rt_ptr_load(ptr, i * stride)
-            i = i + 1
-        ScalableVec(elements: out)
-
-    fn store_strided(self, ptr: *T, stride: usize):
-        val n = self.elements.len()
-        var i = 0
-        while i < n:
-            rt_ptr_store(ptr, i * stride, self.elements[i])
-            i = i + 1
+        LaneIter.new(self.elements)
