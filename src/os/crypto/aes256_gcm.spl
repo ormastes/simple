@@ -134,25 +134,58 @@ fn _xor_v16(a: Vec16u8, b: Vec16u8) -> Vec16u8:
 fn _load_round_key_v(schedule: [u8], round_idx: u64) -> Vec16u8:
     """Load the 16-byte round key R from the 240-byte AES-256 schedule
     into a Vec16u8 (round_idx in 0..=14).
+
+    Note: feeds `rt_bytes_u8_at` (returns i64) directly into the Vec16u8
+    constructor instead of going through `_u8_at` (returns u8). The runtime
+    SIMD dispatcher (`unpack_vec16u8` in interpreter_extern/simd.rs)
+    requires Value::Int lane fields; an i64-into-u8-field store keeps the
+    Value::Int representation, while a u8-into-u8-field store materialises
+    Value::UInt{width:8} which the dispatcher rejects.
     """
-    val base = round_idx * 16
+    val base = (round_idx * 16).to_i64()
     Vec16u8(
-        u0:  _u8_at(schedule, base + 0),
-        u1:  _u8_at(schedule, base + 1),
-        u2:  _u8_at(schedule, base + 2),
-        u3:  _u8_at(schedule, base + 3),
-        u4:  _u8_at(schedule, base + 4),
-        u5:  _u8_at(schedule, base + 5),
-        u6:  _u8_at(schedule, base + 6),
-        u7:  _u8_at(schedule, base + 7),
-        u8_: _u8_at(schedule, base + 8),
-        u9:  _u8_at(schedule, base + 9),
-        u10: _u8_at(schedule, base + 10),
-        u11: _u8_at(schedule, base + 11),
-        u12: _u8_at(schedule, base + 12),
-        u13: _u8_at(schedule, base + 13),
-        u14: _u8_at(schedule, base + 14),
-        u15: _u8_at(schedule, base + 15),
+        u0:  rt_bytes_u8_at(schedule, base + 0),
+        u1:  rt_bytes_u8_at(schedule, base + 1),
+        u2:  rt_bytes_u8_at(schedule, base + 2),
+        u3:  rt_bytes_u8_at(schedule, base + 3),
+        u4:  rt_bytes_u8_at(schedule, base + 4),
+        u5:  rt_bytes_u8_at(schedule, base + 5),
+        u6:  rt_bytes_u8_at(schedule, base + 6),
+        u7:  rt_bytes_u8_at(schedule, base + 7),
+        u8_: rt_bytes_u8_at(schedule, base + 8),
+        u9:  rt_bytes_u8_at(schedule, base + 9),
+        u10: rt_bytes_u8_at(schedule, base + 10),
+        u11: rt_bytes_u8_at(schedule, base + 11),
+        u12: rt_bytes_u8_at(schedule, base + 12),
+        u13: rt_bytes_u8_at(schedule, base + 13),
+        u14: rt_bytes_u8_at(schedule, base + 14),
+        u15: rt_bytes_u8_at(schedule, base + 15),
+    )
+
+fn _load_block_v(block: [u8]) -> Vec16u8:
+    """Load a 16-byte plaintext / counter block into a Vec16u8.
+
+    Same i64-direct rationale as `_load_round_key_v`: avoids the
+    `_u8_at` -> u8-typed-field path that the interpreter's SIMD
+    dispatcher rejects.
+    """
+    Vec16u8(
+        u0:  rt_bytes_u8_at(block, 0),
+        u1:  rt_bytes_u8_at(block, 1),
+        u2:  rt_bytes_u8_at(block, 2),
+        u3:  rt_bytes_u8_at(block, 3),
+        u4:  rt_bytes_u8_at(block, 4),
+        u5:  rt_bytes_u8_at(block, 5),
+        u6:  rt_bytes_u8_at(block, 6),
+        u7:  rt_bytes_u8_at(block, 7),
+        u8_: rt_bytes_u8_at(block, 8),
+        u9:  rt_bytes_u8_at(block, 9),
+        u10: rt_bytes_u8_at(block, 10),
+        u11: rt_bytes_u8_at(block, 11),
+        u12: rt_bytes_u8_at(block, 12),
+        u13: rt_bytes_u8_at(block, 13),
+        u14: rt_bytes_u8_at(block, 14),
+        u15: rt_bytes_u8_at(block, 15),
     )
 
 fn _aes256_encrypt_block_with_schedule(plaintext: [u8], schedule: [u8]) -> [u8]:
@@ -167,7 +200,7 @@ fn _aes256_encrypt_block_with_schedule(plaintext: [u8], schedule: [u8]) -> [u8]:
     Use this in tight loops (e.g. gctr256) to amortize the key-expansion
     cost across many blocks; for one-shot calls, see aes256_encrypt_block.
     """
-    val pt_v = Vec16u8.from_array(plaintext)
+    val pt_v = _load_block_v(plaintext)
     val k0 = _load_round_key_v(schedule, 0)
     var state = _xor_v16(pt_v, k0)
     var r: u64 = 1
