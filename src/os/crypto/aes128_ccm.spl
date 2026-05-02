@@ -317,3 +317,145 @@ fn _xor_bytes(a: [u8], b: [u8]) -> [u8]:
         out.push(_u8_at(a, i) ^ _u8_at(b, i))
         i = i + 1
     out
+
+# ============================================================================
+# Constant-time tag comparison (RFC 3610 §4 + feedback_no_coverups.md pattern)
+#
+# Accumulates XOR-OR over all bytes; returns true only if every byte matches.
+# Always processes both inputs to full length; no early return.
+# Mismatched-length tags are rejected explicitly (length is public).
+# ============================================================================
+
+fn _ct_eq_bytes(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var diff: u32 = 0
+    var i: u64 = 0
+    while i < a.len():
+        diff = diff | (_u8_at(a, i) ^ _u8_at(b, i)).to_u32()
+        i = i + 1
+    diff == 0
+
+# ============================================================================
+# AES-128-CCM Encryption (RFC 3610 §4)
+#
+# Inputs:
+#   key       : 16-byte AES-128 key
+#   nonce     : 13-byte nonce (CCM with L=2; max payload 65535 bytes)
+#   aad       : Additional authenticated data (any length)
+#   plaintext : Data to encrypt (any length, but ≤ 65535 with N=13)
+#   tag_len   : Authentication tag size in bytes; must be in {4,6,8,10,12,14,16}
+#
+# Output: ciphertext || U   where:
+#   ciphertext = CTR_K(plaintext XOR keystream from A_1, A_2, ...)
+#   U          = T XOR (first M bytes of S_0)         (RFC 3610 §4 step 7)
+#   T          = first M bytes of CBC-MAC(B_0 || B_aad || B_payload)
+#
+# Returns: ciphertext concatenated with the tag (M bytes).
+# Caller can split via [..len(plaintext)] and [len(plaintext)..].
+# This matches the aes128_gcm_encrypt return contract for consistency.
+# ============================================================================
+
+fn aes128_ccm_encrypt(key: [u8],
+                      nonce: [u8],
+                      aad: [u8],
+                      plaintext: [u8],
+                      tag_len: u32) -> [u8]:
+    """AES-128-CCM authenticated encryption per RFC 3610.
+
+    Args:
+        key:       16-byte AES-128 key.
+        nonce:     13-byte nonce (N=13, L=2 profile per RFC 3610 §8).
+        aad:       Additional authenticated data.
+        plaintext: Plaintext bytes (≤ 65535).
+        tag_len:   Tag size; must be in {4, 6, 8, 10, 12, 14, 16}.
+
+    Returns: ciphertext || tag    (length == plaintext.len() + tag_len).
+             Returns [] on parameter errors.
+    """
+    # Parameter validation.
+    if key.len() != 16:
+        return []
+    if nonce.len() != 13:
+        return []
+    if (tag_len < 4) or (tag_len > 16) or ((tag_len % 2) != 0):
+        return []
+
+    val round_keys = aes128_key_expansion(key)
+
+    # Step 1-3: CBC-MAC -> T (first M bytes of X_{n+1}).
+    val t = _cbc_mac(round_keys, nonce, aad, plaintext, tag_len)
+
+    # Step 4-6: CTR encrypt the plaintext, XOR with keystream A_1, A_2, ...
+    val ciphertext = _ctr_xor_payload(round_keys, nonce, plaintext)
+
+    # Step 7: U = T XOR S_0[0..M].
+    val s0_mask = _s0_tag_mask(round_keys, nonce, tag_len)
+    val u = _xor_bytes(t, s0_mask)
+
+    # Output: ciphertext || U
+    var out: [u8] = rt_array_new_with_cap((ciphertext.len() + u.len()).to_i64())
+    var i: u64 = 0
+    while i < ciphertext.len():
+        out.push(_u8_at(ciphertext, i))
+        i = i + 1
+    var j: u64 = 0
+    while j < u.len():
+        out.push(_u8_at(u, j))
+        j = j + 1
+    out
+
+# ============================================================================
+# AES-128-CCM Decryption (RFC 3610 §4)
+#
+# Inputs:
+#   key        : 16-byte AES-128 key
+#   nonce      : 13-byte nonce
+#   aad        : Additional authenticated data
+#   ciphertext : Encrypted bytes (without the tag)
+#   tag        : Received authentication tag (M bytes)
+#
+# Output: Aes128CcmResult.Ok(plaintext) if tag verifies; Err(_) otherwise.
+#
+# Steps:
+#   1. P = ciphertext XOR keystream(A_1, A_2, ...)         (CTR decrypt)
+#   2. T' = first M bytes of CBC-MAC(B_0 || B_aad || B_P)
+#   3. U' = T' XOR S_0[0..M]
+#   4. constant-time compare U' to received tag
+# ============================================================================
+
+fn aes128_ccm_decrypt(key: [u8],
+                      nonce: [u8],
+                      aad: [u8],
+                      ciphertext: [u8],
+                      tag: [u8]) -> Aes128CcmResult:
+    """AES-128-CCM authenticated decryption per RFC 3610.
+
+    Returns Aes128CcmResult.Ok(plaintext) only if the received tag matches
+    the recomputed tag in constant time; otherwise Aes128CcmResult.Err.
+    """
+    if key.len() != 16:
+        return Aes128CcmResult.Err("key must be 16 bytes")
+    if nonce.len() != 13:
+        return Aes128CcmResult.Err("nonce must be 13 bytes")
+    val tag_len: u32 = tag.len().to_u32()
+    if (tag_len < 4) or (tag_len > 16) or ((tag_len % 2) != 0):
+        return Aes128CcmResult.Err("tag length must be in {4,6,8,10,12,14,16}")
+
+    val round_keys = aes128_key_expansion(key)
+
+    # Step 1: CTR-decrypt to recover plaintext.
+    val plaintext = _ctr_xor_payload(round_keys, nonce, ciphertext)
+
+    # Step 2: Recompute CBC-MAC over (B_0 || aad || plaintext).
+    val t_recomputed = _cbc_mac(round_keys, nonce, aad, plaintext, tag_len)
+
+    # Step 3: U_expected = T_recomputed XOR S_0[0..M].
+    val s0_mask = _s0_tag_mask(round_keys, nonce, tag_len)
+    val u_expected = _xor_bytes(t_recomputed, s0_mask)
+
+    # Step 4: constant-time compare.
+    if not _ct_eq_bytes(u_expected, tag):
+        return Aes128CcmResult.Err("authentication tag mismatch")
+
+    Aes128CcmResult.Ok(data: plaintext)

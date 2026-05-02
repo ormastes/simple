@@ -1,0 +1,519 @@
+# =============================================================================
+# ML-DSA-65 — Sampling + Encoding (FIPS 204 §B + Algorithms 30–34)
+#
+# Provides the SHAKE-128 / SHAKE-256 XOFs, the rejection-sampled matrix A
+# (ExpandA, Algorithm 32), the eta-bounded secret sampling (ExpandS,
+# Algorithm 33), the gamma1-bounded mask sampling (ExpandMask, Algorithm 34),
+# and the BitPack / BitUnpack / SimpleBitPack helpers used by pkEncode /
+# pkDecode / skEncode / skDecode / sigEncode / sigDecode (Algorithms 22-29).
+#
+# SHAKE is implemented locally rather than imported because src/lib/common/
+# crypto/sha3.spl currently exposes only fixed-output SHA-3 (domain byte
+# 0x06). SHAKE uses domain byte 0x1F, rate=168 (SHAKE-128) or rate=136
+# (SHAKE-256), and supports unbounded squeezing — building it on the public
+# `keccak_f1600` permutation keeps W8-4's sha3.spl finalization untouched.
+#
+# Reference: NIST FIPS 204 §B (SHAKE-XOF, BitPack, SimpleBitPack, etc).
+# Sibling: src/os/crypto/ml_dsa_ntt.spl (ring + NTT primitives).
+# =============================================================================
+
+mod os.crypto.ml_dsa_sample
+
+use std.crypto.sha3.{keccak_f1600}
+use os.crypto.ml_dsa_ntt.{ml_dsa_q, ml_dsa_n, ml_dsa_eta_65, ml_dsa_gamma1_65, modq}
+
+# -----------------------------------------------------------------------------
+# SHAKE-128 / SHAKE-256 XOF (FIPS 202 §6.2 + §B / NIST FIPS 204 §3.7)
+#
+# rate(SHAKE-128) = 168 bytes (capacity 256 bits)
+# rate(SHAKE-256) = 136 bytes (capacity 512 bits)
+# domain separation byte = 0x1F (SHAKE / cSHAKE family).
+#
+# Constant-time policy: SHAKE inputs to ML-DSA are the public parameter ρ
+# and the rejection-sampled mask seeds — leakage of byte counts or rejection
+# iteration counts is not a side channel under the FIPS 204 threat model.
+# -----------------------------------------------------------------------------
+
+# Lane (i,j) stored at index x + 5*y in Keccak-f convention.
+fn _bytes_to_lane_le(bytes: list, off: i64) -> i64:
+    var lane = 0
+    var i = 0
+    while i < 8:
+        lane = lane | (bytes.get(off + i) << (i * 8))
+        i = i + 1
+    lane
+
+fn _lane_to_bytes_le(out: list, lane: i64):
+    var i = 0
+    while i < 8:
+        out.push((lane >> (i * 8)) & 0xff)
+        i = i + 1
+
+fn _empty_state() -> list:
+    var s = []
+    var i = 0
+    while i < 25:
+        s.push(0)
+        i = i + 1
+    s
+
+# Absorb one full rate-byte block.
+fn _shake_absorb_block(state: list, block: list, rate_bytes: i64) -> list:
+    val lane_count = rate_bytes / 8
+    var s = []
+    var i = 0
+    while i < 25:
+        s.push(state.get(i))
+        i = i + 1
+    var lane_i = 0
+    while lane_i < lane_count:
+        val lane = _bytes_to_lane_le(block, lane_i * 8)
+        s[lane_i] = s.get(lane_i) ^ lane
+        lane_i = lane_i + 1
+    keccak_f1600(s)
+
+# SHAKE finalization with domain byte 0x1F.
+fn _shake_finalize(state: list, buffer_in: list, rate_bytes: i64) -> list:
+    var buffer = []
+    var bi = 0
+    val blen = buffer_in.len()
+    while bi < blen:
+        buffer.push(buffer_in.get(bi))
+        bi = bi + 1
+    # Pad with 0x1F ... 0x80 (FIPS 202 multi-rate, SHAKE flavour).
+    buffer.push(0x1F)
+    var pad_pos = blen + 1
+    while pad_pos < rate_bytes:
+        buffer.push(0)
+        pad_pos = pad_pos + 1
+    val last = buffer.get(rate_bytes - 1)
+    buffer[rate_bytes - 1] = last | 0x80
+    _shake_absorb_block(state, buffer, rate_bytes)
+
+# Unbounded squeeze: produce `out_len` bytes from a finalized state.
+fn _shake_squeeze(state_in: list, rate_bytes: i64, out_len: i64) -> list:
+    var state = []
+    var si = 0
+    while si < 25:
+        state.push(state_in.get(si))
+        si = si + 1
+    var out = []
+    var produced = 0
+    while produced < out_len:
+        val lane_count = rate_bytes / 8
+        var lane_i = 0
+        while lane_i < lane_count and produced < out_len:
+            var tmp = []
+            _lane_to_bytes_le(tmp, state.get(lane_i))
+            var k = 0
+            while k < 8 and produced < out_len:
+                out.push(tmp.get(k))
+                produced = produced + 1
+                k = k + 1
+            lane_i = lane_i + 1
+        if produced < out_len:
+            state = keccak_f1600(state)
+    out
+
+# One-shot SHAKE-128: absorb `data`, squeeze `out_len` bytes.
+fn shake128(data: list, out_len: i64) -> list:
+    val rate = 168
+    var state = _empty_state()
+    var buffer = []
+    var pos = 0
+    val n = data.len()
+    while pos + rate <= n:
+        var block = []
+        var k = 0
+        while k < rate:
+            block.push(data.get(pos + k))
+            k = k + 1
+        state = _shake_absorb_block(state, block, rate)
+        pos = pos + rate
+    while pos < n:
+        buffer.push(data.get(pos))
+        pos = pos + 1
+    val final_state = _shake_finalize(state, buffer, rate)
+    _shake_squeeze(final_state, rate, out_len)
+
+# One-shot SHAKE-256: rate=136.
+fn shake256(data: list, out_len: i64) -> list:
+    val rate = 136
+    var state = _empty_state()
+    var buffer = []
+    var pos = 0
+    val n = data.len()
+    while pos + rate <= n:
+        var block = []
+        var k = 0
+        while k < rate:
+            block.push(data.get(pos + k))
+            k = k + 1
+        state = _shake_absorb_block(state, block, rate)
+        pos = pos + rate
+    while pos < n:
+        buffer.push(data.get(pos))
+        pos = pos + 1
+    val final_state = _shake_finalize(state, buffer, rate)
+    _shake_squeeze(final_state, rate, out_len)
+
+# -----------------------------------------------------------------------------
+# RejNTTPoly — FIPS 204 Algorithm 30: rejection sampling from a SHAKE-128
+# byte stream into Z_q^256 (NTT-domain coefficients).  Reads triples of bytes
+# and accepts coefficient if < q.  ML-DSA matrix A entries use this.
+# -----------------------------------------------------------------------------
+
+fn _read_uint23(bytes: list, off: i64) -> i64:
+    val b0 = bytes.get(off)
+    val b1 = bytes.get(off + 1)
+    val b2 = bytes.get(off + 2) & 0x7F      # mask high bit (only 23 bits)
+    b0 | (b1 << 8) | (b2 << 16)
+
+fn rej_ntt_poly_from_seed(rho: list, r: i64, s: i64) -> list:
+    val q = ml_dsa_q()
+    # Seed = rho || s || r  (per FIPS 204 §B Algorithm 32)
+    var seed = []
+    var i = 0
+    while i < rho.len():
+        seed.push(rho.get(i))
+        i = i + 1
+    seed.push(s & 0xff)
+    seed.push(r & 0xff)
+    # Generate enough bytes; in practice <2 * 3 * 256 = ~1536 suffices.
+    val raw = shake128(seed, 1536)
+    var coeffs = []
+    var pos = 0
+    while coeffs.len() < 256 and pos + 3 <= raw.len():
+        val c = _read_uint23(raw, pos)
+        pos = pos + 3
+        if c < q:
+            coeffs.push(c)
+    # If we exhausted bytes without filling, extend with another squeeze block
+    # (rare under the SHAKE distribution but required for completeness).
+    while coeffs.len() < 256:
+        val extra = shake128(seed, 3072)
+        var ep = 0
+        while coeffs.len() < 256 and ep + 3 <= extra.len():
+            val c = _read_uint23(extra, ep)
+            ep = ep + 3
+            if c < q:
+                coeffs.push(c)
+    coeffs
+
+# -----------------------------------------------------------------------------
+# ExpandA — FIPS 204 Algorithm 32: builds matrix A ∈ Z_q^{k×l} (NTT domain)
+# from public seed rho. For ML-DSA-65: k=6 rows × l=5 cols.
+# -----------------------------------------------------------------------------
+
+fn expand_a_65(rho: list) -> list:
+    val k = 6
+    val l = 5
+    var rows = []
+    var i = 0
+    while i < k:
+        var row = []
+        var j = 0
+        while j < l:
+            row.push(rej_ntt_poly_from_seed(rho, i, j))
+            j = j + 1
+        rows.push(row)
+        i = i + 1
+    rows
+
+# -----------------------------------------------------------------------------
+# RejBoundedPoly — FIPS 204 Algorithm 31: eta-bounded coefficient sampling
+# via SHAKE-256.  For η=4 (ML-DSA-65) each nibble v in [0..14] maps to
+# η - (v mod 9) when v < 9, else reject.
+# -----------------------------------------------------------------------------
+
+fn _eta_map_65(v: i64) -> i64:
+    # ML-DSA-65: eta = 4; per FIPS 204 §B Algorithm 31 line 15-16.
+    if v < 9:
+        4 - (v % 9)
+    else:
+        99    # sentinel for reject (caller filters)
+
+fn rej_bounded_poly_from_seed(rho_prime: list, idx: i64) -> list:
+    # rho_prime is 64 bytes; idx ∈ [0, k+l).
+    var seed = []
+    var i = 0
+    while i < rho_prime.len():
+        seed.push(rho_prime.get(i))
+        i = i + 1
+    seed.push(idx & 0xff)
+    seed.push((idx >> 8) & 0xff)
+    val raw = shake256(seed, 512)
+    var coeffs = []
+    var pos = 0
+    while coeffs.len() < 256 and pos < raw.len():
+        val byte = raw.get(pos)
+        pos = pos + 1
+        val v0 = byte & 0x0f
+        val v1 = (byte >> 4) & 0x0f
+        val m0 = _eta_map_65(v0)
+        if m0 != 99 and coeffs.len() < 256:
+            coeffs.push(m0)
+        val m1 = _eta_map_65(v1)
+        if m1 != 99 and coeffs.len() < 256:
+            coeffs.push(m1)
+    while coeffs.len() < 256:
+        val extra = shake256(seed, 1024)
+        var ep = 0
+        while coeffs.len() < 256 and ep < extra.len():
+            val byte = extra.get(ep)
+            ep = ep + 1
+            val v0 = byte & 0x0f
+            val v1 = (byte >> 4) & 0x0f
+            val m0 = _eta_map_65(v0)
+            if m0 != 99 and coeffs.len() < 256:
+                coeffs.push(m0)
+            val m1 = _eta_map_65(v1)
+            if m1 != 99 and coeffs.len() < 256:
+                coeffs.push(m1)
+    coeffs
+
+# -----------------------------------------------------------------------------
+# ExpandS — FIPS 204 Algorithm 33: builds (s1, s2) where s1 ∈ R_q^l with
+# η-bounded coeffs, s2 ∈ R_q^k η-bounded coeffs.  For ML-DSA-65: l=5, k=6.
+# -----------------------------------------------------------------------------
+
+fn expand_s_65(rho_prime: list) -> tuple:
+    val l = 5
+    val k = 6
+    var s1 = []
+    var i = 0
+    while i < l:
+        s1.push(rej_bounded_poly_from_seed(rho_prime, i))
+        i = i + 1
+    var s2 = []
+    var j = 0
+    while j < k:
+        s2.push(rej_bounded_poly_from_seed(rho_prime, l + j))
+        j = j + 1
+    (s1, s2)
+
+# -----------------------------------------------------------------------------
+# ExpandMask — FIPS 204 Algorithm 34: γ1-bounded mask polynomial vector.
+# For ML-DSA-65 γ1 = 2^19, so each coefficient encodes in 20 bits and the
+# coefficient is recovered as (γ1 - reading) ∈ (-γ1, γ1].  l polynomials.
+# -----------------------------------------------------------------------------
+
+fn _read_uint20(bytes: list, off: i64) -> i64:
+    # Read 20 bits starting at bit (off * 4) — caller ensures alignment.
+    # Simpler: read 3 bytes and mask.
+    val b0 = bytes.get(off)
+    val b1 = bytes.get(off + 1)
+    val b2 = bytes.get(off + 2) & 0x0f
+    b0 | (b1 << 8) | (b2 << 16)
+
+fn expand_mask_poly(rho_prime: list, mu: i64, idx: i64) -> list:
+    val gamma1 = ml_dsa_gamma1_65()    # 2^19
+    val q = ml_dsa_q()
+    # Seed = rho_prime || (mu+idx) as 2 bytes (FIPS 204 §B uses LE 16-bit).
+    var seed = []
+    var i = 0
+    while i < rho_prime.len():
+        seed.push(rho_prime.get(i))
+        i = i + 1
+    val tag = mu + idx
+    seed.push(tag & 0xff)
+    seed.push((tag >> 8) & 0xff)
+    # Each coeff is 20 bits = 2.5 bytes; 256 coeffs → 640 bytes (γ1 = 2^19).
+    val raw = shake256(seed, 640)
+    var coeffs = []
+    var bit_off = 0
+    while coeffs.len() < 256:
+        val byte_off = bit_off / 8
+        val rem = bit_off % 8
+        # Build 20 bits from raw stream starting at bit_off.
+        val b0 = raw.get(byte_off)
+        val b1 = raw.get(byte_off + 1)
+        val b2 = raw.get(byte_off + 2)
+        var combined = b0 | (b1 << 8) | (b2 << 16)
+        combined = combined >> rem
+        val v = combined & 0xfffff      # 20 bits
+        # Coefficient = γ1 - v, reduced mod q.
+        coeffs.push(modq(gamma1 - v))
+        bit_off = bit_off + 20
+    coeffs
+
+fn expand_mask_65(rho_prime: list, mu: i64) -> list:
+    val l = 5
+    var y = []
+    var i = 0
+    while i < l:
+        y.push(expand_mask_poly(rho_prime, mu, i))
+        i = i + 1
+    y
+
+# -----------------------------------------------------------------------------
+# SimpleBitPack — FIPS 204 Algorithm 16: pack coefficients in [0, 2^bitlen)
+# into a contiguous byte array, low bits first.  Inverse: SimpleBitUnpack.
+# -----------------------------------------------------------------------------
+
+fn simple_bit_pack(p: list, bitlen: i64) -> list:
+    var out = []
+    var acc = 0
+    var nbits = 0
+    var i = 0
+    while i < p.len():
+        acc = acc | ((p.get(i) & ((1 << bitlen) - 1)) << nbits)
+        nbits = nbits + bitlen
+        while nbits >= 8:
+            out.push(acc & 0xff)
+            acc = acc >> 8
+            nbits = nbits - 8
+        i = i + 1
+    if nbits > 0:
+        out.push(acc & 0xff)
+    out
+
+fn simple_bit_unpack(bytes: list, bitlen: i64, count: i64) -> list:
+    var out = []
+    var acc = 0
+    var nbits = 0
+    var pos = 0
+    val mask = (1 << bitlen) - 1
+    while out.len() < count:
+        while nbits < bitlen and pos < bytes.len():
+            acc = acc | (bytes.get(pos) << nbits)
+            nbits = nbits + 8
+            pos = pos + 1
+        out.push(acc & mask)
+        acc = acc >> bitlen
+        nbits = nbits - bitlen
+    out
+
+# BitPack — same as SimpleBitPack but pre-shifts coefficients into [0, a+b) by
+# subtracting from `a`, where the input range is (-a, b]. Used by ML-DSA-65
+# for s1/s2 (a=b=η=4, bitlen=4) and for w1 / hint encoding.
+fn bit_pack_signed(p: list, a: i64, bitlen: i64) -> list:
+    var shifted = []
+    var i = 0
+    while i < p.len():
+        shifted.push(a - p.get(i))
+        i = i + 1
+    simple_bit_pack(shifted, bitlen)
+
+fn bit_unpack_signed(bytes: list, a: i64, bitlen: i64, count: i64) -> list:
+    val raw = simple_bit_unpack(bytes, bitlen, count)
+    var out = []
+    var i = 0
+    while i < count:
+        out.push(a - raw.get(i))
+        i = i + 1
+    out
+
+# -----------------------------------------------------------------------------
+# SampleInBall — FIPS 204 Algorithm 29: pseudo-random polynomial c with
+# tau ±1 entries, all other coeffs zero.  Uses SHAKE-256(seed) byte stream.
+# -----------------------------------------------------------------------------
+
+fn sample_in_ball(seed: list, tau: i64) -> list:
+    var c = []
+    var i = 0
+    while i < 256:
+        c.push(0)
+        i = i + 1
+    val raw = shake256(seed, 8 + 256)   # 8 sign bytes + index bytes
+    val sign_bytes = []
+    var sb_idx = 0
+    var signs = 0
+    while sb_idx < 8:
+        signs = signs | (raw.get(sb_idx) << (sb_idx * 8))
+        sb_idx = sb_idx + 1
+    var byte_pos = 8
+    var k = 256 - tau
+    var bit_idx = 0
+    while k < 256:
+        # Find next index j ≤ k.
+        var found = false
+        while not found and byte_pos < raw.len():
+            val j = raw.get(byte_pos)
+            byte_pos = byte_pos + 1
+            if j <= k:
+                # Place sign bit: c[k] = c[j], c[j] = (-1)^signs[bit_idx]
+                c[k] = c.get(j)
+                val sign_bit = (signs >> bit_idx) & 1
+                if sign_bit == 1:
+                    c[j] = -1
+                else:
+                    c[j] = 1
+                bit_idx = bit_idx + 1
+                found = true
+        if not found:
+            # Out of bytes — refresh stream.
+            val more = shake256(seed, 512)
+            var mp = 0
+            while not found and mp < more.len():
+                val j = more.get(mp)
+                mp = mp + 1
+                if j <= k:
+                    c[k] = c.get(j)
+                    val sign_bit = (signs >> bit_idx) & 1
+                    if sign_bit == 1:
+                        c[j] = -1
+                    else:
+                        c[j] = 1
+                    bit_idx = bit_idx + 1
+                    found = true
+        k = k + 1
+    c
+
+# -----------------------------------------------------------------------------
+# pkEncode / pkDecode (Algorithms 22 / 23) — pack (rho, t1) into the 1952-byte
+# public key.  rho is 32 bytes; each t1 polynomial coefficient is 10 bits
+# (FIPS 204 §B says 10 = bitlen(2^(23-d) - 1) for d=13).
+# Public key size = 32 + k * 320 = 32 + 6*320 = 1952.
+# -----------------------------------------------------------------------------
+
+fn pk_encode_65(rho: list, t1: list) -> list:
+    var out = []
+    var i = 0
+    while i < rho.len():
+        out.push(rho.get(i))
+        i = i + 1
+    var p = 0
+    while p < t1.len():
+        val packed = simple_bit_pack(t1.get(p), 10)
+        var b = 0
+        while b < packed.len():
+            out.push(packed.get(b))
+            b = b + 1
+        p = p + 1
+    out
+
+fn pk_decode_65(bytes: list) -> tuple:
+    var rho = []
+    var i = 0
+    while i < 32:
+        rho.push(bytes.get(i))
+        i = i + 1
+    var t1 = []
+    var poly_idx = 0
+    val poly_bytes = 320     # 256 * 10 / 8
+    while poly_idx < 6:
+        var poly_buf = []
+        var k = 0
+        while k < poly_bytes:
+            poly_buf.push(bytes.get(32 + poly_idx * poly_bytes + k))
+            k = k + 1
+        t1.push(simple_bit_unpack(poly_buf, 10, 256))
+        poly_idx = poly_idx + 1
+    (rho, t1)
+
+# -----------------------------------------------------------------------------
+# Encoded sizes for ML-DSA-65 (FIPS 204 §B Table):
+#   pk_size = 32 + 6*320           = 1952
+#   sk_size = 128 + (l + k)*128 + k*416 = 128 + 11*128 + 6*416 = 4032
+#   sig_size = 32 + l*640 + omega + k = 32 + 5*640 + 55 + 6  = 3293
+# -----------------------------------------------------------------------------
+
+fn pk_size_65() -> i64:
+    1952
+
+fn sk_size_65() -> i64:
+    4032
+
+fn sig_size_65() -> i64:
+    3309

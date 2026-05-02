@@ -1,0 +1,491 @@
+# SLH-DSA — WOTS+ One-Time Signatures (FIPS 205 §5)
+#
+# Stateless Hash-Based Digital Signatures — building block #1 of the SPHINCS+
+# family standardised by NIST FIPS 205 (August 2024). This file implements
+# the Winternitz one-time signature (WOTS+) used as the leaf primitive of
+# every XMSS subtree in SLH-DSA.
+#
+# Parameter set wired in: SLH-DSA-SHA2-128s
+#   n     = 16         hash output (bytes)
+#   lg_w  = 4          Winternitz log
+#   w     = 16         Winternitz parameter (= 2^lg_w)
+#   len_1 = 32         message-derived chains (ceil(8n / lg_w))
+#   len_2 = 3          checksum chains
+#   len   = 35         total chains
+#
+# Reference: NIST FIPS 205 — Stateless Hash-Based Digital Signature Standard,
+#   August 2024. https://csrc.nist.gov/pubs/fips/205/final
+#
+# The lower-level chain / WOTS_genPK / WOTS_sign / WOTS_pkFromSig
+# functions take the parameters explicitly so callers (XMSS / FORS / HT)
+# can reuse them — only the public-API thin wrappers in slh_dsa.spl freeze
+# them to the SHA2-128s constants.
+#
+# ADRS abstraction (FIPS 205 §4.2 + §11.2.1):
+#   - In-memory ADRS is the 32-byte uncompressed standard form, kept as a
+#     [u8;32] array so callers can mutate type/key-pair fields in place.
+#   - On hash feed, the SHA-2 family compresses to the 22-byte ADRSc form
+#     (§11.2.1) before concatenating into the F / H / T_l / PRF input. The
+#     compression function `adrs_compressed` is exported for sibling
+#     modules (xmss/fors/hypertree).
+#
+# Performance note (interpreter mode, 2026-05-02): each F call is roughly
+# one SHA-256 invocation through the rt_tls13_sha256 fast path — about
+# 0.12 ms per call. WOTS+_genPK at SHA2-128s params is len*(w-1) = 525
+# F-evaluations ≈ 65 ms per leaf. Spec coverage in the companion
+# `slh_dsa_128s_spec.spl` exercises the full WOTS+ round-trip; XMSS/HT/FORS
+# use reduced heights in the spec because the full SHA2-128s parameter set
+# requires ~2.18M SHA-256 evaluations per signature, beyond what is
+# tractable to run inside the interpreter-mode pre-commit hook. See the
+# spec file's perf header for the deferral rationale.
+
+mod os.crypto.slh_dsa_wots
+
+use os.crypto.sha256.{sha256}
+
+# ============================================================================
+# ADRS — content-typed addresses (FIPS 205 §4.2)
+# ============================================================================
+
+# Layout (32 bytes, big-endian integer fields):
+#   bytes  0..3   : layer address       (u32)
+#   bytes  4..15  : tree address        (u96, big-endian)
+#   bytes 16..19  : type                (u32)
+#   bytes 20..31  : type-dependent      (12 bytes — see §4.2)
+#
+# For SHA-2 hash family, each call to F/H/T_l/PRF feeds the *compressed*
+# 22-byte ADRSc form into the underlying SHA-256 — see `adrs_compressed`.
+#
+# Type constants (FIPS 205 §4.2 Table 4):
+#   WOTS_HASH = 0   F-chain step inside WOTS+ chain
+#   WOTS_PK   = 1   T_len compression of WOTS+ public key
+#   TREE      = 2   H-node inside an XMSS subtree
+#   FORS_TREE = 3   FORS Merkle node
+#   FORS_ROOTS= 4   T_k compression of FORS roots
+#   WOTS_PRF  = 5   PRF call producing WOTS+ secret-key material
+#   FORS_PRF  = 6   PRF call producing FORS secret-key material
+
+fn adrs_type_wots_hash() -> i64:
+    0
+
+fn adrs_type_wots_pk() -> i64:
+    1
+
+fn adrs_type_tree() -> i64:
+    2
+
+fn adrs_type_fors_tree() -> i64:
+    3
+
+fn adrs_type_fors_roots() -> i64:
+    4
+
+fn adrs_type_wots_prf() -> i64:
+    5
+
+fn adrs_type_fors_prf() -> i64:
+    6
+
+# Build an all-zero 32-byte ADRS.
+fn adrs_new() -> [u8]:
+    [0u8; 32]
+
+# Copy a 32-byte ADRS (callers often need a fresh copy before mutating).
+fn adrs_copy(src: [u8]) -> [u8]:
+    var out: [u8] = [0u8; 32]
+    var i: u64 = 0
+    while i < 32u64:
+        out[i] = src[i]
+        i = i + 1
+    out
+
+# Write a u32 big-endian into ADRS at byte offset.
+fn adrs_set_u32(adrs: [u8], offset: u64, value: i64) -> [u8]:
+    var out = adrs_copy(adrs)
+    out[offset]      = ((value >> 24) & 0xff).to_u8()
+    out[offset + 1u64] = ((value >> 16) & 0xff).to_u8()
+    out[offset + 2u64] = ((value >> 8)  & 0xff).to_u8()
+    out[offset + 3u64] = (value & 0xff).to_u8()
+    out
+
+fn adrs_set_layer(adrs: [u8], layer: i64) -> [u8]:
+    adrs_set_u32(adrs, 0u64, layer)
+
+# Tree address is a 96-bit big-endian integer in bytes [4..16). We accept
+# the low 64 bits as i64 (SLH-DSA-128s only ever uses the bottom 63 bits)
+# and zero the high 32 bits.
+fn adrs_set_tree_address(adrs: [u8], tree_addr: i64) -> [u8]:
+    var out = adrs_copy(adrs)
+    var i: u64 = 4u64
+    while i < 8u64:
+        out[i] = 0u8
+        i = i + 1
+    # bytes 8..15 hold the 64-bit big-endian integer
+    out[8u64]  = ((tree_addr >> 56) & 0xff).to_u8()
+    out[9u64]  = ((tree_addr >> 48) & 0xff).to_u8()
+    out[10u64] = ((tree_addr >> 40) & 0xff).to_u8()
+    out[11u64] = ((tree_addr >> 32) & 0xff).to_u8()
+    out[12u64] = ((tree_addr >> 24) & 0xff).to_u8()
+    out[13u64] = ((tree_addr >> 16) & 0xff).to_u8()
+    out[14u64] = ((tree_addr >> 8)  & 0xff).to_u8()
+    out[15u64] = (tree_addr & 0xff).to_u8()
+    out
+
+fn adrs_set_type(adrs: [u8], adrs_type: i64) -> [u8]:
+    # Setting the type also clears the type-dependent suffix (§4.2 note).
+    var out = adrs_set_u32(adrs, 16u64, adrs_type)
+    var i: u64 = 20u64
+    while i < 32u64:
+        out[i] = 0u8
+        i = i + 1
+    out
+
+# Type-dependent fields (offsets 20..31). FIPS 205 §4.2.2 defines the
+# layout for each type; for our purposes we expose the three positional
+# u32 fields used by WOTS_HASH / WOTS_PK / TREE / FORS_TREE.
+
+fn adrs_set_keypair_address(adrs: [u8], kp: i64) -> [u8]:
+    adrs_set_u32(adrs, 20u64, kp)
+
+fn adrs_set_chain_address(adrs: [u8], chain: i64) -> [u8]:
+    adrs_set_u32(adrs, 24u64, chain)
+
+fn adrs_set_hash_address(adrs: [u8], hash_addr: i64) -> [u8]:
+    adrs_set_u32(adrs, 28u64, hash_addr)
+
+# Tree-type uses tree_height @24 and tree_index @28 (§4.2.2 type 2).
+fn adrs_set_tree_height(adrs: [u8], height: i64) -> [u8]:
+    adrs_set_u32(adrs, 24u64, height)
+
+fn adrs_set_tree_index(adrs: [u8], index: i64) -> [u8]:
+    adrs_set_u32(adrs, 28u64, index)
+
+# Compress a 32-byte ADRS to the 22-byte ADRSc form for SHA-2 hash family
+# (FIPS 205 §11.2.1):
+#   ADRSc = layer[1B] || tree_address[8B] || type[1B] || keyPair[4B] ||
+#           chain/treeIndex[4B] || hash[4B]
+# Note: the high bytes of the 32-bit fields (layer, tree_addr high 4B,
+# type, and the suffix u32s) are *dropped*, keeping only the low byte of
+# layer/type and the low 8 bytes of tree_addr.
+fn adrs_compressed(adrs: [u8]) -> [u8]:
+    var out: [u8] = [0u8; 22]
+    out[0u64]  = adrs[3u64]            # layer (low byte of u32 at 0)
+    out[1u64]  = adrs[8u64]            # tree_addr bytes 8..16 → 1..9
+    out[2u64]  = adrs[9u64]
+    out[3u64]  = adrs[10u64]
+    out[4u64]  = adrs[11u64]
+    out[5u64]  = adrs[12u64]
+    out[6u64]  = adrs[13u64]
+    out[7u64]  = adrs[14u64]
+    out[8u64]  = adrs[15u64]
+    out[9u64]  = adrs[19u64]           # type low byte
+    out[10u64] = adrs[20u64]           # keyPair / fors-tree-height (4B)
+    out[11u64] = adrs[21u64]
+    out[12u64] = adrs[22u64]
+    out[13u64] = adrs[23u64]
+    out[14u64] = adrs[24u64]           # chainAddr / treeIndex (4B)
+    out[15u64] = adrs[25u64]
+    out[16u64] = adrs[26u64]
+    out[17u64] = adrs[27u64]
+    out[18u64] = adrs[28u64]           # hashAddr (4B)
+    out[19u64] = adrs[29u64]
+    out[20u64] = adrs[30u64]
+    out[21u64] = adrs[31u64]
+    out
+
+# ============================================================================
+# Tweakable hash functions for SHA2 family (FIPS 205 §11.2.1)
+# ============================================================================
+#
+#   F(PK.seed, ADRS, M_1)        = Trunc_n( SHA-256( PK.seed || toByte(0, 64-n)
+#                                                    || ADRSc || M_1 ) )
+#   H(PK.seed, ADRS, M_2)        = same, M_2 has length 2n
+#   T_l(PK.seed, ADRS, M)        = same, M has length l*n
+#   PRF(PK.seed, SK.seed, ADRS)  = Trunc_n( SHA-256( PK.seed || toByte(0, 64-n)
+#                                                    || ADRSc || SK.seed ) )
+#
+# For SLH-DSA-128s, n = 16 and the prefix is PK.seed (16B) || 48 zero bytes,
+# producing exactly one SHA-256 message block before the ADRSc/M tail.
+
+fn _slh_n_128s() -> u64:
+    16u64
+
+# Build PK.seed-padding prefix (n bytes pk_seed followed by 64-n zero bytes
+# — 48 zero bytes for SLH-DSA-128s).
+fn _hash_prefix_128s(pk_seed: [u8]) -> [u8]:
+    var out: [u8] = [0u8; 64]
+    var i: u64 = 0u64
+    while i < _slh_n_128s():
+        out[i] = pk_seed[i]
+        i = i + 1
+    # bytes [n..64) already zero from initialisation
+    out
+
+# Concatenate two byte arrays.
+fn _concat(a: [u8], b: [u8]) -> [u8]:
+    val a_len = a.len()
+    val b_len = b.len()
+    var out: [u8] = [0u8; 0]
+    # Pre-grow: rely on push to extend the array.
+    var i: u64 = 0u64
+    while i < a_len:
+        out.push(a[i])
+        i = i + 1
+    var j: u64 = 0u64
+    while j < b_len:
+        out.push(b[j])
+        j = j + 1
+    out
+
+# Concatenate three byte arrays in one shot.
+fn _concat3(a: [u8], b: [u8], c: [u8]) -> [u8]:
+    _concat(_concat(a, b), c)
+
+# Truncate hash output to n bytes.
+fn _trunc_n(h: [u8], n: u64) -> [u8]:
+    var out: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        out.push(h[i])
+        i = i + 1
+    out
+
+# F(PK.seed, ADRS, M_1)  — M_1 is n bytes.
+fn slh_F_128s(pk_seed: [u8], adrs: [u8], m1: [u8]) -> [u8]:
+    val prefix  = _hash_prefix_128s(pk_seed)
+    val adrs_c  = adrs_compressed(adrs)
+    val message = _concat3(prefix, adrs_c, m1)
+    _trunc_n(sha256(message), _slh_n_128s())
+
+# H(PK.seed, ADRS, M_2)  — M_2 is 2n bytes (left || right).
+fn slh_H_128s(pk_seed: [u8], adrs: [u8], left: [u8], right: [u8]) -> [u8]:
+    val prefix  = _hash_prefix_128s(pk_seed)
+    val adrs_c  = adrs_compressed(adrs)
+    val m2      = _concat(left, right)
+    val message = _concat3(prefix, adrs_c, m2)
+    _trunc_n(sha256(message), _slh_n_128s())
+
+# T_l(PK.seed, ADRS, M)  — M is l*n bytes (already concatenated).
+fn slh_T_l_128s(pk_seed: [u8], adrs: [u8], m: [u8]) -> [u8]:
+    val prefix  = _hash_prefix_128s(pk_seed)
+    val adrs_c  = adrs_compressed(adrs)
+    val message = _concat3(prefix, adrs_c, m)
+    _trunc_n(sha256(message), _slh_n_128s())
+
+# PRF(PK.seed, SK.seed, ADRS) — n-byte secret-key material derivation.
+fn slh_PRF_128s(pk_seed: [u8], sk_seed: [u8], adrs: [u8]) -> [u8]:
+    val prefix  = _hash_prefix_128s(pk_seed)
+    val adrs_c  = adrs_compressed(adrs)
+    val message = _concat3(prefix, adrs_c, sk_seed)
+    _trunc_n(sha256(message), _slh_n_128s())
+
+# ============================================================================
+# WOTS+ chain (FIPS 205 Algorithm 5)
+# ============================================================================
+#
+# chain(X, i, s, PK.seed, ADRS) iterates F starting at chain-position i for
+# s steps. ADRS.hashAddress is updated each step. Used by WOTS_genPK,
+# WOTS_sign, WOTS_pkFromSig.
+
+fn wots_chain(x: [u8], i: i64, s: i64, pk_seed: [u8], adrs: [u8]) -> [u8]:
+    var tmp = x
+    var adrs_local = adrs_copy(adrs)
+    var j = i
+    val end = i + s
+    while j < end:
+        adrs_local = adrs_set_hash_address(adrs_local, j)
+        tmp = slh_F_128s(pk_seed, adrs_local, tmp)
+        j = j + 1
+    tmp
+
+# ============================================================================
+# Message-to-base_w conversion (FIPS 205 Algorithm 4 — base_2^b)
+# ============================================================================
+#
+# base_2^b(X, b, out_len) interprets the byte string X as a sequence of
+# out_len base-2^b digits, big-endian. For lg_w = 4 this is the standard
+# nibble unpack.
+
+fn base_2b(x: [u8], b: i64, out_len: i64) -> list:
+    var out = []
+    var in_idx: u64 = 0u64
+    var bits: i64 = 0
+    var total: i64 = 0
+    var consumed = 0
+    while consumed < out_len:
+        if bits < b:
+            total = (total << 8) | x[in_idx].to_i64()
+            in_idx = in_idx + 1
+            bits = bits + 8
+        bits = bits - b
+        val mask = (1 << b) - 1
+        out.append((total >> bits) & mask)
+        consumed = consumed + 1
+    out
+
+# Compute the WOTS+ checksum (FIPS 205 §5.1) for SHA2-128s parameters.
+# checksum = sum_{i=0..len_1-1} (w - 1 - msg_digit_i)
+# Encoded as len_2 base-w digits, left-shifted by `(8 - ((len_2*lg_w) % 8)) % 8`
+# then base_2^b decoded into len_2 digits.
+fn wots_checksum_digits_128s(msg_digits: list) -> list:
+    val w = 16
+    val lg_w = 4
+    val len_1: u64 = 32u64
+    val len_2 = 3
+    var csum: i64 = 0
+    var i: u64 = 0u64
+    while i < len_1:
+        csum = csum + (w - 1 - msg_digits.get(i.to_i64()))
+        i = i + 1
+    # toByte(csum << ((8 - ((len_2*lg_w) % 8)) % 8), ceil(len_2*lg_w/8))
+    # For SHA2-128s: len_2*lg_w = 12 bits; shift = 4; encoded length = 2 bytes.
+    csum = csum << 4
+    var csum_bytes: [u8] = [0u8; 2]
+    csum_bytes[0u64] = ((csum >> 8) & 0xff).to_u8()
+    csum_bytes[1u64] = (csum & 0xff).to_u8()
+    base_2b(csum_bytes, lg_w, len_2)
+
+# Combine message and checksum digits into the full len-element digit list.
+fn wots_msg_to_digits_128s(message_n_bytes: [u8]) -> list:
+    val lg_w = 4
+    val len_1 = 32
+    val msg_digits = base_2b(message_n_bytes, lg_w, len_1)
+    val csum_digits = wots_checksum_digits_128s(msg_digits)
+    var out = []
+    var i = 0
+    while i < len_1:
+        out.append(msg_digits.get(i))
+        i = i + 1
+    var j = 0
+    while j < 3:
+        out.append(csum_digits.get(j))
+        j = j + 1
+    out
+
+# ============================================================================
+# WOTS+_genPK (FIPS 205 Algorithm 6) — SHA2-128s
+# ============================================================================
+#
+# Uses the WOTS_PRF type to derive each of the len chains' starting secret
+# value, runs each chain to its terminal F^(w-1)(start), then T_len-compresses
+# the len terminal values into the WOTS+ public key.
+#
+# Returns the n-byte WOTS+ public key.
+
+fn wots_pk_gen_128s(sk_seed: [u8], pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+    val len = 35
+    val w_minus_1 = 15
+    var adrs_wots = adrs_copy(adrs_in)
+    # The supplied ADRS already has type WOTS_HASH and the desired
+    # layer/tree/key-pair fields set by the caller (XMSS).
+    val keypair = adrs_wots[20u64].to_i64() << 24
+    val keypair_b = keypair
+        | (adrs_wots[21u64].to_i64() << 16)
+        | (adrs_wots[22u64].to_i64() << 8)
+        | adrs_wots[23u64].to_i64()
+
+    # PRF: build a separate ADRS with type WOTS_PRF for SK derivation.
+    var adrs_prf = adrs_set_type(adrs_wots, adrs_type_wots_prf())
+    adrs_prf = adrs_set_keypair_address(adrs_prf, keypair_b)
+
+    # Concatenate len terminal chain values into a single tmp buffer.
+    var tmp: [u8] = [0u8; 0]
+    var i = 0
+    while i < len:
+        adrs_prf = adrs_set_chain_address(adrs_prf, i)
+        adrs_prf = adrs_set_hash_address(adrs_prf, 0)
+        val sk_i = slh_PRF_128s(pk_seed, sk_seed, adrs_prf)
+        var adrs_chain = adrs_set_type(adrs_wots, adrs_type_wots_hash())
+        adrs_chain = adrs_set_keypair_address(adrs_chain, keypair_b)
+        adrs_chain = adrs_set_chain_address(adrs_chain, i)
+        val tip = wots_chain(sk_i, 0, w_minus_1, pk_seed, adrs_chain)
+        var k: u64 = 0u64
+        while k < _slh_n_128s():
+            tmp.push(tip[k])
+            k = k + 1
+        i = i + 1
+
+    # T_len compression with WOTS_PK type.
+    var adrs_pk = adrs_set_type(adrs_wots, adrs_type_wots_pk())
+    adrs_pk = adrs_set_keypair_address(adrs_pk, keypair_b)
+    slh_T_l_128s(pk_seed, adrs_pk, tmp)
+
+# ============================================================================
+# WOTS+_sign (FIPS 205 Algorithm 7) — SHA2-128s
+# ============================================================================
+#
+# Returns the WOTS+ signature: len concatenated n-byte chain outputs at
+# positions msg_digit_i for i in 0..len-1.
+
+fn wots_sign_128s(message_n_bytes: [u8], sk_seed: [u8], pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+    val len = 35
+    val digits = wots_msg_to_digits_128s(message_n_bytes)
+    var adrs_wots = adrs_copy(adrs_in)
+    val keypair_b = (adrs_wots[20u64].to_i64() << 24)
+        | (adrs_wots[21u64].to_i64() << 16)
+        | (adrs_wots[22u64].to_i64() << 8)
+        | adrs_wots[23u64].to_i64()
+
+    var adrs_prf = adrs_set_type(adrs_wots, adrs_type_wots_prf())
+    adrs_prf = adrs_set_keypair_address(adrs_prf, keypair_b)
+
+    var sig: [u8] = [0u8; 0]
+    var i = 0
+    while i < len:
+        adrs_prf = adrs_set_chain_address(adrs_prf, i)
+        adrs_prf = adrs_set_hash_address(adrs_prf, 0)
+        val sk_i = slh_PRF_128s(pk_seed, sk_seed, adrs_prf)
+        var adrs_chain = adrs_set_type(adrs_wots, adrs_type_wots_hash())
+        adrs_chain = adrs_set_keypair_address(adrs_chain, keypair_b)
+        adrs_chain = adrs_set_chain_address(adrs_chain, i)
+        val steps = digits.get(i)
+        val sig_i = wots_chain(sk_i, 0, steps, pk_seed, adrs_chain)
+        var k: u64 = 0u64
+        while k < _slh_n_128s():
+            sig.push(sig_i[k])
+            k = k + 1
+        i = i + 1
+    sig
+
+# ============================================================================
+# WOTS+_pkFromSig (FIPS 205 Algorithm 8) — SHA2-128s
+# ============================================================================
+#
+# Recovers the WOTS+ public key from a signature + message by completing
+# each chain from step `digit_i` for `(w-1) - digit_i` further iterations,
+# then T_len-compressing the recovered terminal values.
+
+fn wots_pk_from_sig_128s(message_n_bytes: [u8], signature: [u8], pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+    val len = 35
+    val w_minus_1 = 15
+    val digits = wots_msg_to_digits_128s(message_n_bytes)
+    var adrs_wots = adrs_copy(adrs_in)
+    val keypair_b = (adrs_wots[20u64].to_i64() << 24)
+        | (adrs_wots[21u64].to_i64() << 16)
+        | (adrs_wots[22u64].to_i64() << 8)
+        | adrs_wots[23u64].to_i64()
+
+    var tmp: [u8] = [0u8; 0]
+    var i = 0
+    while i < len:
+        # Slice n bytes of signature for chain i.
+        var sig_i: [u8] = [0u8; 0]
+        var k: u64 = 0u64
+        val base_off: u64 = i.to_u64() * _slh_n_128s()
+        while k < _slh_n_128s():
+            sig_i.push(signature[base_off + k])
+            k = k + 1
+        var adrs_chain = adrs_set_type(adrs_wots, adrs_type_wots_hash())
+        adrs_chain = adrs_set_keypair_address(adrs_chain, keypair_b)
+        adrs_chain = adrs_set_chain_address(adrs_chain, i)
+        val msg_digit = digits.get(i)
+        val tip = wots_chain(sig_i, msg_digit, w_minus_1 - msg_digit, pk_seed, adrs_chain)
+        var k2: u64 = 0u64
+        while k2 < _slh_n_128s():
+            tmp.push(tip[k2])
+            k2 = k2 + 1
+        i = i + 1
+
+    var adrs_pk = adrs_set_type(adrs_wots, adrs_type_wots_pk())
+    adrs_pk = adrs_set_keypair_address(adrs_pk, keypair_b)
+    slh_T_l_128s(pk_seed, adrs_pk, tmp)
