@@ -1,0 +1,122 @@
+# TLS 1.2 PRF — RFC 5246 §5
+#
+# RFC 5246 defines a per-cipher-suite PRF built on the P_hash construction:
+#
+#     P_hash(secret, seed) = HMAC_hash(secret, A(1) || seed) ||
+#                            HMAC_hash(secret, A(2) || seed) ||
+#                            HMAC_hash(secret, A(3) || seed) || ...
+#
+# where:
+#     A(0) = seed
+#     A(i) = HMAC_hash(secret, A(i-1))
+#
+# The PRF for TLS 1.2 is then:
+#     PRF(secret, label, seed) = P_hash(secret, label || seed)
+#
+# For the default cipher suites, hash = SHA-256. Cipher suites that bind to
+# SHA-384 (e.g. TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384) use SHA-384 instead.
+#
+# This module exports P_hash for SHA-256 and SHA-384 (Commit 1).
+# Higher-level PRF wrapper, master_secret / key_block / finished_verify_data
+# helpers (RFC 5246 §8.1, §6.3, §7.4.9) are added in Commit 2.
+
+mod crypto.types
+mod crypto.hmac
+
+use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha384_bytes}
+
+# =============================================================================
+# P_hash with HMAC-SHA-256 (RFC 5246 §5)
+# =============================================================================
+
+# RFC 5246 §5 P_SHA256(secret, seed)
+# Iterates the A-chain HMAC construction until at least output_len bytes
+# of keying material have been produced, then truncates to output_len.
+#
+# A(0) = seed
+# A(i) = HMAC_SHA256(secret, A(i-1))
+# P_SHA256(secret, seed) = HMAC_SHA256(secret, A(1) || seed) ||
+#                          HMAC_SHA256(secret, A(2) || seed) || ...
+#
+# reason: positional crypto tls12 prf API
+fn p_hash_sha256(secret: list, seed: list, output_len: i64) -> list:
+    if output_len <= 0:
+        []
+    else:
+        var output = []
+        # A(0) = seed
+        var a = []
+        var k = 0
+        while k < seed.len():
+            a.push(seed.get(k))
+            k = k + 1
+        while output.len() < output_len:
+            # A(i) = HMAC_SHA256(secret, A(i-1))
+            a = hmac_sha256_bytes(secret, a)
+            # block_i = HMAC_SHA256(secret, A(i) || seed)
+            var hmac_input = []
+            var j = 0
+            while j < a.len():
+                hmac_input.push(a.get(j))
+                j = j + 1
+            j = 0
+            while j < seed.len():
+                hmac_input.push(seed.get(j))
+                j = j + 1
+            val block = hmac_sha256_bytes(secret, hmac_input)
+            j = 0
+            while j < block.len():
+                output.push(block.get(j))
+                j = j + 1
+        # Truncate to exact output_len
+        var result = []
+        var i = 0
+        while i < output_len:
+            result.push(output.get(i))
+            i = i + 1
+        result
+
+# =============================================================================
+# P_hash with HMAC-SHA-384 (RFC 5246 §5, used by *_SHA384 cipher suites)
+# =============================================================================
+
+# RFC 5246 §5 P_SHA384(secret, seed)
+# Same construction as P_SHA256 but uses HMAC-SHA-384 (48-byte blocks).
+#
+# reason: positional crypto tls12 prf API
+fn p_hash_sha384(secret: list, seed: list, output_len: i64) -> list:
+    if output_len <= 0:
+        []
+    else:
+        var output = []
+        # A(0) = seed
+        var a = []
+        var k = 0
+        while k < seed.len():
+            a.push(seed.get(k))
+            k = k + 1
+        while output.len() < output_len:
+            # A(i) = HMAC_SHA384(secret, A(i-1))
+            a = hmac_sha384_bytes(secret, a)
+            # block_i = HMAC_SHA384(secret, A(i) || seed)
+            var hmac_input = []
+            var j = 0
+            while j < a.len():
+                hmac_input.push(a.get(j))
+                j = j + 1
+            j = 0
+            while j < seed.len():
+                hmac_input.push(seed.get(j))
+                j = j + 1
+            val block = hmac_sha384_bytes(secret, hmac_input)
+            j = 0
+            while j < block.len():
+                output.push(block.get(j))
+                j = j + 1
+        # Truncate to exact output_len
+        var result = []
+        var i = 0
+        while i < output_len:
+            result.push(output.get(i))
+            i = i + 1
+        result

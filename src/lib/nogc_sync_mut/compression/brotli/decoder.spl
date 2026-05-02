@@ -1,4 +1,4 @@
-# brotli/decoder.spl — RFC 7932 brotli decoder (uncompressed meta blocks)
+# brotli/decoder.spl — RFC 7932 brotli decoder (literal-only compressed tier)
 #
 # Supported:
 #   - WBITS = 16 (default, bit0 = 0 in stream header)
@@ -6,11 +6,24 @@
 #   - Empty stream (ISLAST=1, ISLASTEMPTY=1)
 #   - Uncompressed meta blocks (ISLAST=0, ISUNCOMPRESSED=1)
 #   - Chained meta blocks (last block terminates with ISLAST=1, ISLASTEMPTY=1)
+#   - Compressed meta blocks at the LITERAL-ONLY tier (RFC 7932 §9.2):
+#       NBLTYPESL=NBLTYPESI=NBLTYPESD=1, NPOSTFIX=0, NDIRECT=0, simple prefix
+#       codes (NSYM<=4) for literal/insert-and-copy/distance trees, single
+#       insert-and-copy command whose insert_length equals MLEN so the trailing
+#       copy is omitted per RFC §9.2 ("If the total uncompressed length of
+#       insert and copy commands of a meta-block is the same as the
+#       meta-block length, the last copy is omitted").
+#       This is "literal-only" in semantics — no LZ77 backreference is ever
+#       executed at decode time.
 #
 # Not supported (returns Err(UnsupportedFeature)):
-#   - Compressed meta blocks (ISLAST=0, ISUNCOMPRESSED=0)
-#   - ISLAST=1 non-empty compressed last block
-#   - Metadata meta blocks (MNIBBLES=11)
+#   - LZ77 copy commands (output.len() < MLEN after the insert phase)
+#   - Block-type switching (NBLTYPES > 1 in any of L/I/D)
+#   - Complex prefix codes (HSKIP code != 3)
+#   - NPOSTFIX > 0 or NDIRECT > 0
+#   - Context modes other than 0
+#   - NTREESL/NTREESD > 1 (no context maps)
+#   - Metadata meta blocks (MNIBBLES code 11)
 
 use std.common.compress.types.{CompressionError}
 use std.nogc_sync_mut.compression.brotli.bit_reader.{
@@ -90,6 +103,421 @@ fn _brotli_read_wbits(r: BrotliBitReader) -> Result<_WbitsResult, CompressionErr
     Ok(_WbitsResult(value: wbits, reader: m.reader))
 
 # -------------------------------------------------------------------------
+# Internal: VarLenUint8 (RFC 7932 §9.2)
+# -------------------------------------------------------------------------
+struct _IntReaderResult:
+    value: i64
+    reader: BrotliBitReader
+
+fn _read_varlen_uint8(r: BrotliBitReader) -> Result<_IntReaderResult, CompressionError>:
+    val b0_res = brotli_bits_read(r, 1)
+    if b0_res.is_err():
+        return Err(b0_res.unwrap_err())
+    val b0 = b0_res.unwrap()
+    if b0.value == 0:
+        return Ok(_IntReaderResult(value: 0, reader: b0.reader))
+    val n_res = brotli_bits_read(b0.reader, 3)
+    if n_res.is_err():
+        return Err(n_res.unwrap_err())
+    val n = n_res.unwrap()
+    if n.value == 0:
+        return Ok(_IntReaderResult(value: 1, reader: n.reader))
+    val extra_res = brotli_bits_read(n.reader, n.value)
+    if extra_res.is_err():
+        return Err(extra_res.unwrap_err())
+    val extra = extra_res.unwrap()
+    val value = (1 << n.value) + extra.value
+    Ok(_IntReaderResult(value: value, reader: extra.reader))
+
+# -------------------------------------------------------------------------
+# Internal: Simple prefix code header (RFC 7932 §3.4)
+#
+# Returns the parsed symbol list and the canonical codeword length per symbol.
+# For NSYM=1: lengths = [0]; for NSYM=2: [1,1]; NSYM=3: [1,2,2]; NSYM=4 with
+# tree-select=0: [2,2,2,2]; NSYM=4 with tree-select=1: [1,2,3,3].
+# Symbols in the bitstream are *NOT* sorted; the decoder must sort them by
+# value to map ascending symbol -> ascending canonical code.
+# -------------------------------------------------------------------------
+struct _SimplePrefix:
+    # Symbols and lengths in CANONICAL (codeword-ascending) order.
+    symbols: [i64]
+    lengths: [i64]
+    reader: BrotliBitReader
+
+fn _read_simple_prefix(r: BrotliBitReader, alphabet_bits: i64) -> Result<_SimplePrefix, CompressionError>:
+    # 2 bits HSKIP code
+    val hs_res = brotli_bits_read(r, 2)
+    if hs_res.is_err():
+        return Err(hs_res.unwrap_err())
+    val hs = hs_res.unwrap()
+    if hs.value != 3:
+        return Err(CompressionError.UnsupportedFeature("brotli complex prefix code"))
+    # 2 bits NSYM-1
+    val ns_res = brotli_bits_read(hs.reader, 2)
+    if ns_res.is_err():
+        return Err(ns_res.unwrap_err())
+    val ns = ns_res.unwrap()
+    val nsym = ns.value + 1
+    var rdr = ns.reader
+    var raw_syms: [i64] = []
+    var i = 0
+    while i < nsym:
+        val s_res = brotli_bits_read(rdr, alphabet_bits)
+        if s_res.is_err():
+            return Err(s_res.unwrap_err())
+        val s = s_res.unwrap()
+        raw_syms.push(s.value)
+        rdr = s.reader
+        i = i + 1
+    # Determine codeword lengths
+    var lens: [i64] = []
+    if nsym == 1:
+        lens.push(0)
+    elif nsym == 2:
+        lens.push(1)
+        lens.push(1)
+    elif nsym == 3:
+        lens.push(1)
+        lens.push(2)
+        lens.push(2)
+    else:
+        # nsym == 4: read 1 tree-select bit
+        val ts_res = brotli_bits_read(rdr, 1)
+        if ts_res.is_err():
+            return Err(ts_res.unwrap_err())
+        val ts = ts_res.unwrap()
+        rdr = ts.reader
+        if ts.value == 0:
+            lens.push(2)
+            lens.push(2)
+            lens.push(2)
+            lens.push(2)
+        else:
+            lens.push(1)
+            lens.push(2)
+            lens.push(3)
+            lens.push(3)
+    # Sort symbols ascending (RFC 7932 §3.4: symbols are sorted by value when
+    # mapping to canonical codewords).  Length 1 / 2 / 2 etc. is paired with
+    # the sorted order.
+    # Sort raw_syms (small array, bubble sort).
+    var sorted_syms = raw_syms
+    var a = 0
+    while a < sorted_syms.len():
+        var b = a + 1
+        while b < sorted_syms.len():
+            if sorted_syms[a] > sorted_syms[b]:
+                val tmp = sorted_syms[a]
+                sorted_syms[a] = sorted_syms[b]
+                sorted_syms[b] = tmp
+            b = b + 1
+        a = a + 1
+    Ok(_SimplePrefix(symbols: sorted_syms, lengths: lens, reader: rdr))
+
+# Decode one symbol from a simple prefix tree.
+# For NSYM=1 (lengths=[0]): read 0 bits, return symbol[0].
+# For NSYM=2 (lengths=[1,1]): read 1 bit, 0 -> sym[0], 1 -> sym[1].
+# For NSYM=3 (lengths=[1,2,2]): peek/read bits — codes are 0, 10, 11 (LSB-first).
+#   Read 1 bit: if 0 -> sym[0]; else read 1 more bit: 0 -> sym[1], 1 -> sym[2].
+# For NSYM=4 lengths=[2,2,2,2]: read 2 bits -> sym[bits].
+# For NSYM=4 lengths=[1,2,3,3]: codes are 0, 10, 110, 111.
+#   Read 1: 0 -> sym[0]; else read 1: 0 -> sym[1]; else read 1: 0 -> sym[2], 1 -> sym[3].
+struct _SymReadResult:
+    symbol: i64
+    reader: BrotliBitReader
+
+fn _decode_symbol(tree: _SimplePrefix, r: BrotliBitReader) -> Result<_SymReadResult, CompressionError>:
+    val n = tree.symbols.len()
+    if n == 1:
+        return Ok(_SymReadResult(symbol: tree.symbols[0], reader: r))
+    if n == 2:
+        val b_res = brotli_bits_read(r, 1)
+        if b_res.is_err():
+            return Err(b_res.unwrap_err())
+        val b = b_res.unwrap()
+        return Ok(_SymReadResult(symbol: tree.symbols[b.value], reader: b.reader))
+    if n == 3:
+        val b0_res = brotli_bits_read(r, 1)
+        if b0_res.is_err():
+            return Err(b0_res.unwrap_err())
+        val b0 = b0_res.unwrap()
+        if b0.value == 0:
+            return Ok(_SymReadResult(symbol: tree.symbols[0], reader: b0.reader))
+        val b1_res = brotli_bits_read(b0.reader, 1)
+        if b1_res.is_err():
+            return Err(b1_res.unwrap_err())
+        val b1 = b1_res.unwrap()
+        return Ok(_SymReadResult(symbol: tree.symbols[1 + b1.value], reader: b1.reader))
+    # n == 4
+    if tree.lengths[0] == 2:
+        # All 4 codewords are 2 bits.  Codes 00,01,10,11 map to sym[0..3].
+        val bb_res = brotli_bits_read(r, 2)
+        if bb_res.is_err():
+            return Err(bb_res.unwrap_err())
+        val bb = bb_res.unwrap()
+        return Ok(_SymReadResult(symbol: tree.symbols[bb.value], reader: bb.reader))
+    # tree-select=1: lengths [1,2,3,3]
+    val b0_res = brotli_bits_read(r, 1)
+    if b0_res.is_err():
+        return Err(b0_res.unwrap_err())
+    val b0 = b0_res.unwrap()
+    if b0.value == 0:
+        return Ok(_SymReadResult(symbol: tree.symbols[0], reader: b0.reader))
+    val b1_res = brotli_bits_read(b0.reader, 1)
+    if b1_res.is_err():
+        return Err(b1_res.unwrap_err())
+    val b1 = b1_res.unwrap()
+    if b1.value == 0:
+        return Ok(_SymReadResult(symbol: tree.symbols[1], reader: b1.reader))
+    val b2_res = brotli_bits_read(b1.reader, 1)
+    if b2_res.is_err():
+        return Err(b2_res.unwrap_err())
+    val b2 = b2_res.unwrap()
+    Ok(_SymReadResult(symbol: tree.symbols[2 + b2.value], reader: b2.reader))
+
+# -------------------------------------------------------------------------
+# Internal: Insert-and-copy command length decomposition (RFC 7932 §5)
+#
+# We only need the insert-length component; the copy is omitted by RFC §9.2.
+# Each ICP symbol decomposes into (insert_length_code, copy_length_code,
+# distance_context_id).  The mapping is given by RFC 7932 Table 3, structured
+# in 8 ranges of 64 codes:
+#
+#   ICP code 0..63   : insert_lo_8(0..7),  copy_lo_8(0..7)
+#   ICP code 64..127 : insert_lo_8(0..7),  copy_hi_8(8..23)
+#   ICP code 128..191: insert_md_8(8..23), copy_lo_8(0..7)
+#   ICP code 192..255: insert_md_8(8..23), copy_hi_8(8..23)
+#   ICP code 256..319: insert_hi_8(16..23 hi), copy_lo_8(0..7)
+#   ICP code 320..383: insert_hi_8(16..23 hi), copy_hi_8(8..23)
+#   ICP code 384..447: insert_lo_8(0..7),  copy_md_8 (16..23 hi)
+#   ICP code 448..511: insert_md_8(8..23), copy_md_8 (16..23 hi)
+#   ICP code 512..575: insert_hi_8(16..23 hi), copy_md_8 (16..23 hi)
+#
+# Wait — RFC 7932 §5 actually defines ICP codes 0..703 in 11 ranges of 64.
+# We don't need to implement the full mapping; we only need to extract
+# `insert_length_code` from a given ICP symbol.
+#
+# The actual decomposition (RFC 7932 §5):
+#   ICP code = (insert_kind << 6) | (copy_kind << 3) | (insert_lo & 7), where
+#   the 11 (kind_pair) values map to 11 (insert_kind, copy_kind) pairs.
+# That's incorrect too.  The correct decomposition is:
+#   bits6,7,8,9 of ICP code -> kind_index in 0..10 (i.e. ICP / 64).
+#     kind_index decomposes into (insert_short_code_kind, copy_kind):
+#       0: ins 0..7    cop 0..7    no distance
+#       1: ins 0..7    cop 8..23   no distance, dist=0 implicit
+#       2: ins 8..23   cop 0..7    no distance
+#       3: ins 8..23   cop 8..23   no distance
+#       4: ins 0..7    cop 0..7    distance follows
+#       5: ins 0..7    cop 8..23   distance follows
+#       6: ins 8..23   cop 0..7    distance follows
+#       7: ins 8..23   cop 8..23   distance follows
+#       8: ins 16..23(hi) cop 0..7  distance follows
+#       9: ins 16..23(hi) cop 8..23 distance follows
+#       10: ins 16..23(hi) cop 16..23(hi) distance follows
+#
+# For our literal-only tier we ALWAYS use kind 4 (distance follows, ins 0..7,
+# cop 0..7) for tiny insert_lengths and kinds 5/6/7/etc. for larger.
+# We just need to invert: given an insert_length_code (ILC) in 0..23 and a
+# copy_length_code (CLC) in 0..23, produce an ICP symbol that decodes back.
+#
+# Insert-length codes (ILC) and copy-length codes (CLC) share an encoding:
+#   ILC 0  -> base 0,    extra 0
+#   ILC 1  -> base 1,    extra 0
+#   ILC 2  -> base 2,    extra 0
+#   ILC 3  -> base 3,    extra 0
+#   ILC 4  -> base 4,    extra 0
+#   ILC 5  -> base 5,    extra 0
+#   ILC 6  -> base 6,    extra 1
+#   ILC 7  -> base 8,    extra 1
+#   ILC 8  -> base 10,   extra 2
+#   ILC 9  -> base 14,   extra 2
+#   ILC 10 -> base 18,   extra 3
+#   ILC 11 -> base 26,   extra 3
+#   ILC 12 -> base 34,   extra 4
+#   ILC 13 -> base 50,   extra 4
+#   ILC 14 -> base 66,   extra 5
+#   ILC 15 -> base 98,   extra 5
+#   ILC 16 -> base 130,  extra 6
+#   ILC 17 -> base 194,  extra 7
+#   ILC 18 -> base 322,  extra 8
+#   ILC 19 -> base 578,  extra 9
+#   ILC 20 -> base 1090, extra 10
+#   ILC 21 -> base 2114, extra 12
+#   ILC 22 -> base 6210, extra 14
+#   ILC 23 -> base 22594, extra 24
+#
+# We use the ICP kind=4 layout (distance follows) so the decoder reads a
+# distance code after the copy code; we set CLC=0 (base 2, extra 0) so the
+# distance read is cheap.  Kind 4 maps to ICP codes 256..319 with structure:
+#   ICP = 256 + (CLC_low * 8) + ILC_low,
+# where CLC_low = CLC & 7, ILC_low = ILC & 7.  For ILC <= 7 and CLC <= 7 this
+# is direct.  We use only ILC values whose low 3 bits give the right code.
+# -------------------------------------------------------------------------
+
+# Insert-length code base/extra tables (24 entries).
+fn _insert_length_base(code: i64) -> i64:
+    if code == 0: return 0
+    if code == 1: return 1
+    if code == 2: return 2
+    if code == 3: return 3
+    if code == 4: return 4
+    if code == 5: return 5
+    if code == 6: return 6
+    if code == 7: return 8
+    if code == 8: return 10
+    if code == 9: return 14
+    if code == 10: return 18
+    if code == 11: return 26
+    if code == 12: return 34
+    if code == 13: return 50
+    if code == 14: return 66
+    if code == 15: return 98
+    if code == 16: return 130
+    if code == 17: return 194
+    if code == 18: return 322
+    if code == 19: return 578
+    if code == 20: return 1090
+    if code == 21: return 2114
+    if code == 22: return 6210
+    return 22594
+
+fn _insert_length_extra(code: i64) -> i64:
+    if code <= 5: return 0
+    if code <= 7: return 1
+    if code <= 9: return 2
+    if code <= 11: return 3
+    if code <= 13: return 4
+    if code <= 15: return 5
+    if code == 16: return 6
+    if code == 17: return 7
+    if code == 18: return 8
+    if code == 19: return 9
+    if code == 20: return 10
+    if code == 21: return 12
+    if code == 22: return 14
+    return 24
+
+# Copy-length code base/extra (same structure as insert, except shifted).
+# RFC 7932 §5: copy length codes 0..23 with bases 2,3,4,5,6,7,8,9,10,12,14,18,
+#   22,30,38,54,70,102,134,198,326,582,1094,2118.
+fn _copy_length_base(code: i64) -> i64:
+    if code == 0: return 2
+    if code == 1: return 3
+    if code == 2: return 4
+    if code == 3: return 5
+    if code == 4: return 6
+    if code == 5: return 7
+    if code == 6: return 8
+    if code == 7: return 9
+    if code == 8: return 10
+    if code == 9: return 12
+    if code == 10: return 14
+    if code == 11: return 18
+    if code == 12: return 22
+    if code == 13: return 30
+    if code == 14: return 38
+    if code == 15: return 54
+    if code == 16: return 70
+    if code == 17: return 102
+    if code == 18: return 134
+    if code == 19: return 198
+    if code == 20: return 326
+    if code == 21: return 582
+    if code == 22: return 1094
+    return 2118
+
+fn _copy_length_extra(code: i64) -> i64:
+    if code <= 7: return 0
+    if code <= 8: return 1
+    if code <= 9: return 1
+    if code <= 11: return 2
+    if code <= 13: return 3
+    if code == 14: return 4
+    if code == 15: return 4
+    if code <= 17: return 5
+    if code == 18: return 5
+    if code == 19: return 6
+    if code == 20: return 7
+    if code == 21: return 8
+    if code == 22: return 9
+    return 10
+
+# Decompose an ICP symbol into (insert_length_code, copy_length_code,
+# has_distance_context).  RFC 7932 §5 / Table 4.
+struct _IcpDecomp:
+    ins_code: i64
+    cop_code: i64
+    has_distance: bool
+
+fn _decompose_icp(sym: i64) -> _IcpDecomp:
+    # RFC 7932 §5: 11 kind-pairs in groups of 64.
+    val kind = sym >> 6
+    val low6 = sym & 0x3f
+    val ilc6 = low6 & 0x07
+    val clc6 = low6 >> 3
+    var ins_kind = 0
+    var cop_kind = 0
+    var has_dist = false
+    # Map kind -> (ins_kind, cop_kind, has_dist):
+    #   0: ins 0..7        cop 0..7       no dist (insert only)
+    #   1: ins 0..7        cop 8..23      no dist
+    #   2: ins 8..23       cop 0..7       no dist
+    #   3: ins 8..23       cop 8..23      no dist
+    #   4: ins 0..7        cop 0..7       dist
+    #   5: ins 0..7        cop 8..23      dist
+    #   6: ins 8..23       cop 0..7       dist
+    #   7: ins 8..23       cop 8..23      dist
+    #   8: ins 16..23      cop 0..7       dist
+    #   9: ins 16..23      cop 8..23      dist
+    #   10: ins 16..23     cop 16..23     dist
+    if kind == 0:
+        ins_kind = 0
+        cop_kind = 0
+    elif kind == 1:
+        ins_kind = 0
+        cop_kind = 1
+    elif kind == 2:
+        ins_kind = 1
+        cop_kind = 0
+    elif kind == 3:
+        ins_kind = 1
+        cop_kind = 1
+    elif kind == 4:
+        ins_kind = 0
+        cop_kind = 0
+        has_dist = true
+    elif kind == 5:
+        ins_kind = 0
+        cop_kind = 1
+        has_dist = true
+    elif kind == 6:
+        ins_kind = 1
+        cop_kind = 0
+        has_dist = true
+    elif kind == 7:
+        ins_kind = 1
+        cop_kind = 1
+        has_dist = true
+    elif kind == 8:
+        ins_kind = 2
+        cop_kind = 0
+        has_dist = true
+    elif kind == 9:
+        ins_kind = 2
+        cop_kind = 1
+        has_dist = true
+    else:
+        # kind == 10
+        ins_kind = 2
+        cop_kind = 2
+        has_dist = true
+    # ins_kind: 0=>ins_code in 0..7 (= ilc6); 1=>ins in 8..15 (= 8 + ilc6);
+    # 2=>ins in 16..23 (= 16 + ilc6).
+    val ins_code = (ins_kind * 8) + ilc6
+    val cop_code = (cop_kind * 8) + clc6
+    _IcpDecomp(ins_code: ins_code, cop_code: cop_code, has_distance: has_dist)
+
+# -------------------------------------------------------------------------
 # Internal: one meta-block
 # -------------------------------------------------------------------------
 struct _MetaBlockResult:
@@ -105,6 +533,7 @@ fn _brotli_read_meta_block(r: BrotliBitReader, output: [u8]) -> Result<_MetaBloc
     val islast = islast_res.unwrap().value
     var r2 = islast_res.unwrap().reader
 
+    var is_last = false
     if islast == 1:
         # ISLASTEMPTY: 1 bit
         val ile_res = brotli_bits_read(r2, 1)
@@ -115,10 +544,10 @@ fn _brotli_read_meta_block(r: BrotliBitReader, output: [u8]) -> Result<_MetaBloc
         if ile == 1:
             # Empty last block — stream ends
             return Ok(_MetaBlockResult(output: output, reader: r2, is_last: true))
-        # Non-empty last block => compressed, not supported
-        return Err(CompressionError.UnsupportedFeature("brotli compressed last meta block"))
+        # Non-empty last block: continue, MNIBBLES follows; ISUNCOMPRESSED is omitted.
+        is_last = true
 
-    # ISLAST=0: read MNIBBLES (2 bits)
+    # Read MNIBBLES (2 bits)
     val mnib_res = brotli_bits_read(r2, 2)
     if mnib_res.is_err():
         return Err(mnib_res.unwrap_err())
@@ -127,6 +556,8 @@ fn _brotli_read_meta_block(r: BrotliBitReader, output: [u8]) -> Result<_MetaBloc
 
     if mnibbles_code == 3:
         # Metadata meta-block (MNIBBLES=0 / code=11 = 3 in 2 bits)
+        if is_last:
+            return Err(CompressionError.UnsupportedFeature("brotli metadata meta block in last position"))
         return Err(CompressionError.UnsupportedFeature("brotli metadata meta block"))
 
     # MNIBBLES = 4 + mnibbles_code (yields 4, 5, or 6 nibbles = 16/20/24 bits for MLEN-1)
@@ -143,28 +574,189 @@ fn _brotli_read_meta_block(r: BrotliBitReader, output: [u8]) -> Result<_MetaBloc
         return Err(CompressionError.CorruptStream("brotli MLEN zero after decode"))
 
     # ISUNCOMPRESSED: 1 bit (only present when ISLAST=0)
-    val isu_res = brotli_bits_read(r2, 1)
-    if isu_res.is_err():
-        return Err(isu_res.unwrap_err())
-    val isuncompressed = isu_res.unwrap().value
-    r2 = isu_res.unwrap().reader
+    var isuncompressed = 0
+    if not is_last:
+        val isu_res = brotli_bits_read(r2, 1)
+        if isu_res.is_err():
+            return Err(isu_res.unwrap_err())
+        isuncompressed = isu_res.unwrap().value
+        r2 = isu_res.unwrap().reader
 
-    if isuncompressed == 0:
-        return Err(CompressionError.UnsupportedFeature("brotli compressed meta block"))
+    if isuncompressed == 1:
+        # Align to byte boundary, then read mlen raw bytes
+        r2 = brotli_bits_align_to_byte(r2)
+        val raw_res = brotli_bits_read_bytes(r2, mlen)
+        if raw_res.is_err():
+            return Err(raw_res.unwrap_err())
+        val raw = raw_res.unwrap()
+        r2 = raw.reader
 
-    # Align to byte boundary, then read mlen raw bytes
-    r2 = brotli_bits_align_to_byte(r2)
-    val raw_res = brotli_bits_read_bytes(r2, mlen)
-    if raw_res.is_err():
-        return Err(raw_res.unwrap_err())
-    val raw = raw_res.unwrap()
-    r2 = raw.reader
+        # Append raw bytes to output
+        var new_output = output
+        var i = 0
+        while i < raw.bytes.len():
+            new_output.push(raw.bytes[i])
+            i = i + 1
+        return Ok(_MetaBlockResult(output: new_output, reader: r2, is_last: is_last))
 
-    # Append raw bytes to output
-    var new_output = output
-    var i = 0
-    while i < raw.bytes.len():
-        new_output.push(raw.bytes[i])
-        i = i + 1
+    # Compressed meta block — literal-only tier (RFC 7932 §9.2 + §3.4 + §5).
+    return _decode_compressed_block(r2, output, mlen, is_last)
 
-    Ok(_MetaBlockResult(output: new_output, reader: r2, is_last: false))
+# -------------------------------------------------------------------------
+# Internal: compressed meta block (literal-only tier)
+# -------------------------------------------------------------------------
+fn _decode_compressed_block(r0: BrotliBitReader, output: [u8], mlen: i64, is_last: bool) -> Result<_MetaBlockResult, CompressionError>:
+    var r = r0
+
+    # NBLTYPESL/I/D: each is VarLenUint8 + 1 (so VarLen=0 -> NBLTYPES=1).
+    val nl_res = _read_varlen_uint8(r)
+    if nl_res.is_err():
+        return Err(nl_res.unwrap_err())
+    val nl = nl_res.unwrap()
+    r = nl.reader
+    if nl.value != 0:
+        return Err(CompressionError.UnsupportedFeature("brotli NBLTYPESL > 1 not supported"))
+
+    val ni_res = _read_varlen_uint8(r)
+    if ni_res.is_err():
+        return Err(ni_res.unwrap_err())
+    val ni = ni_res.unwrap()
+    r = ni.reader
+    if ni.value != 0:
+        return Err(CompressionError.UnsupportedFeature("brotli NBLTYPESI > 1 not supported"))
+
+    val nd_res = _read_varlen_uint8(r)
+    if nd_res.is_err():
+        return Err(nd_res.unwrap_err())
+    val nd = nd_res.unwrap()
+    r = nd.reader
+    if nd.value != 0:
+        return Err(CompressionError.UnsupportedFeature("brotli NBLTYPESD > 1 not supported"))
+
+    # NPOSTFIX (2 bits), NDIRECT (4 bits)
+    val np_res = brotli_bits_read(r, 2)
+    if np_res.is_err():
+        return Err(np_res.unwrap_err())
+    val np = np_res.unwrap()
+    r = np.reader
+    if np.value != 0:
+        return Err(CompressionError.UnsupportedFeature("brotli NPOSTFIX > 0 not supported"))
+
+    val ndi_res = brotli_bits_read(r, 4)
+    if ndi_res.is_err():
+        return Err(ndi_res.unwrap_err())
+    val ndi = ndi_res.unwrap()
+    r = ndi.reader
+    if ndi.value != 0:
+        return Err(CompressionError.UnsupportedFeature("brotli NDIRECT > 0 not supported"))
+
+    # CMODE[0] (2 bits per literal block type).  We only support mode 0 (LSB6).
+    val cm_res = brotli_bits_read(r, 2)
+    if cm_res.is_err():
+        return Err(cm_res.unwrap_err())
+    val cm = cm_res.unwrap()
+    r = cm.reader
+    if cm.value != 0:
+        return Err(CompressionError.UnsupportedFeature("brotli context mode != 0"))
+
+    # NTREESL (VarLenUint8 + 1)
+    val ntl_res = _read_varlen_uint8(r)
+    if ntl_res.is_err():
+        return Err(ntl_res.unwrap_err())
+    val ntl = ntl_res.unwrap()
+    r = ntl.reader
+    if ntl.value != 0:
+        return Err(CompressionError.UnsupportedFeature("brotli NTREESL > 1 not supported"))
+
+    # Literal prefix tree (alphabet 256 -> 8 bits per symbol).
+    val lit_res = _read_simple_prefix(r, 8)
+    if lit_res.is_err():
+        return Err(lit_res.unwrap_err())
+    val lit_tree = lit_res.unwrap()
+    r = lit_tree.reader
+
+    # Insert-and-copy prefix tree (alphabet 704 -> 10 bits).
+    val icp_res = _read_simple_prefix(r, 10)
+    if icp_res.is_err():
+        return Err(icp_res.unwrap_err())
+    val icp_tree = icp_res.unwrap()
+    r = icp_tree.reader
+
+    # NTREESD (VarLenUint8 + 1)
+    val ntd_res = _read_varlen_uint8(r)
+    if ntd_res.is_err():
+        return Err(ntd_res.unwrap_err())
+    val ntd = ntd_res.unwrap()
+    r = ntd.reader
+    if ntd.value != 0:
+        return Err(CompressionError.UnsupportedFeature("brotli NTREESD > 1 not supported"))
+
+    # Distance prefix tree (alphabet 16 + NDIRECT + (48 << NPOSTFIX) = 16 + 0 + 48 = 64 -> 6 bits).
+    val dist_res = _read_simple_prefix(r, 6)
+    if dist_res.is_err():
+        return Err(dist_res.unwrap_err())
+    val dist_tree = dist_res.unwrap()
+    r = dist_tree.reader
+
+    # Command loop: emit insert literals + (omitted) copy until output reaches mlen.
+    var out = output
+    val target = out.len() + mlen
+    while out.len() < target:
+        # Decode one ICP symbol
+        val ic_res = _decode_symbol(icp_tree, r)
+        if ic_res.is_err():
+            return Err(ic_res.unwrap_err())
+        val ic = ic_res.unwrap()
+        r = ic.reader
+        val decomp = _decompose_icp(ic.symbol)
+
+        # Compute insert_length
+        val ins_base = _insert_length_base(decomp.ins_code)
+        val ins_extra_bits = _insert_length_extra(decomp.ins_code)
+        var insert_length = ins_base
+        if ins_extra_bits > 0:
+            val ie_res = brotli_bits_read(r, ins_extra_bits)
+            if ie_res.is_err():
+                return Err(ie_res.unwrap_err())
+            val ie = ie_res.unwrap()
+            insert_length = insert_length + ie.value
+            r = ie.reader
+
+        # Compute copy_length (we still need to read its extra bits to keep
+        # the bitstream aligned, but the actual copy is omitted iff
+        # out.len() + insert_length == target).
+        val cop_base = _copy_length_base(decomp.cop_code)
+        val cop_extra_bits = _copy_length_extra(decomp.cop_code)
+        var copy_length = cop_base
+        if cop_extra_bits > 0:
+            val ce_res = brotli_bits_read(r, cop_extra_bits)
+            if ce_res.is_err():
+                return Err(ce_res.unwrap_err())
+            val ce = ce_res.unwrap()
+            copy_length = copy_length + ce.value
+            r = ce.reader
+
+        # Emit insert_length literals
+        var k = 0
+        while k < insert_length:
+            if out.len() >= target:
+                return Err(CompressionError.CorruptStream("brotli insert exceeds MLEN"))
+            val ls_res = _decode_symbol(lit_tree, r)
+            if ls_res.is_err():
+                return Err(ls_res.unwrap_err())
+            val ls = ls_res.unwrap()
+            out.push((ls.symbol & 0xff).to_u8())
+            r = ls.reader
+            k = k + 1
+
+        # If we've reached MLEN exactly, the copy is omitted (RFC §9.2).
+        if out.len() == target:
+            break
+
+        # Otherwise, a real copy is needed -> distance command.  This is the
+        # LZ77 path which we DO NOT support in the literal-only tier.
+        # We still need to consume the distance code + extras to emit a clear
+        # error message.  But since we're refusing anyway, emit the error.
+        return Err(CompressionError.UnsupportedFeature("brotli copy command (LZ77) not supported"))
+
+    Ok(_MetaBlockResult(output: out, reader: r, is_last: is_last))
