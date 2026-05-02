@@ -1,0 +1,507 @@
+# =============================================================================
+# ML-DSA-65 — KeyGen / Sign / Verify (FIPS 204 §5)
+#
+# Module-Lattice-Based Digital Signature Standard (NIST FIPS 204, August 2024).
+# Provides the FIPS 204 §5 wrappers — Algorithms 1 (KeyGen), 2 (Sign), and
+# 3 (Verify) — for the ML-DSA-65 parameter set (NIST security category 3).
+#
+# Threat model (FIPS 204 §3.3):
+#   Public:  rho, t1, message, signature
+#   Private: K (symmetric key), tr, s1, s2, t0, rho' (mask seed)
+#
+# Side-channel discipline:
+#   - Per-coefficient norm checks iterate every coefficient with OR-
+#     accumulation; the *outer* rejection loop iteration count is
+#     intentionally variable (public bound, FIPS 204 security analysis
+#     treats this as non-side-channel — leakage of kappa is irrelevant
+#     since kappa is never reused with a different message).
+#   - SampleInBall draws indices from SHAKE-256(rho''); data-dependent
+#     branches there are on derived data, not the input keying material.
+#
+# Deterministic vs randomized: the default per FIPS 204 §3.6 is randomized
+# (rnd is a fresh 32-byte value); we accept rnd as a parameter so callers
+# can choose either.
+#
+# Sign/Verify pipeline status (2026-05-02): implementation produces a
+# 3293-byte signature but Verify currently rejects it.  See
+#   doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md
+# Algebraic invariants for the underlying primitives are verified in
+#   test/unit/lib/crypto/ml_dsa_65_spec.spl
+#
+# Reference: NIST FIPS 204 — https://csrc.nist.gov/pubs/fips/204/final
+# Siblings:  src/os/crypto/ml_dsa_ntt.spl, src/os/crypto/ml_dsa_sample.spl
+# =============================================================================
+
+mod os.crypto.ml_dsa
+
+use os.crypto.ml_dsa_ntt.{ntt, intt, ntt_multiply, poly_add, poly_sub, poly_scalar_mul, modq, modq_centered, ml_dsa_q, ml_dsa_n, ml_dsa_eta_65, ml_dsa_gamma1_65, ml_dsa_gamma2_65, ml_dsa_tau_65, ml_dsa_beta_65, ml_dsa_omega_65, ml_dsa_k_65, ml_dsa_l_65, power2round_poly, decompose_poly, high_bits_poly, low_bits_poly, make_hint_poly, use_hint_poly, ml_dsa_d}
+use os.crypto.ml_dsa_sample.{shake128, shake256, expand_a_65, expand_s_65, expand_mask_65, sample_in_ball, simple_bit_pack, simple_bit_unpack, bit_pack_signed, bit_unpack_signed, pk_encode_65, pk_decode_65, pk_size_65, sk_size_65, sig_size_65}
+
+# -----------------------------------------------------------------------------
+# Helpers — concat / slice byte arrays, zero polynomial.
+# -----------------------------------------------------------------------------
+
+fn _concat(a: list, b: list) -> list:
+    var out = []
+    var i = 0
+    while i < a.len():
+        out.push(a.get(i))
+        i = i + 1
+    var j = 0
+    while j < b.len():
+        out.push(b.get(j))
+        j = j + 1
+    out
+
+fn _slice(a: list, lo: i64, hi: i64) -> list:
+    var out = []
+    var i = lo
+    while i < hi:
+        out.push(a.get(i))
+        i = i + 1
+    out
+
+fn _zero_poly() -> list:
+    var p = []
+    var i = 0
+    while i < 256:
+        p.push(0)
+        i = i + 1
+    p
+
+fn _poly_vec_zero(n: i64) -> list:
+    var v = []
+    var i = 0
+    while i < n:
+        v.push(_zero_poly())
+        i = i + 1
+    v
+
+# Constant-time-ish OR accumulator: returns 1 if any |centered(p[i])| >= bound.
+# Walks every coefficient (no early-out) to avoid timing leakage on secret
+# norms.
+fn _norm_ge(p: list, bound: i64) -> i64:
+    var fail = 0
+    var i = 0
+    while i < 256:
+        val c = modq_centered(p.get(i))
+        val a = if c < 0: -c else: c
+        if a >= bound:
+            fail = fail | 1
+        i = i + 1
+    fail
+
+fn _vec_norm_ge(v: list, bound: i64) -> i64:
+    var fail = 0
+    var i = 0
+    while i < v.len():
+        fail = fail | _norm_ge(v.get(i), bound)
+        i = i + 1
+    fail
+
+# Vec NTT / INTT / add / sub.
+fn _vec_ntt(v: list) -> list:
+    var out = []
+    var i = 0
+    while i < v.len():
+        out.push(ntt(v.get(i)))
+        i = i + 1
+    out
+
+fn _vec_intt(v: list) -> list:
+    var out = []
+    var i = 0
+    while i < v.len():
+        out.push(intt(v.get(i)))
+        i = i + 1
+    out
+
+fn _vec_add(a: list, b: list) -> list:
+    var out = []
+    var i = 0
+    while i < a.len():
+        out.push(poly_add(a.get(i), b.get(i)))
+        i = i + 1
+    out
+
+fn _vec_sub(a: list, b: list) -> list:
+    var out = []
+    var i = 0
+    while i < a.len():
+        out.push(poly_sub(a.get(i), b.get(i)))
+        i = i + 1
+    out
+
+# Matrix-vector multiplication in NTT domain. A is k x l; v is length l.
+fn _matvec_ntt(a_mat: list, v_ntt: list) -> list:
+    val k = a_mat.len()
+    val l = v_ntt.len()
+    var out = []
+    var i = 0
+    while i < k:
+        var acc = _zero_poly()
+        var j = 0
+        while j < l:
+            val prod = ntt_multiply(a_mat.get(i).get(j), v_ntt.get(j))
+            acc = poly_add(acc, prod)
+            j = j + 1
+        out.push(acc)
+        i = i + 1
+    out
+
+# Scalar-poly times vector (poly * each entry, all in NTT domain).
+fn _poly_times_vec_ntt(c_ntt: list, v_ntt: list) -> list:
+    var out = []
+    var i = 0
+    while i < v_ntt.len():
+        out.push(ntt_multiply(c_ntt, v_ntt.get(i)))
+        i = i + 1
+    out
+
+# -----------------------------------------------------------------------------
+# Encoding helpers (FIPS 204 §B).
+# -----------------------------------------------------------------------------
+
+fn _z_pack(z: list) -> list:
+    val gamma1 = ml_dsa_gamma1_65()
+    var out = []
+    var i = 0
+    while i < z.len():
+        val packed = bit_pack_signed(z.get(i), gamma1, 20)
+        var b = 0
+        while b < packed.len():
+            out.push(packed.get(b))
+            b = b + 1
+        i = i + 1
+    out
+
+fn _z_unpack(bytes: list, l: i64) -> list:
+    val gamma1 = ml_dsa_gamma1_65()
+    val poly_bytes = 640
+    var z = []
+    var i = 0
+    while i < l:
+        val poly_buf = _slice(bytes, i * poly_bytes, (i + 1) * poly_bytes)
+        z.push(bit_unpack_signed(poly_buf, gamma1, 20, 256))
+        i = i + 1
+    z
+
+fn _hint_pack(h: list) -> list:
+    val omega = ml_dsa_omega_65()
+    val k = ml_dsa_k_65()
+    var indices = []
+    var counts = []
+    var idx_i = 0
+    while idx_i < omega:
+        indices.push(0)
+        idx_i = idx_i + 1
+    var written = 0
+    var poly_i = 0
+    while poly_i < k:
+        var coeff_i = 0
+        while coeff_i < 256:
+            if h.get(poly_i).get(coeff_i) == 1 and written < omega:
+                indices[written] = coeff_i
+                written = written + 1
+            coeff_i = coeff_i + 1
+        counts.push(written)
+        poly_i = poly_i + 1
+    _concat(indices, counts)
+
+fn _hint_unpack(bytes: list) -> list:
+    val omega = ml_dsa_omega_65()
+    val k = ml_dsa_k_65()
+    var h = []
+    var written_prev = 0
+    var poly_i = 0
+    while poly_i < k:
+        var poly_h = _zero_poly()
+        val written = bytes.get(omega + poly_i)
+        if written < written_prev or written > omega:
+            return []
+        var idx_i = written_prev
+        while idx_i < written:
+            val coeff_idx = bytes.get(idx_i)
+            poly_h[coeff_idx] = 1
+            idx_i = idx_i + 1
+        h.push(poly_h)
+        written_prev = written
+        poly_i = poly_i + 1
+    h
+
+fn sig_encode(c_tilde: list, z: list, h: list) -> list:
+    val packed_z = _z_pack(z)
+    val packed_h = _hint_pack(h)
+    _concat(_concat(c_tilde, packed_z), packed_h)
+
+fn sig_decode(bytes: list) -> tuple:
+    val l = ml_dsa_l_65()
+    val omega = ml_dsa_omega_65()
+    val k = ml_dsa_k_65()
+    val c_tilde = _slice(bytes, 0, 32)
+    val z_bytes = _slice(bytes, 32, 32 + l * 640)
+    val h_bytes = _slice(bytes, 32 + l * 640, 32 + l * 640 + omega + k)
+    val z = _z_unpack(z_bytes, l)
+    val h = _hint_unpack(h_bytes)
+    (c_tilde, z, h)
+
+fn sk_encode(rho: list, K: list, tr: list, s1: list, s2: list, t0: list) -> list:
+    val eta = ml_dsa_eta_65()
+    var out = _concat(_concat(rho, K), tr)
+    var i = 0
+    while i < s1.len():
+        val packed = bit_pack_signed(s1.get(i), eta, 4)
+        var b = 0
+        while b < packed.len():
+            out.push(packed.get(b))
+            b = b + 1
+        i = i + 1
+    var j = 0
+    while j < s2.len():
+        val packed = bit_pack_signed(s2.get(j), eta, 4)
+        var b = 0
+        while b < packed.len():
+            out.push(packed.get(b))
+            b = b + 1
+        j = j + 1
+    var t = 0
+    while t < t0.len():
+        val packed = bit_pack_signed(t0.get(t), 4096, 13)
+        var b = 0
+        while b < packed.len():
+            out.push(packed.get(b))
+            b = b + 1
+        t = t + 1
+    out
+
+fn sk_decode(bytes: list) -> tuple:
+    val eta = ml_dsa_eta_65()
+    val l = ml_dsa_l_65()
+    val k = ml_dsa_k_65()
+    val rho = _slice(bytes, 0, 32)
+    val K   = _slice(bytes, 32, 64)
+    val tr  = _slice(bytes, 64, 128)
+    var off = 128
+    var s1 = []
+    var i = 0
+    while i < l:
+        val poly_buf = _slice(bytes, off, off + 128)
+        s1.push(bit_unpack_signed(poly_buf, eta, 4, 256))
+        off = off + 128
+        i = i + 1
+    var s2 = []
+    var j = 0
+    while j < k:
+        val poly_buf = _slice(bytes, off, off + 128)
+        s2.push(bit_unpack_signed(poly_buf, eta, 4, 256))
+        off = off + 128
+        j = j + 1
+    var t0 = []
+    var t = 0
+    while t < k:
+        val poly_buf = _slice(bytes, off, off + 416)
+        t0.push(bit_unpack_signed(poly_buf, 4096, 13, 256))
+        off = off + 416
+        t = t + 1
+    (rho, K, tr, s1, s2, t0)
+
+# -----------------------------------------------------------------------------
+# ML-DSA.KeyGen — FIPS 204 Algorithm 1.
+# -----------------------------------------------------------------------------
+
+fn ml_dsa_keygen_65(xi: list) -> tuple:
+    val k = ml_dsa_k_65()
+    val l = ml_dsa_l_65()
+    var seed = []
+    var si = 0
+    while si < xi.len():
+        seed.push(xi.get(si))
+        si = si + 1
+    seed.push(k & 0xff)
+    seed.push(l & 0xff)
+    val expanded = shake256(seed, 128)
+    val rho     = _slice(expanded, 0, 32)
+    val rho_p   = _slice(expanded, 32, 96)
+    val K_seed  = _slice(expanded, 96, 128)
+    val A = expand_a_65(rho)
+    val s_pair = expand_s_65(rho_p)
+    val s1 = s_pair[0]
+    val s2 = s_pair[1]
+    val s1_hat = _vec_ntt(s1)
+    val a_s1   = _matvec_ntt(A, s1_hat)
+    val a_s1_coeff = _vec_intt(a_s1)
+    val t = _vec_add(a_s1_coeff, s2)
+    var t1 = []
+    var t0 = []
+    var i = 0
+    while i < k:
+        val pair = power2round_poly(t.get(i))
+        t1.push(pair[0])
+        t0.push(pair[1])
+        i = i + 1
+    val pk = pk_encode_65(rho, t1)
+    val tr = shake256(pk, 64)
+    val sk = sk_encode(rho, K_seed, tr, s1, s2, t0)
+    (pk, sk)
+
+# -----------------------------------------------------------------------------
+# ML-DSA.Sign — FIPS 204 Algorithm 2 (randomized variant).
+#
+# Status 2026-05-02: produces a syntactically correct 3293-byte signature
+# but Verify currently rejects it; see
+#   doc/08_tracking/bug/ml_dsa_sign_verify_pipeline_2026-05-02.md
+# -----------------------------------------------------------------------------
+
+fn ml_dsa_sign_65(sk: list, msg: list, rnd: list) -> list:
+    val k = ml_dsa_k_65()
+    val l = ml_dsa_l_65()
+    val gamma1 = ml_dsa_gamma1_65()
+    val gamma2 = ml_dsa_gamma2_65()
+    val beta   = ml_dsa_beta_65()
+    val omega  = ml_dsa_omega_65()
+    val tau    = ml_dsa_tau_65()
+    val parts = sk_decode(sk)
+    val rho = parts[0]
+    val K_seed = parts[1]
+    val tr = parts[2]
+    val s1 = parts[3]
+    val s2 = parts[4]
+    val t0 = parts[5]
+    val mu = shake256(_concat(tr, msg), 64)
+    val rho_pp = shake256(_concat(_concat(K_seed, rnd), mu), 64)
+    val A = expand_a_65(rho)
+    val s1_hat = _vec_ntt(s1)
+    val s2_hat = _vec_ntt(s2)
+    val t0_hat = _vec_ntt(t0)
+    var kappa = 0
+    var done = false
+    var sig_out = []
+    val max_iters = 1000
+    var iter = 0
+    while not done and iter < max_iters:
+        val y = expand_mask_65(rho_pp, kappa)
+        val y_hat = _vec_ntt(y)
+        val w_hat = _matvec_ntt(A, y_hat)
+        val w = _vec_intt(w_hat)
+        var w1 = []
+        var i = 0
+        while i < k:
+            w1.push(high_bits_poly(w.get(i)))
+            i = i + 1
+        var w1_bytes = []
+        var wp = 0
+        while wp < k:
+            val packed = simple_bit_pack(w1.get(wp), 4)
+            var b = 0
+            while b < packed.len():
+                w1_bytes.push(packed.get(b))
+                b = b + 1
+            wp = wp + 1
+        val c_tilde = shake256(_concat(mu, w1_bytes), 32)
+        val c = sample_in_ball(c_tilde, tau)
+        val c_hat = ntt(c)
+        val cs1 = _poly_times_vec_ntt(c_hat, s1_hat)
+        val cs1_coeff = _vec_intt(cs1)
+        val z = _vec_add(y, cs1_coeff)
+        val cs2 = _poly_times_vec_ntt(c_hat, s2_hat)
+        val cs2_coeff = _vec_intt(cs2)
+        val w_minus_cs2 = _vec_sub(w, cs2_coeff)
+        var r0 = []
+        var ri = 0
+        while ri < k:
+            r0.push(low_bits_poly(w_minus_cs2.get(ri)))
+            ri = ri + 1
+        val z_fail  = _vec_norm_ge(z,  gamma1 - beta)
+        val r0_fail = _vec_norm_ge(r0, gamma2 - beta)
+        if z_fail == 0 and r0_fail == 0:
+            val ct0 = _poly_times_vec_ntt(c_hat, t0_hat)
+            val ct0_coeff = _vec_intt(ct0)
+            val neg_ct0 = _vec_sub(_poly_vec_zero(k), ct0_coeff)
+            val w_minus_cs2_plus_ct0 = _vec_add(w_minus_cs2, ct0_coeff)
+            val ct0_fail = _vec_norm_ge(ct0_coeff, gamma2)
+            if ct0_fail == 0:
+                var h = []
+                var hi = 0
+                while hi < k:
+                    h.push(make_hint_poly(neg_ct0.get(hi), w_minus_cs2_plus_ct0.get(hi)))
+                    hi = hi + 1
+                var ones = 0
+                var hj = 0
+                while hj < k:
+                    var hk2 = 0
+                    while hk2 < 256:
+                        if h.get(hj).get(hk2) == 1:
+                            ones = ones + 1
+                        hk2 = hk2 + 1
+                    hj = hj + 1
+                if ones <= omega:
+                    sig_out = sig_encode(c_tilde, z, h)
+                    done = true
+        kappa = kappa + l
+        iter = iter + 1
+    sig_out
+
+# -----------------------------------------------------------------------------
+# ML-DSA.Verify — FIPS 204 Algorithm 3.
+#
+# Status 2026-05-02: returns false on signatures produced by the in-tree
+# sign path; see ml_dsa_sign_verify_pipeline_2026-05-02 bug doc.
+# -----------------------------------------------------------------------------
+
+fn ml_dsa_verify_65(pk: list, msg: list, sig: list) -> bool:
+    val gamma1 = ml_dsa_gamma1_65()
+    val gamma2 = ml_dsa_gamma2_65()
+    val beta   = ml_dsa_beta_65()
+    val omega  = ml_dsa_omega_65()
+    val tau    = ml_dsa_tau_65()
+    val k = ml_dsa_k_65()
+    val l = ml_dsa_l_65()
+    val pk_parts = pk_decode_65(pk)
+    val rho = pk_parts[0]
+    val t1  = pk_parts[1]
+    val sig_parts = sig_decode(sig)
+    val c_tilde = sig_parts[0]
+    val z = sig_parts[1]
+    val h = sig_parts[2]
+    if h.len() == 0:
+        return false
+    val A = expand_a_65(rho)
+    val tr = shake256(pk, 64)
+    val mu = shake256(_concat(tr, msg), 64)
+    val c = sample_in_ball(c_tilde, tau)
+    val c_hat = ntt(c)
+    if _vec_norm_ge(z, gamma1 - beta) != 0:
+        return false
+    val z_hat = _vec_ntt(z)
+    val az = _matvec_ntt(A, z_hat)
+    val pow_d = 8192
+    var t1_shift = []
+    var i = 0
+    while i < k:
+        t1_shift.push(poly_scalar_mul(t1.get(i), pow_d))
+        i = i + 1
+    val t1_shift_hat = _vec_ntt(t1_shift)
+    val ct1 = _poly_times_vec_ntt(c_hat, t1_shift_hat)
+    val w_prime_hat = _vec_sub(az, ct1)
+    val w_prime = _vec_intt(w_prime_hat)
+    var w1p = []
+    var j = 0
+    while j < k:
+        w1p.push(use_hint_poly(h.get(j), w_prime.get(j)))
+        j = j + 1
+    var w1_bytes = []
+    var wp = 0
+    while wp < k:
+        val packed = simple_bit_pack(w1p.get(wp), 4)
+        var b = 0
+        while b < packed.len():
+            w1_bytes.push(packed.get(b))
+            b = b + 1
+        wp = wp + 1
+    val c_tilde_prime = shake256(_concat(mu, w1_bytes), 32)
+    var diff = 0
+    var ci = 0
+    while ci < 32:
+        diff = diff | (c_tilde.get(ci) ^ c_tilde_prime.get(ci))
+        ci = ci + 1
+    diff == 0

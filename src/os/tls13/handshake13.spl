@@ -1375,3 +1375,104 @@ fn build_certificate_verify_bytes(algorithm: u16, signature: [u8]) -> [u8]:
     _append_into(out, body_len)
     _append_into(out, body)
     out
+
+# ============================================================================
+# early_data extension — RFC 8446 §4.2.10
+#
+# Wire format:
+#   ClientHello / EncryptedExtensions: empty body (extension_data zero-length)
+#   NewSessionTicket: uint32 max_early_data_size
+# ============================================================================
+
+class EarlyDataExtension:
+    """Server-side max_early_data_size carried on NewSessionTicket (§4.2.10)."""
+    max_early_data_size: u32
+
+class EarlyDataDecodeResult:
+    ext: EarlyDataExtension
+    ok: bool
+    reason: text
+
+fn build_ext_early_data_client() -> [u8]:
+    """early_data extension for ClientHello — empty body. type(2)+length(2)=0."""
+    [0x00u8, 0x2au8, 0x00u8, 0x00u8]
+
+fn build_ext_early_data_ee() -> [u8]:
+    """early_data extension for EncryptedExtensions — empty body."""
+    [0x00u8, 0x2au8, 0x00u8, 0x00u8]
+
+fn build_ext_early_data_nst(max_early_data_size: u32) -> [u8]:
+    """early_data extension for NewSessionTicket: type(2)+length(2)=4+u32."""
+    var out: [u8] = []
+    out.push(0x00u8)
+    out.push(0x2au8)
+    out.push(0x00u8)
+    out.push(0x04u8)
+    out.push(((max_early_data_size >> 24) & 0xFF).to_u8())
+    out.push(((max_early_data_size >> 16) & 0xFF).to_u8())
+    out.push(((max_early_data_size >> 8) & 0xFF).to_u8())
+    out.push((max_early_data_size & 0xFF).to_u8())
+    out
+
+fn decode_ext_early_data_nst(body: [u8]) -> EarlyDataDecodeResult:
+    """Decode a NewSessionTicket early_data extension body (4 bytes)."""
+    if body.len() != 4:
+        return EarlyDataDecodeResult(
+            ext: EarlyDataExtension(max_early_data_size: 0u32),
+            ok: false,
+            reason: "decode_error: early_data NST body must be 4 bytes",
+        )
+    val b0 = body[0].to_u32()
+    val b1 = body[1].to_u32()
+    val b2 = body[2].to_u32()
+    val b3 = body[3].to_u32()
+    val v: u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    EarlyDataDecodeResult(
+        ext: EarlyDataExtension(max_early_data_size: v),
+        ok: true,
+        reason: "",
+    )
+
+fn decode_ext_early_data_client(body: [u8]) -> EarlyDataDecodeResult:
+    """Decode a ClientHello/EE early_data body — MUST be empty per §4.2.10."""
+    if body.len() != 0:
+        return EarlyDataDecodeResult(
+            ext: EarlyDataExtension(max_early_data_size: 0u32),
+            ok: false,
+            reason: "illegal_parameter: early_data CH/EE body must be empty",
+        )
+    EarlyDataDecodeResult(
+        ext: EarlyDataExtension(max_early_data_size: 0u32),
+        ok: true,
+        reason: "",
+    )
+
+# ============================================================================
+# psk_key_exchange_modes extension — RFC 8446 §4.2.9
+#
+# Wire format:
+#   uint8 ke_modes_len
+#   PskKeyExchangeMode ke_modes[ke_modes_len]
+# Values: 0 = psk_ke (no DHE), 1 = psk_dhe_ke (PSK + DHE — default).
+# ============================================================================
+
+fn build_ext_psk_key_exchange_modes(modes: [u8]) -> [u8]:
+    """psk_key_exchange_modes extension (§4.2.9). type(2)+len(2)+u8 count+modes."""
+    var ext_data: [u8] = []
+    ext_data.push((modes.len() & 0xFF).to_u8())
+    var i: u64 = 0
+    val n = modes.len().to_u64()
+    while i < n:
+        ext_data.push(modes[i.to_i64()])
+        i = i + 1
+    var out: [u8] = []
+    out.push(0x00u8)
+    out.push(0x2du8)
+    out.push(((ext_data.len() >> 8) & 0xFF).to_u8())
+    out.push((ext_data.len() & 0xFF).to_u8())
+    var j: u64 = 0
+    val m = ext_data.len().to_u64()
+    while j < m:
+        out.push(ext_data[j.to_i64()])
+        j = j + 1
+    out
