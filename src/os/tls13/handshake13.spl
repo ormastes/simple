@@ -995,6 +995,136 @@ fn build_client_hello2_bytes_with_p256(random: [u8], x25519_pub: [u8], p256_pub:
     out
 
 # ============================================================================
+# Public: HRR connect-flow integration helper (RFC 8446 §4.1.4 + §4.4.1)
+# ============================================================================
+#
+# `process_hrr_after_serverhello` is the pure decision routine the connect
+# flow calls when a ServerHello carries the HRR_MAGIC. It enforces the
+# §4.1.4 rejections ("only one HRR per handshake", "HRR must switch group")
+# and produces the ClientHello2 bytes plus the new transcript seed
+# (synthetic message_hash || HRR-handshake-bytes) per §4.4.1.
+#
+# The function is intentionally I/O-free so it can be unit-tested directly
+# without a TCP socket. The connect flow does the actual `_io_send` of the
+# returned `client_hello2_bytes` and the subsequent `_io_recv_record` for
+# ServerHello2.
+#
+# Note: today's connect flow always advertises an X25519 key_share in CH1
+# (it may also advertise a P-256 key_share once a P-256 ephemeral is
+# generated up-front). Therefore the §4.1.4 same-group rejection currently
+# fires whenever the server picks GROUP_X25519 from CH1. Routing the
+# P-256 case to `build_client_hello2_bytes_with_p256` is retained for the
+# future when CH1 may offer P-256-only key_share or add new groups.
+
+enum HrrFlowResult:
+    Ok(value: HrrFlowOk)
+    Reject(reason: text)
+
+class HrrFlowOk:
+    """Result of HRR processing: bytes to send + transcript seed for §4.4.1."""
+    client_hello2_bytes: [u8]    # handshake-layer CH2 (type+len+body)
+    selected_group: u16          # HRR's NamedGroup pick (for P-256 deferral)
+    transcript_seed: [u8]        # synthetic_message_hash || hrr_hs_bytes
+    hrr_hs_bytes: [u8]           # HRR handshake-layer bytes (for caller debug)
+
+fn process_hrr_after_serverhello(
+        sh_hs_bytes: [u8],
+        sh_body: [u8],
+        ch1_random: [u8],
+        ch1_x25519_pub: [u8],
+        ch1_hash: [u8],
+        new_x25519_pub: [u8],
+        new_p256_pub: [u8],
+        sni_host: text,
+        seen_hrr: bool,
+        ch1_offered_x25519: bool,
+        ch1_offered_p256: bool) -> HrrFlowResult:
+    """Decide CH2 + transcript seed when a ServerHello is actually a HRR.
+
+    Args:
+        sh_hs_bytes: full HRR handshake-layer bytes (type + 3-len + body).
+        sh_body: the body slice (legacy_version onwards) — passed to
+                 parse_hello_retry_request.
+        ch1_random: 32-byte client_random reused verbatim in CH2.
+        ch1_x25519_pub: CH1's X25519 public share (for same-group check).
+        ch1_hash: SHA-256 hash of CH1 handshake-layer bytes (for synthetic
+                  message_hash per §4.4.1).
+        new_x25519_pub: fresh X25519 public share to put in CH2 if HRR
+                        selected GROUP_X25519. Empty if not regenerated.
+        new_p256_pub: fresh P-256 uncompressed point if HRR selected
+                      GROUP_SECP256R1. Empty otherwise.
+        sni_host: SNI hostname (echoed unchanged from CH1).
+        seen_hrr: false on first HRR (Ok path); true on a second HRR
+                  (rejected per §4.1.4).
+        ch1_offered_x25519: whether CH1 advertised a key_share for X25519
+                            (used for same-group rejection).
+        ch1_offered_p256: whether CH1 advertised a key_share for P-256
+                          (used for same-group rejection).
+
+    Returns:
+        HrrFlowResult.Ok(HrrFlowOk{...}) on success — caller MUST send
+        client_hello2_bytes wrapped in a plaintext record, then replace its
+        transcript with `transcript_seed`.
+
+        HrrFlowResult.Reject(reason: ...) on a §4.1.4 violation. Caller
+        MUST close the connection with an alert.
+    """
+    if seen_hrr:
+        # §4.1.4: "If a client receives a second HelloRetryRequest in the
+        # same connection ... it MUST abort the handshake with an
+        # unexpected_message alert."
+        return HrrFlowResult.Reject(reason: "unexpected_message: second HRR in connection")
+
+    val parsed = parse_hello_retry_request(sh_body)
+    var hrr: HelloRetryRequest13 = HelloRetryRequest13(cipher_suite: 0u16, selected_group: 0u16, cookie: [])
+    if val HrrResult.Ok(value) = parsed:
+        hrr = value
+    else:
+        if val HrrResult.Err(reason) = parsed:
+            return HrrFlowResult.Reject(reason: reason)
+
+    # §4.1.4: "Clients MUST abort the handshake with an
+    # `illegal_parameter` alert if the HelloRetryRequest would not result
+    # in any change in the ClientHello." — i.e. the selected_group MUST
+    # NOT match a group whose key_share was already in CH1.
+    if hrr.selected_group == GROUP_X25519 and ch1_offered_x25519:
+        return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group equals CH1 key_share group (X25519)")
+    if hrr.selected_group == GROUP_SECP256R1 and ch1_offered_p256:
+        return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group equals CH1 key_share group (secp256r1)")
+
+    # §4.1.4: server's selected_group MUST be one the client advertised
+    # in supported_groups. Today client advertises {X25519, secp256r1}.
+    if hrr.selected_group != GROUP_X25519 and hrr.selected_group != GROUP_SECP256R1:
+        return HrrFlowResult.Reject(reason: "illegal_parameter: HRR selected_group not in client supported_groups")
+
+    # Build CH2 with a fresh key_share for the chosen group.
+    val ch2 = if hrr.selected_group == GROUP_SECP256R1 {
+        build_client_hello2_bytes_with_p256(ch1_random, [], new_p256_pub, sni_host, hrr.cookie)
+    } else {
+        # GROUP_X25519 path is currently unreachable from the live connect
+        # flow because CH1 advertises X25519 (so it would have been rejected
+        # above as same-group). It is retained for tests and for future
+        # configurations where CH1 may omit X25519 from key_share.
+        build_client_hello2_bytes(ch1_random, new_x25519_pub, sni_host, hrr.cookie)
+    }
+
+    # §4.4.1: "When the server responds to a ClientHello with a
+    # HelloRetryRequest, the value of ClientHello1 is replaced with a
+    # special synthetic handshake message of handshake type
+    # `message_hash` containing Hash(ClientHello1)."
+    val synth = build_hrr_synthetic_message_hash(ch1_hash)
+    var seed: [u8] = _byte_buf(synth.len() + sh_hs_bytes.len())
+    _append_into(seed, synth)
+    _append_into(seed, sh_hs_bytes)
+
+    HrrFlowResult.Ok(value: HrrFlowOk(
+        client_hello2_bytes: ch2,
+        selected_group: hrr.selected_group,
+        transcript_seed: seed,
+        hrr_hs_bytes: sh_hs_bytes,
+    ))
+
+# ============================================================================
 # Public: Parse Certificate Body
 # ============================================================================
 
