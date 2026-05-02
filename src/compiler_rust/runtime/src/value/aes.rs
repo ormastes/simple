@@ -770,6 +770,196 @@ pub extern "C" fn rt_tls13_aes128_gcm_encrypt(
     runtime_array_from_bytes(&result)
 }
 
+// ============================================================================
+// AES-256 key expansion (FIPS 197 §5.2): 32-byte key -> 240-byte expanded
+// schedule (15 round keys, 14 rounds).  The expansion has TWO special cases:
+//   word_index % 8 == 0 : RotWord + SubWord + XOR Rcon
+//   word_index % 8 == 4 : SubWord only
+// ============================================================================
+const AES256_KEY_LEN: usize = 32;
+const AES256_EXPANDED_LEN: usize = 240;
+const AES256_ROUNDS: i64 = 14;
+
+fn expand_key_aes256(key: &[u8; AES256_KEY_LEN]) -> [u8; AES256_EXPANDED_LEN] {
+    const NK: usize = 8;
+    const NR: usize = AES256_ROUNDS as usize;
+    let total_words = 4 * (NR + 1); // 60
+    let mut expanded = [0u8; AES256_EXPANDED_LEN];
+    expanded[..AES256_KEY_LEN].copy_from_slice(key);
+    let mut word_index = NK;
+    while word_index < total_words {
+        let prev = (word_index - 1) * 4;
+        let mut t = [
+            expanded[prev],
+            expanded[prev + 1],
+            expanded[prev + 2],
+            expanded[prev + 3],
+        ];
+        let m = word_index % NK;
+        if m == 0 {
+            // RotWord
+            let r0 = t[1];
+            let r1 = t[2];
+            let r2 = t[3];
+            let r3 = t[0];
+            // SubWord
+            t[0] = SBOX[r0 as usize];
+            t[1] = SBOX[r1 as usize];
+            t[2] = SBOX[r2 as usize];
+            t[3] = SBOX[r3 as usize];
+            // XOR with Rcon (top-byte-packed); for AES-256, (word_index/NK)-1
+            // ranges 0..6 (Rcon[1..7]).
+            let rc = RCON_PACKED[(word_index / NK) - 1];
+            t[0] ^= ((rc >> 24) & 0xff) as u8;
+            t[1] ^= ((rc >> 16) & 0xff) as u8;
+            t[2] ^= ((rc >> 8) & 0xff) as u8;
+            t[3] ^= (rc & 0xff) as u8;
+        } else if m == 4 {
+            // AES-256-only: SubWord without RotWord, no Rcon.
+            t[0] = SBOX[t[0] as usize];
+            t[1] = SBOX[t[1] as usize];
+            t[2] = SBOX[t[2] as usize];
+            t[3] = SBOX[t[3] as usize];
+        }
+        let back = (word_index - NK) * 4;
+        for offset in 0..4 {
+            expanded[word_index * 4 + offset] = expanded[back + offset] ^ t[offset];
+        }
+        word_index += 1;
+    }
+    expanded
+}
+
+pub fn aes256_encrypt_one_block(key: &[u8], block: &[u8]) -> Option<[u8; AES_BLOCK_LEN]> {
+    if key.len() != AES256_KEY_LEN || block.len() != AES_BLOCK_LEN {
+        return None;
+    }
+    let mut k = [0u8; AES256_KEY_LEN];
+    k.copy_from_slice(key);
+    let expanded = expand_key_aes256(&k);
+    encrypt_block_with_expanded_bytes(block, &expanded, AES256_ROUNDS)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_aes256_encrypt_block_into(
+    key: RuntimeValue,
+    block: RuntimeValue,
+    out: RuntimeValue,
+) -> i64 {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return 1;
+    };
+    let Some(block_bytes) = runtime_array_to_bytes(block) else {
+        return 1;
+    };
+    let Some(cipher) = aes256_encrypt_one_block(&key_bytes, &block_bytes) else {
+        return 1;
+    };
+    let out_len = rt_array_len(out);
+    if out_len < AES_BLOCK_LEN as i64 {
+        return 1;
+    }
+    for (i, byte) in cipher.iter().enumerate() {
+        super::collections::rt_array_set(out, i as i64, RuntimeValue::from_int(*byte as i64));
+    }
+    0
+}
+
+pub fn aes256_gcm_encrypt_bytes(
+    key: &[u8],
+    nonce: &[u8],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Option<Vec<u8>> {
+    if key.len() != AES256_KEY_LEN || nonce.len() != 12 {
+        return None;
+    }
+    let mut k = [0u8; AES256_KEY_LEN];
+    k.copy_from_slice(key);
+    let expanded = expand_key_aes256(&k);
+
+    // H = AES_K(0^128)
+    let zero = [0u8; AES_BLOCK_LEN];
+    let h_arr = encrypt_block_with_expanded_bytes(&zero, &expanded, AES256_ROUNDS)?;
+    let h = h_arr;
+
+    // J0 = nonce || 0x00000001 (12-byte nonce path).
+    let mut j0 = [0u8; AES_BLOCK_LEN];
+    j0[..12].copy_from_slice(nonce);
+    j0[15] = 1;
+
+    // Encrypt plaintext with GCTR using counter = inc32(J0)
+    let mut counter = j0;
+    inc32(&mut counter);
+    let mut ciphertext = vec![0u8; plaintext.len()];
+    let full = plaintext.len() / AES_BLOCK_LEN;
+    let rem = plaintext.len() % AES_BLOCK_LEN;
+    for i in 0..full {
+        let stream = encrypt_block_with_expanded_bytes(&counter, &expanded, AES256_ROUNDS)?;
+        let off = i * AES_BLOCK_LEN;
+        for j in 0..AES_BLOCK_LEN {
+            ciphertext[off + j] = plaintext[off + j] ^ stream[j];
+        }
+        inc32(&mut counter);
+    }
+    if rem > 0 {
+        let stream = encrypt_block_with_expanded_bytes(&counter, &expanded, AES256_ROUNDS)?;
+        let off = full * AES_BLOCK_LEN;
+        for j in 0..rem {
+            ciphertext[off + j] = plaintext[off + j] ^ stream[j];
+        }
+    }
+
+    // GHASH(H, AAD || pad || C || pad || [len(AAD)]_64 || [len(C)]_64)
+    let mut y = [0u8; AES_BLOCK_LEN];
+    ghash_update(&mut y, &h, aad);
+    ghash_update(&mut y, &h, &ciphertext);
+    let mut len_block = [0u8; AES_BLOCK_LEN];
+    let aad_bits = (aad.len() as u64).wrapping_mul(8);
+    let ct_bits = (ciphertext.len() as u64).wrapping_mul(8);
+    len_block[..8].copy_from_slice(&aad_bits.to_be_bytes());
+    len_block[8..].copy_from_slice(&ct_bits.to_be_bytes());
+    xor_block_in_place(&mut y, &len_block);
+    y = gf128_mul(&y, &h);
+
+    // T = MSB_t(GCTR_K(J0, S))  (t = 128, full block)
+    let ek_j0 = encrypt_block_with_expanded_bytes(&j0, &expanded, AES256_ROUNDS)?;
+    let mut tag = [0u8; AES_BLOCK_LEN];
+    for i in 0..AES_BLOCK_LEN {
+        tag[i] = y[i] ^ ek_j0[i];
+    }
+
+    let mut out = Vec::with_capacity(ciphertext.len() + AES_BLOCK_LEN);
+    out.extend_from_slice(&ciphertext);
+    out.extend_from_slice(&tag);
+    Some(out)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls13_aes256_gcm_encrypt(
+    key: RuntimeValue,
+    nonce: RuntimeValue,
+    plaintext: RuntimeValue,
+    aad: RuntimeValue,
+) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return empty_runtime_array();
+    };
+    let Some(nonce_bytes) = runtime_array_to_bytes(nonce) else {
+        return empty_runtime_array();
+    };
+    let Some(pt_bytes) = runtime_array_to_bytes(plaintext) else {
+        return empty_runtime_array();
+    };
+    let Some(aad_bytes) = runtime_array_to_bytes(aad) else {
+        return empty_runtime_array();
+    };
+    let Some(result) = aes256_gcm_encrypt_bytes(&key_bytes, &nonce_bytes, &pt_bytes, &aad_bytes) else {
+        return empty_runtime_array();
+    };
+    runtime_array_from_bytes(&result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -970,5 +1160,91 @@ mod tests {
 
         let decrypted = rt_aes_decrypt_block_with_expanded(encrypted, runtime_array_from_bytes(&expanded), 10);
         assert_eq!(runtime_array_to_vec(decrypted), plaintext);
+    }
+
+    // ----------------------------------------------------------------------------
+    // AES-256 / AES-256-GCM tests (FIPS 197 Appendix C, NIST SP 800-38D Appendix B)
+    // ----------------------------------------------------------------------------
+
+    #[test]
+    fn aes256_known_answer_block_encrypt_fips197() {
+        // FIPS 197 Appendix C.3 (AES-256 example).
+        // Key = 000102...1f, PT = 00112233445566778899aabbccddeeff,
+        // CT = 8ea2b7ca516745bfeafc49904b496089.
+        let key = decode_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        let plaintext = decode_hex("00112233445566778899aabbccddeeff");
+        let expected = decode_hex("8ea2b7ca516745bfeafc49904b496089");
+        let cipher = super::aes256_encrypt_one_block(&key, &plaintext).expect("aes256 enc");
+        assert_eq!(cipher.to_vec(), expected);
+    }
+
+    #[test]
+    fn aes256_gcm_nist_sp_800_38d_test_case_13() {
+        // TC13: 32-byte zero key, 12-byte zero IV, empty PT, empty AAD.
+        let key = decode_hex("0000000000000000000000000000000000000000000000000000000000000000");
+        let nonce = decode_hex("000000000000000000000000");
+        let pt: Vec<u8> = vec![];
+        let aad: Vec<u8> = vec![];
+        let expected_tag = decode_hex("530f8afbc74536b9a963b4f1c4cb738b");
+        let out = super::aes256_gcm_encrypt_bytes(&key, &nonce, &pt, &aad).expect("gcm256");
+        assert_eq!(out.len(), 16);
+        assert_eq!(out, expected_tag);
+    }
+
+    #[test]
+    fn aes256_gcm_nist_sp_800_38d_test_case_14() {
+        // TC14: 32-byte zero key, zero IV, 16-byte zero PT, empty AAD.
+        let key = decode_hex("0000000000000000000000000000000000000000000000000000000000000000");
+        let nonce = decode_hex("000000000000000000000000");
+        let pt = decode_hex("00000000000000000000000000000000");
+        let aad: Vec<u8> = vec![];
+        let expected_ct = decode_hex("cea7403d4d606b6e074ec5d3baf39d18");
+        let expected_tag = decode_hex("d0d1c8a799996bf0265b98b5d48ab919");
+        let out = super::aes256_gcm_encrypt_bytes(&key, &nonce, &pt, &aad).expect("gcm256");
+        assert_eq!(out.len(), 32);
+        assert_eq!(&out[..16], &expected_ct[..]);
+        assert_eq!(&out[16..], &expected_tag[..]);
+    }
+
+    #[test]
+    fn aes256_gcm_nist_sp_800_38d_test_case_15() {
+        // TC15: non-trivial 32-byte key, 64-byte plaintext, no AAD.
+        let key = decode_hex(
+            "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
+        );
+        let nonce = decode_hex("cafebabefacedbaddecaf888");
+        let pt = decode_hex(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
+        );
+        let aad: Vec<u8> = vec![];
+        let expected_ct = decode_hex(
+            "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015ad",
+        );
+        let expected_tag = decode_hex("b094dac5d93471bdec1a502270e3cc6c");
+        let out = super::aes256_gcm_encrypt_bytes(&key, &nonce, &pt, &aad).expect("gcm256");
+        assert_eq!(out.len(), pt.len() + 16);
+        assert_eq!(&out[..pt.len()], &expected_ct[..]);
+        assert_eq!(&out[pt.len()..], &expected_tag[..]);
+    }
+
+    #[test]
+    fn aes256_gcm_nist_sp_800_38d_test_case_16() {
+        // TC16: same key/nonce as TC15, 60-byte plaintext, 20-byte AAD.
+        let key = decode_hex(
+            "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
+        );
+        let nonce = decode_hex("cafebabefacedbaddecaf888");
+        let pt = decode_hex(
+            "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
+        );
+        let aad = decode_hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+        let expected_ct = decode_hex(
+            "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662",
+        );
+        let expected_tag = decode_hex("76fc6ece0f4e1768cddf8853bb2d551b");
+        let out = super::aes256_gcm_encrypt_bytes(&key, &nonce, &pt, &aad).expect("gcm256");
+        assert_eq!(out.len(), pt.len() + 16);
+        assert_eq!(&out[..pt.len()], &expected_ct[..]);
+        assert_eq!(&out[pt.len()..], &expected_tag[..]);
     }
 }
