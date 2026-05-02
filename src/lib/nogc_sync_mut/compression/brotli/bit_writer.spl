@@ -56,3 +56,82 @@ fn brotli_bits_write_bytes(w: BrotliBitWriter, payload: [u8]) -> BrotliBitWriter
 fn brotli_bits_writer_finish(w: BrotliBitWriter) -> [u8]:
     val padded = brotli_bits_pad_to_byte(w)
     padded.bytes
+
+# -----------------------------------------------------------------------------
+# Helpers for compressed meta-block emission (literal-only tier, RFC 7932 §9.2)
+# -----------------------------------------------------------------------------
+
+# Reverse the low `nbits` of `code` so the most-significant bit of the
+# canonical Huffman codeword becomes the first (LSB) bit written.
+# Brotli §1.2 reads codewords MSB-first into a buffer that fills LSB-first;
+# emitting the canonical code bits in reversed order achieves byte-LSB-first
+# layout that the decoder reads back correctly.
+fn brotli_bit_reverse(code: i64, nbits: i64) -> i64:
+    var v = code
+    var r = 0
+    var i = 0
+    while i < nbits:
+        r = (r << 1) | (v & 1)
+        v = v >> 1
+        i = i + 1
+    r
+
+# Write a canonical Huffman codeword (length 1..15) with bit-reverse so the
+# decoder peeks the bits and reads them MSB-first.  For length=0 (single
+# symbol in a simple prefix tree) this is a no-op — the decoder reads 0 bits.
+fn brotli_bits_write_huffman_code(w: BrotliBitWriter, code: i64, length: i64) -> BrotliBitWriter:
+    if length <= 0:
+        return w
+    val rev = brotli_bit_reverse(code, length)
+    brotli_bits_write(w, rev, length)
+
+# Write VarLenUint8 (RFC 7932 §9.2): used for NBLTYPESL/I/D, NTREESL/D etc.
+# Encoding:
+#   value == 0          -> 1 bit  "0"
+#   value > 0           -> "1" + 3-bit n + n bits of (value - 1 - (1 << n) is wrong;
+#                           value = (1 << n) + extra, extra in [0 .. (1<<n)-1])
+# The 3-bit `n` is in [0..7] giving values up to 128 + 127 = 255.
+fn brotli_bits_write_varlen_uint8(w: BrotliBitWriter, value: i64) -> BrotliBitWriter:
+    if value == 0:
+        return brotli_bits_write(w, 0, 1)
+    # value >= 1: pick n = bit length of (value) - 1
+    var n = 0
+    var v = value
+    # Find n such that (1 << n) <= value < (1 << (n+1))
+    while (1 << (n + 1)) <= value:
+        n = n + 1
+    # n is in [0..7]
+    val extra = value - (1 << n)
+    var out = brotli_bits_write(w, 1, 1)
+    out = brotli_bits_write(out, n, 3)
+    if n > 0:
+        out = brotli_bits_write(out, extra, n)
+    out
+
+# Write a "simple prefix code" header (RFC 7932 §3.4).
+# Layout:
+#   2 bits = 3   (HSKIP code -> simple representation)
+#   2 bits = NSYM - 1
+#   For each of NSYM symbols, write `alphabet_bits` of the symbol value.
+#   For NSYM=4, write 1 extra "tree-select" bit afterwards (we always use 0 -> equal lengths).
+# Caller must order symbols ascending (smaller symbol value first) per RFC §3.4.
+fn brotli_bits_write_simple_prefix(w: BrotliBitWriter, alphabet_bits: i64, symbols: [i64]) -> BrotliBitWriter:
+    var out = w
+    out = brotli_bits_write(out, 3, 2)            # HSKIP code = 3 -> simple
+    val nsym = symbols.len()
+    out = brotli_bits_write(out, nsym - 1, 2)     # NSYM - 1
+    var i = 0
+    while i < nsym:
+        out = brotli_bits_write(out, symbols[i], alphabet_bits)
+        i = i + 1
+    if nsym == 4:
+        # tree-select = 0 -> all four codewords are 2 bits long
+        out = brotli_bits_write(out, 0, 1)
+    out
+
+# Helper: pad and return the byte length of a writer's output if finished now.
+fn brotli_bits_writer_byte_len(w: BrotliBitWriter) -> i64:
+    var n = w.bytes.len()
+    if w.buf_bits > 0:
+        n = n + 1
+    n

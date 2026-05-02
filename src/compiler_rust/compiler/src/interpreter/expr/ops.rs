@@ -1034,6 +1034,9 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::MatMul => {
                     // Matrix multiplication (@) - Simple Math #1930-#1939
+                    eprintln!("DBG_W85 MatMul: left_kind={} right_kind={}", left_val.type_name(), right_val.type_name());
+                    eprintln!("DBG_W85 MatMul: left_dbg={:?}", left_val);
+                    eprintln!("DBG_W85 MatMul: right_dbg={:?}", right_val);
                     match (&left_val, &right_val) {
                         // Scalar @ Scalar - backward compatibility
                         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
