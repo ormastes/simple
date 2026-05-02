@@ -1,9 +1,10 @@
 # Bug: aes128_gcm_decrypt — `type mismatch: cannot convert string to int`
 
 **Date:** 2026-05-01
-**Status:** Open
+**Status: FIXED 2026-05-01 — root cause: leftover `_debug_bytes4` / `_debug_bytes16` / `_debug_bytes_all` log-scaffolding helpers in `aes128_gcm_decrypt` tripped the semantic checker on f-string-interpolated `u8`/`u64` values; encrypt was unaffected because its fast-path `rt_tls13_aes128_gcm_encrypt` extern returns before any debug call runs. Fix: deleted the call sites in decrypt and removed the unused helpers + `klog_api` import. AES-GCM core (key expansion, GHASH, GCTR, tag compare) was correct all along.**
 **Component:** `src/os/crypto/aes128_gcm.spl` (decrypt path)
 **Discovered-by:** AES-128-GCM NIST SP 800-38D Appendix B spec post-extern-fix
+**Resolution:** All 12 it-blocks (4 encrypt + 4 decrypt round-trip + 4 tag-corruption negative cases) PASS in interpreter mode against `src/compiler_rust/target/bootstrap/simple` — see `test/unit/lib/crypto/aes128_gcm_nist_vectors_spec.spl`. Constant-time tag compare preserved; no extern added.
 
 ## Summary
 
