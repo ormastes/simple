@@ -332,6 +332,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_text_count_codepoints", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_aes_encrypt_block_with_expanded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_aes_decrypt_block_with_expanded", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aes_sbox", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aes_rcon", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aes128_encrypt_block_into", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_tls13_aes128_gcm_encrypt", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cstring_to_text", &[I64], &[I64]),
     // =========================================================================

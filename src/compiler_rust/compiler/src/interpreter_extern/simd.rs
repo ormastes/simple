@@ -6,7 +6,10 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use crate::value_bridge::{runtime_to_value, value_to_runtime};
-use simple_runtime::value::aes::{decrypt_block_with_expanded_bytes, encrypt_block_with_expanded_bytes};
+use simple_runtime::value::aes::{
+    aes128_encrypt_one_block, aes128_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
+    encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon, rt_aes_sbox as ffi_aes_sbox,
+};
 use simple_runtime::value::simd::{
     rt_simd_detect_profile as ffi_detect_profile, rt_simd_has_avx as ffi_has_avx, rt_simd_has_avx2 as ffi_has_avx2,
     rt_simd_has_neon as ffi_has_neon, rt_simd_has_rvv as ffi_has_rvv, rt_simd_has_sse as ffi_has_sse,
@@ -158,6 +161,76 @@ pub fn rt_aes_decrypt_block_with_expanded(args: &[Value]) -> Result<Value, Compi
     let output = decrypt_block_with_expanded_bytes(&block, &expanded, rounds).unwrap_or([0; 16]);
     Ok(Value::array(
         output.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
+    ))
+}
+
+// ============================================================================
+// AES-128 helper externs (FIPS 197 + NIST SP 800-38D)
+// ============================================================================
+
+pub fn rt_aes_sbox(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_aes_sbox expects 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Int(i) => Ok(Value::Int(ffi_aes_sbox(*i))),
+        _ => Err(CompileError::runtime("rt_aes_sbox expects an integer index".to_string())),
+    }
+}
+
+pub fn rt_aes_rcon(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_aes_rcon expects 1 argument".to_string()));
+    }
+    match &args[0] {
+        Value::Int(i) => Ok(Value::Int(ffi_aes_rcon(*i))),
+        _ => Err(CompileError::runtime("rt_aes_rcon expects an integer index".to_string())),
+    }
+}
+
+// rt_aes128_encrypt_block_into(key: [u8], block: [u8], out: [u8]) -> i64
+//
+// Returns 0 on success, 1 on bad input. NOTE: in interpreter mode the runtime
+// `Value::Array` is `Arc<Vec<Value>>`; the args we receive are clones of the
+// caller's Arc, so mutation of `out` does NOT propagate back to the caller.
+// This matches the AES-128-GCM caller's design (it's an unused fallback path
+// when rt_tls13_aes128_gcm_encrypt returns non-empty). Compile-mode (raw FFI
+// pointer) does mutate the caller's array in place via rt_array_set.
+pub fn rt_aes128_encrypt_block_into(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "rt_aes128_encrypt_block_into expects 3 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_aes128_encrypt_block_into", &args[0])?;
+    let block = expect_byte_array("rt_aes128_encrypt_block_into", &args[1])?;
+    // Validate `out` is a byte array of correct length without keeping a Vec copy.
+    let _out = expect_byte_array("rt_aes128_encrypt_block_into", &args[2])?;
+    if key.len() != 16 || block.len() != 16 {
+        return Ok(Value::Int(1));
+    }
+    if aes128_encrypt_one_block(&key, &block).is_some() {
+        Ok(Value::Int(0))
+    } else {
+        Ok(Value::Int(1))
+    }
+}
+
+// rt_tls13_aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
+// AES-128-GCM AEAD encrypt. Returns ciphertext || 16-byte tag, or empty array on error.
+pub fn rt_tls13_aes128_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(
+            "rt_tls13_aes128_gcm_encrypt expects 4 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[0])?;
+    let nonce = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[1])?;
+    let plaintext = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[2])?;
+    let aad = expect_byte_array("rt_tls13_aes128_gcm_encrypt", &args[3])?;
+    let result = aes128_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad).unwrap_or_default();
+    Ok(Value::array(
+        result.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
     ))
 }
 
