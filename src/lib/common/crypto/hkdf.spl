@@ -11,7 +11,7 @@
 mod crypto.types
 mod crypto.hmac
 
-use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha384_bytes, hmac_sha512_bytes}
+use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha384_bytes, hmac_sha512_bytes, hmac_sha1_bytes}
 
 # =============================================================================
 # Internal helper
@@ -222,3 +222,76 @@ fn hkdf_expand_sha384(prk: list, info: list, length: i64) -> list:
 # reason: positional crypto hkdf API
 fn hkdf_sha384(salt: list, ikm: list, info: list, length: i64) -> list:
     hkdf_expand_sha384(hkdf_extract_sha384(salt, ikm), info, length)
+
+# =============================================================================
+# HKDF-SHA-1 (DEPRECATED — legacy interop only)
+#
+# WARNING: SHA-1 is cryptographically broken for collision resistance. HKDF
+# itself only requires PRF strength (HMAC), so HKDF-SHA-1 remains a valid PRK
+# generator for legacy TLS 1.2 PRF, the historical RFC 5869 §A.4-§A.6 test
+# cases, and PBKDF2-HMAC-SHA-1 RFC 6070 vectors. DO NOT use HKDF-SHA-1 in
+# new protocols; prefer HKDF-SHA-256 or HKDF-SHA-512.
+#
+# SHA-1 has a 20-byte output and 64-byte block size. Extract output (PRK)
+# is 20 bytes; Expand max length is 255 * 20 = 5100.
+# =============================================================================
+
+# RFC 5869 §2.2 Extract step using SHA-1
+# PRK = HMAC-SHA-1(salt, IKM)
+# If salt is empty, use HashLen (20) zero bytes per RFC 5869 §2.2.
+# reason: positional crypto hkdf API
+fn hkdf_extract_sha1(salt: list, ikm: list) -> list:
+    var effective_salt = []
+    if salt.len() == 0:
+        effective_salt = _zeros(20)
+    else:
+        var i = 0
+        while i < salt.len():
+            effective_salt.push(salt.get(i))
+            i = i + 1
+    hmac_sha1_bytes(effective_salt, ikm)
+
+# RFC 5869 §2.3 Expand step using SHA-1
+# OKM = T(1) || T(2) || ... || T(N), first `length` bytes
+# T(i) = HMAC-SHA-1(PRK, T(i-1) || info || [i])
+# length must be > 0 and <= 255 * 20 (5100)
+# reason: positional crypto hkdf API
+fn hkdf_expand_sha1(prk: list, info: list, length: i64) -> list:
+    if length <= 0:
+        []
+    else:
+        val max_len = 255 * 20
+        if length > max_len:
+            []
+        else:
+            var output = []
+            var prev_t = []
+            var counter = 1
+            while output.len() < length:
+                var hmac_input = []
+                var j = 0
+                while j < prev_t.len():
+                    hmac_input.push(prev_t.get(j))
+                    j = j + 1
+                j = 0
+                while j < info.len():
+                    hmac_input.push(info.get(j))
+                    j = j + 1
+                hmac_input.push(counter & 0xFF)
+                prev_t = hmac_sha1_bytes(prk, hmac_input)
+                j = 0
+                while j < prev_t.len():
+                    output.push(prev_t.get(j))
+                    j = j + 1
+                counter = counter + 1
+            var result = []
+            var i = 0
+            while i < length:
+                result.push(output.get(i))
+                i = i + 1
+            result
+
+# Combined convenience: Extract then Expand with SHA-1
+# reason: positional crypto hkdf API
+fn hkdf_sha1(salt: list, ikm: list, info: list, length: i64) -> list:
+    hkdf_expand_sha1(hkdf_extract_sha1(salt, ikm), info, length)
