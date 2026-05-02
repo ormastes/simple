@@ -89,6 +89,16 @@ describe "zstd FSE + Huffman encoder primitives":
         # (sum = 32 = table_size). The encoder must produce a state-table
         # of the same size as the decoder would build, with the same
         # spread positions.
+        #
+        # TODO(W12-F): full encode->decode round-trip on these flat counts
+        # currently fails with `zstd fse encode state index oor` from the
+        # broken `nb_bits` formula at zstd_fse.spl:415. Tracked in
+        # `doc/08_tracking/bug/bug_zstd_huf_literal_encoder_bit_layout_2026-05-02.md`
+        # ("Revised hypothesis" -> "B. FSE encoder ..."). W12-E (2026-05-02)
+        # disproved the W9-D Brotli bit-direction analogy and scoped the
+        # FSE rewrite to a follow-up lane; the structural assertion below
+        # is intentionally retained until the rewrite lands so the regression
+        # is caught the moment encode_one_symbol changes shape.
         val table_log = 5
         val counts = [4, 4, 4, 4, 4, 4, 4, 4]
         val encode_table = zstd_fse_build_encode_table(table_log, counts).unwrap()
@@ -129,6 +139,16 @@ describe "zstd FSE + Huffman encoder primitives":
         expect(header[2]).to_be(0x10u8)
 
     it "Huffman literal encoder round-trips through canonical entries":
+        # TODO(W12-F or follow-up zstd lane): full bitstream round-trip
+        # via `zstd_huf_decode_stream_for_test` is BLOCKED on the
+        # `zstd.spl:896` strict trailing-bits invariant in
+        # `_zstd_decode_huffman_stream`. W12-E (2026-05-02) confirmed via
+        # end-to-end trace that no encoder-only fix can satisfy both
+        # `peek(table_bits)` AND `remaining == 0` simultaneously for
+        # mixed-length alphabets. See revised hypothesis A in
+        # `doc/08_tracking/bug/bug_zstd_huf_literal_encoder_bit_layout_2026-05-02.md`.
+        # The structural assertions below stay until the decoder is
+        # relaxed (out of scope for this allowlist).
         # Tiny alphabet, deterministic by construction.
         val literals: [u8] = [
             0x61u8, 0x62u8, 0x61u8, 0x63u8, 0x61u8, 0x62u8,
