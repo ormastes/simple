@@ -37,7 +37,10 @@ This feature standardizes `std.common.compress` as the single shared pure-Simple
 
 ## Verification-Coupled Functional Expectations
 
+> Updated 2026-05-01 to reflect partial-landing reality; see `doc/09_report/verify_common_compression_framework.md` for the live failure list.
+
 - REQ-027: Provide executable spec coverage for full roundtrip behavior, checked-API option failures, kernel-adapter parity, and typed corruption failures.
 - REQ-028: Provide codec-focused unit or integration coverage for LZ4, Zstd, and XZ/LZMA2 using host-generated fixtures across small, medium, and large payloads; incompressible, repetitive, and mixed data; checksum on/off cases; multi-block cases; and dictionary cases where the API supports interoperability.
 - REQ-029: Provide corruption and truncation matrices per codec, including bad headers, bad checksums, bad lengths, malformed entropy tables, unsupported filter chains, truncated block/index/footer tails, and invalid dictionary metadata.
-- REQ-030: Provide forced-tier parity coverage that compares scalar, AVX2, and NEON helper outputs directly and validates codec output parity across forced-tier paths.
+- REQ-030 (Phase 1 / 2026-05-01): Provide forced-tier parity coverage for the helper paths that are SIMD-specialized today — checksum kernels (CRC32, XXH32) and byte-scan/copy kernels — comparing scalar against AVX2 and NEON outputs directly without relying on host-specific auto-detection.
+- REQ-030 (Phase 2): Extend forced-tier parity coverage to SIMD-specialized codec hot paths (Zstd LZ77 match-search and codec-internal checksum kernels) once the SIMD int-intrinsics Phase 1 FR (`simd_int_intrinsics_for_crypto_2026-05-01`) lands. Until that FR lands, codec hot paths remain scalar and codec-output parity across forced tiers is not a Phase 1 acceptance criterion.
