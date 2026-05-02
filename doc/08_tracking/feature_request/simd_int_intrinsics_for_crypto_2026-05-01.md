@@ -1,5 +1,13 @@
 # Feature: extend SIMD surface with int bitwise / rotate / shuffle ops for crypto
 
+> **Phase 2 AES-NI intrinsics LANDED 2026-05-01 — `simd_aes_round` + `simd_aes_round_last`.** Round-level primitives matching Intel `_mm_aesenc_si128` / `_mm_aesenclast_si128` ordering: `state -> ShiftRows -> SubBytes -> MixColumns (regular only) -> XOR key`. x86_64 AES-NI (runtime-detected via `is_x86_feature_detected!("aes")`), AArch64 NEON (`vaeseq_u8` + `vaesmcq_u8` with the standard XOR-first-vs-XOR-last asymmetry handled by feeding zero as AESE's second arg), and a scalar fallback that reuses `aes::SBOX` (no S-box duplication; `const SBOX` made `pub(crate)` for cross-module use). Files:
+> - `src/lib/nogc_sync_mut/simd.spl` — `extern fn rt_simd_aes_round_u8x16` + `extern fn rt_simd_aes_round_last_u8x16` + pure-Simple `simd_aes_round` / `simd_aes_round_last` wrappers.
+> - `src/compiler_rust/runtime/src/value/simd_aes_ops.rs` — NEW. `aes_round_u8x16` / `aes_round_last_u8x16` lane kernels + `extern "C"` symbols. 4 internal Rust unit tests (FIPS 197 §B round-1 KAT, ShiftRows known-vector, last-round S-box check; all PASS).
+> - `src/compiler_rust/compiler/src/interpreter_extern/simd.rs` — handler functions reuse the Phase 2 seed `binop_u8x16` + `unpack_vec16u8` / `pack_vec16u8` plumbing.
+> - `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` — 2 dispatch arms.
+> - `src/compiler_rust/common/src/runtime_symbols.rs` — 2 allowlist entries (already covered by the existing `rt_simd_` prefix tier classification).
+> - Spec: `test/unit/lib/nogc_sync_mut/simd_aes_ops_spec.spl` (5 examples, 0 failures in seed-binary interpreter mode). FIPS 197 Appendix B AES-128 single-block KAT walked round-by-round (R1, R2, R9 via `simd_aes_round`, R10 ciphertext via `simd_aes_round_last` — all byte-exact). 11 round keys hardcoded so the spec exercises the round step in isolation, with key expansion deliberately not invoked (lives in `aes.rs` and stays scalar). Rounds 3..8 are computed implicitly when chaining to R9.
+
 > **Phase 2 seed (Vec16u8 + simd_add_u8x16) LANDED 2026-05-01** — `simd_aes_round` / PCLMUL / shuffle deferred to follow-up waves (those need full AES-NI exposure or different intrinsics). See:
 > - `src/lib/nogc_sync_mut/simd.spl` — `Vec16u8` struct (16 u8 fields `u0..u7,u8_,u9..u15`; `u8_` disambiguates the `u8` type-keyword clash) + `splat`/`from_array`/`zero`/`to_array` + `extern fn rt_simd_add_u8x16` + pure-Simple `simd_add_u8x16` wrapper.
 > - `src/compiler_rust/runtime/src/value/simd_byte_ops.rs` — `add_u8x16` lane kernel (SSE2 `_mm_add_epi8` / NEON `vaddq_u8` / scalar `wrapping_add` fallback) + `extern "C" fn rt_simd_add_u8x16`. 4 internal Rust unit tests.
