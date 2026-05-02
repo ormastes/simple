@@ -4,9 +4,11 @@
 #   early_secret → handshake_secret → master_secret
 #   plus traffic key derivation and Finished MAC
 
-use os.tls13.hkdf.{hkdf_extract, hkdf_expand_label}
+use os.tls13.hkdf.{hkdf_extract, hkdf_expand_label, hkdf_extract_sha384, hkdf_expand_label_sha384}
 use os.tls13.transcript.{Transcript, transcript_hash, transcript_empty_hash}
 use os.crypto.sha256.{sha256_hmac}
+use std.crypto.hmac.{hmac_sha384_bytes}
+use std.crypto.sha512.{sha384_bytes}
 
 fn _copy_prefix(src: [u8], n: u64) -> [u8]:
     var out: [u8] = []
@@ -177,3 +179,62 @@ fn tls13_compute_app_secrets(hs_secrets: Tls13Secrets, transcript_sf: Transcript
         client_app_traffic: client_app,
         server_app_traffic: server_app,
     )
+
+# ============================================================================
+# SHA-384 sibling key schedule — for TLS_AES_256_GCM_SHA384
+#
+# Mirrors the SHA-256 path above with 48-byte secret length and SHA-384
+# HMAC primitives. Per RFC 8446 §7.1, all secret/PRK lengths are HashLen,
+# not constant 32. For TLS_AES_256_GCM_SHA384, HashLen = 48.
+# ============================================================================
+
+fn _zeros_48() -> [u8]:
+    var z: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        z.push(0x00)
+        i = i + 1
+    z
+
+fn _sha384_empty_hash() -> [u8]:
+    """SHA-384("") = 38b060a751ac96384cd9327eb1b1e36a..."""
+    sha384_bytes([])
+
+fn tls13_early_secret_sha384() -> [u8]:
+    """Early secret for SHA-384 path: HKDF-Extract-SHA-384(0^48, 0^48)."""
+    val salt = _zeros_48()
+    val ikm = _zeros_48()
+    hkdf_extract_sha384(salt, ikm)
+
+fn tls13_handshake_secret_sha384(early_secret: [u8], dhe_shared: [u8]) -> [u8]:
+    """SHA-384 path handshake_secret per RFC 8446 §7.1.
+
+    derived = HKDF-Expand-Label-SHA384(early_secret, "derived", SHA-384(""), 48)
+    return HKDF-Extract-SHA-384(salt=derived, IKM=dhe_shared)
+    """
+    val empty_hash = _sha384_empty_hash()
+    val derived = hkdf_expand_label_sha384(early_secret, "derived", empty_hash, 48)
+    hkdf_extract_sha384(derived, dhe_shared)
+
+fn tls13_master_secret_sha384(handshake_secret: [u8]) -> [u8]:
+    """SHA-384 path master_secret."""
+    val empty_hash = _sha384_empty_hash()
+    val derived = hkdf_expand_label_sha384(handshake_secret, "derived", empty_hash, 48)
+    val ikm = _zeros_48()
+    hkdf_extract_sha384(derived, ikm)
+
+fn tls13_traffic_keys_sha384(traffic_secret: [u8]) -> TrafficKeys:
+    """Derive AES-256 key (32 bytes) and IV (12 bytes) from a SHA-384 traffic secret."""
+    val empty: [u8] = []
+    val key = hkdf_expand_label_sha384(traffic_secret, "key", empty, 32)
+    val iv = hkdf_expand_label_sha384(traffic_secret, "iv", empty, 12)
+    TrafficKeys(key: key, iv: iv)
+
+fn tls13_finished_key_sha384(traffic_secret: [u8]) -> [u8]:
+    """SHA-384 Finished key: HKDF-Expand-Label-SHA384(traffic_secret, "finished", "", 48)."""
+    val empty: [u8] = []
+    hkdf_expand_label_sha384(traffic_secret, "finished", empty, 48)
+
+fn tls13_verify_data_sha384(finished_key: [u8], transcript_hash_sha384: [u8]) -> [u8]:
+    """SHA-384 verify_data = HMAC-SHA-384(finished_key, transcript_hash_sha384)."""
+    hmac_sha384_bytes(finished_key, transcript_hash_sha384)
