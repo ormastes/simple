@@ -23,6 +23,7 @@ extern fn rt_tls13_hkdf_expand_label_server_app(secret: [u8], context: [u8]) -> 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 use os.crypto.sha256.{sha256_hmac, sha256_hmac_with_len, sha256_hmac_from_list}
+use std.crypto.hmac.{hmac_sha384_bytes}
 
 fn _text_to_bytes(s: text) -> [u8]:
     rt_text_to_bytes(s)
@@ -299,3 +300,105 @@ fn hkdf_expand_label(secret: [u8], label: text, context: [u8], length: u64) -> [
         i = i + 1
 
     hkdf_expand_with_info_len(prk: secret, info: encoded, info_len: encoded.len().to_u64(), length: length)
+
+# ============================================================================
+# SHA-384 HKDF path — for TLS_AES_256_GCM_SHA384 cipher suite
+#
+# Pure-Simple SHA-384 HKDF using std.crypto.hmac.hmac_sha384_bytes.
+# Distinct from the SHA-256 path above (different output length: 48 vs 32).
+# No SHA-384 runtime extern fast-path yet — falls through to library code.
+# ============================================================================
+
+fn _zeros_48() -> [u8]:
+    var z: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        z.push(0x00)
+        i = i + 1
+    z
+
+fn hkdf_extract_sha384(salt: [u8], ikm: [u8]) -> [u8]:
+    """HKDF-Extract-SHA-384 (RFC 5869 §2.2). PRK = HMAC-SHA-384(salt, IKM).
+
+    If salt is empty, a 48-byte zero string is used (per RFC 5869).
+    Returns 48-byte PRK.
+    """
+    val effective_salt = if salt.len() == 0:
+        _zeros_48()
+    else:
+        salt
+    val out = hmac_sha384_bytes(effective_salt, ikm)
+    _copy_prefix(out, 48)
+
+fn hkdf_expand_sha384(prk: [u8], info: [u8], length: u64) -> [u8]:
+    """HKDF-Expand-SHA-384 (RFC 5869 §2.3). 48-byte digest, max length 255 * 48."""
+    val digest_len: u64 = 48
+    var okm: [u8] = []
+    var okm_len: u64 = 0
+    var t_prev: [u8] = []
+    var counter: u64 = 1
+    val info_len = info.len().to_u64()
+
+    while okm_len < length:
+        var input: [u8] = []
+        var j: u64 = 0
+        while j < t_prev.len().to_u64():
+            input.push(rt_bytes_u8_at(t_prev, j.to_i64()).to_u8())
+            j = j + 1
+        j = 0
+        while j < info_len:
+            input.push(rt_bytes_u8_at(info, j.to_i64()).to_u8())
+            j = j + 1
+        input.push(counter.to_u8())
+
+        val t_i = _copy_prefix(hmac_sha384_bytes(prk, input), digest_len)
+
+        j = 0
+        while j < digest_len and okm_len < length:
+            okm.push(rt_bytes_u8_at(t_i, j.to_i64()).to_u8())
+            okm_len = okm_len + 1
+            j = j + 1
+
+        t_prev = t_i
+        counter = counter + 1
+
+    _copy_prefix(okm, length)
+
+fn hkdf_expand_label_sha384(secret: [u8], label: text, context: [u8], length: u64) -> [u8]:
+    """HKDF-Expand-Label with SHA-384 (RFC 8446 §7.1)."""
+    val label_tail = _label_bytes(label)
+    val label_tail_len = _label_len(label)
+    var label_bytes: [u8] = []
+    label_bytes.push(0x74u8)  # 't'
+    label_bytes.push(0x6cu8)  # 'l'
+    label_bytes.push(0x73u8)  # 's'
+    label_bytes.push(0x31u8)  # '1'
+    label_bytes.push(0x33u8)  # '3'
+    label_bytes.push(0x20u8)  # ' '
+    var label_bytes_len = 6u64
+    var li: u64 = 0
+    while li < label_tail_len:
+        label_bytes.push(rt_bytes_u8_at(label_tail, li.to_i64()).to_u8())
+        label_bytes_len = label_bytes_len + 1
+        li = li + 1
+
+    val context_len = context.len().to_u64()
+
+    var encoded: [u8] = []
+    encoded.push(((length >> 8) & 0xFF).to_u8())
+    encoded.push((length & 0xFF).to_u8())
+    encoded.push(label_bytes_len.to_u8())
+
+    var i: u64 = 0
+    while i < label_bytes_len:
+        encoded.push(rt_bytes_u8_at(label_bytes, i.to_i64()).to_u8())
+        i = i + 1
+
+    encoded.push(context_len.to_u8())
+
+    i = 0
+    while i < context_len:
+        encoded.push(rt_bytes_u8_at(context, i.to_i64()).to_u8())
+        i = i + 1
+
+    hkdf_expand_sha384(prk: secret, info: encoded, length: length)
