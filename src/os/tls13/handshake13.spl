@@ -85,7 +85,8 @@ class ServerHello13:
     """Decoded ServerHello message fields needed by the TLS 1.3 state machine."""
     random: [u8]       # 32 bytes
     cipher_suite: u16
-    x25519_pub: [u8]   # 32 bytes from key_share extension
+    x25519_pub: [u8]   # 32 bytes from key_share extension (empty if absent)
+    p256_pub: [u8]     # 65 bytes uncompressed `04 || X || Y` from key_share (empty if absent)
 
 class ParsedHandshake:
     """Raw parsed handshake envelope: type byte + body bytes."""
@@ -209,6 +210,46 @@ fn _serverhello_x25519_pub(data: [u8]) -> [u8]:
             val key_len = _u16_be(data, offset + 2).to_u64()
             val key_start = offset + 4
             if group == GROUP_X25519 and key_len == 32 and key_start + key_len <= data.len():
+                var out: [u8] = _byte_buf(key_len)
+                var i: u64 = 0
+                while i < key_len:
+                    out = _push_byte(out, _u8_at(data, key_start + i).to_u64().to_i64())
+                    i = i + 1
+                return out
+        offset = offset + ext_len
+    []
+
+fn _serverhello_p256_pub(data: [u8]) -> [u8]:
+    """Extract the server's secp256r1 (P-256) public from a ServerHello body's
+    key_share extension. Returns 65 bytes `04 || X || Y` per RFC 8446 §4.2.8.2
+    + RFC 8422 §5.4, or `[]` if no P-256 KeyShareEntry is present.
+
+    Mirrors `_serverhello_x25519_pub` but matches `group == GROUP_SECP256R1`
+    and `key_len == 65`. Used by the HRR-after-CH2 connect-flow path that
+    closes W5-A AC-7 (P-256 ECDHE → handshake_secret integration).
+    """
+    if data.len() < 40:
+        return []
+    val session_id_len = _u8_at(data, 34).to_u64()
+    var offset = 35u64 + session_id_len + 2u64 + 1u64
+    if offset + 2 > data.len():
+        return []
+    val extensions_len = _u16_be(data, offset).to_u64()
+    offset = offset + 2
+    val extensions_end = offset + extensions_len
+
+    while offset + 4 <= extensions_end and offset + 4 <= data.len():
+        val ext_type = _u16_be(data, offset)
+        offset = offset + 2
+        val ext_len = _u16_be(data, offset).to_u64()
+        offset = offset + 2
+        if offset + ext_len > data.len():
+            return []
+        if ext_type == EXT_KEY_SHARE and ext_len >= 4:
+            val group = _u16_be(data, offset)
+            val key_len = _u16_be(data, offset + 2).to_u64()
+            val key_start = offset + 4
+            if group == GROUP_SECP256R1 and key_len == 65 and key_start + key_len <= data.len():
                 var out: [u8] = _byte_buf(key_len)
                 var i: u64 = 0
                 while i < key_len:
@@ -515,7 +556,7 @@ fn parse_server_hello(data: [u8]) -> ServerHello13:
     """
     _tls_hs_debug("parse_server_hello len={data.len()}")
     if data.len() < 38:
-        return ServerHello13(random: _byte_buf(0), cipher_suite: 0u16, x25519_pub: _byte_buf(0))
+        return ServerHello13(random: _byte_buf(0), cipher_suite: 0u16, x25519_pub: _byte_buf(0), p256_pub: _byte_buf(0))
 
     var random: [u8] = _byte_buf(32)
     var i: u64 = 0
@@ -528,7 +569,8 @@ fn parse_server_hello(data: [u8]) -> ServerHello13:
     ServerHello13(
         random: random,
         cipher_suite: _u16_be(data, 35u64 + session_id_len),
-        x25519_pub: _serverhello_x25519_pub(data))
+        x25519_pub: _serverhello_x25519_pub(data),
+        p256_pub: _serverhello_p256_pub(data))
 
 # ============================================================================
 # Public: Parse EncryptedExtensions (RFC 8446 §4.3.1)
