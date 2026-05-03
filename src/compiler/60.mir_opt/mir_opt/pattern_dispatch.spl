@@ -24,14 +24,17 @@ use compiler.backend.feature_caps.{X86Caps, TargetIdiom}
 # ============================================================================
 
 struct PatternIdiomStats:
-    """Per-pass counters surfaced via opt-remark."""
     visited_functions: i64
     visited_blocks:    i64
     visited_calls:     i64
     cipher_hits:       i64
+    cipher_remark:     bool
 
 fn pattern_idiom_stats_zero() -> PatternIdiomStats:
-    PatternIdiomStats(0, 0, 0, 0)
+    PatternIdiomStats(0, 0, 0, 0, false)
+
+fn pattern_idiom_stats_with_remark() -> PatternIdiomStats:
+    PatternIdiomStats(0, 0, 0, 0, true)
 
 # ============================================================================
 # Intrinsic name -> TargetIdiom mapping
@@ -131,6 +134,10 @@ fn rewrite_block(block: MirBlock, caps: X86Caps, stats: PatternIdiomStats) -> Mi
                                 new_insts.push(new_inst)
                                 stats.cipher_hits = stats.cipher_hits + 1
                                 rewritten = true
+                                if stats.cipher_remark:
+                                    val r_name = rule.name
+                                    val r_intr = rule.intrinsic
+                                    print "[cipher] {callee} -> {r_intr} via {r_name} (target: x86_64)"
                 if not rewritten:
                     new_insts.push(inst)
             case _:
@@ -155,8 +162,9 @@ required idiom.  Stats counters are updated for each visit and each hit.
 The dispatcher in mod.spl invokes run_pattern_idiom_pass (the no-caps
 wrapper below) under the "vectorization" pass name.
 """
-fn run_pattern_idiom_pass_x86(module: MirModule, caps: X86Caps) -> MirModule:
+fn run_pattern_idiom_pass_x86(module: MirModule, caps: X86Caps, cipher_remark: bool) -> MirModule:
     var stats = pattern_idiom_stats_zero()
+    stats.cipher_remark = cipher_remark
     var result = module
     for sym in module.functions.keys():
         stats.visited_functions = stats.visited_functions + 1
@@ -206,4 +214,4 @@ fn run_pattern_idiom_pass(module: MirModule) -> MirModule:
         has_avx2: false,
         has_avx512: false
     )
-    run_pattern_idiom_pass_x86(module, default_caps)
+    run_pattern_idiom_pass_x86(module, default_caps, false)

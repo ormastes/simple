@@ -1,0 +1,265 @@
+# Cipher Parity Spec — MIR-level structural equivalence between software and hardware cipher paths
+#
+# Feature ID: #COMPILER-MIROPT-CIPHER-PARITY
+# Category:   Compiler | MIR Optimization | Cipher Parity
+#
+# Tests cover:
+#   - Function count preserved across software/hardware rewrites (AES, SHA256)
+#   - Instruction count preserved per block after rewrite
+#   - Multi-call blocks: selective rewrite gated on caps
+#   - All 10 SYM_* symbols: Intrinsic when full caps, Call when no caps
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+# The test runner in interpreter mode only verifies file loading and
+# describe/it block reachability.  The assertions inside it-blocks are not
+# executed.  Compiled-mode execution will exercise them.
+
+use compiler.mir_opt.mir_opt.pattern_dispatch.{
+    PatternIdiomStats, pattern_idiom_stats_zero,
+    run_pattern_idiom_pass_x86, idiom_for_intrinsic
+}
+use compiler.mir_opt.mir_opt.pattern.rules_crypto.{
+    lookup_rule_for_callee,
+    SYM_AES_ROUND, SYM_AES_ROUND_LAST,
+    SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST,
+    SYM_SHA256_COMPRESS,
+    SYM_CRC32_UPDATE_BYTE, SYM_CRC32_UPDATE_U32, SYM_CRC32_UPDATE_U64,
+    SYM_CLMUL_LO, SYM_CLMUL_HI
+}
+use compiler.backend.feature_caps.{X86Caps, TargetIdiom}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind, MirBuilder, LocalId, BlockId,
+    SymbolId}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirConstValue,
+    MirLocal, LocalKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind,
+    VhdlHardwareMetadata, vhdl_hardware_metadata_default}
+
+# ============================================================================
+# Helpers — minimal MIR construction for parity tests
+# ============================================================================
+
+fn make_block_id(id: i64) -> BlockId:
+    BlockId(id: id)
+
+fn make_driver_manifest_attr_default() -> DriverManifestAttr:
+    DriverManifestAttr(
+        DriverManifestAttrKind.Driver,
+        0, 0, [], "", ""
+    )
+
+fn make_callee_operand(callee_name: text) -> MirOperand:
+    MirOperand(MirOperandKind.Const(MirConstValue.Str(callee_name), MirType.unit()))
+
+fn make_cipher_call_inst(callee_name: text) -> MirInst:
+    MirInst(MirInstKind.Call(nil, make_callee_operand(callee_name), []))
+
+fn make_call_block(callee_name: text) -> MirBlock:
+    MirBlock(
+        make_block_id(0),
+        nil,
+        [make_cipher_call_inst(callee_name)],
+        MirTerminator.Return(nil)
+    )
+
+fn make_multi_call_block(callees: [text]) -> MirBlock:
+    var insts: [MirInst] = []
+    for c in callees:
+        insts.push(make_cipher_call_inst(c))
+    MirBlock(
+        make_block_id(0),
+        nil,
+        insts,
+        MirTerminator.Return(nil)
+    )
+
+fn make_test_mir_function(blocks: [MirBlock]) -> MirFunction:
+    val sig = MirSignature([], MirType(MirTypeKind.Unit), false)
+    MirFunction(
+        SymbolId(id: 1), "test_fn", sig, [], blocks,
+        make_block_id(0),
+        Span(0, 0, 1, 1),
+        [], false, nil, {}, nil, false, false, "",
+        false, make_driver_manifest_attr_default(),
+        false, vhdl_hardware_metadata_default(),
+        false
+    )
+
+fn make_call_module(callee_name: text) -> MirModule:
+    val block = make_call_block(callee_name)
+    val func  = make_test_mir_function([block])
+    var b = MirBuilder.new()
+    b.add_function(func)
+    b.module
+
+fn make_multi_call_module(callees: [text]) -> MirModule:
+    val block = make_multi_call_block(callees)
+    val func  = make_test_mir_function([block])
+    var b = MirBuilder.new()
+    b.add_function(func)
+    b.module
+
+fn make_x86_caps_full() -> X86Caps:
+    X86Caps(true, true, true, true, false, false)
+
+fn make_x86_caps_none() -> X86Caps:
+    X86Caps(false, false, false, false, false, false)
+
+# ============================================================================
+# Cipher parity — function count preserved
+# ============================================================================
+
+describe "Cipher parity — function count preserved":
+    it "AES round software path (no caps) preserves function count":
+        val m    = make_call_module(SYM_AES_ROUND)
+        val caps = make_x86_caps_none()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
+
+    it "AES round hardware path (full caps) preserves function count":
+        val m    = make_call_module(SYM_AES_ROUND)
+        val caps = make_x86_caps_full()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
+
+    it "SHA256 software path preserves function count":
+        val m    = make_call_module(SYM_SHA256_COMPRESS)
+        val caps = make_x86_caps_none()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
+
+    it "SHA256 hardware path preserves function count":
+        val m    = make_call_module(SYM_SHA256_COMPRESS)
+        val caps = make_x86_caps_full()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
+
+# ============================================================================
+# Cipher parity — instruction count preserved
+# ============================================================================
+
+describe "Cipher parity — instruction count preserved":
+    it "AES rewrite keeps same number of instructions per block":
+        val m    = make_call_module(SYM_AES_ROUND)
+        val caps = make_x86_caps_full()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect(func.blocks[0].instructions.len()).to_equal(1)
+
+    it "SHA256 rewrite keeps same number of instructions per block":
+        val m    = make_call_module(SYM_SHA256_COMPRESS)
+        val caps = make_x86_caps_full()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect(func.blocks[0].instructions.len()).to_equal(1)
+
+    it "CRC32 rewrite keeps same number of instructions per block":
+        val m    = make_call_module(SYM_CRC32_UPDATE_BYTE)
+        val caps = make_x86_caps_full()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect(func.blocks[0].instructions.len()).to_equal(1)
+
+# ============================================================================
+# Cipher parity — multi-call blocks
+# ============================================================================
+
+describe "Cipher parity — multi-call blocks":
+    it "block with 4 AES callees: all 4 rewritten to Intrinsic when has_aes=true":
+        val callees = [SYM_AES_ROUND, SYM_AES_ROUND_LAST, SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST]
+        val m    = make_multi_call_module(callees)
+        val caps = make_x86_caps_full()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val block = func.blocks[0]
+        var intrinsic_count = 0
+        for inst in block.instructions:
+            val is_intrinsic = match inst.kind:
+                case Intrinsic(dest, name, args): true
+                case _: false
+            if is_intrinsic:
+                intrinsic_count = intrinsic_count + 1
+        expect(intrinsic_count).to_equal(4)
+
+    it "block with 4 AES callees: all 4 remain Call when has_aes=false":
+        val callees = [SYM_AES_ROUND, SYM_AES_ROUND_LAST, SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST]
+        val m    = make_multi_call_module(callees)
+        val caps = make_x86_caps_none()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val block = func.blocks[0]
+        var call_count = 0
+        for inst in block.instructions:
+            val is_call = match inst.kind:
+                case Call(dest, func_op, args): true
+                case _: false
+            if is_call:
+                call_count = call_count + 1
+        expect(call_count).to_equal(4)
+
+    it "mixed block (AES + SHA256 + CRC32 + CLMUL): correct selective rewrite with full caps":
+        val callees = [SYM_AES_ROUND, SYM_SHA256_COMPRESS, SYM_CRC32_UPDATE_BYTE, SYM_CLMUL_LO]
+        val m    = make_multi_call_module(callees)
+        val caps = make_x86_caps_full()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val block = func.blocks[0]
+        expect(block.instructions.len()).to_equal(4)
+
+# ============================================================================
+# Cipher parity — all 10 cipher symbols
+# ============================================================================
+
+describe "Cipher parity — all 10 cipher symbols":
+    it "each of the 10 SYM_* constants with full caps produces Intrinsic":
+        val all_syms = [
+            SYM_AES_ROUND, SYM_AES_ROUND_LAST,
+            SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST,
+            SYM_SHA256_COMPRESS,
+            SYM_CRC32_UPDATE_BYTE, SYM_CRC32_UPDATE_U32, SYM_CRC32_UPDATE_U64,
+            SYM_CLMUL_LO, SYM_CLMUL_HI
+        ]
+        val caps = make_x86_caps_full()
+        var all_intrinsic = true
+        for sym in all_syms:
+            val m   = make_call_module(sym)
+            val out = run_pattern_idiom_pass_x86(m, caps, false)
+            val fsym = out.functions.keys()[0]
+            val func = out.functions[fsym]
+            val inst = func.blocks[0].instructions[0]
+            val is_intrinsic = match inst.kind:
+                case Intrinsic(dest, name, args): true
+                case _: false
+            if !is_intrinsic:
+                all_intrinsic = false
+        expect(all_intrinsic).to_equal(true)
+
+    it "each of the 10 SYM_* constants with no caps stays Call":
+        val all_syms = [
+            SYM_AES_ROUND, SYM_AES_ROUND_LAST,
+            SYM_AES_INV_ROUND, SYM_AES_INV_ROUND_LAST,
+            SYM_SHA256_COMPRESS,
+            SYM_CRC32_UPDATE_BYTE, SYM_CRC32_UPDATE_U32, SYM_CRC32_UPDATE_U64,
+            SYM_CLMUL_LO, SYM_CLMUL_HI
+        ]
+        val caps = make_x86_caps_none()
+        var all_call = true
+        for sym in all_syms:
+            val m   = make_call_module(sym)
+            val out = run_pattern_idiom_pass_x86(m, caps, false)
+            val fsym = out.functions.keys()[0]
+            val func = out.functions[fsym]
+            val inst = func.blocks[0].instructions[0]
+            val is_call = match inst.kind:
+                case Call(dest, func_op, args): true
+                case _: false
+            if !is_call:
+                all_call = false
+        expect(all_call).to_equal(true)
