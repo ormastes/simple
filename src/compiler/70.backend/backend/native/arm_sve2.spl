@@ -439,3 +439,145 @@ fn emit_sve2_lastb_b(rd: i64, pg: i64, zn: i64) -> [i64]:
     # Canonical (W0,P0,Z0.B): 0x00 0xA0 0x01 0x05  [VERIFIED llvm-mc]
     """
     _sve2_lasta_lastb_encode(SVE2_LASTB_BASE_B, pg, zn, rd)
+
+# ============================================================================
+# SVE2 Widening Integer Multiply — SMULLB / SMULLT / UMULLB / UMULLT
+# ============================================================================
+#
+# These instructions widen elements: sources are half the element size of the
+# destination. The "B" (bottom) variants use even-indexed elements; "T" (top)
+# variants use odd-indexed elements.
+#
+# S-result from H-sources (32-bit result from 16-bit sources):
+#   SMULLB Zd.S, Zn.H, Zm.H — signed, bottom halves
+#   SMULLT Zd.S, Zn.H, Zm.H — signed, top halves
+#   UMULLB Zd.S, Zn.H, Zm.H — unsigned, bottom halves
+#   UMULLT Zd.S, Zn.H, Zm.H — unsigned, top halves
+#
+# D-result from S-sources (64-bit result from 32-bit sources):
+#   SMULLB Zd.D, Zn.S, Zm.S — signed, bottom halves
+#   SMULLT Zd.D, Zn.S, Zm.S — signed, top halves
+#
+# Encoding (ARMv9 ARM §C7.2):
+#   bits[31:24] = 0x45  (SVE2 integer multiply group)
+#   bits[23:22] = size  (10=S result from H, 11=D result from S)
+#   bit[21]     = 0
+#   bits[20:16] = Zm    (second source)
+#   bits[15:13] = 111   (opcode sub-group for widening multiply)
+#   bit[12]     = 0
+#   bits[11:10] = variant (00=SMULLB, 01=SMULLT, 10=UMULLB, 11=UMULLT)
+#   bits[9:5]   = Zn    (first source)
+#   bits[4:0]   = Zd    (destination)
+#
+# Base opcodes (all register fields = 0), VERIFIED via llvm-mc 2026-05-03:
+#   SMULLB .S: 0x45807000  → [0x00, 0x70, 0x80, 0x45]
+#   SMULLT .S: 0x45807400  → [0x00, 0x74, 0x80, 0x45]
+#   UMULLB .S: 0x45807800  → [0x00, 0x78, 0x80, 0x45]
+#   UMULLT .S: 0x45807C00  → [0x00, 0x7C, 0x80, 0x45]
+#   SMULLB .D: 0x45C07000  → [0x00, 0x70, 0xC0, 0x45]
+#   SMULLT .D: 0x45C07400  → [0x00, 0x74, 0xC0, 0x45]
+#
+# Register field placement (using multiplication for bit shifts):
+#   Zm in bits[20:16]: add Zm * 65536
+#   Zn in bits[9:5]:   add Zn * 32
+#   Zd in bits[4:0]:   add Zd
+
+val SVE2_SMULLB_BASE_S = 0x45807000
+val SVE2_SMULLT_BASE_S = 0x45807400
+val SVE2_UMULLB_BASE_S = 0x45807800
+val SVE2_UMULLT_BASE_S = 0x45807C00
+val SVE2_SMULLB_BASE_D = 0x45C07000
+val SVE2_SMULLT_BASE_D = 0x45C07400
+
+fn _sve2_encode_wmul(zd: i64, zn: i64, zm: i64, base: i64) -> [i64]:
+    """
+    Encode a SVE2 widening multiply instruction (SMULLB/T, UMULLB/T).
+    Parameters: zd = dest Z-reg (0-31), zn/zm = source Z-regs (0-31).
+    base: size+variant-specific base opcode constant.
+
+    # ARMv9 ARM §C7.2 SVE2 widening integer multiply group
+    # Verified bytes via llvm-mc 2026-05-03
+    """
+    var word = base
+    word = word + _sve2_pack_5bit(zm, 16)
+    word = word + _sve2_pack_5bit(zn, 5)
+    word = word + _sve2_pack_5bit(zd, 0)
+    _sve2_word_to_bytes(word)
+
+fn emit_smullb_z_s(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit SMULLB Zd.S, Zn.H, Zm.H — SVE2 signed widening multiply, bottom halves.
+    Result element size .S (32-bit); source element size .H (16-bit).
+    Even-indexed (bottom) source lanes are multiplied.
+    Parameters: raw Z-register indices 0-31.
+
+    # ARMv9 ARM §C7.2 SMULLB (vectors) — S-element form
+    # Canonical bytes (zd=0, zn=0, zm=0): 0x00 0x70 0x80 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=1, zm=2): 0x20 0x70 0x82 0x45  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_wmul(zd, zn, zm, SVE2_SMULLB_BASE_S)
+
+fn emit_smullt_z_s(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit SMULLT Zd.S, Zn.H, Zm.H — SVE2 signed widening multiply, top halves.
+    Result element size .S (32-bit); source element size .H (16-bit).
+    Odd-indexed (top) source lanes are multiplied.
+    Parameters: raw Z-register indices 0-31.
+
+    # ARMv9 ARM §C7.2 SMULLT (vectors) — S-element form
+    # Canonical bytes (zd=0, zn=0, zm=0): 0x00 0x74 0x80 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=1, zm=2): 0x20 0x74 0x82 0x45  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_wmul(zd, zn, zm, SVE2_SMULLT_BASE_S)
+
+fn emit_umullb_z_s(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit UMULLB Zd.S, Zn.H, Zm.H — SVE2 unsigned widening multiply, bottom halves.
+    Result element size .S (32-bit); source element size .H (16-bit).
+    Even-indexed (bottom) source lanes are multiplied.
+    Parameters: raw Z-register indices 0-31.
+
+    # ARMv9 ARM §C7.2 UMULLB (vectors) — S-element form
+    # Canonical bytes (zd=0, zn=0, zm=0): 0x00 0x78 0x80 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=1, zm=2): 0x20 0x78 0x82 0x45  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_wmul(zd, zn, zm, SVE2_UMULLB_BASE_S)
+
+fn emit_umullt_z_s(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit UMULLT Zd.S, Zn.H, Zm.H — SVE2 unsigned widening multiply, top halves.
+    Result element size .S (32-bit); source element size .H (16-bit).
+    Odd-indexed (top) source lanes are multiplied.
+    Parameters: raw Z-register indices 0-31.
+
+    # ARMv9 ARM §C7.2 UMULLT (vectors) — S-element form
+    # Canonical bytes (zd=0, zn=0, zm=0): 0x00 0x7C 0x80 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=1, zm=2): 0x20 0x7C 0x82 0x45  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_wmul(zd, zn, zm, SVE2_UMULLT_BASE_S)
+
+fn emit_smullb_z_d(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit SMULLB Zd.D, Zn.S, Zm.S — SVE2 signed widening multiply, bottom halves.
+    Result element size .D (64-bit); source element size .S (32-bit).
+    Even-indexed (bottom) source lanes are multiplied.
+    Parameters: raw Z-register indices 0-31.
+
+    # ARMv9 ARM §C7.2 SMULLB (vectors) — D-element form
+    # Canonical bytes (zd=0, zn=0, zm=0): 0x00 0x70 0xC0 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=1, zm=2): 0x20 0x70 0xC2 0x45  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_wmul(zd, zn, zm, SVE2_SMULLB_BASE_D)
+
+fn emit_smullt_z_d(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit SMULLT Zd.D, Zn.S, Zm.S — SVE2 signed widening multiply, top halves.
+    Result element size .D (64-bit); source element size .S (32-bit).
+    Odd-indexed (top) source lanes are multiplied.
+    Parameters: raw Z-register indices 0-31.
+
+    # ARMv9 ARM §C7.2 SMULLT (vectors) — D-element form
+    # Canonical bytes (zd=0, zn=0, zm=0): 0x00 0x74 0xC0 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=1, zm=2): 0x20 0x74 0xC2 0x45  [VERIFIED llvm-mc]
+    """
+    _sve2_encode_wmul(zd, zn, zm, SVE2_SMULLT_BASE_D)

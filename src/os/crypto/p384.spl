@@ -1,0 +1,1719 @@
+#![allow(unnamed_duplicate_typed_args)]
+# P-384 (secp384r1) — Pure-Simple ECDSA + ECDH
+#
+# Self-contained module providing:
+#   - 384-bit field arithmetic (mod p) using 12 x 32-bit limbs in u64
+#   - 384-bit scalar arithmetic (mod n)
+#   - Jacobian point operations (double, add_mixed, scalar_mult)
+#   - ECDSA sign/verify with RFC 6979 deterministic nonce (SHA-384)
+#   - ECDH key exchange
+#
+# No FFI — all arithmetic in pure Simple.
+#
+# Curve: y^2 = x^3 - 3x + b (mod p)
+#   p = 2^384 - 2^128 - 2^96 + 2^32 - 1
+#     = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
+#       FFFFFFFF0000000000000000FFFFFFFF
+#   n = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF
+#       581A0DB248B0A77AECEC196ACCC52973
+#
+#   b = B3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875A
+#       C656398D8A2ED19D2A85C8EDD3EC2AEF
+#
+#   G.x = AA87CA22BE8B05378EB1C71EF320AD746E1D3B628BA79B9859F741E082542A38
+#         5502F25DBF55296C3A545E3872760AB7
+#   G.y = 3617DE4A96262C6F5D9E98BF9292DC29F8F41DBD289A147CE9DA3113B5F0B8C0
+#         0A60B1CE1D7E819D7A431D7C90EA0E5F
+#
+# Limb layout: 12 x u64 limbs, each holding a 32-bit value (little-endian).
+# l0 = bits 0..31, l11 = bits 352..383.
+# This avoids the interpreter's bit-63 truncation bug.
+#
+# References:
+#   * FIPS 186-4 / SEC2 v2.0 §2.5.1 (P-384 parameters)
+#   * RFC 6979 (Deterministic Usage of DSA and ECDSA)
+#   * RFC 5903 §4.1 (ECDH with P-384)
+
+use os.crypto.sha384.{sha384}
+
+# ============================================================================
+# HMAC-SHA-384 (RFC 2104) — inline since sha384.spl doesn't export one
+# Block size = 128 bytes, output = 48 bytes
+# ============================================================================
+
+fn __sha384_hmac(key: [u8], data: [u8]) -> [u8]:
+    """HMAC-SHA-384 per RFC 2104."""
+    val block_size: u64 = 128
+    val hash_len: u64 = 48
+    # Normalize key
+    var k_prime: [u8] = []
+    if key.len().to_u64() > block_size:
+        val hashed = sha384(key)
+        var j: u64 = 0
+        while j < hash_len:
+            k_prime.push(hashed[j])
+            j = j + 1
+    else:
+        var j: u64 = 0
+        while j < key.len().to_u64():
+            k_prime.push(key[j])
+            j = j + 1
+    while k_prime.len().to_u64() < block_size:
+        k_prime.push(0x00)
+    # Inner: H((K ^ ipad) || data)
+    var inner_input: [u8] = []
+    var i: u64 = 0
+    while i < block_size:
+        val xored: u8 = (k_prime[i] ^ 0x36u8)
+        inner_input.push(xored)
+        i = i + 1
+    i = 0
+    while i < data.len().to_u64():
+        inner_input.push(data[i])
+        i = i + 1
+    val inner_hash = sha384(inner_input)
+    # Outer: H((K ^ opad) || inner_hash)
+    var outer_input: [u8] = []
+    i = 0
+    while i < block_size:
+        val xored: u8 = (k_prime[i] ^ 0x5Cu8)
+        outer_input.push(xored)
+        i = i + 1
+    i = 0
+    while i < hash_len:
+        outer_input.push(inner_hash[i])
+        i = i + 1
+    sha384(outer_input)
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val MASK32: u64 = 0xFFFFFFFF
+
+# ============================================================================
+# Field element type: 12 x 32-bit limbs in u64 (little-endian)
+# ============================================================================
+
+struct Fe384:
+    l0: u64
+    l1: u64
+    l2: u64
+    l3: u64
+    l4: u64
+    l5: u64
+    l6: u64
+    l7: u64
+    l8: u64
+    l9: u64
+    l10: u64
+    l11: u64
+
+# --- P-384 prime limbs (little-endian 32-bit) ---
+# p = FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE
+#     FFFFFFFF 00000000 00000000 FFFFFFFF
+# LE 32-bit: [0xFFFFFFFF, 0x00000000, 0x00000000, 0xFFFFFFFF,
+#             0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF,
+#             0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF]
+
+fn _p_limb(idx: u64) -> u64:
+    if idx == 0: return MASK32
+    elif idx == 1: return 0
+    elif idx == 2: return 0
+    elif idx == 3: return MASK32
+    elif idx == 4: return 0xFFFFFFFE
+    elif idx == 5: return MASK32
+    elif idx == 6: return MASK32
+    elif idx == 7: return MASK32
+    elif idx == 8: return MASK32
+    elif idx == 9: return MASK32
+    elif idx == 10: return MASK32
+    else: return MASK32
+
+# --- Curve order n limbs (little-endian 32-bit) ---
+# n = FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF C7634D81 F4372DDF
+#     581A0DB2 48B0A77A ECEC196A CCC52973
+# LE 32-bit: [0xCCC52973, 0xECEC196A, 0x48B0A77A, 0x581A0DB2,
+#             0xF4372DDF, 0xC7634D81, 0xFFFFFFFF, 0xFFFFFFFF,
+#             0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF]
+
+fn _n_limb(idx: u64) -> u64:
+    if idx == 0: return 0xCCC52973
+    elif idx == 1: return 0xECEC196A
+    elif idx == 2: return 0x48B0A77A
+    elif idx == 3: return 0x581A0DB2
+    elif idx == 4: return 0xF4372DDF
+    elif idx == 5: return 0xC7634D81
+    elif idx == 6: return MASK32
+    elif idx == 7: return MASK32
+    elif idx == 8: return MASK32
+    elif idx == 9: return MASK32
+    elif idx == 10: return MASK32
+    else: return MASK32
+
+# ============================================================================
+# Field element constructors
+# ============================================================================
+
+fn fe_zero() -> Fe384:
+    Fe384(l0: 0, l1: 0, l2: 0, l3: 0, l4: 0, l5: 0,
+          l6: 0, l7: 0, l8: 0, l9: 0, l10: 0, l11: 0)
+
+fn fe_one() -> Fe384:
+    Fe384(l0: 1, l1: 0, l2: 0, l3: 0, l4: 0, l5: 0,
+          l6: 0, l7: 0, l8: 0, l9: 0, l10: 0, l11: 0)
+
+fn _fe_get(a: Fe384, idx: u64) -> u64:
+    if idx == 0: return a.l0
+    elif idx == 1: return a.l1
+    elif idx == 2: return a.l2
+    elif idx == 3: return a.l3
+    elif idx == 4: return a.l4
+    elif idx == 5: return a.l5
+    elif idx == 6: return a.l6
+    elif idx == 7: return a.l7
+    elif idx == 8: return a.l8
+    elif idx == 9: return a.l9
+    elif idx == 10: return a.l10
+    else: return a.l11
+
+fn _fe_from_arr(a: [u64]) -> Fe384:
+    Fe384(l0: a[0u64], l1: a[1u64], l2: a[2u64], l3: a[3u64],
+          l4: a[4u64], l5: a[5u64], l6: a[6u64], l7: a[7u64],
+          l8: a[8u64], l9: a[9u64], l10: a[10u64], l11: a[11u64])
+
+fn _fe_to_arr(a: Fe384) -> [u64]:
+    var r: [u64] = []
+    r.push(a.l0)
+    r.push(a.l1)
+    r.push(a.l2)
+    r.push(a.l3)
+    r.push(a.l4)
+    r.push(a.l5)
+    r.push(a.l6)
+    r.push(a.l7)
+    r.push(a.l8)
+    r.push(a.l9)
+    r.push(a.l10)
+    r.push(a.l11)
+    r
+
+# ============================================================================
+# Byte encoding/decoding (big-endian 48 bytes <-> 12 LE 32-bit limbs)
+# ============================================================================
+
+fn fe_from_bytes(b: [u8]) -> Fe384:
+    """Decode 48 big-endian bytes to Fe384."""
+    # Big-endian byte[0] is MSB = limb 11 high byte
+    # Each limb is 4 bytes. Limb i covers bytes [44-4i .. 47-4i] (BE offset)
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    i = 0
+    while i < 12:
+        val be_offset: u64 = 44 - (i * 4)
+        var limb_val: u64 = 0
+        val b0: u64 = b[be_offset].to_u64()
+        val b1: u64 = b[be_offset + 1].to_u64()
+        val b2: u64 = b[be_offset + 2].to_u64()
+        val b3: u64 = b[be_offset + 3].to_u64()
+        limb_val = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        limbs[i] = limb_val
+        i = i + 1
+    _fe_from_arr(limbs)
+
+fn fe_to_bytes(a: Fe384) -> [u8]:
+    """Encode Fe384 as 48 big-endian bytes."""
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        result.push(0x00)
+        i = i + 1
+    i = 0
+    while i < 12:
+        val limb_val: u64 = _fe_get(a, i)
+        val be_offset: u64 = 44 - (i * 4)
+        result[be_offset] = ((limb_val >> 24) & 0xFF).to_u8()
+        result[be_offset + 1] = ((limb_val >> 16) & 0xFF).to_u8()
+        result[be_offset + 2] = ((limb_val >> 8) & 0xFF).to_u8()
+        result[be_offset + 3] = (limb_val & 0xFF).to_u8()
+        i = i + 1
+    result
+
+# ============================================================================
+# Field addition: a + b mod p
+# ============================================================================
+
+fn fe_add(a: Fe384, b: Fe384) -> Fe384:
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    var carry: u64 = 0
+    i = 0
+    while i < 12:
+        val s: u64 = _fe_get(a, i) + _fe_get(b, i) + carry
+        limbs[i] = s & MASK32
+        carry = (s >> 32) & MASK32
+        i = i + 1
+    # Conditional subtract p if sum >= p
+    _fe_cond_sub_p(_fe_from_arr(limbs), carry)
+
+fn _fe_cond_sub_p(a: Fe384, top_carry: u64) -> Fe384:
+    """If a >= p (indicated by top_carry or comparison), subtract p."""
+    # Try subtracting p
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    var borrow: u64 = 0
+    i = 0
+    while i < 12:
+        val ai: u64 = _fe_get(a, i)
+        val pi: u64 = _p_limb(i)
+        val diff: u64 = ai + (1 << 32) - pi - borrow
+        limbs[i] = diff & MASK32
+        borrow = 1 - ((diff >> 32) & 1)
+        i = i + 1
+    # If top_carry==1 or borrow==0 (meaning a >= p), use the subtracted result
+    val use_sub: u64 = if top_carry == 1 { 1 } elif borrow == 0 { 1 } else { 0 }
+    _fe_cond_select(a, _fe_from_arr(limbs), use_sub)
+
+fn _fe_cond_select(a: Fe384, b: Fe384, take_b: u64) -> Fe384:
+    """Return b if take_b==1, else a. Branch-free via XOR mask."""
+    val mask: u64 = (0 - take_b) & MASK32
+    Fe384(
+        l0: a.l0 ^ (mask & (a.l0 ^ b.l0)),
+        l1: a.l1 ^ (mask & (a.l1 ^ b.l1)),
+        l2: a.l2 ^ (mask & (a.l2 ^ b.l2)),
+        l3: a.l3 ^ (mask & (a.l3 ^ b.l3)),
+        l4: a.l4 ^ (mask & (a.l4 ^ b.l4)),
+        l5: a.l5 ^ (mask & (a.l5 ^ b.l5)),
+        l6: a.l6 ^ (mask & (a.l6 ^ b.l6)),
+        l7: a.l7 ^ (mask & (a.l7 ^ b.l7)),
+        l8: a.l8 ^ (mask & (a.l8 ^ b.l8)),
+        l9: a.l9 ^ (mask & (a.l9 ^ b.l9)),
+        l10: a.l10 ^ (mask & (a.l10 ^ b.l10)),
+        l11: a.l11 ^ (mask & (a.l11 ^ b.l11))
+    )
+
+# ============================================================================
+# Field subtraction: a - b mod p
+# ============================================================================
+
+fn fe_sub(a: Fe384, b: Fe384) -> Fe384:
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    var borrow: u64 = 0
+    i = 0
+    while i < 12:
+        val ai: u64 = _fe_get(a, i)
+        val bi: u64 = _fe_get(b, i)
+        val diff: u64 = ai + (1 << 32) - bi - borrow
+        limbs[i] = diff & MASK32
+        borrow = 1 - ((diff >> 32) & 1)
+        i = i + 1
+    # If borrow, add p back
+    val result = _fe_from_arr(limbs)
+    if borrow == 1:
+        return _fe_add_p(result)
+    result
+
+fn _fe_add_p(a: Fe384) -> Fe384:
+    """Add p to a (for underflow correction)."""
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    var carry: u64 = 0
+    i = 0
+    while i < 12:
+        val s: u64 = _fe_get(a, i) + _p_limb(i) + carry
+        limbs[i] = s & MASK32
+        carry = (s >> 32) & MASK32
+        i = i + 1
+    _fe_from_arr(limbs)
+
+# ============================================================================
+# Field multiplication: a * b mod p
+# Schoolbook 12x12 -> 24 limb product, then reduce mod p
+# ============================================================================
+
+fn fe_mul(a: Fe384, b: Fe384) -> Fe384:
+    val wide = _fe_mul_wide(a, b)
+    _fe_reduce_wide(wide)
+
+fn fe_sq(a: Fe384) -> Fe384:
+    fe_mul(a, a)
+
+fn _fe_mul_wide(a: Fe384, b: Fe384) -> [u64]:
+    """12x12 schoolbook multiply. Each limb is 32 bits, so product of two
+    limbs fits in 64 bits. Result: 24 limbs of 32-bit values."""
+    var prod: [u64] = []
+    var pi: u64 = 0
+    while pi < 24:
+        prod.push(0)
+        pi = pi + 1
+    var i: u64 = 0
+    while i < 12:
+        var carry: u64 = 0
+        val ai: u64 = _fe_get(a, i)
+        var j: u64 = 0
+        while j < 12:
+            val bj: u64 = _fe_get(b, j)
+            val t: u64 = ai * bj + prod[i + j] + carry
+            prod[i + j] = t & MASK32
+            carry = (t >> 32) & MASK32
+            j = j + 1
+        prod[i + 12] = prod[i + 12] + carry
+        i = i + 1
+    prod
+
+fn _fe_reduce_wide(w: [u64]) -> Fe384:
+    """Reduce a 768-bit (24-limb) value mod p using the iterative method.
+
+    2^384 mod p = 2^128 + 2^96 - 2^32 + 1
+    In 12 limbs (LE 32-bit): R = [1, -1, 0, 2^32... wait, let me be precise]
+
+    Actually: 2^384 = p + (2^128 + 2^96 - 2^32 + 1)
+    So 2^384 mod p = 2^128 + 2^96 - 2^32 + 1
+
+    In 12 LE 32-bit limbs:
+    R[0] = 1, R[1] = 0xFFFFFFFF (which is -1 mod 2^32, but we store unsigned)
+    Actually let me compute properly:
+    2^128 + 2^96 - 2^32 + 1
+    = limb0: 1 (2^0)
+      limb1: 0xFFFFFFFF (because -2^32 + ... we need to be careful)
+
+    Let me do this properly:
+    2^128 + 2^96 - 2^32 + 1 as a 384-bit number:
+    = 0x000000000000000000000000000000000000000000000001 00000001 FFFFFFFF 00000001
+
+    Breaking into 32-bit limbs (LE):
+    limb0 = 0x00000001 (bits 0-31)
+    limb1 = 0xFFFFFFFF (bits 32-63): this is -1 mod 2^32... wait:
+    Actually: 2^128 + 2^96 - 2^32 + 1
+    Let's write in hex:
+    = 0x100000001FFFFFFFF00000001
+    That's a 97-bit number. In 12 LE 32-bit limbs:
+    limb0 = 0x00000001
+    limb1 = 0xFFFFFFFF  (from -2^32 + ... hmm, no)
+
+    Let me just compute: 2^128 + 2^96 - 2^32 + 1
+    = 2^128 + 2^96 - 2^32 + 1
+    In decimal = 340282366920938463463374607431768211457 + 79228162514264337593543950336 - 4294967296 + 1
+    In hex:
+    2^128 = 0x100000000000000000000000000000000
+    2^96  = 0x1000000000000000000000000
+    -2^32 = -0x100000000
+    +1    = 0x1
+
+    Sum = 0x100000000000000000000000000000000
+        + 0x000000001000000000000000000000000
+        - 0x000000000000000000000000100000000
+        + 0x000000000000000000000000000000001
+
+        = 0x100000001000000000000000000000001
+        -                         0x100000000
+        = 0x0FFFFFFFF00000001  -- no wait
+
+    Let me be more careful with the hex:
+    2^128 = 1 followed by 32 hex zeros = 0x1_00000000_00000000_00000000_00000000
+    2^96  = 0x1_00000000_00000000_00000000
+    -2^32 = -0x1_00000000
+    +1    = 0x1
+
+    Adding them (working in bits):
+    2^128 + 2^96 = 0x1_00000001_00000000_00000000_00000000
+    + 1 - 2^32  = 0x1_00000001_00000000_FFFFFFFF_00000001
+
+    Wait: 0x00000000_00000000 - 0x1_00000000 + 1
+        = 0xFFFFFFFF_FFFFFFFF_00000001 - that's not right either.
+
+    The lower 64 bits: 0 - 2^32 + 1 = -4294967295 which is 2^64 - 4294967295
+    = 0xFFFFFFFF00000001
+    And there's a borrow of 1 from the next group.
+
+    So: 2^96 - borrow = 2^96 - 1
+    Upper: 2^128 + (2^96 - 1) = 0x100000000FFFFFFFF (in the upper 128-bit part starting at bit 64)
+
+    Actually let me think in 32-bit limbs (LE):
+    limb0 (bits 0-31): from +1 - 0 = 1 -> 0x00000001
+    limb1 (bits 32-63): from -2^32: we subtract 1 from limb1 = 0 - 1 = borrow, limb = 0xFFFFFFFF
+    limb2 (bits 64-95): borrow from limb1, 0 - 1 = borrow, limb = 0xFFFFFFFF
+    limb3 (bits 96-127): from +2^96: 1 - borrow(1) = 0 -> 0x00000000
+    limb4 (bits 128-159): from +2^128: 1 -> 0x00000001
+    limbs 5-11: 0
+
+    So R = [0x00000001, 0xFFFFFFFF, 0xFFFFFFFF, 0x00000000, 0x00000001, 0, 0, 0, 0, 0, 0, 0]
+
+    Verification: 1 + 0xFFFFFFFF*2^32 + 0xFFFFFFFF*2^64 + 0*2^96 + 1*2^128
+    = 1 + (2^32-1)*2^32 + (2^32-1)*2^64 + 2^128
+    = 1 + 2^64 - 2^32 + 2^96 - 2^64 + 2^128
+    = 1 - 2^32 + 2^96 + 2^128 ✓
+
+    We'll use this for iterative reduction.
+    """
+    # Split into hi (limbs 12..23) and lo (limbs 0..11)
+    # result = hi * R + lo, then iterate until hi portion is zero
+    var lo: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        lo.push(w[i])
+        i = i + 1
+    var hi: [u64] = []
+    i = 0
+    while i < 12:
+        hi.push(w[12 + i])
+        i = i + 1
+    # Multiply hi by R and add to lo
+    # R = [1, 0xFFFFFFFF, 0xFFFFFFFF, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+    # hi*R is at most 12+5 = 17 limbs, but since hi is at most 384 bits
+    # and R is 129 bits, hi*R is at most 513 bits = 17 limbs.
+    # After adding lo, result is at most ~514 bits.
+    # We do another round: split that into hi2 (limbs 12..16) and lo2 (limbs 0..11)
+    # hi2 * R is at most (514-384=130 bits) + 129 bits = ~260 bits, fits in 12 limbs.
+    # One more add and a conditional subtract should suffice.
+
+    val sum1 = _reduce_one_round(hi, lo)
+    # sum1 is at most 17 limbs. Extract hi2 (limbs 12..16) and lo2 (0..11).
+    var lo2: [u64] = []
+    i = 0
+    while i < 12:
+        lo2.push(sum1[i])
+        i = i + 1
+    var hi2: [u64] = []
+    i = 12
+    while i < sum1.len().to_u64():
+        hi2.push(sum1[i])
+        i = i + 1
+    # Pad hi2 to 12 limbs
+    while hi2.len().to_u64() < 12:
+        hi2.push(0)
+
+    val sum2 = _reduce_one_round(hi2, lo2)
+    # sum2 should be at most ~13 limbs. One more round if needed.
+    var lo3: [u64] = []
+    i = 0
+    while i < 12:
+        lo3.push(sum2[i])
+        i = i + 1
+    var hi3: [u64] = []
+    i = 12
+    while i < sum2.len().to_u64():
+        hi3.push(sum2[i])
+        i = i + 1
+    while hi3.len().to_u64() < 12:
+        hi3.push(0)
+
+    val sum3 = _reduce_one_round(hi3, lo3)
+    # Now should fit in 12 limbs. Final conditional subtract.
+    var final_limbs: [u64] = []
+    i = 0
+    while i < 12:
+        final_limbs.push(sum3[i])
+        i = i + 1
+    val raw = _fe_from_arr(final_limbs)
+    _fe_cond_sub_p(raw, 0)
+
+fn _reduce_one_round(hi: [u64], lo: [u64]) -> [u64]:
+    """Compute hi * R + lo where R = [1, 0xFFFFFFFF, 0xFFFFFFFF, 0, 1, 0...].
+    Returns up to 17 limbs."""
+    # hi * R: schoolbook multiply hi (12 limbs) by R (5 nonzero limbs)
+    # R limbs: r0=1, r1=0xFFFFFFFF, r2=0xFFFFFFFF, r3=0, r4=1
+    var prod: [u64] = []
+    var pi: u64 = 0
+    while pi < 17:
+        prod.push(0)
+        pi = pi + 1
+    # Multiply by r0=1
+    var i: u64 = 0
+    while i < 12:
+        prod[i] = prod[i] + hi[i]
+        i = i + 1
+    # Multiply by r1=0xFFFFFFFF
+    i = 0
+    var carry: u64 = 0
+    while i < 12:
+        val t: u64 = hi[i] * MASK32 + prod[i + 1] + carry
+        prod[i + 1] = t & MASK32
+        carry = (t >> 32) & MASK32
+        i = i + 1
+    prod[13] = prod[13] + carry
+    # Multiply by r2=0xFFFFFFFF
+    carry = 0
+    i = 0
+    while i < 12:
+        val t: u64 = hi[i] * MASK32 + prod[i + 2] + carry
+        prod[i + 2] = t & MASK32
+        carry = (t >> 32) & MASK32
+        i = i + 1
+    prod[14] = prod[14] + carry
+    # r3 = 0, skip
+    # Multiply by r4=1
+    i = 0
+    while i < 12:
+        prod[i + 4] = prod[i + 4] + hi[i]
+        i = i + 1
+    # Now propagate carries through prod
+    carry = 0
+    i = 0
+    while i < 17:
+        val s: u64 = prod[i] + carry
+        prod[i] = s & MASK32
+        carry = (s >> 32) & MASK32
+        i = i + 1
+    # Add lo to prod
+    carry = 0
+    i = 0
+    while i < 12:
+        val s: u64 = prod[i] + lo[i] + carry
+        prod[i] = s & MASK32
+        carry = (s >> 32) & MASK32
+        i = i + 1
+    # Propagate carry
+    while i < 17:
+        val s: u64 = prod[i] + carry
+        prod[i] = s & MASK32
+        carry = (s >> 32) & MASK32
+        i = i + 1
+    prod
+
+# ============================================================================
+# Field inversion: a^(p-2) mod p via square-and-multiply
+# ============================================================================
+
+fn fe_inv(a: Fe384) -> Fe384:
+    """Modular inverse via Fermat: a^(p-2) mod p.
+    p-2 = FFFFFFFF...FFFFFFFE FFFFFFFF 00000000 00000000 FFFFFFFD
+    (same as p except last limb is 0xFFFFFFFD instead of 0xFFFFFFFF)."""
+    # We use the binary method: scan p-2 MSB to LSB
+    val exp_bytes = _p_minus_2_bytes()
+    var result = fe_one()
+    var i: u64 = 0
+    while i < 48:
+        var bit: u64 = 0
+        while bit < 8:
+            result = fe_sq(result)
+            val byte_val: u64 = exp_bytes[i].to_u64()
+            val bit_set: u64 = (byte_val >> (7 - bit)) & 1
+            if bit_set == 1:
+                result = fe_mul(result, a)
+            bit = bit + 1
+        i = i + 1
+    result
+
+fn _p_minus_2_bytes() -> [u8]:
+    """p - 2 as 48 big-endian bytes."""
+    # p = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
+    #     FFFFFFFF0000000000000000FFFFFFFF
+    # p-2: last byte 0xFF -> 0xFD
+    var b: [u8] = []
+    # Bytes 0-23: all 0xFF (first 192 bits)
+    var i: u64 = 0
+    while i < 24:
+        b.push(0xFF)
+        i = i + 1
+    # Bytes 24-27: 0xFFFFFFFE
+    b.push(0xFF)
+    b.push(0xFF)
+    b.push(0xFF)
+    b.push(0xFE)
+    # Bytes 28-31: 0xFFFFFFFF
+    b.push(0xFF)
+    b.push(0xFF)
+    b.push(0xFF)
+    b.push(0xFF)
+    # Bytes 32-35: 0x00000000
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    # Bytes 36-39: 0x00000000
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    # Bytes 40-43: 0xFFFFFFFF
+    b.push(0xFF)
+    b.push(0xFF)
+    b.push(0xFF)
+    b.push(0xFF)
+    # Bytes 44-47: 0xFFFFFFFF - 2 = 0xFFFFFFFD
+    b.push(0xFF)
+    b.push(0xFF)
+    b.push(0xFF)
+    b.push(0xFD)
+    b
+
+# ============================================================================
+# Field equality
+# ============================================================================
+
+fn fe_eq(a: Fe384, b: Fe384) -> bool:
+    if a.l0 != b.l0: return false
+    elif a.l1 != b.l1: return false
+    elif a.l2 != b.l2: return false
+    elif a.l3 != b.l3: return false
+    elif a.l4 != b.l4: return false
+    elif a.l5 != b.l5: return false
+    elif a.l6 != b.l6: return false
+    elif a.l7 != b.l7: return false
+    elif a.l8 != b.l8: return false
+    elif a.l9 != b.l9: return false
+    elif a.l10 != b.l10: return false
+    elif a.l11 != b.l11: return false
+    else: return true
+
+# ============================================================================
+# Jacobian point type
+# ============================================================================
+
+struct JacP384:
+    x: Fe384
+    y: Fe384
+    z: Fe384
+    inf: bool
+
+fn _jac_inf() -> JacP384:
+    JacP384(x: fe_zero(), y: fe_one(), z: fe_zero(), inf: true)
+
+fn _jac_from_affine(ax: Fe384, ay: Fe384) -> JacP384:
+    JacP384(x: ax, y: ay, z: fe_one(), inf: false)
+
+# ============================================================================
+# Curve generator G
+# ============================================================================
+
+fn _gx() -> Fe384:
+    var b: [u8] = []
+    b.push(0xAA)
+    b.push(0x87)
+    b.push(0xCA)
+    b.push(0x22)
+    b.push(0xBE)
+    b.push(0x8B)
+    b.push(0x05)
+    b.push(0x37)
+    b.push(0x8E)
+    b.push(0xB1)
+    b.push(0xC7)
+    b.push(0x1E)
+    b.push(0xF3)
+    b.push(0x20)
+    b.push(0xAD)
+    b.push(0x74)
+    b.push(0x6E)
+    b.push(0x1D)
+    b.push(0x3B)
+    b.push(0x62)
+    b.push(0x8B)
+    b.push(0xA7)
+    b.push(0x9B)
+    b.push(0x98)
+    b.push(0x59)
+    b.push(0xF7)
+    b.push(0x41)
+    b.push(0xE0)
+    b.push(0x82)
+    b.push(0x54)
+    b.push(0x2A)
+    b.push(0x38)
+    b.push(0x55)
+    b.push(0x02)
+    b.push(0xF2)
+    b.push(0x5D)
+    b.push(0xBF)
+    b.push(0x55)
+    b.push(0x29)
+    b.push(0x6C)
+    b.push(0x3A)
+    b.push(0x54)
+    b.push(0x5E)
+    b.push(0x38)
+    b.push(0x72)
+    b.push(0x76)
+    b.push(0x0A)
+    b.push(0xB7)
+    fe_from_bytes(b)
+
+fn _gy() -> Fe384:
+    var b: [u8] = []
+    b.push(0x36)
+    b.push(0x17)
+    b.push(0xDE)
+    b.push(0x4A)
+    b.push(0x96)
+    b.push(0x26)
+    b.push(0x2C)
+    b.push(0x6F)
+    b.push(0x5D)
+    b.push(0x9E)
+    b.push(0x98)
+    b.push(0xBF)
+    b.push(0x92)
+    b.push(0x92)
+    b.push(0xDC)
+    b.push(0x29)
+    b.push(0xF8)
+    b.push(0xF4)
+    b.push(0x1D)
+    b.push(0xBD)
+    b.push(0x28)
+    b.push(0x9A)
+    b.push(0x14)
+    b.push(0x7C)
+    b.push(0xE9)
+    b.push(0xDA)
+    b.push(0x31)
+    b.push(0x13)
+    b.push(0xB5)
+    b.push(0xF0)
+    b.push(0xB8)
+    b.push(0xC0)
+    b.push(0x0A)
+    b.push(0x60)
+    b.push(0xB1)
+    b.push(0xCE)
+    b.push(0x1D)
+    b.push(0x7E)
+    b.push(0x81)
+    b.push(0x9D)
+    b.push(0x7A)
+    b.push(0x43)
+    b.push(0x1D)
+    b.push(0x7C)
+    b.push(0x90)
+    b.push(0xEA)
+    b.push(0x0E)
+    b.push(0x5F)
+    fe_from_bytes(b)
+
+fn _curve_b() -> Fe384:
+    var b: [u8] = []
+    b.push(0xB3)
+    b.push(0x31)
+    b.push(0x2F)
+    b.push(0xA7)
+    b.push(0xE2)
+    b.push(0x3E)
+    b.push(0xE7)
+    b.push(0xE4)
+    b.push(0x98)
+    b.push(0x8E)
+    b.push(0x05)
+    b.push(0x6B)
+    b.push(0xE3)
+    b.push(0xF8)
+    b.push(0x2D)
+    b.push(0x19)
+    b.push(0x18)
+    b.push(0x1D)
+    b.push(0x9C)
+    b.push(0x6E)
+    b.push(0xFE)
+    b.push(0x81)
+    b.push(0x41)
+    b.push(0x12)
+    b.push(0x03)
+    b.push(0x14)
+    b.push(0x08)
+    b.push(0x8F)
+    b.push(0x50)
+    b.push(0x13)
+    b.push(0x87)
+    b.push(0x5A)
+    b.push(0xC6)
+    b.push(0x56)
+    b.push(0x39)
+    b.push(0x8D)
+    b.push(0x8A)
+    b.push(0x2E)
+    b.push(0xD1)
+    b.push(0x9D)
+    b.push(0x2A)
+    b.push(0x85)
+    b.push(0xC8)
+    b.push(0xED)
+    b.push(0xD3)
+    b.push(0xEC)
+    b.push(0x2A)
+    b.push(0xEF)
+    fe_from_bytes(b)
+
+# ============================================================================
+# Jacobian point doubling (a = -3 short Weierstrass)
+# Cost: 4M + 4S
+# ============================================================================
+
+fn _jac_double(p: JacP384) -> JacP384:
+    if p.inf:
+        return _jac_inf()
+    val zz = fe_sq(p.z)
+    val xz = fe_sub(p.x, zz)
+    val xpz = fe_add(p.x, zz)
+    val mraw = fe_mul(xz, xpz)
+    val m = fe_add(fe_add(mraw, mraw), mraw)  # 3*(X^2 - Z^4)
+
+    val yy = fe_sq(p.y)
+    val xyy = fe_mul(p.x, yy)
+    val s = fe_add(xyy, xyy)
+    val s2 = fe_add(s, s)  # S = 4*X*Y^2
+
+    val m2 = fe_sq(m)
+    val s2x2 = fe_add(s2, s2)
+    val x3 = fe_sub(m2, s2x2)  # X3 = M^2 - 2S
+
+    val sxm = fe_sub(s2, x3)
+    val msxm = fe_mul(m, sxm)
+    val yyy = fe_sq(yy)
+    val yyy8 = fe_add(fe_add(fe_add(yyy, yyy), fe_add(yyy, yyy)),
+                      fe_add(fe_add(yyy, yyy), fe_add(yyy, yyy)))  # 8*Y^4
+    val y3 = fe_sub(msxm, yyy8)
+
+    val yz = fe_mul(p.y, p.z)
+    val z3 = fe_add(yz, yz)  # Z3 = 2*Y*Z
+
+    JacP384(x: x3, y: y3, z: z3, inf: false)
+
+# ============================================================================
+# Jacobian + affine mixed addition
+# ============================================================================
+
+fn _jac_add_mixed(p: JacP384, ax: Fe384, ay: Fe384) -> JacP384:
+    if p.inf:
+        return JacP384(x: ax, y: ay, z: fe_one(), inf: false)
+
+    val z1z1 = fe_sq(p.z)
+    val u2 = fe_mul(ax, z1z1)
+    val z1z1z1 = fe_mul(z1z1, p.z)
+    val s2 = fe_mul(ay, z1z1z1)
+
+    if fe_eq(p.x, u2):
+        if fe_eq(p.y, s2):
+            return _jac_double(p)
+        return _jac_inf()
+
+    val h = fe_sub(u2, p.x)
+    val r = fe_sub(s2, p.y)
+    val hh = fe_sq(h)
+    val hhh = fe_mul(hh, h)
+    val v = fe_mul(p.x, hh)
+
+    val rr = fe_sq(r)
+    val v2 = fe_add(v, v)
+    val x3 = fe_sub(fe_sub(rr, hhh), v2)
+
+    val vmx = fe_sub(v, x3)
+    val rvmx = fe_mul(r, vmx)
+    val y1hhh = fe_mul(p.y, hhh)
+    val y3 = fe_sub(rvmx, y1hhh)
+
+    val z3 = fe_mul(p.z, h)
+
+    JacP384(x: x3, y: y3, z: z3, inf: false)
+
+# ============================================================================
+# Jacobian + Jacobian full addition (for ECDSA verify)
+# ============================================================================
+
+fn _jac_add_jac(p1: JacP384, p2: JacP384) -> JacP384:
+    if p1.inf:
+        return p2
+    if p2.inf:
+        return p1
+
+    val z1sq = fe_sq(p1.z)
+    val z2sq = fe_sq(p2.z)
+    val z1cu = fe_mul(z1sq, p1.z)
+    val z2cu = fe_mul(z2sq, p2.z)
+
+    val u1 = fe_mul(p1.x, z2sq)
+    val u2 = fe_mul(p2.x, z1sq)
+    val s1 = fe_mul(p1.y, z2cu)
+    val s2 = fe_mul(p2.y, z1cu)
+
+    if fe_eq(u1, u2):
+        if fe_eq(s1, s2):
+            return _jac_double(p1)
+        return _jac_inf()
+
+    val h = fe_sub(u2, u1)
+    val r = fe_sub(s2, s1)
+    val hh = fe_sq(h)
+    val hhh = fe_mul(hh, h)
+    val v = fe_mul(u1, hh)
+
+    val rr = fe_sq(r)
+    val v2 = fe_add(v, v)
+    val x3 = fe_sub(fe_sub(rr, hhh), v2)
+
+    val vmx = fe_sub(v, x3)
+    val rvmx = fe_mul(r, vmx)
+    val s1hhh = fe_mul(s1, hhh)
+    val y3 = fe_sub(rvmx, s1hhh)
+
+    val z3 = fe_mul(fe_mul(p1.z, p2.z), h)
+
+    JacP384(x: x3, y: y3, z: z3, inf: false)
+
+# ============================================================================
+# Constant-time point select
+# ============================================================================
+
+fn _point_cselect(p0: JacP384, p1: JacP384, choose_p1: u64) -> JacP384:
+    val sel_x = _fe_cond_select(p0.x, p1.x, choose_p1)
+    val sel_y = _fe_cond_select(p0.y, p1.y, choose_p1)
+    val sel_z = _fe_cond_select(p0.z, p1.z, choose_p1)
+    val inf0_u: u64 = if p0.inf { 1 } else { 0 }
+    val inf1_u: u64 = if p1.inf { 1 } else { 0 }
+    val mask: u64 = (0 - choose_p1) & MASK32
+    val inf_out_u: u64 = inf0_u ^ (mask & (inf0_u ^ inf1_u))
+    JacP384(x: sel_x, y: sel_y, z: sel_z, inf: inf_out_u == 1)
+
+# ============================================================================
+# Scalar multiplication: MSB-first double-and-add with constant-time select
+# ============================================================================
+
+fn _scalar_mul_affine(scalar: [u8], ax: Fe384, ay: Fe384) -> JacP384:
+    """384-bit MSB-first scalar mult on affine point (ax, ay).
+    scalar: 48 bytes big-endian."""
+    var acc = _jac_inf()
+    var i: u64 = 0
+    while i < 48:
+        val byte_val: u64 = scalar[i].to_u64()
+        var bit: u64 = 0
+        while bit < 8:
+            acc = _jac_double(acc)
+            val bit_set: u64 = (byte_val >> (7 - bit)) & 1
+            val candidate = _jac_add_mixed(acc, ax, ay)
+            acc = _point_cselect(acc, candidate, bit_set)
+            bit = bit + 1
+        i = i + 1
+    acc
+
+# ============================================================================
+# Affine projection
+# ============================================================================
+
+fn _to_affine(p: JacP384) -> (Fe384, Fe384):
+    if p.inf:
+        return (fe_zero(), fe_zero())
+    val zinv = fe_inv(p.z)
+    val zinv2 = fe_sq(zinv)
+    val zinv3 = fe_mul(zinv2, zinv)
+    val ax = fe_mul(p.x, zinv2)
+    val ay = fe_mul(p.y, zinv3)
+    (ax, ay)
+
+# ============================================================================
+# Point on curve check
+# ============================================================================
+
+fn p384_point_on_curve(px: [u8], py: [u8]) -> bool:
+    """Check if affine point (px, py) is on P-384: y^2 == x^3 - 3x + b (mod p)."""
+    val x = fe_from_bytes(px)
+    val y = fe_from_bytes(py)
+    val y2 = fe_sq(y)
+    val x2 = fe_sq(x)
+    val x3 = fe_mul(x2, x)
+    val three_x = fe_add(fe_add(x, x), x)
+    val neg3x = fe_sub(fe_zero(), three_x)
+    val b_val = _curve_b()
+    val rhs = fe_add(fe_add(x3, neg3x), b_val)
+    fe_eq(y2, rhs)
+
+# ============================================================================
+# Scalar field arithmetic (mod n) for ECDSA
+# ============================================================================
+
+struct Scalar384:
+    l0: u64
+    l1: u64
+    l2: u64
+    l3: u64
+    l4: u64
+    l5: u64
+    l6: u64
+    l7: u64
+    l8: u64
+    l9: u64
+    l10: u64
+    l11: u64
+
+fn _sc_zero() -> Scalar384:
+    Scalar384(l0: 0, l1: 0, l2: 0, l3: 0, l4: 0, l5: 0,
+              l6: 0, l7: 0, l8: 0, l9: 0, l10: 0, l11: 0)
+
+fn _sc_one() -> Scalar384:
+    Scalar384(l0: 1, l1: 0, l2: 0, l3: 0, l4: 0, l5: 0,
+              l6: 0, l7: 0, l8: 0, l9: 0, l10: 0, l11: 0)
+
+fn _sc_get(a: Scalar384, idx: u64) -> u64:
+    if idx == 0: return a.l0
+    elif idx == 1: return a.l1
+    elif idx == 2: return a.l2
+    elif idx == 3: return a.l3
+    elif idx == 4: return a.l4
+    elif idx == 5: return a.l5
+    elif idx == 6: return a.l6
+    elif idx == 7: return a.l7
+    elif idx == 8: return a.l8
+    elif idx == 9: return a.l9
+    elif idx == 10: return a.l10
+    else: return a.l11
+
+fn _sc_from_arr(a: [u64]) -> Scalar384:
+    Scalar384(l0: a[0u64], l1: a[1u64], l2: a[2u64], l3: a[3u64],
+              l4: a[4u64], l5: a[5u64], l6: a[6u64], l7: a[7u64],
+              l8: a[8u64], l9: a[9u64], l10: a[10u64], l11: a[11u64])
+
+fn sc_from_bytes(b: [u8]) -> Scalar384:
+    """Decode 48 big-endian bytes to Scalar384 (no reduction)."""
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    i = 0
+    while i < 12:
+        val be_offset: u64 = 44 - (i * 4)
+        val b0: u64 = b[be_offset].to_u64()
+        val b1: u64 = b[be_offset + 1].to_u64()
+        val b2: u64 = b[be_offset + 2].to_u64()
+        val b3: u64 = b[be_offset + 3].to_u64()
+        limbs[i] = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        i = i + 1
+    _sc_from_arr(limbs)
+
+fn sc_to_bytes(a: Scalar384) -> [u8]:
+    """Encode Scalar384 as 48 big-endian bytes after reduction."""
+    val r = _sc_reduce(a)
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        result.push(0x00)
+        i = i + 1
+    i = 0
+    while i < 12:
+        val limb_val: u64 = _sc_get(r, i)
+        val be_offset: u64 = 44 - (i * 4)
+        result[be_offset] = ((limb_val >> 24) & 0xFF).to_u8()
+        result[be_offset + 1] = ((limb_val >> 16) & 0xFF).to_u8()
+        result[be_offset + 2] = ((limb_val >> 8) & 0xFF).to_u8()
+        result[be_offset + 3] = (limb_val & 0xFF).to_u8()
+        i = i + 1
+    result
+
+fn _sc_sub_n_with_borrow(a: Scalar384) -> (Scalar384, u64):
+    """Subtract n from a, return (result, borrow)."""
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    var borrow: u64 = 0
+    i = 0
+    while i < 12:
+        val ai: u64 = _sc_get(a, i)
+        val ni: u64 = _n_limb(i)
+        val diff: u64 = ai + (1 << 32) - ni - borrow
+        limbs[i] = diff & MASK32
+        borrow = 1 - ((diff >> 32) & 1)
+        i = i + 1
+    (_sc_from_arr(limbs), borrow)
+
+fn _sc_reduce(a: Scalar384) -> Scalar384:
+    """Reduce a from [0, 2n) to [0, n)."""
+    val (sub, borrow) = _sc_sub_n_with_borrow(a)
+    val take_sub: u64 = 1 - borrow
+    _sc_cond_select(a, sub, take_sub)
+
+fn _sc_cond_select(a: Scalar384, b: Scalar384, take_b: u64) -> Scalar384:
+    val mask: u64 = (0 - take_b) & MASK32
+    Scalar384(
+        l0: a.l0 ^ (mask & (a.l0 ^ b.l0)),
+        l1: a.l1 ^ (mask & (a.l1 ^ b.l1)),
+        l2: a.l2 ^ (mask & (a.l2 ^ b.l2)),
+        l3: a.l3 ^ (mask & (a.l3 ^ b.l3)),
+        l4: a.l4 ^ (mask & (a.l4 ^ b.l4)),
+        l5: a.l5 ^ (mask & (a.l5 ^ b.l5)),
+        l6: a.l6 ^ (mask & (a.l6 ^ b.l6)),
+        l7: a.l7 ^ (mask & (a.l7 ^ b.l7)),
+        l8: a.l8 ^ (mask & (a.l8 ^ b.l8)),
+        l9: a.l9 ^ (mask & (a.l9 ^ b.l9)),
+        l10: a.l10 ^ (mask & (a.l10 ^ b.l10)),
+        l11: a.l11 ^ (mask & (a.l11 ^ b.l11))
+    )
+
+fn sc_add(a: Scalar384, b: Scalar384) -> Scalar384:
+    """Scalar addition mod n."""
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    var carry: u64 = 0
+    i = 0
+    while i < 12:
+        val s: u64 = _sc_get(a, i) + _sc_get(b, i) + carry
+        limbs[i] = s & MASK32
+        carry = (s >> 32) & MASK32
+        i = i + 1
+    # Conditional subtract n
+    val raw = _sc_from_arr(limbs)
+    val (sub, borrow) = _sc_sub_n_with_borrow(raw)
+    val use_sub: u64 = if carry == 1 { 1 } elif borrow == 0 { 1 } else { 0 }
+    _sc_cond_select(raw, sub, use_sub)
+
+fn sc_sub(a: Scalar384, b: Scalar384) -> Scalar384:
+    """Scalar subtraction mod n."""
+    var limbs: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        limbs.push(0)
+        i = i + 1
+    var borrow: u64 = 0
+    i = 0
+    while i < 12:
+        val ai: u64 = _sc_get(a, i)
+        val bi: u64 = _sc_get(b, i)
+        val diff: u64 = ai + (1 << 32) - bi - borrow
+        limbs[i] = diff & MASK32
+        borrow = 1 - ((diff >> 32) & 1)
+        i = i + 1
+    var r = _sc_from_arr(limbs)
+    if borrow == 1:
+        # Add n back
+        var limbs2: [u64] = []
+        i = 0
+        while i < 12:
+            limbs2.push(0)
+            i = i + 1
+        var c2: u64 = 0
+        i = 0
+        while i < 12:
+            val s: u64 = _sc_get(r, i) + _n_limb(i) + c2
+            limbs2[i] = s & MASK32
+            c2 = (s >> 32) & MASK32
+            i = i + 1
+        r = _sc_from_arr(limbs2)
+    r
+
+fn _sc_mul_wide(a: Scalar384, b: Scalar384) -> [u64]:
+    """12x12 schoolbook multiply -> 24 limbs."""
+    var prod: [u64] = []
+    var pi: u64 = 0
+    while pi < 24:
+        prod.push(0)
+        pi = pi + 1
+    var i: u64 = 0
+    while i < 12:
+        var carry: u64 = 0
+        val ai: u64 = _sc_get(a, i)
+        var j: u64 = 0
+        while j < 12:
+            val bj: u64 = _sc_get(b, j)
+            val t: u64 = ai * bj + prod[i + j] + carry
+            prod[i + j] = t & MASK32
+            carry = (t >> 32) & MASK32
+            j = j + 1
+        prod[i + 12] = prod[i + 12] + carry
+        i = i + 1
+    prod
+
+fn _sc_reduce_wide(w: [u64]) -> Scalar384:
+    """Reduce 768-bit (24 limbs) mod n.
+    Uses iterative method: 2^384 mod n = 2^384 - n (since n < 2^384).
+    R_n = 2^384 - n.
+    n = FFFFFFFF...C7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973
+    R_n = 2^384 - n = 0x000...0000 389CB27E 0BC8D220 A7E5F24D B74F5885 1313E695 333AD68D
+    In 12 LE 32-bit limbs: [0x333AD68D, 0x1313E695, 0xB74F5885, 0xA7E5F24D,
+                             0x0BC8D220, 0x389CB27E, 0, 0, 0, 0, 0, 0]
+    """
+    var lo: [u64] = []
+    var i: u64 = 0
+    while i < 12:
+        lo.push(w[i])
+        i = i + 1
+    var hi: [u64] = []
+    i = 0
+    while i < 12:
+        hi.push(w[12 + i])
+        i = i + 1
+    # hi * R_n + lo
+    val sum1 = _sc_reduce_one_round(hi, lo)
+    # Extract again
+    var lo2: [u64] = []
+    i = 0
+    while i < 12:
+        lo2.push(sum1[i])
+        i = i + 1
+    var hi2: [u64] = []
+    i = 12
+    while i < sum1.len().to_u64():
+        hi2.push(sum1[i])
+        i = i + 1
+    while hi2.len().to_u64() < 12:
+        hi2.push(0)
+    val sum2 = _sc_reduce_one_round(hi2, lo2)
+    # One more round
+    var lo3: [u64] = []
+    i = 0
+    while i < 12:
+        lo3.push(sum2[i])
+        i = i + 1
+    var hi3: [u64] = []
+    i = 12
+    while i < sum2.len().to_u64():
+        hi3.push(sum2[i])
+        i = i + 1
+    while hi3.len().to_u64() < 12:
+        hi3.push(0)
+    val sum3 = _sc_reduce_one_round(hi3, lo3)
+    var final_limbs: [u64] = []
+    i = 0
+    while i < 12:
+        final_limbs.push(sum3[i])
+        i = i + 1
+    val raw = _sc_from_arr(final_limbs)
+    _sc_reduce(raw)
+
+fn _sc_reduce_one_round(hi: [u64], lo: [u64]) -> [u64]:
+    """Compute hi * R_n + lo where R_n = [0x333AD68D, 0x1313E695, 0xB74F5885,
+    0xA7E5F24D, 0x0BC8D220, 0x389CB27E, 0, 0, 0, 0, 0, 0].
+    Returns up to 18 limbs."""
+    # R_n limbs
+    var rn: [u64] = []
+    rn.push(0x333AD68D)
+    rn.push(0x1313E695)
+    rn.push(0xB74F5885)
+    rn.push(0xA7E5F24D)
+    rn.push(0x0BC8D220)
+    rn.push(0x389CB27E)
+
+    var prod: [u64] = []
+    var pi: u64 = 0
+    while pi < 18:
+        prod.push(0)
+        pi = pi + 1
+    # Multiply hi by rn (12 x 6)
+    var i: u64 = 0
+    while i < 12:
+        var carry: u64 = 0
+        val hi_i: u64 = hi[i]
+        var j: u64 = 0
+        while j < 6:
+            val t: u64 = hi_i * rn[j] + prod[i + j] + carry
+            prod[i + j] = t & MASK32
+            carry = (t >> 32) & MASK32
+            j = j + 1
+        prod[i + 6] = prod[i + 6] + carry
+        i = i + 1
+    # Add lo
+    var carry: u64 = 0
+    i = 0
+    while i < 12:
+        val s: u64 = prod[i] + lo[i] + carry
+        prod[i] = s & MASK32
+        carry = (s >> 32) & MASK32
+        i = i + 1
+    while i < 18:
+        val s: u64 = prod[i] + carry
+        prod[i] = s & MASK32
+        carry = (s >> 32) & MASK32
+        i = i + 1
+    prod
+
+fn sc_mul(a: Scalar384, b: Scalar384) -> Scalar384:
+    """Scalar multiplication mod n."""
+    val wide = _sc_mul_wide(a, b)
+    _sc_reduce_wide(wide)
+
+fn sc_sq(a: Scalar384) -> Scalar384:
+    sc_mul(a, a)
+
+fn sc_inv(a: Scalar384) -> Scalar384:
+    """Scalar inverse mod n via Fermat: a^(n-2) mod n."""
+    val exp_bytes = _n_minus_2_bytes()
+    var result = _sc_one()
+    var i: u64 = 0
+    while i < 48:
+        var bit: u64 = 0
+        while bit < 8:
+            result = sc_sq(result)
+            val byte_val: u64 = exp_bytes[i].to_u64()
+            val bit_set: u64 = (byte_val >> (7 - bit)) & 1
+            if bit_set == 1:
+                result = sc_mul(result, a)
+            bit = bit + 1
+        i = i + 1
+    result
+
+fn _n_minus_2_bytes() -> [u8]:
+    """n - 2 as 48 big-endian bytes."""
+    # n = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF
+    #     581A0DB248B0A77AECEC196ACCC52973
+    # n-2: last byte 0x73 -> 0x71
+    var b: [u8] = []
+    # First 24 bytes: all 0xFF
+    var i: u64 = 0
+    while i < 24:
+        b.push(0xFF)
+        i = i + 1
+    # Bytes 24-31: C7634D81 F4372DDF
+    b.push(0xC7)
+    b.push(0x63)
+    b.push(0x4D)
+    b.push(0x81)
+    b.push(0xF4)
+    b.push(0x37)
+    b.push(0x2D)
+    b.push(0xDF)
+    # Bytes 32-39: 581A0DB2 48B0A77A
+    b.push(0x58)
+    b.push(0x1A)
+    b.push(0x0D)
+    b.push(0xB2)
+    b.push(0x48)
+    b.push(0xB0)
+    b.push(0xA7)
+    b.push(0x7A)
+    # Bytes 40-47: ECEC196A CCC52971 (last byte 0x73-2=0x71)
+    b.push(0xEC)
+    b.push(0xEC)
+    b.push(0x19)
+    b.push(0x6A)
+    b.push(0xCC)
+    b.push(0xC5)
+    b.push(0x29)
+    b.push(0x71)
+    b
+
+fn _sc_is_zero(a: Scalar384) -> bool:
+    val r = _sc_reduce(a)
+    if r.l0 != 0: return false
+    elif r.l1 != 0: return false
+    elif r.l2 != 0: return false
+    elif r.l3 != 0: return false
+    elif r.l4 != 0: return false
+    elif r.l5 != 0: return false
+    elif r.l6 != 0: return false
+    elif r.l7 != 0: return false
+    elif r.l8 != 0: return false
+    elif r.l9 != 0: return false
+    elif r.l10 != 0: return false
+    elif r.l11 != 0: return false
+    else: return true
+
+fn _sc_is_valid_k(k: Scalar384) -> bool:
+    """Check k in [1, n-1]."""
+    if _sc_is_zero(k):
+        return false
+    val (_sub, borrow) = _sc_sub_n_with_borrow(k)
+    borrow == 1
+
+# ============================================================================
+# RFC 6979 deterministic nonce (using SHA-384 HMAC)
+# ============================================================================
+
+fn _rfc6979_generate_k(privkey: [u8], msg_hash: [u8]) -> [u8]:
+    """Generate deterministic k per RFC 6979 using HMAC-SHA-384.
+    privkey: 48 bytes, msg_hash: 48 bytes. Returns 48 bytes."""
+    # Step b: V = 0x01 * 48
+    var v_buf: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        v_buf.push(0x01)
+        i = i + 1
+    # Step c: K = 0x00 * 48
+    var k_buf: [u8] = []
+    i = 0
+    while i < 48:
+        k_buf.push(0x00)
+        i = i + 1
+    # Step d: K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
+    var d_data: [u8] = []
+    i = 0
+    while i < 48:
+        d_data.push(v_buf[i])
+        i = i + 1
+    d_data.push(0x00)
+    i = 0
+    while i < 48:
+        d_data.push(privkey[i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        d_data.push(msg_hash[i])
+        i = i + 1
+    k_buf = _sha384_hmac(k_buf, d_data)
+    # Step e: V = HMAC_K(V)
+    v_buf = _sha384_hmac(k_buf, v_buf)
+    # Step f: K = HMAC_K(V || 0x01 || int2octets(x) || bits2octets(h1))
+    var f_data: [u8] = []
+    i = 0
+    while i < 48:
+        f_data.push(v_buf[i])
+        i = i + 1
+    f_data.push(0x01)
+    i = 0
+    while i < 48:
+        f_data.push(privkey[i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        f_data.push(msg_hash[i])
+        i = i + 1
+    k_buf = _sha384_hmac(k_buf, f_data)
+    # Step g: V = HMAC_K(V)
+    v_buf = _sha384_hmac(k_buf, v_buf)
+    # Step h: Loop
+    var attempts: u64 = 0
+    while attempts < 100:
+        v_buf = _sha384_hmac(k_buf, v_buf)
+        val candidate = sc_from_bytes(v_buf)
+        if _sc_is_valid_k(candidate):
+            return v_buf
+        # Retry
+        var retry_data: [u8] = []
+        i = 0
+        while i < 48:
+            retry_data.push(v_buf[i])
+            i = i + 1
+        retry_data.push(0x00)
+        k_buf = _sha384_hmac(k_buf, retry_data)
+        v_buf = _sha384_hmac(k_buf, v_buf)
+        attempts = attempts + 1
+    v_buf
+
+# ============================================================================
+# ECDSA Sign
+# ============================================================================
+
+fn p384_ecdsa_sign(privkey: [u8], msg_hash: [u8]) -> [u8]:
+    """ECDSA sign with RFC 6979 deterministic nonce.
+    privkey: 48 bytes, msg_hash: 48 bytes (SHA-384 hash).
+    Returns: 96 bytes r||s (48 bytes each), or empty on error."""
+    if privkey.len() != 48:
+        return []
+    if msg_hash.len() != 48:
+        return []
+    val k_bytes = _rfc6979_generate_k(privkey, msg_hash)
+    val k = sc_from_bytes(k_bytes)
+    # R = k*G
+    val r_jac = _scalar_mul_affine(k_bytes, _gx(), _gy())
+    val (rx, _ry) = _to_affine(r_jac)
+    val r_bytes = fe_to_bytes(rx)
+    # r = x(R) mod n
+    val r = sc_from_bytes(r_bytes)
+    val r_reduced = _sc_reduce(r)
+    if _sc_is_zero(r_reduced):
+        return []
+    # s = k^-1 * (hash + r*d) mod n
+    val d = sc_from_bytes(privkey)
+    val z = sc_from_bytes(msg_hash)
+    val r_d = sc_mul(r_reduced, d)
+    val z_plus_rd = sc_add(z, r_d)
+    val k_inv = sc_inv(k)
+    val s = sc_mul(k_inv, z_plus_rd)
+    if _sc_is_zero(s):
+        return []
+    # Encode r || s
+    val r_out = sc_to_bytes(r_reduced)
+    val s_out = sc_to_bytes(s)
+    var sig: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        sig.push(r_out[i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        sig.push(s_out[i])
+        i = i + 1
+    sig
+
+# ============================================================================
+# ECDSA Verify
+# ============================================================================
+
+fn p384_ecdsa_verify(pubkey: [u8], msg_hash: [u8], sig: [u8]) -> bool:
+    """Verify ECDSA P-384 signature.
+    pubkey: 97 bytes (04||x||y), msg_hash: 48 bytes, sig: 96 bytes (r||s).
+    Returns true if valid."""
+    if pubkey.len() != 97:
+        return false
+    if msg_hash.len() != 48:
+        return false
+    if sig.len() != 96:
+        return false
+    if pubkey[0u64] != 0x04u8:
+        return false
+    # Parse r, s
+    var r_bytes: [u8] = []
+    var s_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        r_bytes.push(sig[i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        s_bytes.push(sig[48 + i])
+        i = i + 1
+    val r = sc_from_bytes(r_bytes)
+    val s = sc_from_bytes(s_bytes)
+    if _sc_is_zero(r): return false
+    elif _sc_is_zero(s): return false
+    elif _sc_is_valid_k(r) == false: return false
+    elif _sc_is_valid_k(s) == false: return false
+    # w = s^-1 mod n
+    val w = sc_inv(s)
+    # u1 = hash * w mod n
+    val z = sc_from_bytes(msg_hash)
+    val u1 = sc_mul(z, w)
+    # u2 = r * w mod n
+    val u2 = sc_mul(r, w)
+    val u1_bytes = sc_to_bytes(u1)
+    val u2_bytes = sc_to_bytes(u2)
+    # Parse Q
+    var qx_bytes: [u8] = []
+    var qy_bytes: [u8] = []
+    i = 0
+    while i < 48:
+        qx_bytes.push(pubkey[1 + i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        qy_bytes.push(pubkey[49 + i])
+        i = i + 1
+    val qx = fe_from_bytes(qx_bytes)
+    val qy = fe_from_bytes(qy_bytes)
+    # R' = u1*G + u2*Q
+    val p1 = _scalar_mul_affine(u1_bytes, _gx(), _gy())
+    val p2 = _scalar_mul_affine(u2_bytes, qx, qy)
+    val rp = _jac_add_jac(p1, p2)
+    if rp.inf:
+        return false
+    val (rpx, _rpy) = _to_affine(rp)
+    val rpx_bytes = fe_to_bytes(rpx)
+    # Check r == x(R') mod n
+    val rp_scalar = sc_from_bytes(rpx_bytes)
+    val rp_reduced = _sc_reduce(rp_scalar)
+    val r_reduced = _sc_reduce(r)
+    if rp_reduced.l0 != r_reduced.l0: return false
+    elif rp_reduced.l1 != r_reduced.l1: return false
+    elif rp_reduced.l2 != r_reduced.l2: return false
+    elif rp_reduced.l3 != r_reduced.l3: return false
+    elif rp_reduced.l4 != r_reduced.l4: return false
+    elif rp_reduced.l5 != r_reduced.l5: return false
+    elif rp_reduced.l6 != r_reduced.l6: return false
+    elif rp_reduced.l7 != r_reduced.l7: return false
+    elif rp_reduced.l8 != r_reduced.l8: return false
+    elif rp_reduced.l9 != r_reduced.l9: return false
+    elif rp_reduced.l10 != r_reduced.l10: return false
+    elif rp_reduced.l11 != r_reduced.l11: return false
+    else: return true
+
+# ============================================================================
+# ECDH
+# ============================================================================
+
+fn p384_ecdh(privkey: [u8], peer_pubkey: [u8]) -> [u8]:
+    """ECDH key exchange. Returns 48-byte shared secret (x-coordinate).
+    privkey: 48 bytes, peer_pubkey: 97 bytes (04||x||y)."""
+    if privkey.len() != 48:
+        return []
+    if peer_pubkey.len() != 97:
+        return []
+    if peer_pubkey[0u64] != 0x04u8:
+        return []
+    var px_bytes: [u8] = []
+    var py_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        px_bytes.push(peer_pubkey[1 + i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        py_bytes.push(peer_pubkey[49 + i])
+        i = i + 1
+    val px = fe_from_bytes(px_bytes)
+    val py = fe_from_bytes(py_bytes)
+    val jac = _scalar_mul_affine(privkey, px, py)
+    val (ax, _ay) = _to_affine(jac)
+    fe_to_bytes(ax)
+
+fn p384_keygen(privkey: [u8]) -> [u8]:
+    """Generate uncompressed public key from private key.
+    privkey: 48 bytes. Returns 97 bytes (04||x||y), or empty on error."""
+    if privkey.len() != 48:
+        return []
+    val jac = _scalar_mul_affine(privkey, _gx(), _gy())
+    val (ax, ay) = _to_affine(jac)
+    val x_bytes = fe_to_bytes(ax)
+    val y_bytes = fe_to_bytes(ay)
+    var result: [u8] = []
+    result.push(0x04u8)
+    var i: u64 = 0
+    while i < 48:
+        result.push(x_bytes[i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        result.push(y_bytes[i])
+        i = i + 1
+    result
+
+# ============================================================================
+# Field arithmetic byte-level API
+# ============================================================================
+
+fn p384_add(a: [u8], b: [u8]) -> [u8]:
+    """Mod-p addition of two 48-byte big-endian field elements."""
+    fe_to_bytes(fe_add(fe_from_bytes(a), fe_from_bytes(b)))
+
+fn p384_sub(a: [u8], b: [u8]) -> [u8]:
+    """Mod-p subtraction of two 48-byte big-endian field elements."""
+    fe_to_bytes(fe_sub(fe_from_bytes(a), fe_from_bytes(b)))
+
+fn p384_mul(a: [u8], b: [u8]) -> [u8]:
+    """Mod-p multiplication of two 48-byte big-endian field elements."""
+    fe_to_bytes(fe_mul(fe_from_bytes(a), fe_from_bytes(b)))
+
+fn p384_inv(a: [u8]) -> [u8]:
+    """Mod-p inverse of a 48-byte big-endian field element."""
+    fe_to_bytes(fe_inv(fe_from_bytes(a)))
+
+fn p384_scalar_mult(k: [u8], px: [u8], py: [u8]) -> [u8]:
+    """Scalar multiplication k*P. Returns 97-byte uncompressed point or empty."""
+    if k.len() != 48:
+        return []
+    if px.len() != 48:
+        return []
+    if py.len() != 48:
+        return []
+    val fpx = fe_from_bytes(px)
+    val fpy = fe_from_bytes(py)
+    val jac = _scalar_mul_affine(k, fpx, fpy)
+    val (ax, ay) = _to_affine(jac)
+    val x_bytes = fe_to_bytes(ax)
+    val y_bytes = fe_to_bytes(ay)
+    var result: [u8] = []
+    result.push(0x04u8)
+    var i: u64 = 0
+    while i < 48:
+        result.push(x_bytes[i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        result.push(y_bytes[i])
+        i = i + 1
+    result
