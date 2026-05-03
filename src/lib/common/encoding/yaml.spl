@@ -1,0 +1,139 @@
+# YAML parser and writer (basic subset)
+#
+# Supports:
+#   - Scalars: plain, quoted ("double" and 'single'), integers, booleans, null
+#   - Mappings: key: value (indentation-based nesting)
+#   - Sequences: - item (indentation-based)
+#   - Flow sequences: [a, b, c]
+#   - Flow mappings: {key: value}
+#   - Comments: # comment (to end of line)
+#   - Multi-level nesting via indentation
+#
+# NOT supported: anchors/aliases, tags, multi-line scalars (| and >),
+#   complex keys, merge keys
+#
+# Internal representation: delegates to std.common.yaml for parsing and
+#   serialization. Provides a flat convenience API on top.
+#
+# API:
+#   yaml_parse(content)         -> parsed node (text, any)
+#   yaml_parse_mapping(content) -> list of (key, value) pairs
+#   yaml_get(entries, key)      -> scalar text value
+#   yaml_get_list(entries, key) -> sequence items as list
+#   yaml_encode_mapping(entries)-> text YAML for key-value pairs
+#   yaml_encode_scalar(value)   -> quoted text if needed
+#
+# NOTE: All module-level helper functions used to avoid it-block var-mutation
+# footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# Usage:
+#   use std.common.encoding.yaml.{yaml_parse, yaml_parse_mapping,
+#       yaml_get, yaml_get_list, yaml_encode_mapping, yaml_encode_scalar}
+
+mod std.common.encoding.yaml
+
+use std.common.yaml.*
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn yaml_parse(content: text) -> (text, any):
+    """Parse YAML content into a node. Returns a (type, value) tuple where
+    type is 'scalar', 'sequence', or 'mapping'."""
+    yaml_parse_block(content)
+
+fn yaml_parse_mapping(content: text) -> list:
+    """Parse YAML content and return the mapping as a list of (key, value) pairs.
+    If the top-level node is not a mapping, returns an empty list."""
+    var node = yaml_parse(content)
+    var node_type = node.0
+    var result: list = []
+    if node_type == "mapping":
+        result = yaml_get_mapping_pairs(node)
+    result
+
+fn yaml_get(entries: list, key: text) -> text:
+    """Get scalar value by key from a list of (key, value) pairs.
+    Returns empty string if key not found or value is not a scalar."""
+    var i = 0
+    var result = ""
+    var found = false
+    while i < entries.length() and not found:
+        var pair = entries.get(i)
+        var pair_key = pair.0
+        var pair_val = pair.1
+        if pair_key == key:
+            var val_type = pair_val.0
+            if val_type == "scalar":
+                result = yaml_get_scalar_content(pair_val)
+            found = true
+        i = i + 1
+    result
+
+fn yaml_get_list(entries: list, key: text) -> list:
+    """Get sequence items by key from a list of (key, value) pairs.
+    Returns empty list if key not found or value is not a sequence."""
+    var i = 0
+    var result: list = []
+    var found = false
+    while i < entries.length() and not found:
+        var pair = entries.get(i)
+        var pair_key = pair.0
+        var pair_val = pair.1
+        if pair_key == key:
+            var val_type = pair_val.0
+            if val_type == "sequence":
+                result = yaml_get_sequence_items(pair_val)
+            found = true
+        i = i + 1
+    result
+
+fn yaml_encode_scalar(value: text) -> text:
+    """Encode a scalar value, quoting with double quotes if needed.
+    Quotes if: empty, contains ':', '#', leading/trailing space, starts with
+    '-', '[', '{', or parses as bool/null keyword."""
+    var needs_q = false
+    if value.length() == 0:
+        needs_q = true
+    elif value.starts_with(" ") or value.ends_with(" "):
+        needs_q = true
+    elif value.starts_with("-") or value.starts_with("[") or value.starts_with("{"):
+        needs_q = true
+    elif value.contains(":") or value.contains("#"):
+        needs_q = true
+    elif value == "true" or value == "false":
+        needs_q = true
+    elif value == "yes" or value == "no":
+        needs_q = true
+    elif value == "null" or value == "~":
+        needs_q = true
+    if needs_q:
+        var escaped = value.replace("\\", "\\\\")
+        var escaped2 = escaped.replace("\"", "\\\"")
+        "\"" + escaped2 + "\""
+    else:
+        value
+
+fn yaml_encode_mapping(entries: list) -> text:
+    """Serialize a list of (key, value-text) pairs to YAML block mapping.
+    Entries are expected as 2-element lists: [key_text, value_text], or
+    as (key, value) tuples where value is a text scalar."""
+    var parts: [text] = []
+    var i = 0
+    while i < entries.length():
+        var entry = entries.get(i)
+        var k = entry.0
+        var v = entry.1
+        var encoded_v = yaml_encode_scalar(v)
+        var line = k + ": " + encoded_v
+        parts.push(line)
+        i = i + 1
+    parts.join("\n")
+
+# ============================================================================
+# EXPORTS
+# ============================================================================
+
+export yaml_parse, yaml_parse_mapping, yaml_get, yaml_get_list
+export yaml_encode_scalar, yaml_encode_mapping

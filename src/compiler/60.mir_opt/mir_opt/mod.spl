@@ -291,6 +291,7 @@ fn optimize_module_with_caps(module: MirModule, level: OptLevel, caps: X86Caps, 
     optimize_module_with_context(module, level, ctx)
 
 fn optimize_module_with_context(module: MirModule, level: OptLevel, ctx: TargetOptContext) -> MirModule:
+    """Optimize a module with an explicit TargetOptContext carrying target capabilities."""
     var pipeline = optimizationpipeline_for_level(level)
     pipeline.target_ctx = ctx
     pipeline_optimize(pipeline, module)
@@ -380,14 +381,16 @@ fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
 fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirModule:
     """Run pipeline passes on all functions in a module.
 
-    Optimization: Instead of dispatching run_named_pass (string match +
-    allocation) for every (pass, function) pair, we iterate passes in the
-    outer loop and functions in the inner loop.  run_pass_on_module handles
-    one pass across all functions, performing the name-match only once.
+    Target-aware passes (vectorization) read pipeline.target_ctx for
+    capability gating.  All other passes are target-independent.
     """
     var optimized_module = module
+    val ctx = pipeline.target_ctx
     for pass_name in pipeline.passes:
-        optimized_module = run_pass_on_module(pass_name, optimized_module)
+        if pass_name == "vectorization":
+            optimized_module = run_pattern_idiom_pass_x86(optimized_module, ctx.x86_caps, ctx.cipher_remark)
+        else:
+            optimized_module = run_pass_on_module(pass_name, optimized_module)
     optimized_module
 
 fn pipeline_optimize_with_caps(pipeline: OptimizationPipeline, module: MirModule, caps: X86Caps, cipher_remark: bool) -> MirModule:
@@ -488,11 +491,7 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
             # See: doc/05_design/simd_auto_vectorize_design.md §2, §10
             result_module = run_auto_vectorize(result_module)
         case "vectorization":
-            # Module-level pass: invokes the pattern-idiom engine.
-            # Wave K3 walks the module + counts visits; Wave K4 will rewrite
-            # recognised software cipher Calls into MirInstKind.Intrinsic.
-            # See: src/compiler/60.mir_opt/mir_opt/pattern_dispatch.spl
-            result_module = run_pattern_idiom_pass(result_module)
+            pass_do_nothing
         case _:
             # Unknown pass — return module unchanged
             pass_do_nothing

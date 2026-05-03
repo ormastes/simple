@@ -141,7 +141,15 @@ impl BuildCache {
     }
 
     fn compile_test_to_native_via_entry_closure(&self, source: &Path, output: &Path) -> Result<(), String> {
-        let project = ProjectContext::detect(source)
+        let project_source = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| name.starts_with(".spipe_wrapped_entry_"))
+            .and_then(|name| source.parent().map(|parent| parent.join(name.trim_start_matches(".spipe_wrapped_entry_"))))
+            .filter(|candidate| candidate.exists())
+            .unwrap_or_else(|| source.to_path_buf());
+
+        let project = ProjectContext::detect(&project_source)
             .map_err(|e| format!("Failed to detect project for {}: {}", source.display(), e))?;
 
         let mut config = NativeBuildConfig {

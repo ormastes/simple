@@ -1,0 +1,297 @@
+# SEED Block Cipher — Pure Simple Implementation
+#
+# 128-bit symmetric block cipher, 128-bit key, 16-round Feistel network.
+# Standardised by KISA (Korea Information Security Agency).
+#
+# Reference: RFC 4269 — The SEED Encryption Algorithm
+#   https://www.rfc-editor.org/rfc/rfc4269
+#
+# Exposed API:
+#   seed_encrypt_block(key: [u8], block: [u8]) -> [u8]
+#   seed_decrypt_block(key: [u8], block: [u8]) -> [u8]
+#
+# No SFFI/Rust FFI — pure Simple, suitable for baremetal.
+
+# ============================================================================
+# S-Boxes — RFC 4269 Appendix A.1
+# ============================================================================
+
+fn _s0() -> [u8]:
+    [
+        0xA9u8, 0x85u8, 0xD6u8, 0xD3u8, 0x54u8, 0x1Du8, 0xACu8, 0x25u8,
+        0x5Du8, 0x43u8, 0x18u8, 0x1Eu8, 0x51u8, 0xFCu8, 0xCAu8, 0x63u8,
+        0x28u8, 0x44u8, 0x20u8, 0x9Du8, 0xE0u8, 0xE2u8, 0xC8u8, 0x17u8,
+        0xA5u8, 0x8Fu8, 0x03u8, 0x7Bu8, 0xBBu8, 0x13u8, 0xD2u8, 0xEEu8,
+        0x70u8, 0x8Cu8, 0x3Fu8, 0xA8u8, 0x32u8, 0xDDu8, 0xF6u8, 0x74u8,
+        0xECu8, 0x95u8, 0x0Bu8, 0x57u8, 0x5Cu8, 0x5Bu8, 0xBDu8, 0x01u8,
+        0x24u8, 0x1Cu8, 0x73u8, 0x98u8, 0x10u8, 0xCCu8, 0xF2u8, 0xD9u8,
+        0x2Cu8, 0xE7u8, 0x72u8, 0x83u8, 0x9Bu8, 0xD1u8, 0x86u8, 0xC9u8,
+        0x60u8, 0x50u8, 0xA3u8, 0xEBu8, 0x0Du8, 0xB6u8, 0x9Eu8, 0x4Fu8,
+        0xB7u8, 0x5Au8, 0xC6u8, 0x78u8, 0xA6u8, 0x12u8, 0xAFu8, 0xD5u8,
+        0x61u8, 0xC3u8, 0xB4u8, 0x41u8, 0x52u8, 0x7Du8, 0x8Du8, 0x08u8,
+        0x1Fu8, 0x99u8, 0x00u8, 0x19u8, 0x04u8, 0x53u8, 0xF7u8, 0xE1u8,
+        0xFDu8, 0x76u8, 0x2Fu8, 0x27u8, 0xB0u8, 0x8Bu8, 0x0Eu8, 0xABu8,
+        0xA2u8, 0x6Eu8, 0x93u8, 0x4Du8, 0x69u8, 0x7Cu8, 0x09u8, 0x0Au8,
+        0xBFu8, 0xEFu8, 0xF3u8, 0xC5u8, 0x87u8, 0x14u8, 0xFEu8, 0x64u8,
+        0xDEu8, 0x2Eu8, 0x4Bu8, 0x1Au8, 0x06u8, 0x21u8, 0x6Bu8, 0x66u8,
+        0x02u8, 0xF5u8, 0x92u8, 0x8Au8, 0x0Cu8, 0xB3u8, 0x7Eu8, 0xD0u8,
+        0x7Au8, 0x47u8, 0x96u8, 0xE5u8, 0x26u8, 0x80u8, 0xADu8, 0xDFu8,
+        0xA1u8, 0x30u8, 0x37u8, 0xAEu8, 0x36u8, 0x15u8, 0x22u8, 0x38u8,
+        0xF4u8, 0xA7u8, 0x45u8, 0x4Cu8, 0x81u8, 0xE9u8, 0x84u8, 0x97u8,
+        0x35u8, 0xCBu8, 0xCEu8, 0x3Cu8, 0x71u8, 0x11u8, 0xC7u8, 0x89u8,
+        0x75u8, 0xFBu8, 0xDAu8, 0xF8u8, 0x94u8, 0x59u8, 0x82u8, 0xC4u8,
+        0xFFu8, 0x49u8, 0x39u8, 0x67u8, 0xC0u8, 0xCFu8, 0xD7u8, 0xB8u8,
+        0x0Fu8, 0x8Eu8, 0x42u8, 0x23u8, 0x91u8, 0x6Cu8, 0xDBu8, 0xA4u8,
+        0x34u8, 0xF1u8, 0x48u8, 0xC2u8, 0x6Fu8, 0x3Du8, 0x2Du8, 0x40u8,
+        0xBEu8, 0x3Eu8, 0xBCu8, 0xC1u8, 0xAAu8, 0xBAu8, 0x4Eu8, 0x55u8,
+        0x3Bu8, 0xDCu8, 0x68u8, 0x7Fu8, 0x9Cu8, 0xD8u8, 0x4Au8, 0x56u8,
+        0x77u8, 0xA0u8, 0xEDu8, 0x46u8, 0xB5u8, 0x2Bu8, 0x65u8, 0xFAu8,
+        0xE3u8, 0xB9u8, 0xB1u8, 0x9Fu8, 0x5Eu8, 0xF9u8, 0xE6u8, 0xB2u8,
+        0x31u8, 0xEAu8, 0x6Du8, 0x5Fu8, 0xE4u8, 0xF0u8, 0xCDu8, 0x88u8,
+        0x16u8, 0x3Au8, 0x58u8, 0xD4u8, 0x62u8, 0x29u8, 0x07u8, 0x33u8,
+        0xE8u8, 0x1Bu8, 0x05u8, 0x79u8, 0x90u8, 0x6Au8, 0x2Au8, 0x9Au8
+    ]
+
+fn _s1() -> [u8]:
+    [
+        0x38u8, 0xE8u8, 0x2Du8, 0xA6u8, 0xCFu8, 0xDEu8, 0xB3u8, 0xB8u8,
+        0xAFu8, 0x60u8, 0x55u8, 0xC7u8, 0x44u8, 0x6Fu8, 0x6Bu8, 0x5Bu8,
+        0xC3u8, 0x62u8, 0x33u8, 0xB5u8, 0x29u8, 0xA0u8, 0xE2u8, 0xA7u8,
+        0xD3u8, 0x91u8, 0x11u8, 0x06u8, 0x1Cu8, 0xBCu8, 0x36u8, 0x4Bu8,
+        0xEFu8, 0x88u8, 0x6Cu8, 0xA8u8, 0x17u8, 0xC4u8, 0x16u8, 0xF4u8,
+        0xC2u8, 0x45u8, 0xE1u8, 0xD6u8, 0x3Fu8, 0x3Du8, 0x8Eu8, 0x98u8,
+        0x28u8, 0x4Eu8, 0xF6u8, 0x3Eu8, 0xA5u8, 0xF9u8, 0x0Du8, 0xDFu8,
+        0xD8u8, 0x2Bu8, 0x66u8, 0x7Au8, 0x27u8, 0x2Fu8, 0xF1u8, 0x72u8,
+        0x42u8, 0xD4u8, 0x41u8, 0xC0u8, 0x73u8, 0x67u8, 0xACu8, 0x8Bu8,
+        0xF7u8, 0xADu8, 0x80u8, 0x1Fu8, 0xCAu8, 0x2Cu8, 0xAAu8, 0x34u8,
+        0xD2u8, 0x0Bu8, 0xEEu8, 0xE9u8, 0x5Du8, 0x94u8, 0x18u8, 0xF8u8,
+        0x57u8, 0xAEu8, 0x08u8, 0xC5u8, 0x13u8, 0xCDu8, 0x86u8, 0xB9u8,
+        0xFFu8, 0x7Du8, 0xC1u8, 0x31u8, 0xF5u8, 0x8Au8, 0x6Au8, 0xB1u8,
+        0xD1u8, 0x20u8, 0xD7u8, 0x02u8, 0x22u8, 0x04u8, 0x68u8, 0x71u8,
+        0x07u8, 0xDBu8, 0x9Du8, 0x99u8, 0x61u8, 0xBEu8, 0xE6u8, 0x59u8,
+        0xDDu8, 0x51u8, 0x90u8, 0xDCu8, 0x9Au8, 0xA3u8, 0xABu8, 0xD0u8,
+        0x81u8, 0x0Fu8, 0x47u8, 0x1Au8, 0xE3u8, 0xECu8, 0x8Du8, 0xBFu8,
+        0x96u8, 0x7Bu8, 0x5Cu8, 0xA2u8, 0xA1u8, 0x63u8, 0x23u8, 0x4Du8,
+        0xC8u8, 0x9Eu8, 0x9Cu8, 0x3Au8, 0x0Cu8, 0x2Eu8, 0xBAu8, 0x6Eu8,
+        0x9Fu8, 0x5Au8, 0xF2u8, 0x92u8, 0xF3u8, 0x49u8, 0x78u8, 0xCCu8,
+        0x15u8, 0xFBu8, 0x70u8, 0x75u8, 0x7Fu8, 0x35u8, 0x10u8, 0x03u8,
+        0x64u8, 0x6Du8, 0xC6u8, 0x74u8, 0xD5u8, 0xB4u8, 0xEAu8, 0x09u8,
+        0x76u8, 0x19u8, 0xFEu8, 0x40u8, 0x12u8, 0xE0u8, 0xBDu8, 0x05u8,
+        0xFAu8, 0x01u8, 0xF0u8, 0x2Au8, 0x5Eu8, 0xA9u8, 0x56u8, 0x43u8,
+        0x85u8, 0x14u8, 0x89u8, 0x9Bu8, 0xB0u8, 0xE5u8, 0x48u8, 0x79u8,
+        0x97u8, 0xFCu8, 0x1Eu8, 0x82u8, 0x21u8, 0x8Cu8, 0x1Bu8, 0x5Fu8,
+        0x77u8, 0x54u8, 0xB2u8, 0x1Du8, 0x25u8, 0x4Fu8, 0x00u8, 0x46u8,
+        0xEDu8, 0x58u8, 0x52u8, 0xEBu8, 0x7Eu8, 0xDAu8, 0xC9u8, 0xFDu8,
+        0x30u8, 0x95u8, 0x65u8, 0x3Cu8, 0xB6u8, 0xE4u8, 0xBBu8, 0x7Cu8,
+        0x0Eu8, 0x50u8, 0x39u8, 0x26u8, 0x32u8, 0x84u8, 0x69u8, 0x93u8,
+        0x37u8, 0xE7u8, 0x24u8, 0xA4u8, 0xCBu8, 0x53u8, 0x0Au8, 0x87u8,
+        0xD9u8, 0x4Cu8, 0x83u8, 0x8Fu8, 0xCEu8, 0x3Bu8, 0x4Au8, 0xB7u8
+    ]
+
+# ============================================================================
+# G function — RFC 4269 §2.2
+#
+# Input X is treated as X3||X2||X1||X0 (X0 = least-significant byte)
+# m0=0xFC, m1=0xF3, m2=0xCF, m3=0x3F
+#
+# Z0 = {S0(X0)&m0} ^ {S1(X1)&m1} ^ {S0(X2)&m2} ^ {S1(X3)&m3}
+# Z1 = {S0(X0)&m1} ^ {S1(X1)&m2} ^ {S0(X2)&m3} ^ {S1(X3)&m0}
+# Z2 = {S0(X0)&m2} ^ {S1(X1)&m3} ^ {S0(X2)&m0} ^ {S1(X3)&m1}
+# Z3 = {S0(X0)&m3} ^ {S1(X1)&m0} ^ {S0(X2)&m1} ^ {S1(X3)&m2}
+#
+# Result: Z3||Z2||Z1||Z0 packed as u32 (Z0 in bits 7:0)
+# ============================================================================
+
+fn _g(x: u32) -> u32:
+    val s0 = _s0()
+    val s1 = _s1()
+    val x0: u32 = x & 0xFFu32
+    val x1: u32 = (x >> 8) & 0xFFu32
+    val x2: u32 = (x >> 16) & 0xFFu32
+    val x3: u32 = (x >> 24) & 0xFFu32
+    val s0x0: u32 = s0[x0.to_i64()].to_u32()
+    val s1x1: u32 = s1[x1.to_i64()].to_u32()
+    val s0x2: u32 = s0[x2.to_i64()].to_u32()
+    val s1x3: u32 = s1[x3.to_i64()].to_u32()
+    val z0: u32 = (s0x0 & 0xFCu32) ^ (s1x1 & 0xF3u32) ^ (s0x2 & 0xCFu32) ^ (s1x3 & 0x3Fu32)
+    val z1: u32 = (s0x0 & 0xF3u32) ^ (s1x1 & 0xCFu32) ^ (s0x2 & 0x3Fu32) ^ (s1x3 & 0xFCu32)
+    val z2: u32 = (s0x0 & 0xCFu32) ^ (s1x1 & 0x3Fu32) ^ (s0x2 & 0xFCu32) ^ (s1x3 & 0xF3u32)
+    val z3: u32 = (s0x0 & 0x3Fu32) ^ (s1x1 & 0xFCu32) ^ (s0x2 & 0xF3u32) ^ (s1x3 & 0xCFu32)
+    (z3 << 24) | (z2 << 16) | (z1 << 8) | z0
+
+# ============================================================================
+# Round function F — RFC 4269 §2.1
+#
+# R0' = G[G[G[(R0^Ki0)^(R1^Ki1)] + (R0^Ki0)] + G[(R0^Ki0)^(R1^Ki1)]]
+#        + G[G[(R0^Ki0)^(R1^Ki1)] + (R0^Ki0)]
+# R1' = G[G[G[(R0^Ki0)^(R1^Ki1)] + (R0^Ki0)] + G[(R0^Ki0)^(R1^Ki1)]]
+# ============================================================================
+
+fn _f(r0: u32, r1: u32, ki0: u32, ki1: u32) -> (u32, u32):
+    val x: u32 = r0 ^ ki0
+    val y: u32 = r1 ^ ki1
+    val t: u32 = _g(x ^ y)
+    val c: u32 = _g(t + x)
+    val r1p: u32 = _g(c + t)
+    val r0p: u32 = r1p + c
+    (r0p, r1p)
+
+# ============================================================================
+# Key schedule — RFC 4269 §2.3
+#
+# KC constants — sqrt(2) / sqrt(3) based, 16 values
+# ============================================================================
+
+fn _kc(i: i64) -> u32:
+    if i == 0:  0x9E3779B9u32
+    else if i == 1:  0x3C6EF373u32
+    else if i == 2:  0x78DDE6E6u32
+    else if i == 3:  0xF1BBCDCCu32
+    else if i == 4:  0xE3779B99u32
+    else if i == 5:  0xC6EF3733u32
+    else if i == 6:  0x8DDE6E67u32
+    else if i == 7:  0x1BBCDCCFu32
+    else if i == 8:  0x3779B99Eu32
+    else if i == 9:  0x6EF3733Cu32
+    else if i == 10: 0xDDE6E678u32
+    else if i == 11: 0xBBCDCCF1u32
+    else if i == 12: 0x779B99E3u32
+    else if i == 13: 0xEF3733C6u32
+    else if i == 14: 0xDE6E678Du32
+    else:            0xBCDCCF1Bu32
+
+fn _load32be(buf: [u8], off: i64) -> u32:
+    val b0: u32 = buf[off].to_u32()
+    val b1: u32 = buf[off + 1].to_u32()
+    val b2: u32 = buf[off + 2].to_u32()
+    val b3: u32 = buf[off + 3].to_u32()
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+# Key schedule returns 32 subkeys as a flat [u32] array, interleaved (ki0, ki1)
+# rk[2*i] = Ki0, rk[2*i+1] = Ki1 for round i+1
+fn _key_schedule(key: [u8]) -> [u32]:
+    var k0: u32 = _load32be(key, 0)
+    var k1: u32 = _load32be(key, 4)
+    var k2: u32 = _load32be(key, 8)
+    var k3: u32 = _load32be(key, 12)
+    var rk: [u32] = []
+    var i: i64 = 0
+    while i < 16:
+        val kc = _kc(i)
+        val rk0: u32 = _g(k0 + k2 - kc)
+        val rk1: u32 = _g(k1 - k3 + kc)
+        rk.push(rk0)
+        rk.push(rk1)
+        if (i % 2) == 0:
+            # Even index: rotate K0||K1 right 8 bits
+            val nk0: u32 = (k0 >> 8) | (k1 << 24)
+            val nk1: u32 = (k1 >> 8) | (k0 << 24)
+            k0 = nk0
+            k1 = nk1
+        else:
+            # Odd index: rotate K2||K3 left 8 bits
+            val nk2: u32 = (k2 << 8) | (k3 >> 24)
+            val nk3: u32 = (k3 << 8) | (k2 >> 24)
+            k2 = nk2
+            k3 = nk3
+        i = i + 1
+    rk
+
+# ============================================================================
+# Feistel encrypt core
+#
+# 128-bit input: L = L0||L1 (most-significant), R = R0||R1
+# Rounds 1-15: T=R; R=L^F(Ki,R); L=T
+# Round 16:    L=L^F(K16,R); R unchanged
+# Output: L0||L1||R0||R1 big-endian
+# ============================================================================
+
+fn seed_encrypt_block(key: [u8], block: [u8]) -> [u8]:
+    val rk = _key_schedule(key)
+    var l0: u32 = _load32be(block, 0)
+    var l1: u32 = _load32be(block, 4)
+    var r0: u32 = _load32be(block, 8)
+    var r1: u32 = _load32be(block, 12)
+    var round: i64 = 0
+    while round < 15:
+        val ki0: u32 = rk[round * 2]
+        val ki1: u32 = rk[round * 2 + 1]
+        val fr = _f(r0, r1, ki0, ki1)
+        val nl0: u32 = r0
+        val nl1: u32 = r1
+        val nr0: u32 = l0 ^ fr.0
+        val nr1: u32 = l1 ^ fr.1
+        l0 = nl0
+        l1 = nl1
+        r0 = nr0
+        r1 = nr1
+        round = round + 1
+    val fr16 = _f(r0, r1, rk[30], rk[31])
+    l0 = l0 ^ fr16.0
+    l1 = l1 ^ fr16.1
+    var out: [u8] = []
+    out.push(((l0 >> 24) & 0xFFu32).to_u8())
+    out.push(((l0 >> 16) & 0xFFu32).to_u8())
+    out.push(((l0 >> 8) & 0xFFu32).to_u8())
+    out.push((l0 & 0xFFu32).to_u8())
+    out.push(((l1 >> 24) & 0xFFu32).to_u8())
+    out.push(((l1 >> 16) & 0xFFu32).to_u8())
+    out.push(((l1 >> 8) & 0xFFu32).to_u8())
+    out.push((l1 & 0xFFu32).to_u8())
+    out.push(((r0 >> 24) & 0xFFu32).to_u8())
+    out.push(((r0 >> 16) & 0xFFu32).to_u8())
+    out.push(((r0 >> 8) & 0xFFu32).to_u8())
+    out.push((r0 & 0xFFu32).to_u8())
+    out.push(((r1 >> 24) & 0xFFu32).to_u8())
+    out.push(((r1 >> 16) & 0xFFu32).to_u8())
+    out.push(((r1 >> 8) & 0xFFu32).to_u8())
+    out.push((r1 & 0xFFu32).to_u8())
+    out
+
+# ============================================================================
+# Feistel decrypt core
+#
+# Uses same structure as encrypt but iterates subkeys in reverse order.
+# ============================================================================
+
+fn seed_decrypt_block(key: [u8], block: [u8]) -> [u8]:
+    val rk = _key_schedule(key)
+    var l0: u32 = _load32be(block, 0)
+    var l1: u32 = _load32be(block, 4)
+    var r0: u32 = _load32be(block, 8)
+    var r1: u32 = _load32be(block, 12)
+    val fr16 = _f(r0, r1, rk[30], rk[31])
+    l0 = l0 ^ fr16.0
+    l1 = l1 ^ fr16.1
+    var round: i64 = 14
+    while round >= 0:
+        val ki0: u32 = rk[round * 2]
+        val ki1: u32 = rk[round * 2 + 1]
+        val fr = _f(r0, r1, ki0, ki1)
+        val nl0: u32 = r0
+        val nl1: u32 = r1
+        val nr0: u32 = l0 ^ fr.0
+        val nr1: u32 = l1 ^ fr.1
+        l0 = nl0
+        l1 = nl1
+        r0 = nr0
+        r1 = nr1
+        round = round - 1
+    var out: [u8] = []
+    out.push(((l0 >> 24) & 0xFFu32).to_u8())
+    out.push(((l0 >> 16) & 0xFFu32).to_u8())
+    out.push(((l0 >> 8) & 0xFFu32).to_u8())
+    out.push((l0 & 0xFFu32).to_u8())
+    out.push(((l1 >> 24) & 0xFFu32).to_u8())
+    out.push(((l1 >> 16) & 0xFFu32).to_u8())
+    out.push(((l1 >> 8) & 0xFFu32).to_u8())
+    out.push((l1 & 0xFFu32).to_u8())
+    out.push(((r0 >> 24) & 0xFFu32).to_u8())
+    out.push(((r0 >> 16) & 0xFFu32).to_u8())
+    out.push(((r0 >> 8) & 0xFFu32).to_u8())
+    out.push((r0 & 0xFFu32).to_u8())
+    out.push(((r1 >> 24) & 0xFFu32).to_u8())
+    out.push(((r1 >> 16) & 0xFFu32).to_u8())
+    out.push(((r1 >> 8) & 0xFFu32).to_u8())
+    out.push((r1 & 0xFFu32).to_u8())
+    out

@@ -1,0 +1,188 @@
+# TEA and XTEA Block Ciphers — Pure Simple Implementation
+#
+# TEA (Tiny Encryption Algorithm):
+#   64-bit block, 128-bit key, 64 rounds (32 cycles × 2 Feistel rounds).
+#   Delta: 0x9E3779B9. Big-endian byte order.
+#   Reference: D. Wheeler, R. Needham — "TEA, a Tiny Encryption Algorithm" (1994)
+#
+# XTEA (eXtended TEA):
+#   Same block/key size. 64 rounds (32 cycles).
+#   Different key schedule: key index selected by (sum & 3) or ((sum>>11) & 3).
+#   Reference: D. Wheeler, R. Needham — "Tea extensions" (1997)
+#
+# Exposed API:
+#   tea_encrypt(key: [u8], plaintext: [u8]) -> [u8]
+#   tea_decrypt(key: [u8], ciphertext: [u8]) -> [u8]
+#   xtea_encrypt(key: [u8], plaintext: [u8]) -> [u8]
+#   xtea_decrypt(key: [u8], ciphertext: [u8]) -> [u8]
+#
+# No SFFI/Rust FFI — pure Simple, suitable for baremetal.
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+fn _tea_delta() -> u32: 0x9E3779B9
+fn _tea_mask()  -> u32: 0xFFFFFFFF
+
+# ============================================================================
+# Big-endian block I/O — 8-byte block, 16-byte key
+# ============================================================================
+
+fn _load_be32_pair(b: [u8]) -> [u32]:
+    """Load 8 bytes as 2 big-endian u32 words: [v0, v1]."""
+    var w: [u32] = []
+    val w0 = ((b[0].to_u32() << 24) & 0xFFFFFFFF) |
+             ((b[1].to_u32() << 16) & 0xFFFFFFFF) |
+             ((b[2].to_u32() << 8)  & 0xFFFFFFFF) |
+              b[3].to_u32()
+    val w1 = ((b[4].to_u32() << 24) & 0xFFFFFFFF) |
+             ((b[5].to_u32() << 16) & 0xFFFFFFFF) |
+             ((b[6].to_u32() << 8)  & 0xFFFFFFFF) |
+              b[7].to_u32()
+    w.push(w0)
+    w.push(w1)
+    w
+
+fn _store_be32_pair(v0: u32, v1: u32) -> [u8]:
+    """Store 2 u32 words as 8 bytes, big-endian."""
+    var out: [u8] = []
+    out.push(((v0 >> 24) & 0xFF).to_u8())
+    out.push(((v0 >> 16) & 0xFF).to_u8())
+    out.push(((v0 >> 8)  & 0xFF).to_u8())
+    out.push((v0         & 0xFF).to_u8())
+    out.push(((v1 >> 24) & 0xFF).to_u8())
+    out.push(((v1 >> 16) & 0xFF).to_u8())
+    out.push(((v1 >> 8)  & 0xFF).to_u8())
+    out.push((v1         & 0xFF).to_u8())
+    out
+
+fn _load_key_be(key: [u8]) -> [u32]:
+    """Load 16-byte key as 4 big-endian u32 words: [k0, k1, k2, k3]."""
+    var k: [u32] = []
+    val k0 = ((key[0].to_u32()  << 24) & 0xFFFFFFFF) |
+             ((key[1].to_u32()  << 16) & 0xFFFFFFFF) |
+             ((key[2].to_u32()  << 8)  & 0xFFFFFFFF) |
+              key[3].to_u32()
+    val k1 = ((key[4].to_u32()  << 24) & 0xFFFFFFFF) |
+             ((key[5].to_u32()  << 16) & 0xFFFFFFFF) |
+             ((key[6].to_u32()  << 8)  & 0xFFFFFFFF) |
+              key[7].to_u32()
+    val k2 = ((key[8].to_u32()  << 24) & 0xFFFFFFFF) |
+             ((key[9].to_u32()  << 16) & 0xFFFFFFFF) |
+             ((key[10].to_u32() << 8)  & 0xFFFFFFFF) |
+              key[11].to_u32()
+    val k3 = ((key[12].to_u32() << 24) & 0xFFFFFFFF) |
+             ((key[13].to_u32() << 16) & 0xFFFFFFFF) |
+             ((key[14].to_u32() << 8)  & 0xFFFFFFFF) |
+              key[15].to_u32()
+    k.push(k0)
+    k.push(k1)
+    k.push(k2)
+    k.push(k3)
+    k
+
+# ============================================================================
+# TEA encrypt / decrypt
+# ============================================================================
+
+fn tea_encrypt(key: [u8], plaintext: [u8]) -> [u8]:
+    """Encrypt an 8-byte block with a 16-byte key using TEA (32 cycles)."""
+    val k = _load_key_be(key)
+    val words = _load_be32_pair(plaintext)
+    var v0 = words[0]
+    var v1 = words[1]
+    val k0 = k[0]
+    val k1 = k[1]
+    val k2 = k[2]
+    val k3 = k[3]
+    var s: u32 = 0
+    var i: i64 = 0
+    while i < 32:
+        s = (s + _tea_delta()) & _tea_mask()
+        val t0a = ((v1 << 4) & _tea_mask()) + k0
+        val t0b = (v1 + s) & _tea_mask()
+        val t0c = ((v1 >> 5) & _tea_mask()) + k1
+        v0 = (v0 + ((t0a ^ t0b ^ t0c) & _tea_mask())) & _tea_mask()
+        val t1a = ((v0 << 4) & _tea_mask()) + k2
+        val t1b = (v0 + s) & _tea_mask()
+        val t1c = ((v0 >> 5) & _tea_mask()) + k3
+        v1 = (v1 + ((t1a ^ t1b ^ t1c) & _tea_mask())) & _tea_mask()
+        i = i + 1
+    _store_be32_pair(v0, v1)
+
+fn tea_decrypt(key: [u8], ciphertext: [u8]) -> [u8]:
+    """Decrypt an 8-byte block with a 16-byte key using TEA (32 cycles)."""
+    val k = _load_key_be(key)
+    val words = _load_be32_pair(ciphertext)
+    var v0 = words[0]
+    var v1 = words[1]
+    val k0 = k[0]
+    val k1 = k[1]
+    val k2 = k[2]
+    val k3 = k[3]
+    # sum starts at delta*32
+    var s: u32 = (0xC6EF3720) & _tea_mask()
+    var i: i64 = 0
+    while i < 32:
+        val t1a = ((v0 << 4) & _tea_mask()) + k2
+        val t1b = (v0 + s) & _tea_mask()
+        val t1c = ((v0 >> 5) & _tea_mask()) + k3
+        v1 = (v1 - ((t1a ^ t1b ^ t1c) & _tea_mask())) & _tea_mask()
+        val t0a = ((v1 << 4) & _tea_mask()) + k0
+        val t0b = (v1 + s) & _tea_mask()
+        val t0c = ((v1 >> 5) & _tea_mask()) + k1
+        v0 = (v0 - ((t0a ^ t0b ^ t0c) & _tea_mask())) & _tea_mask()
+        s = (s - _tea_delta()) & _tea_mask()
+        i = i + 1
+    _store_be32_pair(v0, v1)
+
+# ============================================================================
+# XTEA encrypt / decrypt
+# ============================================================================
+
+fn xtea_encrypt(key: [u8], plaintext: [u8]) -> [u8]:
+    """Encrypt an 8-byte block with a 16-byte key using XTEA (32 cycles)."""
+    val k = _load_key_be(key)
+    val words = _load_be32_pair(plaintext)
+    var v0 = words[0]
+    var v1 = words[1]
+    var s: u32 = 0
+    var i: i64 = 0
+    while i < 32:
+        val ki0 = s & 3
+        val mix0a = (((v1 << 4) & _tea_mask()) ^ ((v1 >> 5) & _tea_mask())) & _tea_mask()
+        val mix0 = (mix0a + v1) & _tea_mask()
+        val key0 = (s + k[ki0.to_i64()]) & _tea_mask()
+        v0 = (v0 + ((mix0 ^ key0) & _tea_mask())) & _tea_mask()
+        s = (s + _tea_delta()) & _tea_mask()
+        val ki1 = (s >> 11) & 3
+        val mix1a = (((v0 << 4) & _tea_mask()) ^ ((v0 >> 5) & _tea_mask())) & _tea_mask()
+        val mix1 = (mix1a + v0) & _tea_mask()
+        val key1 = (s + k[ki1.to_i64()]) & _tea_mask()
+        v1 = (v1 + ((mix1 ^ key1) & _tea_mask())) & _tea_mask()
+        i = i + 1
+    _store_be32_pair(v0, v1)
+
+fn xtea_decrypt(key: [u8], ciphertext: [u8]) -> [u8]:
+    """Decrypt an 8-byte block with a 16-byte key using XTEA (32 cycles)."""
+    val k = _load_key_be(key)
+    val words = _load_be32_pair(ciphertext)
+    var v0 = words[0]
+    var v1 = words[1]
+    var s: u32 = (0xC6EF3720) & _tea_mask()
+    var i: i64 = 0
+    while i < 32:
+        val ki1 = (s >> 11) & 3
+        val mix1a = (((v0 << 4) & _tea_mask()) ^ ((v0 >> 5) & _tea_mask())) & _tea_mask()
+        val mix1 = (mix1a + v0) & _tea_mask()
+        val key1 = (s + k[ki1.to_i64()]) & _tea_mask()
+        v1 = (v1 - ((mix1 ^ key1) & _tea_mask())) & _tea_mask()
+        s = (s - _tea_delta()) & _tea_mask()
+        val ki0 = s & 3
+        val mix0a = (((v1 << 4) & _tea_mask()) ^ ((v1 >> 5) & _tea_mask())) & _tea_mask()
+        val mix0 = (mix0a + v1) & _tea_mask()
+        val key0 = (s + k[ki0.to_i64()]) & _tea_mask()
+        v0 = (v0 - ((mix0 ^ key0) & _tea_mask())) & _tea_mask()
+        i = i + 1
+    _store_be32_pair(v0, v1)
