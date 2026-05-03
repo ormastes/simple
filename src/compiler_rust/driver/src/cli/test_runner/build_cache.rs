@@ -197,6 +197,7 @@ impl BuildCache {
 
 fn native_test_source_dirs(project_root: &Path) -> Vec<PathBuf> {
     let candidates = [
+        project_root.join("src"),
         project_root.join("src/compiler"),
         project_root.join("src/app"),
         project_root.join("src/lib"),
@@ -255,6 +256,7 @@ mod tests {
         assert_eq!(
             dirs,
             vec![
+                tmp.path().join("src"),
                 tmp.path().join("src/compiler"),
                 tmp.path().join("src/app"),
                 tmp.path().join("src/lib"),

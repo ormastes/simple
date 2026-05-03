@@ -1,0 +1,227 @@
+# INI file parser and writer
+#
+# Format support:
+#   [SectionName]        — section header
+#   key = value          — key-value pair (spaces around = are trimmed)
+#   key=value            — key-value pair (no spaces)
+#   ; comment            — semicolon comment (ignored)
+#   # comment            — hash comment (ignored)
+#   Global keys (before any section) are stored in section "".
+#
+# Entries representation: untyped list of triples [section, key, value].
+# Each entry is an untyped list: .get(0)=section, .get(1)=key, .get(2)=value.
+#
+# Usage:
+#   use std.common.encoding.ini.{ini_parse, ini_get, ini_set, ini_remove,
+#       ini_sections, ini_keys, ini_encode}
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _ini_make_entry(sect: text, k: text, v: text) -> list:
+    """Create a [section, key, value] entry list."""
+    var e = []
+    e.push(sect)
+    e.push(k)
+    e.push(v)
+    e
+
+fn _ini_entry_section(entry: list) -> text:
+    """Get section from entry."""
+    entry.get(0)
+
+fn _ini_entry_key(entry: list) -> text:
+    """Get key from entry."""
+    entry.get(1)
+
+fn _ini_entry_value(entry: list) -> text:
+    """Get value from entry."""
+    entry.get(2)
+
+fn _ini_line_is_comment(line: text) -> bool:
+    """Return true if line is a comment (; or #)."""
+    val t = line.trim()
+    if t.length() == 0:
+        return false
+    val first = t.substring(0, 1)
+    first == ";" or first == "#"
+
+fn _ini_line_is_section(line: text) -> bool:
+    """Return true if line is a section header [...]."""
+    val t = line.trim()
+    if t.length() < 3:
+        return false
+    t.starts_with("[") and t.contains("]")
+
+fn _ini_parse_section(line: text) -> text:
+    """Extract section name from [SectionName] line."""
+    val t = line.trim()
+    val open_idx = t.index_of("[")
+    val close_idx = t.index_of("]")
+    if open_idx < 0 or close_idx <= open_idx:
+        return ""
+    t.substring(open_idx + 1, close_idx).trim()
+
+fn _ini_line_is_kv(line: text) -> bool:
+    """Return true if line contains a key=value pair."""
+    val t = line.trim()
+    if t.length() == 0:
+        return false
+    if _ini_line_is_comment(t):
+        return false
+    if _ini_line_is_section(t):
+        return false
+    t.contains("=")
+
+fn _ini_parse_key(line: text) -> text:
+    """Extract key from 'key = value' line."""
+    val t = line.trim()
+    val eq_idx = t.index_of("=")
+    if eq_idx < 0:
+        return ""
+    t.substring(0, eq_idx).trim()
+
+fn _ini_parse_value(line: text) -> text:
+    """Extract value from 'key = value' line."""
+    val t = line.trim()
+    val eq_idx = t.index_of("=")
+    if eq_idx < 0:
+        return ""
+    t.substring(eq_idx + 1, t.length()).trim()
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn ini_parse(content: text) -> list:
+    """Parse INI content into a list of [section, key, value] entries.
+    Comments and blank lines are skipped.
+    Global keys (before any section) use section name "".
+    Returns: untyped list of entries, each an untyped list [section, key, value]."""
+    var entries = []
+    val lines = content.split("\n")
+    val n = lines.length()
+    var current_section = ""
+    var i = 0
+    while i < n:
+        val line = lines.get(i)
+        val trimmed = line.trim()
+        if trimmed == "":
+            i = i + 1
+        elif _ini_line_is_comment(line):
+            i = i + 1
+        elif _ini_line_is_section(line):
+            current_section = _ini_parse_section(line)
+            i = i + 1
+        elif _ini_line_is_kv(line):
+            val k = _ini_parse_key(line)
+            val v = _ini_parse_value(line)
+            if k.length() > 0:
+                entries.push(_ini_make_entry(current_section, k, v))
+            i = i + 1
+        else:
+            i = i + 1
+    entries
+
+fn ini_get(entries: list, section: text, key: text) -> text:
+    """Get value for section.key from entries.
+    Returns "" if not found."""
+    val n = entries.length()
+    var i = 0
+    var result = ""
+    var found = false
+    while (i < n and not found):
+        val entry = entries.get(i)
+        if (_ini_entry_section(entry) == section and _ini_entry_key(entry) == key):
+            result = _ini_entry_value(entry)
+            found = true
+        i = i + 1
+    result
+
+fn ini_set(entries: list, section: text, key: text, value: text) -> list:
+    """Set or update the value for section.key.
+    If the entry exists, updates it; otherwise appends a new entry.
+    Returns a new entries list."""
+    var new_entries = []
+    val n = entries.length()
+    var found = false
+    var i = 0
+    while i < n:
+        val entry = entries.get(i)
+        if (_ini_entry_section(entry) == section and _ini_entry_key(entry) == key):
+            new_entries.push(_ini_make_entry(section, key, value))
+            found = true
+        else:
+            new_entries.push(entry)
+        i = i + 1
+    if not found:
+        new_entries.push(_ini_make_entry(section, key, value))
+    new_entries
+
+fn ini_remove(entries: list, section: text, key: text) -> list:
+    """Remove the entry for section.key from entries.
+    Returns a new entries list without the removed entry."""
+    var new_entries = []
+    val n = entries.length()
+    var i = 0
+    while i < n:
+        val entry = entries.get(i)
+        if not (_ini_entry_section(entry) == section and _ini_entry_key(entry) == key):
+            new_entries.push(entry)
+        i = i + 1
+    new_entries
+
+fn ini_sections(entries: list) -> [text]:
+    """Return unique section names in order of first appearance.
+    Includes "" if there are global keys."""
+    var sections: [text] = []
+    val n = entries.length()
+    var i = 0
+    while i < n:
+        val entry = entries.get(i)
+        val sect = _ini_entry_section(entry)
+        var already = false
+        var j = 0
+        while j < sections.len():
+            if sections[j] == sect:
+                already = true
+            j = j + 1
+        if not already:
+            sections.push(sect)
+        i = i + 1
+    sections
+
+fn ini_keys(entries: list, section: text) -> [text]:
+    """Return keys in the given section in order of appearance."""
+    var keys: [text] = []
+    val n = entries.length()
+    var i = 0
+    while i < n:
+        val entry = entries.get(i)
+        if _ini_entry_section(entry) == section:
+            keys.push(_ini_entry_key(entry))
+        i = i + 1
+    keys
+
+fn ini_encode(entries: list) -> text:
+    """Serialize entries back to INI format.
+    Global entries ("") come first without a section header."""
+    val sections = ini_sections(entries)
+    var result = ""
+    var si = 0
+    while si < sections.len():
+        val sect = sections[si]
+        if sect != "":
+            if result.length() > 0:
+                result = result + "\n"
+            result = result + "[" + sect + "]\n"
+        val n = entries.length()
+        var i = 0
+        while i < n:
+            val entry = entries.get(i)
+            if _ini_entry_section(entry) == sect:
+                result = result + _ini_entry_key(entry) + " = " + _ini_entry_value(entry) + "\n"
+            i = i + 1
+        si = si + 1
+    result
