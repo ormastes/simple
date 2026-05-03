@@ -1,102 +1,140 @@
 # Simple DB Shared Accel Perf Evidence
 
-**Date:** 2026-05-02  
+**Report file date:** 2026-05-02  
+**Latest verification in this update:** 2026-05-03  
 **Scope:** Phase 1 shared accel verification for SDN, DBFS, and `spostgre`
 
-## What Ran
+## Status
 
-Benchmark script:
+Status: `WARN`
 
-- `bin/simple run test/perf/bench/simple_db_shared_accel.spl`
+- The benchmark harness was rerun successfully on 2026-05-03.
+- The current runtime semantics are shared-path plus scalar fallback, not active
+  SIMD kernels.
+- The old 2026-05-02 statement that `simd_active=true` is not valid for the
+  current harness and is superseded by the rerun below.
+
+## What Ran In This Update
+
+Focused correctness check:
+
+- `bin/simple test test/unit/lib/db/accel_spec.spl`
 
 Startup probe:
 
-- `/usr/bin/time -f "run=%i elapsed=%e rss_kib=%M" bin/simple -c "print 1"`
+- `/usr/bin/time -f "run=%C elapsed=%e rss_kib=%M" bin/simple -c "print 1"`
 
-Fallback / behavior coverage already in tree:
+Benchmark rerun:
 
-- `bin/simple test test/unit/lib/db/accel_spec.spl`
-- `bin/simple test test/unit/lib/database/database_query_spec.spl`
-- `bin/simple test --clean test/integration/lib/database_query_spec.spl`
-- `bin/simple test --clean test/dbfs/dbfs_catalog_schema_spec.spl`
-- `bin/simple test --clean examples/spostgre/test/unit/scan_test.spl`
+- `/usr/bin/time -f "elapsed=%e rss_kib=%M" bin/simple run test/perf/bench/simple_db_shared_accel.spl`
 
-## Host Capability
+## Current Verified Semantics (2026-05-03)
 
-From `accel_capability_report()` during the benchmark run:
+From the successful benchmark rerun:
 
 - tier: `x86_64_avx2`
-- `simd_active=true`
+- `simd_available=true`
+- `simd_active=false`
 - `scalar_fallback=true`
 - width: `256`
 
 Interpretation:
 
 - host SIMD capability detection is live
-- Phase 1 shared accel still executes scalar kernels
-- current numbers therefore measure the cost of the shared abstraction layer,
-  bitmap materialization, and batching structure, not ISA-specific speedups
+- Phase 1 DB accel kernels are still running the scalar-oracle path
+- benchmark labels that say `shared` or `shared_fallback` currently measure
+  shared API, bitmap, row-id, and coarse-filter overhead around scalar behavior
 
-## Startup / RSS
+## Correctness Cross-Check
+
+Verified in this update:
+
+- `test/unit/lib/db/accel_spec.spl` passed: `11` examples, `0` failures
+- `test/perf/bench/simple_db_shared_accel.spl` now runs a preflight before
+  timing and completed successfully on 2026-05-03
+
+Preflight scope inside the benchmark:
+
+- shared text scan count vs scalar text count
+- SDN shared query row count vs scalar row count
+- DBFS `find_child_accel` result vs scalar lookup
+- DBFS prefix result count vs scalar prefix count
+- `spostgre` shared fullscan count vs scalar fullscan count
+- `spostgre` BRIN-refine count vs scalar BRIN-refine count
+
+## Startup / RSS (2026-05-03)
 
 External startup probe (`bin/simple -c "print 1"`):
 
 - run 1: `elapsed=0.03`, `rss_kib=16640`
-- run 2: `elapsed=0.03`, `rss_kib=16640`
-- run 3: `elapsed=0.03`, `rss_kib=16896`
+- run 2: `elapsed=0.02`, `rss_kib=17152`
+- run 3: `elapsed=0.02`, `rss_kib=17152`
 
 Observed result:
 
-- no obvious startup regression signal from the shared accel tranche
-- warm startup stayed at `0.03s`
+- no obvious startup regression signal from this benchmarked path
+- warm startup stayed within `0.02s` to `0.03s`
 - max RSS stayed below `17 MiB` on this probe
 
-## Steady-State Benchmark Highlights
+## Benchmark Rerun Highlights (2026-05-03)
 
 Timed whole benchmark invocation:
 
-- `elapsed=30.54`
-- `rss_kib=32256`
+- `elapsed=7.36`
+- `rss_kib=35540`
 
-Representative p50 results from the benchmark body:
+Representative p50 results from the rerun:
 
 | Workload | p50 |
 | --- | ---: |
-| `accel_text_scan_contains` | `334227307 ns` |
-| `scalar_text_scan_contains` | `1644328 ns` |
-| `sdn_query_batch_filter` | `85209683 ns` |
-| `sdn_query_scalar_filter` | `7624972 ns` |
-| `dbfs_find_child_accel` | `33531271 ns` |
-| `dbfs_find_child_scalar` | `7577160 ns` |
-| `dbfs_prefix_accel` | `37763728 ns` |
-| `dbfs_prefix_scalar` | `8752143 ns` |
-| `spostgre_scan_accel` | `350007651 ns` |
-| `spostgre_scan_scalar` | `1625942 ns` |
+| `shared_text_scan_fallback_contains` | `9564555 ns` |
+| `shared_text_scan_fallback_contains_row_ids` | `14120971 ns` |
+| `scalar_text_scan_contains_loop` | `1671610 ns` |
+| `scalar_text_scan_contains_bitmap_build` | `4995404 ns` |
+| `sdn_querybuilder_execute_rows_shared_fallback` | `10647902 ns` |
+| `sdn_handrolled_scalar_filter_rows` | `8240588 ns` |
+| `dbfs_find_child_accel` | `2194959 ns` |
+| `dbfs_find_child_scalar` | `7433728 ns` |
+| `dbfs_prefix_accel` | `5213110 ns` |
+| `dbfs_prefix_scalar` | `8579786 ns` |
+| `spostgre_shared_fallback_fullscan` | `8031719 ns` |
+| `spostgre_shared_fallback_brin_refine` | `68678279 ns` |
+| `spostgre_scalar_brin_refine` | `22837608 ns` |
+| `spostgre_scalar_fullscan_count_only` | `2487618 ns` |
+| `spostgre_text_search_candidates` | `26559912 ns` |
 
-## Findings
+## Reading The Numbers
 
-1. Phase 1 shared accel is functionally wired, but it is not yet a speed win on this host.
-2. The current accel path is slower than the direct scalar baselines for all measured workloads.
-3. That matches the implementation reality:
-   - bitmap materialization is real
-   - batching is real
-   - host capability reporting is real
-   - ISA-specific SIMD kernels are **not** landed yet
-4. The benchmark is still useful because it establishes a pre-SIMD baseline for:
-   - SDN batch filtering
-   - DBFS namespace summary/prefix scans
-   - `spostgre` tuple-text filtering
+Current takeaways:
+
+1. The rerun confirms the harness is measuring shared-scalar fallback behavior,
+   not active SIMD execution.
+2. The text and `spostgre` shared/fallback paths remain slower than their
+   leaner scalar baselines on this host.
+3. The SDN shared row-materializing path is still slower than the hand-rolled
+   scalar row-materializing loop.
+4. DBFS is mixed: the current shared accel helpers beat the local scalar loops
+   for `find_child` and prefix scans in this rerun.
+5. `spostgre_shared_fallback_brin_refine` must be compared against
+   `spostgre_scalar_brin_refine`, not the count-only fullscan baseline.
+
+## Historical Note About 2026-05-02
+
+This file name remains dated `2026-05-02`, but the report now contains a
+2026-05-03 rerun because the prior text no longer matched current harness
+semantics.
+
+Treat the following as historical-only and superseded:
+
+- the old claim that `simd_active=true`
+- older benchmark labels such as `accel_text_scan_contains`,
+  `sdn_query_batch_filter`, and `spostgre_scan_accel`
+- any interpretation that the Phase 1 numbers reflected active ISA-specific
+  DB kernels
 
 ## Conclusion
 
-Status: `WARN`
-
-- correctness and fallback coverage are in place
-- startup/RSS look stable for this tranche
-- steady-state latency evidence shows the current shared layer is a structural
-  baseline, not a performance win yet
-
-Next action:
-
-- use `test/perf/bench/simple_db_shared_accel.spl` as the before/after harness
-  when real AVX2/NEON kernels are added to `std.db.accel`
+The benchmark is still useful, but only as a shared-fallback baseline and
+correctness guard for later SIMD work. Use
+`test/perf/bench/simple_db_shared_accel.spl` as the before/after harness when
+real DB accel SIMD kernels land.

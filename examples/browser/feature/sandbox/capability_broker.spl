@@ -12,7 +12,7 @@
 use std.io_runtime.{file_read}
 use examples.browser.entity.ipc.process_types.{ProcessId}
 use examples.browser.entity.ipc.message_types.{BrowserIpcMsg, BrowserIpcMethod}
-use examples.browser.shared.logging.{Logger}
+use examples.browser.shared.logging.{Logger, LogLevel}
 use examples.browser.shared.error.{BrowserError, sandbox_error}
 
 # MP-4: Capability type constants
@@ -33,7 +33,7 @@ class SandboxPolicy:
         SandboxPolicy(capabilities: capabilities, denied: denied, pledge: pledge, unveil_paths: unveil_paths)
 
     static fn empty() -> SandboxPolicy:
-        SandboxPolicy(capabilities: [text](), denied: [text](), pledge: false, unveil_paths: [text]())
+        SandboxPolicy(capabilities: [], denied: [], pledge: false, unveil_paths: [])
 
 class PolicyEntry:
     pid_id: i64
@@ -47,7 +47,12 @@ class CapabilityBroker:
     policies: [PolicyEntry]
 
     static fn create_broker(logger: Logger) -> CapabilityBroker:
-        CapabilityBroker(logger: logger, policies: [PolicyEntry]())
+        CapabilityBroker(logger: logger, policies: [])
+
+    static fn new(logger: Logger) -> CapabilityBroker:
+        CapabilityBroker.create_broker(logger)
+
+impl CapabilityBroker:
 
     me apply_sandbox(pid: ProcessId, profile: text) -> Result<(), BrowserError>:
         val policy = self.load_profile(profile)
@@ -227,9 +232,9 @@ class CapabilityBroker:
 
         var section = ""
         var collecting_key = ""
-        var capabilities = [text]()
-        var denied = [text]()
-        var unveil_paths = [text]()
+        var capabilities: [text] = []
+        var denied: [text] = []
+        var unveil_paths: [text] = []
         var pledge = false
         var saw_profile = false
 
@@ -248,9 +253,7 @@ class CapabilityBroker:
                     if trimmed == "]":
                         collecting_key = ""
                     else:
-                        val item = _normalize_item(trimmed)
-                        if item.len() > 0:
-                            _push_list_item(collecting_key, item, capabilities, denied, unveil_paths)
+                        _append_list_items(collecting_key, trimmed, capabilities, denied, unveil_paths)
                 else:
                     val colon_index = trimmed.index_of(":")
                     if colon_index < 0:
@@ -279,7 +282,10 @@ fn _assign_inline_list(key: text, value: text, capabilities: [text], denied: [te
     val inner = value.substring(1, value.len() - 1).trim()
     if inner.len() == 0:
         return
-    for piece in inner.split(","):
+    _append_list_items(key, inner, capabilities, denied, unveil_paths)
+
+fn _append_list_items(key: text, raw_items: text, capabilities: [text], denied: [text], unveil_paths: [text]):
+    for piece in raw_items.split(","):
         val item = _normalize_item(piece)
         if item.len() > 0:
             _push_list_item(key, item, capabilities, denied, unveil_paths)
@@ -299,3 +305,8 @@ fn _normalize_item(raw: text) -> text:
     if item.starts_with("\"") and item.ends_with("\"") and item.len() >= 2:
         item = item.substring(1, item.len() - 1)
     item
+
+fn load_sandbox_policy(profile: text) -> Result<SandboxPolicy, BrowserError>:
+    val logger = Logger.new("sandbox-policy-loader", LogLevel.Error)
+    val broker = CapabilityBroker.create_broker(logger)
+    broker.load_profile(profile)

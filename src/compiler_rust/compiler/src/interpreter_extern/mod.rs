@@ -897,6 +897,8 @@ pub(crate) fn call_extern_function(
         "rt_simd_clmul_lo_u64" => simd::rt_simd_clmul_lo_u64(&evaluated),
         "rt_simd_clmul_hi_u64" => simd::rt_simd_clmul_hi_u64(&evaluated),
         "rt_simd_xor_u64x2" => simd::rt_simd_xor_u64x2(&evaluated),
+        "rt_db_accel_bitmap_and_words" => simd::rt_db_accel_bitmap_and_words(&evaluated),
+        "rt_db_accel_bitmap_or_words" => simd::rt_db_accel_bitmap_or_words(&evaluated),
 
         // ====================================================================
         // Diagram FFI Functions (12 functions)

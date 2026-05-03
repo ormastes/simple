@@ -81,3 +81,25 @@ describe "Database Query — shared accel batching":
         expect results.len() == 2
         expect results[0].get("id")? == "1"
         expect results[1].get("id")? == "3"
+
+    it "keeps execute_bitmap semantics across chained filters":
+        val table = make_table("files", ["id", "path", "kind", "status"], [
+            [("id", "1"), ("path", "src/main.spl"), ("kind", "code"), ("status", "Open")],
+            [("id", "2"), ("path", "src/lib.rs"), ("kind", "code"), ("status", "Closed")],
+            [("id", "3"), ("path", "doc/readme.md"), ("kind", "doc"), ("status", "Open")],
+            [("id", "4"), ("path", "src/query.spl"), ("kind", "code"), ("status", "Open")],
+            [("id", "5"), ("path", "src/query.txt"), ("kind", "doc"), ("status", "Open")]
+        ])
+
+        val builder = QueryBuilder.for_table(table)
+            .filter_by("path", CompareOp.StartsWith, "src/")
+            .filter_in("status", ["Open", "Closed"])
+            .filter_by("kind", CompareOp.Eq, "code")
+        val bitmap = builder.execute_bitmap()
+
+        expect bitmap.count() == 3
+        expect bitmap.get(0) == true
+        expect bitmap.get(1) == true
+        expect bitmap.get(2) == false
+        expect bitmap.get(3) == true
+        expect bitmap.get(4) == false

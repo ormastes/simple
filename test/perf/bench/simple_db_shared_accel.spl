@@ -244,6 +244,56 @@ fn bench_spostgre_text_search(values: [text]) -> BenchResult:
         val _rows = spostgre_text_search(values, "user")
     )
 
+fn run_correctness_preflight(values: [text],
+                             range_ids: [u32],
+                             brin_idx: BrinIndex,
+                             sdn_table: SdnTable,
+                             dentry_table: SchemaTable,
+                             target_name: text):
+    val text_predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "token=user", key_value: 0)
+    val (text_bitmap, text_stats) = scan_text_values(values, text_predicate)
+    val shared_text_count = text_bitmap.count()
+    val scalar_text_matches = scalar_text_count(values, "token=user")
+    if shared_text_count != scalar_text_matches:
+        panic("shared text scan preflight mismatch: shared={shared_text_count} scalar={scalar_text_matches}")
+    if text_stats.candidates_kept != shared_text_count:
+        panic("shared text scan stats mismatch: stats={text_stats.candidates_kept} bitmap={shared_text_count}")
+
+    val sdn_shared_rows = QueryBuilder.for_table(sdn_table)
+        .filter_by("path", CompareOp.StartsWith, "src/")
+        .filter_by("valid", CompareOp.Eq, "true")
+        .execute()
+    val sdn_scalar_rows = scalar_sdn_query_rows(sdn_table)
+    if sdn_shared_rows.len() != sdn_scalar_rows.len():
+        panic("sdn shared/scalar row-count mismatch: shared={sdn_shared_rows.len()} scalar={sdn_scalar_rows.len()}")
+
+    val accel_child = dentry_table.find_child_accel(7, target_name).unwrap()
+    val scalar_child = scalar_dentry_find_child(dentry_table, target_name)
+    if accel_child.child_ino != scalar_child:
+        panic("dbfs find_child mismatch: shared={accel_child.child_ino} scalar={scalar_child}")
+
+    val accel_prefix_rows = dentry_table.list_children_with_prefix(7, "src_")
+    val scalar_prefix_rows = scalar_dentry_prefix_count(dentry_table, "src_")
+    if accel_prefix_rows.len() != scalar_prefix_rows:
+        panic("dbfs prefix mismatch: shared={accel_prefix_rows.len()} scalar={scalar_prefix_rows}")
+
+    val spostgre_shared = spostgre_scan_text(values, text_predicate)
+    val spostgre_scalar = scalar_spostgre_count(values, "token=user")
+    if spostgre_shared.matched_rows.len() != spostgre_scalar:
+        panic("spostgre fullscan mismatch: shared={spostgre_shared.matched_rows.len()} scalar={spostgre_scalar}")
+
+    val spostgre_brin_shared = spostgre_scan_text_with_brin(
+        range_ids,
+        values,
+        brin_idx,
+        BrinValue(kind: BRIN_KIND_INT, raw: 300),
+        BrinValue(kind: BRIN_KIND_INT, raw: 399),
+        text_predicate
+    )
+    val spostgre_brin_scalar = scalar_spostgre_brin_refine_count(values, range_ids, brin_idx)
+    if spostgre_brin_shared.matched_rows.len() != spostgre_brin_scalar:
+        panic("spostgre BRIN refine mismatch: shared={spostgre_brin_shared.matched_rows.len()} scalar={spostgre_brin_scalar}")
+
 fn main():
     val capability = accel_capability_report()
     val text_values = build_text_values(1024)
@@ -257,6 +307,8 @@ fn main():
     print "capability tier={capability.tier_name} simd_available={capability.simd_available} simd_active={capability.simd_active} scalar_fallback={capability.scalar_fallback} width_bits={capability.simd_width_bits}"
     print "note: Phase 1 shared accel still uses scalar kernels; shared/fallback benches measure API, bitmap construction, row-id materialization, and coarse-filter behavior as much as kernel speed."
     print "note: SDN labels now compare row-materializing QueryBuilder fallback against a row-materializing scalar loop. spostgre BRIN is now paired fairly with a scalar BRIN-refine baseline, while the scalar fullscan baseline remains count-only."
+    run_correctness_preflight(text_values, spostgre_range_ids, spostgre_brin, sdn_table, dentry_table, target_name)
+    print "preflight: shared-path counts match current scalar-oracle behavior for text, SDN, DBFS, and spostgre."
     print ""
 
     val results = [

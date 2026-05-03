@@ -17,7 +17,7 @@ class ProcessMailbox:
     messages: [BrowserIpcMsg]
 
     static fn for_pid(pid_id: i64) -> ProcessMailbox:
-        ProcessMailbox(pid_id: pid_id, messages: [BrowserIpcMsg]())
+        ProcessMailbox(pid_id: pid_id, messages: [])
 
 class ProcessManager:
     logger: Logger
@@ -28,10 +28,12 @@ class ProcessManager:
     static fn create_manager(logger: Logger) -> ProcessManager:
         ProcessManager(
             logger: logger,
-            processes: [ProcessInfo](),
-            mailboxes: [ProcessMailbox](),
+            processes: [],
+            mailboxes: [],
             next_pid: 1
         )
+
+impl ProcessManager:
 
     me spawn(kind: ProcessKind) -> Result<ProcessId, BrowserError>:
         # Allocate a new PID and create a process entry
@@ -82,11 +84,11 @@ class ProcessManager:
                             mailbox.messages.remove(0)
                             steps = steps + 1
                             dispatched = dispatched + 1
-                        self.mailboxes.set(mailbox_idx, mailbox)
+                        self.mailboxes[mailbox_idx] = mailbox
                     # Update memory_usage as a rough instruction counter
                     val new_mem = info.memory_usage + steps
                     val updated = ProcessInfo(pid: info.pid, state: info.state, memory_usage: new_mem)
-                    self.processes.set(i, updated)
+                    self.processes[i] = updated
                 _: pass_dn
             i = i + 1
         self.logger.debug("tick: dispatched {dispatched} messages across {self.processes.len()} processes")
@@ -136,7 +138,7 @@ class ProcessManager:
                     return nil
                 val msg = mailbox.messages.get(0)
                 mailbox.messages.remove(0)
-                self.mailboxes.set(i, mailbox)
+                self.mailboxes[i] = mailbox
                 return Some(msg)
             i = i + 1
         nil
@@ -144,7 +146,7 @@ class ProcessManager:
     me drain_all_queues() -> [BrowserIpcMsg]:
         # MP-1: Event loop hook — drain all process queues in one tick.
         # Returns all messages across all processes in mailbox order.
-        var all_msgs = [BrowserIpcMsg]()
+        var all_msgs: [BrowserIpcMsg] = []
         var i = 0
         while i < self.mailboxes.len():
             var mailbox = self.mailboxes.get(i)
@@ -152,7 +154,7 @@ class ProcessManager:
                 val msg = mailbox.messages.get(0)
                 mailbox.messages.remove(0)
                 all_msgs.push(msg)
-            self.mailboxes.set(i, mailbox)
+            self.mailboxes[i] = mailbox
             i = i + 1
         all_msgs
 
@@ -211,7 +213,7 @@ class ProcessManager:
             val info = self.processes.get(i)
             if info.pid.id == pid.id:
                 val updated = ProcessInfo(pid: pid, state: state, memory_usage: info.memory_usage)
-                self.processes.set(i, updated)
+                self.processes[i] = updated
                 return
             i = i + 1
 
@@ -230,7 +232,7 @@ class ProcessManager:
             var mailbox = self.mailboxes.get(i)
             if mailbox.pid_id == pid_id:
                 mailbox.messages.push(msg)
-                self.mailboxes.set(i, mailbox)
+                self.mailboxes[i] = mailbox
                 return Ok(())
             i = i + 1
         Err(ipc_error("No mailbox for process pid={pid_id}"))

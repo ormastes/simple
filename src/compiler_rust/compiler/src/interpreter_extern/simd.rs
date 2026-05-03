@@ -19,6 +19,9 @@ use simple_runtime::value::simd::{
 use simple_runtime::value::simd_aes_ops::{
     aes_round_last_u8x16 as ffi_aes_round_last_u8x16, aes_round_u8x16 as ffi_aes_round_u8x16,
 };
+use simple_runtime::value::db_accel_bitmap_ops::{
+    bitmap_and_words as ffi_bitmap_and_words, bitmap_or_words as ffi_bitmap_or_words,
+};
 use simple_runtime::value::simd_byte_ops::add_u8x16 as ffi_add_u8x16;
 use simple_runtime::value::simd_clmul_ops::{
     clmul_hi_u64 as ffi_clmul_hi_u64, clmul_lo_u64 as ffi_clmul_lo_u64, xor_u64x2 as ffi_xor_u64x2,
@@ -755,6 +758,27 @@ fn pack_vec2u64(lanes: [u64; 2]) -> Value {
     }
 }
 
+fn unpack_u64_array(name: &str, value: &Value) -> Result<Vec<u64>, CompileError> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| require_u64_value(name, item))
+            .collect(),
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected [u64] array, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn pack_u64_array(words: Vec<u64>) -> Value {
+    Value::array(
+        words.into_iter()
+            .map(|word| Value::UInt { value: word, width: 64 })
+            .collect(),
+    )
+}
+
 fn binop_u64x2<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
 where
     F: Fn([u64; 2], [u64; 2]) -> [u64; 2],
@@ -814,4 +838,26 @@ pub fn rt_simd_clmul_hi_u64(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_simd_xor_u64x2(args: &[Value]) -> Result<Value, CompileError> {
     binop_u64x2("rt_simd_xor_u64x2", args, ffi_xor_u64x2)
+}
+
+pub fn rt_db_accel_bitmap_and_words(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_db_accel_bitmap_and_words expects 2 arguments".to_string(),
+        ));
+    }
+    let lhs = unpack_u64_array("rt_db_accel_bitmap_and_words(lhs)", &args[0])?;
+    let rhs = unpack_u64_array("rt_db_accel_bitmap_and_words(rhs)", &args[1])?;
+    Ok(pack_u64_array(ffi_bitmap_and_words(&lhs, &rhs)))
+}
+
+pub fn rt_db_accel_bitmap_or_words(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_db_accel_bitmap_or_words expects 2 arguments".to_string(),
+        ));
+    }
+    let lhs = unpack_u64_array("rt_db_accel_bitmap_or_words(lhs)", &args[0])?;
+    let rhs = unpack_u64_array("rt_db_accel_bitmap_or_words(rhs)", &args[1])?;
+    Ok(pack_u64_array(ffi_bitmap_or_words(&lhs, &rhs)))
 }

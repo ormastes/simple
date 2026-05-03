@@ -34,6 +34,7 @@ mod core;
 pub mod diagram_ffi;
 pub mod profiler_ffi;
 mod dict;
+pub mod db_accel_bitmap_ops;
 // FFI object-based system
 pub mod ffi_example;
 pub mod ffi_macros;
