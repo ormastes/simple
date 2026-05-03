@@ -171,6 +171,31 @@ pub struct SimdFeatures {
 }
 
 impl SimdFeatures {
+    #[cfg(target_arch = "aarch64")]
+    fn detect_aarch64_optional_features() -> (bool, bool) {
+        // Rust's stable stdlib does not provide an in-process runtime probe for
+        // SVE/SVE2 here. Using `cfg!(target_feature = "...")` would report how
+        // this binary was compiled, not what the current host supports.
+        //
+        // Prefer an explicit downscope over overstating host capabilities in
+        // persisted cpu_config.sdn until a real runtime probe is implemented.
+        (false, false)
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    fn detect_riscv64_optional_features() -> bool {
+        // Do not treat compile-time `target_feature=v` as host runtime support.
+        false
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn detect_wasm32_optional_features() -> bool {
+        // In a generic wasm32 binary, `cfg!(target_feature = "simd128")`
+        // reflects the compilation target, not the embedding runtime's active
+        // capabilities at first use.
+        false
+    }
+
     /// Detect SIMD features at runtime.
     #[cfg(target_arch = "x86_64")]
     pub fn detect() -> Self {
@@ -218,6 +243,7 @@ impl SimdFeatures {
     /// Detect SIMD features at runtime (ARM).
     #[cfg(target_arch = "aarch64")]
     pub fn detect() -> Self {
+        let (sve, sve2) = Self::detect_aarch64_optional_features();
         SimdFeatures {
             sse: false,
             sse2: false,
@@ -230,8 +256,8 @@ impl SimdFeatures {
             avx512f: false,
             fma: true,  // NEON includes FMA
             neon: true, // NEON is always available on AArch64
-            sve: cfg!(target_feature = "sve"),
-            sve2: cfg!(target_feature = "sve2"),
+            sve,
+            sve2,
             rvv: false,
             wasm128: false,
         }
@@ -240,6 +266,7 @@ impl SimdFeatures {
     /// Detect SIMD features at runtime (RISC-V 64).
     #[cfg(target_arch = "riscv64")]
     pub fn detect() -> Self {
+        let rvv = Self::detect_riscv64_optional_features();
         SimdFeatures {
             sse: false,
             sse2: false,
@@ -254,7 +281,7 @@ impl SimdFeatures {
             neon: false,
             sve: false,
             sve2: false,
-            rvv: cfg!(target_feature = "v"),
+            rvv,
             wasm128: false,
         }
     }
@@ -262,6 +289,7 @@ impl SimdFeatures {
     /// Detect SIMD features at runtime (WASM).
     #[cfg(target_arch = "wasm32")]
     pub fn detect() -> Self {
+        let wasm128 = Self::detect_wasm32_optional_features();
         SimdFeatures {
             sse: false,
             sse2: false,
@@ -277,7 +305,7 @@ impl SimdFeatures {
             sve: false,
             sve2: false,
             rvv: false,
-            wasm128: cfg!(target_feature = "simd128"),
+            wasm128,
         }
     }
 

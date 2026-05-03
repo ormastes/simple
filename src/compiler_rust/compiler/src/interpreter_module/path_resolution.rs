@@ -520,6 +520,7 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
 #[cfg(test)]
 mod tests {
     use super::{compute_cache_key, normalize_base_dir, resolve_module_path};
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
@@ -538,6 +539,53 @@ mod tests {
             None => std::env::remove_var("SIMPLE_SIMD_TIER"),
         }
         result
+    }
+
+    fn with_simd_envs<T>(simd_tier: Option<&str>, cpu_config_path: Option<&Path>, f: impl FnOnce() -> T) -> T {
+        let _guard = simd_tier_env_lock().lock().unwrap();
+        let previous_simd_tier = std::env::var("SIMPLE_SIMD_TIER").ok();
+        let previous_cpu_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
+
+        match simd_tier {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+
+        match cpu_config_path {
+            Some(path) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", path),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+
+        let result = f();
+
+        match previous_simd_tier.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+
+        match previous_cpu_config_path.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+
+        result
+    }
+
+    fn config_document(enabled_tier: &str, instruction_sets: &str) -> String {
+        format!(
+            "version: 1\n\
+target_triple: test-triple\n\
+generated_by: \"test\"\n\
+support:\n\
+    simd_tier: x86_64_avx2\n\
+    instruction_sets: [sse2, avx2]\n\
+simple_support:\n\
+    simd_tier_fallbacks: [x86_64_avx2, x86_64_sse2, scalar]\n\
+    instruction_sets: [sse2, avx2]\n\
+enabled:\n\
+    simd_tier: {enabled_tier}\n\
+    instruction_sets: [{instruction_sets}]\n"
+        )
     }
 
     #[test]
@@ -627,6 +675,62 @@ mod tests {
         let avx2 = with_simd_tier_env("x86_64_avx2", || compute_cache_key(&parts, base_dir));
 
         assert_ne!(scalar, avx2);
+    }
+
+    #[test]
+    fn cache_key_changes_with_configured_active_tier_without_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let scalar_path = temp.path().join("scalar_cpu_config.sdn");
+        let sse2_path = temp.path().join("sse2_cpu_config.sdn");
+        fs::write(&scalar_path, config_document("scalar", "")).unwrap();
+        fs::write(&sse2_path, config_document("x86_64_sse2", "sse2")).unwrap();
+
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let base_dir = Path::new("/tmp/project/src");
+
+        let scalar = with_simd_envs(None, Some(&scalar_path), || compute_cache_key(&parts, base_dir));
+        let sse2 = with_simd_envs(None, Some(&sse2_path), || compute_cache_key(&parts, base_dir));
+
+        assert_ne!(scalar, sse2);
+    }
+
+    #[test]
+    fn resolve_module_path_uses_configured_variant_roots_without_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let base_dir = project_root.join("src/app");
+        let scalar_config = project_root.join("scalar_cpu_config.sdn");
+        let sse2_config = project_root.join("sse2_cpu_config.sdn");
+
+        fs::create_dir_all(base_dir.as_path()).unwrap();
+        fs::create_dir_all(project_root.join("src/lib/std/src/io")).unwrap();
+        fs::create_dir_all(project_root.join("src/lib/std/variants/x86_64_sse2/src/io")).unwrap();
+        fs::write(
+            project_root.join("src/lib/std/src/io/__init__.spl"),
+            "fn scalar() -> i64:\n    return 0\n",
+        )
+        .unwrap();
+        fs::write(
+            project_root.join("src/lib/std/variants/x86_64_sse2/src/io/__init__.spl"),
+            "fn sse2() -> i64:\n    return 1\n",
+        )
+        .unwrap();
+        fs::write(&scalar_config, config_document("scalar", "")).unwrap();
+        fs::write(&sse2_config, config_document("x86_64_sse2", "sse2")).unwrap();
+
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let scalar = with_simd_envs(None, Some(&scalar_config), || {
+            resolve_module_path(&parts, &base_dir).unwrap()
+        });
+        let sse2 = with_simd_envs(None, Some(&sse2_config), || {
+            resolve_module_path(&parts, &base_dir).unwrap()
+        });
+
+        assert_eq!(scalar, project_root.join("src/lib/std/src/io/__init__.spl"));
+        assert_eq!(
+            sse2,
+            project_root.join("src/lib/std/variants/x86_64_sse2/src/io/__init__.spl")
+        );
     }
 }
 

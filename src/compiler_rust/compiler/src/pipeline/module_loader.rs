@@ -1346,7 +1346,60 @@ mod tests {
     use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
     use simple_parser::token::Span;
     use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
     use std::path::Path;
+
+    fn simd_tier_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_simd_envs<T>(simd_tier: Option<&str>, cpu_config_path: Option<&Path>, f: impl FnOnce() -> T) -> T {
+        let _guard = simd_tier_env_lock().lock().unwrap();
+        let previous_simd_tier = std::env::var("SIMPLE_SIMD_TIER").ok();
+        let previous_cpu_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
+
+        match simd_tier {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+
+        match cpu_config_path {
+            Some(path) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", path),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+
+        let result = f();
+
+        match previous_simd_tier.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+
+        match previous_cpu_config_path.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+
+        result
+    }
+
+    fn config_document(enabled_tier: &str, instruction_sets: &str) -> String {
+        format!(
+            "version: 1\n\
+target_triple: test-triple\n\
+generated_by: \"test\"\n\
+support:\n\
+    simd_tier: x86_64_avx2\n\
+    instruction_sets: [sse2, avx2]\n\
+simple_support:\n\
+    simd_tier_fallbacks: [x86_64_avx2, x86_64_sse2, scalar]\n\
+    instruction_sets: [sse2, avx2]\n\
+enabled:\n\
+    simd_tier: {enabled_tier}\n\
+    instruction_sets: [{instruction_sets}]\n"
+        )
+    }
 
     #[test]
     fn test_startup_app_type_parsing() {
@@ -1406,6 +1459,44 @@ mod tests {
         .unwrap();
 
         assert!(resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl"));
+    }
+
+    #[test]
+    fn resolve_use_to_path_uses_configured_variant_stdlib_root_without_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let base_dir = project_root.join("src/app");
+        let scalar_config = project_root.join("scalar_cpu_config.sdn");
+        let sse2_config = project_root.join("sse2_cpu_config.sdn");
+        fs::create_dir_all(&base_dir).unwrap();
+        fs::create_dir_all(project_root.join("src/lib/std/src/io")).unwrap();
+        fs::create_dir_all(project_root.join("src/lib/std/variants/x86_64_sse2/src/io")).unwrap();
+        fs::write(project_root.join("src/lib/std/src/io/__init__.spl"), "export scalar\n").unwrap();
+        fs::write(
+            project_root.join("src/lib/std/variants/x86_64_sse2/src/io/__init__.spl"),
+            "export sse2\n",
+        )
+        .unwrap();
+        fs::write(&scalar_config, config_document("scalar", "")).unwrap();
+        fs::write(&sse2_config, config_document("x86_64_sse2", "sse2")).unwrap();
+
+        let use_stmt = use_stmt(
+            &["std", "io"],
+            ImportTarget::Group(vec![ImportTarget::Single("env_get".to_string())]),
+        );
+
+        let scalar = with_simd_envs(None, Some(&scalar_config), || {
+            resolve_use_to_path(&use_stmt, &base_dir).unwrap()
+        });
+        let sse2 = with_simd_envs(None, Some(&sse2_config), || {
+            resolve_use_to_path(&use_stmt, &base_dir).unwrap()
+        });
+
+        assert_eq!(scalar, project_root.join("src/lib/std/src/io/__init__.spl"));
+        assert_eq!(
+            sse2,
+            project_root.join("src/lib/std/variants/x86_64_sse2/src/io/__init__.spl")
+        );
     }
 
     #[test]

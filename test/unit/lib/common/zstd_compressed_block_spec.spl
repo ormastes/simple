@@ -72,6 +72,9 @@ fn _unsupported_literals_payload(literals_type: i64, size_format: i64) -> [u8]:
         0x00u8
     ]
 
+fn _exact_direct_weight_literals_payload() -> [u8]:
+    [0x84u8, 0x43u8, 0x20u8, 0x10u8, 0x80u8, 0x0Du8]
+
 describe "zstd compressed blocks with zero sequences":
     it "decodes a compressed block containing raw literals and nbSeq == 0":
         val frame = _zstd_frame(3, _compressed_block([
@@ -93,11 +96,10 @@ describe "zstd compressed blocks with zero sequences":
         expect(decoded.is_err()).to_equal(false)
         expect(decoded.unwrap()).to_equal([0x41u8, 0x41u8, 0x41u8, 0x41u8])
 
-    it "decodes the host-valid fresh-table single-stream direct-weight fixture":
+    it "decodes the exact in-tree fresh-table single-stream direct-weight fixture":
         val frame = _zstd_frame(4, _compressed_block([
-            0x42u8, 0x80u8, 0x01u8,
-            0x84u8, 0x43u8, 0x20u8, 0x10u8,
-            0x80u8, 0x0Du8,
+            0x42u8, 0x80u8, 0x01u8
+        ] + _exact_direct_weight_literals_payload() + [
             0x00u8
         ]))
         val decoded = zstd_decompress_frame(frame)
@@ -115,11 +117,34 @@ describe "zstd compressed blocks with zero sequences":
         expect(decoded.is_err()).to_equal(true)
         _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
 
-    it "rejects fresh-table single-stream compressed literals with the 4-byte header form":
-        val frame = _zstd_frame(4, _compressed_block(_unsupported_literals_payload(2, 2)))
+    it "rejects fresh-table single-stream direct-weight payloads behind the 4-byte header form":
+        val frame = _zstd_frame(4, _compressed_block(_compressed_literals_header(2, 2, 4, 6) + _exact_direct_weight_literals_payload() + [
+            0x00u8
+        ]))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "exact single-stream direct-weight fixture")
+
+    it "rejects fresh-table single-stream direct-weight payloads with non-pinned literal bytes":
+        val frame = _zstd_frame(4, _compressed_block([
+            0x42u8, 0x80u8, 0x01u8,
+            0x84u8, 0x43u8, 0x20u8, 0x10u8,
+            0x80u8, 0x0Cu8,
+            0x00u8
+        ]))
+        val decoded = zstd_decompress_frame(frame)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "exact single-stream direct-weight fixture")
+
+    it "rejects fresh-table single-stream direct-weight payloads with non-pinned regenerated size":
+        val frame = _zstd_frame(5, _compressed_block([
+            0x52u8, 0x80u8, 0x01u8
+        ] + _exact_direct_weight_literals_payload() + [
+            0x00u8
+        ]))
+        val decoded = zstd_decompress_frame(frame)
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "exact single-stream direct-weight fixture")
 
     it "rejects fresh-table four-stream compressed literals with the 5-byte header form":
         val frame = _zstd_frame(4, _compressed_block(_unsupported_literals_payload(2, 3)))
@@ -180,4 +205,4 @@ describe "zstd compressed blocks with zero sequences":
         ]))
         val decoded = zstd_decompress_frame(frame)
         expect(decoded.is_err()).to_equal(true)
-        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "single-stream direct-weight fixture")
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "exact single-stream direct-weight fixture")

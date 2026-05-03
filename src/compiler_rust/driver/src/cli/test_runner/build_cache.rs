@@ -25,8 +25,9 @@ const CACHE_DIR: &str = "tmp/test_cache";
 pub struct BuildCache {
     cache_dir: PathBuf,
     force_rebuild: bool,
-    /// Per-path hash cache — avoids re-reading + re-hashing the same file.
-    hash_cache: RefCell<HashMap<PathBuf, u64>>,
+    /// Per-path+tier hash cache — avoids re-reading + re-hashing the same
+    /// file while still invalidating when the active SIMD tier changes.
+    hash_cache: RefCell<HashMap<(PathBuf, String), u64>>,
     /// Per-path content cache — lets compile_test_to_native reuse the bytes
     /// that source_hash already read instead of reading the file a second time.
     content_cache: RefCell<HashMap<PathBuf, Vec<u8>>>,
@@ -53,8 +54,10 @@ impl BuildCache {
     /// hash and the raw bytes.  Subsequent calls return the cached hash
     /// without any I/O.
     fn source_hash(&self, path: &Path) -> Option<u64> {
+        let active_tier = active_simd_tier().as_str().to_string();
+        let cache_key = (path.to_path_buf(), active_tier.clone());
         // Fast path: already computed
-        if let Some(&h) = self.hash_cache.borrow().get(path) {
+        if let Some(&h) = self.hash_cache.borrow().get(&cache_key) {
             return Some(h);
         }
         // Slow path: read, hash, cache
@@ -62,9 +65,9 @@ impl BuildCache {
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         path.hash(&mut hasher);
-        active_simd_tier().as_str().hash(&mut hasher);
+        active_tier.hash(&mut hasher);
         let hash = hasher.finish();
-        self.hash_cache.borrow_mut().insert(path.to_path_buf(), hash);
+        self.hash_cache.borrow_mut().insert(cache_key, hash);
         self.content_cache.borrow_mut().insert(path.to_path_buf(), content);
         Some(hash)
     }
@@ -472,5 +475,47 @@ mod tests {
 
         assert_eq!(configured_hash, expected_active_hash);
         assert_ne!(configured_hash, detected_hash);
+    }
+
+    #[test]
+    fn test_source_hash_refreshes_when_override_changes_on_same_cache() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("demo_spec.spl");
+        fs::write(&source, "test body").expect("source file");
+
+        let detected = detect_profile();
+        let initial_tier = detected.best_available_implementation();
+        let changed_tier = match initial_tier {
+            simple_simd::SimdTier::X86_64Avx512 => simple_simd::SimdTier::X86_64Avx2,
+            simple_simd::SimdTier::X86_64Avx2 => simple_simd::SimdTier::X86_64Sse2,
+            simple_simd::SimdTier::X86_64Sse2 => simple_simd::SimdTier::Scalar,
+            simple_simd::SimdTier::Aarch64Neon => simple_simd::SimdTier::Scalar,
+            simple_simd::SimdTier::Riscv64Rvv => simple_simd::SimdTier::Scalar,
+            _ => return,
+        };
+
+        let previous_override = std::env::var("SIMPLE_SIMD_TIER").ok();
+        let previous_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
+        std::env::remove_var("SIMPLE_CPU_CONFIG_PATH");
+
+        let cache = BuildCache::new(false);
+
+        std::env::set_var("SIMPLE_SIMD_TIER", initial_tier.as_str());
+        let initial_hash = cache.source_hash(&source).expect("initial hash");
+
+        std::env::set_var("SIMPLE_SIMD_TIER", changed_tier.as_str());
+        let changed_hash = cache.source_hash(&source).expect("changed hash");
+
+        match previous_override.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+        match previous_config_path.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+
+        assert_ne!(initial_hash, changed_hash);
     }
 }

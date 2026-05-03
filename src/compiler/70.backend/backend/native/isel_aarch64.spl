@@ -18,7 +18,7 @@ use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_i
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
 use compiler.backend.native.mach_inst.{AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X5, AARCH64_X6, AARCH64_X7, AARCH64_X8, AARCH64_X9, AARCH64_X16, AARCH64_X29, AARCH64_X30, AARCH64_SP}
 use compiler.backend.native.mach_inst.{AARCH64_ARG_REGS, AARCH64_CALLEE_SAVED}
-use compiler.backend.native.mach_inst.{A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK, A64_OP_ADD, A64_OP_SUB, A64_OP_MUL, A64_OP_SDIV, A64_OP_AND, A64_OP_ORR, A64_OP_EOR, A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET, A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE, A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP, A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_NOP, A64_OP_CBZ, A64_OP_CBNZ}
+use compiler.backend.native.mach_inst.{A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK, A64_OP_ADD, A64_OP_SUB, A64_OP_MUL, A64_OP_SDIV, A64_OP_AND, A64_OP_ORR, A64_OP_EOR, A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET, A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE, A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP, A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_NOP, A64_OP_CBZ, A64_OP_CBNZ, A64_OP_RBIT, A64_OP_CLZ, A64_OP_REV}
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 
@@ -113,7 +113,7 @@ fn isel_module_aarch64(module: MirModule) -> MachModule:
     var mach_module = new_mach_module(module.name)
     var ctx = new_isel_context()
 
-    val func_keys = module.functions_keys(functions)
+    val func_keys = module.functions.keys()
     for key in func_keys:
         val func = module.functions[key]
         var result = a64_isel_function(ctx, func)
@@ -135,7 +135,7 @@ fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
 
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
-        next_vreg: func.locals_len(locals) + 100,
+        next_vreg: func.locals.len() + 100,
         frame_slots: ctx.frame_slots,
         next_frame_offset: 0,
         extern_symbols: ctx.extern_symbols,
@@ -145,7 +145,7 @@ fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
 
     # Allocate frame slots for locals that need stack space
     for local in func.locals:
-        val size = local.type__size_bytes(type_)
+        val size = local.type_.size_bytes()
         local_ctx = isel_alloc_frame_slot(local_ctx, local.id.id, size)
 
     # Generate prologue block
@@ -236,6 +236,8 @@ fn a64_isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
             a64_isel_store(ctx, ptr, value)
         case Call(dest, func_op, args):
             a64_isel_call(ctx, dest, func_op, args)
+        case Intrinsic(dest, name, args):
+            a64_isel_intrinsic(ctx, dest, name, args)
         case GetField(dest, base, field):
             a64_isel_get_field(ctx, dest, base, field)
         case SetField(base, field, value):
@@ -261,6 +263,53 @@ fn a64_isel_const(ctx: ISelContext, dest: LocalId, value: MirConstValue, type_: 
 fn a64_isel_copy(ctx: ISelContext, dest: LocalId, src: LocalId) -> ISelInstResult:
     val inst = new_mach_inst(A64_OP_MOV, [local_vreg_op(dest.id), local_vreg_op(src.id)])
     ISelInstResult(insts: [inst], ctx: ctx)
+
+fn a64_select_scalar_bitmanip(ctx: ISelContext, dest: Operand, name: text, src: Operand) -> ISelInstResult:
+    var insts: [MachInst] = []
+
+    if name == "bit_clz":
+        insts.push(new_mach_inst(A64_OP_CLZ, [dest, src]))
+        return ISelInstResult(insts: insts, ctx: ctx)
+
+    if name == "bit_ctz":
+        val tmp = Operand(kind: OperandKind.Reg(MachReg(kind: MachRegKind.Virtual(ctx.next_vreg))))
+        val next_ctx = ISelContext(
+            next_vreg: ctx.next_vreg + 1,
+            frame_slots: ctx.frame_slots,
+            next_frame_offset: ctx.next_frame_offset,
+            extern_symbols: ctx.extern_symbols,
+            data_entries: ctx.data_entries,
+            string_counter: ctx.string_counter
+        )
+        insts.push(new_mach_inst(A64_OP_RBIT, [tmp, src]))
+        insts.push(new_mach_inst(A64_OP_CLZ, [dest, tmp]))
+        return ISelInstResult(insts: insts, ctx: next_ctx)
+
+    if name == "bit_bswap":
+        insts.push(new_mach_inst(A64_OP_REV, [dest, src]))
+        return ISelInstResult(insts: insts, ctx: ctx)
+
+    if name == "bit_bitreverse":
+        insts.push(new_mach_inst(A64_OP_RBIT, [dest, src]))
+        return ISelInstResult(insts: insts, ctx: ctx)
+
+    ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
+
+fn a64_isel_intrinsic(ctx: ISelContext, dest: LocalId?, name: text, args: [MirOperand]) -> ISelInstResult:
+    match dest:
+        case Some(dest_local):
+            if args.length != 1:
+                return ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
+
+            val low = a64_lower_operand(ctx, args[0])
+            val dest_op = local_vreg_op(dest_local.id)
+            var insts = low.insts
+            val selected = a64_select_scalar_bitmanip(low.ctx, dest_op, name, low.result)
+            for inst in selected.insts:
+                insts.push(inst)
+            ISelInstResult(insts: insts, ctx: selected.ctx)
+        case _:
+            ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
 
 # ============================================================================
 # Binary Operations
@@ -553,4 +602,3 @@ fn a64_isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], d
 # ============================================================================
 # Exports
 # ============================================================================
-

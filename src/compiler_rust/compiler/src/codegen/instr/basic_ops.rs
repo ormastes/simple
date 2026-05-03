@@ -2,13 +2,14 @@
 //!
 //! Handles simple operations: copy, cast, unary operations, and spread.
 
-use cranelift_codegen::ir::{types, InstBuilder};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use crate::hir::{TypeId, UnaryOp};
 use crate::mir::VReg;
 
+use super::helpers::adapted_call;
 use super::{InstrContext, InstrResult};
 
 /// Compile Copy instruction: copies a value from one register to another
@@ -63,7 +64,44 @@ pub fn compile_cast<M: Module>(
     let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
     let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
 
-    let val = if is_from_float && !is_to_float {
+    let val = if from_ty == TypeId::STRING && (to_int_width.is_some() || is_to_float) {
+        let string_len_id = ctx.runtime_funcs["rt_string_len"];
+        let string_len_ref = ctx.module.declare_func_in_func(string_len_id, builder.func);
+        let len_call = adapted_call(builder, string_len_ref, &[src_val]);
+        let len_val = builder.inst_results(len_call)[0];
+
+        let string_data_id = ctx.runtime_funcs["rt_string_data"];
+        let string_data_ref = ctx.module.declare_func_in_func(string_data_id, builder.func);
+        let data_call = adapted_call(builder, string_data_ref, &[src_val]);
+        let data_ptr = builder.inst_results(data_call)[0];
+
+        let zero = builder.ins().iconst(types::I64, 0);
+        let has_data = builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, len_val, zero);
+        let first_byte = builder.ins().load(types::I8, MemFlags::new(), data_ptr, 0);
+        let widened_first_byte = builder.ins().uextend(types::I64, first_byte);
+        let code_i64 = builder.ins().select(
+            has_data,
+            widened_first_byte,
+            zero,
+        );
+
+        if is_to_float {
+            if to_ty == TypeId::F32 {
+                builder.ins().fcvt_from_uint(types::F32, code_i64)
+            } else {
+                builder.ins().fcvt_from_uint(types::F64, code_i64)
+            }
+        } else {
+            match to_int_width {
+                Some(types::I8) => builder.ins().ireduce(types::I8, code_i64),
+                Some(types::I16) => builder.ins().ireduce(types::I16, code_i64),
+                Some(types::I32) => builder.ins().ireduce(types::I32, code_i64),
+                _ => code_i64,
+            }
+        }
+    } else if is_from_float && !is_to_float {
         // Float to int conversion
         let widened = if to_signed {
             builder.ins().fcvt_to_sint(types::I64, src_val)

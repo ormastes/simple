@@ -1,6 +1,8 @@
 //! Tests for native project builder.
 
+use std::fs;
 use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use crate::codegen::common_backend::module_prefix_from_path;
@@ -27,6 +29,53 @@ fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
         None => std::env::remove_var("SIMPLE_SIMD_TIER"),
     }
     result
+}
+
+fn with_simd_envs<T>(simd_tier: Option<&str>, cpu_config_path: Option<&Path>, f: impl FnOnce() -> T) -> T {
+    let _guard = simd_tier_env_lock().lock().unwrap();
+    let previous_simd_tier = std::env::var("SIMPLE_SIMD_TIER").ok();
+    let previous_cpu_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
+
+    match simd_tier {
+        Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+        None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+    }
+
+    match cpu_config_path {
+        Some(path) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", path),
+        None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+    }
+
+    let result = f();
+
+    match previous_simd_tier.as_deref() {
+        Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+        None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+    }
+
+    match previous_cpu_config_path.as_deref() {
+        Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+        None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+    }
+
+    result
+}
+
+fn config_document(enabled_tier: &str, instruction_sets: &str) -> String {
+    format!(
+        "version: 1\n\
+target_triple: test-triple\n\
+generated_by: \"test\"\n\
+support:\n\
+    simd_tier: x86_64_avx2\n\
+    instruction_sets: [sse2, avx2]\n\
+simple_support:\n\
+    simd_tier_fallbacks: [x86_64_avx2, x86_64_sse2, scalar]\n\
+    instruction_sets: [sse2, avx2]\n\
+enabled:\n\
+    simd_tier: {enabled_tier}\n\
+    instruction_sets: [{instruction_sets}]\n"
+    )
 }
 
 fn with_current_dir<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
@@ -146,6 +195,24 @@ fn test_object_cache_key_separates_simd_tiers() {
     });
 
     assert_ne!(scalar, avx2);
+}
+
+#[test]
+fn test_object_cache_key_separates_configured_active_tiers_without_override() {
+    let temp = tempfile::tempdir().unwrap();
+    let scalar_path = temp.path().join("scalar_cpu_config.sdn");
+    let sse2_path = temp.path().join("sse2_cpu_config.sdn");
+    fs::write(&scalar_path, config_document("scalar", "")).unwrap();
+    fs::write(&sse2_path, config_document("x86_64_sse2", "sse2")).unwrap();
+
+    let scalar = with_simd_envs(None, Some(&scalar_path), || {
+        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+    });
+    let sse2 = with_simd_envs(None, Some(&sse2_path), || {
+        object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
+    });
+
+    assert_ne!(scalar, sse2);
 }
 
 #[test]

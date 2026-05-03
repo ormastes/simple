@@ -38,8 +38,8 @@ use std::sync::Mutex;
 struct DynamicRuntime {
     /// Handle from dlopen (0 if not loaded or failed)
     handle: usize,
-    /// Whether we already attempted to load (to avoid repeated failures)
-    attempted: bool,
+    /// Active tier used for the current handle/symbol cache
+    active_tier: Option<SimdTier>,
     /// Cached symbol lookups: function name -> function pointer address
     symbols: HashMap<String, usize>,
 }
@@ -47,7 +47,7 @@ struct DynamicRuntime {
 static DYNAMIC_RUNTIME: std::sync::LazyLock<Mutex<DynamicRuntime>> = std::sync::LazyLock::new(|| {
     Mutex::new(DynamicRuntime {
         handle: 0,
-        attempted: false,
+        active_tier: None,
         symbols: HashMap::new(),
     })
 });
@@ -160,9 +160,15 @@ fn runtime_lib_name() -> String {
 
 fn runtime_library_candidates(path: PathBuf, simd_tier: SimdTier) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let use_bare_names = path.parent().is_none();
     for variant in runtime_variant_tiers(simd_tier) {
-        candidates.push(parent.join(runtime_variant_library_name(variant)));
+        let variant_name = runtime_variant_library_name(variant);
+        if use_bare_names {
+            candidates.push(PathBuf::from(variant_name));
+        } else {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            candidates.push(parent.join(variant_name));
+        }
     }
     candidates.push(path);
     candidates
@@ -769,14 +775,21 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
 
     // --- Step 1: Try the main runtime library ---
     let runtime_result = {
+        let active_tier = active_simd_tier();
         let mut rt = match DYNAMIC_RUNTIME.lock() {
             Ok(rt) => rt,
             Err(_) => return None,
         };
 
-        // Lazy-load the runtime library on first call
-        if !rt.attempted {
-            rt.attempted = true;
+        // Refresh the runtime handle and symbol cache whenever the active tier
+        // changes, and retry loading after prior misses so config/env edits or
+        // newly installed runtime variants can take effect in a long-lived process.
+        if rt.active_tier != Some(active_tier) {
+            rt.handle = 0;
+            rt.symbols.clear();
+            rt.active_tier = Some(active_tier);
+        }
+        if rt.handle == 0 {
             rt.handle = load_runtime_library();
         }
 
@@ -850,6 +863,44 @@ mod tests {
         assert_eq!(
             names,
             vec![runtime_variant_library_name(SimdTier::Aarch64Neon), runtime_lib_name(),]
+        );
+    }
+
+    #[test]
+    fn runtime_candidates_keep_bare_names_for_system_path_lookup() {
+        let default_path = PathBuf::from(runtime_lib_name());
+        let candidates = runtime_library_candidates(default_path, SimdTier::X86_64Avx512);
+        let names = candidates
+            .iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                runtime_variant_library_name(SimdTier::X86_64Avx2),
+                runtime_variant_library_name(SimdTier::X86_64Sse2),
+                runtime_lib_name(),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_candidates_keep_explicit_parent_for_sibling_probes() {
+        let default_path = PathBuf::from(format!("target/debug/{}", runtime_lib_name()));
+        let candidates = runtime_library_candidates(default_path, SimdTier::X86_64Avx512);
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(format!(
+                "target/debug/{}",
+                runtime_variant_library_name(SimdTier::X86_64Avx2)
+            ))
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from(format!(
+                "target/debug/{}",
+                runtime_variant_library_name(SimdTier::X86_64Sse2)
+            ))
         );
     }
 }

@@ -202,4 +202,22 @@ enabled:\n\
             assert_eq!(active_simd_tier(), SimdTier::Scalar);
         });
     }
+
+    #[test]
+    fn configured_enabled_tier_changes_stdlib_root_order_without_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+        fs::write(&path, config_document("x86_64_sse2")).unwrap();
+
+        with_simd_envs(None, Some(&path), || {
+            let roots = stdlib_root_candidates(Path::new("/tmp/proj/src/lib/std/src"));
+            assert_eq!(
+                roots,
+                vec![
+                    PathBuf::from("/tmp/proj/src/lib/std/variants/x86_64_sse2/src"),
+                    PathBuf::from("/tmp/proj/src/lib/std/src"),
+                ]
+            );
+        });
+    }
 }

@@ -534,6 +534,144 @@ fn _defl_emit_end_of_block(writer: DeflBitWriter) -> DeflBitWriter:
     # Symbol 256: 7-bit code 0000000
     _defl_write_bits_msb(writer, 0, 7)
 
+# Append a DEFLATE sync-flush block (empty non-final stored block).
+# Bit-aligns the writer, then emits: BFINAL=0, BTYPE=00, align, LEN=0, NLEN=0xFFFF.
+# The resulting 5 bytes on the wire (after alignment pad) end in 00 00 FF FF.
+fn _defl_append_sync_flush(writer: DeflBitWriter) -> DeflBitWriter:
+    # BFINAL=0, BTYPE=00 (stored)
+    var w = _defl_write_bits(writer, 0, 1)
+    w = _defl_write_bits(w, 0, 2)
+    # Align to byte boundary
+    if w.bit_count > 0:
+        var remaining = 8 - w.bit_count
+        w = _defl_write_bits(w, 0, remaining)
+    # LEN=0 (16-bit LE), NLEN=0xFFFF (ones complement of 0)
+    w = _defl_write_bits(w, 0, 16)
+    w = _defl_write_bits(w, 0xFFFF, 16)
+    w
+
+# Compress `data` using DEFLATE with a sync-flush terminator (RFC 7692).
+# Unlike deflate_compress (BFINAL=1), this uses BFINAL=0 and appends an
+# empty non-final stored block so the output ends in 0x00 0x00 0xFF 0xFF.
+# ws_compress_message strips those 4 trailing bytes per RFC 7692 §7.2.1.
+fn deflate_compress_sync_flush(data: [u8]) -> [u8]:
+    if data.len() == 0:
+        # Empty input: just a sync-flush block (BFINAL=0 stored, len=0)
+        var w = _defl_new_writer()
+        w = _defl_append_sync_flush(w)
+        return _defl_flush_writer(w)
+
+    var w = _defl_new_writer()
+    # BFINAL=0, BTYPE=01 (fixed Huffman, non-final)
+    w = _defl_write_bits(w, 0, 1)
+    w = _defl_write_bits(w, 1, 2)
+
+    if data.len() < _DEFL_MIN_MATCH:
+        var i = 0
+        while i < data.len():
+            w = _defl_emit_literal(w, data[i].to_i64())
+            i = i + 1
+        w = _defl_emit_end_of_block(w)
+        w = _defl_append_sync_flush(w)
+        return _defl_flush_writer(w)
+
+    # LZ77 with hash chain (same as deflate_compress)
+    var head: [i64] = []
+    var hi = 0
+    while hi < _DEFL_HASH_SIZE:
+        head.push(-1)
+        hi = hi + 1
+
+    var prev: [i64] = []
+    var pi = 0
+    while pi < _DEFL_WINDOW_SIZE:
+        prev.push(-1)
+        pi = pi + 1
+
+    var pos = 0
+    while pos < data.len():
+        val match_result = _defl_find_match(data, pos, head, prev)
+        val match_len = match_result.0
+        val match_dist = match_result.1
+
+        if match_len >= _DEFL_MIN_MATCH:
+            w = _defl_emit_length_distance(w, match_len, match_dist)
+            var mi = 0
+            while mi < match_len:
+                if pos + mi + 2 < data.len():
+                    val mh = _defl_hash3(data, pos + mi)
+                    prev[(pos + mi) % _DEFL_WINDOW_SIZE] = head[mh]
+                    head[mh] = pos + mi
+                mi = mi + 1
+            pos = pos + match_len
+        else:
+            w = _defl_emit_literal(w, data[pos].to_i64())
+            if pos + 2 < data.len():
+                val h = _defl_hash3(data, pos)
+                prev[pos % _DEFL_WINDOW_SIZE] = head[h]
+                head[h] = pos
+            pos = pos + 1
+
+    w = _defl_emit_end_of_block(w)
+    w = _defl_append_sync_flush(w)
+    _defl_flush_writer(w)
+
+# Decompress until EOF (no BFINAL=1 required). Used by ws_decompress_message
+# which re-appends the 4-byte sync-flush tail before calling this.
+fn deflate_decompress_eof(data: [u8]) -> [u8]:
+    var r = _defl_new_reader(data)
+    var output: [u8] = []
+
+    while r.byte_pos < r.src.len():
+        val bfinal_pair = _defl_read_bits(r, 1)
+        val bfinal = bfinal_pair.0
+        r = bfinal_pair.1
+
+        val btype_pair = _defl_read_bits(r, 2)
+        val btype = btype_pair.0
+        r = btype_pair.1
+
+        if btype == 0:
+            # Stored (uncompressed) block
+            r = _defl_align_to_byte(r)
+            val len_pair = _defl_read_bits(r, 16)
+            val block_len = len_pair.0
+            r = len_pair.1
+            # Skip NLEN (complement)
+            val nlen_pair = _defl_read_bits(r, 16)
+            r = nlen_pair.1
+            var ci = 0
+            while ci < block_len:
+                if r.byte_pos >= r.src.len():
+                    ci = block_len  # break
+                else:
+                    var b: u8 = r.src[r.byte_pos]
+                    output.push(b)
+                    r = DeflBitReader(src: r.src, byte_pos: r.byte_pos + 1, bit_pos: 0)
+                    ci = ci + 1
+        elif btype == 1:
+            # Fixed Huffman
+            val lit_tree = _defl_build_fixed_lit_tree()
+            val dist_tree = _defl_build_fixed_dist_tree()
+            val result = _defl_decode_block(lit_tree, dist_tree, r, output)
+            output = result.0
+            r = result.1
+        elif btype == 2:
+            # Dynamic Huffman
+            val trees = _defl_decode_dynamic_trees(r)
+            val lit_tree = trees.0
+            val dist_tree = trees.1
+            r = trees.2
+            val result = _defl_decode_block(lit_tree, dist_tree, r, output)
+            output = result.0
+            r = result.1
+
+        if bfinal == 1:
+            # Explicit final block marker — stop early
+            r = DeflBitReader(src: r.src, byte_pos: r.src.len(), bit_pos: 0)
+
+    output
+
 fn deflate_compress(data: [u8]) -> [u8]:
     if data.len() == 0:
         # Emit a single final empty stored block
