@@ -21,7 +21,7 @@ mod os.crypto.salsa20
 
 fn _s20_u32_mask(x: u32) -> u32:
     """Mask to 32 bits."""
-    x & 0xFFFFFFFF
+    x & 0xFFFFFFFFu32
 
 fn _s20_rotl32(x: u32, n: u32) -> u32:
     """32-bit left rotation."""
@@ -51,19 +51,6 @@ fn _s20_word_b3(w: u32) -> u8:
 # Salsa20 Quarter Round
 # =============================================================================
 
-fn _s20_quarter_round(s: [u32], a: u64, b: u64, c: u64, d: u64):
-    """Salsa20 quarter round — mutates state in place.
-
-    b ^= (a + d) <<< 7
-    c ^= (b + a) <<< 9
-    d ^= (c + b) <<< 13
-    a ^= (d + c) <<< 18
-    """
-    s[b] = s[b] ^ _s20_rotl32(_s20_u32_mask(s[a] + s[d]), 7u32)
-    s[c] = s[c] ^ _s20_rotl32(_s20_u32_mask(s[b] + s[a]), 9u32)
-    s[d] = s[d] ^ _s20_rotl32(_s20_u32_mask(s[c] + s[b]), 13u32)
-    s[a] = s[a] ^ _s20_rotl32(_s20_u32_mask(s[d] + s[c]), 18u32)
-
 # =============================================================================
 # Salsa20/20 Core — 20-round hash
 # =============================================================================
@@ -73,40 +60,96 @@ fn salsa20_20_core(input: [u32]) -> [u32]:
 
     Performs 10 double-rounds (20 rounds total) then adds initial state.
     Input and output are 16 words (64 bytes).
+    Quarter rounds are inlined to avoid array-mutation-through-parameter
+    interpreter limitation.
 
     Example:
         val output = salsa20_20_core(input)
     """
     # Working copy
-    var x: [u32] = []
-    var i: u64 = 0
-    while i < 16:
-        x.push(input[i])
-        i = i + 1
+    var x0 = input[0]
+    var x1 = input[1]
+    var x2 = input[2]
+    var x3 = input[3]
+    var x4 = input[4]
+    var x5 = input[5]
+    var x6 = input[6]
+    var x7 = input[7]
+    var x8 = input[8]
+    var x9 = input[9]
+    var x10 = input[10]
+    var x11 = input[11]
+    var x12 = input[12]
+    var x13 = input[13]
+    var x14 = input[14]
+    var x15 = input[15]
 
     # 10 double-rounds (20 rounds total)
+    # Each double-round = column round + row round
+    # QR(a,b,c,d): b^=rotl(a+d,7); c^=rotl(b+a,9); d^=rotl(c+b,13); a^=rotl(d+c,18)
     var round: u64 = 0
     while round < 10:
-        # Column rounds
-        _s20_quarter_round(x, 0, 4, 8, 12)
-        _s20_quarter_round(x, 5, 9, 13, 1)
-        _s20_quarter_round(x, 10, 14, 2, 6)
-        _s20_quarter_round(x, 15, 3, 7, 11)
-
-        # Row rounds
-        _s20_quarter_round(x, 0, 1, 2, 3)
-        _s20_quarter_round(x, 5, 6, 7, 4)
-        _s20_quarter_round(x, 10, 11, 8, 9)
-        _s20_quarter_round(x, 15, 12, 13, 14)
+        # Column round: QR(0,4,8,12)
+        x4 = x4 ^ _s20_rotl32(_s20_u32_mask(x0 + x12), 7u32)
+        x8 = x8 ^ _s20_rotl32(_s20_u32_mask(x4 + x0), 9u32)
+        x12 = x12 ^ _s20_rotl32(_s20_u32_mask(x8 + x4), 13u32)
+        x0 = x0 ^ _s20_rotl32(_s20_u32_mask(x12 + x8), 18u32)
+        # Column round: QR(5,9,13,1)
+        x9 = x9 ^ _s20_rotl32(_s20_u32_mask(x5 + x1), 7u32)
+        x13 = x13 ^ _s20_rotl32(_s20_u32_mask(x9 + x5), 9u32)
+        x1 = x1 ^ _s20_rotl32(_s20_u32_mask(x13 + x9), 13u32)
+        x5 = x5 ^ _s20_rotl32(_s20_u32_mask(x1 + x13), 18u32)
+        # Column round: QR(10,14,2,6)
+        x14 = x14 ^ _s20_rotl32(_s20_u32_mask(x10 + x6), 7u32)
+        x2 = x2 ^ _s20_rotl32(_s20_u32_mask(x14 + x10), 9u32)
+        x6 = x6 ^ _s20_rotl32(_s20_u32_mask(x2 + x14), 13u32)
+        x10 = x10 ^ _s20_rotl32(_s20_u32_mask(x6 + x2), 18u32)
+        # Column round: QR(15,3,7,11)
+        x3 = x3 ^ _s20_rotl32(_s20_u32_mask(x15 + x11), 7u32)
+        x7 = x7 ^ _s20_rotl32(_s20_u32_mask(x3 + x15), 9u32)
+        x11 = x11 ^ _s20_rotl32(_s20_u32_mask(x7 + x3), 13u32)
+        x15 = x15 ^ _s20_rotl32(_s20_u32_mask(x11 + x7), 18u32)
+        # Row round: QR(0,1,2,3)
+        x1 = x1 ^ _s20_rotl32(_s20_u32_mask(x0 + x3), 7u32)
+        x2 = x2 ^ _s20_rotl32(_s20_u32_mask(x1 + x0), 9u32)
+        x3 = x3 ^ _s20_rotl32(_s20_u32_mask(x2 + x1), 13u32)
+        x0 = x0 ^ _s20_rotl32(_s20_u32_mask(x3 + x2), 18u32)
+        # Row round: QR(5,6,7,4)
+        x6 = x6 ^ _s20_rotl32(_s20_u32_mask(x5 + x4), 7u32)
+        x7 = x7 ^ _s20_rotl32(_s20_u32_mask(x6 + x5), 9u32)
+        x4 = x4 ^ _s20_rotl32(_s20_u32_mask(x7 + x6), 13u32)
+        x5 = x5 ^ _s20_rotl32(_s20_u32_mask(x4 + x7), 18u32)
+        # Row round: QR(10,11,8,9)
+        x11 = x11 ^ _s20_rotl32(_s20_u32_mask(x10 + x9), 7u32)
+        x8 = x8 ^ _s20_rotl32(_s20_u32_mask(x11 + x10), 9u32)
+        x9 = x9 ^ _s20_rotl32(_s20_u32_mask(x8 + x11), 13u32)
+        x10 = x10 ^ _s20_rotl32(_s20_u32_mask(x9 + x8), 18u32)
+        # Row round: QR(15,12,13,14)
+        x12 = x12 ^ _s20_rotl32(_s20_u32_mask(x15 + x14), 7u32)
+        x13 = x13 ^ _s20_rotl32(_s20_u32_mask(x12 + x15), 9u32)
+        x14 = x14 ^ _s20_rotl32(_s20_u32_mask(x13 + x12), 13u32)
+        x15 = x15 ^ _s20_rotl32(_s20_u32_mask(x14 + x13), 18u32)
 
         round = round + 1
 
-    # Add initial state
+    # Add initial state and collect result
     var result: [u32] = []
-    i = 0
-    while i < 16:
-        result.push(_s20_u32_mask(x[i] + input[i]))
-        i = i + 1
+    result.push(_s20_u32_mask(x0 + input[0]))
+    result.push(_s20_u32_mask(x1 + input[1]))
+    result.push(_s20_u32_mask(x2 + input[2]))
+    result.push(_s20_u32_mask(x3 + input[3]))
+    result.push(_s20_u32_mask(x4 + input[4]))
+    result.push(_s20_u32_mask(x5 + input[5]))
+    result.push(_s20_u32_mask(x6 + input[6]))
+    result.push(_s20_u32_mask(x7 + input[7]))
+    result.push(_s20_u32_mask(x8 + input[8]))
+    result.push(_s20_u32_mask(x9 + input[9]))
+    result.push(_s20_u32_mask(x10 + input[10]))
+    result.push(_s20_u32_mask(x11 + input[11]))
+    result.push(_s20_u32_mask(x12 + input[12]))
+    result.push(_s20_u32_mask(x13 + input[13]))
+    result.push(_s20_u32_mask(x14 + input[14]))
+    result.push(_s20_u32_mask(x15 + input[15]))
 
     result
 
@@ -317,69 +360,104 @@ fn hsalsa20(key: [u8], input: [u8]) -> [u8]:
     val state = _s20_build_hsalsa_state(key, input)
 
     # Run core WITHOUT adding initial state (raw permutation output)
-    var x: [u32] = []
-    var i: u64 = 0
-    while i < 16:
-        x.push(state[i])
-        i = i + 1
+    # Quarter rounds inlined to avoid array-mutation-through-parameter issue.
+    var x0 = state[0]
+    var x1 = state[1]
+    var x2 = state[2]
+    var x3 = state[3]
+    var x4 = state[4]
+    var x5 = state[5]
+    var x6 = state[6]
+    var x7 = state[7]
+    var x8 = state[8]
+    var x9 = state[9]
+    var x10 = state[10]
+    var x11 = state[11]
+    var x12 = state[12]
+    var x13 = state[13]
+    var x14 = state[14]
+    var x15 = state[15]
 
     var round: u64 = 0
     while round < 10:
-        _s20_quarter_round(x, 0, 4, 8, 12)
-        _s20_quarter_round(x, 5, 9, 13, 1)
-        _s20_quarter_round(x, 10, 14, 2, 6)
-        _s20_quarter_round(x, 15, 3, 7, 11)
-
-        _s20_quarter_round(x, 0, 1, 2, 3)
-        _s20_quarter_round(x, 5, 6, 7, 4)
-        _s20_quarter_round(x, 10, 11, 8, 9)
-        _s20_quarter_round(x, 15, 12, 13, 14)
+        # Column round: QR(0,4,8,12)
+        x4 = x4 ^ _s20_rotl32(_s20_u32_mask(x0 + x12), 7u32)
+        x8 = x8 ^ _s20_rotl32(_s20_u32_mask(x4 + x0), 9u32)
+        x12 = x12 ^ _s20_rotl32(_s20_u32_mask(x8 + x4), 13u32)
+        x0 = x0 ^ _s20_rotl32(_s20_u32_mask(x12 + x8), 18u32)
+        # Column round: QR(5,9,13,1)
+        x9 = x9 ^ _s20_rotl32(_s20_u32_mask(x5 + x1), 7u32)
+        x13 = x13 ^ _s20_rotl32(_s20_u32_mask(x9 + x5), 9u32)
+        x1 = x1 ^ _s20_rotl32(_s20_u32_mask(x13 + x9), 13u32)
+        x5 = x5 ^ _s20_rotl32(_s20_u32_mask(x1 + x13), 18u32)
+        # Column round: QR(10,14,2,6)
+        x14 = x14 ^ _s20_rotl32(_s20_u32_mask(x10 + x6), 7u32)
+        x2 = x2 ^ _s20_rotl32(_s20_u32_mask(x14 + x10), 9u32)
+        x6 = x6 ^ _s20_rotl32(_s20_u32_mask(x2 + x14), 13u32)
+        x10 = x10 ^ _s20_rotl32(_s20_u32_mask(x6 + x2), 18u32)
+        # Column round: QR(15,3,7,11)
+        x3 = x3 ^ _s20_rotl32(_s20_u32_mask(x15 + x11), 7u32)
+        x7 = x7 ^ _s20_rotl32(_s20_u32_mask(x3 + x15), 9u32)
+        x11 = x11 ^ _s20_rotl32(_s20_u32_mask(x7 + x3), 13u32)
+        x15 = x15 ^ _s20_rotl32(_s20_u32_mask(x11 + x7), 18u32)
+        # Row round: QR(0,1,2,3)
+        x1 = x1 ^ _s20_rotl32(_s20_u32_mask(x0 + x3), 7u32)
+        x2 = x2 ^ _s20_rotl32(_s20_u32_mask(x1 + x0), 9u32)
+        x3 = x3 ^ _s20_rotl32(_s20_u32_mask(x2 + x1), 13u32)
+        x0 = x0 ^ _s20_rotl32(_s20_u32_mask(x3 + x2), 18u32)
+        # Row round: QR(5,6,7,4)
+        x6 = x6 ^ _s20_rotl32(_s20_u32_mask(x5 + x4), 7u32)
+        x7 = x7 ^ _s20_rotl32(_s20_u32_mask(x6 + x5), 9u32)
+        x4 = x4 ^ _s20_rotl32(_s20_u32_mask(x7 + x6), 13u32)
+        x5 = x5 ^ _s20_rotl32(_s20_u32_mask(x4 + x7), 18u32)
+        # Row round: QR(10,11,8,9)
+        x11 = x11 ^ _s20_rotl32(_s20_u32_mask(x10 + x9), 7u32)
+        x8 = x8 ^ _s20_rotl32(_s20_u32_mask(x11 + x10), 9u32)
+        x9 = x9 ^ _s20_rotl32(_s20_u32_mask(x8 + x11), 13u32)
+        x10 = x10 ^ _s20_rotl32(_s20_u32_mask(x9 + x8), 18u32)
+        # Row round: QR(15,12,13,14)
+        x12 = x12 ^ _s20_rotl32(_s20_u32_mask(x15 + x14), 7u32)
+        x13 = x13 ^ _s20_rotl32(_s20_u32_mask(x12 + x15), 9u32)
+        x14 = x14 ^ _s20_rotl32(_s20_u32_mask(x13 + x12), 13u32)
+        x15 = x15 ^ _s20_rotl32(_s20_u32_mask(x14 + x13), 18u32)
 
         round = round + 1
 
     # Output: first row [0,5,10,15] + middle key words [6,7,8,9]
     # (DJB xsalsa-20110204.pdf §2: z0,z5,z10,z15,z6,z7,z8,z9)
     var out: [u8] = []
-    val w0 = x[0]
-    out.push(_s20_word_b0(w0))
-    out.push(_s20_word_b1(w0))
-    out.push(_s20_word_b2(w0))
-    out.push(_s20_word_b3(w0))
-    val w5 = x[5]
-    out.push(_s20_word_b0(w5))
-    out.push(_s20_word_b1(w5))
-    out.push(_s20_word_b2(w5))
-    out.push(_s20_word_b3(w5))
-    val w10 = x[10]
-    out.push(_s20_word_b0(w10))
-    out.push(_s20_word_b1(w10))
-    out.push(_s20_word_b2(w10))
-    out.push(_s20_word_b3(w10))
-    val w15 = x[15]
-    out.push(_s20_word_b0(w15))
-    out.push(_s20_word_b1(w15))
-    out.push(_s20_word_b2(w15))
-    out.push(_s20_word_b3(w15))
-    val w6 = x[6]
-    out.push(_s20_word_b0(w6))
-    out.push(_s20_word_b1(w6))
-    out.push(_s20_word_b2(w6))
-    out.push(_s20_word_b3(w6))
-    val w7 = x[7]
-    out.push(_s20_word_b0(w7))
-    out.push(_s20_word_b1(w7))
-    out.push(_s20_word_b2(w7))
-    out.push(_s20_word_b3(w7))
-    val w8 = x[8]
-    out.push(_s20_word_b0(w8))
-    out.push(_s20_word_b1(w8))
-    out.push(_s20_word_b2(w8))
-    out.push(_s20_word_b3(w8))
-    val w9 = x[9]
-    out.push(_s20_word_b0(w9))
-    out.push(_s20_word_b1(w9))
-    out.push(_s20_word_b2(w9))
-    out.push(_s20_word_b3(w9))
+    out.push(_s20_word_b0(x0))
+    out.push(_s20_word_b1(x0))
+    out.push(_s20_word_b2(x0))
+    out.push(_s20_word_b3(x0))
+    out.push(_s20_word_b0(x5))
+    out.push(_s20_word_b1(x5))
+    out.push(_s20_word_b2(x5))
+    out.push(_s20_word_b3(x5))
+    out.push(_s20_word_b0(x10))
+    out.push(_s20_word_b1(x10))
+    out.push(_s20_word_b2(x10))
+    out.push(_s20_word_b3(x10))
+    out.push(_s20_word_b0(x15))
+    out.push(_s20_word_b1(x15))
+    out.push(_s20_word_b2(x15))
+    out.push(_s20_word_b3(x15))
+    out.push(_s20_word_b0(x6))
+    out.push(_s20_word_b1(x6))
+    out.push(_s20_word_b2(x6))
+    out.push(_s20_word_b3(x6))
+    out.push(_s20_word_b0(x7))
+    out.push(_s20_word_b1(x7))
+    out.push(_s20_word_b2(x7))
+    out.push(_s20_word_b3(x7))
+    out.push(_s20_word_b0(x8))
+    out.push(_s20_word_b1(x8))
+    out.push(_s20_word_b2(x8))
+    out.push(_s20_word_b3(x8))
+    out.push(_s20_word_b0(x9))
+    out.push(_s20_word_b1(x9))
+    out.push(_s20_word_b2(x9))
+    out.push(_s20_word_b3(x9))
 
     out
 
