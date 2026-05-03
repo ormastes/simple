@@ -19,6 +19,8 @@ real implementation for:
 - reload after an on-disk edit in the same process
 - canonical rewrite using `support ∩ simple_support`
 
+For non-x86 optional runtime detection, the spec intentionally treats v1 as conservative unless an explicit target probe exists. That means this feature is not blocked by missing direct runtime probes for `aarch64_sve` or `aarch64_sve2`, because current shipped behavior collapses those hosts to `aarch64_neon`. It is also not blocked by the lack of `wasm128` runtime probing in this slice. By contrast, `riscv64_rvv` auto-selection is only considered first-class when explicit RVV host probing exists and is verified.
+
 This is still a real black-box command path from SSpec, but it is command-level
 behavioral verification rather than in-process function calls.
 
@@ -78,3 +80,10 @@ loader candidate enumeration, package runtime selection, or compiler stdlib
 root resolution inside the SSpec runner, this file should be upgraded again
 from command-level verification to direct temp-file/env-driven behavioral
 scenarios.
+
+Separate from that observability gap, v1 also defers real runtime probing for
+optional non-x86 tiers such as `aarch64_sve`, `aarch64_sve2`, and
+`riscv64_rvv`. This spec therefore treats those paths as contract limits, not
+as global release blockers. Only a release that explicitly promises RVV host
+auto-selection would need RVV probing to move from deferred work to required
+coverage here.

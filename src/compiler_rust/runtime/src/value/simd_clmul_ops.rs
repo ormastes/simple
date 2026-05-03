@@ -98,14 +98,20 @@ pub fn clmul_lo_u64(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("pclmulqdq") {
-            return unsafe { clmul_lo_u64_x86(a, b) };
+            unsafe { clmul_lo_u64_x86(a, b) }
+        } else {
+            let (lo, hi) = clmul64_scalar(a[0], b[0]);
+            [lo, hi]
         }
     }
     #[cfg(all(target_arch = "aarch64", target_feature = "aes", target_feature = "neon"))]
-    unsafe {
-        return clmul_lo_u64_neon(a, b);
+    {
+        unsafe { clmul_lo_u64_neon(a, b) }
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", target_feature = "aes", target_feature = "neon")
+    )))]
     {
         let (lo, hi) = clmul64_scalar(a[0], b[0]);
         [lo, hi]
@@ -121,14 +127,20 @@ pub fn clmul_hi_u64(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("pclmulqdq") {
-            return unsafe { clmul_hi_u64_x86(a, b) };
+            unsafe { clmul_hi_u64_x86(a, b) }
+        } else {
+            let (lo, hi) = clmul64_scalar(a[1], b[1]);
+            [lo, hi]
         }
     }
     #[cfg(all(target_arch = "aarch64", target_feature = "aes", target_feature = "neon"))]
-    unsafe {
-        return clmul_hi_u64_neon(a, b);
+    {
+        unsafe { clmul_hi_u64_neon(a, b) }
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", target_feature = "aes", target_feature = "neon")
+    )))]
     {
         let (lo, hi) = clmul64_scalar(a[1], b[1]);
         [lo, hi]
@@ -139,14 +151,17 @@ pub fn clmul_hi_u64(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
 #[inline]
 pub fn xor_u64x2(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-    unsafe {
-        return xor_u64x2_x86(a, b);
+    {
+        unsafe { xor_u64x2_x86(a, b) }
     }
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    unsafe {
-        return xor_u64x2_neon(a, b);
+    {
+        unsafe { xor_u64x2_neon(a, b) }
     }
-    #[allow(unreachable_code)]
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        all(target_arch = "aarch64", target_feature = "neon")
+    )))]
     {
         xor_u64x2_scalar(a, b)
     }

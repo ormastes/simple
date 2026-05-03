@@ -121,79 +121,45 @@ fn _mat_set(mat: [i64], cols: i64, row: i64, col: i64, value: i64) -> [i64]:
     m[row * cols + col] = value
     m
 
-fn _mat_create_vandermonde(n_rows: i64, n_cols: i64) -> [i64]:
-    """Create an n_rows x n_cols Vandermonde matrix over GF(2^8).
-    V[i][j] = alpha^(i*j), where alpha = 2.
+fn _build_encoding_matrix(n_total: i64, k_data: i64) -> [i64]:
+    """Build a systematic n_total x k_data encoding matrix.
+    Top k rows = identity (systematic property).
+    Bottom m rows = Cauchy parity matrix (guarantees MDS).
+    Cauchy matrix: C[i][j] = 1 / (x_i XOR y_j) where x and y are
+    disjoint sets of GF(2^8) elements.
+    We use x_i = k_data + i (for i in 0..m-1) and y_j = j (for j in 0..k_data-1).
     reason: RS encoding matrix construction"""
     _gf_ensure_tables()
+    val m = n_total - k_data
     var mat: [i64] = []
+
+    # Top k rows: identity matrix
     var i = 0
-    while i < n_rows:
+    while i < k_data:
         var j = 0
-        while j < n_cols:
-            # V[i][j] = alpha^(i*j) = exp_table[(i*j) % 255]
-            if i == 0 or j == 0:
+        while j < k_data:
+            if i == j:
                 mat.push(1)
             else:
-                val exp_val = (i * j) % 255
-                mat.push(_gf_exp_table[exp_val])
+                mat.push(0)
             j = j + 1
         i = i + 1
+
+    # Bottom m rows: Cauchy matrix
+    # C[i][j] = gf_inv(x_i XOR y_j)
+    # x_i = k_data + i, y_j = j (these are disjoint since x >= k_data, y < k_data)
+    var pi = 0
+    while pi < m:
+        val x_i = k_data + pi
+        var pj = 0
+        while pj < k_data:
+            val y_j = pj
+            val diff = x_i xor y_j
+            mat.push(gf_inv(diff))
+            pj = pj + 1
+        pi = pi + 1
+
     mat
-
-fn _mat_make_systematic(mat: [i64], n_rows: i64, n_cols: i64) -> [i64]:
-    """Row-reduce a Vandermonde matrix so the top k rows form an identity.
-    Input: n_rows x n_cols matrix (n_rows >= n_cols).
-    Output: same matrix after Gauss-Jordan elimination on first n_cols rows.
-    reason: systematic encoding matrix"""
-    var m = mat
-    val k = n_cols
-
-    var col = 0
-    while col < k:
-        # Find pivot row (row with non-zero entry in this column, starting from col)
-        var pivot_row = col
-        var found_pivot = false
-        while pivot_row < n_rows and not found_pivot:
-            if _mat_get(m, k, pivot_row, col) != 0:
-                found_pivot = true
-            else:
-                pivot_row = pivot_row + 1
-
-        # Swap pivot row with current row
-        if pivot_row != col:
-            var c = 0
-            while c < k:
-                val tmp = _mat_get(m, k, col, c)
-                m = _mat_set(m, k, col, c, _mat_get(m, k, pivot_row, c))
-                m = _mat_set(m, k, pivot_row, c, tmp)
-                c = c + 1
-
-        # Scale pivot row so pivot element becomes 1
-        val pivot_val = _mat_get(m, k, col, col)
-        val pivot_inv = gf_inv(pivot_val)
-        var c2 = 0
-        while c2 < k:
-            val old_val = _mat_get(m, k, col, c2)
-            m = _mat_set(m, k, col, c2, gf_mul(old_val, pivot_inv))
-            c2 = c2 + 1
-
-        # Eliminate this column from all other rows
-        var r = 0
-        while r < n_rows:
-            if r != col:
-                val factor = _mat_get(m, k, r, col)
-                if factor != 0:
-                    var c3 = 0
-                    while c3 < k:
-                        val old_r = _mat_get(m, k, r, c3)
-                        val sub_val = gf_mul(factor, _mat_get(m, k, col, c3))
-                        m = _mat_set(m, k, r, c3, gf_add(old_r, sub_val))
-                        c3 = c3 + 1
-            r = r + 1
-
-        col = col + 1
-    m
 
 fn _mat_invert(mat: [i64], n: i64) -> Result<[i64], text>:
     """Invert an n x n matrix over GF(2^8) using Gauss-Jordan.
@@ -299,9 +265,8 @@ fn rs_encode(data: [u8], parity_count: i64) -> Result<[u8], text>:
 
     _gf_ensure_tables()
 
-    # Build encoding matrix: n x k Vandermonde, then make systematic
-    var vand = _mat_create_vandermonde(n, k)
-    var enc_mat = _mat_make_systematic(vand, n, k)
+    # Build encoding matrix: top k rows = identity, bottom m rows = Cauchy
+    val enc_mat = _build_encoding_matrix(n, k)
 
     # Output: first k bytes are data (systematic), next m bytes are parity
     var output: [u8] = []
@@ -360,8 +325,7 @@ fn rs_decode(received: [u8], parity_count: i64, erasure_positions: [i64]) -> Res
     _gf_ensure_tables()
 
     # Build the full encoding matrix (same as encode)
-    var vand = _mat_create_vandermonde(n, k)
-    var enc_mat = _mat_make_systematic(vand, n, k)
+    val enc_mat = _build_encoding_matrix(n, k)
 
     # Determine surviving row indices (those NOT in erasure_positions)
     # We need exactly k surviving rows.

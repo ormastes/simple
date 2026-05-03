@@ -274,6 +274,17 @@ impl<'a> MirLowerer<'a> {
         let receiver_reg = self.lower_expr(receiver)?;
         let index_reg = self.lower_expr(index)?;
         let receiver_ty = receiver.ty;
+        let element_expr_ty = if expr_ty == TypeId::ANY {
+            self.type_registry
+                .and_then(|tr| tr.get(receiver_ty))
+                .and_then(|ty| match ty {
+                    HirType::Array { element, .. } => Some(*element),
+                    _ => None,
+                })
+                .unwrap_or(expr_ty)
+        } else {
+            expr_ty
+        };
 
         // Check if the receiver is a tuple type. Labeled tuple indexing also
         // lowers through rt_tuple_get because MIR stores fields positionally.
@@ -345,7 +356,7 @@ impl<'a> MirLowerer<'a> {
 
         // rt_array_get returns RuntimeValue; unbox if the expected type is a native type
         let needs_int_unbox = matches!(
-            expr_ty,
+            element_expr_ty,
             TypeId::I8
                 | TypeId::I16
                 | TypeId::I32
@@ -356,18 +367,18 @@ impl<'a> MirLowerer<'a> {
                 | TypeId::U64
                 | TypeId::BOOL
         );
-        let needs_float_unbox = matches!(expr_ty, TypeId::F32 | TypeId::F64);
+        let needs_float_unbox = matches!(element_expr_ty, TypeId::F32 | TypeId::F64);
 
         if needs_int_unbox {
             if std::env::var("FR_DRIVER_0002B_TRACE").is_ok() {
-                eprintln!("[narrow-hit-1] expr_ty={:?}", expr_ty);
+                eprintln!("[narrow-hit-1] expr_ty={:?}", element_expr_ty);
             }
             // FR-DRIVER-0002b array variant (A2): after UnboxInt produces an
             // i64-typed payload, narrow it to the actual element width so
             // `body::build_vreg_types` stamps the correct narrow TypeId on the
             // dest, letting `compile_binop` dispatch unsigned `>>` to `ushr`
             // for U8/U16/U32 (and signed `>>` to `sshr` for I8/I16/I32).
-            let (to_bits, signed_opt): (u8, Option<bool>) = match expr_ty {
+            let (to_bits, signed_opt): (u8, Option<bool>) = match element_expr_ty {
                 TypeId::U8 => (8, Some(false)),
                 TypeId::U16 => (16, Some(false)),
                 TypeId::U32 => (32, Some(false)),

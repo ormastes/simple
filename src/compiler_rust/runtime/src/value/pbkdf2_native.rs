@@ -15,7 +15,28 @@
 //! See: `doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md`.
 
 use hmac::Hmac;
+use sha1::Sha1;
 use sha2::{Sha256, Sha384, Sha512};
+
+/// PBKDF2-HMAC-SHA-1 (RFC 5802 SCRAM-SHA-1).
+///
+/// Returns a freshly-allocated `Vec<u8>` of length `dk_len`.
+/// `iterations` and `dk_len` are clamped to non-negative `u32` /
+/// `usize` respectively; `iterations <= 0` is normalised to 1 to match
+/// the existing pure-Simple semantics for defensive callers.
+pub fn pbkdf2_hmac_sha1(password: &[u8], salt: &[u8], iterations: i64, dk_len: i64) -> Vec<u8> {
+    let rounds = if iterations <= 0 {
+        1u32
+    } else {
+        iterations.min(u32::MAX as i64) as u32
+    };
+    let n = if dk_len <= 0 { 0usize } else { dk_len as usize };
+    let mut out = vec![0u8; n];
+    if n > 0 {
+        pbkdf2::pbkdf2::<Hmac<Sha1>>(password, salt, rounds, &mut out);
+    }
+    out
+}
 
 /// PBKDF2-HMAC-SHA-256.
 ///
@@ -136,5 +157,15 @@ mod tests {
     fn dk_len_zero() {
         let dk = pbkdf2_hmac_sha256(b"password", b"salt", 1, 0);
         assert!(dk.is_empty());
+    }
+
+    // RFC 6070 §2 TC1: P="password" S="salt" c=4096 dkLen=20 (SHA-1)
+    #[test]
+    fn rfc6070_tc3_sha1_c4096() {
+        let dk = pbkdf2_hmac_sha1(b"password", b"salt", 4096, 20);
+        assert_eq!(
+            hex(&dk),
+            "4b007901b765489abead49d926f721d065a429c1"
+        );
     }
 }

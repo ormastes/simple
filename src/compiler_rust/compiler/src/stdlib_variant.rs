@@ -57,6 +57,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
+    use simple_simd::{host_cpu_config, HostCpuConfig};
 
     fn simd_tier_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -96,20 +97,63 @@ mod tests {
         with_simd_envs(value, None, f)
     }
 
-    fn config_document(enabled_tier: &str) -> String {
+    fn render_string_list(values: &[String]) -> String {
+        format!("[{}]", values.join(", "))
+    }
+
+    fn render_tier_list(values: &[SimdTier]) -> String {
+        format!(
+            "[{}]",
+            values.iter().map(|value| value.as_str()).collect::<Vec<_>>().join(", ")
+        )
+    }
+
+    fn instruction_sets_for_tier(tier: SimdTier) -> &'static [&'static str] {
+        match tier {
+            SimdTier::Scalar => &[],
+            SimdTier::X86_64Sse2 => &["sse2"],
+            SimdTier::X86_64Avx2 => &["sse2", "avx2"],
+            SimdTier::X86_64Avx512 => &["sse2", "avx2", "avx512f"],
+            SimdTier::Aarch64Neon => &["neon"],
+            SimdTier::Aarch64Sve => &["neon", "sve"],
+            SimdTier::Aarch64Sve2 => &["neon", "sve", "sve2"],
+            SimdTier::Riscv64Rvv => &["rvv"],
+            SimdTier::Wasm128 => &["wasm128"],
+        }
+    }
+
+    fn config_document(base: &HostCpuConfig, enabled_tier: SimdTier) -> String {
+        let enabled_instruction_sets = instruction_sets_for_tier(enabled_tier)
+            .iter()
+            .filter(|instruction_set| {
+                base.simple_support
+                    .instruction_sets
+                    .iter()
+                    .any(|supported| supported == **instruction_set)
+            })
+            .map(|instruction_set| (*instruction_set).to_string())
+            .collect::<Vec<_>>();
+
         format!(
             "version: 1\n\
-target_triple: test-triple\n\
+target_triple: {}\n\
 generated_by: \"test\"\n\
 support:\n\
-    simd_tier: x86_64_avx2\n\
-    instruction_sets: [sse2, avx2]\n\
+    simd_tier: {}\n\
+    instruction_sets: {}\n\
 simple_support:\n\
-    simd_tier_fallbacks: [x86_64_avx2, x86_64_sse2, scalar]\n\
-    instruction_sets: [sse2, avx2]\n\
+    simd_tier_fallbacks: {}\n\
+    instruction_sets: {}\n\
 enabled:\n\
-    simd_tier: {enabled_tier}\n\
-    instruction_sets: [sse2, avx2]\n"
+    simd_tier: {}\n\
+    instruction_sets: {}\n",
+            base.target_triple,
+            base.support.simd_tier.as_str(),
+            render_string_list(&base.support.instruction_sets),
+            render_tier_list(&base.simple_support.simd_tier_fallbacks),
+            render_string_list(&base.simple_support.instruction_sets),
+            enabled_tier.as_str(),
+            render_string_list(&enabled_instruction_sets),
         )
     }
 
@@ -171,11 +215,20 @@ enabled:\n\
     fn config_enabled_tier_is_used_without_override() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cpu_config.sdn");
-        fs::write(&path, config_document("scalar")).unwrap();
+        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        let configured_tier = base
+            .simple_support
+            .simd_tier_fallbacks
+            .iter()
+            .rev()
+            .copied()
+            .find(|tier| *tier != base.enabled.simd_tier)
+            .unwrap_or(base.enabled.simd_tier);
+        fs::write(&path, config_document(&base, configured_tier)).unwrap();
 
         with_simd_envs(None, Some(&path), || {
-            assert_eq!(active_simd_tier(), SimdTier::Scalar);
-            assert_eq!(active_simd_tier_name(), "scalar");
+            assert_eq!(active_simd_tier(), configured_tier);
+            assert_eq!(active_simd_tier_name(), configured_tier.as_str());
         });
     }
 
@@ -183,11 +236,20 @@ enabled:\n\
     fn explicit_override_takes_precedence_over_config_enabled_tier() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cpu_config.sdn");
-        fs::write(&path, config_document("scalar")).unwrap();
+        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        let configured_tier = base
+            .simple_support
+            .simd_tier_fallbacks
+            .iter()
+            .rev()
+            .copied()
+            .find(|tier| *tier != base.enabled.simd_tier)
+            .unwrap_or(base.enabled.simd_tier);
+        fs::write(&path, config_document(&base, configured_tier)).unwrap();
 
-        with_simd_envs(Some("x86_64_sse2"), Some(&path), || {
-            assert_eq!(active_simd_tier(), SimdTier::X86_64Sse2);
-            assert_eq!(active_simd_tier_name(), "x86_64_sse2");
+        with_simd_envs(Some(base.enabled.simd_tier.as_str()), Some(&path), || {
+            assert_eq!(active_simd_tier(), base.enabled.simd_tier);
+            assert_eq!(active_simd_tier_name(), base.enabled.simd_tier.as_str());
         });
     }
 
@@ -195,11 +257,20 @@ enabled:\n\
     fn invalid_override_falls_back_to_configured_enabled_tier() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cpu_config.sdn");
-        fs::write(&path, config_document("scalar")).unwrap();
+        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        let configured_tier = base
+            .simple_support
+            .simd_tier_fallbacks
+            .iter()
+            .rev()
+            .copied()
+            .find(|tier| *tier != base.enabled.simd_tier)
+            .unwrap_or(base.enabled.simd_tier);
+        fs::write(&path, config_document(&base, configured_tier)).unwrap();
 
         with_simd_envs(Some("definitely-not-a-tier"), Some(&path), || {
-            assert_eq!(active_simd_tier(), SimdTier::Scalar);
-            assert_eq!(active_simd_tier_name(), "scalar");
+            assert_eq!(active_simd_tier(), configured_tier);
+            assert_eq!(active_simd_tier_name(), configured_tier.as_str());
         });
     }
 
@@ -207,18 +278,28 @@ enabled:\n\
     fn configured_enabled_tier_changes_stdlib_root_order_without_override() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("cpu_config.sdn");
-        fs::write(&path, config_document("x86_64_sse2")).unwrap();
+        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        let configured_tier = base
+            .simple_support
+            .simd_tier_fallbacks
+            .iter()
+            .rev()
+            .copied()
+            .find(|tier| !tier.is_scalar())
+            .unwrap_or(base.enabled.simd_tier);
+        fs::write(&path, config_document(&base, configured_tier)).unwrap();
 
         with_simd_envs(None, Some(&path), || {
-            assert_eq!(active_simd_tier(), SimdTier::X86_64Sse2);
+            assert_eq!(active_simd_tier(), configured_tier);
             let roots = stdlib_root_candidates(Path::new("/tmp/proj/src/lib/std/src"));
-            assert_eq!(
-                roots,
-                vec![
-                    PathBuf::from("/tmp/proj/src/lib/std/variants/x86_64_sse2/src"),
-                    PathBuf::from("/tmp/proj/src/lib/std/src"),
-                ]
-            );
+            let mut expected = configured_tier
+                .compatible_fallbacks()
+                .iter()
+                .filter(|tier| !tier.is_scalar())
+                .map(|tier| PathBuf::from(format!("/tmp/proj/src/lib/std/variants/{}/src", tier.as_str())))
+                .collect::<Vec<_>>();
+            expected.push(PathBuf::from("/tmp/proj/src/lib/std/src"));
+            assert_eq!(roots, expected);
         });
     }
 }
