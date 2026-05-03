@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push};
 use super::core::RuntimeValue;
@@ -19,6 +19,7 @@ type F64FmaKernel = fn(&[f64], &[f64], &[f64], &mut [f64]);
 type F64ReduceKernel = fn(&[f64]) -> f64;
 type F64DotKernel = fn(&[f64], &[f64]) -> f64;
 
+#[derive(Clone, Copy)]
 struct NumericKernelProvider {
     tier: SimdTier,
     add_f32: F32MapKernel,
@@ -100,9 +101,26 @@ fn provider_for_tier(tier: SimdTier) -> NumericKernelProvider {
     }
 }
 
-fn numeric_kernel_provider() -> &'static NumericKernelProvider {
-    static PROVIDER: OnceLock<NumericKernelProvider> = OnceLock::new();
-    PROVIDER.get_or_init(|| provider_for_tier(active_simd_tier()))
+fn numeric_kernel_provider_cache() -> &'static Mutex<Option<NumericKernelProvider>> {
+    static PROVIDER: OnceLock<Mutex<Option<NumericKernelProvider>>> = OnceLock::new();
+    PROVIDER.get_or_init(|| Mutex::new(None))
+}
+
+fn numeric_kernel_provider() -> NumericKernelProvider {
+    let active_tier = active_simd_tier();
+    let mut guard = numeric_kernel_provider_cache().lock().unwrap();
+    match *guard {
+        Some(provider) if provider.tier == active_tier => provider,
+        _ => {
+            let provider = provider_for_tier(active_tier);
+            *guard = Some(provider);
+            provider
+        }
+    }
+}
+
+pub(crate) fn clear_numeric_kernel_provider_cache() {
+    *numeric_kernel_provider_cache().lock().unwrap() = None;
 }
 
 pub(crate) fn active_numeric_kernel_tier() -> SimdTier {
@@ -1128,6 +1146,26 @@ pub extern "C" fn rt_numeric_dot_f64(lhs: RuntimeValue, rhs: RuntimeValue) -> Ru
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn simd_tier_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_simd_tier_override<T>(value: &str, test: impl FnOnce() -> T) -> T {
+        let _guard = simd_tier_env_lock().lock().unwrap();
+        let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+        std::env::set_var("SIMPLE_SIMD_TIER", value);
+        clear_numeric_kernel_provider_cache();
+        let result = test();
+        clear_numeric_kernel_provider_cache();
+        match previous {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+        result
+    }
 
     fn runtime_array_to_f64s(value: RuntimeValue) -> Vec<f64> {
         let len = rt_array_len(value);
@@ -1163,6 +1201,15 @@ mod tests {
         let mut out = [0.0f32; 3];
         (provider.add_f32)(&lhs, &rhs, &mut out);
         assert_eq!(out, [5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn cached_provider_refreshes_when_active_tier_changes() {
+        with_simd_tier_override("x86_64_sse2", || {
+            assert_eq!(active_numeric_kernel_tier(), SimdTier::X86_64Sse2);
+            std::env::set_var("SIMPLE_SIMD_TIER", "scalar");
+            assert_eq!(active_numeric_kernel_tier(), SimdTier::Scalar);
+        });
     }
 
     #[test]

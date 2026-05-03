@@ -193,19 +193,23 @@ pub(crate) fn compile_method_call_static<M: Module>(
         None
     };
     let lookup_name = lookup_name_storage.as_deref().unwrap_or(func_name);
+    let receiver_ty = ctx.vreg_types.get(&receiver).copied();
+    let allow_qualified_builtin = matches!(receiver_ty, Some(TypeId::STRING));
 
     // First check if this is a builtin method (String, Array methods)
     // Try to compile as builtin - these have runtime function implementations
-    if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
-        if let Some(d) = dest {
-            ctx.vreg_values.insert(*d, result);
+    if !lookup_name.contains('.') || allow_qualified_builtin {
+        if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, result);
+            }
+            // NOTE: Do NOT store the push result back to the receiver variable.
+            // rt_array_push returns bool (success/failure), NOT a new array pointer.
+            // The array is mutated in-place; the pointer stays valid.
+            // Storing the bool (1=true) back would corrupt the array variable,
+            // causing segfaults on subsequent array access.
+            return Ok(());
         }
-        // NOTE: Do NOT store the push result back to the receiver variable.
-        // rt_array_push returns bool (success/failure), NOT a new array pointer.
-        // The array is mutated in-place; the pointer stays valid.
-        // Storing the bool (1=true) back would corrupt the array variable,
-        // causing segfaults on subsequent array access.
-        return Ok(());
     }
 
     // Try to find the function - check multiple patterns

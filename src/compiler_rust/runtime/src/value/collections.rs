@@ -2,7 +2,7 @@
 //! Dict FFI functions are in the dict module.
 
 use std::cmp::Ordering;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use super::byte_kernels::{
     avx2_byte_find, avx2_byte_rfind, byte_split_ranges_for_tier, neon_byte_find, neon_byte_rfind, scalar_byte_find,
@@ -68,6 +68,7 @@ type ByteFindKernel = fn(&[u8], &[u8], usize) -> Option<usize>;
 type ByteRfindKernel = fn(&[u8], &[u8]) -> Option<usize>;
 type ByteSplitKernel = fn(&str, &str) -> Vec<(usize, usize)>;
 
+#[derive(Clone, Copy)]
 struct CollectionProviders {
     array_sort: ArraySortKernel,
     byte_find: ByteFindKernel,
@@ -76,9 +77,8 @@ struct CollectionProviders {
     simd_tier: SimdTier,
 }
 
-fn collection_providers() -> &'static CollectionProviders {
-    static PROVIDERS: OnceLock<CollectionProviders> = OnceLock::new();
-    PROVIDERS.get_or_init(|| match active_simd_tier() {
+fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
+    match tier {
         SimdTier::X86_64Sse2 => CollectionProviders {
             array_sort: scalar_array_sort,
             byte_find: scalar_byte_find,
@@ -107,7 +107,33 @@ fn collection_providers() -> &'static CollectionProviders {
             byte_split: scalar_byte_split_ranges,
             simd_tier: tier,
         },
-    })
+    }
+}
+
+fn collection_provider_cache() -> &'static Mutex<Option<CollectionProviders>> {
+    static PROVIDERS: OnceLock<Mutex<Option<CollectionProviders>>> = OnceLock::new();
+    PROVIDERS.get_or_init(|| Mutex::new(None))
+}
+
+fn collection_providers() -> CollectionProviders {
+    let active_tier = active_simd_tier();
+    let mut guard = collection_provider_cache().lock().unwrap();
+    match *guard {
+        Some(providers) if providers.simd_tier == active_tier => providers,
+        _ => {
+            let providers = providers_for_tier(active_tier);
+            *guard = Some(providers);
+            providers
+        }
+    }
+}
+
+pub(crate) fn active_collection_simd_tier() -> SimdTier {
+    collection_providers().simd_tier
+}
+
+pub(crate) fn clear_collection_provider_cache() {
+    *collection_provider_cache().lock().unwrap() = None;
 }
 
 #[inline]

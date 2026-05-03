@@ -219,6 +219,25 @@ impl NativeProjectBuilder {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn quote_linker_response_path(path: &Path) -> String {
+        let raw = path.to_string_lossy();
+        let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn write_linker_object_response_file(temp_dir: &Path, object_paths: &[PathBuf]) -> Result<PathBuf, String> {
+        let rsp_path = temp_dir.join("spl_objects.rsp");
+        let contents = object_paths
+            .iter()
+            .map(|obj| Self::quote_linker_response_path(obj))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&rsp_path, format!("{contents}\n")).map_err(|e| format!("write object response file: {e}"))?;
+        Ok(rsp_path)
+    }
+
     fn cached_global_symbols<'a>(
         cache: &'a mut HashMap<PathBuf, Vec<String>>,
         obj: &Path,
@@ -537,6 +556,13 @@ int main(int argc, char** argv) {
         }
 
         if object_paths.len() > 100 {
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                let rsp_path = Self::write_linker_object_response_file(temp_dir, object_paths)?;
+                cmd.arg(format!("@{}", rsp_path.display()));
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+            {
             let archive_path = temp_dir.join("libspl_objects.a");
             let ar_tool = find_archive_tool();
             let is_msvc_lib = ar_tool == "lib";
@@ -622,6 +648,7 @@ int main(int argc, char** argv) {
                         .arg(&archive_path)
                         .arg("-Wl,--no-whole-archive");
                 }
+            }
             }
         } else {
             for obj in object_paths {

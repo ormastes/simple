@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
 use simple_compiler::{CompilerPipeline, ProjectContext};
-use simple_simd::detect_profile;
+use simple_simd::{active_simd_tier, detect_profile};
 
 /// Cache directory for compiled test artifacts
 const CACHE_DIR: &str = "tmp/test_cache";
@@ -62,7 +62,7 @@ impl BuildCache {
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         path.hash(&mut hasher);
-        detect_profile().as_str().hash(&mut hasher);
+        active_simd_tier().as_str().hash(&mut hasher);
         let hash = hasher.finish();
         self.hash_cache.borrow_mut().insert(path.to_path_buf(), hash);
         self.content_cache.borrow_mut().insert(path.to_path_buf(), content);
@@ -280,7 +280,49 @@ fn detect_native_test_project_root(source: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn render_cpu_config(
+        target_triple: &str,
+        support_tier: &str,
+        support_sets: &[&str],
+        simple_fallbacks: &[&str],
+        simple_sets: &[&str],
+        enabled_tier: &str,
+        enabled_sets: &[&str],
+    ) -> String {
+        fn render_list(values: &[&str]) -> String {
+            format!("[{}]", values.join(", "))
+        }
+
+        format!(
+            "version: 1\n\
+             target_triple: {target_triple}\n\
+             generated_by: simple-simd\n\
+             support {{\n\
+               simd_tier: {support_tier}\n\
+               instruction_sets: {support_sets}\n\
+             }}\n\
+             simple_support {{\n\
+               simd_tier_fallbacks: {simple_fallbacks}\n\
+               instruction_sets: {simple_sets}\n\
+             }}\n\
+             enabled {{\n\
+               simd_tier: {enabled_tier}\n\
+               instruction_sets: {enabled_sets}\n\
+             }}\n",
+            support_sets = render_list(support_sets),
+            simple_fallbacks = render_list(simple_fallbacks),
+            simple_sets = render_list(simple_sets),
+            enabled_sets = render_list(enabled_sets),
+        )
+    }
 
     #[test]
     fn test_source_hash_deterministic() {
@@ -346,5 +388,89 @@ mod tests {
                 tmp.path().join("test"),
             ]
         );
+    }
+
+    #[test]
+    fn test_source_hash_uses_configured_active_simd_tier() {
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let temp = tempdir().expect("tempdir");
+        let source = temp.path().join("demo_spec.spl");
+        let config_path = temp.path().join("cpu_config.sdn");
+        fs::write(&source, "test body").expect("source file");
+
+        let detected = detect_profile();
+        let active_tier = detected.best_available_implementation();
+        let configured_tier = match active_tier {
+            simple_simd::SimdTier::X86_64Avx2 => simple_simd::SimdTier::X86_64Sse2,
+            simple_simd::SimdTier::X86_64Avx512 => simple_simd::SimdTier::X86_64Avx2,
+            simple_simd::SimdTier::Aarch64Neon => simple_simd::SimdTier::Scalar,
+            simple_simd::SimdTier::Riscv64Rvv => simple_simd::SimdTier::Scalar,
+            _ => return,
+        };
+
+        let (support_sets, simple_fallbacks, simple_sets, enabled_sets): (&[&str], &[&str], &[&str], &[&str]) =
+            match active_tier {
+                simple_simd::SimdTier::X86_64Avx512 => (
+                    &["sse2", "avx2", "avx512f"],
+                    &["x86_64_avx2", "x86_64_sse2", "scalar"],
+                    &["sse2", "avx2"],
+                    &["sse2", "avx2"],
+                ),
+                simple_simd::SimdTier::X86_64Avx2 => (
+                    &["sse2", "avx2"],
+                    &["x86_64_avx2", "x86_64_sse2", "scalar"],
+                    &["sse2", "avx2"],
+                    &["sse2"],
+                ),
+                simple_simd::SimdTier::Aarch64Neon => (&["neon"], &["aarch64_neon", "scalar"], &["neon"], &[]),
+                simple_simd::SimdTier::Riscv64Rvv => (&["rvv"], &["riscv64_rvv", "scalar"], &["rvv"], &[]),
+                _ => return,
+            };
+
+        let previous_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
+        let previous_override = std::env::var("SIMPLE_SIMD_TIER").ok();
+        std::env::set_var("SIMPLE_CPU_CONFIG_PATH", &config_path);
+        std::env::remove_var("SIMPLE_SIMD_TIER");
+
+        fs::write(
+            &config_path,
+            render_cpu_config(
+                simple_target::Target::host().triple_str(),
+                active_tier.as_str(),
+                support_sets,
+                simple_fallbacks,
+                simple_sets,
+                configured_tier.as_str(),
+                enabled_sets,
+            ),
+        )
+        .expect("cpu_config.sdn");
+
+        let cache = BuildCache::new(false);
+        let configured_hash = cache.source_hash(&source).expect("configured hash");
+
+        let mut active_hasher = DefaultHasher::new();
+        fs::read(&source).expect("source bytes").hash(&mut active_hasher);
+        source.hash(&mut active_hasher);
+        configured_tier.as_str().hash(&mut active_hasher);
+        let expected_active_hash = active_hasher.finish();
+
+        let mut detected_hasher = DefaultHasher::new();
+        fs::read(&source).expect("source bytes").hash(&mut detected_hasher);
+        source.hash(&mut detected_hasher);
+        detected.as_str().hash(&mut detected_hasher);
+        let detected_hash = detected_hasher.finish();
+
+        match previous_config_path.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+        match previous_override.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+
+        assert_eq!(configured_hash, expected_active_hash);
+        assert_ne!(configured_hash, detected_hash);
     }
 }

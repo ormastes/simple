@@ -52,11 +52,18 @@ pub fn select_best_runtime_variant<'a>(
 ) -> Option<&'a RuntimeVariantResource> {
     for fallback in simd_tier.compatible_fallbacks() {
         let fallback = fallback.best_available_implementation();
-        if let Some(entry) = variants.iter().find(|entry| {
-            entry.target_triple == target_triple && entry.simd_tier.best_available_implementation() == fallback
-        }) {
+        if let Some(entry) = variants
+            .iter()
+            .find(|entry| runtime_variant_matches(entry, target_triple, fallback))
+        {
             return Some(entry);
         }
     }
     None
+}
+
+pub fn runtime_variant_matches(entry: &RuntimeVariantResource, target_triple: &str, simd_tier: SimdTier) -> bool {
+    !entry.resource_path.is_empty()
+        && entry.target_triple == target_triple
+        && entry.simd_tier.best_available_implementation() == simd_tier
 }

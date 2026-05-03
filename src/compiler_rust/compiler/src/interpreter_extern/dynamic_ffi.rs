@@ -28,8 +28,10 @@
 use crate::error::CompileError;
 use crate::plugin_manifest;
 use crate::value::Value;
+use simple_simd::{active_simd_tier, SimdTier};
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Global state for the dynamically loaded runtime library.
@@ -83,30 +85,34 @@ static MANIFEST_LIBRARIES: std::sync::LazyLock<Mutex<HashMap<String, SatelliteLi
 /// 3. System library paths (via dlopen with just the library name)
 fn load_runtime_library() -> usize {
     let lib_name = runtime_lib_name();
+    let active_tier = active_simd_tier();
 
     // Try paths relative to the current executable
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             // 1. Same directory as executable
-            let same_dir = exe_dir.join(&lib_name);
-            if let Some(handle) = try_dlopen(&same_dir.to_string_lossy()) {
-                tracing::debug!("Loaded runtime library from: {}", same_dir.display());
-                return handle;
+            for candidate in runtime_library_candidates(exe_dir.join(&lib_name), active_tier) {
+                if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+                    tracing::debug!("Loaded runtime library from: {}", candidate.display());
+                    return handle;
+                }
             }
 
             // 2. ../lib/ relative to executable
-            let lib_dir = exe_dir.join("../lib").join(&lib_name);
-            if let Some(handle) = try_dlopen(&lib_dir.to_string_lossy()) {
-                tracing::debug!("Loaded runtime library from: {}", lib_dir.display());
-                return handle;
+            for candidate in runtime_library_candidates(exe_dir.join("../lib").join(&lib_name), active_tier) {
+                if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+                    tracing::debug!("Loaded runtime library from: {}", candidate.display());
+                    return handle;
+                }
             }
 
             // 3. ../lib/ without canonicalization (in case symlinks differ)
             if let Some(parent) = exe_dir.parent() {
-                let lib_dir2 = parent.join("lib").join(&lib_name);
-                if let Some(handle) = try_dlopen(&lib_dir2.to_string_lossy()) {
-                    tracing::debug!("Loaded runtime library from: {}", lib_dir2.display());
-                    return handle;
+                for candidate in runtime_library_candidates(parent.join("lib").join(&lib_name), active_tier) {
+                    if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+                        tracing::debug!("Loaded runtime library from: {}", candidate.display());
+                        return handle;
+                    }
                 }
             }
         }
@@ -115,17 +121,21 @@ fn load_runtime_library() -> usize {
     // 4. Also try cargo target directory (for development)
     // Look for target/debug/ or target/release/ relative to current dir
     for profile in &["debug", "release", "bootstrap"] {
-        let cargo_path = format!("target/{}/{}", profile, lib_name);
-        if let Some(handle) = try_dlopen(&cargo_path) {
-            tracing::debug!("Loaded runtime library from cargo target: {}", cargo_path);
-            return handle;
+        let cargo_path = PathBuf::from(format!("target/{}/{}", profile, lib_name));
+        for candidate in runtime_library_candidates(cargo_path, active_tier) {
+            if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+                tracing::debug!("Loaded runtime library from cargo target: {}", candidate.display());
+                return handle;
+            }
         }
     }
 
     // 5. System library search (just pass the name, let the OS find it)
-    if let Some(handle) = try_dlopen(&lib_name) {
-        tracing::debug!("Loaded runtime library from system path: {}", lib_name);
-        return handle;
+    for candidate in runtime_library_candidates(PathBuf::from(&lib_name), active_tier) {
+        if let Some(handle) = try_dlopen(&candidate.to_string_lossy()) {
+            tracing::debug!("Loaded runtime library from system path: {}", candidate.display());
+            return handle;
+        }
     }
 
     tracing::debug!("Could not find runtime library: {}", lib_name);
@@ -146,6 +156,58 @@ fn runtime_lib_name() -> String {
     {
         "libsimple_runtime.so".to_string()
     }
+}
+
+fn runtime_library_candidates(path: PathBuf, simd_tier: SimdTier) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    for variant in runtime_variant_tiers(simd_tier) {
+        candidates.push(parent.join(runtime_variant_library_name(variant)));
+    }
+    candidates.push(path);
+    candidates
+}
+
+fn runtime_variant_tiers(simd_tier: SimdTier) -> Vec<SimdTier> {
+    let mut variants = Vec::new();
+    for fallback in simd_tier.best_available_implementation().compatible_fallbacks() {
+        if let Some(runtime_variant) = dynamic_runtime_variant(*fallback) {
+            if !variants.contains(&runtime_variant) {
+                variants.push(runtime_variant);
+            }
+        }
+    }
+    variants
+}
+
+fn dynamic_runtime_variant(simd_tier: SimdTier) -> Option<SimdTier> {
+    match simd_tier.best_available_implementation() {
+        SimdTier::X86_64Avx2 => Some(SimdTier::X86_64Avx2),
+        SimdTier::X86_64Sse2 => Some(SimdTier::X86_64Sse2),
+        SimdTier::Aarch64Neon => Some(SimdTier::Aarch64Neon),
+        SimdTier::Riscv64Rvv => Some(SimdTier::Riscv64Rvv),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_variant_library_name(simd_tier: SimdTier) -> String {
+    format!("libsimple_runtime.{}.so", simd_tier.as_str())
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_variant_library_name(simd_tier: SimdTier) -> String {
+    format!("libsimple_runtime.{}.dylib", simd_tier.as_str())
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_variant_library_name(simd_tier: SimdTier) -> String {
+    format!("simple_runtime.{}.dll", simd_tier.as_str())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn runtime_variant_library_name(simd_tier: SimdTier) -> String {
+    format!("libsimple_runtime.{}.so", simd_tier.as_str())
 }
 
 /// Derive the satellite prefix from a function name, if it matches a known prefix.
@@ -753,4 +815,41 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_candidates_try_variants_before_scalar() {
+        let default_path = PathBuf::from(format!("target/debug/{}", runtime_lib_name()));
+        let candidates = runtime_library_candidates(default_path, SimdTier::X86_64Avx512);
+        let names = candidates
+            .iter()
+            .map(|value| value.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                runtime_variant_library_name(SimdTier::X86_64Avx2),
+                runtime_variant_library_name(SimdTier::X86_64Sse2),
+                runtime_lib_name(),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_candidates_do_not_duplicate_collapsed_variants() {
+        let default_path = PathBuf::from(runtime_lib_name());
+        let candidates = runtime_library_candidates(default_path, SimdTier::Aarch64Sve2);
+        let names = candidates
+            .iter()
+            .map(|value| value.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![runtime_variant_library_name(SimdTier::Aarch64Neon), runtime_lib_name(),]
+        );
+    }
 }

@@ -8,7 +8,7 @@ use simple_common::Target;
 use simple_simd::{active_simd_tier, SimdTier};
 
 use super::format::*;
-use super::simd_metadata::{select_best_runtime_variant, RuntimeVariantResource, VariantMetadata};
+use super::simd_metadata::{runtime_variant_matches, select_best_runtime_variant, RuntimeVariantResource, VariantMetadata};
 use super::writer::PackageError;
 
 /// Loaded package information.
@@ -52,10 +52,24 @@ impl LoadedPackage {
     }
 
     pub fn select_embedded_runtime_resource(&self, target_triple: &str, simd_tier: SimdTier) -> Option<&ResourceEntry> {
-        let variant = self.select_runtime_variant_resource(target_triple, simd_tier)?;
-        self.resources
-            .iter()
-            .find(|resource| resource.path == variant.resource_path)
+        let manifest = self.manifest.as_ref()?;
+        for fallback in simd_tier.compatible_fallbacks() {
+            let fallback = fallback.best_available_implementation();
+            for variant in manifest
+                .runtime_variants
+                .iter()
+                .filter(|variant| runtime_variant_matches(variant, target_triple, fallback))
+            {
+                if let Some(resource) = self
+                    .resources
+                    .iter()
+                    .find(|resource| resource.path == variant.resource_path)
+                {
+                    return Some(resource);
+                }
+            }
+        }
+        None
     }
 
     pub fn select_host_embedded_runtime_resource(&self) -> Option<&ResourceEntry> {
@@ -116,7 +130,10 @@ impl PackageReader {
             reader.seek(SeekFrom::Start(trailer.manifest_offset))?;
             let mut manifest_data = vec![0u8; trailer.manifest_size as usize];
             reader.read_exact(&mut manifest_data)?;
-            ManifestSection::from_bytes(&manifest_data)
+            Some(
+                ManifestSection::from_bytes(&manifest_data)
+                    .ok_or_else(|| PackageError::CompressionError("Invalid manifest section".to_string()))?,
+            )
         } else {
             None
         };
@@ -170,7 +187,9 @@ impl PackageReader {
         let mut manifest_data = vec![0u8; trailer.manifest_size as usize];
         file.read_exact(&mut manifest_data)?;
 
-        Ok(ManifestSection::from_bytes(&manifest_data))
+        ManifestSection::from_bytes(&manifest_data)
+            .map(Some)
+            .ok_or_else(|| PackageError::CompressionError("Invalid manifest section".to_string()))
     }
 
     /// Helper to read path from binary data
@@ -724,5 +743,60 @@ mod tests {
             .select_embedded_runtime_resource("x86_64-unknown-linux-gnu", SimdTier::X86_64Avx512)
             .unwrap();
         assert_eq!(selected.path, "runtime/libsimple_runtime.x86_64_avx2.so");
+    }
+
+    #[test]
+    fn test_selects_embedded_runtime_fallback_when_best_metadata_resource_is_missing() {
+        let package = LoadedPackage {
+            trailer: PackageTrailer::new(),
+            settlement_data: Vec::new(),
+            manifest: Some(ManifestSection {
+                manifest_toml: "name = \"demo\"".to_string(),
+                lock_toml: None,
+                target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+                simd_tier: SimdTier::Scalar,
+                runtime_variants: vec![
+                    RuntimeVariantResource {
+                        target_triple: "x86_64-unknown-linux-gnu".to_string(),
+                        simd_tier: SimdTier::X86_64Avx2,
+                        resource_path: "runtime/libsimple_runtime.x86_64_avx2.so".to_string(),
+                    },
+                    RuntimeVariantResource {
+                        target_triple: "x86_64-unknown-linux-gnu".to_string(),
+                        simd_tier: SimdTier::X86_64Sse2,
+                        resource_path: "runtime/libsimple_runtime.x86_64_sse2.so".to_string(),
+                    },
+                ],
+            }),
+            resources: vec![ResourceEntry {
+                path: "runtime/libsimple_runtime.x86_64_sse2.so".to_string(),
+                data: vec![1],
+                uncompressed_size: 1,
+                checksum: 1,
+            }],
+        };
+
+        let selected = package
+            .select_embedded_runtime_resource("x86_64-unknown-linux-gnu", SimdTier::X86_64Avx2)
+            .unwrap();
+        assert_eq!(selected.path, "runtime/libsimple_runtime.x86_64_sse2.so");
+    }
+
+    #[test]
+    fn test_load_from_bytes_rejects_invalid_manifest_section() {
+        let reader = PackageReader::new();
+        let mut bytes = build_package_bytes(ManifestSection {
+            manifest_toml: "name = \"demo\"".to_string(),
+            lock_toml: None,
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            simd_tier: SimdTier::Scalar,
+            runtime_variants: Vec::new(),
+        });
+        let trailer = PackageTrailer::from_bytes(&bytes).unwrap();
+        bytes[trailer.manifest_offset as usize..trailer.manifest_offset as usize + 4]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let err = reader.load_from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, PackageError::CompressionError(_)));
     }
 }

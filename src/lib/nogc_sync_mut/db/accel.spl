@@ -264,9 +264,10 @@ fn byte_span_prefix_len(lhs: ByteSpan, rhs: ByteSpan) -> i64:
     limit
 
 fn is_delimiter_byte(byte: u8) -> bool:
-    byte == (" " as u8) or byte == ("\t" as u8) or byte == ("\n" as u8) or
-    byte == ("\r" as u8) or byte == ("," as u8) or byte == ("|" as u8) or
-    byte == ("\"" as u8) or byte == ("'" as u8)
+    val code = byte as i64
+    code == 32 or code == 9 or code == 10 or
+    code == 13 or code == 44 or code == 124 or
+    code == 34 or code == 39
 
 fn byte_span_find_delimiter(span: ByteSpan) -> i64:
     var idx = 0
@@ -277,7 +278,15 @@ fn byte_span_find_delimiter(span: ByteSpan) -> i64:
     -1
 
 fn text_find_delimiter(value: text) -> i64:
-    byte_span_find_delimiter(text_to_byte_span(value))
+    var best = -1
+    val delimiters = [" ", "\t", "\n", "\r", ",", "|", "\"", "'"]
+    var idx = 0
+    while idx < delimiters.len():
+        val found = value.find(delimiters[idx as i32])
+        if found >= 0 and (best < 0 or found < best):
+            best = found
+        idx = idx + 1
+    best
 
 fn text_equals_span(lhs: text, rhs: text) -> bool:
     lhs == rhs
@@ -310,12 +319,13 @@ fn byte_span_matches_at(haystack: ByteSpan, start: i64, needle: ByteSpan) -> boo
     true
 
 fn is_token_boundary_byte(byte: u8) -> bool:
-    byte == (" " as u8) or byte == ("\t" as u8) or byte == ("\n" as u8) or
-    byte == ("\r" as u8) or byte == ("," as u8) or byte == ("|" as u8) or
-    byte == ("\"" as u8) or byte == ("'" as u8) or byte == ("(" as u8) or
-    byte == (")" as u8) or byte == ("[" as u8) or byte == ("]" as u8) or
-    byte == ("{" as u8) or byte == ("}" as u8) or byte == (":" as u8) or
-    byte == (";" as u8) or byte == ("/" as u8) or byte == ("\\" as u8)
+    val code = byte as i64
+    code == 32 or code == 9 or code == 10 or
+    code == 13 or code == 44 or code == 124 or
+    code == 34 or code == 39 or code == 40 or
+    code == 41 or code == 91 or code == 93 or
+    code == 123 or code == 125 or code == 58 or
+    code == 59 or code == 47 or code == 92
 
 fn text_matches_at(value: text, start: i64, token: text) -> bool:
     var offset = 0
@@ -328,22 +338,40 @@ fn text_matches_at(value: text, start: i64, token: text) -> bool:
 fn text_contains_token(value: text, token: text) -> bool:
     if token == "":
         return false
-    val value_span = text_to_byte_span(value)
-    val token_span = text_to_byte_span(token)
-    if token_span.len == 0 or value_span.len < token_span.len:
-        return false
-    val token_len = token_span.len
-    val first = token_span.bytes[token_span.start]
+    val token_len = token.len()
     var start = 0
-    while start <= value_span.len - token_len:
-        if value_span.bytes[value_span.start + start] == first and byte_span_matches_at(value_span, start, token_span):
-            val left_ok = if start == 0: true else: is_token_boundary_byte(value_span.bytes[value_span.start + start - 1])
+    while start <= value.len() - token_len:
+        val suffix = value.slice(start, value.len())
+        if suffix.starts_with(token):
+            val left_ok = if start == 0:
+                true
+            else:
+                text_has_token_boundary_suffix(value.slice(0, start))
             val right_idx = start + token_len
-            val right_ok = if right_idx >= value_span.len: true else: is_token_boundary_byte(value_span.bytes[value_span.start + right_idx])
+            val right_ok = if right_idx >= value.len():
+                true
+            else:
+                text_has_token_boundary_prefix(value.slice(right_idx, value.len()))
             if left_ok and right_ok:
                 return true
         start = start + 1
     false
+
+fn text_has_token_boundary_suffix(value: text) -> bool:
+    value.ends_with(" ") or value.ends_with("\t") or value.ends_with("\n") or
+    value.ends_with("\r") or value.ends_with(",") or value.ends_with("|") or
+    value.ends_with("\"") or value.ends_with("'") or value.ends_with("(") or
+    value.ends_with(")") or value.ends_with("[") or value.ends_with("]") or
+    value.ends_with("{") or value.ends_with("}") or value.ends_with(":") or
+    value.ends_with(";") or value.ends_with("/") or value.ends_with("\\")
+
+fn text_has_token_boundary_prefix(value: text) -> bool:
+    value.starts_with(" ") or value.starts_with("\t") or value.starts_with("\n") or
+    value.starts_with("\r") or value.starts_with(",") or value.starts_with("|") or
+    value.starts_with("\"") or value.starts_with("'") or value.starts_with("(") or
+    value.starts_with(")") or value.starts_with("[") or value.starts_with("]") or
+    value.starts_with("{") or value.starts_with("}") or value.starts_with(":") or
+    value.starts_with(";") or value.starts_with("/") or value.starts_with("\\")
 
 fn trigram_extract(value: text) -> [text]:
     if value.len() < 3:

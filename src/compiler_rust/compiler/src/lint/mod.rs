@@ -83,7 +83,7 @@ mod tests {
 pub fn format_number(x: i64) -> text:
     return "hello"
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         assert!(!diagnostics.is_empty());
         assert!(diagnostics.iter().any(|d| d.lint == LintName::PrimitiveApi));
         assert!(diagnostics.iter().all(|d| d.level == LintLevel::Warn));
@@ -99,7 +99,7 @@ pub fn abs(x: f64) -> f64:
 pub fn max(a: i64, b: i64) -> i64:
     return a
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         assert!(
             diagnostics.iter().all(|d| d.lint != LintName::PrimitiveApi),
             "pure math functions should be exempt from primitive_api lint"
@@ -113,7 +113,7 @@ pub fn max(a: i64, b: i64) -> i64:
 pub fn widen(x: i32) -> i64:
     return 0
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::PrimitiveApi));
     }
 
@@ -215,7 +215,7 @@ describe "demo":
     it "uses fake success":
         expect(true).to_equal(true)
 "#;
-        let diagnostics = check_code_in_file("demo_spec.spl", &code);
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipePlaceholderTests));
     }
 
@@ -227,7 +227,7 @@ describe "demo":
         print "[skip] env unavailable"
         return
 "#;
-        let diagnostics = check_code_in_file("demo_spec.spl", &code);
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipeNoPrintBasedTests));
     }
 
@@ -238,7 +238,7 @@ describe "demo":
     it "just calls helper":
         run_check()
 "#;
-        let diagnostics = check_code_in_file("demo_spec.spl", &code);
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipeEmptyExamples));
     }
 
@@ -249,7 +249,7 @@ describe "demo":
     it "wraps comparison":
         expect(code != 0).to_equal(true)
 "#;
-        let diagnostics = check_code_in_file("demo_spec.spl", &code);
+        let diagnostics = check_code_in_file("demo_spec.spl", code);
         assert!(diagnostics
             .iter()
             .any(|d| d.lint == LintName::SPipeBooleanWrapperAssertions));
@@ -261,7 +261,7 @@ describe "demo":
 fn not_done(port: i64) -> i64:
     pass_todo("implement driver")
 "#;
-        let diagnostics = check_code_in_file("demo.spl", &code);
+        let diagnostics = check_code_in_file("demo.spl", code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::StubImpl));
     }
 
@@ -271,7 +271,7 @@ fn not_done(port: i64) -> i64:
 fn not_done():
     pass_todo
 "#;
-        let diagnostics = check_code_in_file("demo.spl", &code);
+        let diagnostics = check_code_in_file("demo.spl", code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentPass));
     }
 
@@ -281,7 +281,7 @@ fn not_done():
 fn not_done():
     todo("fix")
 "#;
-        let diagnostics = check_code_in_file("demo.spl", &code);
+        let diagnostics = check_code_in_file("demo.spl", code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentTodo));
     }
 
@@ -293,7 +293,7 @@ fn classify(x: i64):
         case 0: "zero"
         case _: "other"
 "#;
-        let diagnostics = check_code_in_file("demo.spl", &code);
+        let diagnostics = check_code_in_file("demo.spl", code);
         assert!(diagnostics.iter().any(|d| d.lint == LintName::RequiredCommentWildcard));
     }
 
@@ -400,7 +400,7 @@ pub fn raw_bytes(count: i32) -> i32:
 pub fn get_name() -> str:
     return "test"
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         // str is allowed
         assert!(diagnostics.is_empty());
     }
@@ -411,7 +411,7 @@ pub fn get_name() -> str:
 pub fn find_value() -> Option[i64]:
     return None
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         // Should warn about i64 inside Option
         assert!(diagnostics.iter().any(|d| d.lint == LintName::PrimitiveApi));
     }
@@ -702,7 +702,7 @@ pub fn point(x: i64, y: i64) -> i64:
 fn test():
     val result = point(3, 4)
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -721,7 +721,7 @@ pub fn point(x: i64, y: i64) -> i64:
 fn test():
     val result = point(x: 3, y: 4)
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -739,7 +739,7 @@ pub fn describe(name: text, age: i64) -> text:
 fn test():
     val result = describe("Alice", 30)
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -757,7 +757,7 @@ pub fn point(x: i64, y: i64) -> i64:
 fn test():
     val result = point(x: 3, 4)
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -776,7 +776,7 @@ fn point(x: i64, y: i64) -> i64:
 fn test():
     val result = point(3, 4)
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -793,7 +793,7 @@ pub fn transfer(src: text from, dst: text to) -> text:
 fn test():
     val result = transfer("a.txt" from, "b.txt" to)
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -810,7 +810,7 @@ pub fn transfer(src: text from, dst: text to) -> text:
 fn test():
     val result = transfer("a.txt" from, "b.txt")
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         let dup_warnings: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnnamedDuplicateTypedArgs)
@@ -1508,7 +1508,7 @@ pub fn create_router() -> Router:
 fn my_function():
     pass
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         let unknown_dec: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.lint == LintName::UnknownDecorator)
@@ -1527,7 +1527,7 @@ fn my_function():
 fn my_function():
     pass
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         assert!(diagnostics.iter().all(|d| d.lint != LintName::UnknownDecorator));
     }
 
@@ -1539,7 +1539,7 @@ fn my_function():
 @no_gc
 mod sample
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         assert!(diagnostics
             .iter()
             .all(|d| d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute));
@@ -1552,7 +1552,7 @@ mod sample
 fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64) -> i32:
     pass
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         assert!(diagnostics
             .iter()
             .all(|d| d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute));
@@ -1565,7 +1565,7 @@ fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64) -> i32:
 @variant(any)
 mod sample
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         assert!(diagnostics
             .iter()
             .all(|d| d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute));
@@ -1578,7 +1578,7 @@ mod sample
 fn syscall() -> i64:
     0
 "#;
-        let diagnostics = check_code(&code);
+        let diagnostics = check_code(code);
         assert!(diagnostics
             .iter()
             .all(|d| d.lint != LintName::UnknownDecorator && d.lint != LintName::UnknownAttribute));

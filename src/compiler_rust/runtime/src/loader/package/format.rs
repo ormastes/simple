@@ -211,7 +211,7 @@ impl ManifestSection {
 
     /// Parse from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 8 {
+        if bytes.len() < 4 {
             return None;
         }
 
@@ -229,7 +229,7 @@ impl ManifestSection {
         offset += manifest_len;
 
         // Read lock
-        if offset + 4 > bytes.len() {
+        if offset == bytes.len() {
             return Some(Self {
                 manifest_toml,
                 lock_toml: None,
@@ -242,7 +242,10 @@ impl ManifestSection {
         let lock_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
         offset += 4;
 
-        let lock_toml = if lock_len > 0 && offset + lock_len <= bytes.len() {
+        if lock_len > 0 && offset + lock_len > bytes.len() {
+            return None;
+        }
+        let lock_toml = if lock_len > 0 {
             Some(String::from_utf8(bytes[offset..offset + lock_len].to_vec()).ok()?)
         } else {
             None
@@ -251,11 +254,15 @@ impl ManifestSection {
             offset += lock_len;
         }
 
-        let target_triple = read_optional_string(bytes, &mut offset)?;
-        let simd_tier = read_required_string(bytes, &mut offset)
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(SimdTier::Scalar);
-        let runtime_variants = if offset + 4 <= bytes.len() {
+        let target_triple = read_optional_trailing_string(bytes, &mut offset)?;
+        let simd_tier = if offset == bytes.len() {
+            SimdTier::Scalar
+        } else {
+            read_required_string(bytes, &mut offset)?.parse().ok()?
+        };
+        let runtime_variants = if offset == bytes.len() {
+            Vec::new()
+        } else if offset + 4 <= bytes.len() {
             let count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
             offset += 4;
             let mut variants = Vec::with_capacity(count);
@@ -271,7 +278,7 @@ impl ManifestSection {
             }
             variants
         } else {
-            Vec::new()
+            return None;
         };
 
         Some(Self {
@@ -299,7 +306,7 @@ fn write_string(data: &mut Vec<u8>, value: &str) {
 
 fn read_optional_string(bytes: &[u8], offset: &mut usize) -> Option<Option<String>> {
     if *offset + 4 > bytes.len() {
-        return Some(None);
+        return None;
     }
     let len = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().ok()?) as usize;
     *offset += 4;
@@ -314,8 +321,15 @@ fn read_optional_string(bytes: &[u8], offset: &mut usize) -> Option<Option<Strin
     Some(Some(value))
 }
 
+fn read_optional_trailing_string(bytes: &[u8], offset: &mut usize) -> Option<Option<String>> {
+    if *offset == bytes.len() {
+        return Some(None);
+    }
+    read_optional_string(bytes, offset)
+}
+
 fn read_required_string(bytes: &[u8], offset: &mut usize) -> Option<String> {
-    read_optional_string(bytes, offset)?.or_else(|| Some("scalar".to_string()))
+    read_optional_string(bytes, offset)?
 }
 
 /// Resource entry in the resources section.
@@ -511,5 +525,32 @@ mod tests {
         let restored = ManifestSection::from_bytes(&bytes).unwrap();
         assert!(restored.runtime_variants.is_empty());
         assert_eq!(restored.simd_tier, SimdTier::Scalar);
+    }
+
+    #[test]
+    fn test_manifest_section_rejects_truncated_lock_payload() {
+        let manifest_bytes = b"name = \"broken\"";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(manifest_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(manifest_bytes);
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(b"short");
+
+        assert!(ManifestSection::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_manifest_section_rejects_partial_runtime_variants_trailer() {
+        let section = ManifestSection {
+            manifest_toml: "name = \"legacy\"".to_string(),
+            lock_toml: None,
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            simd_tier: SimdTier::Scalar,
+            runtime_variants: Vec::new(),
+        };
+        let mut bytes = section.to_bytes();
+        bytes.push(1);
+
+        assert!(ManifestSection::from_bytes(&bytes).is_none());
     }
 }

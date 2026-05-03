@@ -1,6 +1,7 @@
 //! Tests for collection functionality (arrays, tuples, strings, dicts)
 
 use super::{
+    active_collection_simd_tier,
     rt_array_clear,
     rt_array_get,
     rt_array_len,
@@ -70,7 +71,30 @@ use super::{
     rt_tuple_set,
 };
 // Dict functions are in a sibling module, import via crate path
-use crate::value::{rt_dict_clear, rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, RuntimeValue};
+use crate::value::{
+    clear_all_runtime_registries, rt_dict_clear, rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, RuntimeValue,
+};
+use simple_simd::SimdTier;
+use std::sync::{Mutex, OnceLock};
+
+fn simd_tier_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_simd_tier_override<T>(value: &str, test: impl FnOnce() -> T) -> T {
+    let _guard = simd_tier_env_lock().lock().unwrap();
+    let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+    std::env::set_var("SIMPLE_SIMD_TIER", value);
+    clear_all_runtime_registries();
+    let result = test();
+    clear_all_runtime_registries();
+    match previous {
+        Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+        None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+    }
+    result
+}
 
 // ============================================================================
 // Array Tests
@@ -210,6 +234,15 @@ fn test_array_invalid_value() {
     assert!(!rt_array_push(not_an_array, RuntimeValue::from_int(99)));
     assert!(rt_array_pop(not_an_array).is_nil());
     assert!(!rt_array_clear(not_an_array));
+}
+
+#[test]
+fn test_collection_provider_refreshes_when_active_tier_changes() {
+    with_simd_tier_override("x86_64_sse2", || {
+        assert_eq!(active_collection_simd_tier(), SimdTier::X86_64Sse2);
+        std::env::set_var("SIMPLE_SIMD_TIER", "scalar");
+        assert_eq!(active_collection_simd_tier(), SimdTier::Scalar);
+    });
 }
 
 // ============================================================================

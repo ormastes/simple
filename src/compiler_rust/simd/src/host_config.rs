@@ -62,6 +62,7 @@ impl From<std::io::Error> for HostCpuConfigError {
 #[derive(Clone)]
 struct CachedConfig {
     path: PathBuf,
+    source: Option<String>,
     config: HostCpuConfig,
 }
 
@@ -84,16 +85,19 @@ pub fn active_simd_tier() -> SimdTier {
 
 pub fn host_cpu_config() -> Result<HostCpuConfig, HostCpuConfigError> {
     let path = cpu_config_path().ok_or(HostCpuConfigError::MissingPath)?;
+    let source = config_file_source(&path)?;
     let mut guard = config_cache().lock().unwrap();
     if let Some(cached) = guard.as_ref() {
-        if cached.path == path {
+        if cached.path == path && cached.source == source {
             return Ok(cached.config.clone());
         }
     }
 
     let config = load_or_initialize_config(&path)?;
+    let source = config_file_source(&path)?;
     *guard = Some(CachedConfig {
         path,
+        source,
         config: config.clone(),
     });
     Ok(config)
@@ -140,6 +144,14 @@ fn load_or_initialize_config(path: &Path) -> Result<HostCpuConfig, HostCpuConfig
 
     write_config(path, &detected)?;
     Ok(detected)
+}
+
+fn config_file_source(path: &Path) -> Result<Option<String>, HostCpuConfigError> {
+    match fs::read_to_string(path) {
+        Ok(source) => Ok(Some(source)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    }
 }
 
 fn detected_config() -> HostCpuConfig {
@@ -549,6 +561,24 @@ mod tests {
             }
 
             assert_eq!(active, SimdTier::X86_64Avx2);
+        });
+    }
+
+    #[test]
+    fn host_cpu_config_reloads_after_on_disk_edit_in_same_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+
+        with_cpu_config_path(&path, || {
+            let initial = host_cpu_config().unwrap();
+            fs::write(&path, "enabled: [\n").unwrap();
+
+            let err = host_cpu_config().unwrap_err();
+            assert!(matches!(err, HostCpuConfigError::Parse(_)));
+
+            fs::write(&path, render_config(&initial)).unwrap();
+            let reloaded = host_cpu_config().unwrap();
+            assert_eq!(reloaded, initial);
         });
     }
 

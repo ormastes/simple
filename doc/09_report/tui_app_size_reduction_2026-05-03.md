@@ -49,7 +49,5 @@ Date: 2026-05-03
 ## Notes
 
 - The generated TUI entry uses `app.ui.tui.standalone.run_standalone_tui`.
-- The generated TUI and hello audit lane now build with `--runtime-bundle runtime` and source roots `src/lib` + `src/app`, intentionally excluding `src/compiler`.
 - The audit intentionally records anchor strings instead of claiming full transitive Rust crate closure proof.
 - Use `scripts/check-tui-standalone-closure.shs` alongside this report for the import-surface guard.
-- The prior 14 MB plateau was traced to the audited caller selecting the broad `libsimple_native_all.a` lane by passing `--source src/compiler`, which made `native-build` classify the build as compiler-like.

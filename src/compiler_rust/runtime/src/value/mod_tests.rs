@@ -1,4 +1,10 @@
 use super::*;
+use std::sync::{Mutex, OnceLock};
+
+fn simd_tier_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn test_int_roundtrip() {
@@ -125,6 +131,40 @@ fn test_ffi_functions() {
     assert!(rt_value_is_nil(rt_value_nil()));
     assert!(rt_value_truthy(rt_value_int(1)));
     assert!(!rt_value_truthy(rt_value_int(0)));
+}
+
+#[test]
+fn clear_all_runtime_registries_resets_tier_sensitive_provider_caches() {
+    let _guard = simd_tier_env_lock().lock().unwrap();
+    let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+
+    std::env::set_var("SIMPLE_SIMD_TIER", "x86_64_sse2");
+    clear_all_runtime_registries();
+    assert_eq!(
+        super::numeric_kernels::active_numeric_kernel_tier(),
+        simple_simd::SimdTier::X86_64Sse2
+    );
+    assert_eq!(
+        super::collections::active_collection_simd_tier(),
+        simple_simd::SimdTier::X86_64Sse2
+    );
+
+    std::env::set_var("SIMPLE_SIMD_TIER", "scalar");
+    clear_all_runtime_registries();
+    assert_eq!(
+        super::numeric_kernels::active_numeric_kernel_tier(),
+        simple_simd::SimdTier::Scalar
+    );
+    assert_eq!(
+        super::collections::active_collection_simd_tier(),
+        simple_simd::SimdTier::Scalar
+    );
+
+    match previous {
+        Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+        None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+    }
+    clear_all_runtime_registries();
 }
 
 // ========================================================================

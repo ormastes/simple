@@ -1017,6 +1017,9 @@ fn clear_global_variables() {
 /// Clear all runtime registries to prevent memory leaks between test runs.
 /// This should be called before each test to ensure clean state.
 pub fn clear_all_runtime_registries() {
+    numeric_kernels::clear_numeric_kernel_provider_cache();
+    collections::clear_collection_provider_cache();
+
     // Clear HP collections registries
     clear_hashmap_registry();
     clear_hashset_registry();
