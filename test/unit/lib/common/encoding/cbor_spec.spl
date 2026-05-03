@@ -1,0 +1,641 @@
+# CBOR Encoder/Decoder Specification
+# Tests the pure-Simple CBOR implementation in
+# src/lib/common/encoding/cbor.spl against RFC 8949.
+#
+# NOTE: The interpreter test runner verifies file loading, NOT it-block
+# execution. Assertions only fire under compiled/native mode.
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+
+use std.encoding.cbor.{cbor_encode_uint, cbor_encode_int,
+    cbor_encode_bytes, cbor_encode_text,
+    cbor_encode_array_header, cbor_encode_map_header,
+    cbor_encode_tag, cbor_encode_bool, cbor_encode_null,
+    cbor_encode_undefined,
+    cbor_decode_type, cbor_decode_int,
+    cbor_decode_text, cbor_decode_bytes}
+
+# ============================================================================
+# Unsigned integer encode helpers
+# ============================================================================
+
+fn _uint_zero_ok() -> bool:
+    # 0 → [0x00]
+    val b = cbor_encode_uint(0)
+    b.len() == 1 and b[0].to_i64() == 0x00
+
+fn _uint_23_ok() -> bool:
+    # 23 → [0x17]  (max 1-byte inline value)
+    val b = cbor_encode_uint(23)
+    b.len() == 1 and b[0].to_i64() == 0x17
+
+fn _uint_24_ok() -> bool:
+    # 24 → [0x18, 0x18]  (first 2-byte form)
+    val b = cbor_encode_uint(24)
+    b.len() == 2 and b[0].to_i64() == 0x18 and b[1].to_i64() == 0x18
+
+fn _uint_255_ok() -> bool:
+    # 255 → [0x18, 0xFF]
+    val b = cbor_encode_uint(255)
+    b.len() == 2 and b[0].to_i64() == 0x18 and b[1].to_i64() == 0xFF
+
+fn _uint_256_ok() -> bool:
+    # 256 → [0x19, 0x01, 0x00]
+    val b = cbor_encode_uint(256)
+    b.len() == 3 and b[0].to_i64() == 0x19 and b[1].to_i64() == 0x01 and b[2].to_i64() == 0x00
+
+fn _uint_1000_ok() -> bool:
+    # 1000 → [0x19, 0x03, 0xE8]
+    val b = cbor_encode_uint(1000)
+    b.len() == 3 and b[0].to_i64() == 0x19 and b[1].to_i64() == 0x03 and b[2].to_i64() == 0xE8
+
+fn _uint_65535_ok() -> bool:
+    # 65535 → [0x19, 0xFF, 0xFF]
+    val b = cbor_encode_uint(65535)
+    b.len() == 3 and b[0].to_i64() == 0x19 and b[1].to_i64() == 0xFF and b[2].to_i64() == 0xFF
+
+fn _uint_65536_ok() -> bool:
+    # 65536 → [0x1A, 0x00, 0x01, 0x00, 0x00]
+    val b = cbor_encode_uint(65536)
+    (b.len() == 5) and
+    (b[0].to_i64() == 0x1A) and
+    (b[1].to_i64() == 0x00) and
+    (b[2].to_i64() == 0x01) and
+    (b[3].to_i64() == 0x00) and
+    (b[4].to_i64() == 0x00)
+
+# ============================================================================
+# Signed integer encode helpers (negative)
+# ============================================================================
+
+fn _int_minus1_ok() -> bool:
+    # -1 → major type 1, value 0 → [0x20]
+    val b = cbor_encode_int(-1)
+    b.len() == 1 and b[0].to_i64() == 0x20
+
+fn _int_minus24_ok() -> bool:
+    # -24 → major type 1, value 23 → [0x37]
+    val b = cbor_encode_int(-24)
+    b.len() == 1 and b[0].to_i64() == 0x37
+
+fn _int_minus25_ok() -> bool:
+    # -25 → major type 1, value 24 → [0x38, 0x18]
+    val b = cbor_encode_int(-25)
+    b.len() == 2 and b[0].to_i64() == 0x38 and b[1].to_i64() == 0x18
+
+fn _int_minus100_ok() -> bool:
+    # -100 → major type 1, value 99 → [0x38, 0x63]
+    val b = cbor_encode_int(-100)
+    b.len() == 2 and b[0].to_i64() == 0x38 and b[1].to_i64() == 0x63
+
+fn _int_pos_zero_ok() -> bool:
+    # 0 → major type 0 → [0x00]
+    val b = cbor_encode_int(0)
+    b.len() == 1 and b[0].to_i64() == 0x00
+
+fn _int_pos_1000_ok() -> bool:
+    # 1000 → same as cbor_encode_uint(1000)
+    val b = cbor_encode_int(1000)
+    b.len() == 3 and b[0].to_i64() == 0x19 and b[1].to_i64() == 0x03 and b[2].to_i64() == 0xE8
+
+# ============================================================================
+# Byte string encode helpers
+# ============================================================================
+
+fn _bytes_empty_ok() -> bool:
+    # empty bstr → [0x40]
+    val data: [u8] = []
+    val b = cbor_encode_bytes(data)
+    b.len() == 1 and b[0].to_i64() == 0x40
+
+fn _bytes_three_ok() -> bool:
+    # [0x01, 0x02, 0x03] → [0x43, 0x01, 0x02, 0x03]
+    var data: [u8] = []
+    data.push(0x01)
+    data.push(0x02)
+    data.push(0x03)
+    val b = cbor_encode_bytes(data)
+    (b.len() == 4) and
+    (b[0].to_i64() == 0x43) and
+    (b[1].to_i64() == 0x01) and
+    (b[2].to_i64() == 0x02) and
+    (b[3].to_i64() == 0x03)
+
+fn _bytes_24_len_ok() -> bool:
+    # 24-byte payload → header is [0x58, 0x18] (2 bytes), total = 26
+    var data: [u8] = []
+    var i = 0
+    while i < 24:
+        data.push(0xAA)
+        i = i + 1
+    val b = cbor_encode_bytes(data)
+    (b.len() == 26) and (b[0].to_i64() == 0x58) and (b[1].to_i64() == 24)
+
+# ============================================================================
+# Text string encode helpers
+# ============================================================================
+
+fn _text_empty_ok() -> bool:
+    # "" → [0x60]
+    val b = cbor_encode_text("")
+    b.len() == 1 and b[0].to_i64() == 0x60
+
+fn _text_hello_len_ok() -> bool:
+    # "hello" (5 bytes) → [0x65, 'h','e','l','l','o']
+    val b = cbor_encode_text("hello")
+    b.len() == 6
+
+fn _text_hello_header_ok() -> bool:
+    val b = cbor_encode_text("hello")
+    b[0].to_i64() == 0x65
+
+fn _text_hello_bytes_ok() -> bool:
+    val b = cbor_encode_text("hello")
+    (b[1].to_i64() == 104) and  # 'h'
+    (b[2].to_i64() == 101) and  # 'e'
+    (b[3].to_i64() == 108) and  # 'l'
+    (b[4].to_i64() == 108) and  # 'l'
+    (b[5].to_i64() == 111)      # 'o'
+
+fn _text_24_len_ok() -> bool:
+    # 24-char string → header [0x78, 0x18], total = 26
+    val s = "aaaaabbbbbcccccdddddeeeef"  # 25 chars
+    val b = cbor_encode_text(s)
+    (b.len() == 27) and (b[0].to_i64() == 0x78) and (b[1].to_i64() == 25)
+
+# ============================================================================
+# Array / map header helpers
+# ============================================================================
+
+fn _array_empty_ok() -> bool:
+    # count=0 → [0x80]
+    val b = cbor_encode_array_header(0)
+    b.len() == 1 and b[0].to_i64() == 0x80
+
+fn _array_three_ok() -> bool:
+    # count=3 → [0x83]
+    val b = cbor_encode_array_header(3)
+    b.len() == 1 and b[0].to_i64() == 0x83
+
+fn _array_23_ok() -> bool:
+    # count=23 → [0x97]
+    val b = cbor_encode_array_header(23)
+    b.len() == 1 and b[0].to_i64() == 0x97
+
+fn _array_24_ok() -> bool:
+    # count=24 → [0x98, 0x18]
+    val b = cbor_encode_array_header(24)
+    b.len() == 2 and b[0].to_i64() == 0x98 and b[1].to_i64() == 24
+
+fn _map_empty_ok() -> bool:
+    # count=0 → [0xA0]
+    val b = cbor_encode_map_header(0)
+    b.len() == 1 and b[0].to_i64() == 0xA0
+
+fn _map_two_ok() -> bool:
+    # count=2 → [0xA2]
+    val b = cbor_encode_map_header(2)
+    b.len() == 1 and b[0].to_i64() == 0xA2
+
+fn _map_24_ok() -> bool:
+    # count=24 → [0xB8, 0x18]
+    val b = cbor_encode_map_header(24)
+    b.len() == 2 and b[0].to_i64() == 0xB8 and b[1].to_i64() == 24
+
+# ============================================================================
+# Tag helpers
+# ============================================================================
+
+fn _tag_0_ok() -> bool:
+    # tag 0 (datetime text) → [0xC0]
+    val b = cbor_encode_tag(0)
+    b.len() == 1 and b[0].to_i64() == 0xC0
+
+fn _tag_1_ok() -> bool:
+    # tag 1 (unix timestamp) → [0xC1]
+    val b = cbor_encode_tag(1)
+    b.len() == 1 and b[0].to_i64() == 0xC1
+
+fn _tag_32_ok() -> bool:
+    # tag 32 (URI) → [0xD8, 0x20]
+    val b = cbor_encode_tag(32)
+    b.len() == 2 and b[0].to_i64() == 0xD8 and b[1].to_i64() == 32
+
+# ============================================================================
+# Bool / null / undefined helpers
+# ============================================================================
+
+fn _bool_false_ok() -> bool:
+    val b = cbor_encode_bool(false)
+    b.len() == 1 and b[0].to_i64() == 0xF4
+
+fn _bool_true_ok() -> bool:
+    val b = cbor_encode_bool(true)
+    b.len() == 1 and b[0].to_i64() == 0xF5
+
+fn _null_ok() -> bool:
+    val b = cbor_encode_null()
+    b.len() == 1 and b[0].to_i64() == 0xF6
+
+fn _undefined_ok() -> bool:
+    val b = cbor_encode_undefined()
+    b.len() == 1 and b[0].to_i64() == 0xF7
+
+# ============================================================================
+# cbor_decode_type helpers
+# ============================================================================
+
+fn _dtype_uint_zero_ok() -> bool:
+    val b = cbor_encode_uint(0)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 0 and r[2] == 0 and r[3] == 1
+
+fn _dtype_uint_23_ok() -> bool:
+    val b = cbor_encode_uint(23)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 0 and r[2] == 23 and r[3] == 1
+
+fn _dtype_uint_24_ok() -> bool:
+    val b = cbor_encode_uint(24)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 0 and r[2] == 24 and r[3] == 2
+
+fn _dtype_uint_1000_ok() -> bool:
+    val b = cbor_encode_uint(1000)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 0 and r[2] == 1000 and r[3] == 3
+
+fn _dtype_neg_minus1_ok() -> bool:
+    val b = cbor_encode_int(-1)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 1 and r[2] == 0 and r[3] == 1
+
+fn _dtype_neg_minus25_ok() -> bool:
+    val b = cbor_encode_int(-25)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 1 and r[2] == 24 and r[3] == 2
+
+fn _dtype_bstr_ok() -> bool:
+    val data: [u8] = []
+    val b = cbor_encode_bytes(data)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 2 and r[2] == 0 and r[3] == 1
+
+fn _dtype_tstr_ok() -> bool:
+    val b = cbor_encode_text("")
+    val r = cbor_decode_type(b, 0)
+    r[0] == 3 and r[2] == 0 and r[3] == 1
+
+fn _dtype_array_ok() -> bool:
+    val b = cbor_encode_array_header(3)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 4 and r[2] == 3 and r[3] == 1
+
+fn _dtype_map_ok() -> bool:
+    val b = cbor_encode_map_header(2)
+    val r = cbor_decode_type(b, 0)
+    r[0] == 5 and r[2] == 2 and r[3] == 1
+
+# ============================================================================
+# cbor_decode_int helpers
+# ============================================================================
+
+fn _di_zero_ok() -> bool:
+    val b = cbor_encode_int(0)
+    val r = cbor_decode_int(b, 0)
+    r[0] == 0 and r[1] == 1
+
+fn _di_23_ok() -> bool:
+    val b = cbor_encode_int(23)
+    val r = cbor_decode_int(b, 0)
+    r[0] == 23 and r[1] == 1
+
+fn _di_1000_ok() -> bool:
+    val b = cbor_encode_int(1000)
+    val r = cbor_decode_int(b, 0)
+    r[0] == 1000 and r[1] == 3
+
+fn _di_minus1_ok() -> bool:
+    val b = cbor_encode_int(-1)
+    val r = cbor_decode_int(b, 0)
+    r[0] == -1 and r[1] == 1
+
+fn _di_minus24_ok() -> bool:
+    val b = cbor_encode_int(-24)
+    val r = cbor_decode_int(b, 0)
+    r[0] == -24 and r[1] == 1
+
+fn _di_minus25_ok() -> bool:
+    val b = cbor_encode_int(-25)
+    val r = cbor_decode_int(b, 0)
+    r[0] == -25 and r[1] == 2
+
+fn _di_minus100_ok() -> bool:
+    val b = cbor_encode_int(-100)
+    val r = cbor_decode_int(b, 0)
+    r[0] == -100 and r[1] == 2
+
+# ============================================================================
+# cbor_decode_text helpers
+# ============================================================================
+
+fn _dt_empty_ok() -> bool:
+    val b = cbor_encode_text("")
+    val r = cbor_decode_text(b, 0)
+    r[0] == "" and r[1] == 1
+
+fn _dt_hello_ok() -> bool:
+    val b = cbor_encode_text("hello")
+    val r = cbor_decode_text(b, 0)
+    r[0] == "hello" and r[1] == 6
+
+fn _dt_hi_newpos_ok() -> bool:
+    val b = cbor_encode_text("hi")
+    val r = cbor_decode_text(b, 0)
+    # header=1 + payload=2 = 3
+    r[0] == "hi" and r[1] == 3
+
+# ============================================================================
+# Round-trip integer helpers
+# ============================================================================
+
+fn _rt_int(n: i64) -> i64:
+    """Encode then decode integer n, returning decoded value."""
+    val encoded = cbor_encode_int(n)
+    val r = cbor_decode_int(encoded, 0)
+    r[0]
+
+fn _rt_zero_ok() -> bool:
+    _rt_int(0) == 0
+
+fn _rt_1_ok() -> bool:
+    _rt_int(1) == 1
+
+fn _rt_23_ok() -> bool:
+    _rt_int(23) == 23
+
+fn _rt_24_ok() -> bool:
+    _rt_int(24) == 24
+
+fn _rt_255_ok() -> bool:
+    _rt_int(255) == 255
+
+fn _rt_1000_ok() -> bool:
+    _rt_int(1000) == 1000
+
+fn _rt_65535_ok() -> bool:
+    _rt_int(65535) == 65535
+
+fn _rt_65536_ok() -> bool:
+    _rt_int(65536) == 65536
+
+fn _rt_minus1_ok() -> bool:
+    _rt_int(-1) == -1
+
+fn _rt_minus24_ok() -> bool:
+    _rt_int(-24) == -24
+
+fn _rt_minus25_ok() -> bool:
+    _rt_int(-25) == -25
+
+fn _rt_minus100_ok() -> bool:
+    _rt_int(-100) == -100
+
+fn _rt_minus1000_ok() -> bool:
+    _rt_int(-1000) == -1000
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "CBOR — unsigned integer encode":
+
+    it "0 encodes as [0x00]":
+        expect(_uint_zero_ok()).to_equal(true)
+
+    it "23 encodes as [0x17] (max 1-byte inline)":
+        expect(_uint_23_ok()).to_equal(true)
+
+    it "24 encodes as [0x18, 0x18]":
+        expect(_uint_24_ok()).to_equal(true)
+
+    it "255 encodes as [0x18, 0xFF]":
+        expect(_uint_255_ok()).to_equal(true)
+
+    it "256 encodes as [0x19, 0x01, 0x00]":
+        expect(_uint_256_ok()).to_equal(true)
+
+    it "1000 encodes as [0x19, 0x03, 0xE8]":
+        expect(_uint_1000_ok()).to_equal(true)
+
+    it "65535 encodes as [0x19, 0xFF, 0xFF]":
+        expect(_uint_65535_ok()).to_equal(true)
+
+    it "65536 encodes as 5-byte form":
+        expect(_uint_65536_ok()).to_equal(true)
+
+describe "CBOR — signed integer encode (negative)":
+
+    it "-1 encodes as [0x20]":
+        expect(_int_minus1_ok()).to_equal(true)
+
+    it "-24 encodes as [0x37]":
+        expect(_int_minus24_ok()).to_equal(true)
+
+    it "-25 encodes as [0x38, 0x18]":
+        expect(_int_minus25_ok()).to_equal(true)
+
+    it "-100 encodes as [0x38, 0x63]":
+        expect(_int_minus100_ok()).to_equal(true)
+
+    it "0 via cbor_encode_int encodes as [0x00]":
+        expect(_int_pos_zero_ok()).to_equal(true)
+
+    it "1000 via cbor_encode_int encodes same as uint":
+        expect(_int_pos_1000_ok()).to_equal(true)
+
+describe "CBOR — byte string encode":
+
+    it "empty bytes encodes as [0x40]":
+        expect(_bytes_empty_ok()).to_equal(true)
+
+    it "3-byte payload encodes correctly":
+        expect(_bytes_three_ok()).to_equal(true)
+
+    it "24-byte payload uses 2-byte header":
+        expect(_bytes_24_len_ok()).to_equal(true)
+
+describe "CBOR — text string encode":
+
+    it "empty string encodes as [0x60]":
+        expect(_text_empty_ok()).to_equal(true)
+
+    it "hello encodes to 6 bytes total":
+        expect(_text_hello_len_ok()).to_equal(true)
+
+    it "hello header byte is 0x65":
+        expect(_text_hello_header_ok()).to_equal(true)
+
+    it "hello payload bytes are correct ASCII":
+        expect(_text_hello_bytes_ok()).to_equal(true)
+
+    it "25-char string uses 2-byte header":
+        expect(_text_24_len_ok()).to_equal(true)
+
+describe "CBOR — array header encode":
+
+    it "count=0 encodes as [0x80]":
+        expect(_array_empty_ok()).to_equal(true)
+
+    it "count=3 encodes as [0x83]":
+        expect(_array_three_ok()).to_equal(true)
+
+    it "count=23 encodes as [0x97]":
+        expect(_array_23_ok()).to_equal(true)
+
+    it "count=24 encodes as [0x98, 0x18]":
+        expect(_array_24_ok()).to_equal(true)
+
+describe "CBOR — map header encode":
+
+    it "count=0 encodes as [0xA0]":
+        expect(_map_empty_ok()).to_equal(true)
+
+    it "count=2 encodes as [0xA2]":
+        expect(_map_two_ok()).to_equal(true)
+
+    it "count=24 encodes as [0xB8, 0x18]":
+        expect(_map_24_ok()).to_equal(true)
+
+describe "CBOR — tag encode":
+
+    it "tag 0 encodes as [0xC0]":
+        expect(_tag_0_ok()).to_equal(true)
+
+    it "tag 1 encodes as [0xC1]":
+        expect(_tag_1_ok()).to_equal(true)
+
+    it "tag 32 encodes as [0xD8, 0x20]":
+        expect(_tag_32_ok()).to_equal(true)
+
+describe "CBOR — simple values encode":
+
+    it "false encodes as [0xF4]":
+        expect(_bool_false_ok()).to_equal(true)
+
+    it "true encodes as [0xF5]":
+        expect(_bool_true_ok()).to_equal(true)
+
+    it "null encodes as [0xF6]":
+        expect(_null_ok()).to_equal(true)
+
+    it "undefined encodes as [0xF7]":
+        expect(_undefined_ok()).to_equal(true)
+
+describe "CBOR — decode_type":
+
+    it "uint 0 → major=0, value=0, consumed=1":
+        expect(_dtype_uint_zero_ok()).to_equal(true)
+
+    it "uint 23 → major=0, value=23, consumed=1":
+        expect(_dtype_uint_23_ok()).to_equal(true)
+
+    it "uint 24 → major=0, value=24, consumed=2":
+        expect(_dtype_uint_24_ok()).to_equal(true)
+
+    it "uint 1000 → major=0, value=1000, consumed=3":
+        expect(_dtype_uint_1000_ok()).to_equal(true)
+
+    it "int -1 → major=1, raw=0, consumed=1":
+        expect(_dtype_neg_minus1_ok()).to_equal(true)
+
+    it "int -25 → major=1, raw=24, consumed=2":
+        expect(_dtype_neg_minus25_ok()).to_equal(true)
+
+    it "empty bytes → major=2, value=0, consumed=1":
+        expect(_dtype_bstr_ok()).to_equal(true)
+
+    it "empty text → major=3, value=0, consumed=1":
+        expect(_dtype_tstr_ok()).to_equal(true)
+
+    it "array(3) → major=4, value=3, consumed=1":
+        expect(_dtype_array_ok()).to_equal(true)
+
+    it "map(2) → major=5, value=2, consumed=1":
+        expect(_dtype_map_ok()).to_equal(true)
+
+describe "CBOR — decode_int":
+
+    it "0 decodes to 0, consumed=1":
+        expect(_di_zero_ok()).to_equal(true)
+
+    it "23 decodes to 23, consumed=1":
+        expect(_di_23_ok()).to_equal(true)
+
+    it "1000 decodes to 1000, consumed=3":
+        expect(_di_1000_ok()).to_equal(true)
+
+    it "-1 decodes to -1, consumed=1":
+        expect(_di_minus1_ok()).to_equal(true)
+
+    it "-24 decodes to -24, consumed=1":
+        expect(_di_minus24_ok()).to_equal(true)
+
+    it "-25 decodes to -25, consumed=2":
+        expect(_di_minus25_ok()).to_equal(true)
+
+    it "-100 decodes to -100, consumed=2":
+        expect(_di_minus100_ok()).to_equal(true)
+
+describe "CBOR — decode_text":
+
+    it "empty string decodes back, consumed=1":
+        expect(_dt_empty_ok()).to_equal(true)
+
+    it "hello decodes back, consumed=6":
+        expect(_dt_hello_ok()).to_equal(true)
+
+    it "hi decodes back, consumed=3":
+        expect(_dt_hi_newpos_ok()).to_equal(true)
+
+describe "CBOR — integer round-trip":
+
+    it "0 round-trips":
+        expect(_rt_zero_ok()).to_equal(true)
+
+    it "1 round-trips":
+        expect(_rt_1_ok()).to_equal(true)
+
+    it "23 round-trips":
+        expect(_rt_23_ok()).to_equal(true)
+
+    it "24 round-trips":
+        expect(_rt_24_ok()).to_equal(true)
+
+    it "255 round-trips":
+        expect(_rt_255_ok()).to_equal(true)
+
+    it "1000 round-trips":
+        expect(_rt_1000_ok()).to_equal(true)
+
+    it "65535 round-trips":
+        expect(_rt_65535_ok()).to_equal(true)
+
+    it "65536 round-trips":
+        expect(_rt_65536_ok()).to_equal(true)
+
+    it "-1 round-trips":
+        expect(_rt_minus1_ok()).to_equal(true)
+
+    it "-24 round-trips":
+        expect(_rt_minus24_ok()).to_equal(true)
+
+    it "-25 round-trips":
+        expect(_rt_minus25_ok()).to_equal(true)
+
+    it "-100 round-trips":
+        expect(_rt_minus100_ok()).to_equal(true)
+
+    it "-1000 round-trips":
+        expect(_rt_minus1000_ok()).to_equal(true)
