@@ -1,0 +1,378 @@
+# COSE Sign1 + COSE Mac0 — RFC 9052 (§4.2, §6.2)
+#
+# Implements the two simplest single-signer/single-MAC profiles:
+#   COSE_Sign1  — EdDSA (Ed25519, alg=-8)   CBOR tag 18
+#   COSE_Mac0   — HMAC-SHA-256 (alg=5)      CBOR tag 17
+#
+# No multi-recipient, no key derivation, no detached payload.
+# Byte representation strategy:
+#   - CBOR layer: [i64] throughout (matches cbor_encode_* / cbor_decode_*)
+#   - hmac_sha256_bytes: list (compatible with [i64])
+#   - ed25519_sign/verify: [u8] — bridged with helpers below
+#
+# Reference: https://www.rfc-editor.org/rfc/rfc9052
+# ==============================================================================
+
+@allow(star_import, unnamed_duplicate_typed_args)
+
+use std.common.cbor.core.*
+use std.crypto.hmac.{hmac_sha256_bytes}
+use os.crypto.ed25519.{ed25519_sign, ed25519_verify}
+
+# ==============================================================================
+# Algorithm constants (RFC 9052 §8, RFC 9053)
+# ==============================================================================
+# COSE header label for algorithm
+val COSE_LABEL_ALG: i64 = 1
+# EdDSA (Ed25519) algorithm identifier
+val COSE_ALG_EDDSA: i64 = -8
+# HMAC 256/256 algorithm identifier
+val COSE_ALG_HMAC_256_256: i64 = 5
+# CBOR tag for COSE_Sign1
+val COSE_TAG_SIGN1: i64 = 18
+# CBOR tag for COSE_Mac0
+val COSE_TAG_MAC0: i64 = 17
+
+# ==============================================================================
+# CoseError — minimal error representation
+# ==============================================================================
+val COSE_OK: i64               = 0
+val COSE_ERR_BAD_STRUCTURE: i64 = 1
+val COSE_ERR_BAD_SIGNATURE: i64 = 2
+val COSE_ERR_BAD_MAC: i64      = 3
+val COSE_ERR_UNSUPPORTED_ALG: i64 = 4
+
+# ==============================================================================
+# Byte conversion helpers
+# ==============================================================================
+
+# Convert [i64] → [u8] for Ed25519 interface.
+fn _i64_list_to_u8(src: [i64]) -> [u8]:
+    """Convert [i64] byte array (values 0-255) to [u8]."""
+    var dst: [u8] = []
+    var i = 0
+    while i < src.len():
+        dst.push(src[i] as u8)
+        i = i + 1
+    dst
+
+# Convert [u8] → [i64] for CBOR interface.
+fn _u8_to_i64_list(src: [u8]) -> [i64]:
+    """Convert [u8] to [i64] byte array."""
+    var dst: [i64] = []
+    var i: u64 = 0
+    while i < src.len():
+        dst.push(src[i] as i64)
+        i = i + 1
+    dst
+
+# ==============================================================================
+# Protected header helpers
+# ==============================================================================
+
+# Encode a one-entry protected header map { 1: alg_id } as a CBOR bstr.
+# RFC 9052 §3: protected is a serialized CBOR map wrapped as bstr.
+# Empty map case: zero-length bstr h''.
+fn _encode_protected_hdr(alg: i64) -> [i64]:
+    """Encode protected header {alg: alg_id} as CBOR bstr."""
+    # Build inner map CBOR: {1: alg}
+    val map_hdr  = cbor_encode_map_header(1)          # 1-entry map
+    val key_cbor = cbor_encode_int(COSE_LABEL_ALG)    # key = 1
+    val val_cbor = cbor_encode_int(alg)               # value = alg
+    var inner: [i64] = []
+    for b in map_hdr:
+        inner = inner.push(b)
+    for b in key_cbor:
+        inner = inner.push(b)
+    for b in val_cbor:
+        inner = inner.push(b)
+    # Wrap as bstr
+    cbor_encode_bytes(inner)
+
+# Encode an empty protected header as a zero-length bstr.
+fn _encode_empty_protected() -> [i64]:
+    """Encode empty protected header as zero-length bstr (h'')."""
+    cbor_encode_bytes([])
+
+# ==============================================================================
+# Sig_structure encoder (RFC 9052 §4.4)
+#   ["Signature1", protected_bstr, external_aad_bstr, payload_bstr]
+# ==============================================================================
+fn _encode_sig_structure(protected_bstr: [i64], payload_bytes: [i64]) -> [i64]:
+    """Build ToBeSigned bytes per RFC 9052 §4.4."""
+    val ctx     = cbor_encode_text("Signature1")
+    val ext_aad = cbor_encode_bytes([])   # empty external AAD
+    val payload = cbor_encode_bytes(payload_bytes)
+
+    # 4-element array
+    val arr_hdr = cbor_encode_array_header(4)
+    var out: [i64] = []
+    for b in arr_hdr:
+        out = out.push(b)
+    for b in ctx:
+        out = out.push(b)
+    for b in protected_bstr:
+        out = out.push(b)
+    for b in ext_aad:
+        out = out.push(b)
+    for b in payload:
+        out = out.push(b)
+    out
+
+# ==============================================================================
+# MAC_structure encoder (RFC 9052 §6.3)
+#   ["MAC0", protected_bstr, external_aad_bstr, payload_bstr]
+# ==============================================================================
+fn _encode_mac_structure(protected_bstr: [i64], payload_bytes: [i64]) -> [i64]:
+    """Build ToBeMACed bytes per RFC 9052 §6.3."""
+    val ctx     = cbor_encode_text("MAC0")
+    val ext_aad = cbor_encode_bytes([])
+    val payload = cbor_encode_bytes(payload_bytes)
+
+    val arr_hdr = cbor_encode_array_header(4)
+    var out: [i64] = []
+    for b in arr_hdr:
+        out = out.push(b)
+    for b in ctx:
+        out = out.push(b)
+    for b in protected_bstr:
+        out = out.push(b)
+    for b in ext_aad:
+        out = out.push(b)
+    for b in payload:
+        out = out.push(b)
+    out
+
+# ==============================================================================
+# COSE_Sign1 create
+# RFC 9052 §4.2 — tagged CBOR array [protected_bstr, unprotected_map, payload_bstr, sig_bstr]
+# ==============================================================================
+fn cose_sign1_create(
+    payload_bytes: [i64],
+    private_seed:  [u8],
+    public_key:    [u8],
+    alg:           i64
+) -> [i64]:
+    """Create a COSE_Sign1 message (CBOR tag 18).
+
+    payload_bytes : raw payload (unencoded bytes)
+    private_seed  : Ed25519 32-byte private seed
+    public_key    : Ed25519 32-byte public key
+    alg           : algorithm ID (use COSE_ALG_EDDSA = -8)
+    Returns: CBOR-encoded COSE_Sign1 with tag 18.
+    """
+    val protected_bstr   = _encode_protected_hdr(alg)
+    val unprotected_cbor = cbor_encode_map_header(0)  # empty map
+
+    # Build Sig_structure and sign
+    val tbs      = _encode_sig_structure(protected_bstr, payload_bytes)
+    val tbs_u8   = _i64_list_to_u8(tbs)
+    val sig_u8   = ed25519_sign(private_seed, public_key, tbs_u8)
+    val sig_cbor = cbor_encode_bytes(_u8_to_i64_list(sig_u8))
+
+    val payload_cbor = cbor_encode_bytes(payload_bytes)
+
+    # Assemble 4-element array
+    val arr_hdr = cbor_encode_array_header(4)
+    var body: [i64] = []
+    for b in arr_hdr:
+        body = body.push(b)
+    for b in protected_bstr:
+        body = body.push(b)
+    for b in unprotected_cbor:
+        body = body.push(b)
+    for b in payload_cbor:
+        body = body.push(b)
+    for b in sig_cbor:
+        body = body.push(b)
+
+    # Wrap with CBOR tag 18
+    cbor_encode_tagged(COSE_TAG_SIGN1, body)
+
+# ==============================================================================
+# COSE_Sign1 verify
+# Returns (payload_bytes, err_code). payload is [] on error.
+# ==============================================================================
+fn cose_sign1_verify(cose_bytes: [i64], public_key: [u8]) -> ([i64], i64):
+    """Verify a COSE_Sign1 message. Returns (payload, err_code).
+
+    Accepts both tagged (tag 18) and untagged COSE_Sign1.
+    err_code == COSE_OK (0) on success.
+    """
+    var offset = 0
+
+    # Skip optional tag 18
+    if cbor_is_tagged(cose_bytes, offset):
+        val cbor_tag_info     = cbor_decode_tag(cose_bytes, offset)
+        val cbor_tag_num      = cbor_tag_info.0
+        val cbor_tag_consumed = cbor_tag_info.1
+        if cbor_tag_num != COSE_TAG_SIGN1:
+            return ([], COSE_ERR_BAD_STRUCTURE)
+        offset = offset + cbor_tag_consumed
+
+    # Expect 4-element array
+    val arr_result = cbor_decode_array_header(cose_bytes, offset)
+    val arr_len    = arr_result.0
+    val arr_consumed = arr_result.2
+    if arr_len != 4:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+    offset = offset + arr_consumed
+
+    # [0] protected bstr
+    val protected_result   = cbor_decode_bytes(cose_bytes, offset)
+    val protected_bstr_raw = protected_result.0   # the raw inner bytes (serialized map)
+    val prot_consumed      = protected_result.1
+    if prot_consumed == 0:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+    # Reconstruct the protected bstr (re-encode for Sig_structure)
+    val protected_bstr = cbor_encode_bytes(protected_bstr_raw)
+    offset = offset + prot_consumed
+
+    # [1] unprotected map — skip it
+    val skip1 = cbor_item_size(cose_bytes, offset)
+    if skip1 == 0:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+    offset = offset + skip1
+
+    # [2] payload bstr
+    val payload_result   = cbor_decode_bytes(cose_bytes, offset)
+    val payload_bytes    = payload_result.0
+    val payload_consumed = payload_result.1
+    if payload_consumed == 0:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+    offset = offset + payload_consumed
+
+    # [3] signature bstr
+    val sig_result   = cbor_decode_bytes(cose_bytes, offset)
+    val sig_bytes    = sig_result.0
+    val sig_consumed = sig_result.1
+    if sig_consumed == 0:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+
+    # Rebuild Sig_structure and verify
+    val tbs    = _encode_sig_structure(protected_bstr, payload_bytes)
+    val tbs_u8 = _i64_list_to_u8(tbs)
+    val sig_u8 = _i64_list_to_u8(sig_bytes)
+
+    val ok = ed25519_verify(public_key, tbs_u8, sig_u8)
+    if ok:
+        return (payload_bytes, COSE_OK)
+    ([], COSE_ERR_BAD_SIGNATURE)
+
+# ==============================================================================
+# COSE_Mac0 create
+# RFC 9052 §6.2 — tagged CBOR array [protected_bstr, unprotected_map, payload_bstr, tag_bstr]
+# ==============================================================================
+fn cose_mac0_create(
+    payload_bytes: [i64],
+    mac_key:       [i64],
+    alg:           i64
+) -> [i64]:
+    """Create a COSE_Mac0 message (CBOR tag 17).
+
+    payload_bytes : raw payload bytes
+    mac_key       : symmetric key bytes (32 bytes for HMAC-256)
+    alg           : algorithm ID (use COSE_ALG_HMAC_256_256 = 5)
+    Returns: CBOR-encoded COSE_Mac0 with tag 17.
+    """
+    val protected_bstr   = _encode_protected_hdr(alg)
+    val unprotected_cbor = cbor_encode_map_header(0)
+
+    # Build MAC_structure and compute MAC
+    val tbm    = _encode_mac_structure(protected_bstr, payload_bytes)
+    val mac_bytes = hmac_sha256_bytes(mac_key, tbm)
+    val tag_cbor  = cbor_encode_bytes(mac_bytes)
+
+    val payload_cbor = cbor_encode_bytes(payload_bytes)
+
+    val arr_hdr = cbor_encode_array_header(4)
+    var body: [i64] = []
+    for b in arr_hdr:
+        body = body.push(b)
+    for b in protected_bstr:
+        body = body.push(b)
+    for b in unprotected_cbor:
+        body = body.push(b)
+    for b in payload_cbor:
+        body = body.push(b)
+    for b in tag_cbor:
+        body = body.push(b)
+
+    cbor_encode_tagged(COSE_TAG_MAC0, body)
+
+# ==============================================================================
+# COSE_Mac0 verify
+# Returns (payload_bytes, err_code). payload is [] on error.
+# ==============================================================================
+fn cose_mac0_verify(cose_bytes: [i64], mac_key: [i64]) -> ([i64], i64):
+    """Verify a COSE_Mac0 message. Returns (payload, err_code).
+
+    Accepts both tagged (tag 17) and untagged COSE_Mac0.
+    err_code == COSE_OK (0) on success.
+    """
+    var offset = 0
+
+    # Skip optional tag 17
+    if cbor_is_tagged(cose_bytes, offset):
+        val cbor_tag_info     = cbor_decode_tag(cose_bytes, offset)
+        val cbor_tag_num      = cbor_tag_info.0
+        val cbor_tag_consumed = cbor_tag_info.1
+        if cbor_tag_num != COSE_TAG_MAC0:
+            return ([], COSE_ERR_BAD_STRUCTURE)
+        offset = offset + cbor_tag_consumed
+
+    # Expect 4-element array
+    val arr_result   = cbor_decode_array_header(cose_bytes, offset)
+    val arr_len      = arr_result.0
+    val arr_consumed = arr_result.2
+    if arr_len != 4:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+    offset = offset + arr_consumed
+
+    # [0] protected bstr
+    val protected_result   = cbor_decode_bytes(cose_bytes, offset)
+    val protected_bstr_raw = protected_result.0
+    val prot_consumed      = protected_result.1
+    if prot_consumed == 0:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+    val protected_bstr = cbor_encode_bytes(protected_bstr_raw)
+    offset = offset + prot_consumed
+
+    # [1] unprotected map — skip
+    val skip1 = cbor_item_size(cose_bytes, offset)
+    if skip1 == 0:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+    offset = offset + skip1
+
+    # [2] payload bstr
+    val payload_result   = cbor_decode_bytes(cose_bytes, offset)
+    val payload_bytes    = payload_result.0
+    val payload_consumed = payload_result.1
+    if payload_consumed == 0:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+    offset = offset + payload_consumed
+
+    # [3] mac tag bstr
+    val mac_tag_result   = cbor_decode_bytes(cose_bytes, offset)
+    val stored_tag       = mac_tag_result.0
+    val mac_tag_consumed = mac_tag_result.1
+    if mac_tag_consumed == 0:
+        return ([], COSE_ERR_BAD_STRUCTURE)
+
+    # Recompute MAC and compare constant-time
+    val tbm          = _encode_mac_structure(protected_bstr, payload_bytes)
+    val expected_tag = hmac_sha256_bytes(mac_key, tbm)
+
+    if expected_tag.len() != stored_tag.len():
+        return ([], COSE_ERR_BAD_MAC)
+
+    # Constant-time comparison (expected_tag: list; stored_tag: [i64])
+    var diff: i64 = 0
+    var i = 0
+    while i < expected_tag.len():
+        diff = diff | (expected_tag.get(i) ^ stored_tag[i])
+        i = i + 1
+
+    if diff != 0:
+        return ([], COSE_ERR_BAD_MAC)
+    (payload_bytes, COSE_OK)

@@ -1,0 +1,104 @@
+# KMAC-128 / KMAC-256 — NIST SP 800-185 §4
+#
+# KMAC (Keccak Message Authentication Code) is a keyed hash function built
+# on top of cSHAKE-128 / cSHAKE-256. It can also be used as a variable-length
+# PRF (pseudo-random function).
+#
+# Algorithm (SP 800-185 §4.3.1):
+#   KMAC128(K, X, L, S):
+#     newX = bytepad(encode_string(K), 168) || X || right_encode(L)
+#     return cSHAKE128(newX, L, "KMAC", S)
+#
+#   KMAC256(K, X, L, S):
+#     newX = bytepad(encode_string(K), 136) || X || right_encode(L)
+#     return cSHAKE256(newX, L, "KMAC", S)
+#
+# Parameters:
+#   K            — secret key (byte list)
+#   X            — input/message (byte list)
+#   L            — output length in bits
+#   S            — customization string (byte list; empty list = no customization)
+#
+# KMAC128 block rate = 168 bytes; KMAC256 block rate = 136 bytes.
+#
+# History (2026-05-03): Initial implementation, NIST SP 800-185 §4 KAT vectors
+# verified in test/unit/os/crypto/kmac_spec.spl.
+#
+# References:
+#   NIST SP 800-185 — SHA-3 Derived Functions: cSHAKE, KMAC, TupleHash, ParallelHash
+#   https://csrc.nist.gov/publications/detail/sp/800-185/final
+
+mod os.crypto.kmac
+
+use os.crypto.cshake.{cshake128, cshake256, encode_string, bytepad, right_encode}
+
+# ============================================================================
+# Helper: ASCII bytes for "KMAC"
+# ============================================================================
+
+# Returns the byte list [0x4B, 0x4D, 0x41, 0x43] = "KMAC" in ASCII.
+fn _kmac_name() -> list:
+    var n = []
+    n.push(0x4B)  # K
+    n.push(0x4D)  # M
+    n.push(0x41)  # A
+    n.push(0x43)  # C
+    n
+
+# ============================================================================
+# KMAC-128 (SP 800-185 §4.3.1)
+# ============================================================================
+#
+# KMAC128(K, X, L, S) where L is bit length of desired output.
+# Returns L/8 bytes (L must be a multiple of 8 per spec; we pass L in bits).
+
+fn kmac128(key: list, input: list, output_len: i64, customization: list) -> list:
+    # newX = bytepad(encode_string(K), 168) || X || right_encode(L)
+    val encoded_key = encode_string(key)
+    val padded_key = bytepad(encoded_key, 168)
+    val right_len = right_encode(output_len)
+
+    var new_x = []
+    var i = 0
+    while i < padded_key.len():
+        new_x.push(padded_key.get(i))
+        i = i + 1
+    i = 0
+    while i < input.len():
+        new_x.push(input.get(i))
+        i = i + 1
+    i = 0
+    while i < right_len.len():
+        new_x.push(right_len.get(i))
+        i = i + 1
+
+    # output byte count = output_len / 8  (output_len is in bits)
+    val output_bytes = output_len / 8
+    cshake128(new_x, output_bytes, _kmac_name(), customization)
+
+# ============================================================================
+# KMAC-256 (SP 800-185 §4.3.1)
+# ============================================================================
+
+fn kmac256(key: list, input: list, output_len: i64, customization: list) -> list:
+    # newX = bytepad(encode_string(K), 136) || X || right_encode(L)
+    val encoded_key = encode_string(key)
+    val padded_key = bytepad(encoded_key, 136)
+    val right_len = right_encode(output_len)
+
+    var new_x = []
+    var i = 0
+    while i < padded_key.len():
+        new_x.push(padded_key.get(i))
+        i = i + 1
+    i = 0
+    while i < input.len():
+        new_x.push(input.get(i))
+        i = i + 1
+    i = 0
+    while i < right_len.len():
+        new_x.push(right_len.get(i))
+        i = i + 1
+
+    val output_bytes = output_len / 8
+    cshake256(new_x, output_bytes, _kmac_name(), customization)

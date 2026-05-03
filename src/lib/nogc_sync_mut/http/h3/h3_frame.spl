@@ -1,0 +1,353 @@
+# HTTP/3 Frame Layer — RFC 9114 §7.2
+#
+# Implements the HTTP/3 wire frame format:
+#   - Variable-length integer encoding (RFC 9000 §16)
+#   - Frame emit: varint(type) || varint(length) || payload
+#   - Frame parse: decode type + length varints, slice payload
+#
+# Frame types (RFC 9114 §7.2):
+#   DATA(0x00), HEADERS(0x01), CANCEL_PUSH(0x03), SETTINGS(0x04),
+#   PUSH_PROMISE(0x05), GOAWAY(0x07), MAX_PUSH_ID(0x0d)
+#
+# No QUIC transport — frame layer only. Reserved-range/QPACK deferred.
+#
+# Reference: RFC 9114 §7.2, RFC 9000 §16
+
+# ============================================================================
+# Constants — frame type identifiers (RFC 9114 §7.2)
+# ============================================================================
+
+val H3_FRAME_DATA: i64        = 0x00
+val H3_FRAME_HEADERS: i64     = 0x01
+val H3_FRAME_CANCEL_PUSH: i64 = 0x03
+val H3_FRAME_SETTINGS: i64    = 0x04
+val H3_FRAME_PUSH_PROMISE: i64 = 0x05
+val H3_FRAME_GOAWAY: i64      = 0x07
+val H3_FRAME_MAX_PUSH_ID: i64 = 0x0d
+
+# ============================================================================
+# SETTINGS identifiers (RFC 9114 §7.2.4.1)
+# ============================================================================
+
+val H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY: i64 = 0x01
+val H3_SETTINGS_MAX_FIELD_SECTION_SIZE: i64   = 0x06
+val H3_SETTINGS_QPACK_BLOCKED_STREAMS: i64    = 0x07
+
+# ============================================================================
+# Result types
+# ============================================================================
+
+class H3VarintOk:
+    """Successful varint decode: decoded value and number of bytes consumed."""
+    value: i64
+    consumed: i64
+
+enum H3VarintResult:
+    """Result of decoding a QUIC variable-length integer."""
+    Ok(H3VarintOk)
+    Err(msg: text)
+
+class H3FrameOk:
+    """Successful frame parse: frame type, payload bytes, and new offset."""
+    frame_type: i64
+    payload: [u8]
+    new_offset: i64
+
+enum H3FrameResult:
+    """Result of parsing one HTTP/3 frame."""
+    Ok(H3FrameOk)
+    Err(msg: text)
+
+# ============================================================================
+# Per-type payload structs
+# ============================================================================
+
+class H3Setting:
+    """One HTTP/3 SETTINGS parameter (identifier, value) — both varints on wire."""
+    identifier: i64
+    value: i64
+
+# ============================================================================
+# Tagged union: H3Frame
+# ============================================================================
+
+class H3DataFrame:
+    """RFC 9114 §7.2.1 DATA. Opaque application bytes."""
+    payload: [u8]
+
+class H3HeadersFrame:
+    """RFC 9114 §7.2.2 HEADERS. Opaque QPACK-encoded field section (QPACK deferred)."""
+    encoded_fields: [u8]
+
+class H3CancelPushFrame:
+    """RFC 9114 §7.2.3 CANCEL_PUSH. push_id is a varint on wire."""
+    push_id: i64
+
+class H3SettingsFrame:
+    """RFC 9114 §7.2.4 SETTINGS. Sequence of (id, value) varint pairs."""
+    settings: [H3Setting]
+
+class H3PushPromiseFrame:
+    """RFC 9114 §7.2.5 PUSH_PROMISE. push_id + opaque encoded_fields."""
+    push_id: i64
+    encoded_fields: [u8]
+
+class H3GoawayFrame:
+    """RFC 9114 §7.2.6 GOAWAY. stream_id or push_id depending on sender."""
+    id: i64
+
+class H3MaxPushIdFrame:
+    """RFC 9114 §7.2.7 MAX_PUSH_ID."""
+    push_id: i64
+
+enum H3Frame:
+    """Discriminated union of HTTP/3 frame types."""
+    Data(H3DataFrame)
+    Headers(H3HeadersFrame)
+    CancelPush(H3CancelPushFrame)
+    Settings(H3SettingsFrame)
+    PushPromise(H3PushPromiseFrame)
+    Goaway(H3GoawayFrame)
+    MaxPushId(H3MaxPushIdFrame)
+
+# ============================================================================
+# Internal byte helpers
+# ============================================================================
+
+fn _h3_append_bytes(out: [u8], src: [u8]):
+    """Append all bytes of src onto out."""
+    var i = 0
+    val n = src.len()
+    loop:
+        if i >= n:
+            break
+        out.push(src[i])
+        i = i + 1
+
+# ============================================================================
+# Variable-length integer encoding — RFC 9000 §16
+#
+# Two high bits of the first byte give the encoded length:
+#   00 → 1 byte  (6-bit value,  0..63)
+#   01 → 2 bytes (14-bit value, 0..16383)
+#   10 → 4 bytes (30-bit value, 0..1073741823)
+#   11 → 8 bytes (62-bit value, 0..4611686018427387903)
+#
+# Value bits are big-endian and share the first byte with the 2-bit prefix.
+# ============================================================================
+
+pub fn h3_varint_encode(u: i64) -> [u8]:
+    """Encode an i64 as an RFC 9000 variable-length integer."""
+    var out: [u8] = []
+    if u <= 63:
+        # 1-byte form: 0b00xxxxxx
+        out.push(u & 0xff)
+    elif u <= 16383:
+        # 2-byte form: 0b01xxxxxx xxxxxxxx
+        val v = 0x4000 | u
+        out.push((v >> 8) & 0xff)
+        out.push(v & 0xff)
+    elif u <= 1073741823:
+        # 4-byte form: 0b10xxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
+        val v = 0x80000000 | u
+        out.push((v >> 24) & 0xff)
+        out.push((v >> 16) & 0xff)
+        out.push((v >> 8) & 0xff)
+        out.push(v & 0xff)
+    else:
+        # 8-byte form: 0b11xxxxxx ... (62-bit value)
+        # Use two 32-bit halves to avoid i64 overflow on the prefix OR.
+        # The top 2 bits are 0b11, so high word OR is 0xc0000000.
+        val hi = 0xc0000000 | ((u >> 32) & 0x3fffffff)
+        val lo = u & 0xffffffff
+        out.push((hi >> 24) & 0xff)
+        out.push((hi >> 16) & 0xff)
+        out.push((hi >> 8) & 0xff)
+        out.push(hi & 0xff)
+        out.push((lo >> 24) & 0xff)
+        out.push((lo >> 16) & 0xff)
+        out.push((lo >> 8) & 0xff)
+        out.push(lo & 0xff)
+    return out
+
+pub fn h3_varint_decode(bytes: [u8], offset: i64) -> H3VarintResult:
+    """Decode an RFC 9000 variable-length integer from bytes at offset.
+
+    Returns Ok(value, consumed) on success; consumed is 1, 2, 4, or 8.
+    Returns Err on truncation or invalid input.
+    """
+    if offset >= bytes.len():
+        return H3VarintResult.Err("offset past end of buffer")
+    val first = bytes[offset] & 0xff
+    val prefix = (first >> 6) & 0x03
+    if prefix == 0:
+        # 1-byte form
+        return H3VarintResult.Ok(H3VarintOk(value: first & 0x3f, consumed: 1))
+    elif prefix == 1:
+        # 2-byte form
+        if offset + 2 > bytes.len():
+            return H3VarintResult.Err("2-byte varint truncated")
+        val b1 = bytes[offset + 1] & 0xff
+        val v = ((first & 0x3f) << 8) | b1
+        return H3VarintResult.Ok(H3VarintOk(value: v, consumed: 2))
+    elif prefix == 2:
+        # 4-byte form
+        if offset + 4 > bytes.len():
+            return H3VarintResult.Err("4-byte varint truncated")
+        val b1 = bytes[offset + 1] & 0xff
+        val b2 = bytes[offset + 2] & 0xff
+        val b3 = bytes[offset + 3] & 0xff
+        val v = ((first & 0x3f) << 24) | (b1 << 16) | (b2 << 8) | b3
+        return H3VarintResult.Ok(H3VarintOk(value: v, consumed: 4))
+    else:
+        # 8-byte form (prefix == 3)
+        if offset + 8 > bytes.len():
+            return H3VarintResult.Err("8-byte varint truncated")
+        val b1 = bytes[offset + 1] & 0xff
+        val b2 = bytes[offset + 2] & 0xff
+        val b3 = bytes[offset + 3] & 0xff
+        val b4 = bytes[offset + 4] & 0xff
+        val b5 = bytes[offset + 5] & 0xff
+        val b6 = bytes[offset + 6] & 0xff
+        val b7 = bytes[offset + 7] & 0xff
+        val v = (((first & 0x3f) << 24) | (b1 << 16) | (b2 << 8) | b3) << 32 | ((b4 << 24) | (b5 << 16) | (b6 << 8) | b7)
+        return H3VarintResult.Ok(H3VarintOk(value: v, consumed: 8))
+    return H3VarintResult.Err("unreachable")
+
+# ============================================================================
+# Frame emit — RFC 9114 §7.2
+#
+# Wire format: varint(type) || varint(length) || payload
+# ============================================================================
+
+pub fn h3_frame_emit(frame_type: i64, payload: [u8]) -> [u8]:
+    """Encode an HTTP/3 frame: varint(type) || varint(len) || payload."""
+    var out: [u8] = []
+    val type_bytes = h3_varint_encode(frame_type)
+    val len_bytes = h3_varint_encode(payload.len())
+    _h3_append_bytes(out, type_bytes)
+    _h3_append_bytes(out, len_bytes)
+    _h3_append_bytes(out, payload)
+    return out
+
+# ============================================================================
+# Frame parse — RFC 9114 §7.2
+# ============================================================================
+
+pub fn h3_frame_parse(bytes: [u8], offset: i64) -> H3FrameResult:
+    """Parse one HTTP/3 frame from bytes starting at offset.
+
+    Returns Ok(frame_type, payload, new_offset) where new_offset points
+    past the end of this frame. Returns Err on truncation or bad varint.
+    """
+    # Decode frame type varint
+    val type_r = h3_varint_decode(bytes, offset)
+    match type_r:
+        case Err(msg):
+            return H3FrameResult.Err(msg)
+        case Ok(tr):
+            val after_type = offset + tr.consumed
+            # Decode payload length varint
+            val len_r = h3_varint_decode(bytes, after_type)
+            match len_r:
+                case Err(msg):
+                    return H3FrameResult.Err(msg)
+                case Ok(lr):
+                    val payload_start = after_type + lr.consumed
+                    val payload_end = payload_start + lr.value
+                    if payload_end > bytes.len():
+                        return H3FrameResult.Err("frame payload truncated")
+                    var payload: [u8] = []
+                    var j = payload_start
+                    loop:
+                        if j >= payload_end:
+                            break
+                        payload.push(bytes[j])
+                        j = j + 1
+                    return H3FrameResult.Ok(H3FrameOk(
+                        frame_type: tr.value,
+                        payload: payload,
+                        new_offset: payload_end
+                    ))
+    return H3FrameResult.Err("unreachable")
+
+# ============================================================================
+# SETTINGS payload encode/decode — RFC 9114 §7.2.4
+#
+# Wire: sequence of (varint id, varint value) pairs filling the payload.
+# ============================================================================
+
+pub fn h3_settings_encode(settings: [H3Setting]) -> [u8]:
+    """Encode a SETTINGS payload: sequence of varint(id) || varint(value) pairs."""
+    var out: [u8] = []
+    var i = 0
+    val n = settings.len()
+    loop:
+        if i >= n:
+            break
+        val s = settings[i]
+        val id_bytes = h3_varint_encode(s.identifier)
+        val val_bytes = h3_varint_encode(s.value)
+        _h3_append_bytes(out, id_bytes)
+        _h3_append_bytes(out, val_bytes)
+        i = i + 1
+    return out
+
+pub fn h3_settings_decode(payload: [u8]) -> [H3Setting]:
+    """Decode a SETTINGS payload into a list of H3Setting pairs.
+
+    Ignores unknown identifiers (per RFC 9114 §7.2.4). Returns empty list
+    on any parse error (truncated varint).
+    """
+    var out: [H3Setting] = []
+    var offset = 0
+    val n = payload.len()
+    loop:
+        if offset >= n:
+            break
+        val id_r = h3_varint_decode(payload, offset)
+        match id_r:
+            case Err(_):
+                break
+            case Ok(ir):
+                val after_id = offset + ir.consumed
+                val val_r = h3_varint_decode(payload, after_id)
+                match val_r:
+                    case Err(_):
+                        break
+                    case Ok(vr):
+                        out.push(H3Setting(identifier: ir.value, value: vr.value))
+                        offset = after_id + vr.consumed
+    return out
+
+# ============================================================================
+# High-level H3Frame serializer
+# ============================================================================
+
+pub fn h3_write_frame(frame: H3Frame) -> [u8]:
+    """Serialize an H3Frame to bytes (varint type + varint length + payload)."""
+    match frame:
+        case Data(d):
+            return h3_frame_emit(H3_FRAME_DATA, d.payload)
+        case Headers(h):
+            return h3_frame_emit(H3_FRAME_HEADERS, h.encoded_fields)
+        case CancelPush(c):
+            val payload = h3_varint_encode(c.push_id)
+            return h3_frame_emit(H3_FRAME_CANCEL_PUSH, payload)
+        case Settings(s):
+            val payload = h3_settings_encode(s.settings)
+            return h3_frame_emit(H3_FRAME_SETTINGS, payload)
+        case PushPromise(pp):
+            var payload: [u8] = []
+            val id_bytes = h3_varint_encode(pp.push_id)
+            _h3_append_bytes(payload, id_bytes)
+            _h3_append_bytes(payload, pp.encoded_fields)
+            return h3_frame_emit(H3_FRAME_PUSH_PROMISE, payload)
+        case Goaway(g):
+            val payload = h3_varint_encode(g.id)
+            return h3_frame_emit(H3_FRAME_GOAWAY, payload)
+        case MaxPushId(m):
+            val payload = h3_varint_encode(m.push_id)
+            return h3_frame_emit(H3_FRAME_MAX_PUSH_ID, payload)
+    var empty: [u8] = []
+    return empty

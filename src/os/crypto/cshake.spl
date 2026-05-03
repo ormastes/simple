@@ -1,0 +1,261 @@
+# cSHAKE-128 / cSHAKE-256 — NIST SP 800-185 §3
+#
+# Customizable variants of SHAKE-128 and SHAKE-256 that accept a function-name
+# string N and a customization string S. When both N and S are empty, cSHAKE
+# degenerates to SHAKE (FIPS 202 §6.2/§6.3).
+#
+# Rates:
+#   cSHAKE-128: rate = 1344 bits = 168 bytes, capacity = 256 bits
+#   cSHAKE-256: rate = 1088 bits = 136 bytes, capacity = 512 bits
+#
+# Domain separator:
+#   cSHAKE: 0x04  (2-bit suffix `00` + multi-rate pad; SP 800-185 §3.3)
+#   SHAKE (fallback): 0x1F (FIPS 202 §6.2/§6.3)
+#
+# Encoding functions (SP 800-185 §2.3):
+#   left_encode(x)  : 1-byte length prefix + big-endian bytes of x
+#   right_encode(x) : big-endian bytes of x + 1-byte length suffix
+#   encode_string(S): left_encode(bitlen(S)) || S
+#   bytepad(X, w)   : left_encode(w) || X || zero-padding to multiple of w
+#
+# History (2026-05-03): Initial implementation for KMAC support.
+#
+# References:
+#   NIST SP 800-185 — SHA-3 Derived Functions: cSHAKE, KMAC, TupleHash, ParallelHash
+#   https://csrc.nist.gov/publications/detail/sp/800-185/final
+
+mod os.crypto.cshake
+
+use lib.common.crypto.sha3.{keccak_f1600}
+
+# ============================================================================
+# Encoding Primitives — SP 800-185 §2.3
+# ============================================================================
+
+# left_encode(x): encode non-negative integer x as a byte string with a
+# 1-byte length prefix. The output is: [n, b_{n-1}, ..., b_0] where n is
+# the number of bytes needed to represent x and b_i are big-endian bytes.
+# Special case: left_encode(0) = [1, 0].
+fn left_encode(x: i64) -> list:
+    var out = []
+    if x == 0:
+        out.push(1)
+        out.push(0)
+        out
+    else:
+        # Collect big-endian bytes
+        var bytes = []
+        var v = x
+        while v > 0:
+            bytes.push(v & 0xFF)
+            v = v >> 8
+        # bytes is in little-endian order; reverse to get big-endian
+        val n = bytes.len()
+        # prepend count byte
+        out.push(n)
+        var i = n - 1
+        while i >= 0:
+            out.push(bytes.get(i))
+            i = i - 1
+        out
+
+# right_encode(x): encode non-negative integer x as a byte string with a
+# 1-byte length suffix. The output is: [b_{n-1}, ..., b_0, n].
+# Special case: right_encode(0) = [0, 1].
+fn right_encode(x: i64) -> list:
+    var out = []
+    if x == 0:
+        out.push(0)
+        out.push(1)
+        out
+    else:
+        var bytes = []
+        var v = x
+        while v > 0:
+            bytes.push(v & 0xFF)
+            v = v >> 8
+        val n = bytes.len()
+        var i = n - 1
+        while i >= 0:
+            out.push(bytes.get(i))
+            i = i - 1
+        out.push(n)
+        out
+
+# encode_string(S): left_encode(bitlen(S)) || S
+# S is a list of bytes; bit length = byte_length * 8.
+fn encode_string(s: list) -> list:
+    val bitlen = s.len() * 8
+    var out = left_encode(bitlen)
+    var i = 0
+    while i < s.len():
+        out.push(s.get(i))
+        i = i + 1
+    out
+
+# bytepad(X, w): left_encode(w) || X || zero-padding so total is multiple of w.
+fn bytepad(x: list, w: i64) -> list:
+    var out = left_encode(w)
+    var i = 0
+    while i < x.len():
+        out.push(x.get(i))
+        i = i + 1
+    # Pad with zeros until length is a multiple of w
+    while out.len() % w != 0:
+        out.push(0)
+    out
+
+# ============================================================================
+# Internal sponge helpers (duplicated from ml_kem_kpke.spl pattern)
+# ============================================================================
+
+fn _cs_zero_state() -> list:
+    var s = []
+    var i = 0
+    while i < 25:
+        s.push(0)
+        i = i + 1
+    s
+
+fn _cs_le_lane(bytes: list, off: i64) -> i64:
+    var lane = 0
+    var i = 0
+    while i < 8:
+        val b = bytes.get(off + i) & 0xFF
+        lane = lane | (b << (8 * i))
+        i = i + 1
+    lane
+
+fn _cs_emit_lane_le(out: list, lane: i64):
+    var i = 0
+    while i < 8:
+        out.push((lane >> (8 * i)) & 0xFF)
+        i = i + 1
+
+fn _cs_absorb_block(state: list, block: list, rate_bytes: i64) -> list:
+    val lane_count = rate_bytes / 8
+    var s = []
+    var i = 0
+    while i < 25:
+        s.push(state.get(i))
+        i = i + 1
+    var lane_i = 0
+    while lane_i < lane_count:
+        val lane = _cs_le_lane(block, lane_i * 8)
+        s[lane_i] = s.get(lane_i) ^ lane
+        lane_i = lane_i + 1
+    keccak_f1600(s)
+
+# Absorb with a given domain-separator byte (0x04 for cSHAKE, 0x1F for SHAKE).
+fn _cs_absorb_with_domain(input: list, rate_bytes: i64, domain_byte: i64) -> list:
+    var state = _cs_zero_state()
+    var buf = []
+    var i = 0
+    while i < input.len():
+        buf.push(input.get(i))
+        if buf.len() == rate_bytes:
+            state = _cs_absorb_block(state, buf, rate_bytes)
+            buf = []
+        i = i + 1
+    # Multi-rate padding
+    buf.push(domain_byte)
+    while buf.len() < rate_bytes:
+        buf.push(0)
+    val last = buf.get(rate_bytes - 1)
+    buf[rate_bytes - 1] = last | 0x80
+    state = _cs_absorb_block(state, buf, rate_bytes)
+    state
+
+fn _cs_squeeze(state_in: list, rate_bytes: i64, nbytes: i64) -> list:
+    var state = []
+    var i = 0
+    while i < 25:
+        state.push(state_in.get(i))
+        i = i + 1
+    var out = []
+    var produced = 0
+    while produced < nbytes:
+        val lane_count = rate_bytes / 8
+        var lane_i = 0
+        while lane_i < lane_count and produced < nbytes:
+            var tmp = []
+            _cs_emit_lane_le(tmp, state.get(lane_i))
+            var k = 0
+            while k < 8 and produced < nbytes:
+                out.push(tmp.get(k))
+                produced = produced + 1
+                k = k + 1
+            lane_i = lane_i + 1
+        if produced < nbytes:
+            state = keccak_f1600(state)
+    out
+
+# ============================================================================
+# cSHAKE-128 / cSHAKE-256 — SP 800-185 §3.3
+# ============================================================================
+#
+# cSHAKE128(X, L, N, S):
+#   If N == "" and S == "": return SHAKE128(X, L)  [FIPS 202 fallback]
+#   Else: return Keccak[256](bytepad(encode_string(N)||encode_string(S),168)||X||0x04, L)
+#
+# cSHAKE256(X, L, N, S):
+#   If N == "" and S == "": return SHAKE256(X, L)  [FIPS 202 fallback]
+#   Else: return Keccak[512](bytepad(encode_string(N)||encode_string(S),136)||X||0x04, L)
+
+# cSHAKE-128: rate=168 bytes.
+fn cshake128(input: list, output_len: i64, name: list, customization: list) -> list:
+    if name.len() == 0 and customization.len() == 0:
+        # Fall back to SHAKE-128 (domain 0x1F)
+        val st = _cs_absorb_with_domain(input, 168, 0x1F)
+        _cs_squeeze(st, 168, output_len)
+    else:
+        # Build prefix: bytepad(encode_string(N) || encode_string(S), 168)
+        var ns = encode_string(name)
+        val es = encode_string(customization)
+        var i = 0
+        while i < es.len():
+            ns.push(es.get(i))
+            i = i + 1
+        val prefix = bytepad(ns, 168)
+        # Concatenate prefix || input
+        var full_input = []
+        i = 0
+        while i < prefix.len():
+            full_input.push(prefix.get(i))
+            i = i + 1
+        i = 0
+        while i < input.len():
+            full_input.push(input.get(i))
+            i = i + 1
+        # Absorb with cSHAKE domain byte 0x04
+        val st = _cs_absorb_with_domain(full_input, 168, 0x04)
+        _cs_squeeze(st, 168, output_len)
+
+# cSHAKE-256: rate=136 bytes.
+fn cshake256(input: list, output_len: i64, name: list, customization: list) -> list:
+    if name.len() == 0 and customization.len() == 0:
+        # Fall back to SHAKE-256 (domain 0x1F)
+        val st = _cs_absorb_with_domain(input, 136, 0x1F)
+        _cs_squeeze(st, 136, output_len)
+    else:
+        # Build prefix: bytepad(encode_string(N) || encode_string(S), 136)
+        var ns = encode_string(name)
+        val es = encode_string(customization)
+        var i = 0
+        while i < es.len():
+            ns.push(es.get(i))
+            i = i + 1
+        val prefix = bytepad(ns, 136)
+        # Concatenate prefix || input
+        var full_input = []
+        i = 0
+        while i < prefix.len():
+            full_input.push(prefix.get(i))
+            i = i + 1
+        i = 0
+        while i < input.len():
+            full_input.push(input.get(i))
+            i = i + 1
+        # Absorb with cSHAKE domain byte 0x04
+        val st = _cs_absorb_with_domain(full_input, 136, 0x04)
+        _cs_squeeze(st, 136, output_len)
