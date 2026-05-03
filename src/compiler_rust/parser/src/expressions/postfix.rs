@@ -838,12 +838,19 @@ impl<'a> Parser<'a> {
         else if self.check(&TokenKind::LParen) {
             self.advance(); // consume '('
             while !self.check(&TokenKind::RParen) && !self.is_at_end() {
+                let param_span = self.current.span;
                 let name = if self.check(&TokenKind::Underscore) {
                     self.advance();
                     "_".to_string()
                 } else {
                     self.expect_identifier()?
                 };
+                if Self::is_reserved_parameter_name(name.as_str()) {
+                    return Err(ParseError::syntax_error_with_span(
+                        format!("reserved keyword '{}' cannot be used as a parameter name", name),
+                        param_span,
+                    ));
+                }
                 params.push(LambdaParam { name, ty: None });
                 if self.check(&TokenKind::Comma) {
                     self.advance();
@@ -854,12 +861,19 @@ impl<'a> Parser<'a> {
         // Check for no-param lambda: \: expr (also treated as capture-all)
         else if !self.check(&TokenKind::Colon) {
             // Check for wildcard parameter: \_
+            let param_span = self.current.span;
             let name = if self.check(&TokenKind::Underscore) {
                 self.advance();
                 "_".to_string()
             } else {
                 self.expect_identifier()?
             };
+            if Self::is_reserved_parameter_name(name.as_str()) {
+                return Err(ParseError::syntax_error_with_span(
+                    format!("reserved keyword '{}' cannot be used as a parameter name", name),
+                    param_span,
+                ));
+            }
             params.push(LambdaParam { name, ty: None });
             self.parse_remaining_lambda_params(&mut params)?;
         } else {
@@ -876,12 +890,19 @@ impl<'a> Parser<'a> {
         // Check for no-param lambda: || expr
         if !self.check(&TokenKind::Pipe) {
             // Check for wildcard parameter: |_|
+            let param_span = self.current.span;
             let name = if self.check(&TokenKind::Underscore) {
                 self.advance();
                 "_".to_string()
             } else {
                 self.expect_identifier()?
             };
+            if Self::is_reserved_parameter_name(name.as_str()) {
+                return Err(ParseError::syntax_error_with_span(
+                    format!("reserved keyword '{}' cannot be used as a parameter name", name),
+                    param_span,
+                ));
+            }
             params.push(LambdaParam { name, ty: None });
             self.parse_remaining_lambda_params(&mut params)?;
         }

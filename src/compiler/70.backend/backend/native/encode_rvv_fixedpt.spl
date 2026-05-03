@@ -1,0 +1,144 @@
+# src/compiler/70.backend/backend/native/encode_rvv_fixedpt.spl
+#
+# RVV v1.0 Fixed-Point Byte-Emit Encoder — Pure Simple
+#
+# Produces exact 4-byte little-endian instruction words for RISC-V Vector
+# fixed-point clip/round and saturating add/sub instructions per RVV v1.0.
+#
+# Reference: RISC-V Vector Extension v1.0
+#   §12.4  Vector Single-Width Scaling Shift Instructions (vssrl, vssra)
+#   §12.5  Vector Narrowing Fixed-Point Clip Instructions (vnclipu, vnclip)
+#   §13.1  Vector Single-Width Saturating Add and Subtract (vsaddu, vsadd)
+#
+# Instruction format (all 32-bit, OP-V major opcode 0x57):
+#   bits[31:26] = funct6
+#   bit[25]     = vm   (1=unmasked)
+#   bits[24:20] = vs2
+#   bits[19:15] = vs1 or rs1
+#   bits[14:12] = funct3 (OPIVV=000=0, OPIVX=100=4)
+#   bits[11:7]  = vd
+#   bits[6:0]   = opcode 0x57
+#
+# funct6/funct3 values (RVV v1.0):
+#   vssrl.vv   0x2A (101010)  OPIVV funct3=0  scaling shift right logical (vector-vector)
+#   vssra.vv   0x2B (101011)  OPIVV funct3=0  scaling shift right arithmetic (vector-vector)
+#   vnclipu.wv 0x2E (101110)  OPIVV funct3=0  narrowing unsigned clip
+#   vnclip.wv  0x2F (101111)  OPIVV funct3=0  narrowing signed clip
+#   vssrl.vx   0x2A (101010)  OPIVX funct3=4  scaling shift right logical (scalar)
+#   vssra.vx   0x2B (101011)  OPIVX funct3=4  scaling shift right arithmetic (scalar)
+#   vsaddu.vv  0x20 (100000)  OPIVV funct3=0  saturating unsigned add
+#   vsadd.vv   0x21 (100001)  OPIVV funct3=0  saturating signed add
+#
+# Encoding convention: multiplication/division only (avoids negative-bit-op
+# hazards in interpreter mode). Consistent with encode_rvv_zvk.spl and
+# encode_rvv_widen.spl.
+#
+# Return type: [i64] (4 bytes, little-endian).
+#
+# ALL byte goldens derived from RVV v1.0 spec table + manual derivation formula
+# (llvm-mc unavailable on build host).
+
+# ============================================================================
+# Internal helpers (independent copy; each encoder module is a separate module)
+# ============================================================================
+
+fn _rvv_fp_word_to_le4(word: i64) -> [i64]:
+    """
+    Convert a 32-bit fixed-point instruction word to 4 little-endian bytes.
+    Uses division/modulo to avoid negative bit-op hazards in interpreter.
+    """
+    var w = word
+    if w < 0:
+        w = w + 4294967296
+    val b0 = w % 256
+    val b1 = (w / 256) % 256
+    val b2 = (w / 65536) % 256
+    val b3 = (w / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn _encode_rvv_fp(funct6: i64, vm: i64, vs2: i64, vs1: i64, funct3: i64, vd: i64) -> [i64]:
+    """
+    Encode an OP-V fixed-point instruction (opcode=0x57=87) with parameterised funct3.
+
+    funct6: 6-bit function code (bits[31:26])
+    vm:     1=unmasked (bit[25])
+    vs2:    source register 2 (bits[24:20])
+    vs1:    source register 1 or rs1 (bits[19:15])
+    funct3: OPIVV=0 for vector-vector; OPIVX=4 for vector-scalar (bits[14:12])
+    vd:     destination register (bits[11:7])
+    """
+    val word = (funct6 * 67108864) + (vm * 33554432) + (vs2 * 1048576) + (vs1 * 32768) + (funct3 * 4096) + (vd * 128) + 87
+    _rvv_fp_word_to_le4(word)
+
+# ============================================================================
+# Scaling Shift Instructions (RVV v1.0 §12.4)
+# ============================================================================
+
+# RVV v1.0 §12.4 vssrl.vv; funct6=0x2A (101010); OPIVV funct3=0; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xAA2180D7 LE [0xD7,0x80,0x21,0xAA]
+fn emit_vssrl_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Scaling shift right logical, rounding: vd = roundingshift(vs2, vs1) (vector-vector)."""
+    _encode_rvv_fp(0x2A, 1, vs2, vs1, 0, vd)
+
+# RVV v1.0 §12.4 vssra.vv; funct6=0x2B (101011); OPIVV funct3=0; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xAE2180D7 LE [0xD7,0x80,0x21,0xAE]
+fn emit_vssra_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Scaling shift right arithmetic, rounding: vd = roundingshift(vs2, vs1) signed (vector-vector)."""
+    _encode_rvv_fp(0x2B, 1, vs2, vs1, 0, vd)
+
+# RVV v1.0 §12.4 vssrl.vx; funct6=0x2A (101010); OPIVX funct3=4; vm=1
+# Canonical (vd=1, vs2=2, rs1=3): word=0xAA21C0D7 LE [0xD7,0xC0,0x21,0xAA]
+fn emit_vssrl_vx(vd: i64, vs2: i64, rs1: i64) -> [i64]:
+    """Scaling shift right logical, rounding: vd = roundingshift(vs2, rs1) (vector-scalar)."""
+    _encode_rvv_fp(0x2A, 1, vs2, rs1, 4, vd)
+
+# RVV v1.0 §12.4 vssra.vx; funct6=0x2B (101011); OPIVX funct3=4; vm=1
+# Canonical (vd=1, vs2=2, rs1=3): word=0xAE21C0D7 LE [0xD7,0xC0,0x21,0xAE]
+fn emit_vssra_vx(vd: i64, vs2: i64, rs1: i64) -> [i64]:
+    """Scaling shift right arithmetic, rounding: vd = roundingshift(vs2, rs1) signed (vector-scalar)."""
+    _encode_rvv_fp(0x2B, 1, vs2, rs1, 4, vd)
+
+# ============================================================================
+# Narrowing Fixed-Point Clip Instructions (RVV v1.0 §12.5)
+# ============================================================================
+
+# RVV v1.0 §12.5 vnclipu.wv; funct6=0x2E (101110); OPIVV funct3=0; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xBA2180D7 LE [0xD7,0x80,0x21,0xBA]
+fn emit_vnclipu_wv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Narrowing unsigned clip: vd = clip(vs2, vs1) unsigned (element width halved)."""
+    _encode_rvv_fp(0x2E, 1, vs2, vs1, 0, vd)
+
+# RVV v1.0 §12.5 vnclip.wv; funct6=0x2F (101111); OPIVV funct3=0; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xBE2180D7 LE [0xD7,0x80,0x21,0xBE]
+fn emit_vnclip_wv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Narrowing signed clip: vd = clip(vs2, vs1) signed (element width halved)."""
+    _encode_rvv_fp(0x2F, 1, vs2, vs1, 0, vd)
+
+# ============================================================================
+# Saturating Add/Subtract (RVV v1.0 §13.1)
+# ============================================================================
+
+# RVV v1.0 §13.1 vsaddu.vv; funct6=0x20 (100000); OPIVV funct3=0; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0x822180D7 LE [0xD7,0x80,0x21,0x82]
+fn emit_vsaddu_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Saturating unsigned add: vd = sat_add_u(vs2, vs1)."""
+    _encode_rvv_fp(0x20, 1, vs2, vs1, 0, vd)
+
+# RVV v1.0 §13.1 vsadd.vv; funct6=0x21 (100001); OPIVV funct3=0; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0x862180D7 LE [0xD7,0x80,0x21,0x86]
+fn emit_vsadd_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Saturating signed add: vd = sat_add_s(vs2, vs1)."""
+    _encode_rvv_fp(0x21, 1, vs2, vs1, 0, vd)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_vssrl_vv
+export emit_vssra_vv
+export emit_vnclipu_wv
+export emit_vnclip_wv
+export emit_vssrl_vx
+export emit_vssra_vx
+export emit_vsaddu_vv
+export emit_vsadd_vv

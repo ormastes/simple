@@ -1,7 +1,7 @@
 # Interpreter: sequential `if X: return Y` only first branch fires
 
-**Status:** OPEN. Reproduced by W18-K (SCRAM-SHA-256). Severity: silent
-miscompute / control-flow corruption.
+**Status:** RESOLVED (2026-05-03). No longer reproducible in current binary.
+Regression spec added: `test/unit/compiler/sequential_if_return_spec.spl` (8/8 PASS).
 **Path:** `bug` track. Interpreter.
 
 ## Symptom
