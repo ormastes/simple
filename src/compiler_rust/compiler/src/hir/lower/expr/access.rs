@@ -252,6 +252,9 @@ impl Lowerer {
     }
 
     fn try_resolve_global_field_type_by_name(&mut self, struct_name: &str, field_name: &str) -> Option<TypeId> {
+        if let Some((_, field_ty)) = self.resolve_duplicate_global_field_variant(struct_name, field_name) {
+            return Some(field_ty);
+        }
         let field_type_name = {
             let global_defs = self.global_struct_defs.as_ref()?;
             let fields = global_defs.get(struct_name)?;
@@ -263,12 +266,76 @@ impl Lowerer {
     }
 
     fn try_resolve_global_field_index_by_name(&self, struct_name: &str, field_name: &str) -> Option<usize> {
+        if let Some((index, _)) = self
+            .duplicate_global_struct_defs
+            .as_ref()
+            .and_then(|variants| variants.get(struct_name))
+            .and_then(|variants| {
+                let mut matches = variants.iter().filter_map(|fields| {
+                    fields
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, (fname, _))| (fname == field_name).then_some(idx))
+                });
+                let first = matches.next()?;
+                if matches.next().is_some() {
+                    None
+                } else {
+                    Some((first, ()))
+                }
+            })
+        {
+            return Some(index);
+        }
         let global_defs = self.global_struct_defs.as_ref()?;
         let fields = global_defs.get(struct_name)?;
         fields
             .iter()
             .enumerate()
             .find_map(|(idx, (fname, _))| if fname == field_name { Some(idx) } else { None })
+    }
+
+    fn try_resolve_global_field_type_name_by_name(&self, struct_name: &str, field_name: &str) -> Option<String> {
+        let field_type_spec = self
+            .duplicate_global_struct_defs
+            .as_ref()
+            .and_then(|variants| variants.get(struct_name))
+            .and_then(|variants| {
+                let mut matches = variants.iter().filter_map(|fields| {
+                    fields
+                        .iter()
+                        .find_map(|(fname, ftype)| (fname == field_name).then_some(ftype.clone()))
+                });
+                let first = matches.next()?;
+                if matches.next().is_some() {
+                    None
+                } else {
+                    Some(first)
+                }
+            })
+            .or_else(|| {
+                self.global_struct_defs
+                    .as_ref()
+                    .and_then(|defs| defs.get(struct_name))
+                    .and_then(|fields| {
+                        fields
+                            .iter()
+                            .find_map(|(fname, ftype)| (fname == field_name).then_some(ftype.clone()))
+                    })
+            })?;
+
+        Self::named_struct_name_from_type_spec(&field_type_spec).and_then(|candidate| {
+            self.global_struct_defs
+                .as_ref()
+                .is_some_and(|defs| defs.contains_key(&candidate))
+                .then_some(candidate.clone())
+                .or_else(|| {
+                    self.duplicate_global_struct_defs
+                        .as_ref()
+                        .is_some_and(|defs| defs.contains_key(&candidate))
+                        .then_some(candidate)
+                })
+        })
     }
 
     fn try_resolve_receiver_struct_name_from_expr(&mut self, receiver: &Expr, ctx: &FunctionContext) -> Option<String> {
@@ -283,6 +350,11 @@ impl Lowerer {
             }
             Expr::FieldAccess { receiver: base, field } => {
                 let base_struct_name = self.try_resolve_receiver_struct_name_from_expr(base, ctx)?;
+                if let Some(field_struct_name) =
+                    self.try_resolve_global_field_type_name_by_name(&base_struct_name, field)
+                {
+                    return Some(field_struct_name);
+                }
                 let field_ty = self
                     .try_resolve_field_type_by_name(&base_struct_name, field)
                     .or_else(|| self.try_resolve_global_field_type_by_name(&base_struct_name, field))?;
@@ -308,6 +380,16 @@ impl Lowerer {
 
     fn is_unspecific_field_struct_name(struct_name: &str) -> bool {
         matches!(struct_name, "ANY" | "Any" | "wildcard") || struct_name.starts_with("TypeId(")
+    }
+
+    fn named_struct_name_from_type_spec(spec: &str) -> Option<String> {
+        let spec = spec.trim();
+        if let Some(inner) = spec.strip_prefix("Simple(\"").and_then(|rest| rest.strip_suffix("\")")) {
+            return Some(inner.to_string());
+        }
+        spec.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.'))
+            .then_some(spec.to_string())
     }
 
     fn has_known_method_for_struct_name(&self, struct_name: &str, method_name: &str) -> bool {

@@ -122,6 +122,19 @@ impl<'a> MirLowerer<'a> {
             let arg = &args[0];
             let arg_reg = self.lower_expr(arg)?;
 
+            if arg.ty == TypeId::U64 {
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_raw_u64_to_string"),
+                        args: vec![arg_reg],
+                    });
+                    dest
+                });
+            }
+
             // Check if argument is a native integer or float type that needs boxing
             let needs_boxing = matches!(
                 arg.ty,
@@ -223,6 +236,20 @@ impl<'a> MirLowerer<'a> {
             let mut boxed_arg_regs = Vec::new();
             for arg in args {
                 let arg_reg = self.lower_expr(arg)?;
+                if arg.ty == TypeId::U64 {
+                    let stringified = self.with_func(|func, current_block| {
+                        let stringified = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(stringified),
+                            target: CallTarget::from_name("rt_raw_u64_to_string"),
+                            args: vec![arg_reg],
+                        });
+                        stringified
+                    })?;
+                    boxed_arg_regs.push(stringified);
+                    continue;
+                }
                 let needs_int_boxing = matches!(
                     arg.ty,
                     TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64

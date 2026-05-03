@@ -173,10 +173,25 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
-        // Builtin primitive .to_string()/.str() routes to rt_to_string,
-        // which expects a tagged RuntimeValue receiver rather than a
-        // raw native scalar.
-        if method == "to_string" || method == "str" {
+        // Builtin primitive .to_string()/.to_text()/.str() routes to
+        // rt_to_string, which expects a tagged RuntimeValue receiver rather than
+        // a raw native scalar.
+        //
+        // Native `u64` values above the 61-bit tagged-int limit cannot be boxed
+        // losslessly, so route them through an unsigned-specific bridge instead.
+        if method == "to_string" || method == "to_text" || method == "str" {
+            if receiver.ty == TypeId::U64 {
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::effects::CallTarget::from_name("rt_raw_u64_to_string"),
+                        args: vec![receiver_reg],
+                    });
+                    dest
+                });
+            }
             let needs_int_boxing = matches!(
                 receiver.ty,
                 TypeId::I8

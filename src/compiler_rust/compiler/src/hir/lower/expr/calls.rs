@@ -184,8 +184,10 @@ impl Lowerer {
         let func_hir = Box::new(self.lower_expr(callee, ctx)?);
         let args_hir = self.lower_call_args(args, ctx)?;
 
-        // Return type comes from function type
-        let ret_ty = func_hir.ty; // Simplified - would need function type lookup
+        // Prefer the declared return type for the named callee when we know it.
+        // This keeps local variables initialized from imported/helper calls on a
+        // concrete type path instead of degrading to ANY at the next field access.
+        let ret_ty = self.call_return_type(callee, func_hir.ty);
 
         Ok(HirExpr {
             kind: HirExprKind::Call {

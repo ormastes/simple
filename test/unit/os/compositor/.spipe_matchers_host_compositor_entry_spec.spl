@@ -1,0 +1,263 @@
+# @cover src/os/compositor/host_compositor_entry.spl 80%
+"""
+# Host Compositor Entry Spec
+
+Deterministic unit tests for the shared host compositor bootstrap boundary.
+Tests avoid creating real host windows except for the TUI nil boundary, which
+returns before touching SFFI.
+"""
+
+use std.spec.{describe, it, expect}
+use common.window_protocol.geometry.{Size}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.host_compositor_entry.{
+    HOST_WM_IDLE_SLEEP_MS,
+    HostBackendKind,
+    HostCompositor,
+    HostWmAppProcess,
+    HostWmConfig,
+    HostWmHandle,
+    WmService,
+    host_taskbar_dock_width,
+    host_taskbar_item_width,
+    host_taskbar_item_x,
+    host_wm_surface_failure_reason,
+    init_host_wm,
+}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_MINIMIZE, COMP_RESTORE}
+
+var _fake_present_count: i64 = 0
+
+class FakeCompositorBackend:
+    w: i32
+    h: i32
+
+impl CompositorBackend for FakeCompositorBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        _fake_present_count = _fake_present_count
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        _fake_present_count = _fake_present_count
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        _fake_present_count = _fake_present_count
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        _fake_present_count = _fake_present_count
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        _fake_present_count = _fake_present_count
+
+    me present():
+        _fake_present_count = _fake_present_count + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        _fake_present_count = _fake_present_count + 1
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn _browser_config() -> HostWmConfig:
+    HostWmConfig(
+        backend: HostBackendKind.Browser,
+        initial_size: Size.wh(320, 240),
+        title: "browser-wm"
+    )
+
+describe "HostWmConfig":
+
+    it "keeps title in the bootstrap contract":
+        val cfg = HostWmConfig(
+            backend: HostBackendKind.Electron,
+            initial_size: Size.wh(1280, 800),
+            title: "electron-test"
+        )
+        expect cfg.title == "electron-test"
+
+describe "host surface failure boundaries":
+
+    it "accepts a nonzero event loop and window surface":
+        val reason = host_wm_surface_failure_reason(_browser_config(), 10, 20)
+        expect(reason).to_be_nil
+
+    it "documents the TUI stub boundary":
+        val cfg = HostWmConfig(
+            backend: HostBackendKind.Tui,
+            initial_size: Size.wh(80, 24),
+            title: "tui-wm"
+        )
+        val reason = host_wm_surface_failure_reason(cfg, 10, 20)
+        expect reason == "tui host compositor bootstrap is not implemented"
+
+    it "rejects zero-sized host surfaces before SFFI bootstrap":
+        val cfg = HostWmConfig(
+            backend: HostBackendKind.Browser,
+            initial_size: Size.wh(0, 240),
+            title: "bad-size"
+        )
+        val reason = host_wm_surface_failure_reason(cfg, 10, 20)
+        expect reason == "host compositor size must be nonzero"
+
+    it "returns nil for TUI without touching host window SFFI":
+        val cfg = HostWmConfig(
+            backend: HostBackendKind.Tui,
+            initial_size: Size.wh(80, 24),
+            title: "tui-wm"
+        )
+        val result = init_host_wm(cfg)
+        expect(result).to_be_nil
+
+describe "HostWmHandle loop behavior":
+
+    it "runs one tick without host event polling when no event loop is attached":
+        _fake_present_count = 0
+        val backend = FakeCompositorBackend(w: 320, h: 240)
+        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        val handle = HostWmHandle(
+            compositor: comp,
+            wm: WmService.new(),
+            event_loop_id: 0,
+            window_id: 0
+        )
+        val pumped = handle.pump_host_events()
+        handle.run_once()
+        expect pumped == 0
+        expect _fake_present_count == 1
+
+    it "records compositor resize dimensions":
+        val backend = FakeCompositorBackend(w: 320, h: 240)
+        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        comp.resize(640, 480)
+        expect comp.width == 640
+        expect comp.height == 480
+
+    it "does not tick after the WM has stopped":
+        _fake_present_count = 0
+        val backend = FakeCompositorBackend(w: 320, h: 240)
+        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        val wm = WmService.new()
+        wm.stop()
+        val handle = HostWmHandle(
+            compositor: comp,
+            wm: wm,
+            event_loop_id: 0,
+            window_id: 0
+        )
+        handle.run_once()
+        expect _fake_present_count == 0
+
+    it "uses a nonzero idle sleep interval for tick_forever":
+        expect HOST_WM_IDLE_SLEEP_MS > 0
+
+describe "HostCompositor hosted window state":
+
+    it "creates, updates, minimizes, restores, and destroys hosted windows":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Hosted App", 40, 50, 320, 180, "", 900, "/sys/apps/test")
+        expect comp.windows.len() == 1
+        expect comp.windows[0].title == "Hosted App"
+        expect comp.windows[0].focused == true
+
+        val wid = comp.windows[0].id
+        comp.apply_bridge_request(2, 77, COMP_UPDATE_TREE.to_i64(), wid, "", 0, 0, 0, 0, "rendered content", 0, "/sys/apps/test")
+        expect comp.windows[0].content == "rendered content"
+
+        comp.apply_bridge_request(3, 77, COMP_MINIMIZE.to_i64(), wid, "", 0, 0, 0, 0, "", 0, "/sys/apps/test")
+        expect comp.windows[0].minimized == true
+
+        comp.apply_bridge_request(4, 77, COMP_RESTORE.to_i64(), wid, "", 0, 0, 0, 0, "", 0, "/sys/apps/test")
+        expect comp.windows[0].minimized == false
+        expect comp.windows[0].focused == true
+
+        comp.apply_bridge_request(5, 77, COMP_DESTROY_WINDOW.to_i64(), wid, "", 0, 0, 0, 0, "", 0, "/sys/apps/test")
+        expect comp.windows.len() == 0
+
+    it "maps taskbar hit to the expected window and restores focus":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 11, COMP_CREATE_WINDOW.to_i64(), 0, "One", 20, 60, 200, 140, "", 1, "/sys/apps/one")
+        comp.apply_bridge_request(2, 22, COMP_CREATE_WINDOW.to_i64(), 0, "Two", 50, 90, 200, 140, "", 2, "/sys/apps/two")
+        val first_id = comp.windows[0].id
+        val dock_y = 480 - 62
+        val first_x = host_taskbar_item_x(640, comp.windows.len(), 0)
+        expect comp.hit_taskbar(first_x + 20, dock_y + 16) == first_id
+        comp.apply_bridge_request(3, 11, COMP_MINIMIZE.to_i64(), first_id, "", 0, 0, 0, 0, "", 0, "/sys/apps/one")
+        comp.focus_window(first_id)
+        expect comp.windows[comp.windows.len() - 1].id == first_id
+        expect comp.windows[comp.windows.len() - 1].minimized == false
+
+    it "keeps overflow taskbar entries clickable past four windows":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        var i = 0
+        while i < 6:
+            comp.apply_bridge_request(i.to_i64() + 1, i.to_i64() + 11, COMP_CREATE_WINDOW.to_i64(), 0, "App {i}", 20 + i * 10, 60 + i * 8, 200, 140, "", i.to_i64() + 1, "/sys/apps/app{i}")
+            i = i + 1
+        val count = comp.windows.len()
+        val dock_w = host_taskbar_dock_width(640, count)
+        val item_w = host_taskbar_item_width(640, count)
+        val last_x = host_taskbar_item_x(640, count, 5)
+        val dock_y = 480 - 62
+        expect dock_w < 640
+        expect comp.hit_taskbar(last_x + (item_w / 2), dock_y + 16) == comp.windows[5].id
+
+    it "clamps dragged windows inside the visible desktop":
+        val backend = FakeCompositorBackend(w: 320, h: 240)
+        val comp = HostCompositor.new(backend, Size.wh(320, 240))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Drag", 40, 70, 120, 90, "", 1, "/sys/apps/drag")
+        val wid = comp.windows[0].id
+        comp.dragging = true
+        comp.drag_window_id = wid
+        comp.drag_offset_x = 60
+        comp.drag_offset_y = 40
+        comp.handle_mouse_move(-20, 10)
+        expect comp.windows[0].x == 0
+        expect comp.windows[0].y == 48
+
+    it "resizes windows from the visible bottom-right grip":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Resize", 40, 70, 200, 160, "", 1, "/sys/apps/resize")
+        comp.handle_mouse_move(238, 228)
+        comp.handle_left_button(true)
+        expect comp.resizing == true
+        comp.handle_mouse_move(280, 260)
+        expect comp.windows[0].w == 242
+        expect comp.windows[0].h == 192
+        comp.handle_left_button(false)
+        expect comp.resizing == false
+
+    it "clamps user resize to the hosted WM minimum size":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Resize Min", 40, 70, 200, 160, "", 1, "/sys/apps/resize")
+        comp.handle_mouse_move(238, 228)
+        comp.handle_left_button(true)
+        comp.handle_mouse_move(0, 0)
+        expect comp.windows[0].w == 160
+        expect comp.windows[0].h == 120
+        comp.handle_left_button(false)
+
+    it "records a visible failure window for a child that exits before creating a window":
+        val backend = FakeCompositorBackend(w: 640, h: 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.app_processes.push(HostWmAppProcess(
+            title: "Broken",
+            app_id: "/sys/apps/broken",
+            source_path: "src/app/hosted_apps/broken.spl",
+            pid: -1,
+            failed: false
+        ))
+        comp.record_launch_failure(0)
+        expect comp.app_processes[0].failed == true
+        expect comp.windows.len() == 1
+        expect comp.windows[0].title == "Broken failed"
+        expect (comp.windows[0].content).contains("failed to create a window")

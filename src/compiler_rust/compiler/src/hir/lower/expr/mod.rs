@@ -257,6 +257,11 @@ impl Lowerer {
                 kind: HirExprKind::Local(idx),
                 ty,
             })
+        } else if let Some(ty) = self.named_callable_return_type(name) {
+            Ok(HirExpr {
+                kind: HirExprKind::Global(name.to_string()),
+                ty,
+            })
         } else if let Some(ty) = self.globals.get(name).copied() {
             Ok(HirExpr {
                 kind: HirExprKind::Global(name.to_string()),
@@ -330,6 +335,31 @@ impl Lowerer {
                     .map(|function| function.return_type)
             })
             .or_else(|| self.globals.get(&qualified).copied())
+    }
+
+    fn named_callable_return_type(&self, name: &str) -> Option<TypeId> {
+        self.method_return_types
+            .get(name)
+            .copied()
+            .or_else(|| self.globals.get(name).copied())
+            .or_else(|| {
+                self.resolve_function_alias(name).and_then(|target| {
+                    self.method_return_types
+                        .get(target)
+                        .copied()
+                        .or_else(|| self.globals.get(target).copied())
+                })
+            })
+    }
+
+    fn call_return_type(&self, callee: &Expr, fallback: TypeId) -> TypeId {
+        match callee {
+            Expr::Identifier(name) => self.named_callable_return_type(name).unwrap_or(fallback),
+            Expr::Path(segments) if segments.len() == 2 => self
+                .static_member_return_type(&segments[0], &segments[1])
+                .unwrap_or(fallback),
+            _ => fallback,
+        }
     }
 
     fn resolve_static_member_name(&self, type_name: &str, member: &str) -> Option<String> {

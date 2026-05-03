@@ -207,6 +207,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_utf8_")
         || name == "rt_text_count_codepoints"
         || name.starts_with("rt_to_string")
+        || name == "rt_raw_u64_to_string"
         || name.starts_with("rt_cstring_to_text")
         || name.starts_with("rt_object_")
         || name.starts_with("rt_closure_")
@@ -706,6 +707,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_sandbox_get_network_mode",
     "rt_sandbox_get_fs_mode",
     "rt_to_string",
+    "rt_raw_u64_to_string",
     "rt_value_to_string",
     "rt_value_eq",
     "rt_native_eq",

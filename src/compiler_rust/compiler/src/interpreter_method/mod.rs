@@ -386,14 +386,68 @@ pub(crate) fn evaluate_method_call(
                 return Ok(result);
             }
         }
-        // W5-I follow-up (regression from 2ec2342969): `data[i]` on `[u8]` now yields
-        // `Value::UInt { width: 8 }`, so `byte.to_u32() / .to_i64() / .to_u64()` and
-        // the rest of the int-method family must dispatch through the same handler.
-        // Treat the unsigned bit-pattern as i64 — same trick as `value_bridge.rs:288`
-        // and `value_impl.rs::as_int`. cast_int_to_numeric in handle_int_methods
-        // already wraps to the target width, so semantics match a real u8/u16/u32/u64
-        // receiver.
-        Value::UInt { value, .. } => {
+        // Keep unsigned receivers on an unsigned path for methods whose
+        // observable result depends on the sign bit (for example `to_text()`
+        // on `0xCAFEBABEDEADBEEFu64`). Fall back to the signed helper for the
+        // legacy int API after preserving the common unsigned cases.
+        Value::UInt { value, width } => {
+            match method {
+                "abs" => {
+                    return Ok(Value::UInt {
+                        value: *value,
+                        width: *width,
+                    })
+                }
+                "sign" | "signum" => {
+                    return Ok(Value::UInt {
+                        value: if *value == 0 { 0 } else { 1 },
+                        width: *width,
+                    })
+                }
+                "is_positive" => return Ok(Value::Bool(*value > 0)),
+                "is_negative" => return Ok(Value::Bool(false)),
+                "is_zero" => return Ok(Value::Bool(*value == 0)),
+                "is_even" => return Ok(Value::Bool(*value % 2 == 0)),
+                "is_odd" => return Ok(Value::Bool(*value % 2 != 0)),
+                "to_float" | "to_f64" => return Ok(Value::Float(*value as f64)),
+                "to_f32" => return Ok(Value::Float32(*value as f32)),
+                "to_u8" => {
+                    return Ok(Value::UInt {
+                        value: (*value as u8) as u64,
+                        width: 8,
+                    })
+                }
+                "to_u16" => {
+                    return Ok(Value::UInt {
+                        value: (*value as u16) as u64,
+                        width: 16,
+                    })
+                }
+                "to_u32" => {
+                    return Ok(Value::UInt {
+                        value: (*value as u32) as u64,
+                        width: 32,
+                    })
+                }
+                "to_u64" => {
+                    return Ok(Value::UInt {
+                        value: *value,
+                        width: 64,
+                    })
+                }
+                "to_i8" => return Ok(Value::Int(*value as i8 as i64)),
+                "to_i16" => return Ok(Value::Int(*value as i16 as i64)),
+                "to_i32" => return Ok(Value::Int(*value as i32 as i64)),
+                "to_i64" => return Ok(Value::Int(*value as i64)),
+                "to_string" | "to_text" => return Ok(Value::Str(value.to_string())),
+                "bit_count" | "count_ones" => return Ok(Value::Int(value.count_ones() as i64)),
+                "leading_zeros" => return Ok(Value::Int(value.leading_zeros() as i64)),
+                "trailing_zeros" => return Ok(Value::Int(value.trailing_zeros() as i64)),
+                "to_hex" => return Ok(Value::Str(format!("{:x}", value))),
+                "to_bin" => return Ok(Value::Str(format!("{:b}", value))),
+                "to_oct" => return Ok(Value::Str(format!("{:o}", value))),
+                _ => {}
+            }
             if let Some(result) = primitives::handle_int_methods(
                 *value as i64,
                 method,

@@ -1,0 +1,126 @@
+# =============================================================================
+# ML-DSA-87 (FIPS 204) — KAT spec (W15-A)
+#
+# Parameter set ML-DSA-87 (NIST security category 5, FIPS 204 §4 Table 1):
+#   k = 8, l = 7, eta = 2, tau = 60, beta = 120,
+#   gamma1 = 2^19 = 524288, gamma2 = (q-1)/32 = 261888, omega = 75
+#   pk = 2592 B, sk = 4896 B, sig = 4627 B
+#
+# Coverage:
+#   1. KeyGen sizes (pk = 2592, sk = 4896 — FIPS 204 §B Table 2)
+#   2. Sign(sk, m) → σ; Verify(pk, m, σ) == true (positive round-trip)
+#   3. Verify rejects bit-flipped message (negative path)
+#   4. Verify rejects bit-flipped signature (negative path)
+#
+# Per `feedback_compile_mode_false_greens.md`, run via direct invocation:
+#   bin/simple test/unit/lib/crypto/ml_dsa_87_kat_spec.spl
+# Per `feedback_it_block_var_mutation.md`, payloads are built in module-level
+# fn helpers so each `it` body sees a single `val` already populated.
+# =============================================================================
+
+use std.spipe.*
+use os.crypto.ml_dsa_sample.{pk_size_87, sk_size_87, sig_size_87}
+use os.crypto.ml_dsa.{ml_dsa_keygen_87, ml_dsa_sign_87, ml_dsa_verify_87}
+
+# ----- module-level helpers ---------------------------------------------
+
+fn _xi() -> list:
+    var v = []
+    var i = 0
+    while i < 32:
+        v.push(i & 0xff)
+        i = i + 1
+    v
+
+fn _msg() -> list:
+    var v = []
+    var i = 0
+    while i < 16:
+        v.push(0x42)
+        i = i + 1
+    v
+
+fn _rnd() -> list:
+    var v = []
+    var i = 0
+    while i < 32:
+        v.push(0)
+        i = i + 1
+    v
+
+fn _keygen_pk_len() -> i64:
+    val pair = ml_dsa_keygen_87(_xi())
+    pair[0].len()
+
+fn _keygen_sk_len() -> i64:
+    val pair = ml_dsa_keygen_87(_xi())
+    pair[1].len()
+
+fn _sign_verify_round_trip() -> bool:
+    val kp = ml_dsa_keygen_87(_xi())
+    val pk = kp[0]
+    val sk = kp[1]
+    val sig = ml_dsa_sign_87(sk, _msg(), _rnd())
+    if sig.len() == 0:
+        return false
+    ml_dsa_verify_87(pk, _msg(), sig)
+
+fn _verify_rejects_tampered_msg() -> bool:
+    val kp = ml_dsa_keygen_87(_xi())
+    val pk = kp[0]
+    val sk = kp[1]
+    val sig = ml_dsa_sign_87(sk, _msg(), _rnd())
+    if sig.len() == 0:
+        return false
+    var bad = []
+    val m = _msg()
+    var i = 0
+    while i < m.len():
+        bad.push(m.get(i))
+        i = i + 1
+    bad[0] = bad.get(0) ^ 0x01
+    not ml_dsa_verify_87(pk, bad, sig)
+
+fn _verify_rejects_tampered_sig() -> bool:
+    val kp = ml_dsa_keygen_87(_xi())
+    val pk = kp[0]
+    val sk = kp[1]
+    val sig = ml_dsa_sign_87(sk, _msg(), _rnd())
+    if sig.len() == 0:
+        return false
+    var bad_sig = []
+    var i = 0
+    while i < sig.len():
+        bad_sig.push(sig.get(i))
+        i = i + 1
+    # Flip a bit in c_tilde (first 32 bytes of signature).
+    bad_sig[0] = bad_sig.get(0) ^ 0x01
+    not ml_dsa_verify_87(pk, _msg(), bad_sig)
+
+# ----- specs -------------------------------------------------------------
+
+describe "ML-DSA-87 KeyGen sizes":
+
+    it "ml_dsa_keygen_87 produces pk of size 2592 bytes (FIPS 204 §B Table 2)":
+        expect _keygen_pk_len() == 2592
+        expect _keygen_pk_len() == pk_size_87()
+
+    it "ml_dsa_keygen_87 produces sk of size 4896 bytes (FIPS 204 §B Table 2)":
+        expect _keygen_sk_len() == 4896
+        expect _keygen_sk_len() == sk_size_87()
+
+
+describe "ML-DSA-87 end-to-end Sign + Verify":
+
+    # Negative-path tests are non-negotiable companions to the positive case
+    # — they prove Verify is not a reject-everything (or accept-everything)
+    # stub. Per W13-D discipline (`feedback_no_coverups.md`).
+
+    it "Sign(sk, m) → σ; Verify(pk, m, σ) == true":
+        expect _sign_verify_round_trip() == true
+
+    it "Verify rejects bit-flipped message":
+        expect _verify_rejects_tampered_msg() == true
+
+    it "Verify rejects bit-flipped signature (c_tilde)":
+        expect _verify_rejects_tampered_sig() == true

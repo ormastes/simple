@@ -56,6 +56,18 @@ fn string_interp_float_boxing() {
 }
 
 #[test]
+fn string_interp_u64_uses_raw_string_bridge() {
+    let mir = compile_to_mir(
+        "fn test() -> i64:\n    val x: u64 = 0xFFFFFFFFFFFFFFFFu64\n    val s = \"{x}\"\n    return 42\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_raw_u64_to_string"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
+}
+
+#[test]
 fn string_interp_string_no_boxing() {
     // When interpolating a string variable, no boxing or rt_value_to_string is needed —
     // the string is used directly.
@@ -82,6 +94,16 @@ fn print_int_boxing() {
 fn print_float_boxing() {
     let mir = compile_to_mir("fn test() -> i64:\n    val f: f64 = 2.5\n    print \"{f}\"\n    return 42\n").unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::BoxFloat { .. })));
+}
+
+#[test]
+fn print_u64_uses_raw_string_bridge() {
+    let mir =
+        compile_to_mir("fn test() -> i64:\n    val x: u64 = 0xFFFFFFFFFFFFFFFFu64\n    print x\n    return 42\n").unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_raw_u64_to_string"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::BoxInt { .. })));
 }
 
 // =============================================================================

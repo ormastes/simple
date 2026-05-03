@@ -38,6 +38,41 @@ pub fn lookup_seed_unit(suffix: &str) -> Option<&'static (&'static str, &'static
 }
 
 impl<'a> super::Lexer<'a> {
+    #[inline]
+    fn integer_token(value: i64, suffix: Option<NumericSuffix>) -> TokenKind {
+        if let Some(suffix) = suffix {
+            TokenKind::TypedInteger(value, suffix)
+        } else {
+            TokenKind::Integer(value)
+        }
+    }
+
+    fn parse_integer_digits(
+        &self,
+        digits: &str,
+        radix: u32,
+        suffix: Option<NumericSuffix>,
+        invalid_number_message: String,
+    ) -> TokenKind {
+        if matches!(suffix.as_ref(), Some(NumericSuffix::U64)) {
+            return match u64::from_str_radix(digits, radix) {
+                // TokenKind still stores integer payloads as i64, so preserve the
+                // exact 64-bit pattern instead of routing explicit u64 literals
+                // through the signed parser first.
+                Ok(value) => TokenKind::TypedInteger(value as i64, NumericSuffix::U64),
+                Err(_) => TokenKind::Error(invalid_number_message),
+            };
+        }
+
+        match i64::from_str_radix(digits, radix) {
+            Ok(value) => Self::integer_token(value, suffix),
+            Err(_) => match u64::from_str_radix(digits, radix) {
+                Ok(value) => Self::integer_token(value as i64, suffix),
+                Err(_) => TokenKind::Error(invalid_number_message),
+            },
+        }
+    }
+
     /// Helper to check if underscore is followed by a unit suffix (not a digit separator).
     /// Takes a validator to check if a character is a valid digit for the current radix.
     #[inline]
@@ -88,16 +123,13 @@ impl<'a> super::Lexer<'a> {
 
     /// Helper to parse integers with non-decimal radix
     fn parse_radix_integer(&mut self, num_str: &str, radix: u32, radix_name: &str) -> TokenKind {
-        match i64::from_str_radix(&num_str[2..], radix) {
-            Ok(n) => {
-                if let Some(suffix) = self.scan_numeric_suffix() {
-                    TokenKind::TypedInteger(n, suffix)
-                } else {
-                    TokenKind::Integer(n)
-                }
-            }
-            Err(_) => TokenKind::Error(format!("Invalid {} number: {}", radix_name, num_str)),
-        }
+        let suffix = self.scan_numeric_suffix();
+        self.parse_integer_digits(
+            &num_str[2..],
+            radix,
+            suffix,
+            format!("Invalid {} number: {}", radix_name, num_str),
+        )
     }
 
     pub(super) fn scan_number(&mut self, first: char) -> TokenKind {
@@ -112,29 +144,13 @@ impl<'a> super::Lexer<'a> {
                         self.advance();
                         num_str.push(ch);
                         self.scan_radix_digits(&mut num_str, |c| c.is_ascii_hexdigit());
-                        return match i64::from_str_radix(&num_str[2..], 16) {
-                            Ok(n) => {
-                                if let Some(suffix) = self.scan_numeric_suffix() {
-                                    TokenKind::TypedInteger(n, suffix)
-                                } else {
-                                    TokenKind::Integer(n)
-                                }
-                            }
-                            Err(_) => {
-                                // Try u64 for large hex values (bit patterns, masks)
-                                match u64::from_str_radix(&num_str[2..], 16) {
-                                    Ok(n) => {
-                                        let val = n as i64;
-                                        if let Some(suffix) = self.scan_numeric_suffix() {
-                                            TokenKind::TypedInteger(val, suffix)
-                                        } else {
-                                            TokenKind::Integer(val)
-                                        }
-                                    }
-                                    Err(_) => TokenKind::Error(format!("Invalid hex number: {}", num_str)),
-                                }
-                            }
-                        };
+                        let suffix = self.scan_numeric_suffix();
+                        return self.parse_integer_digits(
+                            &num_str[2..],
+                            16,
+                            suffix,
+                            format!("Invalid hex number: {}", num_str),
+                        );
                     }
                     'o' | 'O' => {
                         self.advance();
@@ -248,29 +264,7 @@ impl<'a> super::Lexer<'a> {
                 Err(_) => TokenKind::Error(format!("Invalid float: {}", num_str)),
             }
         } else {
-            match num_str.parse::<i64>() {
-                Ok(n) => {
-                    if let Some(s) = suffix {
-                        TokenKind::TypedInteger(n, s)
-                    } else {
-                        TokenKind::Integer(n)
-                    }
-                }
-                Err(_) => {
-                    // Try u64 for values just above i64::MAX (e.g., 9223372036854775808)
-                    match num_str.parse::<u64>() {
-                        Ok(n) => {
-                            let val = n as i64;
-                            if let Some(s) = suffix {
-                                TokenKind::TypedInteger(val, s)
-                            } else {
-                                TokenKind::Integer(val)
-                            }
-                        }
-                        Err(_) => TokenKind::Error(format!("Invalid integer: {}", num_str)),
-                    }
-                }
-            }
+            self.parse_integer_digits(&num_str, 10, suffix, format!("Invalid integer: {}", num_str))
         }
     }
 

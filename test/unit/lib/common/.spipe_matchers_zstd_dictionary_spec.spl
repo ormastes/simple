@@ -17,6 +17,15 @@ use std.common.compress.{CompressionError}
 # Once that bug is fixed, an additional fixture using host `zstd --train`
 # output can be added.
 #
+# End-to-end consumption coverage (added 2026-05-01, T24 Wave-4):
+# A Compressed_Block whose literals section is a Treeless_Literals_Block
+# proves that `dictionary_state.huffman` actually flows through the
+# per-frame `huffman_table_state` slot used by the block decoder. The
+# Repeat_Mode FSE / repeat_offsets end-to-end seam is NOT exercised here
+# (this fixture uses sequence_count=0 to keep the bit-stream construction
+# tractable). That gap is tracked under
+# `doc/08_tracking/bug/zstd_dict_repeat_mode_fse_endtoend_2026-05-01.md`.
+#
 # Layout of `DICT_OK` per RFC 8478 §6:
 #   bytes [0..4):    Magic_Number 0xEC30A437 little-endian
 #   bytes [4..8):    Dictionary_ID 0x12345678 little-endian
@@ -104,6 +113,98 @@ val FRAME_RAW_WITH_DICT: [u8] = [
     0x43u8, 0x54u8, 0x21u8, 0x21u8
 ]
 
+# End-to-end consumption fixture (AC-1):
+#
+# Same DICT_OK as above (direct-weight Huffman, weights [3,2,1] -> deduced
+# 4-symbol tree with bit-lengths [1, 2, 3, 3] for symbols 0..3, table_bits=3).
+# After zstd_huf canonical assignment (sort by weight ASC then symbol ASC,
+# then assign codes starting from longest length), the layout is:
+#   sym 2: bits=3, code=0b000
+#   sym 3: bits=3, code=0b001
+#   sym 1: bits=2, code=0b01
+#   sym 0: bits=1, code=0b1
+# zstd_huf_expand_decode_table populates table_bits=3 (size=8) lookup
+# (LSB-indexed via reverse_bits(code, bits) | (extra << bits)):
+#   table[0] = sym 2, bits=3
+#   table[1] = sym 0, bits=1
+#   table[2] = sym 1, bits=2
+#   table[3] = sym 0, bits=1
+#   table[4] = sym 3, bits=3
+#   table[5] = sym 0, bits=1
+#   table[6] = sym 1, bits=2
+#   table[7] = sym 0, bits=1
+#
+# This frame's first (and only) block is a Compressed_Block whose literals
+# section is a Treeless_Literals_Block (literals_type=3, size_format=0,
+# 1-stream). Treeless requires a previously seeded Huffman table; the
+# decoder fails at `_zstd_parse_literals_section` with
+# `UnsupportedFeature("zstd treeless literals need a prior Huffman table")`
+# unless the dictionary state's `huffman` field has been threaded into
+# `huffman_table_state` for this frame's decode loop. Successful decode
+# therefore proves that `_zstd_frame_dictionary_state` actually flows
+# `dictionary_state.huffman` into `_zstd_decompress_frame_for_tier_with_dictionary`.
+#
+# Bitstream (1 byte = 0x47 = 0b01000111): the byte has the end-marker bit
+# at position 6, with 6 data bits below (0b000111). The backward bit
+# reader (`zstd_bits_init`) strips the marker, leaving reservoir=0x07,
+# 6 bits. Iteration walk against the table above:
+#   peek 3 = 7 -> table[7]=sym0, bits=1; consume -> reservoir=0x03, 5 bits
+#   peek 3 = 3 -> table[3]=sym0, bits=1; consume -> reservoir=0x01, 4 bits
+#   peek 3 = 1 -> table[1]=sym0, bits=1; consume -> reservoir=0x00, 3 bits
+#   peek 3 = 0 -> table[0]=sym2, bits=3; consume -> reservoir=0,    0 bits
+# Decoded literals: [sym0, sym0, sym0, sym2] = bytes [0x00, 0x00, 0x00, 0x02].
+# Sequence_count=0, so the block ends after the literals; frame_out
+# (which started as the dictionary's content_prefix) gets these 4 literals
+# appended, and the final output is the slice past the prefix = 4 bytes.
+#
+# Frame layout:
+#   [0..4):  Magic 0xFD2FB528 little-endian (28 B5 2F FD)
+#   [4]:     FHD 0x23 (FCS_flag=0 -> 1-byte FCS, single_segment=1, DID_flag=3 -> 4-byte ID)
+#   [5..9):  Dictionary_ID 0x12345678 little-endian (78 56 34 12)
+#   [9]:     Frame_Content_Size = 4 (1 byte)
+#   [10..13):Block header: last=1, type=2 (Compressed), size=5 (literals_hdr 3 + bitstream 1 + seq_count 1)
+#            value = 1 | (2<<1) | (5<<3) = 0x2D
+#   [13..16):Literals header: type=3, size_format=0, regen=4, compressed=1
+#            byte0 = (4<<4)|(0<<2)|3 = 0x43
+#            byte1 = (regen>>4 & 0x3F) | ((compressed & 3)<<6) = 0|((1&3)<<6) = 0x40
+#            byte2 = compressed>>2 = 0x00
+#   [16]:    1-stream Huffman bitstream byte = 0x58
+#   [17]:    Number_of_Sequences = 0
+val FRAME_TREELESS_WITH_DICT: [u8] = [
+    0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8,
+    0x23u8,
+    0x78u8, 0x56u8, 0x34u8, 0x12u8,
+    0x04u8,
+    0x2Du8, 0x00u8, 0x00u8,
+    0x43u8, 0x40u8, 0x00u8,
+    0x47u8,
+    0x00u8
+]
+
+# AC-2 negative: identical Compressed_Block payload but the frame header
+# advertises NO dictionary_id (DID_flag=0). The decoder runs without a
+# dictionary, so `huffman_table_state` is initialised to nil. When the
+# Treeless_Literals_Block tries to consume that nil seed,
+# `_zstd_parse_literals_section` must Err with
+# `UnsupportedFeature("zstd treeless literals need a prior Huffman table")`,
+# proving that the failure mode is typed (not silent corruption).
+#
+# Frame layout (no dict_id, FCS still 1 byte):
+#   [0..4):  Magic 0xFD2FB528 little-endian
+#   [4]:     FHD 0x20 (FCS_flag=0, single_segment=1, DID_flag=0)
+#   [5]:     Frame_Content_Size = 4 (1 byte)
+#   [6..9):  Block header (same as positive case): last=1, type=2, size=5
+#   [9..14): Compressed_Block payload (literals_hdr + bitstream + seq_count)
+val FRAME_TREELESS_NO_DICT: [u8] = [
+    0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8,
+    0x20u8,
+    0x04u8,
+    0x2Du8, 0x00u8, 0x00u8,
+    0x43u8, 0x40u8, 0x00u8,
+    0x47u8,
+    0x00u8
+]
+
 fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
     match err:
         CompressionError.InvalidHeader(message):
@@ -137,6 +238,8 @@ val MODULE_PARSE_TRUNC_REPS = zstd_parse_dictionary_for_test(DICT_TRUNCATED_REPS
 val MODULE_PARSE_ZERO_REP = zstd_parse_dictionary_for_test(DICT_ZERO_REP, DICT_OK_ID)
 val MODULE_DECODE_FRAME = zstd_decompress_frame_with_dictionary(FRAME_RAW_WITH_DICT, DICT_OK, DICT_OK_ID)
 val MODULE_DECODE_FRAME_NO_DICT = zstd_decompress_frame(FRAME_RAW_WITH_DICT)
+val MODULE_DECODE_TREELESS_WITH_DICT = zstd_decompress_frame_with_dictionary(FRAME_TREELESS_WITH_DICT, DICT_OK, DICT_OK_ID)
+val MODULE_DECODE_TREELESS_NO_DICT = zstd_decompress_frame(FRAME_TREELESS_NO_DICT)
 
 describe "zstd dictionary-frame decode (RFC 8478 §6)":
     it "parses a well-formed dictionary blob and seeds entropy state":
@@ -180,3 +283,25 @@ describe "zstd dictionary-frame decode (RFC 8478 §6)":
     it "rejects a dict-referencing frame when no dictionary is supplied":
         expect MODULE_DECODE_FRAME_NO_DICT.is_err() == true
         _expect_compression_error(MODULE_DECODE_FRAME_NO_DICT.unwrap_err(), "UnsupportedFeature", "dictionary-backed frames require")
+
+    it "consumes seeded Huffman state via a Treeless_Literals_Block (end-to-end)":
+        # AC-1: dictionary-supplied huffman_table_state is the only way the
+        # Treeless block here can decode. If `_zstd_frame_dictionary_state`
+        # didn't actually flow `dictionary_state.huffman` into the frame's
+        # huffman_table_state slot, the literals dispatch would fail with
+        # `UnsupportedFeature("treeless literals need a prior Huffman table")`.
+        expect MODULE_DECODE_TREELESS_WITH_DICT.is_ok() == true
+        val out = MODULE_DECODE_TREELESS_WITH_DICT.unwrap()
+        expect out.len() == 4
+        expect out[0] == 0x00u8
+        expect out[1] == 0x00u8
+        expect out[2] == 0x00u8
+        expect out[3] == 0x02u8
+
+    it "rejects Treeless literals when no dictionary state seeds Huffman (typed error)":
+        # AC-2: same Compressed_Block payload but the frame's FHD declares
+        # DID_flag=0, so no dictionary state seeds huffman_table_state. The
+        # decoder MUST fail with the precise typed error rather than emit
+        # silent garbage bytes.
+        expect MODULE_DECODE_TREELESS_NO_DICT.is_err() == true
+        _expect_compression_error(MODULE_DECODE_TREELESS_NO_DICT.unwrap_err(), "UnsupportedFeature", "treeless literals")

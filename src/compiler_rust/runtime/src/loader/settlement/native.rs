@@ -305,6 +305,7 @@ impl LoadedNativeLib {
             NativeLibHandle::Process(handle) => {
                 let c_name = CString::new(name).ok()?;
                 lookup(*handle, &c_name)
+                    .or_else(|| simple_runtime_abi::lookup_registered_static_runtime_symbol(name).map(|ptr| ptr as usize))
             }
             NativeLibHandle::Dynamic(handle) => {
                 let c_name = CString::new(name).ok()?;
@@ -415,6 +416,16 @@ impl NativeLibManager {
 
     /// Load and add a system library.
     pub fn add_system(&mut self, name: &str) -> Result<NativeHandle, String> {
+        if let Some(&handle) = self.by_name.get(name) {
+            return Ok(handle);
+        }
+        if name == "__process__" {
+            let lib = LoadedNativeLib::load_process(name.to_string())?;
+            let handle = NativeHandle(self.libraries.len() as u32);
+            self.by_name.insert(name.to_string(), handle);
+            self.libraries.push(lib);
+            return Ok(handle);
+        }
         let lib = LoadedNativeLib::load_system(name.to_string())?;
         let handle = NativeHandle(self.libraries.len() as u32);
         self.by_name.insert(name.to_string(), handle);

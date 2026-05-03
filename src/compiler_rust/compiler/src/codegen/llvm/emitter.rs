@@ -2054,7 +2054,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "llvm"))]
 mod tests {
     use super::LlvmEmitter;
 

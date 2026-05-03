@@ -1,0 +1,774 @@
+# BSON Encoder/Decoder Specification
+# Reference: https://bsonspec.org/spec.html
+# Test vectors verified against Python bson.encode.
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# NOTE: Enum variants use positional (unnamed) fields because the interpreter
+# does not support case Variant(field: bind) destructuring in fn bodies.
+
+use std.encoding.bson.{BsonValue, BsonError, bson_encode, bson_decode}
+
+# ============================================================================
+# Encode helpers — built at module level
+# ============================================================================
+
+fn _enc_empty_doc() -> Result<[u8], BsonError>:
+    bson_encode(BsonValue.Doc([]))
+
+fn _enc_int32_a_1() -> Result<[u8], BsonError>:
+    bson_encode(BsonValue.Doc([("a", BsonValue.Int32(1))]))
+
+fn _enc_str_a_b() -> Result<[u8], BsonError>:
+    bson_encode(BsonValue.Doc([("a", BsonValue.Str("b"))]))
+
+fn _enc_null_a() -> Result<[u8], BsonError>:
+    bson_encode(BsonValue.Doc([("a", BsonValue.Null)]))
+
+fn _enc_bool_true_a() -> Result<[u8], BsonError>:
+    bson_encode(BsonValue.Doc([("a", BsonValue.Bool(true))]))
+
+fn _enc_bool_false_a() -> Result<[u8], BsonError>:
+    bson_encode(BsonValue.Doc([("a", BsonValue.Bool(false))]))
+
+fn _enc_not_doc() -> Result<[u8], BsonError>:
+    bson_encode(BsonValue.Int32(1))
+
+# ============================================================================
+# Byte-extraction helpers (avoid & 0xFF in it-block expect chains)
+# ============================================================================
+
+fn _byte_at(b: [u8], i: i64) -> i64:
+    b[i].to_i64() & 0xFF
+
+# ============================================================================
+# Reference-vector check helpers — call from it blocks
+# ============================================================================
+
+fn _check_empty_doc_ok() -> bool:
+    val r = _enc_empty_doc()
+    if not r.is_ok():
+        return false
+    val b = r.unwrap()
+    if b.len() != 5:
+        return false
+    if _byte_at(b, 0) != 0x05:
+        return false
+    if _byte_at(b, 1) != 0x00:
+        return false
+    _byte_at(b, 4) == 0x00
+
+fn _check_int32_a1_ok() -> bool:
+    val r = _enc_int32_a_1()
+    if not r.is_ok():
+        return false
+    val b = r.unwrap()
+    if b.len() != 12:
+        return false
+    if _byte_at(b, 0) != 0x0C:
+        return false
+    if _byte_at(b, 4) != 0x10:
+        return false
+    if _byte_at(b, 5) != 0x61:
+        return false
+    if _byte_at(b, 6) != 0x00:
+        return false
+    if _byte_at(b, 7) != 0x01:
+        return false
+    if _byte_at(b, 8) != 0x00:
+        return false
+    _byte_at(b, 11) == 0x00
+
+fn _check_str_ab_ok() -> bool:
+    val r = _enc_str_a_b()
+    if not r.is_ok():
+        return false
+    val b = r.unwrap()
+    if b.len() != 14:
+        return false
+    if _byte_at(b, 0) != 0x0E:
+        return false
+    if _byte_at(b, 4) != 0x02:
+        return false
+    if _byte_at(b, 7) != 0x02:
+        return false
+    if _byte_at(b, 11) != 0x62:
+        return false
+    if _byte_at(b, 12) != 0x00:
+        return false
+    _byte_at(b, 13) == 0x00
+
+fn _check_null_a_ok() -> bool:
+    val r = _enc_null_a()
+    if not r.is_ok():
+        return false
+    val b = r.unwrap()
+    if b.len() != 8:
+        return false
+    _byte_at(b, 4) == 0x0A
+
+fn _check_bool_true_ok() -> bool:
+    val r = _enc_bool_true_a()
+    if not r.is_ok():
+        return false
+    val b = r.unwrap()
+    if b.len() != 9:
+        return false
+    if _byte_at(b, 4) != 0x08:
+        return false
+    _byte_at(b, 7) == 0x01
+
+fn _check_bool_false_ok() -> bool:
+    val r = _enc_bool_false_a()
+    if not r.is_ok():
+        return false
+    val b = r.unwrap()
+    if b.len() != 9:
+        return false
+    _byte_at(b, 7) == 0x00
+
+fn _check_not_doc_err() -> bool:
+    val r = _enc_not_doc()
+    if r.is_ok():
+        return false
+    match r:
+        case Err(e):
+            match e:
+                case BsonError.NotADocument:
+                    true
+                case _:
+                    false
+        case _:
+            false
+
+# ============================================================================
+# Decode helpers — built at module level
+# ============================================================================
+
+fn _make_empty_doc_bytes() -> [u8]:
+    # {} → 0x05 0x00 0x00 0x00 0x00
+    var b: [u8] = []
+    b.push(0x05)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b
+
+fn _make_int32_a_1_bytes() -> [u8]:
+    # {"a": 1} Int32 → 0x0c 0x00 0x00 0x00 0x10 0x61 0x00 0x01 0x00 0x00 0x00 0x00
+    var b: [u8] = []
+    b.push(0x0C)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x10)
+    b.push(0x61)
+    b.push(0x00)
+    b.push(0x01)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b
+
+fn _make_str_a_b_bytes() -> [u8]:
+    # {"a": "b"} → 0x0e 0x00 0x00 0x00 0x02 0x61 0x00 0x02 0x00 0x00 0x00 0x62 0x00 0x00
+    var b: [u8] = []
+    b.push(0x0E)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x02)
+    b.push(0x61)
+    b.push(0x00)
+    b.push(0x02)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x62)
+    b.push(0x00)
+    b.push(0x00)
+    b
+
+fn _make_null_a_bytes() -> [u8]:
+    # {"a": null} → 0x08 0x00 0x00 0x00 0x0a 0x61 0x00 0x00
+    var b: [u8] = []
+    b.push(0x08)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x0A)
+    b.push(0x61)
+    b.push(0x00)
+    b.push(0x00)
+    b
+
+fn _make_bool_true_a_bytes() -> [u8]:
+    # {"a": true} → 0x09 0x00 0x00 0x00 0x08 0x61 0x00 0x01 0x00
+    var b: [u8] = []
+    b.push(0x09)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x08)
+    b.push(0x61)
+    b.push(0x00)
+    b.push(0x01)
+    b.push(0x00)
+    b
+
+fn _make_bool_false_a_bytes() -> [u8]:
+    # {"a": false} → 0x09 0x00 0x00 0x00 0x08 0x61 0x00 0x00 0x00
+    var b: [u8] = []
+    b.push(0x09)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x08)
+    b.push(0x61)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b
+
+fn _dec_empty_doc() -> Result<BsonValue, BsonError>:
+    bson_decode(_make_empty_doc_bytes())
+
+fn _dec_int32_a_1() -> Result<BsonValue, BsonError>:
+    bson_decode(_make_int32_a_1_bytes())
+
+fn _dec_str_a_b() -> Result<BsonValue, BsonError>:
+    bson_decode(_make_str_a_b_bytes())
+
+fn _dec_null_a() -> Result<BsonValue, BsonError>:
+    bson_decode(_make_null_a_bytes())
+
+fn _dec_bool_true_a() -> Result<BsonValue, BsonError>:
+    bson_decode(_make_bool_true_a_bytes())
+
+fn _dec_bool_false_a() -> Result<BsonValue, BsonError>:
+    bson_decode(_make_bool_false_a_bytes())
+
+fn _dec_too_short() -> Result<BsonValue, BsonError>:
+    # Only 4 bytes — needs at least 5
+    bson_decode([0x05u8, 0x00u8, 0x00u8, 0x00u8])
+
+fn _dec_length_mismatch() -> Result<BsonValue, BsonError>:
+    # declares length=5 but buffer has 6 bytes
+    bson_decode([0x05u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8])
+
+fn _dec_length_too_small() -> Result<BsonValue, BsonError>:
+    # declares length=4 (< 5 minimum), buffer=4 bytes
+    bson_decode([0x04u8, 0x00u8, 0x00u8, 0x00u8])
+
+# ============================================================================
+# Decode check helpers
+# ============================================================================
+
+fn _check_dec_empty_doc() -> bool:
+    val r = _dec_empty_doc()
+    if not r.is_ok():
+        return false
+    match r.unwrap():
+        case BsonValue.Doc(ps):
+            ps.len() == 0
+        case _:
+            false
+
+fn _check_dec_int32_a1() -> bool:
+    val r = _dec_int32_a_1()
+    if not r.is_ok():
+        return false
+    match r.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            if ps[0].0 != "a":
+                return false
+            match ps[0].1:
+                case BsonValue.Int32(nv):
+                    nv == 1
+                case _:
+                    false
+        case _:
+            false
+
+fn _check_dec_str_ab() -> bool:
+    val r = _dec_str_a_b()
+    if not r.is_ok():
+        return false
+    match r.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Str(sv):
+                    sv == "b"
+                case _:
+                    false
+        case _:
+            false
+
+fn _check_dec_null_a() -> bool:
+    val r = _dec_null_a()
+    if not r.is_ok():
+        return false
+    match r.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Null:
+                    true
+                case _:
+                    false
+        case _:
+            false
+
+fn _check_dec_bool_true() -> bool:
+    val r = _dec_bool_true_a()
+    if not r.is_ok():
+        return false
+    match r.unwrap():
+        case BsonValue.Doc(ps):
+            match ps[0].1:
+                case BsonValue.Bool(bv):
+                    bv == true
+                case _:
+                    false
+        case _:
+            false
+
+fn _check_dec_bool_false() -> bool:
+    val r = _dec_bool_false_a()
+    if not r.is_ok():
+        return false
+    match r.unwrap():
+        case BsonValue.Doc(ps):
+            match ps[0].1:
+                case BsonValue.Bool(bv):
+                    bv == false
+                case _:
+                    false
+        case _:
+            false
+
+fn _check_dec_too_short() -> bool:
+    val r = _dec_too_short()
+    if r.is_ok():
+        return false
+    match r:
+        case Err(e):
+            match e:
+                case BsonError.UnexpectedEnd:
+                    true
+                case _:
+                    false
+        case _:
+            false
+
+fn _check_dec_length_mismatch() -> bool:
+    val r = _dec_length_mismatch()
+    if r.is_ok():
+        return false
+    match r:
+        case Err(e):
+            match e:
+                case BsonError.LengthMismatch:
+                    true
+                case _:
+                    false
+        case _:
+            false
+
+fn _check_dec_length_too_small() -> bool:
+    val r = _dec_length_too_small()
+    if r.is_ok():
+        return false
+    match r:
+        case Err(e):
+            match e:
+                case BsonError.UnexpectedEnd:
+                    true
+                case _:
+                    false
+        case _:
+            false
+
+# ============================================================================
+# Round-trip helpers
+# ============================================================================
+
+fn _rt_empty() -> bool:
+    val enc = bson_encode(BsonValue.Doc([]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            ps.len() == 0
+        case _:
+            false
+
+fn _rt_int32() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("x", BsonValue.Int32(42))]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Int32(nv):
+                    nv == 42
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_int64() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("x", BsonValue.Int64(9876543210))]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Int64(nv):
+                    nv == 9876543210
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_string() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("k", BsonValue.Str("hello"))]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Str(sv):
+                    sv == "hello"
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_null() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("n", BsonValue.Null)]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Null:
+                    true
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_bool_true() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("b", BsonValue.Bool(true))]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Bool(bv):
+                    bv == true
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_bool_false() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("b", BsonValue.Bool(false))]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Bool(bv):
+                    bv == false
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_nested() -> bool:
+    val inner = BsonValue.Doc([("b", BsonValue.Int32(7))])
+    val enc = bson_encode(BsonValue.Doc([("a", inner)]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Doc(inner_ps):
+                    if inner_ps.len() != 1:
+                        return false
+                    match inner_ps[0].1:
+                        case BsonValue.Int32(nv):
+                            nv == 7
+                        case _:
+                            false
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_array() -> bool:
+    val arr = BsonValue.Array([BsonValue.Int32(1), BsonValue.Int32(2)])
+    val enc = bson_encode(BsonValue.Doc([("a", arr)]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Array(aitems):
+                    if aitems.len() != 2:
+                        return false
+                    match aitems[0]:
+                        case BsonValue.Int32(nv):
+                            nv == 1
+                        case _:
+                            false
+                case _:
+                    false
+        case _:
+            false
+
+fn _make_bin_data() -> [u8]:
+    var data: [u8] = []
+    data.push(0xDE)
+    data.push(0xAD)
+    data
+
+fn _rt_binary() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("b", BsonValue.Bin(0, _make_bin_data()))]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Bin(st, bs):
+                    (st == 0) and (bs.len() == 2)
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_datetime() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("t", BsonValue.DateTime(1234567890000))]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.DateTime(msv):
+                    msv == 1234567890000
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_regex() -> bool:
+    val enc = bson_encode(BsonValue.Doc([("r", BsonValue.Regex("foo", "i"))]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            if ps.len() != 1:
+                return false
+            match ps[0].1:
+                case BsonValue.Regex(pat, opt):
+                    (pat == "foo") and (opt == "i")
+                case _:
+                    false
+        case _:
+            false
+
+fn _rt_multi_field() -> bool:
+    val enc = bson_encode(BsonValue.Doc([
+        ("a", BsonValue.Int32(1)),
+        ("b", BsonValue.Str("x")),
+        ("c", BsonValue.Bool(true))
+    ]))
+    if not enc.is_ok():
+        return false
+    val dec = bson_decode(enc.unwrap())
+    if not dec.is_ok():
+        return false
+    match dec.unwrap():
+        case BsonValue.Doc(ps):
+            ps.len() == 3
+        case _:
+            false
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "BSON encoder — reference vectors":
+
+    context "empty document":
+        it "encodes empty doc correctly":
+            expect _check_empty_doc_ok() == true
+
+    context "Int32":
+        it "encodes int32 field correctly":
+            expect _check_int32_a1_ok() == true
+
+    context "String":
+        it "encodes string field correctly":
+            expect _check_str_ab_ok() == true
+
+    context "Null":
+        it "encodes null field correctly":
+            expect _check_null_a_ok() == true
+
+    context "Bool":
+        it "encodes bool true field correctly":
+            expect _check_bool_true_ok() == true
+
+        it "encodes bool false field correctly":
+            expect _check_bool_false_ok() == true
+
+    context "encode error":
+        it "returns NotADocument when top-level value is not Doc":
+            expect _check_not_doc_err() == true
+
+describe "BSON decoder — reference vectors":
+
+    context "empty document":
+        it "decodes empty doc bytes correctly":
+            expect _check_dec_empty_doc() == true
+
+    context "Int32":
+        it "decodes int32 field bytes correctly":
+            expect _check_dec_int32_a1() == true
+
+    context "String":
+        it "decodes string field bytes correctly":
+            expect _check_dec_str_ab() == true
+
+    context "Null":
+        it "decodes null field bytes correctly":
+            expect _check_dec_null_a() == true
+
+    context "Bool":
+        it "decodes bool true bytes correctly":
+            expect _check_dec_bool_true() == true
+
+        it "decodes bool false bytes correctly":
+            expect _check_dec_bool_false() == true
+
+describe "BSON decoder — error cases":
+
+    context "too short":
+        it "returns UnexpectedEnd when buffer is under 5 bytes":
+            expect _check_dec_too_short() == true
+
+    context "length mismatch":
+        it "returns LengthMismatch when declared length differs from buffer":
+            expect _check_dec_length_mismatch() == true
+
+    context "declared length below minimum":
+        it "returns UnexpectedEnd when declared length is under 5":
+            expect _check_dec_length_too_small() == true
+
+describe "BSON round-trip":
+
+    it "empty document round-trips":
+        expect _rt_empty() == true
+
+    it "Int32 round-trips":
+        expect _rt_int32() == true
+
+    it "Int64 round-trips":
+        expect _rt_int64() == true
+
+    it "String round-trips":
+        expect _rt_string() == true
+
+    it "Null round-trips":
+        expect _rt_null() == true
+
+    it "Bool true round-trips":
+        expect _rt_bool_true() == true
+
+    it "Bool false round-trips":
+        expect _rt_bool_false() == true
+
+    it "nested document round-trips":
+        expect _rt_nested() == true
+
+    it "array round-trips":
+        expect _rt_array() == true
+
+    it "binary round-trips":
+        expect _rt_binary() == true
+
+    it "datetime round-trips":
+        expect _rt_datetime() == true
+
+    it "regex round-trips":
+        expect _rt_regex() == true
+
+    it "multi-field document round-trips":
+        expect _rt_multi_field() == true

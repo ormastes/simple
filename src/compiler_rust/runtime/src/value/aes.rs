@@ -489,8 +489,16 @@ pub extern "C" fn rt_aes_decrypt_block_with_expanded(
 // ============================================================================
 
 const RCON_PACKED: [u32; 10] = [
-    0x01_00_00_00, 0x02_00_00_00, 0x04_00_00_00, 0x08_00_00_00, 0x10_00_00_00,
-    0x20_00_00_00, 0x40_00_00_00, 0x80_00_00_00, 0x1b_00_00_00, 0x36_00_00_00,
+    0x01_00_00_00,
+    0x02_00_00_00,
+    0x04_00_00_00,
+    0x08_00_00_00,
+    0x10_00_00_00,
+    0x20_00_00_00,
+    0x40_00_00_00,
+    0x80_00_00_00,
+    0x1b_00_00_00,
+    0x36_00_00_00,
 ];
 
 #[no_mangle]
@@ -576,11 +584,7 @@ pub fn aes128_encrypt_one_block(key: &[u8], block: &[u8]) -> Option<[u8; AES_BLO
 }
 
 #[no_mangle]
-pub extern "C" fn rt_aes128_encrypt_block_into(
-    key: RuntimeValue,
-    block: RuntimeValue,
-    out: RuntimeValue,
-) -> i64 {
+pub extern "C" fn rt_aes128_encrypt_block_into(key: RuntimeValue, block: RuntimeValue, out: RuntimeValue) -> i64 {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
         return 1;
     };
@@ -613,10 +617,7 @@ pub extern "C" fn rt_aes128_encrypt_block_into(
 // Returns empty array on bad sizes.
 // ----------------------------------------------------------------------------
 #[no_mangle]
-pub extern "C" fn rt_aes128_encrypt_block_pure(
-    key: RuntimeValue,
-    block: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_aes128_encrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
         return empty_runtime_array();
     };
@@ -700,12 +701,7 @@ fn inc32(counter: &mut [u8; AES_BLOCK_LEN]) {
     counter[15] = bytes[3];
 }
 
-pub fn aes128_gcm_encrypt_bytes(
-    key: &[u8],
-    nonce: &[u8],
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Option<Vec<u8>> {
+pub fn aes128_gcm_encrypt_bytes(key: &[u8], nonce: &[u8], plaintext: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     if key.len() != AES_BLOCK_LEN || nonce.len() != 12 {
         return None;
     }
@@ -958,11 +954,7 @@ pub fn aes256_encrypt_one_block(key: &[u8], block: &[u8]) -> Option<[u8; AES_BLO
 }
 
 #[no_mangle]
-pub extern "C" fn rt_aes256_encrypt_block_into(
-    key: RuntimeValue,
-    block: RuntimeValue,
-    out: RuntimeValue,
-) -> i64 {
+pub extern "C" fn rt_aes256_encrypt_block_into(key: RuntimeValue, block: RuntimeValue, out: RuntimeValue) -> i64 {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
         return 1;
     };
@@ -990,10 +982,7 @@ pub extern "C" fn rt_aes256_encrypt_block_into(
 // Returns empty array on bad sizes (key must be 32B, block 16B).
 // ----------------------------------------------------------------------------
 #[no_mangle]
-pub extern "C" fn rt_aes256_encrypt_block_pure(
-    key: RuntimeValue,
-    block: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_aes256_encrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
         return empty_runtime_array();
     };
@@ -1006,12 +995,7 @@ pub extern "C" fn rt_aes256_encrypt_block_pure(
     runtime_array_from_bytes(&cipher)
 }
 
-pub fn aes256_gcm_encrypt_bytes(
-    key: &[u8],
-    nonce: &[u8],
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Option<Vec<u8>> {
+pub fn aes256_gcm_encrypt_bytes(key: &[u8], nonce: &[u8], plaintext: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
     if key.len() != AES256_KEY_LEN || nonce.len() != 12 {
         return None;
     }
@@ -1499,9 +1483,7 @@ mod tests {
     #[test]
     fn aes256_gcm_nist_sp_800_38d_test_case_15() {
         // TC15: non-trivial 32-byte key, 64-byte plaintext, no AAD.
-        let key = decode_hex(
-            "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
-        );
+        let key = decode_hex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
         let nonce = decode_hex("cafebabefacedbaddecaf888");
         let pt = decode_hex(
             "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255",
@@ -1520,9 +1502,7 @@ mod tests {
     #[test]
     fn aes256_gcm_nist_sp_800_38d_test_case_16() {
         // TC16: same key/nonce as TC15, 60-byte plaintext, 20-byte AAD.
-        let key = decode_hex(
-            "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
-        );
+        let key = decode_hex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
         let nonce = decode_hex("cafebabefacedbaddecaf888");
         let pt = decode_hex(
             "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",

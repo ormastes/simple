@@ -1,0 +1,93 @@
+"""
+# Compiled Module Adapter Specification
+
+**Feature IDs:** #SMF-004
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** In Progress
+**Plan:** doc/03_plan/smf_load_enable_plan.md
+
+## Overview
+
+Tests for CompiledCallable factory functions and the compiled module registry (cmr_*).
+"""
+
+import std.spec
+
+describe "CompiledCallable":
+    it "creates AST callable with correct fields":
+        val c = compiled_callable_from_ast("my_fn", 42, "std.text", 3)
+        expect c.name == "my_fn"
+        expect c.origin_kind == "ast"
+        expect c.decl_id == 42
+        expect c.module_name == "std.text"
+        expect c.param_count == 3
+
+    it "creates compiled symbol callable":
+        val c = compiled_callable_from_symbol("add", 1000, "_simple_add", "std.math", 2)
+        expect c.name == "add"
+        expect c.origin_kind == "compiled"
+        expect c.address == 1000
+        expect c.symbol_name == "_simple_add"
+
+    it "creates JIT callable":
+        val c = compiled_callable_from_jit("sort", 2000, "sort_T", "i64", "std.algo", 1)
+        expect c.name == "sort"
+        expect c.origin_kind == "jit"
+        expect c.address == 2000
+        expect c.template_name == "sort_T"
+        expect c.type_args == "i64"
+
+describe "CompiledModuleRegistry":
+    it "starts empty after init":
+        cmr_init()
+        expect cmr_count() == 0
+
+    it "registers and looks up a callable":
+        cmr_init()
+        val c = compiled_callable_from_ast("my_fn", 1, "mod_a", 2)
+        cmr_register(c)
+        val found = cmr_lookup("my_fn")
+        expect found == found
+        expect cmr_count() == 1
+
+    it "returns nil for unknown name":
+        cmr_init()
+        val found = cmr_lookup("nonexistent")
+        expect found == nil
+
+    it "tracks module membership":
+        cmr_init()
+        expect cmr_has_module("mod_a") == false
+        val c = compiled_callable_from_ast("fn1", 1, "mod_a", 0)
+        cmr_register(c)
+        expect cmr_has_module("mod_a") == true
+
+    it "tracks module exports as comma-separated names":
+        cmr_init()
+        cmr_register(compiled_callable_from_ast("fn1", 1, "mod_a", 0))
+        cmr_register(compiled_callable_from_ast("fn2", 2, "mod_a", 1))
+        val exports = cmr_get_module_exports("mod_a")
+        expect (exports).contains("fn1")
+        expect (exports).contains("fn2")
+
+    it "returns empty string for unknown module exports":
+        cmr_init()
+        expect cmr_get_module_exports("unknown") == ""
+
+    it "overwrites existing entry with same name":
+        cmr_init()
+        cmr_register(compiled_callable_from_ast("fn1", 1, "mod_a", 0))
+        cmr_register(compiled_callable_from_ast("fn1", 99, "mod_a", 3))
+        expect cmr_count() == 1
+        val found = cmr_lookup("fn1")
+        expect found.decl_id == 99
+        expect found.param_count == 3
+
+    it "unloads module entries":
+        cmr_init()
+        cmr_register(compiled_callable_from_ast("fn1", 1, "mod_a", 0))
+        cmr_register(compiled_callable_from_ast("fn2", 2, "mod_b", 0))
+        cmr_unload_module("mod_a")
+        expect cmr_has_module("mod_a") == false
+        expect cmr_has_module("mod_b") == true

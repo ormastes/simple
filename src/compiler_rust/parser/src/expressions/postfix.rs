@@ -655,16 +655,25 @@ impl<'a> Parser<'a> {
                                 let mut depth = 1u32;
                                 while depth > 0 && !self.is_at_end() {
                                     match &self.current.kind {
-                                        TokenKind::Lt => { depth += 1; self.advance(); }
+                                        TokenKind::Lt => {
+                                            depth += 1;
+                                            self.advance();
+                                        }
                                         TokenKind::Gt => {
                                             depth -= 1;
                                             self.advance();
                                         }
                                         TokenKind::ShiftRight => {
-                                            if depth >= 2 { depth -= 2; } else { depth = 0; }
+                                            if depth >= 2 {
+                                                depth -= 2;
+                                            } else {
+                                                depth = 0;
+                                            }
                                             self.advance();
                                         }
-                                        _ => { self.advance(); }
+                                        _ => {
+                                            self.advance();
+                                        }
                                     }
                                 }
                                 break;

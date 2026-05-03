@@ -64,6 +64,11 @@ pub struct Lowerer {
     #[allow(clippy::type_complexity)]
     // reason: Arc<HashMap<String, Vec<(String, String)>>> is the cross-module struct field index
     pub(super) global_struct_defs: Option<std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>>,
+    /// Duplicate struct/class definitions keyed by bare type name. Each value
+    /// preserves all colliding layouts so field fallback can pick a unique
+    /// variant by field name without merging incompatible offsets.
+    pub(super) duplicate_global_struct_defs:
+        Option<std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, String)>>>>>,
     /// Field names that appear in more than one globally-known struct.
     /// Cross-module lookups skip these to avoid picking the wrong struct's
     /// byte offset (see the BeDomNode/BeLayoutBox `children` collision that
@@ -115,6 +120,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            duplicate_global_struct_defs: None,
             ambiguous_field_names: None,
             global_enum_defs: None,
         }
@@ -149,6 +155,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            duplicate_global_struct_defs: None,
             ambiguous_field_names: None,
             global_enum_defs: None,
         }
@@ -206,6 +213,7 @@ impl Lowerer {
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
+            duplicate_global_struct_defs: None,
             ambiguous_field_names: None,
             global_enum_defs: None,
         }
@@ -244,6 +252,13 @@ impl Lowerer {
         defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
     ) {
         self.global_struct_defs = Some(defs);
+    }
+
+    pub fn set_duplicate_global_struct_defs(
+        &mut self,
+        defs: std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, String)>>>>,
+    ) {
+        self.duplicate_global_struct_defs = Some(defs);
     }
 
     /// Get global struct definitions (if set).

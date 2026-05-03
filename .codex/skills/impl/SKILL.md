@@ -63,9 +63,14 @@ bin/simple test && bin/simple build lint
 ### Phase 15: Verify + VCS Sync
 - Run `verify` skill — must show STATUS: PASS
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, run:
-  - `sh scripts/check-core-runtime-smoke.shs <runtime>`
-  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.shs`
-  - If publish/package flow changed: `sh scripts/check-mcp-package-smoke.shs`
+  - `<runtime> check src/compiler`
+  - `<runtime> check src/lib`
+  - `<runtime> check src/app/mcp`
+  - `<runtime> check src/app/simple_lsp_mcp`
+  - `SIMPLE_LIB=src <runtime> test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`
+  - If publish/package flow changed:
+  - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server`
+  - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
 - VCS sync: `jj commit -m "feat: <feature description>"`
 
 ## Stub Prevention Gate

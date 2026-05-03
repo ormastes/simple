@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+MCP_SERVER="${MCP_SERVER:-bin/simple_mcp_server}"
+LSP_MCP_SERVER="${LSP_MCP_SERVER:-bin/simple_lsp_mcp_server}"
+
+if [ ! -x "$SIMPLE_BINARY" ]; then
+    echo "simple_binary_exists=false"
+    echo "error=missing_simple_binary:$SIMPLE_BINARY"
+    exit 1
+fi
+
+if [ ! -x "$MCP_SERVER" ]; then
+    echo "mcp_server_exists=false"
+    echo "error=missing_mcp_server:$MCP_SERVER"
+    exit 1
+fi
+
+if [ ! -x "$LSP_MCP_SERVER" ]; then
+    echo "lsp_mcp_server_exists=false"
+    echo "error=missing_lsp_mcp_server:$LSP_MCP_SERVER"
+    exit 1
+fi
+
+TMPDIR="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR"' EXIT INT TERM
+
+printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n' \
+    | "$MCP_SERVER" > "$TMPDIR/mcp.jsonl"
+
+printf '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}\n{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}\n' \
+    | "$LSP_MCP_SERVER" > "$TMPDIR/lsp.jsonl"
+
+python3 - "$TMPDIR/mcp.jsonl" "$TMPDIR/lsp.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+def validate(path_str: str, prefix: str) -> None:
+    path = Path(path_str)
+    lines = [line for line in path.read_text().splitlines() if line.strip()]
+    json_valid = True
+    schema_valid = True
+    tool_count = 0
+    try:
+        payloads = [json.loads(line) for line in lines]
+    except Exception:
+        json_valid = False
+        schema_valid = False
+        payloads = []
+    if payloads:
+        tools = payloads[-1].get("result", {}).get("tools", [])
+        tool_count = len(tools)
+        for tool in tools:
+            schema = tool.get("inputSchema")
+            if not isinstance(schema, dict):
+                schema_valid = False
+                continue
+            props = schema.get("properties", {})
+            required = schema.get("required", [])
+            if not isinstance(props, dict) or not isinstance(required, list):
+                schema_valid = False
+                continue
+            for key in required:
+                if key not in props:
+                    schema_valid = False
+                    break
+    print(f"{prefix}_tools_json_valid={'true' if json_valid else 'false'}")
+    print(f"{prefix}_tools_schema_valid={'true' if schema_valid else 'false'}")
+    print(f"{prefix}_tools_count={tool_count}")
+    if not json_valid or not schema_valid:
+        sys.exit(1)
+
+validate(sys.argv[1], "mcp")
+validate(sys.argv[2], "lsp")
+PY

@@ -5,6 +5,30 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    pub(super) fn resolve_duplicate_global_field_variant(
+        &mut self,
+        struct_name: &str,
+        field_name: &str,
+    ) -> Option<(usize, TypeId)> {
+        let field_type_name = {
+            let variants = self.duplicate_global_struct_defs.as_ref()?.get(struct_name)?;
+            let mut matches = variants.iter().filter_map(|fields| {
+                fields
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, (fname, ftype))| (fname == field_name).then(|| (idx, ftype.clone())))
+            });
+            let first = matches.next()?;
+            if matches.next().is_some() {
+                return None;
+            }
+            first
+        };
+        let (index, field_type_name) = field_type_name;
+        let field_ty = self.resolve_global_type_spec(&field_type_name).unwrap_or(TypeId::ANY);
+        Some((index, field_ty))
+    }
+
     fn resolve_global_field_info(&mut self, field: &str) -> Option<(usize, TypeId, usize, String)> {
         let mut best_global: Option<(usize, String, usize, String)> = None;
         let global_defs = self.global_struct_defs.clone()?;

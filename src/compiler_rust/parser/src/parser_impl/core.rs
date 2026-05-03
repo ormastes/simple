@@ -921,6 +921,24 @@ impl<'a> Parser<'a> {
         )
     }
 
+    fn is_reserved_parameter_name(name: &str) -> bool {
+        matches!(
+            name,
+            "pass"
+                | "out"
+                | "gen"
+                | "val"
+                | "def"
+                | "exists"
+                | "actor"
+                | "assert"
+                | "join"
+                | "pass_todo"
+                | "pass_do_nothing"
+                | "pass_dn"
+        )
+    }
+
     /// Parse block body (assumes INDENT has already been consumed).
     /// Used when we need to manually handle what comes before the block body.
     pub(crate) fn parse_block_body(&mut self) -> Result<Block, ParseError> {
@@ -1004,10 +1022,7 @@ impl<'a> Parser<'a> {
                 self.expect_identifier()?
             };
 
-            if matches!(
-                name.as_str(),
-                "pass" | "pass_todo" | "pass_do_nothing" | "pass_dn"
-            ) {
+            if Self::is_reserved_parameter_name(name.as_str()) {
                 return Err(ParseError::syntax_error_with_span(
                     format!("reserved keyword '{}' cannot be used as a parameter name", name),
                     param_span,

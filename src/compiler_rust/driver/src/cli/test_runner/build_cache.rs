@@ -145,7 +145,11 @@ impl BuildCache {
             .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| name.starts_with(".spipe_wrapped_entry_"))
-            .and_then(|name| source.parent().map(|parent| parent.join(name.trim_start_matches(".spipe_wrapped_entry_"))))
+            .and_then(|name| {
+                source
+                    .parent()
+                    .map(|parent| parent.join(name.trim_start_matches(".spipe_wrapped_entry_")))
+            })
             .filter(|candidate| candidate.exists())
             .unwrap_or_else(|| source.to_path_buf());
 

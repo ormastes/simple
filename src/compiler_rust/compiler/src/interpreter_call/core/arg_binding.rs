@@ -125,7 +125,8 @@ pub(crate) fn bind_args_with_injected(
                     } else if positional_idx < var_idx {
                         // Regular parameter before variadic
                         let param = params_to_bind[positional_idx];
-                        let val = coerce_unsigned(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
+                        let val =
+                            coerce_unsigned(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
                         validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     } else {

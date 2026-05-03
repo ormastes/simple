@@ -67,7 +67,9 @@ If an MCP client starts the server but refuses to load tools, first verify the
 native protocol output instead of reinstalling blindly:
 
 ```bash
-SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs
+bin/simple check src/app/mcp
+bin/simple check src/app/simple_lsp_mcp
+SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
 ```
 
 The common failure in April 2026 was a malformed static `tools/list` fallback:
@@ -90,7 +92,8 @@ If schema validation fails:
    line:
 
    ```bash
-   sh scripts/mcp_native_diag.shs
+   bin/simple test test/feature/app/mcp_protocol_runtime_spec.spl
+   bin/simple test test/feature/app/mcp_cli_passthrough_diag_spec.spl
    ```
 
 2. Check `src/app/mcp/main.spl` static schema helpers. Any parameter added to a
@@ -104,13 +107,16 @@ If schema validation fails:
 4. Rebuild and rerun the native smoke:
 
    ```bash
-   SIMPLE_BINARY=bin/simple sh scripts/check-mcp-native-smoke.shs
+   bin/simple check src/app/mcp
+   bin/simple check src/app/simple_lsp_mcp
+   SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
    ```
 
 5. If the npm package or registry wrapper changed, also run:
 
    ```bash
-   sh scripts/check-mcp-package-smoke.shs
+   bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
+   bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
    ```
 
 Do not publish npm, registry metadata, or plugin bundles while either

@@ -24,7 +24,11 @@ use sha2::{Sha256, Sha384, Sha512};
 /// `usize` respectively; `iterations <= 0` is normalised to 1 to match
 /// the existing pure-Simple semantics for defensive callers.
 pub fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: i64, dk_len: i64) -> Vec<u8> {
-    let rounds = if iterations <= 0 { 1u32 } else { iterations.min(u32::MAX as i64) as u32 };
+    let rounds = if iterations <= 0 {
+        1u32
+    } else {
+        iterations.min(u32::MAX as i64) as u32
+    };
     let n = if dk_len <= 0 { 0usize } else { dk_len as usize };
     let mut out = vec![0u8; n];
     if n > 0 {
@@ -35,7 +39,11 @@ pub fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: i64, dk_len:
 
 /// PBKDF2-HMAC-SHA-384.
 pub fn pbkdf2_hmac_sha384(password: &[u8], salt: &[u8], iterations: i64, dk_len: i64) -> Vec<u8> {
-    let rounds = if iterations <= 0 { 1u32 } else { iterations.min(u32::MAX as i64) as u32 };
+    let rounds = if iterations <= 0 {
+        1u32
+    } else {
+        iterations.min(u32::MAX as i64) as u32
+    };
     let n = if dk_len <= 0 { 0usize } else { dk_len as usize };
     let mut out = vec![0u8; n];
     if n > 0 {
@@ -46,7 +54,11 @@ pub fn pbkdf2_hmac_sha384(password: &[u8], salt: &[u8], iterations: i64, dk_len:
 
 /// PBKDF2-HMAC-SHA-512.
 pub fn pbkdf2_hmac_sha512(password: &[u8], salt: &[u8], iterations: i64, dk_len: i64) -> Vec<u8> {
-    let rounds = if iterations <= 0 { 1u32 } else { iterations.min(u32::MAX as i64) as u32 };
+    let rounds = if iterations <= 0 {
+        1u32
+    } else {
+        iterations.min(u32::MAX as i64) as u32
+    };
     let n = if dk_len <= 0 { 0usize } else { dk_len as usize };
     let mut out = vec![0u8; n];
     if n > 0 {

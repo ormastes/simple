@@ -1,0 +1,93 @@
+# @cover app.ui.ipc.protocol
+
+
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render, build_ipc_dialog,
+    build_ipc_notification, build_ipc_window_control, build_ipc_request_fetch,
+    build_ipc_request_http, extract_json_field, escape_ipc_json}
+use common.ui.widget.{UIEvent}
+
+describe "IPC Protocol":
+    describe "parse_ipc_message":
+        it "parses keypress events":
+            val event = parse_ipc_message("{\"type\":\"keypress\",\"key\":\"j\"}")
+            expect event == nil
+
+        it "parses action events":
+            val event = parse_ipc_message("{\"type\":\"action\",\"name\":\"save\"}")
+            expect event == nil
+
+        it "parses resize events":
+            val event = parse_ipc_message("{\"type\":\"resize\",\"width\":\"800\",\"height\":\"600\"}")
+            expect event == nil
+
+        it "parses quit events":
+            val event = parse_ipc_message("{\"type\":\"quit\"}")
+            expect event == nil
+
+        it "returns nil for unknown messages":
+            val event = parse_ipc_message("{\"type\":\"unknown\"}")
+            expect event == nil
+
+        it "parses fetch results with headers":
+            val event = parse_ipc_message("{\"type\":\"fetch_result\",\"requestId\":\"fetch-3\",\"url\":\"https://example.com/data\",\"status\":\"200\",\"headers\":\"Content-Type: text/plain\\nSet-Cookie: sid=abc\",\"body\":\"alpha\",\"error\":\"\"}")
+            match event:
+                UIEvent.FetchResult(request_id, url, status, headers, body, error) =>
+                    expect request_id == "fetch-3"
+                    expect url == "https://example.com/data"
+                    expect status == 200
+                    expect (headers).contains("Set-Cookie: sid=abc")
+                    expect body == "alpha"
+                    expect error == ""
+                _ =>
+                    expect false == true
+
+    describe "build_ipc_render":
+        it "builds a render message":
+            val msg = build_ipc_render("<div>hello</div>")
+            expect (msg).contains("render")
+            expect (msg).contains("hello")
+
+    describe "build_ipc_dialog":
+        it "builds a dialog message":
+            val msg = build_ipc_dialog("info", "Title", "Body text")
+            expect (msg).contains("dialog")
+            expect (msg).contains("Title")
+            expect (msg).contains("Body text")
+
+    describe "build_ipc_notification":
+        it "builds a notification message":
+            val msg = build_ipc_notification("Alert", "Something happened")
+            expect (msg).contains("notification")
+            expect (msg).contains("Alert")
+
+    describe "build_ipc_request_http":
+        it "builds a GET fetch request without body fields":
+            val msg = build_ipc_request_fetch("https://example.com", "req-1")
+            expect (msg).contains("\"type\":\"request_fetch\"")
+            expect (msg).contains("\"url\":\"https://example.com\"")
+            expect (msg).contains("\"requestId\":\"req-1\"")
+            expect (msg).contains("\"method\":\"GET\"")
+
+        it "builds a POST fetch request with body and content type":
+            val msg = build_ipc_request_http("https://example.com/submit", "req-2", "POST", "Cookie: sid=abc", "q=cat", "application/x-www-form-urlencoded")
+            expect (msg).contains("\"method\":\"POST\"")
+            expect (msg).contains("\"headers\":\"Cookie: sid=abc\"")
+            expect (msg).contains("\"body\":\"q=cat\"")
+            expect (msg).contains("\"contentType\":\"application/x-www-form-urlencoded\"")
+
+    describe "extract_json_field":
+        it "extracts string fields":
+            expect extract_json_field("{\"key\":\"value\"}", "key") == "value"
+            expect extract_json_field("{\"a\":\"1\",\"b\":\"2\"}", "b") == "2"
+
+        it "returns empty for missing fields":
+            expect extract_json_field("{\"key\":\"value\"}", "missing") == ""
+
+    describe "escape_ipc_json":
+        it "escapes special characters":
+            val escaped = escape_ipc_json("hello\nworld")
+            expect (escaped).contains("\\n")
+
+        it "escapes quotes":
+            val escaped = escape_ipc_json("say \"hi\"")
+            expect (escaped).contains("\\\"")

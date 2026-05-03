@@ -87,9 +87,9 @@ pub use collections::{RuntimeArray, RuntimeString, RuntimeTuple};
 pub use dict::RuntimeDict;
 pub use aes::{
     rt_aes128_encrypt_block_into, rt_aes128_encrypt_block_pure, rt_aes256_encrypt_block_into,
-    rt_aes256_encrypt_block_pure, rt_aes_decrypt_block_with_expanded,
-    rt_aes_encrypt_block_with_expanded, rt_aes_rcon, rt_aes_sbox, rt_tls13_aes128_gcm_decrypt,
-    rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt, rt_tls13_aes256_gcm_encrypt,
+    rt_aes256_encrypt_block_pure, rt_aes_decrypt_block_with_expanded, rt_aes_encrypt_block_with_expanded, rt_aes_rcon,
+    rt_aes_sbox, rt_tls13_aes128_gcm_decrypt, rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt,
+    rt_tls13_aes256_gcm_encrypt,
 };
 
 // Re-export object types
@@ -310,8 +310,8 @@ pub use ffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_std
 // Re-export print FFI functions
 pub use ffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
-    rt_println_value, rt_stderr_flush, rt_stderr_write, rt_stdout_flush, rt_stdout_write, rt_value_format_string,
-    rt_value_to_string,
+    rt_println_value, rt_raw_u64_to_string, rt_stderr_flush, rt_stderr_write, rt_stdout_flush, rt_stdout_write,
+    rt_value_format_string, rt_value_to_string,
 };
 
 // Re-export log FFI functions

@@ -82,7 +82,11 @@ fn sub_bytes(mut s: [u8; 16]) -> [u8; 16] {
 fn xtime(b: u8) -> u8 {
     let high = (b & 0x80) != 0;
     let shifted = b << 1;
-    if high { shifted ^ 0x1B } else { shifted }
+    if high {
+        shifted ^ 0x1B
+    } else {
+        shifted
+    }
 }
 
 /// FIPS 197 §5.1.3 MixColumns on a single 4-byte column.
@@ -238,9 +242,39 @@ unsafe fn aes_round_last_neon(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rt_simd_aes_round_u8x16(
-    s0: u8, s1: u8, s2: u8, s3: u8, s4: u8, s5: u8, s6: u8, s7: u8, s8: u8, s9: u8, s10: u8, s11: u8, s12: u8,
-    s13: u8, s14: u8, s15: u8, k0: u8, k1: u8, k2: u8, k3: u8, k4: u8, k5: u8, k6: u8, k7: u8, k8: u8, k9: u8,
-    k10: u8, k11: u8, k12: u8, k13: u8, k14: u8, k15: u8, out: *mut u8,
+    s0: u8,
+    s1: u8,
+    s2: u8,
+    s3: u8,
+    s4: u8,
+    s5: u8,
+    s6: u8,
+    s7: u8,
+    s8: u8,
+    s9: u8,
+    s10: u8,
+    s11: u8,
+    s12: u8,
+    s13: u8,
+    s14: u8,
+    s15: u8,
+    k0: u8,
+    k1: u8,
+    k2: u8,
+    k3: u8,
+    k4: u8,
+    k5: u8,
+    k6: u8,
+    k7: u8,
+    k8: u8,
+    k9: u8,
+    k10: u8,
+    k11: u8,
+    k12: u8,
+    k13: u8,
+    k14: u8,
+    k15: u8,
+    out: *mut u8,
 ) {
     let r = aes_round_u8x16(
         [s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15],
@@ -256,9 +290,39 @@ pub extern "C" fn rt_simd_aes_round_u8x16(
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rt_simd_aes_round_last_u8x16(
-    s0: u8, s1: u8, s2: u8, s3: u8, s4: u8, s5: u8, s6: u8, s7: u8, s8: u8, s9: u8, s10: u8, s11: u8, s12: u8,
-    s13: u8, s14: u8, s15: u8, k0: u8, k1: u8, k2: u8, k3: u8, k4: u8, k5: u8, k6: u8, k7: u8, k8: u8, k9: u8,
-    k10: u8, k11: u8, k12: u8, k13: u8, k14: u8, k15: u8, out: *mut u8,
+    s0: u8,
+    s1: u8,
+    s2: u8,
+    s3: u8,
+    s4: u8,
+    s5: u8,
+    s6: u8,
+    s7: u8,
+    s8: u8,
+    s9: u8,
+    s10: u8,
+    s11: u8,
+    s12: u8,
+    s13: u8,
+    s14: u8,
+    s15: u8,
+    k0: u8,
+    k1: u8,
+    k2: u8,
+    k3: u8,
+    k4: u8,
+    k5: u8,
+    k6: u8,
+    k7: u8,
+    k8: u8,
+    k9: u8,
+    k10: u8,
+    k11: u8,
+    k12: u8,
+    k13: u8,
+    k14: u8,
+    k15: u8,
+    out: *mut u8,
 ) {
     let r = aes_round_last_u8x16(
         [s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15],
@@ -317,12 +381,7 @@ mod tests {
     #[test]
     fn shift_rows_known_vector() {
         // Identity column layout: state[col*4 + row] = col*4 + row.
-        let s = [
-            0, 1, 2, 3,
-            4, 5, 6, 7,
-            8, 9, 10, 11,
-            12, 13, 14, 15,
-        ];
+        let s = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         // Row 1 cycles left by 1: r[1]=s[5], r[5]=s[9], r[9]=s[13], r[13]=s[1].
         let r = shift_rows(s);
         assert_eq!(r[1], 5);

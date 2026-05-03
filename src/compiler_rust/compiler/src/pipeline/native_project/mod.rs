@@ -103,6 +103,10 @@ pub(crate) struct ModuleImports {
     /// Global struct definitions: struct_name -> [(field_name, field_type_name)].
     /// Shared across all compilation units for consistent cross-module field offsets.
     pub struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
+    /// Duplicate global struct/class definitions grouped by bare type name.
+    /// Used only for bounded field-name disambiguation when `struct_defs`
+    /// lost information due to same-name collisions across modules.
+    pub duplicate_struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, String)>>>>,
     /// Global enum definitions: enum_name -> [(variant_name, payload_arity)].
     /// Shared across all compilation units. The HIR lowerer consumes this in
     /// `compile_file_to_object` to eagerly seed `module.types.name_to_id` and
@@ -507,6 +511,7 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(result.all_mangled),
                 re_exports: std::sync::Arc::new(result.re_exports),
                 struct_defs: std::sync::Arc::new(result.struct_defs),
+                duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
                 data_exports: std::sync::Arc::new(result.data_exports),
                 populate_global_struct_defs: self.config.entry_closure,
@@ -519,6 +524,7 @@ impl NativeProjectBuilder {
                 all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
                 re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
                 struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 populate_global_struct_defs: false,

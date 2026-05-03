@@ -1,0 +1,144 @@
+# TargetCaps — Schema Contract Tests
+#
+# Feature ID: #COMPILER-BACKEND-FEATURE-CAPS
+# Category:   Compiler | Backend | Target Capability Interface
+# Status:     Schema only — preset derivation + supports/cost dispatch
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  The assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+
+use compiler.backend.feature_caps.{
+    TargetIdiom,
+    X86Caps, Aarch64Caps, Rv64Caps,
+    x86_caps_from_target, aarch64_caps_from_target, rv64_caps_from_target
+}
+
+# ============================================================================
+# Preset derivation — x86_64 micro-arch levels
+# ============================================================================
+
+describe "TargetCaps — x86_64 preset derivation":
+    it "x86_64-v1 has none of aes/sha/sse42/pclmul/avx2/avx512":
+        val caps = x86_caps_from_target("x86_64-v1")
+        expect caps.has_aes == false
+        expect caps.has_sha_ni == false
+        expect caps.has_sse42 == false
+        expect caps.has_pclmul == false
+        expect caps.has_avx2 == false
+        expect caps.has_avx512 == false
+
+    it "x86_64-v2 has sse42 only (no aes, no pclmul, no avx2, no avx512, no sha_ni)":
+        val caps = x86_caps_from_target("x86_64-v2")
+        expect caps.has_sse42 == true
+        expect caps.has_aes == false
+        expect caps.has_sha_ni == false
+        expect caps.has_pclmul == false
+        expect caps.has_avx2 == false
+        expect caps.has_avx512 == false
+
+    it "x86_64-v3 has aes + pclmul + avx2 + sse42, no avx512, no sha_ni":
+        val caps = x86_caps_from_target("x86_64-v3")
+        expect caps.has_aes == true
+        expect caps.has_sse42 == true
+        expect caps.has_pclmul == true
+        expect caps.has_avx2 == true
+        expect caps.has_sha_ni == false
+        expect caps.has_avx512 == false
+
+    it "x86_64-v4 has avx512 + sha_ni in addition to v3 features":
+        val caps = x86_caps_from_target("x86_64-v4")
+        expect caps.has_aes == true
+        expect caps.has_sha_ni == true
+        expect caps.has_sse42 == true
+        expect caps.has_pclmul == true
+        expect caps.has_avx2 == true
+        expect caps.has_avx512 == true
+
+    it "unknown triple defaults to all-false":
+        val caps = x86_caps_from_target("unknown-triple-xyz")
+        expect caps.has_aes == false
+        expect caps.has_sha_ni == false
+        expect caps.has_sse42 == false
+        expect caps.has_pclmul == false
+        expect caps.has_avx2 == false
+        expect caps.has_avx512 == false
+
+# ============================================================================
+# supports() dispatch across backends
+# ============================================================================
+
+describe "TargetCaps — supports() dispatch":
+    it "X86Caps with has_aes=true supports AesEnc":
+        val caps = X86Caps(
+            has_aes: true,
+            has_sha_ni: false,
+            has_sse42: false,
+            has_pclmul: false,
+            has_avx2: false,
+            has_avx512: false
+        )
+        expect caps.supports(TargetIdiom.AesEnc) == true
+
+    it "X86Caps with has_aes=false reports false for AesEnc":
+        val caps = X86Caps(
+            has_aes: false,
+            has_sha_ni: false,
+            has_sse42: false,
+            has_pclmul: false,
+            has_avx2: false,
+            has_avx512: false
+        )
+        expect caps.supports(TargetIdiom.AesEnc) == false
+
+    it "Aarch64Caps with has_aes=true supports AesEnc":
+        val caps = Aarch64Caps(
+            has_aes: true,
+            has_sha2: false,
+            has_sha3: false,
+            has_crc32: false,
+            has_pmull: false,
+            has_sve2: false,
+            has_neon: true
+        )
+        expect caps.supports(TargetIdiom.AesEnc) == true
+
+    it "Rv64Caps with has_zvkned=true supports AesEnc":
+        val caps = Rv64Caps(
+            has_zvkned: true,
+            has_zvknh: false,
+            has_zvkg: false,
+            has_v: true,
+            vlen_bits: 128
+        )
+        expect caps.supports(TargetIdiom.AesEnc) == true
+
+    it "cost(unsupported idiom) returns -1":
+        val caps = X86Caps(
+            has_aes: false,
+            has_sha_ni: false,
+            has_sse42: false,
+            has_pclmul: false,
+            has_avx2: false,
+            has_avx512: false
+        )
+        expect caps.cost(TargetIdiom.AesEnc) == -1
+
+# ============================================================================
+# preferred_vector_width_bits — sanity checks per backend
+# ============================================================================
+
+describe "TargetCaps — preferred_vector_width_bits":
+    it "X86Caps avx512 returns 512":
+        val caps = x86_caps_from_target("x86_64-v4")
+        expect caps.preferred_vector_width_bits() > 0 == true
+        expect caps.preferred_vector_width_bits() == 512
+
+    it "X86Caps avx2-only returns 256":
+        val caps = x86_caps_from_target("x86_64-v3")
+        expect caps.preferred_vector_width_bits() == 256
+
+    it "X86Caps baseline returns 128":
+        val caps = x86_caps_from_target("x86_64-v1")
+        expect caps.preferred_vector_width_bits() == 128

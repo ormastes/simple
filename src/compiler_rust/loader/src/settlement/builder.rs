@@ -18,8 +18,8 @@ use crate::smf::settlement::{
 /// Looks in several locations:
 /// 1. Environment variable SIMPLE_STUB_PATH
 /// 2. Same directory as the current executable
-/// 3. target/release/simple-stub (for development)
-/// 4. target/debug/simple-stub (for development)
+/// 3. `bin/simple-stub`
+/// 4. `src/compiler_rust/target/<profile>/simple-stub` (for development)
 pub fn find_stub() -> Option<PathBuf> {
     // Check environment variable first
     if let Ok(path) = std::env::var("SIMPLE_STUB_PATH") {
@@ -52,28 +52,31 @@ pub fn find_stub() -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok());
 
     if let Some(root) = workspace_root {
-        // Try release first
-        let release_stub = root.join("rust/target/release/simple-stub");
-        if release_stub.exists() {
-            return Some(release_stub);
-        }
-
-        // Try debug
-        let debug_stub = root.join("rust/target/debug/simple-stub");
-        if debug_stub.exists() {
-            return Some(debug_stub);
+        for candidate in [
+            root.join("bin/simple-stub"),
+            root.join("src/compiler_rust/target/release/simple-stub"),
+            root.join("src/compiler_rust/target/release-opt/simple-stub"),
+            root.join("src/compiler_rust/target/bootstrap/simple-stub"),
+            root.join("src/compiler_rust/target/debug/simple-stub"),
+        ] {
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
 
         // Walk up to find workspace root
         let mut current = root;
         for _ in 0..5 {
-            let release_stub = current.join("rust/target/release/simple-stub");
-            if release_stub.exists() {
-                return Some(release_stub);
-            }
-            let debug_stub = current.join("rust/target/debug/simple-stub");
-            if debug_stub.exists() {
-                return Some(debug_stub);
+            for candidate in [
+                current.join("bin/simple-stub"),
+                current.join("src/compiler_rust/target/release/simple-stub"),
+                current.join("src/compiler_rust/target/release-opt/simple-stub"),
+                current.join("src/compiler_rust/target/bootstrap/simple-stub"),
+                current.join("src/compiler_rust/target/debug/simple-stub"),
+            ] {
+                if candidate.exists() {
+                    return Some(candidate);
+                }
             }
             if let Some(parent) = current.parent() {
                 current = parent.to_path_buf();

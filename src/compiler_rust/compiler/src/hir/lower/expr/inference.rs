@@ -17,6 +17,8 @@ impl Lowerer {
             Expr::Identifier(name) => {
                 if let Some(idx) = ctx.lookup(name) {
                     Ok(ctx.locals[idx].ty)
+                } else if let Some(ty) = self.named_callable_return_type(name) {
+                    Ok(ty)
                 } else if let Some(ty) = self.globals.get(name) {
                     Ok(*ty)
                 } else if self.lenient_types {
@@ -52,8 +54,8 @@ impl Lowerer {
                 _ => self.infer_type(operand, ctx),
             },
             Expr::Call { callee, .. } => {
-                // Return type of call is the type of the callee (function)
-                self.infer_type(callee, ctx)
+                let callee_ty = self.infer_type(callee, ctx)?;
+                Ok(self.call_return_type(callee, callee_ty))
             }
             Expr::If { then_branch, .. } => {
                 // Type of if-expression is the type of the then branch

@@ -11,6 +11,16 @@ use simple_runtime::value::{
     rt_array_new, rt_array_push, rt_array_get, rt_array_set, rt_array_pop, rt_array_clear, rt_array_len,
 };
 
+fn interpreter_byte_at(value: &Value) -> i64 {
+    let normalized = value.clone().deref_pointer();
+    match normalized {
+        Value::Int(n) => n & 0xFF,
+        Value::UInt { value, .. } => (value & 0xFF) as i64,
+        Value::Union { inner, .. } => interpreter_byte_at(&inner),
+        other => other.as_int().map(|n| n & 0xFF).unwrap_or(0),
+    }
+}
+
 // ============================================================================
 // Array Creation
 // ============================================================================
@@ -65,12 +75,8 @@ pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     match arr {
         Value::Array(vec) => {
-            let byte_val = vec.get(idx as usize).cloned().unwrap_or(Value::Int(0));
-            match byte_val {
-                Value::Int(n) => Ok(Value::Int(n & 0xFF)),
-                Value::UInt { value, width: 8 } => Ok(Value::Int((value & 0xFF) as i64)),
-                _ => Ok(Value::Int(0)),
-            }
+            let byte_val = vec.get(idx as usize).unwrap_or(&Value::Int(0));
+            Ok(Value::Int(interpreter_byte_at(byte_val)))
         }
         Value::Int(raw) => {
             // Fall back to runtime call for heap-backed arrays (raw pointer)
@@ -79,6 +85,31 @@ pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
             Ok(Value::Int(rv.to_raw() as i64 & 0xFF))
         }
         _ => Ok(Value::Int(0)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{interpreter_byte_at, rt_bytes_u8_at_fn};
+    use crate::value::Value;
+
+    #[test]
+    fn interpreter_byte_at_reads_u8_values_through_wrappers() {
+        assert_eq!(interpreter_byte_at(&Value::UInt { value: 0x2d, width: 8 }), 0x2d);
+        assert_eq!(
+            interpreter_byte_at(&Value::Union {
+                type_index: 0,
+                inner: Box::new(Value::UInt { value: 0x2d, width: 8 }),
+            }),
+            0x2d
+        );
+    }
+
+    #[test]
+    fn rt_bytes_u8_at_reads_u8_array_entries() {
+        let arr = Value::array(vec![Value::UInt { value: 0x2d, width: 8 }]);
+        let result = rt_bytes_u8_at_fn(&[arr, Value::Int(0)]).expect("byte lookup should succeed");
+        assert_eq!(result, Value::Int(0x2d));
     }
 }
 

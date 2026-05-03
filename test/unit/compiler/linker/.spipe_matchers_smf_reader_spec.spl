@@ -1,0 +1,55 @@
+"""SMF reader specification tests."""
+
+use compiler.backend.linker.smf_reader.{SmfHeaderRaw, SmfHeader, parse_platform, parse_arch, parse_compression, parse_flags}
+use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
+
+describe "Smf Reader":
+    it "parses a raw header into the high-level header view":
+        val raw = SmfHeaderRaw(
+            magic: [83, 77, 70, 0],
+            version_major: 1,
+            version_minor: 1,
+            platform: 1,
+            arch: 0,
+            flags: 0x01 | 0x04 | 0x20,
+            compression: 1,
+            section_count: 4,
+            section_table_offset: 128,
+            symbol_table_offset: 256,
+            symbol_count: 6,
+            exported_count: 2,
+            entry_point: 4096,
+            stub_size: 0,
+            smf_data_offset: 128,
+            module_hash: 123,
+            source_hash: 456,
+            app_type: 0
+        )
+
+        val header = SmfHeader.from_raw(raw)
+        expect header.version == (1, 1)
+        expect header.platform == Platform.Linux
+        expect header.arch == Arch.X86_64
+        expect header.section_count == 4
+        expect header.symbol_count == 6
+        expect header.flags.executable == true
+        expect header.flags.debug_info == true
+        expect header.has_note_sdn == true
+        expect header.compression == CompressionType.Zstd
+        expect header.is_v1_1() == true
+
+    it "maps platform, arch, and compression helper values":
+        expect parse_platform(1) == Platform.Linux
+        expect parse_platform(99) == Platform.Any
+        expect parse_arch(0) == Arch.X86_64
+        expect parse_arch(7) == Arch.Wasm64
+        expect parse_compression(0) == CompressionType.None_
+        expect parse_compression(2) == CompressionType.Lz4
+
+    it "parses bit flags consistently":
+        val flags = parse_flags(0x01 | 0x02 | 0x08 | 0x10)
+        expect flags.executable == true
+        expect flags.reloadable == true
+        expect flags.debug_info == false
+        expect flags.pic == true
+        expect flags.has_stub == true

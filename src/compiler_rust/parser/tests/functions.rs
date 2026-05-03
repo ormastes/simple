@@ -117,6 +117,32 @@ fn parse_default_parameters() {
     parse_ok("fn greet(name = 'World'):\n    return name");
 }
 
+#[test]
+fn reject_reserved_parameter_names() {
+    for name in [
+        "pass",
+        "out",
+        "gen",
+        "val",
+        "def",
+        "exists",
+        "actor",
+        "join",
+        "pass_todo",
+        "pass_do_nothing",
+        "pass_dn",
+    ] {
+        let src = format!("fn bad({name}: text):\n    return {name}");
+        let mut parser = Parser::new(&src);
+        let err = parser.parse().expect_err("reserved parameter name should fail");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains(&format!("reserved keyword '{name}' cannot be used as a parameter name")),
+            "unexpected error for {name}: {rendered}"
+        );
+    }
+}
+
 // Lambda expressions
 #[test]
 fn parse_lambda_expression() {

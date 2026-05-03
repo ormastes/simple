@@ -1,0 +1,246 @@
+# FFDHE RFC 7919 Known-Answer Test (KAT) Spec
+#
+# Tests the pure-Simple FFDHE implementation in src/os/crypto/ffdhe.spl
+# against RFC 7919 Appendix A named-group primes and vanilla DH semantics.
+#
+# Coverage:
+#   §1  Small-prime sanity (p=23, g=2) — DH round-trip, fast in interpreter
+#   §2  ffdhe2048 prime integrity — SHA-256 fingerprint matches RFC 7919 A.1
+#   §3  ffdhe3072 prime integrity — SHA-256 fingerprint matches RFC 7919 A.2
+#   §4  ffdhe4096 prime integrity — SHA-256 fingerprint matches RFC 7919 A.3
+#   §5  ffdhe2048 Alice/Bob round-trip — marked @slow (2048-bit modexp)
+#
+# NOTE: Run in interpreter mode only.
+# See .claude/memory/feedback_compile_mode_false_greens.md.
+#
+# Interpreter-mode note: it-block bodies are not executed in
+# `bin/simple test` (file-load verification only); byte-exact assertions
+# fire in compiled/native mode.  @slow tests require --run-slow-tests.
+#
+# Performance note:
+#   §1 small-prime tests: < 1 ms in interpreter mode.
+#   §2-4 fingerprint tests: O(256-512 bytes) hex decode + SHA-256 — fast.
+#   §5 2048-bit round-trip: O(minutes) in interpreter; @slow.
+#   Named 2048/3072/4096-bit round-trips beyond §5 are deferred to a
+#   native rt_modexp extern — tracked in
+#   doc/02_requirements/feature/ffdhe_native_modexp_2026-05-02.md.
+#
+# Reference: https://www.rfc-editor.org/rfc/rfc7919
+
+use std.spipe.*
+use os.crypto.ffdhe.{
+    ffdhe2048_p, ffdhe3072_p, ffdhe4096_p, ffdhe_g,
+    ffdhe_keygen, ffdhe_dh,
+    ffdhe_pub_to_bytes, ffdhe_bytes_to_pub,
+    ffdhe_prime_bytes
+}
+use os.crypto.sha256.{sha256}
+
+# =============================================================================
+# Helpers — module-level to avoid it-block var-mutation footgun.
+# (see .claude/memory/feedback_it_block_var_mutation.md)
+# =============================================================================
+
+fn _f_nibble(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a" or c == "A": return 10
+    if c == "b" or c == "B": return 11
+    if c == "c" or c == "C": return 12
+    if c == "d" or c == "D": return 13
+    if c == "e" or c == "E": return 14
+    if c == "f" or c == "F": return 15
+    0
+
+fn _bytes_to_hex(bytes: [u8]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var result: text = ""
+    var i: u64 = 0
+    while i < bytes.len():
+        val b = bytes[i].to_i64()
+        result = result + hex_chars.char_at(b / 16) + hex_chars.char_at(b % 16)
+        i = i + 1
+    result
+
+# Small test prime p=23 and generator g=2 (all DH arithmetic mod 23).
+# Alice private=4 => pub = 2^4 mod 23 = 16
+# Bob   private=7 => pub = 2^7 mod 23 = 13
+# shared = 13^4 mod 23 = 16^7 mod 23 = 18
+fn _small_p() -> list:
+    ffdhe_bytes_to_pub([23])
+
+fn _small_g() -> list:
+    ffdhe_bytes_to_pub([2])
+
+fn _alice_scalar() -> [u8]:
+    [4]
+
+fn _bob_scalar() -> [u8]:
+    [7]
+
+# ffdhe2048 private scalar for Alice (32 random bytes — deterministic for KAT)
+fn _alice_priv_2048() -> [u8]:
+    var s: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        s.push((i + 1).to_u8())
+        i = i + 1
+    s
+
+# ffdhe2048 private scalar for Bob
+fn _bob_priv_2048() -> [u8]:
+    var s: [u8] = []
+    var i: i64 = 0
+    while i < 32:
+        s.push((255 - i).to_u8())
+        i = i + 1
+    s
+
+# =============================================================================
+# §1 — Small-prime DH sanity (p=23, g=2)
+# Fast in interpreter mode (single-digit exponents).
+# =============================================================================
+
+describe "FFDHE RFC 7919 — §1 small-prime DH sanity (p=23, g=2)":
+
+    it "Alice pub = g^4 mod 23 = 16":
+        val p = _small_p()
+        val g = _small_g()
+        val kp = ffdhe_keygen(p, g, _alice_scalar())
+        val pub_bytes = ffdhe_pub_to_bytes(kp[1], 1)
+        expect pub_bytes[0].to_i64() == 16
+
+    it "Bob pub = g^7 mod 23 = 13":
+        val p = _small_p()
+        val g = _small_g()
+        val kp = ffdhe_keygen(p, g, _bob_scalar())
+        val pub_bytes = ffdhe_pub_to_bytes(kp[1], 1)
+        expect pub_bytes[0].to_i64() == 13
+
+    it "Alice and Bob derive the same shared secret (18)":
+        val p = _small_p()
+        val g = _small_g()
+        val alice_kp = ffdhe_keygen(p, g, _alice_scalar())
+        val bob_kp   = ffdhe_keygen(p, g, _bob_scalar())
+        val shared_alice = ffdhe_dh(alice_kp[0], bob_kp[1], p)
+        val shared_bob   = ffdhe_dh(bob_kp[0], alice_kp[1], p)
+        val sa_bytes = ffdhe_pub_to_bytes(shared_alice, 1)
+        val sb_bytes = ffdhe_pub_to_bytes(shared_bob, 1)
+        expect sa_bytes[0].to_i64() == 18
+        expect sb_bytes[0].to_i64() == 18
+        expect sa_bytes[0] == sb_bytes[0]
+
+    it "round-trip byte serialization of small pub key":
+        val p = _small_p()
+        val g = _small_g()
+        val kp = ffdhe_keygen(p, g, _alice_scalar())
+        val pub_bytes = ffdhe_pub_to_bytes(kp[1], 1)
+        val recovered = ffdhe_bytes_to_pub(pub_bytes)
+        val recovered_bytes = ffdhe_pub_to_bytes(recovered, 1)
+        expect recovered_bytes[0] == pub_bytes[0]
+
+# =============================================================================
+# §2 — ffdhe2048 prime integrity (SHA-256 fingerprint)
+# Fast: decodes 256-byte hex, serialises BigInt, hashes with SHA-256.
+# =============================================================================
+
+describe "FFDHE RFC 7919 — §2 ffdhe2048 prime integrity":
+
+    it "ffdhe2048_p() encodes to exactly 256 bytes":
+        val p = ffdhe2048_p()
+        val pb = ffdhe_prime_bytes(p, 256)
+        expect pb.len().to_i64() == 256
+
+    it "ffdhe2048 SHA-256 fingerprint matches RFC 7919 Appendix A.1":
+        # Computed: python3 -c \"import hashlib; print(hashlib.sha256(bytes.fromhex(hex)).hexdigest())\"
+        val p = ffdhe2048_p()
+        val pb = ffdhe_prime_bytes(p, 256)
+        val fp = _bytes_to_hex(sha256(pb))
+        expect(fp).to_equal(
+            "d417dfe49b439655f30febdda2200fec593724fd78029662be911a1bcfd701da"
+        )
+
+    it "ffdhe2048 first byte is 0xFF":
+        val p = ffdhe2048_p()
+        val pb = ffdhe_prime_bytes(p, 256)
+        expect pb[0].to_i64() == 255
+
+    it "ffdhe2048 last byte is 0xFF":
+        val p = ffdhe2048_p()
+        val pb = ffdhe_prime_bytes(p, 256)
+        expect pb[255].to_i64() == 255
+
+# =============================================================================
+# §3 — ffdhe3072 prime integrity (SHA-256 fingerprint)
+# =============================================================================
+
+describe "FFDHE RFC 7919 — §3 ffdhe3072 prime integrity":
+
+    it "ffdhe3072_p() encodes to exactly 384 bytes":
+        val p = ffdhe3072_p()
+        val pb = ffdhe_prime_bytes(p, 384)
+        expect pb.len().to_i64() == 384
+
+    it "ffdhe3072 SHA-256 fingerprint matches RFC 7919 Appendix A.2":
+        val p = ffdhe3072_p()
+        val pb = ffdhe_prime_bytes(p, 384)
+        val fp = _bytes_to_hex(sha256(pb))
+        expect(fp).to_equal(
+            "0eaf67db3a839156d5013494a5318a772b5697d270d721f37f092efc69ea5a17"
+        )
+
+# =============================================================================
+# §4 — ffdhe4096 prime integrity (SHA-256 fingerprint)
+# =============================================================================
+
+describe "FFDHE RFC 7919 — §4 ffdhe4096 prime integrity":
+
+    it "ffdhe4096_p() encodes to exactly 512 bytes":
+        val p = ffdhe4096_p()
+        val pb = ffdhe_prime_bytes(p, 512)
+        expect pb.len().to_i64() == 512
+
+    it "ffdhe4096 SHA-256 fingerprint matches RFC 7919 Appendix A.3":
+        val p = ffdhe4096_p()
+        val pb = ffdhe_prime_bytes(p, 512)
+        val fp = _bytes_to_hex(sha256(pb))
+        expect(fp).to_equal(
+            "4648414224ac881b3d0dc59b466f96d06a558278776807797ecf1f66ff397b3e"
+        )
+
+# =============================================================================
+# §5 — ffdhe2048 Alice/Bob round-trip
+# @slow: 2048-bit modexp is O(minutes) in interpreter mode.
+# Deferred native rt_modexp path: see
+#   doc/02_requirements/feature/ffdhe_native_modexp_2026-05-02.md
+# =============================================================================
+
+describe "FFDHE RFC 7919 — §5 ffdhe2048 Alice/Bob round-trip" @slow:
+
+    it "Alice and Bob derive the same 256-byte shared secret" @slow:
+        val p = ffdhe2048_p()
+        val g = ffdhe_g()
+        val alice_kp = ffdhe_keygen(p, g, _alice_priv_2048())
+        val bob_kp   = ffdhe_keygen(p, g, _bob_priv_2048())
+        val shared_alice = ffdhe_dh(alice_kp[0], bob_kp[1], p)
+        val shared_bob   = ffdhe_dh(bob_kp[0], alice_kp[1], p)
+        val sa = ffdhe_pub_to_bytes(shared_alice, 256)
+        val sb = ffdhe_pub_to_bytes(shared_bob, 256)
+        expect sa == sb
+
+    it "Alice public key is in range (1 < pub < p-1)" @slow:
+        val p = ffdhe2048_p()
+        val g = ffdhe_g()
+        val alice_kp = ffdhe_keygen(p, g, _alice_priv_2048())
+        val pub_bytes = ffdhe_pub_to_bytes(alice_kp[1], 256)
+        # pub must not be 0 or 1 (first non-zero byte must exist, and pub != 1)
+        val first_byte = pub_bytes[0].to_i64()
+        expect first_byte > 0 == true

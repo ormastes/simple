@@ -276,6 +276,41 @@ fn test_lower_ambiguous_loop_element_field_access_with_global_array_type() {
 }
 
 #[test]
+fn test_lower_field_access_uses_unique_duplicate_struct_variant() {
+    let source = "fn test(t: ObjTaker) -> i64:\n    return t.compiler_ctx.handle\n";
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+
+    let mut lowerer = Lowerer::new();
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([
+        (
+            "ObjTaker".to_string(),
+            vec![("compiler_ctx".to_string(), "CompilerContext".to_string())],
+        ),
+        (
+            "CompilerContext".to_string(),
+            vec![("alive".to_string(), "bool".to_string())],
+        ),
+    ])));
+    lowerer.set_duplicate_global_struct_defs(Arc::new(HashMap::from([(
+        "CompilerContext".to_string(),
+        vec![
+            vec![("alive".to_string(), "bool".to_string())],
+            vec![("handle".to_string(), "i64".to_string())],
+        ],
+    )])));
+    lowerer.set_ambiguous_field_names(Arc::new(HashSet::new()));
+
+    let lowered = lowerer.lower_module(&module).unwrap();
+    let func = &lowered.functions[0];
+    let HirStmt::Return(Some(expr)) = &func.body[0] else {
+        panic!("Expected return statement");
+    };
+    assert!(matches!(expr.kind, HirExprKind::FieldAccess { .. }));
+    assert_eq!(expr.ty, TypeId::I64);
+}
+
+#[test]
 fn test_lower_assignment() {
     let module = parse_and_lower("fn test() -> i64:\n    let mut x: i64 = 0\n    x = 42\n    return x\n").unwrap();
 

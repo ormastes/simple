@@ -229,9 +229,11 @@ pub(crate) fn compile_file_to_object(
             .filter_map(|(name, indices)| if indices.len() > 1 { Some(name) } else { None })
             .collect();
         lowerer.set_global_struct_defs(std::sync::Arc::new((*imports.struct_defs).clone()));
+        lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new((*imports.duplicate_struct_defs).clone()));
         lowerer.set_ambiguous_field_names(std::sync::Arc::new(ambiguous));
     } else {
         lowerer.set_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
+        lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(std::collections::HashMap::new()));
         lowerer.set_ambiguous_field_names(std::sync::Arc::new(std::collections::HashSet::new()));
     }
     // W15-H: seed the lowerer with the project-wide enum table and

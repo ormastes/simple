@@ -1,4 +1,3 @@
-
 // === Literal Tests ===
 
 #[test]
@@ -20,6 +19,24 @@ fn test_hex_literals() {
     assert_eq!(
         tokenize("0x1A2B"),
         vec![TokenKind::Integer(0x1A2B), TokenKind::Eof]
+    );
+}
+
+#[test]
+fn test_hex_u64_literals_preserve_high_bit_patterns() {
+    assert_eq!(
+        tokenize("0x8000000000000000u64"),
+        vec![
+            TokenKind::TypedInteger(i64::MIN, crate::token::NumericSuffix::U64),
+            TokenKind::Eof
+        ]
+    );
+    assert_eq!(
+        tokenize("0xFFFFFFFFFFFFFFFFu64"),
+        vec![
+            TokenKind::TypedInteger(-1, crate::token::NumericSuffix::U64),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -96,10 +113,7 @@ fn test_raw_string_literals() {
     // Backslashes are literal in raw strings
     assert_eq!(
         tokenize(r#"'hello\nworld'"#),
-        vec![
-            TokenKind::RawString("hello\\nworld".to_string()),
-            TokenKind::Eof
-        ]
+        vec![TokenKind::RawString("hello\\nworld".to_string()), TokenKind::Eof]
     );
     // Braces are literal in raw strings (no interpolation)
     assert_eq!(
@@ -118,10 +132,7 @@ fn test_raw_double_string_literals() {
     // Backslashes are literal in r"..." strings
     assert_eq!(
         tokenize(r#"r"hello\nworld""#),
-        vec![
-            TokenKind::RawString("hello\\nworld".to_string()),
-            TokenKind::Eof
-        ]
+        vec![TokenKind::RawString("hello\\nworld".to_string()), TokenKind::Eof]
     );
     // Braces are literal in r"..." strings (no interpolation)
     assert_eq!(
@@ -131,10 +142,7 @@ fn test_raw_double_string_literals() {
     // Escape sequences are not processed
     assert_eq!(
         tokenize(r#"r"tab\there""#),
-        vec![
-            TokenKind::RawString("tab\\there".to_string()),
-            TokenKind::Eof
-        ]
+        vec![TokenKind::RawString("tab\\there".to_string()), TokenKind::Eof]
     );
 }
 
@@ -148,18 +156,12 @@ fn test_raw_triple_string_literals() {
     // Multi-line raw triple-quoted strings
     assert_eq!(
         tokenize("r\"\"\"line1\nline2\"\"\""),
-        vec![
-            TokenKind::String("line1\nline2".to_string()),
-            TokenKind::Eof
-        ]
+        vec![TokenKind::String("line1\nline2".to_string()), TokenKind::Eof]
     );
     // Backslashes are literal in r"""...""" strings
     assert_eq!(
         tokenize(r#"r"""hello\nworld""""#),
-        vec![
-            TokenKind::String("hello\\nworld".to_string()),
-            TokenKind::Eof
-        ]
+        vec![TokenKind::String("hello\\nworld".to_string()), TokenKind::Eof]
     );
 }
 
@@ -178,10 +180,7 @@ fn test_triple_quoted_strings() {
     // Multi-line triple-quoted strings
     assert_eq!(
         tokenize("\"\"\"line1\nline2\"\"\""),
-        vec![
-            TokenKind::String("line1\nline2".to_string()),
-            TokenKind::Eof
-        ]
+        vec![TokenKind::String("line1\nline2".to_string()), TokenKind::Eof]
     );
 }
 
@@ -275,14 +274,8 @@ fn test_interpolated_strings() {
 
 #[test]
 fn test_bool_literals() {
-    assert_eq!(
-        tokenize("true"),
-        vec![TokenKind::Bool(true), TokenKind::Eof]
-    );
-    assert_eq!(
-        tokenize("false"),
-        vec![TokenKind::Bool(false), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("true"), vec![TokenKind::Bool(true), TokenKind::Eof]);
+    assert_eq!(tokenize("false"), vec![TokenKind::Bool(false), TokenKind::Eof]);
 }
 
 #[test]
@@ -371,7 +364,6 @@ fn test_suspension_keywords() {
     // Verify that ~ alone is still a tilde operator
     assert_eq!(tokenize("~"), vec![TokenKind::Tilde, TokenKind::Eof]);
 }
-
 
 // === Contextual Keyword Tests ===
 

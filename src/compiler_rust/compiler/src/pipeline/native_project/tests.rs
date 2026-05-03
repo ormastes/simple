@@ -503,6 +503,80 @@ fn test_re_exports_include_glob_imported_facade_symbols() {
     assert_eq!(use_map.get("log_info"), Some(&expected));
 }
 
+#[test]
+fn test_duplicate_struct_sidecar_resolves_unique_compiler_context_handle() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let compiler_root = src_root.join("compiler");
+    std::fs::create_dir_all(compiler_root.join("99.loader/loader")).unwrap();
+    std::fs::create_dir_all(compiler_root.join("99.loader")).unwrap();
+    std::fs::create_dir_all(compiler_root.join("70.backend/linker")).unwrap();
+
+    let alive_ctx = compiler_root.join("99.loader/compiler_ffi.spl");
+    let handle_ctx = compiler_root.join("99.loader/loader/compiler_ffi.spl");
+    let consumer = compiler_root.join("70.backend/linker/obj_taker.spl");
+
+    std::fs::write(
+        &alive_ctx,
+        "class CompilerContext:\n    alive: bool\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &handle_ctx,
+        "struct CompilerContext:\n    handle: i64\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &consumer,
+        "struct ObjTaker:\n    compiler_ctx: CompilerContext\n\nfn handle_of(t: ObjTaker) -> i64:\n    return t.compiler_ctx.handle\n",
+    )
+    .unwrap();
+
+    let file_sources = vec![
+        (alive_ctx.clone(), std::fs::read_to_string(&alive_ctx).unwrap()),
+        (handle_ctx.clone(), std::fs::read_to_string(&handle_ctx).unwrap()),
+        (consumer.clone(), std::fs::read_to_string(&consumer).unwrap()),
+    ];
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&compiler_root), &src_root);
+
+    let compiler_context_variants = result
+        .duplicate_struct_defs
+        .get("CompilerContext")
+        .expect("expected duplicate CompilerContext layouts");
+    assert!(compiler_context_variants
+        .iter()
+        .any(|fields| fields == &vec![("handle".to_string(), "Simple(\"i64\")".to_string())]));
+
+    let mut field_indices: std::collections::HashMap<String, std::collections::HashSet<usize>> =
+        std::collections::HashMap::new();
+    for fields in result.struct_defs.values() {
+        for (idx, (field_name, _)) in fields.iter().enumerate() {
+            field_indices.entry(field_name.clone()).or_default().insert(idx);
+        }
+    }
+    let ambiguous: std::collections::HashSet<String> = field_indices
+        .into_iter()
+        .filter_map(|(name, indices)| if indices.len() > 1 { Some(name) } else { None })
+        .collect();
+
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer).unwrap())
+        .parse()
+        .unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_global_struct_defs(std::sync::Arc::new(result.struct_defs));
+    lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(result.duplicate_struct_defs));
+    lowerer.set_ambiguous_field_names(std::sync::Arc::new(ambiguous));
+
+    let lowered = lowerer.lower_module(&ast).unwrap();
+    let func = &lowered.functions[0];
+    let crate::hir::HirStmt::Return(Some(expr)) = &func.body[0] else {
+        panic!("expected return statement");
+    };
+    assert!(matches!(expr.kind, crate::hir::HirExprKind::FieldAccess { .. }));
+    assert_eq!(expr.ty, crate::hir::TypeId::I64);
+}
+
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
 fn test_runtime_retention_symbols_include_object_undefineds_and_roots() {
@@ -566,6 +640,7 @@ void app_call(void) { rt_used(); }
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         populate_global_struct_defs: false,
@@ -652,6 +727,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
         re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
         struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         populate_global_struct_defs: false,

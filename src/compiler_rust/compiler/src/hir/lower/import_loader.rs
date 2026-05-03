@@ -12,6 +12,59 @@ use super::lowerer::Lowerer;
 use crate::CompileError;
 
 impl Lowerer {
+    fn import_target_exports_name(target: &ImportTarget, name: &str) -> bool {
+        match target {
+            ImportTarget::Glob => true,
+            ImportTarget::Single(item) => item == name,
+            ImportTarget::Aliased { name: item, alias } => item == name || alias == name,
+            ImportTarget::Group(items) => items.iter().any(|item| Self::import_target_exports_name(item, name)),
+        }
+    }
+
+    fn import_target_intersects(requested: &ImportTarget, available: &ImportTarget) -> bool {
+        let mut requested_names = Vec::new();
+        Self::requested_import_names(requested, &mut requested_names);
+        if requested_names.is_empty() {
+            return true;
+        }
+
+        requested_names
+            .iter()
+            .any(|name| Self::import_target_exports_name(available, name))
+    }
+
+    fn load_reexported_symbols_from_items(&mut self, items: &[Node], target: &ImportTarget) -> LowerResult<usize> {
+        let mut imported_count = 0;
+
+        for item in items {
+            match item {
+                Node::UseStmt(use_stmt) => {
+                    if Self::import_target_intersects(target, &use_stmt.target) {
+                        self.load_imported_types(&use_stmt.path, &use_stmt.target)?;
+                        imported_count += 1;
+                    }
+                }
+                Node::MultiUse(multi_use) => {
+                    for (path, nested_target) in &multi_use.imports {
+                        if Self::import_target_intersects(target, nested_target) {
+                            self.load_imported_types(path, nested_target)?;
+                            imported_count += 1;
+                        }
+                    }
+                }
+                Node::ExportUseStmt(export_use) => {
+                    if Self::import_target_intersects(target, &export_use.target) {
+                        self.load_imported_types(&export_use.path, &export_use.target)?;
+                        imported_count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(imported_count)
+    }
+
     fn preregister_imported_type_placeholder(&mut self, item: &Node) {
         match item {
             Node::Class(class_def) => {
@@ -292,6 +345,7 @@ impl Lowerer {
                     if self.should_import_symbol(&func_def.name, target) {
                         let ret_ty = self.resolve_type_opt(&func_def.return_type)?;
                         self.globals.insert(func_def.name.clone(), ret_ty);
+                        self.method_return_types.insert(func_def.name.clone(), ret_ty);
                         self.imported_function_names.insert(func_def.name.clone());
                         if func_def.is_pure() {
                             self.pure_functions.insert(func_def.name.clone());
@@ -364,6 +418,7 @@ impl Lowerer {
                                 let ret_ty = self.resolve_type_opt(&method.return_type)?;
                                 let method_full_name = format!("{}.{}", type_name, method.name);
                                 self.globals.insert(method_full_name.clone(), ret_ty);
+                                self.method_return_types.insert(method_full_name.clone(), ret_ty);
                                 // Mark as imported function so MIR lowering skips it as a global
                                 // (prevents IncompatibleDeclaration when codegen declares it as data)
                                 self.imported_function_names.insert(method_full_name);
@@ -379,6 +434,7 @@ impl Lowerer {
                     if self.should_import_symbol(&extern_fn.name, target) {
                         let ret_ty = self.resolve_type_opt(&extern_fn.return_type)?;
                         self.globals.insert(extern_fn.name.clone(), ret_ty);
+                        self.method_return_types.insert(extern_fn.name.clone(), ret_ty);
                         // Imported externs participate in function-value lowering via
                         // HIR globals, but they are still function symbols and must be
                         // tracked as such so later MIR/LLVM stages do not redeclare
@@ -499,6 +555,7 @@ impl Lowerer {
             }
         }
 
+        imported_count += self.load_reexported_symbols_from_items(items, target)?;
         self.materialize_import_aliases(items, target);
 
         Ok(imported_count)
@@ -740,5 +797,88 @@ impl Lowerer {
             }
             ImportTarget::Aliased { name: n, .. } => n == name, // Import if matches (will be aliased later)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hir::lower::error::LowerError;
+    use crate::hir::lower::lowerer::Lowerer;
+    use crate::hir::types::{HirExprKind, HirStmt, TypeId};
+    use crate::module_resolver::ModuleResolver;
+    use crate::test_helpers::create_test_project;
+    use simple_parser::Parser;
+    use std::fs;
+
+    #[test]
+    fn lowers_field_access_through_reexported_use_shim() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let app_io = src.join("app").join("io");
+        let app_cli = src.join("app").join("cli");
+        fs::create_dir_all(&app_io).unwrap();
+        fs::create_dir_all(&app_cli).unwrap();
+
+        fs::write(
+            app_io.join("process_ops.spl"),
+            r#"
+struct ProcessResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn shell(cmd: text) -> ProcessResult:
+    ProcessResult(stdout: cmd, stderr: "", exit_code: 0)
+"#,
+        )
+        .unwrap();
+        fs::write(
+            app_io.join("mod.spl"),
+            "use app.io.process_ops.{ProcessResult, shell}\n",
+        )
+        .unwrap();
+        let main_path = app_cli.join("main.spl");
+        fs::write(
+            &main_path,
+            r#"
+use app.io.mod (shell)
+
+fn test() -> i64:
+    val result = shell("echo hi")
+    result.exit_code
+"#,
+        )
+        .unwrap();
+
+        let source = fs::read_to_string(&main_path).unwrap();
+        let mut parser = Parser::new(&source);
+        let ast = parser.parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let mut lowerer = Lowerer::with_module_resolver(resolver, main_path.clone());
+        let lowered = lowerer.lower_module(&ast).expect("HIR lowering should succeed");
+
+        let func = lowered
+            .functions
+            .iter()
+            .find(|func| func.name == "test")
+            .expect("test function");
+        match &func.body[1] {
+            HirStmt::Expr(expr) => {
+                assert_eq!(expr.ty, TypeId::I64);
+                assert!(matches!(expr.kind, HirExprKind::FieldAccess { .. }));
+            }
+            other => panic!("expected field access expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_target_intersection_matches_group_reexports() {
+        let requested = ImportTarget::Single("shell".to_string());
+        let available = ImportTarget::Group(vec![
+            ImportTarget::Single("process_output".to_string()),
+            ImportTarget::Single("shell".to_string()),
+        ]);
+        assert!(Lowerer::import_target_intersects(&requested, &available));
     }
 }

@@ -408,7 +408,15 @@ pub fn shr_i32x8(a: [i32; 8], n: i64) -> [i32; 8] {
 
 #[no_mangle]
 pub extern "C" fn rt_simd_add_i32x4(
-    a0: i32, a1: i32, a2: i32, a3: i32, b0: i32, b1: i32, b2: i32, b3: i32, out: *mut i32,
+    a0: i32,
+    a1: i32,
+    a2: i32,
+    a3: i32,
+    b0: i32,
+    b1: i32,
+    b2: i32,
+    b3: i32,
+    out: *mut i32,
 ) {
     let r = add_i32x4([a0, a1, a2, a3], [b0, b1, b2, b3]);
     unsafe {
@@ -421,7 +429,15 @@ pub extern "C" fn rt_simd_add_i32x4(
 
 #[no_mangle]
 pub extern "C" fn rt_simd_sub_i32x4(
-    a0: i32, a1: i32, a2: i32, a3: i32, b0: i32, b1: i32, b2: i32, b3: i32, out: *mut i32,
+    a0: i32,
+    a1: i32,
+    a2: i32,
+    a3: i32,
+    b0: i32,
+    b1: i32,
+    b2: i32,
+    b3: i32,
+    out: *mut i32,
 ) {
     let r = sub_i32x4([a0, a1, a2, a3], [b0, b1, b2, b3]);
     unsafe {
@@ -434,7 +450,15 @@ pub extern "C" fn rt_simd_sub_i32x4(
 
 #[no_mangle]
 pub extern "C" fn rt_simd_mul_i32x4(
-    a0: i32, a1: i32, a2: i32, a3: i32, b0: i32, b1: i32, b2: i32, b3: i32, out: *mut i32,
+    a0: i32,
+    a1: i32,
+    a2: i32,
+    a3: i32,
+    b0: i32,
+    b1: i32,
+    b2: i32,
+    b3: i32,
+    out: *mut i32,
 ) {
     let r = mul_i32x4([a0, a1, a2, a3], [b0, b1, b2, b3]);
     unsafe {
@@ -447,7 +471,15 @@ pub extern "C" fn rt_simd_mul_i32x4(
 
 #[no_mangle]
 pub extern "C" fn rt_simd_xor_i32x4(
-    a0: i32, a1: i32, a2: i32, a3: i32, b0: i32, b1: i32, b2: i32, b3: i32, out: *mut i32,
+    a0: i32,
+    a1: i32,
+    a2: i32,
+    a3: i32,
+    b0: i32,
+    b1: i32,
+    b2: i32,
+    b3: i32,
+    out: *mut i32,
 ) {
     let r = xor_i32x4([a0, a1, a2, a3], [b0, b1, b2, b3]);
     unsafe {
@@ -460,7 +492,15 @@ pub extern "C" fn rt_simd_xor_i32x4(
 
 #[no_mangle]
 pub extern "C" fn rt_simd_and_i32x4(
-    a0: i32, a1: i32, a2: i32, a3: i32, b0: i32, b1: i32, b2: i32, b3: i32, out: *mut i32,
+    a0: i32,
+    a1: i32,
+    a2: i32,
+    a3: i32,
+    b0: i32,
+    b1: i32,
+    b2: i32,
+    b3: i32,
+    out: *mut i32,
 ) {
     let r = and_i32x4([a0, a1, a2, a3], [b0, b1, b2, b3]);
     unsafe {
@@ -473,7 +513,15 @@ pub extern "C" fn rt_simd_and_i32x4(
 
 #[no_mangle]
 pub extern "C" fn rt_simd_or_i32x4(
-    a0: i32, a1: i32, a2: i32, a3: i32, b0: i32, b1: i32, b2: i32, b3: i32, out: *mut i32,
+    a0: i32,
+    a1: i32,
+    a2: i32,
+    a3: i32,
+    b0: i32,
+    b1: i32,
+    b2: i32,
+    b3: i32,
+    out: *mut i32,
 ) {
     let r = or_i32x4([a0, a1, a2, a3], [b0, b1, b2, b3]);
     unsafe {
@@ -510,12 +558,24 @@ pub extern "C" fn rt_simd_shr_i32x4(a0: i32, a1: i32, a2: i32, a3: i32, n: i64, 
 pub extern "C" fn rt_simd_add_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0), *a.offset(1), *a.offset(2), *a.offset(3),
-            *a.offset(4), *a.offset(5), *a.offset(6), *a.offset(7),
+            *a.offset(0),
+            *a.offset(1),
+            *a.offset(2),
+            *a.offset(3),
+            *a.offset(4),
+            *a.offset(5),
+            *a.offset(6),
+            *a.offset(7),
         ];
         let bv = [
-            *b.offset(0), *b.offset(1), *b.offset(2), *b.offset(3),
-            *b.offset(4), *b.offset(5), *b.offset(6), *b.offset(7),
+            *b.offset(0),
+            *b.offset(1),
+            *b.offset(2),
+            *b.offset(3),
+            *b.offset(4),
+            *b.offset(5),
+            *b.offset(6),
+            *b.offset(7),
         ];
         let r = add_i32x8(av, bv);
         for i in 0..8 {
@@ -528,12 +588,24 @@ pub extern "C" fn rt_simd_add_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_sub_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0), *a.offset(1), *a.offset(2), *a.offset(3),
-            *a.offset(4), *a.offset(5), *a.offset(6), *a.offset(7),
+            *a.offset(0),
+            *a.offset(1),
+            *a.offset(2),
+            *a.offset(3),
+            *a.offset(4),
+            *a.offset(5),
+            *a.offset(6),
+            *a.offset(7),
         ];
         let bv = [
-            *b.offset(0), *b.offset(1), *b.offset(2), *b.offset(3),
-            *b.offset(4), *b.offset(5), *b.offset(6), *b.offset(7),
+            *b.offset(0),
+            *b.offset(1),
+            *b.offset(2),
+            *b.offset(3),
+            *b.offset(4),
+            *b.offset(5),
+            *b.offset(6),
+            *b.offset(7),
         ];
         let r = sub_i32x8(av, bv);
         for i in 0..8 {
@@ -546,12 +618,24 @@ pub extern "C" fn rt_simd_sub_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_mul_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0), *a.offset(1), *a.offset(2), *a.offset(3),
-            *a.offset(4), *a.offset(5), *a.offset(6), *a.offset(7),
+            *a.offset(0),
+            *a.offset(1),
+            *a.offset(2),
+            *a.offset(3),
+            *a.offset(4),
+            *a.offset(5),
+            *a.offset(6),
+            *a.offset(7),
         ];
         let bv = [
-            *b.offset(0), *b.offset(1), *b.offset(2), *b.offset(3),
-            *b.offset(4), *b.offset(5), *b.offset(6), *b.offset(7),
+            *b.offset(0),
+            *b.offset(1),
+            *b.offset(2),
+            *b.offset(3),
+            *b.offset(4),
+            *b.offset(5),
+            *b.offset(6),
+            *b.offset(7),
         ];
         let r = mul_i32x8(av, bv);
         for i in 0..8 {
@@ -564,12 +648,24 @@ pub extern "C" fn rt_simd_mul_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_xor_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0), *a.offset(1), *a.offset(2), *a.offset(3),
-            *a.offset(4), *a.offset(5), *a.offset(6), *a.offset(7),
+            *a.offset(0),
+            *a.offset(1),
+            *a.offset(2),
+            *a.offset(3),
+            *a.offset(4),
+            *a.offset(5),
+            *a.offset(6),
+            *a.offset(7),
         ];
         let bv = [
-            *b.offset(0), *b.offset(1), *b.offset(2), *b.offset(3),
-            *b.offset(4), *b.offset(5), *b.offset(6), *b.offset(7),
+            *b.offset(0),
+            *b.offset(1),
+            *b.offset(2),
+            *b.offset(3),
+            *b.offset(4),
+            *b.offset(5),
+            *b.offset(6),
+            *b.offset(7),
         ];
         let r = xor_i32x8(av, bv);
         for i in 0..8 {
@@ -582,12 +678,24 @@ pub extern "C" fn rt_simd_xor_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_and_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0), *a.offset(1), *a.offset(2), *a.offset(3),
-            *a.offset(4), *a.offset(5), *a.offset(6), *a.offset(7),
+            *a.offset(0),
+            *a.offset(1),
+            *a.offset(2),
+            *a.offset(3),
+            *a.offset(4),
+            *a.offset(5),
+            *a.offset(6),
+            *a.offset(7),
         ];
         let bv = [
-            *b.offset(0), *b.offset(1), *b.offset(2), *b.offset(3),
-            *b.offset(4), *b.offset(5), *b.offset(6), *b.offset(7),
+            *b.offset(0),
+            *b.offset(1),
+            *b.offset(2),
+            *b.offset(3),
+            *b.offset(4),
+            *b.offset(5),
+            *b.offset(6),
+            *b.offset(7),
         ];
         let r = and_i32x8(av, bv);
         for i in 0..8 {
@@ -600,12 +708,24 @@ pub extern "C" fn rt_simd_and_i32x8(a: *const i32, b: *const i32, out: *mut i32)
 pub extern "C" fn rt_simd_or_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0), *a.offset(1), *a.offset(2), *a.offset(3),
-            *a.offset(4), *a.offset(5), *a.offset(6), *a.offset(7),
+            *a.offset(0),
+            *a.offset(1),
+            *a.offset(2),
+            *a.offset(3),
+            *a.offset(4),
+            *a.offset(5),
+            *a.offset(6),
+            *a.offset(7),
         ];
         let bv = [
-            *b.offset(0), *b.offset(1), *b.offset(2), *b.offset(3),
-            *b.offset(4), *b.offset(5), *b.offset(6), *b.offset(7),
+            *b.offset(0),
+            *b.offset(1),
+            *b.offset(2),
+            *b.offset(3),
+            *b.offset(4),
+            *b.offset(5),
+            *b.offset(6),
+            *b.offset(7),
         ];
         let r = or_i32x8(av, bv);
         for i in 0..8 {
@@ -618,8 +738,14 @@ pub extern "C" fn rt_simd_or_i32x8(a: *const i32, b: *const i32, out: *mut i32) 
 pub extern "C" fn rt_simd_shl_i32x8(a: *const i32, n: i64, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0), *a.offset(1), *a.offset(2), *a.offset(3),
-            *a.offset(4), *a.offset(5), *a.offset(6), *a.offset(7),
+            *a.offset(0),
+            *a.offset(1),
+            *a.offset(2),
+            *a.offset(3),
+            *a.offset(4),
+            *a.offset(5),
+            *a.offset(6),
+            *a.offset(7),
         ];
         let r = shl_i32x8(av, n);
         for i in 0..8 {
@@ -632,8 +758,14 @@ pub extern "C" fn rt_simd_shl_i32x8(a: *const i32, n: i64, out: *mut i32) {
 pub extern "C" fn rt_simd_shr_i32x8(a: *const i32, n: i64, out: *mut i32) {
     unsafe {
         let av = [
-            *a.offset(0), *a.offset(1), *a.offset(2), *a.offset(3),
-            *a.offset(4), *a.offset(5), *a.offset(6), *a.offset(7),
+            *a.offset(0),
+            *a.offset(1),
+            *a.offset(2),
+            *a.offset(3),
+            *a.offset(4),
+            *a.offset(5),
+            *a.offset(6),
+            *a.offset(7),
         ];
         let r = shr_i32x8(av, n);
         for i in 0..8 {
@@ -712,7 +844,16 @@ mod tests {
 
     #[test]
     fn shl_shr_round_trip_x8() {
-        let v = [0x000000FF_i32, 0x00007F7F, 0x000F0F0F, 0x00010203, 0x00ABCDEF, 0x00112233, 0x00AA5555, 0x007FFFFF];
+        let v = [
+            0x000000FF_i32,
+            0x00007F7F,
+            0x000F0F0F,
+            0x00010203,
+            0x00ABCDEF,
+            0x00112233,
+            0x00AA5555,
+            0x007FFFFF,
+        ];
         let shifted = shl_i32x8(v, 8);
         assert_eq!(shr_i32x8(shifted, 8), v);
     }
@@ -730,12 +871,7 @@ mod tests {
         let b = [1_i32, -1, 0, -1];
         assert_eq!(
             add_i32x4(a, b),
-            [
-                i32::MAX.wrapping_add(1),
-                (-1_i32).wrapping_add(-1),
-                0,
-                0,
-            ]
+            [i32::MAX.wrapping_add(1), (-1_i32).wrapping_add(-1), 0, 0,]
         );
     }
 
@@ -750,15 +886,7 @@ mod tests {
     fn sub_wrap_x4() {
         let a = [i32::MIN, 0, 1, -1];
         let b = [1_i32, 1, -1, 1];
-        assert_eq!(
-            sub_i32x4(a, b),
-            [
-                i32::MIN.wrapping_sub(1),
-                -1,
-                2,
-                -2,
-            ]
-        );
+        assert_eq!(sub_i32x4(a, b), [i32::MIN.wrapping_sub(1), -1, 2, -2,]);
     }
 
     #[test]
@@ -774,12 +902,7 @@ mod tests {
         let b = [2_i32, -1, 7, -1];
         assert_eq!(
             mul_i32x4(a, b),
-            [
-                i32::MAX.wrapping_mul(2),
-                1,
-                0,
-                i32::MIN.wrapping_mul(-1),
-            ]
+            [i32::MAX.wrapping_mul(2), 1, 0, i32::MIN.wrapping_mul(-1),]
         );
     }
 

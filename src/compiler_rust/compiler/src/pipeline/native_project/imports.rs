@@ -17,6 +17,11 @@ pub(crate) struct ImportMapResult {
     pub re_exports: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     /// Global struct definitions: struct_name -> field names (in order).
     pub struct_defs: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Duplicate global struct/class definitions keyed by bare type name.
+    /// Each entry preserves the full field layout for every colliding
+    /// definition so the HIR lowerer can disambiguate field lookups by the
+    /// requested field name instead of relying on the lossy first-wins map.
+    pub duplicate_struct_defs: std::collections::HashMap<String, Vec<Vec<(String, String)>>>,
     /// Global enum definitions: enum_name -> variants, where each variant is
     /// `(variant_name, payload_arity)`. `payload_arity = None` means a unit
     /// variant (no fields); `Some(n)` means a payload variant with `n` fields
@@ -203,6 +208,7 @@ pub(crate) fn build_import_map(
 
     let mut raw_to_mangled: HashMap<String, Vec<String>> = HashMap::new();
     let mut struct_defs: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut duplicate_struct_defs: HashMap<String, Vec<Vec<(String, String)>>> = HashMap::new();
     let mut enum_defs: HashMap<String, Vec<(String, Option<usize>)>> = HashMap::new();
     let mut data_exports: HashSet<String> = HashSet::new();
 
@@ -250,7 +256,7 @@ pub(crate) fn build_import_map(
                                     (f.name.clone(), ty_name)
                                 })
                                 .collect();
-                            struct_defs.entry(c.name.clone()).or_insert(fields);
+                            record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &c.name, fields);
                         }
                         for m in &c.methods {
                             if !m.body.statements.is_empty() {
@@ -311,7 +317,7 @@ pub(crate) fn build_import_map(
                                     (f.name.clone(), ty_name)
                                 })
                                 .collect();
-                            struct_defs.entry(s.name.clone()).or_insert(fields);
+                            record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &s.name, fields);
                         }
                         for m in &s.methods {
                             if !m.body.statements.is_empty() {
@@ -367,7 +373,7 @@ pub(crate) fn build_import_map(
                                     })
                                     .collect();
                                 if !named.is_empty() {
-                                    struct_defs.entry(v.name.clone()).or_insert(named);
+                                    record_struct_fields(&mut struct_defs, &mut duplicate_struct_defs, &v.name, named);
                                 }
                             }
                         }
@@ -506,8 +512,35 @@ pub(crate) fn build_import_map(
         all_mangled: raw_to_mangled,
         re_exports,
         struct_defs,
+        duplicate_struct_defs,
         enum_defs,
         data_exports,
+    }
+}
+
+fn record_struct_fields(
+    struct_defs: &mut std::collections::HashMap<String, Vec<(String, String)>>,
+    duplicate_struct_defs: &mut std::collections::HashMap<String, Vec<Vec<(String, String)>>>,
+    name: &str,
+    fields: Vec<(String, String)>,
+) {
+    if fields.is_empty() {
+        return;
+    }
+
+    match struct_defs.get(name) {
+        None => {
+            struct_defs.insert(name.to_string(), fields);
+        }
+        Some(existing) if *existing == fields => {}
+        Some(existing) => {
+            let variants = duplicate_struct_defs
+                .entry(name.to_string())
+                .or_insert_with(|| vec![existing.clone()]);
+            if !variants.iter().any(|candidate| candidate == &fields) {
+                variants.push(fields);
+            }
+        }
     }
 }
 

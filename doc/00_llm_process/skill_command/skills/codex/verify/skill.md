@@ -64,9 +64,14 @@ Scan for stub patterns — any match is a **FAIL**:
 - **Reliability:** error handling complete, `Result<T, E>` + `?` used consistently
 - **Maintainability:** files under 800 lines, no duplication
 - **Core/MCP regression gate:** when compiler/core/lib or MCP/LSP files changed, require passing:
-  - `sh scripts/check-core-runtime-smoke.shs <runtime>`
-  - `SIMPLE_BINARY=<runtime> sh scripts/check-mcp-native-smoke.shs`
-  - If npm packaging/release flow changed: `sh scripts/check-mcp-package-smoke.shs`
+  - `<runtime> check src/compiler`
+  - `<runtime> check src/lib`
+  - `<runtime> check src/app/mcp`
+  - `<runtime> check src/app/simple_lsp_mcp`
+  - `SIMPLE_LIB=src <runtime> test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`
+  - If npm packaging/release flow changed:
+  - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server`
+  - `<runtime> native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server`
 
 ### Phase 6: Documentation Freshness
 

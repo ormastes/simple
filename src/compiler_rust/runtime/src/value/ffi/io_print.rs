@@ -258,6 +258,19 @@ pub extern "C" fn rt_value_to_string(v: RuntimeValue) -> RuntimeValue {
     unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
 }
 
+/// Convert a raw native `u64` payload to a string RuntimeValue.
+///
+/// Native codegen keeps `u64` scalars as raw 64-bit integers. Values with any
+/// high bits set cannot be losslessly boxed into the 61-bit tagged-int
+/// RuntimeValue representation, so callers must route unsigned stringification
+/// through this helper instead of `rt_value_to_string`.
+#[no_mangle]
+pub extern "C" fn rt_raw_u64_to_string(raw: i64) -> RuntimeValue {
+    let s = (raw as u64).to_string();
+    let bytes = s.as_bytes();
+    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+}
+
 /// Format a RuntimeValue using a format specifier string.
 /// The format spec follows Python conventions: [[fill]align][sign][#][0][width][grouping][.precision][type]
 ///
@@ -884,6 +897,21 @@ mod tests {
         assert!(float_str.starts_with("3.25") || float_str == "3.139999999999997");
         assert_eq!(value_to_display_string(RuntimeValue::from_bool(true)), "true");
         assert_eq!(value_to_display_string(RuntimeValue::from_bool(false)), "false");
+    }
+
+    #[test]
+    fn test_raw_u64_to_string_preserves_high_bit_patterns() {
+        let top_bit = rt_raw_u64_to_string(i64::MIN);
+        let all_bits = rt_raw_u64_to_string(-1);
+        let marker = rt_raw_u64_to_string(0xCAFEBABEDEADBEEFu64 as i64);
+
+        let top_bit_text = value_to_display_string(top_bit);
+        let all_bits_text = value_to_display_string(all_bits);
+        let marker_text = value_to_display_string(marker);
+
+        assert_eq!(top_bit_text, "9223372036854775808");
+        assert_eq!(all_bits_text, "18446744073709551615");
+        assert_eq!(marker_text, "14627333968688430831");
     }
 
     #[test]

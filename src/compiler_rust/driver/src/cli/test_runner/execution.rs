@@ -1355,7 +1355,13 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     });
     let helpers_section = if helpers_used { SPIPE_INLINE_HELPERS } else { "" };
 
-    let wrapped = format!("{}\n{}\n{}\nfn main():\n{}", import_parts.join("\n"), helpers_section, top_joined, body_joined);
+    let wrapped = format!(
+        "{}\n{}\n{}\nfn main():\n{}",
+        import_parts.join("\n"),
+        helpers_section,
+        top_joined,
+        body_joined
+    );
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
