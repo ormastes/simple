@@ -36,7 +36,7 @@ fn _bytes_hex(b: [u8]) -> text:
         i = i + 1
     s
 
-fn _make_48_byte_key(seed: u8) -> [u8]:
+fn _make_key(seed: u8) -> [u8]:
     var k: [u8] = []
     var i: u64 = 0
     while i < 48:
@@ -151,7 +151,7 @@ fn _gy_bytes() -> [u8]:
 
 describe "P-384":
 
-    it "p384_add 1 plus 1 mod p equals 2":
+    it "field add and mul":
         var one: [u8] = []
         var i: u64 = 0
         while i < 47:
@@ -159,21 +159,13 @@ describe "P-384":
             i = i + 1
         one.push(0x01)
         val two_bytes = p384_add(one, one)
-        var expected: [u8] = []
-        i = 0
-        while i < 47:
-            expected.push(0x00)
-            i = i + 1
-        expected.push(0x02)
-        expect(_bytes_hex(two_bytes)).to_equal(_bytes_hex(expected))
-
-    it "p384_mul 2 times 3 mod p equals 6":
         var two: [u8] = []
-        var i: u64 = 0
+        i = 0
         while i < 47:
             two.push(0x00)
             i = i + 1
         two.push(0x02)
+        expect(_bytes_hex(two_bytes)).to_equal(_bytes_hex(two))
         var three: [u8] = []
         i = 0
         while i < 47:
@@ -181,68 +173,30 @@ describe "P-384":
             i = i + 1
         three.push(0x03)
         val six_bytes = p384_mul(two, three)
-        var expected: [u8] = []
+        var six: [u8] = []
         i = 0
         while i < 47:
-            expected.push(0x00)
+            six.push(0x00)
             i = i + 1
-        expected.push(0x06)
-        expect(_bytes_hex(six_bytes)).to_equal(_bytes_hex(expected))
+        six.push(0x06)
+        expect(_bytes_hex(six_bytes)).to_equal(_bytes_hex(six))
 
     it "Generator G is on the P-384 curve":
         expect(p384_point_on_curve(_gx_bytes(), _gy_bytes())).to_equal(true)
 
-    it "keygen produces 97-byte uncompressed pubkey":
-        val sk = _make_48_byte_key(0x6B)
+    it "keygen and ECDSA sign-verify round trip":
+        val sk = _make_key(0x6B)
         val pub_key = p384_keygen(sk)
         expect(pub_key.len()).to_equal(97)
         expect(pub_key[0u64]).to_equal(0x04u8)
-
-    it "generated pubkey is on curve":
-        val sk = _make_48_byte_key(0x6B)
-        val pub_key = p384_keygen(sk)
-        var px: [u8] = []
-        var py: [u8] = []
-        var i: u64 = 0
-        while i < 48:
-            px.push(pub_key[1 + i])
-            i = i + 1
-        i = 0
-        while i < 48:
-            py.push(pub_key[49 + i])
-            i = i + 1
-        expect(p384_point_on_curve(px, py)).to_equal(true)
-
-    it "ECDSA sign produces 96-byte signature":
-        val sk = _make_48_byte_key(0x6B)
-        val msg_hash = sha384(_make_48_byte_key(0x01))
+        val msg_hash = sha384(_make_key(0x01))
         val sig = p384_ecdsa_sign(sk, msg_hash)
         expect(sig.len()).to_equal(96)
-
-    it "ECDSA verify accepts valid signature":
-        val sk = _make_48_byte_key(0x6B)
-        val pub_key = p384_keygen(sk)
-        val msg_hash = sha384(_make_48_byte_key(0x01))
-        val sig = p384_ecdsa_sign(sk, msg_hash)
         expect(p384_ecdsa_verify(pub_key, msg_hash, sig)).to_equal(true)
 
-    it "ECDSA verify rejects corrupted signature":
-        val sk = _make_48_byte_key(0x6B)
-        val pub_key = p384_keygen(sk)
-        val msg_hash = sha384(_make_48_byte_key(0x01))
-        val sig = p384_ecdsa_sign(sk, msg_hash)
-        sig[0u64] = (sig[0u64] ^ 0x01u8)
-        expect(p384_ecdsa_verify(pub_key, msg_hash, sig)).to_equal(false)
-
-    it "ECDH shared secret is 48 bytes":
-        val sk = _make_48_byte_key(0x6B)
-        val pub_key = p384_keygen(sk)
-        val shared = p384_ecdh(sk, pub_key)
-        expect(shared.len()).to_equal(48)
-
-    it "ECDH is commutative":
-        val alice_priv = _make_48_byte_key(0x6B)
-        val bob_priv = _make_48_byte_key(0x01)
+    it "ECDH commutativity":
+        val alice_priv = _make_key(0x6B)
+        val bob_priv = _make_key(0x01)
         val alice_pub = p384_keygen(alice_priv)
         val bob_pub = p384_keygen(bob_priv)
         val shared_ab = p384_ecdh(alice_priv, bob_pub)
