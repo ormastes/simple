@@ -105,6 +105,34 @@ fn a64_lower_const_int(ctx: ISelContext, v: i64) -> LoweredOperand:
 
     LoweredOperand(insts: insts, result: dest, ctx: new_ctx)
 
+fn a64_emit_load_imm(dest: Operand, v: i64) -> [MachInst]:
+    var uval = v
+    if uval < 0:
+        uval = uval + 9223372036854775807
+        uval = uval + 1
+
+    val chunk0 = uval % 65536
+    val chunk1_raw = uval / 65536
+    val chunk1 = chunk1_raw % 65536
+    val chunk2_raw = chunk1_raw / 65536
+    val chunk2 = chunk2_raw % 65536
+    val chunk3 = chunk2_raw / 65536
+
+    var insts: [MachInst] = []
+    insts.push(new_mach_inst(A64_OP_MOVZ, [dest, op_imm(chunk0)]))
+    if chunk1 != 0:
+        insts.push(new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk1), op_imm(16)]))
+    if chunk2 != 0:
+        insts.push(new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk2), op_imm(32)]))
+    if chunk3 != 0:
+        insts.push(new_mach_inst(A64_OP_MOVK, [dest, op_imm(chunk3), op_imm(48)]))
+    insts
+
+fn a64_alloc_temp(ctx: ISelContext) -> LoweredOperand:
+    val next_ctx = isel_alloc_vreg(ctx)
+    val temp = op_reg(virtual_reg(isel_get_vreg(next_ctx)))
+    LoweredOperand(insts: [], result: temp, ctx: next_ctx)
+
 # ============================================================================
 # Instruction Selection - Core
 # ============================================================================
@@ -292,6 +320,61 @@ fn a64_select_scalar_bitmanip(ctx: ISelContext, dest: Operand, name: text, src: 
     if name == "bit_bitreverse":
         insts.push(new_mach_inst(A64_OP_RBIT, [dest, src]))
         return ISelInstResult(insts: insts, ctx: ctx)
+
+    if name == "bit_popcount":
+        val rhs_tmp = a64_alloc_temp(ctx)
+        val helper_tmp = a64_alloc_temp(rhs_tmp.ctx)
+        val mask_tmp = a64_alloc_temp(helper_tmp.ctx)
+        val rhs = rhs_tmp.result
+        val helper = helper_tmp.result
+        val mask = mask_tmp.result
+
+        # Scalar SWAR popcount for a 64-bit value using existing integer ops.
+        insts.push(new_mach_inst(A64_OP_MOV, [dest, src]))
+        for inst in a64_emit_load_imm(helper, 1):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_LSR, [rhs, dest, helper]))
+        for inst in a64_emit_load_imm(mask, 0x5555555555555555):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_AND, [rhs, rhs, mask]))
+        insts.push(new_mach_inst(A64_OP_SUB, [dest, dest, rhs]))
+
+        for inst in a64_emit_load_imm(helper, 2):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_LSR, [rhs, dest, helper]))
+        for inst in a64_emit_load_imm(mask, 0x3333333333333333):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_AND, [rhs, rhs, mask]))
+        insts.push(new_mach_inst(A64_OP_AND, [helper, dest, mask]))
+        insts.push(new_mach_inst(A64_OP_ADD, [dest, helper, rhs]))
+
+        for inst in a64_emit_load_imm(helper, 4):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_LSR, [rhs, dest, helper]))
+        insts.push(new_mach_inst(A64_OP_ADD, [dest, dest, rhs]))
+        for inst in a64_emit_load_imm(mask, 0x0f0f0f0f0f0f0f0f):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_AND, [dest, dest, mask]))
+
+        for inst in a64_emit_load_imm(helper, 8):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_LSR, [rhs, dest, helper]))
+        insts.push(new_mach_inst(A64_OP_ADD, [dest, dest, rhs]))
+
+        for inst in a64_emit_load_imm(helper, 16):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_LSR, [rhs, dest, helper]))
+        insts.push(new_mach_inst(A64_OP_ADD, [dest, dest, rhs]))
+
+        for inst in a64_emit_load_imm(helper, 32):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_LSR, [rhs, dest, helper]))
+        insts.push(new_mach_inst(A64_OP_ADD, [dest, dest, rhs]))
+
+        for inst in a64_emit_load_imm(mask, 0x7f):
+            insts.push(inst)
+        insts.push(new_mach_inst(A64_OP_AND, [dest, dest, mask]))
+        return ISelInstResult(insts: insts, ctx: mask_tmp.ctx)
 
     ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
 
