@@ -647,43 +647,32 @@ fn aria_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]:
 
     val rks: [[u8]] = _key_schedule(key)
 
-    # Decryption round keys (RFC 5794 §2.6):
-    # dk1 = ek_{nr+1}
-    # dk_i = A(ek_{nr+2-i})  for i=2..nr
-    # dk_{nr+1} = ek_1
-    # Build dks indexed 0..nr (size nr+1)
-    var dks: [[u8]] = []
-    # dk1 = rks[nr]  (ek_{nr+1})
-    dks.push(rks[nri])
-    # dk2..dk_nr = diffuse(rks[nr-1]) .. diffuse(rks[1])
-    var j: i64 = nri - 1
-    while j >= 1:
-        dks.push(_diffuse(rks[j - 1]))
-        j = j - 1
-    # dk_{nr+1} = rks[0]  (ek_1)
-    dks.push(rks[0])
-
     var state: [u8] = _new_buf(16)
     var i: u64 = 0
     while i < 16:
         state.push(_u8_at(ciphertext, i))
         i = i + 1
 
-    # Rounds 1..nr-1: XOR dk, substitute, diffuse
-    # Per RFC 5794 §2.6: decryption uses SL2 for odd rounds, SL1 for even rounds
-    # (swapped from encryption which uses SL1/SL2 for odd/even).
-    var round: i64 = 1
-    while round < nri:
-        val rk: [u8] = dks[round - 1]
-        val after_xor: [u8] = _xor16(state, rk)
-        val after_sub: [u8] = if (round % 2) == 1: _sub_sl2(after_xor) else: _sub_sl1(after_xor)
-        state = _diffuse(after_sub)
-        round = round + 1
+    # Step 1: undo the final encryption round (round nr).
+    # Encryption final round: CT = SL(state XOR ek_nr) XOR ek_{nr+1}
+    # For nr=12 (even): SL = SL2, so CT = SL2(state XOR ek12) XOR ek13
+    # Inverse: state = SL2^{-1}(CT XOR ek13) XOR ek12 = SL1(CT XOR rks[nr]) XOR rks[nr-1]
+    # For nr=14 (even): same formula.
+    # For nr=16 (even): same formula.
+    # All supported key sizes give even nr (12, 14, 16), so final enc round always uses SL2.
+    val undo_xor: [u8] = _xor16(state, rks[nri])
+    val undo_sub: [u8] = _sub_sl1(undo_xor)
+    state = _xor16(undo_sub, rks[nri - 1])
 
-    # Final round: XOR dk_nr, SL1 (odd position corresponds to enc round 1), XOR dk_{nr+1}
-    # Decrypt final round nr undoes encrypt round 1 (odd → enc used SL1 → dec uses SL1)
-    val rk_nr: [u8] = dks[nri - 1]
-    val after_xor_nr: [u8] = _xor16(state, rk_nr)
-    val after_sub_nr: [u8] = _sub_sl1(after_xor_nr)
-    val rk_final: [u8] = dks[nri]
-    _xor16(after_sub_nr, rk_final)
+    # Step 2: undo rounds nr-1 down to 1.
+    # For odd encryption round r: state_out = A(SL1(state_in XOR ek_r))
+    # Inverse: state_in = SL2(A(state_out)) XOR ek_r
+    # For even encryption round r: state_out = A(SL2(state_in XOR ek_r))
+    # Inverse: state_in = SL1(A(state_out)) XOR ek_r
+    var r: i64 = nri - 1
+    while r >= 1:
+        val rk: [u8] = rks[r - 1]
+        val ad: [u8] = _diffuse(state)
+        state = _xor16(if (r % 2) == 1: _sub_sl2(ad) else: _sub_sl1(ad), rk)
+        r = r - 1
+    state
