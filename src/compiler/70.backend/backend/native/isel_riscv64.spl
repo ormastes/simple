@@ -20,9 +20,10 @@ use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_i
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{RiscvTargetContract, riscv_linux_target_contract}
+use compiler.mir.intrinsics.{BIT_ROTATE_LEFT, BIT_ROTATE_RIGHT, BIT_CLZ, BIT_CTZ, BIT_BSWAP}
 use compiler.backend.native.mach_inst.{RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7, RV_X8, RV_X9, RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15, RV_X16, RV_X17, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X28, RV_X29, RV_X30, RV_X31}
 use compiler.backend.native.mach_inst.{RV_ARG_REGS, RV_CALLEE_SAVED}
-use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC, RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET, RV_OP_CALL, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ}
+use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC, RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET, RV_OP_CALL, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ, RV_OP_ROL, RV_OP_ROR, RV_OP_CLZ, RV_OP_CTZ, RV_OP_REV8}
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 
@@ -78,12 +79,10 @@ fn rv_isel_unsupported(message: text):
 
 fn rv_module_has_scalable_vec(module: MirModule) -> bool:
     """Return true if any function local has ScalableVec type (deferred lowering guard)."""
-    val func_keys = module.functions_keys(functions)
+    val func_keys = module.functions.keys()
     for key in func_keys:
         val func = module.functions[key]
-        val local_keys = func.locals_keys(locals)
-        for lkey in local_keys:
-            val local = func.locals[lkey]
+        for local in func.locals:
             match local.type_.kind:
                 case ScalableVec(_, _): return true
                 case _: ()
@@ -98,7 +97,7 @@ fn isel_module_riscv64(module: MirModule) -> MachModule:
     var mach_module = new_mach_module(module.name)
     var ctx = new_isel_context()
 
-    val func_keys = module.functions_keys(functions)
+    val func_keys = module.functions.keys()
     for key in func_keys:
         val func = module.functions[key]
         var result = rv_isel_function(ctx, func)
@@ -120,7 +119,7 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
 
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
-        next_vreg: func.locals_len(locals) + 100,
+        next_vreg: func.locals.len() + 100,
         frame_slots: ctx.frame_slots,
         next_frame_offset: 0,
         extern_symbols: ctx.extern_symbols,
@@ -130,7 +129,7 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
 
     # Allocate frame slots for locals that need stack space
     for local in func.locals:
-        val size = local.type__size_bytes(type_)
+        val size = local.type_.size_bytes()
         local_ctx = isel_alloc_frame_slot(local_ctx, local.id.id, size)
 
     # Generate prologue block
@@ -189,7 +188,9 @@ fn rv_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
     ISelFuncResult(func: mach_func, ctx: out_ctx)
 
 fn rv_isel_block(ctx: ISelContext, block: MirBlock) -> ISelBlockResult:
-    val label = if block.has_label: block.label_value else: "bb{block.id.id}"
+    val label = match block.label:
+        case Some(lbl): lbl
+        case None: "bb{block.id.id}"
     var mach_block = new_mach_block(label, block.id.id)
     var current_ctx = ctx
 
@@ -228,6 +229,8 @@ fn rv_isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
             rv_isel_load(ctx, dest, ptr)
         case Store(ptr, value):
             rv_isel_store(ctx, ptr, value)
+        case Intrinsic(dest, name, args):
+            rv_isel_intrinsic(ctx, dest, name, args)
         case Call(dest, func_op, args):
             rv_isel_call(ctx, dest, func_op, args)
         case GetField(dest, base, field):
@@ -255,6 +258,49 @@ fn rv_isel_copy(ctx: ISelContext, dest: LocalId, src: LocalId) -> ISelInstResult
     # MV rd, rs (pseudo: ADDI rd, rs, 0)
     val inst = new_mach_inst(RV_OP_MV, [local_vreg_op(dest.id), local_vreg_op(src.id)])
     ISelInstResult(insts: [inst], ctx: ctx)
+
+fn rv_select_scalar_bitmanip(ctx: ISelContext, dest: Operand, name: text, args: [Operand]) -> ISelInstResult:
+    if name == BIT_ROTATE_LEFT:
+        if args.len() != 2:
+            return ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+        return ISelInstResult(insts: [new_mach_inst(RV_OP_ROL, [dest, args[0], args[1]])], ctx: ctx)
+
+    if name == BIT_ROTATE_RIGHT:
+        if args.len() != 2:
+            return ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+        return ISelInstResult(insts: [new_mach_inst(RV_OP_ROR, [dest, args[0], args[1]])], ctx: ctx)
+
+    if args.len() != 1:
+        return ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+
+    if name == BIT_CLZ:
+        return ISelInstResult(insts: [new_mach_inst(RV_OP_CLZ, [dest, args[0]])], ctx: ctx)
+    if name == BIT_CTZ:
+        return ISelInstResult(insts: [new_mach_inst(RV_OP_CTZ, [dest, args[0]])], ctx: ctx)
+    if name == BIT_BSWAP:
+        return ISelInstResult(insts: [new_mach_inst(RV_OP_REV8, [dest, args[0]])], ctx: ctx)
+
+    ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+
+fn rv_isel_intrinsic(ctx: ISelContext, dest: LocalId?, name: text, args: [MirOperand]) -> ISelInstResult:
+    match dest:
+        case Some(dest_local):
+            var insts: [MachInst] = []
+            var current_ctx = ctx
+            var lowered_args: [Operand] = []
+            for arg in args:
+                val low = rv_lower_operand(current_ctx, arg)
+                current_ctx = low.ctx
+                for inst in low.insts:
+                    insts.push(inst)
+                lowered_args.push(low.result)
+
+            val selected = rv_select_scalar_bitmanip(current_ctx, local_vreg_op(dest_local.id), name, lowered_args)
+            for inst in selected.insts:
+                insts.push(inst)
+            ISelInstResult(insts: insts, ctx: selected.ctx)
+        case None:
+            ISelInstResult(insts: [], ctx: ctx)
 
 # ============================================================================
 # Binary Operations
@@ -423,7 +469,7 @@ fn rv_isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirO
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
 fn rv_isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult:
-    val size = type__size_bytes(type_)
+    val size = type_.size_bytes()
     val aligned = if size < 16: 16 else: size
     # Round up to multiple of 16
     var alloc_size = aligned
@@ -455,7 +501,7 @@ fn rv_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [Mir
     var current_ctx = ctx
 
     # Lower arguments into ABI registers (a0-a7 = x10-x17)
-    for i in 0..args_len(args):
+    for i in 0..args.len():
         val arg_low = rv_lower_operand(current_ctx, args[i])
         current_ctx = arg_low.ctx
         for ai in arg_low.insts:
@@ -483,9 +529,10 @@ fn rv_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [Mir
             rv_isel_unsupported("call target")
 
     # Move return value from a0 (x10)
-    if has_dest:
-        val d = dest_value
-        insts.push(new_mach_inst(RV_OP_MV, [local_vreg_op(d.id), op_phys(RV_X10)]))
+    match dest:
+        case Some(d):
+            insts.push(new_mach_inst(RV_OP_MV, [local_vreg_op(d.id), op_phys(RV_X10)]))
+        case None: ()
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
@@ -512,13 +559,14 @@ fn rv_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
 
 fn rv_isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
     var insts: [MachInst] = []
-    if has_value:
-        val v = value_value
-        val low = rv_lower_operand(ctx, v)
-        for ai in low.insts:
-            insts.push(ai)
-        # MV a0, result (move return value to a0 = x10)
-        insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X10), low.result]))
+    match value:
+        case Some(v):
+            val low = rv_lower_operand(ctx, v)
+            for ai in low.insts:
+                insts.push(ai)
+            # MV a0, result (move return value to a0 = x10)
+            insts.push(new_mach_inst(RV_OP_MV, [op_phys(RV_X10), low.result]))
+        case None: ()
     # Epilogue: restore ra, s0, adjust sp, return
     # LD ra, offset(sp)
     insts.push(new_mach_inst(RV_OP_LD, [op_phys(RV_X1), op_mem(physical_reg(RV_X2), 0)]))
@@ -545,7 +593,7 @@ fn rv_isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], de
     var current_ctx = val_low.ctx
 
     # Generate LI + BEQ chain for each case
-    for i in 0..targets_len(targets):
+    for i in 0..targets.len():
         val target = targets[i]
         # Load case value into temp vreg
         val case_low = isel_fresh_dest(current_ctx)

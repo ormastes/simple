@@ -52,6 +52,7 @@ fn init_monoio() {
     monoio_thread::init_runtime_thread();
 }
 
+#[cfg(feature = "runtime-symbol-table")]
 #[ctor::ctor]
 fn register_static_runtime_symbols_with_abi() {
     register_static_runtime_symbols();
@@ -196,6 +197,7 @@ pub extern "C" fn simple_runtime_abi_version() -> u32 {
 }
 
 pub fn register_static_runtime_symbols() {
+    #[cfg(feature = "runtime-symbol-table")]
     let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
 }
 

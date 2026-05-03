@@ -33,7 +33,7 @@ pub extern "C" fn rt_sha1_new() -> i64 {
     #[cfg(not(feature = "runtime-sha"))]
     {
         runtime_sha_unavailable("rt_sha1_new");
-        return -1;
+        -1
     }
 
     #[cfg(feature = "runtime-sha")]
@@ -57,7 +57,6 @@ pub unsafe extern "C" fn rt_sha1_write(handle: i64, data_ptr: *const u8, data_le
         let _ = data_ptr;
         let _ = data_len;
         runtime_sha_unavailable("rt_sha1_write");
-        return;
     }
 
     #[cfg(feature = "runtime-sha")]
@@ -80,7 +79,7 @@ pub extern "C" fn rt_sha1_finish(handle: i64) -> RuntimeValue {
     {
         let _ = handle;
         runtime_sha_unavailable("rt_sha1_finish");
-        return RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR);
+        RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR)
     }
 
     #[cfg(feature = "runtime-sha")]
@@ -104,7 +103,7 @@ pub extern "C" fn rt_sha1_finish_bytes(handle: i64) -> RuntimeValue {
     {
         let _ = handle;
         runtime_sha_unavailable("rt_sha1_finish_bytes");
-        return RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR);
+        RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR)
     }
 
     #[cfg(feature = "runtime-sha")]
@@ -127,7 +126,6 @@ pub extern "C" fn rt_sha1_reset(handle: i64) {
     {
         let _ = handle;
         runtime_sha_unavailable("rt_sha1_reset");
-        return;
     }
 
     #[cfg(feature = "runtime-sha")]
@@ -145,7 +143,6 @@ pub extern "C" fn rt_sha1_free(handle: i64) {
     #[cfg(not(feature = "runtime-sha"))]
     {
         let _ = handle;
-        return;
     }
 
     #[cfg(feature = "runtime-sha")]
@@ -161,7 +158,7 @@ pub extern "C" fn rt_sha1_finish_base64(handle: i64) -> RuntimeValue {
     {
         let _ = handle;
         runtime_sha_unavailable("rt_sha1_finish_base64");
-        return RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR);
+        RuntimeValue::from_special(crate::value::tags::SPECIAL_ERROR)
     }
 
     #[cfg(feature = "runtime-sha")]

@@ -476,10 +476,10 @@ mod tests {
     #[test]
     fn test_test_meta_with_kind() {
         let span = Span::new(0, 10, 1, 0);
-        let slow_meta = TestMeta::with_kind("slow test".to_string(), span.clone(), TestKind::Slow);
+        let slow_meta = TestMeta::with_kind("slow test".to_string(), span, TestKind::Slow);
         assert!(slow_meta.is_slow());
 
-        let skip_meta = TestMeta::with_kind("skipped test".to_string(), span.clone(), TestKind::Skipped);
+        let skip_meta = TestMeta::with_kind("skipped test".to_string(), span, TestKind::Skipped);
         assert!(skip_meta.is_skipped());
     }
 
@@ -499,10 +499,10 @@ mod tests {
     #[test]
     fn test_group_meta() {
         let span = Span::new(0, 100, 1, 0);
-        let mut group = TestGroupMeta::new("Math operations".to_string(), span.clone());
+        let mut group = TestGroupMeta::new("Math operations".to_string(), span);
 
-        let test1 = TestMeta::new("adds numbers".to_string(), span.clone());
-        let test2 = TestMeta::with_kind("handles overflow".to_string(), span.clone(), TestKind::Slow);
+        let test1 = TestMeta::new("adds numbers".to_string(), span);
+        let test2 = TestMeta::with_kind("handles overflow".to_string(), span, TestKind::Slow);
 
         group.add_test(test1, &[]);
         group.add_test(test2, &[]);
@@ -516,10 +516,10 @@ mod tests {
         let span = Span::new(0, 100, 1, 0);
         let mut file_meta = FileTestMeta::new();
 
-        let mut group = TestGroupMeta::new("Group".to_string(), span.clone());
-        group.add_test(TestMeta::new("test1".to_string(), span.clone()), &[]);
+        let mut group = TestGroupMeta::new("Group".to_string(), span);
+        group.add_test(TestMeta::new("test1".to_string(), span), &[]);
         group.add_test(
-            TestMeta::with_kind("test2".to_string(), span.clone(), TestKind::Skipped),
+            TestMeta::with_kind("test2".to_string(), span, TestKind::Skipped),
             &[],
         );
 

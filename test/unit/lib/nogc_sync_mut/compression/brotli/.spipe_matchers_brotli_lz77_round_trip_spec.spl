@@ -6,7 +6,7 @@
 # The encoder picks the LZ77 path when:
 #   - distinct(input) <= 4    (simple-prefix literal tree)
 #   - data[p..n] = data[p-d..n-d] for some prefix p in 0..=130 and distance d
-#   - cop_len = n-p in 2..=133, with the 70..133 tier requiring p=130 so the
+#   - cop_len = n-p in 2..=261, with the 70..261 tier requiring p=130 so the
 #     encoder can use insert-length code 16 and ICP kind 10
 # Otherwise it falls back to the literal-only or uncompressed paths.
 # All paths must round-trip byte-exactly through the decoder.
@@ -225,15 +225,32 @@ fn _a129b_periodic_264() -> [u8]:
     _repeat_a_then_b(129, 1, 134)
 
 # 295 bytes with a 130-byte period prefix (129x'A' + 'B') and a 165-byte tail.
-# This is the widened single-command boundary: p=130, copy_len=165,
+# This is the top of copy-length code 18: p=130, copy_len=165,
 # insert-length code 16, copy-length code 18, and ICP kind 10.
 fn _a129b_periodic_295() -> [u8]:
     _repeat_a_then_b(129, 1, 165)
 
-# 296 bytes on the same period, one byte beyond the widened copy code 18 range.
-# The encoder must fall back while preserving a byte-exact round trip.
+# 296 bytes on the same period, one byte into the next decoder-supported copy
+# bucket: p=130, copy_len=166, insert-length code 16, copy-length code 19.
 fn _a129b_periodic_296() -> [u8]:
     _repeat_a_then_b(129, 1, 166)
+
+# 328 bytes with a 130-byte period prefix (129x'A' + 'B') and a 198-byte tail.
+# This is the first copy-length code 19 case: p=130, copy_len=198,
+# insert-length code 16, copy-length code 19, and ICP kind 10.
+fn _a129b_periodic_328() -> [u8]:
+    _repeat_a_then_b(129, 1, 198)
+
+# 391 bytes with a 130-byte period prefix (129x'A' + 'B') and a 261-byte tail.
+# This is the widened single-command boundary: p=130, copy_len=261,
+# insert-length code 16, copy-length code 19, and ICP kind 10.
+fn _a129b_periodic_391() -> [u8]:
+    _repeat_a_then_b(129, 1, 261)
+
+# 392 bytes on the same period, one byte beyond the widened copy code 19 range.
+# The encoder must fall back while preserving a byte-exact round trip.
+fn _a129b_periodic_392() -> [u8]:
+    _repeat_a_then_b(129, 1, 262)
 
 # 264 bytes with a 131-byte period prefix (130x'A' + 'B') and a 133-byte tail.
 # The first usable backreference is at p=131, just outside the still-bounded
@@ -461,8 +478,32 @@ describe("brotli_encode (LZ77) — round-trip"):
         val out = result.unwrap()
         expect _bytes_equal(out, payload) == true
 
-    it("round-trips a 296-byte repeat just beyond the widened copy-length boundary"):
+    it("round-trips the 296-byte first copy-code-19 case"):
         val payload = _a129b_periodic_296()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 328-byte first copy-code-19 base case"):
+        val payload = _a129b_periodic_328()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 391-byte widened copy-length boundary"):
+        val payload = _a129b_periodic_391()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a 392-byte repeat just beyond the widened copy-length boundary"):
+        val payload = _a129b_periodic_392()
         val encoded = brotli_encode(payload)
         val result = brotli_decode(encoded)
         expect result.is_err() == false
@@ -557,9 +598,21 @@ describe("brotli_encode (LZ77) — size advantage"):
         val compressed = brotli_encode(payload)
         expect compressed.len() < raw.len() == true
 
-    it("296-byte over-budget repeat is no smaller than the 295-byte boundary case"):
-        val at_limit = brotli_encode(_a129b_periodic_295())
-        val over_limit = brotli_encode(_a129b_periodic_296())
+    it("296-byte first copy-code-19 case stays smaller than uncompressed fallback"):
+        val payload = _a129b_periodic_296()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("391-byte widened boundary stays smaller than uncompressed fallback"):
+        val payload = _a129b_periodic_391()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("392-byte over-budget repeat is no smaller than the 391-byte boundary case"):
+        val at_limit = brotli_encode(_a129b_periodic_391())
+        val over_limit = brotli_encode(_a129b_periodic_392())
         expect over_limit.len() >= at_limit.len() == true
 
     it("264-byte 131-period repeat is no smaller than the 263-byte boundary case"):

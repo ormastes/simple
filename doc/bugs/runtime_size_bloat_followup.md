@@ -338,3 +338,37 @@ Follow-on implication:
 - route minimal app/native UI lanes explicitly through `--runtime-bundle runtime`
 - avoid passing `src/compiler` to narrow app builds unless the entry actually
   requires compiler services
+
+## 11. Additional May 2026 Static Runtime Symbol Table Evidence
+
+Further size-map analysis on **2026-05-03** showed that current-source narrow
+runtime-only binaries were still carrying a large always-linked runtime symbol
+registry:
+
+- `src/compiler_rust/runtime/build.rs` generated `RUNTIME_SYMBOL_ENTRIES` from
+  the full `RUNTIME_SYMBOL_NAMES` list
+- `src/compiler_rust/runtime/src/lib.rs` always included that generated table
+  and registered it at startup through a `#[ctor]`
+- the result was a very large `.rodata` symbol-name blob plus additional linked
+  code and relocation surface even for tiny static native apps
+
+Measured against fresh current-source bootstrap runtime archives:
+
+- before gating the static runtime symbol table:
+  - stripped narrow hello: **1,539,872 bytes**
+  - `.text`: **890,968**
+  - `.rodata`: **306,208**
+- after gating the static runtime symbol table out of the default runtime lane:
+  - stripped narrow hello: **447,840 bytes**
+  - stripped narrow minimal TUI: **447,840 bytes**
+  - `.text`: **311,128**
+  - `.rodata`: **51,968**
+
+Interpretation:
+
+- the static runtime symbol registry was one of the dominant remaining size
+  roots in the narrow lane
+- removing it from the default runtime build reduced the fresh current-source
+  narrow binary by roughly **71%**
+- the registry should remain opt-in for loader/test scenarios rather than
+  always-on for ordinary static native applications

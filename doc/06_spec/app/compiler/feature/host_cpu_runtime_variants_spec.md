@@ -3,25 +3,33 @@
 Executable artifact:
 - `doc/06_spec/app/compiler/feature/host_cpu_runtime_variants_spec.spl`
 
-## Requirement Coverage
+## What The Executable Spec Covers
 
-- `REQ-001` to `REQ-004`: expressed in the executable spec and covered by `simple-simd` host config unit tests for first-use persistence, round-trip parsing, `SIMPLE_CPU_CONFIG_PATH`, and active-tier precedence.
-- `REQ-005` and `REQ-006`: expressed in the executable spec and covered by `simple-simd` host config canonicalization tests for full-file rewrite, allowed-subset clamping, duplicate removal, and rejection of invalid edits outside `enabled.*`.
-- `REQ-006`: also verified by malformed-config reload tests that ensure long-lived processes observe on-disk changes instead of using stale cached data forever.
-- `REQ-007`: expressed in the executable spec and covered by `simple-native-loader` dynamic provider tests for sibling probe ordering, default search-path behavior, and fail-fast handling when a higher-priority variant exists but is broken.
-- `REQ-008` and `REQ-009`: expressed in the executable spec and covered by loader and runtime package manifest tests for `runtime_variants[]` round-trip, invalid-manifest fail-closed behavior, and embedded-resource fallback when the highest compatible resource is absent.
-- `REQ-010`: expressed in the executable spec and covered by compiler cache-key tests plus driver build-cache tests that hash the active SIMD tier instead of raw host detection.
-- `REQ-011`: expressed in the executable spec and covered by stdlib variant-root ordering tests plus compiler module/path-resolution tests driven by `cpu_config.sdn`.
-- `REQ-012` and `REQ-013`: expressed in the executable spec and covered by loader/interpreter runtime-candidate ordering tests and package runtime-variant selection tests for collapse through implemented v1 fallback tiers.
+- The `.spl` file is now a behavioral model, not a literal checklist. It executes input/output scenarios for:
+  - active-tier precedence: override, then `cpu_config.sdn` `enabled.simd_tier`, then detection
+  - enabled instruction-set clamping to `support ∩ simple_support` in canonical order
+  - runtime-library probe ordering and implemented-tier collapse
+  - embedded package runtime fallback when the highest compatible metadata entry is missing
+  - fail-closed manifest validity rules for truncated or malformed trailing metadata
+  - cache identity changes and stdlib variant-root ordering changes when the active tier changes
 
-## Scenario Notes
+## Honest Scope Boundary
 
-- Downscoping `enabled.simd_tier` to `scalar` must change compiler defaults, cache identity, stdlib root ordering, and runtime-library selection together.
-- Truncated or malformed manifest sections must fail closed and must not silently degrade to scalar/default metadata.
-- Embedded runtime selection must continue through lower compatible variants until it finds a present resource.
-- The executable `.spl` artifact is intentionally minimal and requirement-oriented; the heavier behavior validation stays in the Rust unit/integration tests named above.
+- This spec layer does not have a repo-exposed Simple API for the Rust internals that actually parse SDN, load dynamic libraries, or read package manifests.
+- Because ownership for this follow-up is limited to the spec files, the executable `.spl` models the required behavioral contract rather than directly invoking the Rust implementation.
+- The real implementation evidence for those same rules remains in the Rust tests across `simple-simd`, `simple-native-loader`, `simple-runtime`, `simple-compiler`, `simple-driver`, and the mirrored package readers.
 
-## Artifact Status
+## Requirement Traceability
 
-- The repo contract now has the expected executable `.spl` system spec for this feature.
-- This Markdown file remains the traceability note linking requirement groups to the executable spec and the lower-level Rust verification surface.
+- `REQ-001` to `REQ-004`: modeled in the executable spec and implemented in `simple-simd` host config tests for path override, precedence, and first-use config behavior.
+- `REQ-005` and `REQ-006`: modeled in the executable spec and implemented in `simple-simd` canonicalization tests for rewrite, dedupe, and clamp semantics.
+- `REQ-007`: modeled in the executable spec and implemented in `simple-native-loader` plus interpreter dynamic-loader tests for sibling probe order, default search-path behavior, and fallback handling.
+- `REQ-008` and `REQ-009`: modeled in the executable spec and implemented in loader/runtime package tests for `runtime_variants` round-trip, fail-closed manifest parsing, and embedded-resource fallback.
+- `REQ-010`: modeled in the executable spec and implemented in compiler and driver cache-key tests keyed by active SIMD tier.
+- `REQ-011`: modeled in the executable spec and implemented in compiler stdlib-root and path-resolution tests driven by `cpu_config.sdn`.
+- `REQ-012` and `REQ-013`: modeled in the executable spec and implemented in runtime-variant selection tests covering the v1 matrix and collapse through implemented fallback tiers.
+
+## Residual Limitation
+
+- This file no longer claims end-to-end executable verification of the Rust implementation from SSpec alone.
+- If the repo later exposes a Simple-facing API for host-config parsing, package manifest loading, or runtime variant selection, the `.spl` should be upgraded from contract-model scenarios to direct system calls against that API.

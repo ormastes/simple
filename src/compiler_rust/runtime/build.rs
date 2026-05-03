@@ -7,11 +7,13 @@ fn main() {
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let source = manifest_dir.join("../common/src/runtime_symbols.rs");
     let content = fs::read_to_string(&source).expect("read runtime_symbols.rs");
     let runtime_src = manifest_dir.join("src");
+    let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
 
     // Symbols provided by simple-native-all (not the runtime stub) when driver-hooks is active.
     // Under driver-hooks, the runtime stub is cfg-gated out; the real C symbol lives in native_all.
@@ -49,6 +51,13 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let mut generated = String::new();
     generated.push_str("use simple_runtime_abi::RuntimeSymbolEntry;\n\n");
+
+    if !runtime_symbol_table {
+        generated.push_str("pub static RUNTIME_SYMBOL_ENTRIES: &[RuntimeSymbolEntry] = &[];\n");
+        fs::write(out_dir.join("runtime_symbol_entries.rs"), generated).expect("write runtime symbol entries");
+        return;
+    }
+
     generated.push_str("mod exported_symbols {\n");
     generated.push_str("    unsafe extern \"C\" {\n");
     for symbol in &symbols {

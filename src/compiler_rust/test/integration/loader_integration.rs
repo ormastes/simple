@@ -2,10 +2,8 @@
 //! Tests ModuleLoader, ModuleRegistry, SMF loading, and symbol resolution
 //! Focus: Public function coverage for simple_loader
 
-#![allow(unused_imports, unused_variables)]
-
 use simple_driver::Runner;
-use simple_loader::smf::{SmfHeader, SmfSection, SectionType};
+use simple_loader::smf::{SmfHeader, SectionType};
 use simple_loader::{ModuleLoader, ModuleRegistry};
 use std::fs;
 use std::io::Cursor;
@@ -18,8 +16,7 @@ use tempfile::tempdir;
 #[test]
 fn test_module_loader_new() {
     let loader = ModuleLoader::new();
-    // Just verify it doesn't panic
-    let _ = loader;
+    drop(loader);
 }
 
 #[test]
@@ -111,8 +108,7 @@ fn test_loaded_module_source_hash() {
     let module = loader.load(&smf_path).expect("load");
 
     let hash = module.source_hash();
-    // Hash is a u64
-    let _ = hash;
+    assert_eq!(std::mem::size_of_val(&hash), std::mem::size_of::<u64>());
 }
 
 #[test]
@@ -129,8 +125,7 @@ fn test_loaded_module_is_reloadable() {
     let module = loader.load(&smf_path).expect("load");
 
     let reloadable = module.is_reloadable();
-    // Should return a boolean
-    let _ = reloadable;
+    assert_eq!(std::mem::size_of_val(&reloadable), std::mem::size_of::<bool>());
 }
 
 #[test]
@@ -148,8 +143,9 @@ fn test_loaded_module_get_function() {
 
     // Try to get main function
     let func: Option<fn() -> i32> = module.get_function("main");
-    // May or may not find it depending on symbol visibility
-    let _ = func;
+    if let Some(main) = func {
+        assert_eq!(main(), 77);
+    }
 }
 
 // =============================================================================
@@ -188,7 +184,7 @@ fn test_module_registry_unload() {
         .expect("compile");
 
     let registry = ModuleRegistry::new();
-    let _module = registry.load(&smf_path).expect("load");
+    registry.load(&smf_path).expect("load");
 
     let unloaded = registry.unload(&smf_path);
     assert!(unloaded, "Should unload successfully");
@@ -238,12 +234,13 @@ fn test_module_registry_resolve_symbol() {
         .expect("compile");
 
     let registry = ModuleRegistry::new();
-    let _module = registry.load(&smf_path).expect("load");
+    registry.load(&smf_path).expect("load");
 
     // Try to resolve main symbol
     let symbol = registry.resolve_symbol("main");
-    // May or may not find it
-    let _ = symbol;
+    if let Some(symbol) = symbol {
+        assert_ne!(symbol, 0, "Resolved symbol address should be non-zero");
+    }
 }
 
 // =============================================================================
@@ -282,8 +279,7 @@ fn test_smf_header_has_debug_info() {
     let header = SmfHeader::read(&mut cursor).expect("read header");
 
     let has_debug = header.has_debug_info();
-    // Should return a boolean
-    let _ = has_debug;
+    assert_eq!(std::mem::size_of_val(&has_debug), std::mem::size_of::<bool>());
 }
 
 #[test]
@@ -369,7 +365,7 @@ fn test_reload_preserves_other_modules() {
 
     let registry = ModuleRegistry::new();
 
-    let _mod1 = registry.load(&smf1).expect("load 1");
+    registry.load(&smf1).expect("load 1");
     let mod2 = registry.load(&smf2).expect("load 2");
 
     // Recompile and reload mod1

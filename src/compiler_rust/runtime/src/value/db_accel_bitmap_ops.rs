@@ -222,6 +222,7 @@ mod tests {
         assert_eq!(read_runtime_array(result), vec![0b1011, 0b0101, 0b1111]);
     }
 
+    #[cfg(feature = "runtime-symbol-table")]
     #[test]
     fn bitmap_exports_register_for_static_symbol_resolution() {
         crate::register_static_runtime_symbols();

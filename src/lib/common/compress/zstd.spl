@@ -8,10 +8,6 @@ val ZSTD_MAGIC: u32 = 0xFD2FB528u32
 val ZSTD_LL_MAX_TABLE_LOG: i64 = 9
 val ZSTD_ML_MAX_TABLE_LOG: i64 = 9
 val ZSTD_OF_MAX_TABLE_LOG: i64 = 8
-val ZSTD_EXACT_FRESH_TABLE_LITERAL_REGENERATED_SIZE: i64 = 4
-val ZSTD_EXACT_FRESH_TABLE_LITERAL_PAYLOAD: [u8] = [
-    0x84u8, 0x43u8, 0x20u8, 0x10u8, 0x80u8, 0x0Du8
-]
 val ZSTD_LL_DEFAULT_DISTRIBUTION: [i64] = [
     4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1,
     2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
@@ -968,19 +964,6 @@ fn _zstd_decode_huffman_4streams(input: [u8], stream_start: i64, stream_end: i64
         return Err(stream4_res.unwrap_err())
     Ok(stream1_res.unwrap() + stream2_res.unwrap() + stream3_res.unwrap() + stream4_res.unwrap())
 
-fn _zstd_matches_exact_fresh_table_literal_lane(input: [u8], payload_start: i64, payload_end: i64, size_format: i64, regenerated_size: i64) -> bool:
-    if size_format != 0 or regenerated_size != ZSTD_EXACT_FRESH_TABLE_LITERAL_REGENERATED_SIZE:
-        return false
-    val payload_len = payload_end - payload_start
-    if payload_len != ZSTD_EXACT_FRESH_TABLE_LITERAL_PAYLOAD.len():
-        return false
-    var idx = 0
-    while idx < payload_len:
-        if input[payload_start + idx] != ZSTD_EXACT_FRESH_TABLE_LITERAL_PAYLOAD[idx]:
-            return false
-        idx = idx + 1
-    true
-
 fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64, previous_table_state: ZstdHufTableState?) -> Result<(ZstdLiteralsSection, ZstdHufTableState?), CompressionError>:
     if block_start >= block_end:
         return Err(CompressionError.TruncatedInput("zstd literals header"))
@@ -1065,18 +1048,7 @@ fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64, p
     if payload_end > block_end:
         return Err(CompressionError.TruncatedInput("zstd compressed literals payload"))
     if literals_type == 2:
-        # Bounded support: accept only the exact in-tree fresh-table
-        # single-stream direct-weight payload. All adjacent fresh-table forms
-        # stay fail-closed until separately proven against host zstd.
-        if _zstd_matches_exact_fresh_table_literal_lane(input, payload_start, payload_end, size_format, regenerated_size):
-            val literals_res = _zstd_decode_huffman_literals(input, payload_start, payload_end, regenerated_size)
-            if literals_res.is_err():
-                return Err(literals_res.unwrap_err())
-            val decoded = literals_res.unwrap()
-            return Ok((ZstdLiteralsSection(literals: decoded.literals, bytes_used: header_size + compressed_size), decoded.table_state))
-        if size_format == 0 or size_format == 2:
-            return Err(CompressionError.UnsupportedFeature("zstd fresh-table compressed literals beyond the exact single-stream direct-weight fixture are unsupported"))
-        return Err(CompressionError.UnsupportedFeature("zstd fresh-table compressed literals (four-stream) are not host-validated"))
+        return Err(CompressionError.UnsupportedFeature("zstd fresh-table compressed literals are unsupported"))
     if previous_table_state == nil:
         return Err(CompressionError.UnsupportedFeature("zstd treeless literals need a prior Huffman table"))
     var table_state: ZstdHufTableState? = previous_table_state

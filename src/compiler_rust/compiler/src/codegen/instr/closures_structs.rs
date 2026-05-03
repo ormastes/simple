@@ -634,7 +634,7 @@ fn try_compile_builtin_method_call<M: Module>(
             "to_i32" => TypeId::I32,
             "to_i64" | "to_int" => TypeId::I64,
             "to_f32" => TypeId::F32,
-            "to_f64" => TypeId::F64,
+            "to_f64" | "to_float" => TypeId::F64,
             _ => return Ok(Some(receiver_val)),
         };
 

@@ -1,6 +1,7 @@
 use std.spec.{describe, it, expect}
 use std.common.compress.{CompressionCodec, CompressionLevel, CompressionOptions, CompressionError, default_compression_options}
 use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
+use std.io_runtime.{shell}
 
 val HOST_VALID_FRESH_TABLE_FRAME: [u8] = [
     0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8, 0x24u8, 0x86u8, 0xF5u8, 0x01u8,
@@ -14,6 +15,11 @@ val HOST_VALID_FRESH_TABLE_FRAME: [u8] = [
     0x01u8, 0x00u8, 0x03u8, 0x18u8, 0x68u8, 0x88u8, 0x02u8, 0xBBu8,
     0x59u8, 0x9Fu8, 0xC9u8
 ]
+val HOST_VALID_FRESH_TABLE_FRAME_HEX = "28b52ffd2486f5010032040d13c0251d002419b714084978bafdfa6b6bd73c010c5c31c51c36f4f52fe1e8a7a5477a055861bdd5241719acfc01c81cbae8222101000318688802bb599fc9"
+val HOST_REJECTED_DIRECT_WEIGHT_FRAME_HEX = "28b52ffda00400000055000042800184432010800d00"
+val TMP_ROOT = "/tmp/zstd_single_sequence_compress_spec"
+
+extern fn rt_file_read_bytes(path: text) -> [u8]
 
 fn _repeated_tail_payload() -> [u8]:
     [
@@ -85,7 +91,7 @@ fn _compressed_block(payload: [u8]) -> [u8]:
         ((header >> 16) & 0xFF).to_u8()
     ] + payload
 
-fn _host_rejected_direct_huf_frame() -> [u8]:
+fn _host_rejected_direct_weight_frame() -> [u8]:
     [
         0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8,
         0xA0u8,
@@ -96,6 +102,17 @@ fn _host_rejected_direct_huf_frame() -> [u8]:
         0x80u8, 0x0Du8,
         0x00u8
     ])
+
+fn _ensure_tmp_root():
+    val result = shell("mkdir -p '" + TMP_ROOT + "'")
+    expect(result.exit_code).to_equal(0)
+
+fn _write_hex_file(path: text, hex: text):
+    val run = shell("printf '%s' '" + hex + "' | xxd -r -p > '" + path + "'")
+    expect(run.exit_code).to_equal(0)
+
+fn _read_bytes(path: text) -> [u8]:
+    rt_file_read_bytes(path) ?? []
 
 fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
     match err:
@@ -176,8 +193,45 @@ describe "zstd repeated-tail encoder fallback":
         expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
 
-    it "accepts the exact host-valid direct-Huffman single-stream fixture":
-        val frame = _host_rejected_direct_huf_frame()
+    it "fails closed on the host-rejected direct-weight single-stream candidate":
+        val frame = _host_rejected_direct_weight_frame()
         val decoded = zstd_decompress_frame(frame)
-        expect(decoded.is_err()).to_equal(false)
-        expect(decoded.unwrap()).to_equal([0x00u8, 0x01u8, 0x04u8, 0x05u8])
+        expect(decoded.is_err()).to_equal(true)
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
+
+    it "host zstd rejects the direct-weight candidate bytes":
+        _ensure_tmp_root()
+        val compressed_path = TMP_ROOT + "/direct_weight_candidate.zst"
+        _write_hex_file(compressed_path, HOST_REJECTED_DIRECT_WEIGHT_FRAME_HEX)
+        val run = shell("zstd -q -d -f '" + compressed_path + "' -o '" + compressed_path + ".out'")
+        expect(run.exit_code != 0).to_equal(true)
+
+    it "host zstd accepts the pinned fresh-table single-stream frame":
+        _ensure_tmp_root()
+        val compressed_path = TMP_ROOT + "/host_valid_fresh_table_frame.zst"
+        val output_path = TMP_ROOT + "/host_valid_fresh_table_frame.out"
+        _write_hex_file(compressed_path, HOST_VALID_FRESH_TABLE_FRAME_HEX)
+        val run = shell("zstd -q -d -f '" + compressed_path + "' -o '" + output_path + "'")
+        if run.exit_code != 0:
+            print(run.stdout)
+            print(run.stderr)
+        expect(run.exit_code).to_equal(0)
+        expect(_read_bytes(output_path)).to_equal([
+            0x54u8, 0x68u8, 0x69u8, 0x73u8, 0x20u8, 0x69u8, 0x73u8, 0x20u8,
+            0x61u8, 0x20u8, 0x73u8, 0x68u8, 0x6Fu8, 0x72u8, 0x74u8, 0x20u8,
+            0x65u8, 0x6Eu8, 0x67u8, 0x6Cu8, 0x69u8, 0x73u8, 0x68u8, 0x20u8,
+            0x73u8, 0x65u8, 0x6Eu8, 0x74u8, 0x65u8, 0x6Eu8, 0x63u8, 0x65u8,
+            0x20u8, 0x77u8, 0x69u8, 0x74u8, 0x68u8, 0x20u8, 0x72u8, 0x65u8,
+            0x70u8, 0x65u8, 0x61u8, 0x74u8, 0x65u8, 0x64u8, 0x20u8, 0x6Cu8,
+            0x65u8, 0x74u8, 0x74u8, 0x65u8, 0x72u8, 0x73u8, 0x20u8, 0x61u8,
+            0x6Eu8, 0x64u8, 0x20u8, 0x73u8, 0x70u8, 0x61u8, 0x63u8, 0x65u8,
+            0x73u8, 0x2Eu8, 0x20u8, 0x54u8, 0x68u8, 0x69u8, 0x73u8, 0x20u8,
+            0x69u8, 0x73u8, 0x20u8, 0x61u8, 0x20u8, 0x73u8, 0x68u8, 0x6Fu8,
+            0x72u8, 0x74u8, 0x20u8, 0x65u8, 0x6Eu8, 0x67u8, 0x6Cu8, 0x69u8,
+            0x73u8, 0x68u8, 0x20u8, 0x73u8, 0x65u8, 0x6Eu8, 0x74u8, 0x65u8,
+            0x6Eu8, 0x63u8, 0x65u8, 0x20u8, 0x77u8, 0x69u8, 0x74u8, 0x68u8,
+            0x20u8, 0x72u8, 0x65u8, 0x70u8, 0x65u8, 0x61u8, 0x74u8, 0x65u8,
+            0x64u8, 0x20u8, 0x6Cu8, 0x65u8, 0x74u8, 0x74u8, 0x65u8, 0x72u8,
+            0x73u8, 0x20u8, 0x61u8, 0x6Eu8, 0x64u8, 0x20u8, 0x73u8, 0x70u8,
+            0x61u8, 0x63u8, 0x65u8, 0x73u8, 0x2Eu8, 0x20u8
+        ])
