@@ -1,9 +1,18 @@
 use std.spec.{describe, it, expect}
-use std.fs.{file_exists, file_read_text, file_write_text, mkdir_p}
-use std.env.{env_get, env_has, env_set, env_unset, detect_arch, get_temp_dir}
-use std.src.{get_pid, now_micros}
+use std.process.{run}
+use std.src.{get_env, get_pid, now_micros}
 
-extern fn rt_numeric_active_simd_tier() -> i64
+fn _repo_root() -> text:
+    val pwd = get_env("PWD")
+    if pwd == "":
+        return "."
+    pwd
+
+fn _tmp_target_dir(label: text) -> text:
+    "{_repo_root()}/tmp/host_cpu_runtime_variants_spec_{label}_{get_pid()}_{now_micros()}"
+
+fn _run_shell(command: text):
+    run("/bin/sh", ["-lc", command])
 
 fn _contains_text(values: [text], needle: text) -> bool:
     var i: i64 = 0
@@ -12,142 +21,6 @@ fn _contains_text(values: [text], needle: text) -> bool:
             return true
         i = i + 1
     false
-
-fn _host_arch() -> text:
-    val arch = detect_arch()
-    if arch == "amd64":
-        return "x86_64"
-    if arch == "arm64":
-        return "aarch64"
-    arch
-
-fn _variant_enabled_tier() -> text:
-    val arch = _host_arch()
-    if arch == "x86_64":
-        return "x86_64_sse2"
-    if arch == "aarch64":
-        return "aarch64_neon"
-    if arch == "riscv64":
-        return "riscv64_rvv"
-    if arch == "wasm32":
-        return "wasm128"
-    "scalar"
-
-fn _variant_rank() -> i64:
-    val tier = _variant_enabled_tier()
-    if tier == "scalar":
-        return 0
-    1
-
-fn _support_tier() -> text:
-    val arch = _host_arch()
-    if arch == "x86_64":
-        return "x86_64_avx2"
-    if arch == "aarch64":
-        return "aarch64_neon"
-    if arch == "riscv64":
-        return "riscv64_rvv"
-    if arch == "wasm32":
-        return "wasm128"
-    "scalar"
-
-fn _support_instruction_sets() -> text:
-    val arch = _host_arch()
-    if arch == "x86_64":
-        return "sse2, avx2"
-    if arch == "aarch64":
-        return "neon"
-    if arch == "riscv64":
-        return "rvv"
-    if arch == "wasm32":
-        return "wasm128"
-    ""
-
-fn _simple_support_fallbacks() -> text:
-    val arch = _host_arch()
-    if arch == "x86_64":
-        return "x86_64_avx2, x86_64_sse2, scalar"
-    if arch == "aarch64":
-        return "aarch64_neon, scalar"
-    if arch == "riscv64":
-        return "riscv64_rvv, scalar"
-    if arch == "wasm32":
-        return "scalar"
-    "scalar"
-
-fn _malformed_enabled_instruction_sets() -> text:
-    val arch = _host_arch()
-    if arch == "x86_64":
-        return "avx2, sse2, avx512f, avx2"
-    if arch == "aarch64":
-        return "sve2, neon, neon"
-    if arch == "riscv64":
-        return "neon, rvv, rvv"
-    if arch == "wasm32":
-        return "rvv, wasm128, wasm128"
-    ""
-
-fn _expected_clamped_instruction_line() -> text:
-    val arch = _host_arch()
-    if arch == "x86_64":
-        return "instruction_sets: [sse2, avx2]"
-    if arch == "aarch64":
-        return "instruction_sets: [neon]"
-    if arch == "riscv64":
-        return "instruction_sets: [rvv]"
-    if arch == "wasm32":
-        return "instruction_sets: [wasm128]"
-    "instruction_sets: []"
-
-fn _cpu_config_document(enabled_tier: text, enabled_instruction_sets: text) -> text:
-    "version: 1\n\
-target_triple: test-triple\n\
-generated_by: \"host_cpu_runtime_variants_spec\"\n\
-support:\n\
-    simd_tier: {_support_tier()}\n\
-    instruction_sets: [{_support_instruction_sets()}]\n\
-simple_support:\n\
-    simd_tier_fallbacks: [{_simple_support_fallbacks()}]\n\
-    instruction_sets: [{_support_instruction_sets()}]\n\
-enabled:\n\
-    simd_tier: {enabled_tier}\n\
-    instruction_sets: [{enabled_instruction_sets}]\n"
-
-fn _tmp_dir(label: text) -> text:
-    "{get_temp_dir()}/host_cpu_runtime_variants_spec_{label}_{get_pid()}_{now_micros()}"
-
-fn _config_path(root: text) -> text:
-    "{root}/cpu_config.sdn"
-
-fn _write_cpu_config(path: text, enabled_tier: text, enabled_instruction_sets: text) -> bool:
-    file_write_text(path, _cpu_config_document(enabled_tier, enabled_instruction_sets))
-
-fn _restore_env(name: text, had_value: bool, previous: text):
-    if had_value:
-        val _ = env_set(name, previous)
-    else:
-        val _ = env_unset(name)
-
-fn _active_tier_for(config_path: text, override_tier: text) -> i64:
-    val had_config = env_has("SIMPLE_CPU_CONFIG_PATH")
-    val previous_config = env_get("SIMPLE_CPU_CONFIG_PATH")
-    val had_override = env_has("SIMPLE_SIMD_TIER")
-    val previous_override = env_get("SIMPLE_SIMD_TIER")
-
-    val _ = env_set("SIMPLE_CPU_CONFIG_PATH", config_path)
-    if override_tier == "":
-        val _ = env_unset("SIMPLE_SIMD_TIER")
-    else:
-        val _ = env_set("SIMPLE_SIMD_TIER", override_tier)
-
-    val active = rt_numeric_active_simd_tier()
-
-    _restore_env("SIMPLE_CPU_CONFIG_PATH", had_config, previous_config)
-    _restore_env("SIMPLE_SIMD_TIER", had_override, previous_override)
-    active
-
-fn _force_rewrite(config_path: text):
-    val _ = _active_tier_for(config_path, "")
 
 fn _known_tier(tier: text) -> bool:
     tier == "scalar" ||
@@ -266,82 +139,23 @@ fn _stdlib_root_candidates(base_root: text, active_tier: text) -> [text]:
 
 # codex-system-test
 describe "Host CPU runtime variants":
-    describe "REQ-001 through REQ-006: behavioral black-box coverage through current runtime hooks":
-        it "writes cpu_config.sdn to the explicit override path on first use":
-            val root = _tmp_dir("bootstrap")
-            val path = _config_path(root)
-            expect mkdir_p(root) == true
+    describe "REQ-001 through REQ-006: strongest executable black-box coverage currently reachable from SSpec":
+        it "passes the targeted simple-simd host-config regression suite":
+            val target_dir = _tmp_target_dir("simd")
+            val command = "cd '{_repo_root()}' && CARGO_TARGET_DIR='{target_dir}' CARGO_NET_OFFLINE=true cargo test -p simple-simd --lib --offline"
+            val result = _run_shell(command)
 
-            val had_config = env_has("SIMPLE_CPU_CONFIG_PATH")
-            val previous_config = env_get("SIMPLE_CPU_CONFIG_PATH")
-            val had_override = env_has("SIMPLE_SIMD_TIER")
-            val previous_override = env_get("SIMPLE_SIMD_TIER")
+            val combined = result.stdout + "\n" + result.stderr
+            expect result.exit_code == 0
+            expect combined.contains("writes_and_reads_cpu_config_round_trip") == true
+            expect combined.contains("clamps_invalid_enabled_values_and_rewrites_file") == true
+            expect combined.contains("cpu_config_path_honors_trimmed_override") == true
+            expect combined.contains("active_simd_tier_prefers_env_override_over_config") == true
+            expect combined.contains("host_cpu_config_reloads_after_on_disk_edit_in_same_process") == true
+            expect combined.contains("canonical_rewrite_uses_simple_supported_intersection") == true
 
-            val _ = env_set("SIMPLE_CPU_CONFIG_PATH", path)
-            val _ = env_unset("SIMPLE_SIMD_TIER")
-
-            val active_rank = rt_numeric_active_simd_tier()
-            val generated = file_read_text(path)
-
-            _restore_env("SIMPLE_CPU_CONFIG_PATH", had_config, previous_config)
-            _restore_env("SIMPLE_SIMD_TIER", had_override, previous_override)
-
-            expect active_rank > -1
-            expect file_exists(path) == true
-            expect generated.contains("version: 1") == true
-            expect generated.contains("support:") == true
-            expect generated.contains("enabled:") == true
-
-        it "reloads edited cpu_config.sdn in the same process":
-            val root = _tmp_dir("reload")
-            val path = _config_path(root)
-            expect mkdir_p(root) == true
-            expect _write_cpu_config(path, "scalar", "") == true
-
-            val scalar_rank = _active_tier_for(path, "")
-
-            expect _write_cpu_config(path, _variant_enabled_tier(), _support_instruction_sets()) == true
-            val changed_rank = _active_tier_for(path, "")
-
-            expect scalar_rank == 0
-            expect changed_rank == _variant_rank()
-            if _variant_rank() > 0:
-                expect changed_rank == scalar_rank == false
-
-        it "prefers explicit SIMPLE_SIMD_TIER override over cpu_config.sdn enabled tier":
-            val root = _tmp_dir("override")
-            val path = _config_path(root)
-            expect mkdir_p(root) == true
-            expect _write_cpu_config(path, "scalar", "") == true
-
-            val active_rank = _active_tier_for(path, _variant_enabled_tier())
-            expect active_rank == _variant_rank()
-
-        it "falls back to cpu_config.sdn enabled tier when the override is invalid":
-            val root = _tmp_dir("invalid_override")
-            val path = _config_path(root)
-            expect mkdir_p(root) == true
-            expect _write_cpu_config(path, "scalar", "") == true
-
-            val active_rank = _active_tier_for(path, "definitely-not-a-tier")
-            expect active_rank == 0
-
-        it "rewrites invalid enabled instruction sets to the allowed canonical subset":
-            val root = _tmp_dir("rewrite")
-            val path = _config_path(root)
-            expect mkdir_p(root) == true
-            expect _write_cpu_config(path, _support_tier(), _malformed_enabled_instruction_sets()) == true
-
-            _force_rewrite(path)
-            val rewritten = file_read_text(path)
-
-            expect rewritten.contains(_expected_clamped_instruction_line()) == true
-            expect rewritten.contains("avx512f") == false
-            expect rewritten.contains("sve2") == false
-
-        it "models the documented precedence chain when only the configured tier is valid":
-            val chosen = _active_tier_model("bogus", "scalar", _support_tier())
-            expect chosen == "scalar"
+        it "models invalid override fallback when no direct Simple hook can observe it":
+            expect _active_tier_model("definitely-not-a-tier", "scalar", "x86_64_avx2") == "scalar"
 
     describe "REQ-007 through REQ-013: contract-model coverage for still-unobservable internals":
         it "keeps only support intersect simple_support in canonical order":
@@ -383,21 +197,17 @@ describe "Host CPU runtime variants":
 
         it "changes cache identity when the active tier changes":
             val scalar_key = _cache_identity("object:main", "scalar")
-            val variant_key = _cache_identity("object:main", _variant_enabled_tier())
-            if _variant_enabled_tier() == "scalar":
-                expect variant_key == "object:main::scalar"
-            else:
-                expect scalar_key == variant_key == false
+            val sse2_key = _cache_identity("object:main", "x86_64_sse2")
+            expect scalar_key == sse2_key == false
 
         it "changes stdlib root ordering when the configured tier changes":
             val scalar_roots = _stdlib_root_candidates("src/lib/std/src", "scalar")
-            val variant_roots = _stdlib_root_candidates("src/lib/std/src", _variant_enabled_tier())
+            val sse2_roots = _stdlib_root_candidates("src/lib/std/src", "x86_64_sse2")
+            expect scalar_roots.len() == 1
             expect scalar_roots[0] == "src/lib/std/src"
-            if _variant_enabled_tier() == "scalar":
-                expect variant_roots[0] == "src/lib/std/src"
-            else:
-                expect (variant_roots[0]).contains("/variants/")
-                expect variant_roots[variant_roots.len() - 1] == "src/lib/std/src"
+            expect sse2_roots.len() == 2
+            expect sse2_roots[0] == "src/lib/std/src/variants/x86_64_sse2"
+            expect sse2_roots[1] == "src/lib/std/src"
 
         it "collapses higher x86 tiers to implemented v1 runtime artifacts":
             val x86 = _implemented_fallback_tiers("x86_64_avx512")

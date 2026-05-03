@@ -5,21 +5,36 @@ Executable artifact:
 
 ## What The Executable Spec Now Verifies Directly
 
-The `.spl` file is no longer only a literal contract model. It now uses current
-Simple-facing runtime hooks plus real temp files and environment variables to
-exercise the feature in-process where that is actually exposed today.
+The `.spl` file is no longer only a literal contract model, but the strongest
+behavioral path currently reachable from `simple test` is narrower than hoped.
 
-Direct behavioral coverage now includes:
-- writing a fresh `cpu_config.sdn` at an explicit `SIMPLE_CPU_CONFIG_PATH` on first use
-- editing that same file and observing the active runtime SIMD tier change again in the same process
-- explicit override precedence: `SIMPLE_SIMD_TIER` over `cpu_config.sdn`
-- invalid override fallback back to `cpu_config.sdn enabled.simd_tier`
-- canonical rewrite of malformed `enabled.instruction_sets` after a real runtime read
+Direct executable coverage now shells out to the source-of-truth Rust test
+suite in `simple-simd` and asserts that the relevant host-config regressions
+pass in a fresh isolated Cargo target dir. That executable check covers the
+real implementation for:
+- first-use `cpu_config.sdn` generation
+- invalid `enabled` clamp and rewrite
+- `SIMPLE_CPU_CONFIG_PATH` override handling
+- explicit override precedence over config
+- reload after an on-disk edit in the same process
+- canonical rewrite using `support ∩ simple_support`
 
-The behavioral hook used is the runtime-exported `rt_numeric_active_simd_tier()`
-symbol, because it is currently the strongest repo-exposed Simple entrypoint
-that flows through the active-tier resolution path backed by the Rust host CPU
-config implementation.
+This is still a real black-box command path from SSpec, but it is command-level
+behavioral verification rather than in-process function calls.
+
+## Why The Spec Does Not Call The Runtime Internals Directly
+
+I attempted to upgrade the spec further by calling a real runtime symbol from
+the `.spl` itself after writing temp config files. That works for `bin/simple -c`
+sources, but the `simple test` runner does not expose that symbol to SSpec
+execution. In other words:
+- the direct runtime hook exists in some Simple execution contexts
+- the SSpec runner used for this file cannot link it today
+
+Because of that limitation, the most honest executable route from this spec is:
+1. run a real command from SSpec
+2. build the current Rust implementation
+3. assert that the relevant implementation tests passed
 
 ## What Still Remains Modeled
 
@@ -38,29 +53,28 @@ visible.
 ## Why The Spec Stops There
 
 This follow-up was intentionally limited to the spec files, and the repo still
-does not expose direct Simple-callable APIs for:
-- parsing `cpu_config.sdn` through the Rust host-config module
+does not expose stable Simple-callable APIs for:
+- parsing `cpu_config.sdn` through the Rust host-config module from SSpec
 - asking the native loader for its candidate library list
 - invoking package runtime-variant selection directly
 - querying compiler/module-loader stdlib root candidates directly from SSpec
+- observing invalid override fallback in-process from the test runner itself
 
 Without those hooks, pretending to verify those paths end-to-end from `.spl`
-would be dishonest. The strongest feasible black-box coverage today is the
-runtime active-tier path, because it is reachable from Simple through a real
-runtime symbol and it performs actual config reads and rewrites.
+would be dishonest, so the remaining sections stay explicitly modeled.
 
 ## Traceability Split
 
-- `REQ-001` to `REQ-006`: directly behavior-tested in the `.spl` via temp
-  `cpu_config.sdn` files, env changes, real runtime calls, and rewritten-file
-  assertions.
+- `REQ-001` to `REQ-006`: executable command-level verification plus one small
+  remaining precedence model for invalid-override fallback.
 - `REQ-007` to `REQ-013`: still modeled in the `.spl` and backed by the Rust
   unit/integration tests added across `simple-native-loader`, package readers,
   `simple-compiler`, and `simple-driver`.
 
 ## Residual Limitation
 
-If the repo later exposes stable Simple-facing hooks for loader candidate
-enumeration, package runtime selection, or compiler stdlib root resolution, the
-remaining modeled sections should be upgraded to the same temp-file/env-driven
-behavioral style used here.
+If the repo later exposes stable Simple-facing hooks for host-config reads,
+loader candidate enumeration, package runtime selection, or compiler stdlib
+root resolution inside the SSpec runner, this file should be upgraded again
+from command-level verification to direct temp-file/env-driven behavioral
+scenarios.
