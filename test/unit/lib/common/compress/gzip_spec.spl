@@ -2,7 +2,7 @@
 # Tests round-trip compress/decompress and known test vectors.
 # No imports needed - describe/it/expect are built-in.
 
-use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+use std.common.compress.gzip.{gzip_compress, gzip_decompress, gzip_crc32}
 
 describe "gzip RFC 1952":
     it "round-trips Hello, World!":
@@ -45,10 +45,10 @@ describe "gzip RFC 1952":
         val decompressed = gzip_decompress(compressed)
         expect(decompressed).to_equal(empty)
 
-    it "decompresses known stored-block gzip stream for test":
-        # Hand-crafted stored-block gzip for "test" (4 bytes: 116 101 115 116)
-        # Header: 1f 8b 08 00 00 00 00 00 00 ff
-        # DEFLATE stored: 01 04 00 fb ff 74 65 73 74
+    it "decompresses known Python-generated gzip stream":
+        # From Python: gzip.compress(b"test") produces this exact stream
+        # Header: 1f 8b 08 00 00 00 00 00 00 03
+        # DEFLATE (fixed Huffman): 2b 49 2d 2e 01 00
         # CRC-32: 0c 7e 7f d8  (LE of 0xD87F7E0C)
         # ISIZE: 04 00 00 00
         var stream: [u8] = []
@@ -71,27 +71,21 @@ describe "gzip RFC 1952":
         stream.push(h7)
         var h8: u8 = 0x00u8
         stream.push(h8)
-        var h9: u8 = 0xFFu8
+        var h9: u8 = 0x03u8
         stream.push(h9)
-        # DEFLATE stored block: BFINAL=1, BTYPE=00, LEN=4, NLEN=0xFBFF, "test"
-        var d0: u8 = 0x01u8
+        # DEFLATE fixed Huffman (6 bytes)
+        var d0: u8 = 0x2Bu8
         stream.push(d0)
-        var d1: u8 = 0x04u8
+        var d1: u8 = 0x49u8
         stream.push(d1)
-        var d2: u8 = 0x00u8
+        var d2: u8 = 0x2Du8
         stream.push(d2)
-        var d3: u8 = 0xFBu8
+        var d3: u8 = 0x2Eu8
         stream.push(d3)
-        var d4: u8 = 0xFFu8
+        var d4: u8 = 0x01u8
         stream.push(d4)
-        var d5: u8 = 0x74u8
+        var d5: u8 = 0x00u8
         stream.push(d5)
-        var d6: u8 = 0x65u8
-        stream.push(d6)
-        var d7: u8 = 0x73u8
-        stream.push(d7)
-        var d8: u8 = 0x74u8
-        stream.push(d8)
         # CRC-32 (LE of 0xD87F7E0C)
         var c0: u8 = 0x0Cu8
         stream.push(c0)
@@ -138,7 +132,7 @@ describe "gzip RFC 1952":
         var t3: u8 = 116u8
         input.push(t3)
 
-        val crc = _gzip_crc32(input)
+        val crc = gzip_crc32(input)
         expect(crc).to_equal(0xD87F7E0Cu32)
 
     it "validates gzip header magic bytes":
@@ -203,7 +197,7 @@ describe "gzip RFC 1952":
         input.push(a2)
 
         var compressed = gzip_compress(input)
-        # Corrupt CRC (second-to-last 8 bytes area, specifically the CRC)
+        # Corrupt CRC (last 8 bytes area, specifically the CRC)
         val crc_offset: i64 = compressed.len() - 8
         compressed[crc_offset] = compressed[crc_offset] ^ 0x01u8
 

@@ -1004,6 +1004,16 @@ impl<'a> Parser<'a> {
                 self.expect_identifier()?
             };
 
+            if matches!(
+                name.as_str(),
+                "pass" | "pass_todo" | "pass_do_nothing" | "pass_dn"
+            ) {
+                return Err(ParseError::syntax_error_with_span(
+                    format!("reserved keyword '{}' cannot be used as a parameter name", name),
+                    param_span,
+                ));
+            }
+
             let ty = if self.check(&TokenKind::Colon) {
                 self.advance();
                 Some(self.parse_type()?)

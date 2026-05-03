@@ -249,42 +249,41 @@ class SdnTable:
     # Add row
     me add_row(row: SdnRow) -> bool:
         # If has primary key (id field), add to index
-        if row.has("id"):
-            val id = row.get("id")?
-            self.index[id] = self.rows.len()
+        val id = row.get("id")
+        if id.?:
+            self.index[id ?? ""] = self.rows.len()
 
         self.rows.push(row)
         true
 
     # Update row by primary key
     me update_row(key: text, row: SdnRow) -> bool:
-        if not self.index.has(key):
-            return false
-
-        val idx = self.index[key]
-        self.rows[idx] = row
-        true
+        for (i, current) in self.rows.enumerate():
+            if current.get("id") == Some(key):
+                self.rows[i] = row
+                self.index[key] = i
+                return true
+        false
 
     # Get row by primary key
     fn get_row(key: text) -> SdnRow?:
-        if not self.index.has(key):
-            return nil
-
-        val idx = self.index[key]
-        Some(self.rows[idx])
+        for row in self.rows:
+            if row.get("id") == Some(key):
+                return Some(row)
+        nil
 
     # Soft delete (set valid=false)
     me mark_deleted(key: text) -> bool:
-        if not self.index.has(key):
-            return false
-
-        val idx = self.index[key]
-        # NOTE: self.rows[idx].set() modifies a copy in bootstrap runtime
-        # Must read, modify, write back
-        var row = self.rows[idx]
-        row.set("valid", "false")
-        self.rows[idx] = row
-        true
+        for (i, current) in self.rows.enumerate():
+            if current.get("id") == Some(key):
+                # NOTE: self.rows[idx].set() modifies a copy in bootstrap runtime
+                # Must read, modify, write back
+                var row = current
+                row.set("valid", "false")
+                self.rows[i] = row
+                self.index[key] = i
+                return true
+        false
 
     # Delete row by primary key (alias for mark_deleted)
     me delete_row(key: text) -> bool:
@@ -310,9 +309,8 @@ class SdnTable:
     me rebuild_index():
         self.index.clear()
         for (i, row) in self.rows.enumerate():
-            if row.has("id"):
-                if val Some(id_value) = row.get("id"):
-                    self.index[id_value] = i
+            if val Some(id_value) = row.get("id"):
+                self.index[id_value] = i
 
 # ============================================================================
 # SdnDatabase - Base class for all databases
@@ -374,12 +372,13 @@ class SdnDatabase:
         var sections: [text] = []
 
         # Write strings table first
-        val strings_table = self.interner.to_sdn()
+        val strings_table: SdnTable = self.interner.to_sdn()
         sections.push(strings_table.to_sdn())
 
         # Write all other tables
         for (name, table) in self.tables:
-            sections.push(table.to_sdn())
+            val typed_table: SdnTable = table
+            sections.push(typed_table.to_sdn())
 
         val content = sections.join("\n\n") + "\n\n"
 
@@ -425,7 +424,7 @@ class SdnDatabase:
     fn export_table_sdn(name: text) -> text?:
         if not self.tables.has(name):
             return nil
-        val table = self.tables[name]
+        val table: SdnTable = self.tables[name]
         Some(table.to_sdn())
 
     # Import a table from SDN text

@@ -13,7 +13,7 @@
 
 mod crypto.types
 
-use std.simd.{Vec4i, simd_xor_i32x4, simd_shl_i32x4, simd_shr_i32x4, simd_or_i32x4, simd_and_i32x4, simd_rotr_i32x4}
+use std.simd.{Vec4i, simd_add_i32x4, simd_xor_i32x4, simd_shl_i32x4, simd_shr_i32x4, simd_or_i32x4, simd_and_i32x4, simd_rotr_i32x4}
 
 # =============================================================================
 # SHA-256 Constants and Initial Values
@@ -292,10 +292,11 @@ fn sha256_process_block_simd(h: list, block: list) -> list:
             w.get(i - 12)
         )
         val s0_v = sha256_little_sigma0_x4(v_in)
-        val s0_0 = _v4i_lane_u32(s0_v.x)
-        val s0_1 = _v4i_lane_u32(s0_v.y)
-        val s0_2 = _v4i_lane_u32(s0_v.z)
-        val s0_3 = _v4i_lane_u32(s0_v.w)
+        val s0_lanes = s0_v.to_array()
+        val s0_0 = _v4i_lane_u32(s0_lanes[0])
+        val s0_1 = _v4i_lane_u32(s0_lanes[1])
+        val s0_2 = _v4i_lane_u32(s0_lanes[2])
+        val s0_3 = _v4i_lane_u32(s0_lanes[3])
 
         # Lane 0
         val w0 = add_mod32(
@@ -547,7 +548,7 @@ fn _sha256_u32_to_i32(x: i64) -> i32:
 # 4-lane wrapping i32 add (mod 2^32). Follows ChaCha20 _vadd pattern.
 fn _sha256_vadd(a: Vec4i, b: Vec4i) -> Vec4i:
     """4-lane wrapping i32 add. Relies on Simple's i32 overflow wrapping mod 2^32."""
-    Vec4i(x: a.x + b.x, y: a.y + b.y, z: a.z + b.z, w: a.w + b.w)
+    simd_add_i32x4(a, b)
 
 # Broadcast an i64 (u32 range) constant to all 4 lanes.
 fn _sha256_vsplat(k: i64) -> Vec4i:
@@ -730,13 +731,9 @@ fn _sha256_extract_digest(state: list, lane: i64) -> list:
     var out = []
     var i = 0
     while i < 8:
-        val v = state.get(i)
-        val word: i64 = if lane == 0: v.x.to_i64()
-                        else:
-                          if lane == 1: v.y.to_i64()
-                          else:
-                            if lane == 2: v.z.to_i64()
-                            else: v.w.to_i64()
+        val v: Vec4i = state.get(i)
+        val lanes = v.to_array()
+        val word: i64 = lanes[lane.to_i32()].to_i64()
         val w32 = word & 0xFFFFFFFF
         out.push((w32 >> 24) & 0xFF)
         out.push((w32 >> 16) & 0xFF)

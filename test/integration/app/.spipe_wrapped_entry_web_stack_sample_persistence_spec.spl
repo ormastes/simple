@@ -1,35 +1,21 @@
-use app.web_stack_sample.app.{open_web_stack_sample}
+
 
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 val DB_PATH = "/tmp/web_stack_sample_persistence_{rt_getpid()}_{rt_time_now_unix_micros()}.sdn"
-val USERNAME = "persist_user"
-val EMAIL = "persist@example.com"
-val PASSWORD = "persist-pass-123"
-val TITLE = "Persistent item"
-val DETAILS = "Created before restart and found after restart"
+val RUNNER = "test/integration/app/web_stack_sample_persistence_runner.spl"
 
 fn main():
-
     describe "web_stack_sample simpledb restart persistence":
         it "persists app-surface register create login and search across reopen":
-            val seed_app = open_web_stack_sample("simpledb", DB_PATH)?
-            val register = seed_app.post_register(USERNAME, EMAIL, PASSWORD)?
-            expect register.status == 302
-            expect register.session_id.len() > 0
+            val (seed_stdout, _seed_stderr, seed_code) = rt_process_run("bin/simple", ["run", RUNNER, "seed", DB_PATH])
+            expect seed_code == 0
+            expect (seed_stdout).contains("PERSISTENCE_SEEDED")
+            expect (seed_stdout).contains("item=Persistent item")
 
-            val item = seed_app.create_item(register.session_id, TITLE, DETAILS)?
-            expect item.title == TITLE
-
-            val verify_app = open_web_stack_sample("simpledb", DB_PATH)?
-            val login = verify_app.post_login(USERNAME, PASSWORD)?
-            expect login.status == 302
-            expect login.session_id.len() > 0
-
-            val search = verify_app.search_items(login.session_id, "Persistent")?
-            expect search.status == 200
-            expect (search.body).contains("LOGIN-SUCCESS:{USERNAME}")
-            expect (search.body).contains("SEARCH-HIT:{TITLE}")
-            expect (search.body).contains(TITLE)
-            expect (search.body).contains(DETAILS)
+            val (verify_stdout, _verify_stderr, verify_code) = rt_process_run("bin/simple", ["run", RUNNER, "verify", DB_PATH])
+            expect verify_code == 0
+            expect (verify_stdout).contains("PERSISTENCE_VERIFIED")
+            expect (verify_stdout).contains("item=Persistent item")

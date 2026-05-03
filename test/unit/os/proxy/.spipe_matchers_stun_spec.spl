@@ -1,0 +1,516 @@
+"""STUN RFC 5769 §2 Known-Answer Test (KAT) vectors.
+
+Test vectors for §2.1 Sample Request, §2.2 Sample IPv4 Response,
+§2.3 Sample IPv6 Response.
+
+All byte arrays are built via .push(v.to_u8()) — never [u8] literals, which
+decode as zero bytes through rt_bytes_u8_at under the interpreter.
+(See doc/08_tracking/bug/interpreter_array_push_u8_literal_lost_2026-05-02.md)
+
+NOTE: SOFTWARE attribute (RFC type 0x8022) currently parses as
+Unknown(type_code: 0x8022, value: ...) due to
+STUN_ATTR_SOFTWARE = 0x802b (wrong code) in stun.spl.
+See doc/08_tracking/bug/stun_software_attr_wrong_type_code_2026-05-03.md
+
+NOTE: Round-trip tests use parse→build→reparse semantic comparison, not
+byte-exact wire comparison, because RFC 5769 vectors use 0x20 padding bytes
+whereas stun_build emits RFC-correct 0x00 padding (RFC 5389 §15.1 SHOULD=zero).
+"""
+
+use std.spipe.*
+
+use os.proxy.stun.{
+    StunClass, StunMethod, StunAttr, StunParseResult,
+    stun_parse, stun_build
+}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# ============================================================================
+# Fixtures (module-level — feedback_it_block_var_mutation.md)
+# All byte arrays are built via .push(v.to_u8()) to dodge the interpreter
+# [u8]-literal bug.
+# ============================================================================
+
+fn _bv(values: [i64]) -> [u8]:
+    """Build a [u8] from i64 values via the interpreter-safe push path."""
+    var buf: [u8] = []
+    for v in values:
+        buf.push(v.to_u8())
+    buf
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    """Return true iff a and b have identical length and content."""
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len().to_i64():
+        if rt_bytes_u8_at(a, i) != rt_bytes_u8_at(b, i):
+            return false
+        i = i + 1
+    true
+
+# §2.1 full wire (108 bytes): Binding Request
+fn _sec21_wire() -> [u8]:
+    _bv([
+        # Header
+        0x00i64, 0x01i64, 0x00i64, 0x58i64,   # type=BindingRequest, len=88
+        0x21i64, 0x12i64, 0xa4i64, 0x42i64,   # magic cookie
+        0xb7i64, 0xe7i64, 0xa7i64, 0x01i64,   # transaction ID (12 bytes)
+        0xbci64, 0x34i64, 0xd6i64, 0x86i64,
+        0xfai64, 0x87i64, 0xdfi64, 0xaei64,
+        # SOFTWARE attr (type 0x8022, len 16) — "STUN test client"
+        0x80i64, 0x22i64, 0x00i64, 0x10i64,
+        0x53i64, 0x54i64, 0x55i64, 0x4ei64,
+        0x20i64, 0x74i64, 0x65i64, 0x73i64,
+        0x74i64, 0x20i64, 0x63i64, 0x6ci64,
+        0x69i64, 0x65i64, 0x6ei64, 0x74i64,
+        # PRIORITY attr (type 0x0024, len 4)
+        0x00i64, 0x24i64, 0x00i64, 0x04i64,
+        0x6ei64, 0x00i64, 0x01i64, 0xffi64,
+        # ICE-CONTROLLED attr (type 0x8029, len 8)
+        0x80i64, 0x29i64, 0x00i64, 0x08i64,
+        0x93i64, 0x2fi64, 0xf9i64, 0xb1i64,
+        0x51i64, 0x26i64, 0x3bi64, 0x36i64,
+        # USERNAME attr (type 0x0006, len 9, padded to 12 with 0x20 per RFC 5769)
+        0x00i64, 0x06i64, 0x00i64, 0x09i64,
+        0x65i64, 0x76i64, 0x74i64, 0x6ai64,
+        0x3ai64, 0x68i64, 0x36i64, 0x76i64,
+        0x59i64, 0x20i64, 0x20i64, 0x20i64,
+        # MESSAGE-INTEGRITY attr (type 0x0008, len 20)
+        0x00i64, 0x08i64, 0x00i64, 0x14i64,
+        0x9ai64, 0xeai64, 0xa7i64, 0x0ci64,
+        0xbfi64, 0xd8i64, 0xcbi64, 0x56i64,
+        0x78i64, 0x1ei64, 0xf2i64, 0xb5i64,
+        0xb2i64, 0xd3i64, 0xf2i64, 0x49i64,
+        0xc1i64, 0xb5i64, 0x71i64, 0xa2i64,
+        # FINGERPRINT attr (type 0x8028, len 4)
+        0x80i64, 0x28i64, 0x00i64, 0x04i64,
+        0xe5i64, 0x7ai64, 0x3bi64, 0xcfi64
+    ])
+
+# §2.2 full wire (80 bytes): Binding Success Response (IPv4)
+fn _sec22_wire() -> [u8]:
+    _bv([
+        # Header
+        0x01i64, 0x01i64, 0x00i64, 0x3ci64,   # type=BindingSuccessResp, len=60
+        0x21i64, 0x12i64, 0xa4i64, 0x42i64,   # magic cookie
+        0xb7i64, 0xe7i64, 0xa7i64, 0x01i64,   # transaction ID
+        0xbci64, 0x34i64, 0xd6i64, 0x86i64,
+        0xfai64, 0x87i64, 0xdfi64, 0xaei64,
+        # SOFTWARE attr (type 0x8022, len 11, padded with 0x20 per RFC 5769) — "test vector"
+        0x80i64, 0x22i64, 0x00i64, 0x0bi64,
+        0x74i64, 0x65i64, 0x73i64, 0x74i64,
+        0x20i64, 0x76i64, 0x65i64, 0x63i64,
+        0x74i64, 0x6fi64, 0x72i64, 0x20i64,
+        # XOR-MAPPED-ADDRESS (IPv4): type 0x0020, len 8
+        0x00i64, 0x20i64, 0x00i64, 0x08i64,
+        0x00i64, 0x01i64, 0xa1i64, 0x47i64,   # family=IPv4, xor'd port
+        0xe1i64, 0x12i64, 0xa6i64, 0x43i64,   # xor'd IPv4 = 192.0.2.1
+        # MESSAGE-INTEGRITY (len 20)
+        0x00i64, 0x08i64, 0x00i64, 0x14i64,
+        0x2bi64, 0x91i64, 0xf5i64, 0x99i64,
+        0xfdi64, 0x9ei64, 0x90i64, 0xc3i64,
+        0x8ci64, 0x74i64, 0x89i64, 0xf9i64,
+        0x2ai64, 0xf9i64, 0xbai64, 0x53i64,
+        0xf0i64, 0x6bi64, 0xe7i64, 0xd7i64,
+        # FINGERPRINT (len 4)
+        0x80i64, 0x28i64, 0x00i64, 0x04i64,
+        0xc0i64, 0x7di64, 0x4ci64, 0x96i64
+    ])
+
+# §2.3 full wire (92 bytes): Binding Success Response (IPv6)
+fn _sec23_wire() -> [u8]:
+    _bv([
+        # Header
+        0x01i64, 0x01i64, 0x00i64, 0x48i64,   # type=BindingSuccessResp, len=72
+        0x21i64, 0x12i64, 0xa4i64, 0x42i64,   # magic cookie
+        0xb7i64, 0xe7i64, 0xa7i64, 0x01i64,   # transaction ID
+        0xbci64, 0x34i64, 0xd6i64, 0x86i64,
+        0xfai64, 0x87i64, 0xdfi64, 0xaei64,
+        # SOFTWARE attr (type 0x8022, len 11, padded with 0x20 per RFC 5769) — "test vector"
+        0x80i64, 0x22i64, 0x00i64, 0x0bi64,
+        0x74i64, 0x65i64, 0x73i64, 0x74i64,
+        0x20i64, 0x76i64, 0x65i64, 0x63i64,
+        0x74i64, 0x6fi64, 0x72i64, 0x20i64,
+        # XOR-MAPPED-ADDRESS (IPv6): type 0x0020, len 20
+        0x00i64, 0x20i64, 0x00i64, 0x14i64,
+        0x00i64, 0x02i64, 0xa1i64, 0x47i64,   # family=IPv6, xor'd port
+        0x01i64, 0x13i64, 0xa9i64, 0xfai64,   # xor'd IPv6 (16 bytes)
+        0xa5i64, 0xd3i64, 0xf1i64, 0x79i64,
+        0xbci64, 0x25i64, 0xf4i64, 0xb5i64,
+        0xbei64, 0xd2i64, 0xb9i64, 0xd9i64,
+        # MESSAGE-INTEGRITY (len 20)
+        0x00i64, 0x08i64, 0x00i64, 0x14i64,
+        0xa3i64, 0x82i64, 0x95i64, 0x4ei64,
+        0x4bi64, 0xe6i64, 0x7bi64, 0xf1i64,
+        0x17i64, 0x84i64, 0xc9i64, 0x7ci64,
+        0x82i64, 0x92i64, 0xc2i64, 0x75i64,
+        0xbfi64, 0xe3i64, 0xedi64, 0x41i64,
+        # FINGERPRINT (len 4)
+        0x80i64, 0x28i64, 0x00i64, 0x04i64,
+        0xc8i64, 0xfbi64, 0x0bi64, 0x4ci64
+    ])
+
+# ============================================================================
+# §2.1 Sample Request
+# ============================================================================
+
+describe "RFC 5769 §2.1 Sample Request — parse":
+
+    it "parses as Binding Request class and method":
+        val wire = _sec21_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunClass.Request = msg.class_:
+                if val StunMethod.Binding = msg.method:
+                    expect true == true
+                else:
+                    expect false == true
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "decodes transaction ID byte-exact":
+        val wire = _sec21_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            val txn = msg.transaction_id
+            expect txn.len().to_i64() == 12
+            expect rt_bytes_u8_at(txn, 0) == 0xb7i64
+            expect rt_bytes_u8_at(txn, 1) == 0xe7i64
+            expect rt_bytes_u8_at(txn, 2) == 0xa7i64
+            expect rt_bytes_u8_at(txn, 3) == 0x01i64
+            expect rt_bytes_u8_at(txn, 4) == 0xbci64
+            expect rt_bytes_u8_at(txn, 5) == 0x34i64
+            expect rt_bytes_u8_at(txn, 6) == 0xd6i64
+            expect rt_bytes_u8_at(txn, 7) == 0x86i64
+            expect rt_bytes_u8_at(txn, 8) == 0xfai64
+            expect rt_bytes_u8_at(txn, 9) == 0x87i64
+            expect rt_bytes_u8_at(txn, 10) == 0xdfi64
+            expect rt_bytes_u8_at(txn, 11) == 0xaei64
+        else:
+            expect false == true
+
+    it "has 6 attributes":
+        # [0]=SOFTWARE(Unknown 0x8022), [1]=PRIORITY(Unknown 0x0024),
+        # [2]=ICE-CONTROLLED(Unknown 0x8029), [3]=USERNAME,
+        # [4]=MESSAGE-INTEGRITY, [5]=FINGERPRINT(Unknown 0x8028)
+        val wire = _sec21_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            expect msg.attributes.len().to_i64() == 6
+        else:
+            expect false == true
+
+    it "attr[3] is USERNAME evtj:h6vY":
+        val wire = _sec21_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.Username(value) = msg.attributes[3]:
+                expect value == "evtj:h6vY"
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "attr[4] is MESSAGE-INTEGRITY with 20-byte HMAC-SHA1":
+        val wire = _sec21_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.MessageIntegrity(hmac) = msg.attributes[4]:
+                expect hmac.len().to_i64() == 20
+                expect rt_bytes_u8_at(hmac, 0) == 0x9ai64
+                expect rt_bytes_u8_at(hmac, 19) == 0xa2i64
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "attr[0] is SOFTWARE parsed as Unknown(0x8022) — bug stun_software_attr_wrong_type_code":
+        # STUN_ATTR_SOFTWARE is 0x802b but RFC assigns 0x8022.
+        # Until fixed, SOFTWARE parses as Unknown.
+        val wire = _sec21_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.Unknown(type_code, value) = msg.attributes[0]:
+                expect type_code == 0x8022i64
+                expect value.len().to_i64() == 16
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "attr[5] FINGERPRINT parses as Unknown(0x8028) with CRC32 e5 7a 3b cf":
+        val wire = _sec21_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.Unknown(type_code, value) = msg.attributes[5]:
+                expect type_code == 0x8028i64
+                expect value.len().to_i64() == 4
+                expect rt_bytes_u8_at(value, 0) == 0xe5i64
+                expect rt_bytes_u8_at(value, 1) == 0x7ai64
+                expect rt_bytes_u8_at(value, 2) == 0x3bi64
+                expect rt_bytes_u8_at(value, 3) == 0xcfi64
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+describe "RFC 5769 §2.1 Sample Request — semantic round-trip":
+
+    it "parse then build then reparse yields same class, method, txn_id, attr count":
+        # Note: byte-exact round-trip not possible — RFC 5769 uses 0x20 padding;
+        # stun_build emits RFC-correct 0x00 padding. Both are valid per RFC 5389.
+        val wire = _sec21_wire()
+        if val StunParseResult.Ok(msg1) = stun_parse(wire):
+            val rebuilt = stun_build(msg1)
+            if val StunParseResult.Ok(msg2) = stun_parse(rebuilt):
+                if val StunClass.Request = msg2.class_:
+                    if val StunMethod.Binding = msg2.method:
+                        expect msg2.attributes.len().to_i64() == 6
+                        expect _bytes_equal(msg2.transaction_id, msg1.transaction_id) == true
+                    else:
+                        expect false == true
+                else:
+                    expect false == true
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+# ============================================================================
+# §2.2 Sample IPv4 Response
+# ============================================================================
+
+describe "RFC 5769 §2.2 Sample IPv4 Response — parse":
+
+    it "parses as Binding SuccessResp":
+        val wire = _sec22_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunClass.SuccessResp = msg.class_:
+                if val StunMethod.Binding = msg.method:
+                    expect true == true
+                else:
+                    expect false == true
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "has 4 attributes":
+        # [0]=SOFTWARE(Unknown 0x8022), [1]=XOR-MAPPED-ADDRESS,
+        # [2]=MESSAGE-INTEGRITY, [3]=FINGERPRINT(Unknown 0x8028)
+        val wire = _sec22_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            expect msg.attributes.len().to_i64() == 4
+        else:
+            expect false == true
+
+    it "XOR-MAPPED-ADDRESS decodes to 192.0.2.1 port 32853":
+        val wire = _sec22_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.XorMappedAddress(family, ip, port) = msg.attributes[1]:
+                expect family == 0x01i64
+                expect port == 32853
+                expect ip.len().to_i64() == 4
+                expect rt_bytes_u8_at(ip, 0) == 192
+                expect rt_bytes_u8_at(ip, 1) == 0
+                expect rt_bytes_u8_at(ip, 2) == 2
+                expect rt_bytes_u8_at(ip, 3) == 1
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "MESSAGE-INTEGRITY is 20 bytes with correct boundary bytes":
+        val wire = _sec22_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.MessageIntegrity(hmac) = msg.attributes[2]:
+                expect hmac.len().to_i64() == 20
+                expect rt_bytes_u8_at(hmac, 0) == 0x2bi64
+                expect rt_bytes_u8_at(hmac, 19) == 0xd7i64
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "FINGERPRINT is Unknown(0x8028) with bytes c0 7d 4c 96":
+        val wire = _sec22_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.Unknown(type_code, value) = msg.attributes[3]:
+                expect type_code == 0x8028i64
+                expect rt_bytes_u8_at(value, 0) == 0xc0i64
+                expect rt_bytes_u8_at(value, 1) == 0x7di64
+                expect rt_bytes_u8_at(value, 2) == 0x4ci64
+                expect rt_bytes_u8_at(value, 3) == 0x96i64
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+describe "RFC 5769 §2.2 Sample IPv4 Response — semantic round-trip":
+
+    it "parse then build then reparse yields same class, method, txn_id, attr count":
+        val wire = _sec22_wire()
+        if val StunParseResult.Ok(msg1) = stun_parse(wire):
+            val rebuilt = stun_build(msg1)
+            if val StunParseResult.Ok(msg2) = stun_parse(rebuilt):
+                if val StunClass.SuccessResp = msg2.class_:
+                    if val StunMethod.Binding = msg2.method:
+                        expect msg2.attributes.len().to_i64() == 4
+                        expect _bytes_equal(msg2.transaction_id, msg1.transaction_id) == true
+                    else:
+                        expect false == true
+                else:
+                    expect false == true
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "round-tripped XOR-MAPPED-ADDRESS preserves 192.0.2.1 port 32853":
+        val wire = _sec22_wire()
+        if val StunParseResult.Ok(msg1) = stun_parse(wire):
+            val rebuilt = stun_build(msg1)
+            if val StunParseResult.Ok(msg2) = stun_parse(rebuilt):
+                if val StunAttr.XorMappedAddress(family, ip, port) = msg2.attributes[1]:
+                    expect family == 0x01i64
+                    expect port == 32853
+                    expect rt_bytes_u8_at(ip, 0) == 192
+                    expect rt_bytes_u8_at(ip, 3) == 1
+                else:
+                    expect false == true
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+# ============================================================================
+# §2.3 Sample IPv6 Response
+# ============================================================================
+
+describe "RFC 5769 §2.3 Sample IPv6 Response — parse":
+
+    it "parses as Binding SuccessResp":
+        val wire = _sec23_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunClass.SuccessResp = msg.class_:
+                if val StunMethod.Binding = msg.method:
+                    expect true == true
+                else:
+                    expect false == true
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "has 4 attributes":
+        val wire = _sec23_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            expect msg.attributes.len().to_i64() == 4
+        else:
+            expect false == true
+
+    it "XOR-MAPPED-ADDRESS decodes to 2001:db8:1234:5678:11:2233:4455:6677 port 32853":
+        val wire = _sec23_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.XorMappedAddress(family, ip, port) = msg.attributes[1]:
+                expect family == 0x02i64
+                expect port == 32853
+                expect ip.len().to_i64() == 16
+                # 2001:0db8:1234:5678:0011:2233:4455:6677
+                expect rt_bytes_u8_at(ip, 0) == 0x20i64
+                expect rt_bytes_u8_at(ip, 1) == 0x01i64
+                expect rt_bytes_u8_at(ip, 2) == 0x0di64
+                expect rt_bytes_u8_at(ip, 3) == 0xb8i64
+                expect rt_bytes_u8_at(ip, 4) == 0x12i64
+                expect rt_bytes_u8_at(ip, 5) == 0x34i64
+                expect rt_bytes_u8_at(ip, 6) == 0x56i64
+                expect rt_bytes_u8_at(ip, 7) == 0x78i64
+                expect rt_bytes_u8_at(ip, 8) == 0x00i64
+                expect rt_bytes_u8_at(ip, 9) == 0x11i64
+                expect rt_bytes_u8_at(ip, 10) == 0x22i64
+                expect rt_bytes_u8_at(ip, 11) == 0x33i64
+                expect rt_bytes_u8_at(ip, 12) == 0x44i64
+                expect rt_bytes_u8_at(ip, 13) == 0x55i64
+                expect rt_bytes_u8_at(ip, 14) == 0x66i64
+                expect rt_bytes_u8_at(ip, 15) == 0x77i64
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "MESSAGE-INTEGRITY is 20 bytes with correct boundary bytes":
+        val wire = _sec23_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.MessageIntegrity(hmac) = msg.attributes[2]:
+                expect hmac.len().to_i64() == 20
+                expect rt_bytes_u8_at(hmac, 0) == 0xa3i64
+                expect rt_bytes_u8_at(hmac, 19) == 0x41i64
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "FINGERPRINT is Unknown(0x8028) with bytes c8 fb 0b 4c":
+        val wire = _sec23_wire()
+        if val StunParseResult.Ok(msg) = stun_parse(wire):
+            if val StunAttr.Unknown(type_code, value) = msg.attributes[3]:
+                expect type_code == 0x8028i64
+                expect rt_bytes_u8_at(value, 0) == 0xc8i64
+                expect rt_bytes_u8_at(value, 1) == 0xfbi64
+                expect rt_bytes_u8_at(value, 2) == 0x0bi64
+                expect rt_bytes_u8_at(value, 3) == 0x4ci64
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+describe "RFC 5769 §2.3 Sample IPv6 Response — semantic round-trip":
+
+    it "parse then build then reparse yields same class, method, txn_id, attr count":
+        val wire = _sec23_wire()
+        if val StunParseResult.Ok(msg1) = stun_parse(wire):
+            val rebuilt = stun_build(msg1)
+            if val StunParseResult.Ok(msg2) = stun_parse(rebuilt):
+                if val StunClass.SuccessResp = msg2.class_:
+                    if val StunMethod.Binding = msg2.method:
+                        expect msg2.attributes.len().to_i64() == 4
+                        expect _bytes_equal(msg2.transaction_id, msg1.transaction_id) == true
+                    else:
+                        expect false == true
+                else:
+                    expect false == true
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+    it "round-tripped XOR-MAPPED-ADDRESS IPv6 preserves 2001:db8:: port 32853":
+        val wire = _sec23_wire()
+        if val StunParseResult.Ok(msg1) = stun_parse(wire):
+            val rebuilt = stun_build(msg1)
+            if val StunParseResult.Ok(msg2) = stun_parse(rebuilt):
+                if val StunAttr.XorMappedAddress(family, ip, port) = msg2.attributes[1]:
+                    expect family == 0x02i64
+                    expect port == 32853
+                    expect ip.len().to_i64() == 16
+                    expect rt_bytes_u8_at(ip, 0) == 0x20i64
+                    expect rt_bytes_u8_at(ip, 1) == 0x01i64
+                    expect rt_bytes_u8_at(ip, 15) == 0x77i64
+                else:
+                    expect false == true
+            else:
+                expect false == true
+        else:
+            expect false == true
+
+# ============================================================================
+# Wire-length sanity checks
+# ============================================================================
+
+describe "RFC 5769 wire buffer lengths":
+
+    it "§2.1 wire is 108 bytes":
+        expect _sec21_wire().len().to_i64() == 108
+
+    it "§2.2 wire is 80 bytes":
+        expect _sec22_wire().len().to_i64() == 80
+
+    it "§2.3 wire is 92 bytes":
+        expect _sec23_wire().len().to_i64() == 92

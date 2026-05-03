@@ -1,0 +1,195 @@
+# AES-GCM-SIV Debug Spec — Trace TC1 intermediates
+#
+# Purpose: Diagnose TC1 failure by checking AES block encryption outputs
+# against known RFC 8452 intermediate values.
+#
+# TC1 RFC 8452 intermediates (key=01 00*15, nonce=03 00*11):
+#   AES-128(key, LE32(0)||nonce) = AES(010000..., 00000000 03000000000000000000000000)
+#   auth_key = enc0[:8] || enc1[:8]
+#       enc0 = AES_key(LE32(0) || nonce) = AES(0100...0000, 00000000030000000000000000000000)
+#       enc1 = AES_key(LE32(1) || nonce) = AES(0100...0000, 01000000030000000000000000000000)
+#   RFC says auth_key = d9b360279694941a c5dbc6987ada7377
+#   RFC says enc_key  = 4004a0dcd862f2a5 7360219d2d44ef6c
+#
+# If AES encrypt works: AES(key=01000...0, block=00000000030000000000000000000000)
+#   should give a specific value from which we take first 8 bytes.
+#
+# Simple AES(zeros, zeros) = 66e94bd4ef8a2c3b884cfa59ca342b2e  (FIPS 197 A.1)
+# We verify AES(key=0100..., blk=00000000 03000000...) produces correct enc0
+
+use os.crypto.aes_gcm_siv.{aes128_gcm_siv_encrypt, aes256_gcm_siv_encrypt, AesGcmSivResult}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+extern fn rt_aes128_encrypt_block_pure(key: [u8], block: [u8]) -> [u8]
+
+fn _i64_at(buf: [u8], idx: u64) -> i64:
+    rt_bytes_u8_at(buf, idx.to_i64())
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# Build array with Value::Int elements for rt_aes128_encrypt_block_pure
+fn _aes128_enc(key16: [u8], block16: [u8]) -> [u8]:
+    var k: [u8] = rt_array_new_with_cap(16)
+    var i: u64 = 0
+    while i < 16:
+        k.push(_i64_at(key16, i))
+        i = i + 1
+    var b: [u8] = rt_array_new_with_cap(16)
+    i = 0
+    while i < 16:
+        b.push(_i64_at(block16, i))
+        i = i + 1
+    rt_aes128_encrypt_block_pure(k, b)
+
+fn _equal_bytes(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    while i < a.len():
+        if a.get(i) != b.get(i):
+            return false
+        i = i + 1
+    true
+
+# FIPS 197 A.1: AES-128(key=all-zeros, block=all-zeros) = 66e94bd4ef8a2c3b884cfa59ca342b2e
+fn _fips197_key() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _fips197_block() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+fn _fips197_expected() -> [u8]:
+    [0x66u8, 0xe9u8, 0x4bu8, 0xd4u8, 0xefu8, 0x8au8, 0x2cu8, 0x3bu8,
+     0x88u8, 0x4cu8, 0xfau8, 0x59u8, 0xcau8, 0x34u8, 0x2bu8, 0x2eu8]
+
+# TC1 KGK = 01 00*15
+fn _tc1_kgk() -> [u8]:
+    [0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+# TC1 nonce = 03 00*11
+fn _tc1_nonce() -> [u8]:
+    [0x03u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+# KD block 0: LE32(0) || nonce = 00000000 030000000000000000000000
+fn _tc1_kd_block0() -> [u8]:
+    [0x00u8, 0x00u8, 0x00u8, 0x00u8,  # LE32(0)
+     0x03u8, 0x00u8, 0x00u8, 0x00u8,  # nonce bytes 0-3
+     0x00u8, 0x00u8, 0x00u8, 0x00u8,  # nonce bytes 4-7
+     0x00u8, 0x00u8, 0x00u8, 0x00u8]  # nonce bytes 8-11
+
+# KD block 1: LE32(1) || nonce = 01000000 030000000000000000000000
+fn _tc1_kd_block1() -> [u8]:
+    [0x01u8, 0x00u8, 0x00u8, 0x00u8,  # LE32(1)
+     0x03u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+# KD block 2: LE32(2) || nonce = 02000000 030000000000000000000000
+fn _tc1_kd_block2() -> [u8]:
+    [0x02u8, 0x00u8, 0x00u8, 0x00u8,  # LE32(2)
+     0x03u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+# KD block 3: LE32(3) || nonce = 03000000 030000000000000000000000
+fn _tc1_kd_block3() -> [u8]:
+    [0x03u8, 0x00u8, 0x00u8, 0x00u8,  # LE32(3)
+     0x03u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8,
+     0x00u8, 0x00u8, 0x00u8, 0x00u8]
+
+# RFC 8452 intermediate: enc0 = AES_kgk(kd_block0)
+# auth_key = enc0[:8] || enc1[:8] = d9b360279694941a c5dbc6987ada7377
+fn _expected_auth_key() -> [u8]:
+    [0xd9u8, 0xb3u8, 0x60u8, 0x27u8, 0x96u8, 0x94u8, 0x94u8, 0x1au8,
+     0xc5u8, 0xdbu8, 0xc6u8, 0x98u8, 0x7au8, 0xdau8, 0x73u8, 0x77u8]
+
+# RFC 8452 intermediate: enc_key = enc2[:8] || enc3[:8] = 4004a0dcd862f2a5 7360219d2d44ef6c
+fn _expected_enc_key() -> [u8]:
+    [0x40u8, 0x04u8, 0xa0u8, 0xdcu8, 0xd8u8, 0x62u8, 0xf2u8, 0xa5u8,
+     0x73u8, 0x60u8, 0x21u8, 0x9du8, 0x2du8, 0x44u8, 0xefu8, 0x6cu8]
+
+# TC1 final tag (= result, since PT is empty): dc20e2d83f25705bb49e439eca56de25
+fn _tc1_expected_tag() -> [u8]:
+    [0xdcu8, 0x20u8, 0xe2u8, 0xd8u8, 0x3fu8, 0x25u8, 0x70u8, 0x5bu8,
+     0xb4u8, 0x9eu8, 0x43u8, 0x9eu8, 0xcau8, 0x56u8, 0xdeu8, 0x25u8]
+
+describe "AES-GCM-SIV debug: AES block encrypt sanity":
+
+    it "FIPS 197 A.1: AES-128(zeros, zeros) = 66e94bd4ef8a2c3b884cfa59ca342b2e":
+        val result = _aes128_enc(_fips197_key(), _fips197_block())
+        expect _equal_bytes(result, _fips197_expected()) == true
+
+describe "AES-GCM-SIV debug: TC1 key derivation":
+
+    it "KD enc0 = AES_kgk(LE32(0)||nonce) has correct first 8 bytes (auth_key[:8] = d9b36027 96949 41a)":
+        val enc0 = _aes128_enc(_tc1_kgk(), _tc1_kd_block0())
+        # auth_key[:8] should be d9 b3 60 27 96 94 94 1a
+        val expected_first8: [u8] = [0xd9u8, 0xb3u8, 0x60u8, 0x27u8, 0x96u8, 0x94u8, 0x94u8, 0x1au8]
+        var got8: [u8] = []
+        var i: u64 = 0
+        while i < 8:
+            got8.push(enc0.get(i))
+            i = i + 1
+        expect _equal_bytes(got8, expected_first8) == true
+
+    it "KD enc1 = AES_kgk(LE32(1)||nonce) has correct first 8 bytes (auth_key[8:16] = c5dbc698 7ada7377)":
+        val enc1 = _aes128_enc(_tc1_kgk(), _tc1_kd_block1())
+        val expected_second8: [u8] = [0xc5u8, 0xdbu8, 0xc6u8, 0x98u8, 0x7au8, 0xdau8, 0x73u8, 0x77u8]
+        var got8: [u8] = []
+        var i: u64 = 0
+        while i < 8:
+            got8.push(enc1.get(i))
+            i = i + 1
+        expect _equal_bytes(got8, expected_second8) == true
+
+    it "KD enc2 = AES_kgk(LE32(2)||nonce) has correct first 8 bytes (enc_key[:8] = 4004a0dc d862f2a5)":
+        val enc2 = _aes128_enc(_tc1_kgk(), _tc1_kd_block2())
+        val expected_8: [u8] = [0x40u8, 0x04u8, 0xa0u8, 0xdcu8, 0xd8u8, 0x62u8, 0xf2u8, 0xa5u8]
+        var got8: [u8] = []
+        var i: u64 = 0
+        while i < 8:
+            got8.push(enc2.get(i))
+            i = i + 1
+        expect _equal_bytes(got8, expected_8) == true
+
+    it "KD enc3 = AES_kgk(LE32(3)||nonce) has correct first 8 bytes (enc_key[8:16] = 7360219d 2d44ef6c)":
+        val enc3 = _aes128_enc(_tc1_kgk(), _tc1_kd_block3())
+        val expected_8: [u8] = [0x73u8, 0x60u8, 0x21u8, 0x9du8, 0x2du8, 0x44u8, 0xefu8, 0x6cu8]
+        var got8: [u8] = []
+        var i: u64 = 0
+        while i < 8:
+            got8.push(enc3.get(i))
+            i = i + 1
+        expect _equal_bytes(got8, expected_8) == true
+
+describe "AES-GCM-SIV debug: TC1 tag computation":
+
+    it "TC1 full encrypt = dc20e2d8... (empty PT, empty AAD)":
+        # With correct auth/enc keys, POLYVAL(zeros) = 0, XOR nonce[0:12], mask bit127, AES_enc_key
+        # AES_enc_key(0 XOR 03000000000000000000000000000000 & ~bit127)
+        # = AES_enc_key(030000000000000000000000 || 00...00 with bit127 cleared)
+        # = tag dc20e2d83f25705bb49e439eca56de25
+        val enc_key = _expected_enc_key()
+        # Build s = nonce_xor_masked = nonce padded to 16 bytes, bit127 cleared
+        # nonce = 030000000000000000000000 -> pad with 0x00, 0x00, 0x00, 0x00 (4 zero bytes at end)
+        # XOR with POLYVAL result (all zeros) = no change
+        # bit127 clear: byte15 & 0x7F = 0x00 (already clear)
+        val s_masked: [u8] = [0x03u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+                               0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        val computed_tag = _aes128_enc(enc_key, s_masked)
+        expect _equal_bytes(computed_tag, _tc1_expected_tag()) == true
+
+    it "TC1 aes128_gcm_siv_encrypt gives correct tag":
+        val key: [u8] = [0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+                          0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        val nonce: [u8] = [0x03u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+                            0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8]
+        val result = aes128_gcm_siv_encrypt(key, nonce, [], [])
+        expect _equal_bytes(result, _tc1_expected_tag()) == true

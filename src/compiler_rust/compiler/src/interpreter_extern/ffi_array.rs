@@ -68,6 +68,7 @@ pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
             let byte_val = vec.get(idx as usize).cloned().unwrap_or(Value::Int(0));
             match byte_val {
                 Value::Int(n) => Ok(Value::Int(n & 0xFF)),
+                Value::UInt { value, width: 8 } => Ok(Value::Int((value & 0xFF) as i64)),
                 _ => Ok(Value::Int(0)),
             }
         }

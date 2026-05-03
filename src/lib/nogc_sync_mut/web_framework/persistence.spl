@@ -43,7 +43,38 @@ impl WebRecordStore<T>:
             return Err("SQL repository is not configured")
         self.ensure_simple_table()
 
+    me create_store_table() -> Result<(), text>:
+        if self.backend_kind == "sqlite":
+            if val Some(repo) = self.sql_repo:
+                val result = repo.create_table()
+                match result:
+                    Ok(_): return Ok(())
+                    Err(_e): return Err("Failed to create SQL table")
+            return Err("SQL repository is not configured")
+        self.ensure_simple_table()
+
     me insert(entity: T) -> Result<i64, text>:
+        if self.backend_kind == "sqlite":
+            if val Some(repo) = self.sql_repo:
+                val result = repo.insert(entity)
+                match result:
+                    Ok(id): return Ok(id)
+                    Err(_e): return Err("Failed to insert record")
+            return Err("SQL repository is not configured")
+
+        var db = self.fresh_simple_db()?
+        var table = self.load_or_create_table(db)
+        val next_id = self.next_simple_id(table)
+        val to_row = self.adapter.to_row_fn
+        val row = to_row(next_id, entity)
+        table.add_row(row)
+        db.set_table(self.adapter.table_name, table)
+        if not db.save():
+            return Err("Failed to save Simple DB record")
+        self.simple_db = Some(db)
+        Ok(next_id)
+
+    me insert_record(entity: T) -> Result<i64, text>:
         if self.backend_kind == "sqlite":
             if val Some(repo) = self.sql_repo:
                 val result = repo.insert(entity)
@@ -87,7 +118,51 @@ impl WebRecordStore<T>:
         self.simple_db = Some(db)
         Ok(1)
 
+    me update_record(id: i64, entity: T) -> Result<i64, text>:
+        if self.backend_kind == "sqlite":
+            if val Some(repo) = self.sql_repo:
+                val result = repo.update(id, entity)
+                match result:
+                    Ok(changed): return Ok(changed)
+                    Err(_e): return Err("Failed to update record")
+            return Err("SQL repository is not configured")
+
+        var db = self.fresh_simple_db()?
+        var table = self.load_or_create_table(db)
+        val key = "{id}"
+        if not table.index.has(key):
+            return Ok(0)
+        val to_row = self.adapter.to_row_fn
+        val row = to_row(id, entity)
+        table.update_row(key, row)
+        db.set_table(self.adapter.table_name, table)
+        if not db.save():
+            return Err("Failed to save Simple DB update")
+        self.simple_db = Some(db)
+        Ok(1)
+
     me delete_by_id(id: i64) -> Result<i64, text>:
+        if self.backend_kind == "sqlite":
+            if val Some(repo) = self.sql_repo:
+                val result = repo.delete_by_id(id)
+                match result:
+                    Ok(changed): return Ok(changed)
+                    Err(_e): return Err("Failed to delete record")
+            return Err("SQL repository is not configured")
+
+        var db = self.fresh_simple_db()?
+        var table = self.load_or_create_table(db)
+        val key = "{id}"
+        if not table.index.has(key):
+            return Ok(0)
+        table.mark_deleted(key)
+        db.set_table(self.adapter.table_name, table)
+        if not db.save():
+            return Err("Failed to save Simple DB delete")
+        self.simple_db = Some(db)
+        Ok(1)
+
+    me delete_record_by_id(id: i64) -> Result<i64, text>:
         if self.backend_kind == "sqlite":
             if val Some(repo) = self.sql_repo:
                 val result = repo.delete_by_id(id)
@@ -132,7 +207,46 @@ impl WebRecordStore<T>:
         val entity = from_row(candidate)?
         Ok(Some(entity))
 
+    fn load_record_by_id(id: i64) -> Result<T?, text>:
+        if self.backend_kind == "sqlite":
+            if val Some(repo) = self.sql_repo:
+                val result = repo.find_by_id(id)
+                match result:
+                    Ok(found): return Ok(found)
+                    Err(_e): return Err("Failed to find record")
+            return Err("SQL repository is not configured")
+
+        val db = self.fresh_simple_db()?
+        val table = self.lookup_table(db)
+        if not table.?:
+            return Ok(nil)
+        val key = "{id}"
+        val row = table.unwrap().get_row(key)
+        if not row.?:
+            return Ok(nil)
+        val candidate = row.unwrap()
+        if candidate.get("valid") == Some("false"):
+            return Ok(nil)
+        val from_row = self.adapter.from_row_fn
+        val entity = from_row(candidate)?
+        Ok(Some(entity))
+
     fn find_all() -> Result<[T], text>:
+        if self.backend_kind == "sqlite":
+            if val Some(repo) = self.sql_repo:
+                val result = repo.find_all()
+                match result:
+                    Ok(items): return Ok(items)
+                    Err(_e): return Err("Failed to load records")
+            return Err("SQL repository is not configured")
+
+        val db = self.fresh_simple_db()?
+        val table = self.lookup_table(db)
+        if not table.?:
+            return Ok([])
+        self.decode_valid_rows(table.unwrap().valid_rows())
+
+    fn load_all_records() -> Result<[T], text>:
         if self.backend_kind == "sqlite":
             if val Some(repo) = self.sql_repo:
                 val result = repo.find_all()
@@ -206,16 +320,25 @@ impl WebRecordStore<T>:
             return Ok(db)
         Err("Simple DB is not configured")
 
+    fn require_store_simple_db() -> Result<SdnDatabase, text>:
+        if val Some(db) = self.simple_db:
+            return Ok(db)
+        Err("Simple DB is not configured")
+
     me fresh_simple_db() -> Result<SdnDatabase, text>:
         self.reload_simple_db(self.simple_db_path())?
         self.require_simple_db()
 
     fn lookup_table(db: SdnDatabase) -> SdnTable?:
-        db.get_table(self.adapter.table_name)
+        for (name, table) in db.tables:
+            if name == self.adapter.table_name:
+                return Some(table)
+        nil
 
     fn load_or_create_table(db: SdnDatabase) -> SdnTable:
-        if val Some(table) = db.get_table(self.adapter.table_name):
-            return table
+        for (name, table) in db.tables:
+            if name == self.adapter.table_name:
+                return table
         var columns: [text] = ["id", "valid"]
         for col in self.adapter.columns:
             columns.push(col)

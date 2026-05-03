@@ -220,10 +220,13 @@ fn open_web_stack_sample(backend_kind: text, path: text) -> Result<WebStackSampl
         val item_repo = Repository.new(db, SampleItemCodec())
         var users = WebRecordStore.sql(user_repo, sample_user_adapter())
         var items = WebRecordStore.sql(item_repo, sample_item_adapter())
-        users.create_table()?
-        items.create_table()?
+        var sql_users: WebRecordStore<SampleUser> = users
+        var sql_items: WebRecordStore<SampleItem> = items
+        sql_users.create_store_table()?
+        sql_items.create_store_table()?
         var sessions = SessionStore.sqlite(db)
-        sessions.init()?
+        var sqlite_sessions: SessionStore = sessions
+        sqlite_sessions.init()?
         return Ok(WebStackSampleApp(
             backend_kind: "sqlite",
             users: users,
@@ -235,13 +238,16 @@ fn open_web_stack_sample(backend_kind: text, path: text) -> Result<WebStackSampl
 
     var simple_db = load_sdn_database(path) ?? new_sdn_database(path)
     var users = WebRecordStore.simpledb(simple_db, sample_user_adapter())
-    users.create_table()?
-    simple_db = users.require_simple_db()?
+    var simple_users: WebRecordStore<SampleUser> = users
+    simple_users.create_store_table()?
+    simple_db = simple_users.require_store_simple_db()?
     var items = WebRecordStore.simpledb(simple_db, sample_item_adapter())
-    items.create_table()?
-    simple_db = items.require_simple_db()?
+    var simple_items: WebRecordStore<SampleItem> = items
+    simple_items.create_store_table()?
+    simple_db = simple_items.require_store_simple_db()?
     var sessions = SessionStore.simpledb(simple_db)
-    sessions.init()?
+    var simple_sessions: SessionStore = sessions
+    simple_sessions.init()?
     Ok(WebStackSampleApp(
         backend_kind: "simpledb",
         users: users,
@@ -289,8 +295,9 @@ impl WebStackSampleApp:
             password_hash: password_hash,
             created_at: sample_timestamp()
         )
-        val id = self.users.insert(user)?
-        val saved = self.users.find_by_id(id)?
+        var users: WebRecordStore<SampleUser> = self.users
+        val id = users.insert_record(user)?
+        val saved = users.load_record_by_id(id)?
         if saved.?:
             val saved_user = saved.unwrap()
             return Ok(saved_user)
@@ -369,8 +376,9 @@ impl WebStackSampleApp:
             created_at: now,
             updated_at: now
         )
-        val id = self.items.insert(item)?
-        val saved = self.items.find_by_id(id)?
+        var items: WebRecordStore<SampleItem> = self.items
+        val id = items.insert_record(item)?
+        val saved = items.load_record_by_id(id)?
         if saved.?:
             return Ok(saved.unwrap())
         Err("Failed to reload created item")
@@ -400,7 +408,8 @@ impl WebStackSampleApp:
             created_at: item.created_at,
             updated_at: sample_timestamp()
         )
-        self.items.update(item_id, updated)?
+        var items: WebRecordStore<SampleItem> = self.items
+        items.update_record(item_id, updated)?
         val user = self.require_user(session_id)?
         val items = self.items_for_user(user.id, "")?
         Ok(SampleResponse(
@@ -413,7 +422,8 @@ impl WebStackSampleApp:
 
     me post_delete_item(session_id: text, item_id: i64) -> Result<SampleResponse, text>:
         self.require_owned_item(session_id, item_id)?
-        self.items.delete_by_id(item_id)?
+        var items: WebRecordStore<SampleItem> = self.items
+        items.delete_record_by_id(item_id)?
         return self.list_items(session_id, "")
 
     fn search_items(session_id: text, query: text) -> Result<SampleResponse, text>:
@@ -432,14 +442,16 @@ impl WebStackSampleApp:
         val user_id = session_data.get("_user_id") ?? ""
         if user_id.len() == 0:
             return Err("Authentication required")
-        val maybe_user = self.users.find_by_id(user_id.to_int() ?? 0)?
+        var users: WebRecordStore<SampleUser> = self.users
+        val maybe_user = users.load_record_by_id(user_id.to_int() ?? 0)?
         if maybe_user.?:
             return Ok(maybe_user.unwrap())
         Err("User not found")
 
     fn require_owned_item(session_id: text, item_id: i64) -> Result<SampleItem, text>:
         val user = self.require_user(session_id)?
-        val maybe_item = self.items.find_by_id(item_id)?
+        var items: WebRecordStore<SampleItem> = self.items
+        val maybe_item = items.load_record_by_id(item_id)?
         if not maybe_item.?:
             return Err("Item not found")
         val item = maybe_item.unwrap()
@@ -448,7 +460,8 @@ impl WebStackSampleApp:
         Ok(item)
 
     fn items_for_user(user_id: i64, query: text) -> Result<[SampleItem], text>:
-        val all = self.items.find_all()?
+        var items_store: WebRecordStore<SampleItem> = self.items
+        val all = items_store.load_all_records()?
         val needle = query.trim().lower()
         var items: [SampleItem] = []
         for item in all:

@@ -66,6 +66,35 @@ pub(crate) fn bind_args_with_injected(
     let mut positional_idx = 0usize;
     let mut variadic_values = Vec::new();
 
+    let coerce_unsigned = |value: Value, ty: Option<&Type>| -> Value {
+        match ty {
+            Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") => {
+                let width: u8 = match type_name.as_str() {
+                    "u8" => 8,
+                    "u16" => 16,
+                    "u32" => 32,
+                    "u64" => 64,
+                    _ => unreachable!(),
+                };
+                match value {
+                    Value::UInt { .. } => value,
+                    Value::Int(i) => {
+                        let masked: u64 = match width {
+                            8 => (i as u8) as u64,
+                            16 => (i as u16) as u64,
+                            32 => (i as u32) as u64,
+                            64 => i as u64,
+                            _ => i as u64,
+                        };
+                        Value::UInt { value: masked, width }
+                    }
+                    other => other,
+                }
+            }
+            _ => value,
+        }
+    };
+
     for arg in args {
         // Check if this is a spread expression (args...)
         if let Expr::Spread(inner) = &arg.value {
@@ -96,7 +125,7 @@ pub(crate) fn bind_args_with_injected(
                     } else if positional_idx < var_idx {
                         // Regular parameter before variadic
                         let param = params_to_bind[positional_idx];
-                        let val = wrap_trait_object!(spread_item, param.ty.as_ref());
+                        let val = coerce_unsigned(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
                         validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     } else {
@@ -126,7 +155,7 @@ pub(crate) fn bind_args_with_injected(
                         ));
                     }
                     let param = params_to_bind[positional_idx];
-                    let val = wrap_trait_object!(spread_item, param.ty.as_ref());
+                    let val = coerce_unsigned(wrap_trait_object!(spread_item, param.ty.as_ref()), param.ty.as_ref());
                     validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                     bound.insert(param.name.clone(), val);
                 }
@@ -175,7 +204,10 @@ pub(crate) fn bind_args_with_injected(
                         }
                     }
                 }
-                let val = wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref()));
+                let val = coerce_unsigned(
+                    wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref())),
+                    param.and_then(|p| p.ty.as_ref()),
+                );
                 validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name));
                 bound.insert(name.clone(), val);
             } else {
@@ -187,7 +219,7 @@ pub(crate) fn bind_args_with_injected(
                     } else {
                         // Regular positional parameter before variadic
                         let param = params_to_bind[positional_idx];
-                        let val = wrap_trait_object!(val, param.ty.as_ref());
+                        let val = coerce_unsigned(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
                         validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     }
@@ -232,7 +264,7 @@ pub(crate) fn bind_args_with_injected(
                             ));
                         }
                     }
-                    let val = wrap_trait_object!(val, param.ty.as_ref());
+                    let val = coerce_unsigned(wrap_trait_object!(val, param.ty.as_ref()), param.ty.as_ref());
                     validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                     bound.insert(param.name.clone(), val);
                 }
@@ -251,7 +283,7 @@ pub(crate) fn bind_args_with_injected(
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
                 let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
-                let v = wrap_trait_object!(v, param.ty.as_ref());
+                let v = coerce_unsigned(wrap_trait_object!(v, param.ty.as_ref()), param.ty.as_ref());
                 validate_unit!(
                     &v,
                     param.ty.as_ref(),
