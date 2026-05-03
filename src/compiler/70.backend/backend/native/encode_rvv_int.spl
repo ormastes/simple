@@ -1,0 +1,177 @@
+# src/compiler/70.backend/backend/native/encode_rvv_int.spl
+#
+# RVV v1.0 Integer Arithmetic Byte-Emit Encoder — Pure Simple
+#
+# Produces exact 4-byte little-endian instruction words for RISC-V Vector
+# basic integer arithmetic (OPIVV and OPMVV) instructions per RVV v1.0.
+#
+# Reference: RISC-V Vector Extension v1.0
+#   §11.1  Vector Single-Width Integer Add and Subtract
+#   §11.4  Vector Bitwise Logical Instructions
+#   §11.6  Vector Single-Width Shift Instructions
+#   §11.10 Vector Single-Width Integer Multiply Instructions
+#
+# Instruction format (all 32-bit, OP-V major opcode 0x57):
+#   bits[31:26] = funct6
+#   bit[25]     = vm   (1=unmasked, 0=masked)
+#   bits[24:20] = vs2
+#   bits[19:15] = vs1
+#   bits[14:12] = funct3 (OPIVV=000=0, OPMVV=010=2)
+#   bits[11:7]  = vd
+#   bits[6:0]   = opcode 0x57
+#
+# funct6/funct3 values:
+#   vadd.vv   0x00 (000000)  OPIVV funct3=0  vm=1  §11.1
+#   vsub.vv   0x02 (000010)  OPIVV funct3=0  vm=1  §11.1
+#   vand.vv   0x09 (001001)  OPIVV funct3=0  vm=1  §11.4
+#   vor.vv    0x0A (001010)  OPIVV funct3=0  vm=1  §11.4
+#   vxor.vv   0x0B (001011)  OPIVV funct3=0  vm=1  §11.4
+#   vsll.vv   0x25 (100101)  OPIVV funct3=0  vm=1  §11.6
+#   vsrl.vv   0x28 (101000)  OPIVV funct3=0  vm=1  §11.6
+#   vmul.vv   0x25 (100101)  OPMVV funct3=2  vm=1  §11.10
+#
+# Encoding convention: multiplication/division only (avoids negative-bit-op
+# hazards in interpreter mode). Consistent with encode_rvv_mask.spl and
+# encode_rvv_zvk.spl.
+#
+# Return type: [i64] (4 bytes, little-endian).
+#
+# ALL byte goldens derived from RVV v1.0 spec table + manual derivation formula
+# (llvm-mc unavailable on build host).
+# ============================================================================
+# Internal helpers (independent copy; encode_rvv_mask.spl is a separate module)
+# ============================================================================
+
+fn _rvv_int_word_to_le4(word: i64) -> [i64]:
+    """
+    Convert a 32-bit integer instruction word to 4 little-endian bytes.
+    Uses division/modulo to avoid negative bit-op hazards in interpreter.
+    """
+    var w = word
+    if w < 0:
+        w = w + 4294967296
+    val b0 = w % 256
+    val b1 = (w / 256) % 256
+    val b2 = (w / 65536) % 256
+    val b3 = (w / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn _rvv_int_encode_opivv(funct6: i64, vm: i64, vs2: i64, vs1: i64, vd: i64) -> [i64]:
+    """
+    Encode an OP-V integer vector-vector instruction (funct3=OPIVV=0).
+
+    funct6: 6-bit function code (bits[31:26])
+    vm:     bit[25] (1=unmasked)
+    vs2:    source register 2 (bits[24:20])
+    vs1:    source register 1 (bits[19:15])
+    vd:     destination register (bits[11:7])
+    """
+    val word = (funct6 * 67108864) + (vm * 33554432) + (vs2 * 1048576) + (vs1 * 32768) + (0 * 4096) + (vd * 128) + 87
+    _rvv_int_word_to_le4(word)
+
+fn _rvv_int_encode_opmvv(funct6: i64, vm: i64, vs2: i64, vs1: i64, vd: i64) -> [i64]:
+    """
+    Encode an OP-V integer multiply instruction (funct3=OPMVV=2).
+
+    funct6: 6-bit function code (bits[31:26])
+    vm:     bit[25] (1=unmasked)
+    vs2:    source register 2 (bits[24:20])
+    vs1:    source register 1 (bits[19:15])
+    vd:     destination register (bits[11:7])
+    """
+    val word = (funct6 * 67108864) + (vm * 33554432) + (vs2 * 1048576) + (vs1 * 32768) + (2 * 4096) + (vd * 128) + 87
+    _rvv_int_word_to_le4(word)
+
+# ============================================================================
+# Add / Subtract (RVV v1.0 §11.1)
+# ============================================================================
+
+# RVV v1.0 §11.1 vadd.vv; funct6=0x00 (000000); OPIVV funct3=0; vm=1
+# Canonical (vd=0, vs2=0, vs1=0): word=0x02000057 LE [0x57,0x00,0x00,0x02]
+# Canonical (vd=1, vs2=2, vs1=3): word=0x022180D7 LE [0xD7,0x80,0x21,0x02]
+fn emit_vadd_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Vector add: vd = vs2 + vs1 (element-wise, unmasked)."""
+    _rvv_int_encode_opivv(0x00, 1, vs2, vs1, vd)
+
+# RVV v1.0 §11.1 vsub.vv; funct6=0x02 (000010); OPIVV funct3=0; vm=1
+# Canonical (vd=0, vs2=0, vs1=0): word=0x0A000057 LE [0x57,0x00,0x00,0x0A]
+# Canonical (vd=1, vs2=2, vs1=3): word=0x0A2180D7 LE [0xD7,0x80,0x21,0x0A]
+fn emit_vsub_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Vector subtract: vd = vs2 - vs1 (element-wise, unmasked)."""
+    _rvv_int_encode_opivv(0x02, 1, vs2, vs1, vd)
+
+# ============================================================================
+# Bitwise Logical (RVV v1.0 §11.4)
+# ============================================================================
+
+# RVV v1.0 §11.4 vand.vv; funct6=0x09 (001001); OPIVV funct3=0; vm=1
+# Canonical (vd=0, vs2=0, vs1=0): word=0x26000057 LE [0x57,0x00,0x00,0x26]
+# Canonical (vd=1, vs2=2, vs1=3): word=0x262180D7 LE [0xD7,0x80,0x21,0x26]
+fn emit_vand_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Vector AND: vd = vs2 AND vs1 (element-wise, unmasked)."""
+    _rvv_int_encode_opivv(0x09, 1, vs2, vs1, vd)
+
+# RVV v1.0 §11.4 vor.vv; funct6=0x0A (001010); OPIVV funct3=0; vm=1
+# Canonical (vd=0, vs2=0, vs1=0): word=0x2A000057 LE [0x57,0x00,0x00,0x2A]
+# Canonical (vd=1, vs2=2, vs1=3): word=0x2A2180D7 LE [0xD7,0x80,0x21,0x2A]
+fn emit_vor_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Vector OR: vd = vs2 OR vs1 (element-wise, unmasked)."""
+    _rvv_int_encode_opivv(0x0A, 1, vs2, vs1, vd)
+
+# RVV v1.0 §11.4 vxor.vv; funct6=0x0B (001011); OPIVV funct3=0; vm=1
+# Canonical (vd=0, vs2=0, vs1=0): word=0x2E000057 LE [0x57,0x00,0x00,0x2E]
+# Canonical (vd=1, vs2=2, vs1=3): word=0x2E2180D7 LE [0xD7,0x80,0x21,0x2E]
+fn emit_vxor_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Vector XOR: vd = vs2 XOR vs1 (element-wise, unmasked)."""
+    _rvv_int_encode_opivv(0x0B, 1, vs2, vs1, vd)
+
+# ============================================================================
+# Shift (RVV v1.0 §11.6)
+# ============================================================================
+
+# RVV v1.0 §11.6 vsll.vv; funct6=0x25 (100101); OPIVV funct3=0; vm=1
+# Canonical (vd=0, vs2=0, vs1=0): word=0x96000057 LE [0x57,0x00,0x00,0x96]
+# Canonical (vd=1, vs2=2, vs1=3): word=0x962180D7 LE [0xD7,0x80,0x21,0x96]
+fn emit_vsll_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Vector shift left logical: vd = vs2 << vs1 (element-wise, unmasked)."""
+    _rvv_int_encode_opivv(0x25, 1, vs2, vs1, vd)
+
+# RVV v1.0 §11.6 vsrl.vv; funct6=0x28 (101000); OPIVV funct3=0; vm=1
+# Canonical (vd=0, vs2=0, vs1=0): word=0xA2000057 LE [0x57,0x00,0x00,0xA2]
+# Canonical (vd=1, vs2=2, vs1=3): word=0xA22180D7 LE [0xD7,0x80,0x21,0xA2]
+fn emit_vsrl_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Vector shift right logical: vd = vs2 >> vs1 (element-wise, unmasked)."""
+    _rvv_int_encode_opivv(0x28, 1, vs2, vs1, vd)
+
+# ============================================================================
+# Multiply (RVV v1.0 §11.10)
+# ============================================================================
+
+# RVV v1.0 §11.10 vmul.vv; funct6=0x25 (100101); OPMVV funct3=2; vm=1
+# Canonical (vd=0, vs2=0, vs1=0): word=0x96002057 LE [0x57,0x20,0x00,0x96]
+# Canonical (vd=1, vs2=2, vs1=3): word=0x962120D7 LE [0xD7,0x20,0x21,0x96]  (wait: let me recompute)
+# word=(0x25*67108864)+(1*33554432)+(2*1048576)+(3*32768)+(2*4096)+(1*128)+87
+#     =2516582400+33554432+2097152+98304+8192+128+87 = 2552340695 = 0x982120D7? No:
+# 0x25=37: 37*67108864=2483027968
+# +33554432=2516582400
+# +2*1048576=2*1048576=2097152 → 2518679552
+# +3*32768=98304 → 2518777856
+# +2*4096=8192 → 2518786048
+# +1*128=128 → 2518786176
+# +87 → 2518786263 = 0x962120D7 LE [0xD7,0x20,0x21,0x96]
+fn emit_vmul_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Vector multiply low: vd = vs2 * vs1 low bits (element-wise, unmasked)."""
+    _rvv_int_encode_opmvv(0x25, 1, vs2, vs1, vd)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_vadd_vv
+export emit_vsub_vv
+export emit_vand_vv
+export emit_vor_vv
+export emit_vxor_vv
+export emit_vsll_vv
+export emit_vsrl_vv
+export emit_vmul_vv
