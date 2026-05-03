@@ -1,0 +1,68 @@
+# Opt-remark flag parsing and emit hooks for --opt-remark=cipher,simd
+#
+# Parses a comma-separated category list.  Currently recognised categories:
+#   cipher  — one diagnostic line per cipher-idiom rule fire
+#   simd    — one diagnostic line per SIMD-idiom rule fire (reserved)
+#
+# emit_cipher_remark is the hook called at each cipher-rule application.
+# Wave K4 owner wires it into pattern_dispatch.spl; this file only provides
+# the function and the config struct so the wiring can be done independently.
+
+# ============================================================================
+# OptRemarkConfig — parsed --opt-remark flag state
+# ============================================================================
+
+"""Parsed state of the --opt-remark=... CLI flag."""
+struct OptRemarkConfig:
+    cipher_enabled: bool
+    simd_enabled:   bool
+
+"""Return an OptRemarkConfig with all categories disabled."""
+fn opt_remark_config_disabled() -> OptRemarkConfig:
+    OptRemarkConfig(cipher_enabled: false, simd_enabled: false)
+
+# ============================================================================
+# parse_opt_remarks — "cipher,simd" -> OptRemarkConfig
+# ============================================================================
+
+"""Parse --opt-remark=<input> into an OptRemarkConfig.
+
+input is a comma-separated list of category names; whitespace is stripped.
+Unrecognised categories are silently ignored (future-proofing).
+An empty string returns all-disabled.
+"""
+fn parse_opt_remarks(input: text) -> OptRemarkConfig:
+    var cipher = false
+    var simd   = false
+    if input.trim() == "":
+        return OptRemarkConfig(cipher_enabled: false, simd_enabled: false)
+    val parts = input.split(",")
+    for raw in parts:
+        val token = raw.trim()
+        if token == "cipher":
+            cipher = true
+        elif token == "simd":
+            simd = true
+        # else: unrecognised category — ignored
+    OptRemarkConfig(cipher_enabled: cipher, simd_enabled: simd)
+
+# ============================================================================
+# emit_cipher_remark — diagnostic hook for cipher rule fires
+# ============================================================================
+
+"""Emit one diagnostic line for a cipher-idiom rule fire.
+
+Output format (to stdout):
+  [cipher] <callee> -> <intrinsic> via <rule_name> (target: <target>)
+
+Call this from pattern_dispatch.spl after each successful rewrite when the
+OptRemarkConfig has cipher_enabled = true.  This function itself is
+unconditional; the caller gates on config.cipher_enabled.
+"""
+fn emit_cipher_remark(rule_name: text, callee: text, intrinsic: text, target: text):
+    print "[cipher] {callee} -> {intrinsic} via {rule_name} (target: {target})"
+
+"""Emit an opt-remark only when the config has cipher remarks enabled."""
+fn emit_cipher_remark_if(config: OptRemarkConfig, rule_name: text, callee: text, intrinsic: text, target: text):
+    if config.cipher_enabled:
+        emit_cipher_remark(rule_name, callee, intrinsic, target)

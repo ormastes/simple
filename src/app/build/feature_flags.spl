@@ -1,0 +1,167 @@
+# Feature flag parsing for --target-features=+aes,+sha,-pclmul
+#
+# Parses a comma-separated list of signed feature names into FeatureFlag
+# structs, then provides apply_feature_overrides_* helpers that update
+# X86Caps / Aarch64Caps / Rv64Caps in-place semantics (returns new value).
+#
+# Used by build_cli.spl to wire --target-features into the compiler pipeline.
+
+use compiler.backend.feature_caps.{X86Caps, Aarch64Caps, Rv64Caps}
+
+# ============================================================================
+# FeatureFlag — one parsed +name / -name token
+# ============================================================================
+
+"""A single feature flag entry parsed from --target-features input."""
+struct FeatureFlag:
+    name:    text
+    enabled: bool
+
+# ============================================================================
+# parse_target_features — "+aes,+sha,-pclmul" -> [FeatureFlag]
+# ============================================================================
+
+"""Parse a comma-separated feature list of the form '+aes,+sha,-pclmul'.
+
+Whitespace around each token is stripped.  Tokens must begin with '+' or '-'.
+A token without a sign prefix is a hard error; an error message is returned
+via the second tuple element and the list is empty.
+"""
+fn parse_target_features(input: text) -> ([FeatureFlag], text):
+    if input.trim() == "":
+        return ([], "")
+    val parts = input.split(",")
+    var flags: [FeatureFlag] = []
+    for raw in parts:
+        val token = raw.trim()
+        if token == "":
+            continue
+        if token.starts_with("+"):
+            val n = token[1:].trim()
+            flags.push(FeatureFlag(name: n, enabled: true))
+        elif token.starts_with("-"):
+            val n = token[1:].trim()
+            flags.push(FeatureFlag(name: n, enabled: false))
+        else:
+            val msg = "bad feature flag '${token}': must start with '+' or '-' (e.g. +aes or -sha)"
+            return ([], msg)
+    (flags, "")
+
+# ============================================================================
+# apply_feature_overrides_x86
+# ============================================================================
+
+"""Apply a list of FeatureFlags to an X86Caps, returning the updated caps.
+
+Unknown flag names (e.g. AArch64-only flags) are silently ignored so that a
+shared feature string can be passed across target contexts without error.
+"""
+fn apply_feature_overrides_x86(base: X86Caps, flags: [FeatureFlag]) -> X86Caps:
+    var has_aes    = base.has_aes
+    var has_sha_ni = base.has_sha_ni
+    var has_sse42  = base.has_sse42
+    var has_pclmul = base.has_pclmul
+    var has_avx2   = base.has_avx2
+    var has_avx512 = base.has_avx512
+    for f in flags:
+        val n = f.name
+        val e = f.enabled
+        if n == "aes":
+            has_aes = e
+        elif n == "sha" or n == "sha-ni":
+            has_sha_ni = e
+        elif n == "sse4.2" or n == "sse42":
+            has_sse42 = e
+        elif n == "pclmul":
+            has_pclmul = e
+        elif n == "avx2":
+            has_avx2 = e
+        elif n == "avx512":
+            has_avx512 = e
+        # else: unknown / other-arch flag — ignored silently
+    X86Caps(
+        has_aes: has_aes,
+        has_sha_ni: has_sha_ni,
+        has_sse42: has_sse42,
+        has_pclmul: has_pclmul,
+        has_avx2: has_avx2,
+        has_avx512: has_avx512
+    )
+
+# ============================================================================
+# apply_feature_overrides_aarch64
+# ============================================================================
+
+"""Apply a list of FeatureFlags to an Aarch64Caps, returning updated caps.
+
+Unknown flag names (e.g. x86/RV64-only) are silently ignored.
+"""
+fn apply_feature_overrides_aarch64(base: Aarch64Caps, flags: [FeatureFlag]) -> Aarch64Caps:
+    var has_aes   = base.has_aes
+    var has_sha2  = base.has_sha2
+    var has_sha3  = base.has_sha3
+    var has_pmull = base.has_pmull
+    var has_crc32 = base.has_crc32
+    var has_neon  = base.has_neon
+    var has_sve2  = base.has_sve2
+    for f in flags:
+        val n = f.name
+        val e = f.enabled
+        if n == "aes-arm" or n == "aes":
+            has_aes = e
+        elif n == "sha-arm" or n == "sha2":
+            has_sha2 = e
+        elif n == "sha3-arm" or n == "sha3":
+            has_sha3 = e
+        elif n == "pmull":
+            has_pmull = e
+        elif n == "crc32-arm" or n == "crc32":
+            has_crc32 = e
+        elif n == "neon":
+            has_neon = e
+        elif n == "sve2":
+            has_sve2 = e
+        # else: unknown / other-arch flag — ignored silently
+    Aarch64Caps(
+        has_aes: has_aes,
+        has_sha2: has_sha2,
+        has_sha3: has_sha3,
+        has_pmull: has_pmull,
+        has_crc32: has_crc32,
+        has_neon: has_neon,
+        has_sve2: has_sve2
+    )
+
+# ============================================================================
+# apply_feature_overrides_rv64
+# ============================================================================
+
+"""Apply a list of FeatureFlags to an Rv64Caps, returning updated caps.
+
+Unknown flag names (e.g. x86/AArch64-only) are silently ignored.
+"""
+fn apply_feature_overrides_rv64(base: Rv64Caps, flags: [FeatureFlag]) -> Rv64Caps:
+    var has_zvkned = base.has_zvkned
+    var has_zvknh  = base.has_zvknh
+    var has_zvkg   = base.has_zvkg
+    var has_v      = base.has_v
+    var vlen       = base.vlen_bits
+    for f in flags:
+        val n = f.name
+        val e = f.enabled
+        if n == "zvkned":
+            has_zvkned = e
+        elif n == "zvknh":
+            has_zvknh = e
+        elif n == "zvkg":
+            has_zvkg = e
+        elif n == "v" or n == "zvector":
+            has_v = e
+        # else: unknown / other-arch flag — ignored silently
+    Rv64Caps(
+        has_zvkned: has_zvkned,
+        has_zvknh: has_zvknh,
+        has_zvkg: has_zvkg,
+        has_v: has_v,
+        vlen_bits: vlen
+    )

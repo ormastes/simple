@@ -1,0 +1,74 @@
+# build_cli.spl — CLI flag wiring for --target-features and --opt-remark
+#
+# Provides parse_build_driver_flags which scans the raw CLI arg list for the
+# two new driver flags and returns typed parsed results.  Callers (e.g. the
+# build orchestrator) call this after the standard arg parser and merge the
+# results with the active target preset.
+#
+# Disjoint scope: feature_flags.spl and opt_remarks.spl are the source of
+# truth for parsing logic; this module only orchestrates extraction from argv.
+
+use app.build.feature_flags.{FeatureFlag, parse_target_features}
+use app.build.opt_remarks.{OptRemarkConfig, parse_opt_remarks, opt_remark_config_disabled}
+
+# ============================================================================
+# BuildDriverFlags — combined result of the two new CLI flags
+# ============================================================================
+
+"""Parsed values for the driver-level CLI flags added in Phase 7."""
+struct BuildDriverFlags:
+    target_features: [FeatureFlag]
+    opt_remarks:     OptRemarkConfig
+    parse_error:     text
+
+"""Return a zero-value BuildDriverFlags (no overrides, no remarks)."""
+fn build_driver_flags_none() -> BuildDriverFlags:
+    BuildDriverFlags(
+        target_features: [],
+        opt_remarks: opt_remark_config_disabled(),
+        parse_error: ""
+    )
+
+# ============================================================================
+# parse_build_driver_flags — argv -> BuildDriverFlags
+# ============================================================================
+
+"""Scan an argv list for --target-features=... and --opt-remark=... flags.
+
+Each flag is expected in the form '--flag=value'.  The first parse error
+encountered is recorded in BuildDriverFlags.parse_error; on error
+target_features is empty so no capabilities are overridden.
+
+Unknown flags in argv are ignored; this function is additive.
+"""
+fn parse_build_driver_flags(args: [text]) -> BuildDriverFlags:
+    var features_raw = ""
+    var remarks_raw  = ""
+    val tf_prefix  = "--target-features="
+    val opt_prefix = "--opt-remark="
+    for arg in args:
+        if arg.starts_with(tf_prefix):
+            features_raw = arg[tf_prefix.len():]
+        elif arg.starts_with(opt_prefix):
+            remarks_raw = arg[opt_prefix.len():]
+    val remarks = parse_opt_remarks(remarks_raw)
+    if features_raw.trim() == "":
+        return BuildDriverFlags(
+            target_features: [],
+            opt_remarks: remarks,
+            parse_error: ""
+        )
+    val result = parse_target_features(features_raw)
+    val flags = result[0]
+    val err   = result[1]
+    if err != "":
+        return BuildDriverFlags(
+            target_features: [],
+            opt_remarks: remarks,
+            parse_error: err
+        )
+    BuildDriverFlags(
+        target_features: flags,
+        opt_remarks: remarks,
+        parse_error: ""
+    )
