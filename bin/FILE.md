@@ -25,8 +25,10 @@
 **Main CLI wrappers for the current platform runtime**
 
 Created by `scripts/setup.sh`. It normally dispatches to
-`release/<arch>-<vendor>-<os>-<abi>/simple(.exe)`, and can route selected
-commands such as `lint` through the bootstrap binary when that path is known-good.
+`release/<arch>-<vendor>-<os>-<abi>/simple(.exe)`, but `test` and `os`
+prefer fresh local compiler binaries (`target/bootstrap`, then `target/release`,
+then `target/debug`) before packaged `bin/release/...` binaries so focused
+verification uses the newest driver build.
 On Windows, `scripts/setup.cmd` installs `bin\\simple.cmd` for CMD/PowerShell
 and `bin\\simple` for Git Bash / MSYS2, while `bin\\simple.exe` remains the
 native runtime entrypoint when present.
@@ -35,6 +37,7 @@ Run `scripts/setup.sh` or `scripts\\setup.cmd` after cloning or bootstrapping.
 **Features:**
 - Multi-platform support (9 architectures)
 - Fast-path optimization for common commands (~160ms faster)
+- Fresh-driver preference for `test` and `os` commands
 - Stderr filtering (removes debug noise)
 - Version detection from `VERSION` file
 - Stdlib path optimization (eliminates 78+ path probes)

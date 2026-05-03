@@ -583,6 +583,16 @@ pub fn aes128_encrypt_one_block(key: &[u8], block: &[u8]) -> Option<[u8; AES_BLO
     encrypt_block_with_expanded_bytes(block, &expanded, 10)
 }
 
+pub fn aes128_decrypt_one_block(key: &[u8], block: &[u8]) -> Option<[u8; AES_BLOCK_LEN]> {
+    if key.len() != AES_BLOCK_LEN || block.len() != AES_BLOCK_LEN {
+        return None;
+    }
+    let mut k = [0u8; AES_BLOCK_LEN];
+    k.copy_from_slice(key);
+    let expanded = expand_key_aes128(&k);
+    decrypt_block_with_expanded_bytes(block, &expanded, 10)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_aes128_encrypt_block_into(key: RuntimeValue, block: RuntimeValue, out: RuntimeValue) -> i64 {
     let Some(key_bytes) = runtime_array_to_bytes(key) else {
@@ -628,6 +638,25 @@ pub extern "C" fn rt_aes128_encrypt_block_pure(key: RuntimeValue, block: Runtime
         return empty_runtime_array();
     };
     runtime_array_from_bytes(&cipher)
+}
+
+// ----------------------------------------------------------------------------
+// rt_aes128_decrypt_block_pure(key, block) -> [u8]
+// Pure-functional AES-128 single-block decrypt. Returns a fresh 16-byte plain
+// array. Empty array on bad sizes.
+// ----------------------------------------------------------------------------
+#[no_mangle]
+pub extern "C" fn rt_aes128_decrypt_block_pure(key: RuntimeValue, block: RuntimeValue) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return empty_runtime_array();
+    };
+    let Some(block_bytes) = runtime_array_to_bytes(block) else {
+        return empty_runtime_array();
+    };
+    let Some(plain) = aes128_decrypt_one_block(&key_bytes, &block_bytes) else {
+        return empty_runtime_array();
+    };
+    runtime_array_from_bytes(&plain)
 }
 
 // ============================================================================

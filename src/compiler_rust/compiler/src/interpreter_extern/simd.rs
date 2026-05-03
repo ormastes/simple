@@ -7,8 +7,8 @@ use crate::error::CompileError;
 use crate::value::Value;
 use crate::value_bridge::{runtime_to_value, value_to_runtime};
 use simple_runtime::value::aes::{
-    aes128_encrypt_one_block, aes128_gcm_decrypt_bytes, aes128_gcm_encrypt_bytes, aes256_encrypt_one_block,
-    aes256_gcm_decrypt_bytes, aes256_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
+    aes128_decrypt_one_block, aes128_encrypt_one_block, aes128_gcm_decrypt_bytes, aes128_gcm_encrypt_bytes,
+    aes256_encrypt_one_block, aes256_gcm_decrypt_bytes, aes256_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
     encrypt_block_with_expanded_bytes, rt_aes_rcon as ffi_aes_rcon, rt_aes_sbox as ffi_aes_sbox, AesGcmDecryptOutcome,
 };
 use simple_runtime::value::simd::{
@@ -253,6 +253,18 @@ pub fn rt_aes128_encrypt_block_pure(args: &[Value]) -> Result<Value, CompileErro
     }
     let cipher = aes128_encrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
     Ok(Value::array(cipher.iter().map(|b| Value::Int(*b as i64)).collect()))
+}
+
+pub fn rt_aes128_decrypt_block_pure(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_aes128_decrypt_block_pure expects 2 arguments".to_string(),
+        ));
+    }
+    let key = expect_byte_array("rt_aes128_decrypt_block_pure", &args[0])?;
+    let block = expect_byte_array("rt_aes128_decrypt_block_pure", &args[1])?;
+    let plain = aes128_decrypt_one_block(&key, &block).unwrap_or([0u8; 16]);
+    Ok(Value::array(plain.iter().map(|b| Value::Int(*b as i64)).collect()))
 }
 
 // rt_tls13_aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]

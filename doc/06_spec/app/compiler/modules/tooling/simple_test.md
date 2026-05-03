@@ -288,6 +288,12 @@ warning and then executed as plain interpreter mode. Until that is fixed, the
 documented composite mode string should be treated as the intended interface,
 not a verified current behavior.
 
+For ordinary `test` and `os` invocations, the repo wrapper now prefers fresh
+workspace builds from `src/compiler_rust/target/bootstrap`, `target/release`,
+and `target/debug` before packaged binaries under `bin/release/`. This avoids
+stale-driver false negatives when the compiler/runtime changed in the same
+workspace session.
+
 ## Watch Mode
 
 ```bash

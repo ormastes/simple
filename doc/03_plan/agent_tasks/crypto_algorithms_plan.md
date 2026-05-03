@@ -6,8 +6,8 @@
 |----------|-------------|----------------|-------------|
 | Block Ciphers | 14 | 2 | 0 |
 | Stream Ciphers | 5 | 0 | 0 |
-| AEAD | 7 | 1 | 0 |
-| Hashes | 15 | 1 | 0 |
+| AEAD | 8 | 0 | 0 |
+| Hashes | 16 | 0 | 0 |
 | KDF/Password | 9 | 0 | 0 |
 | MAC | 8 | 1 | 0 |
 | Asymmetric/Sigs | 10 | 2 | 1 |
@@ -59,7 +59,7 @@
 
 ## AEAD Modes
 
-### Done (7)
+### Done (8)
 | Module | Standard | Tests |
 |--------|----------|-------|
 | `aes128_gcm.spl` | AES-128-GCM | pass |
@@ -68,18 +68,13 @@
 | `chacha20_poly1305.spl` | ChaCha20-Poly1305 RFC 8439 | pass |
 | `aes_cmac.spl` | AES-CMAC RFC 4493 | pass |
 | EAX (in `aes_modes`) | EAX mode | pass |
-| `ocb3.spl` | OCB3 AEAD | file exists |
-
-### Needs Spec (1)
-| Module | Issue |
-|--------|-------|
-| `ocb3.spl` | File exists, needs KAT verification |
+| `ocb3.spl` | OCB3 AEAD | pass (focused encrypt/decrypt conformance) |
 
 ---
 
 ## Hashes (`src/os/crypto/` + `src/lib/common/hash/`)
 
-### Done (15)
+### Done (16)
 | Module | Standard | Tests |
 |--------|----------|-------|
 | `sha256.spl` | SHA-256 + HMAC-SHA-256 | pass |
@@ -94,14 +89,10 @@
 | `tiger.spl` | Tiger | pass (5 KAT) |
 | `whirlpool.spl` | Whirlpool ISO 10118-3 | pass (3 KAT) — fixed W37-I |
 | `sm3.spl` | SM3 GB/T 32905 | pass (3 KAT) — fixed W37 |
+| `streebog.spl` | Streebog / GOST R 34.11-2012 | pass (focused RFC KAT) |
 | `siphash.spl` | SipHash-2-4 + SipHash-1-3 | pass |
 | `adler32.spl` | Adler-32 + Fletcher-32 | pass (11) |
 | `crc32.spl` | CRC-32 + CRC-32C | pass |
-
-### Needs Work (1)
-| Module | Issue | Agent |
-|--------|-------|-------|
-| Streebog (GOST R 34.11-2012) | Had /tmp backup, never committed | unassigned |
 
 ---
 

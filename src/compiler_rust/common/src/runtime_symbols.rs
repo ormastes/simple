@@ -519,6 +519,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_aes_sbox",
     "rt_aes_rcon",
     "rt_aes128_encrypt_block_into",
+    "rt_aes128_encrypt_block_pure",
+    "rt_aes128_decrypt_block_pure",
     "rt_tls13_sha256",
     "rt_tls13_hkdf_extract",
     "rt_tls13_hkdf_extract_into",
@@ -724,7 +726,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_rsa_sha512_sign",
     "rt_ed25519_sign",
     "rt_ecdsa_p256_sign",
-    // PBKDF2-HMAC-SHA-2 native helpers (FR pbkdf2_native_runtime_helpers_2026-05-01)
+    // PBKDF2-HMAC native helpers (FR pbkdf2_native_runtime_helpers_2026-05-01)
+    "rt_pbkdf2_hmac_sha1",
     "rt_pbkdf2_hmac_sha256",
     "rt_pbkdf2_hmac_sha384",
     "rt_pbkdf2_hmac_sha512",

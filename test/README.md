@@ -64,6 +64,11 @@ bin/simple test --mode=smf           # SMF compiled
 bin/simple test --mode=native        # Native compiled
 ```
 
+`bin/simple test` now prefers fresh local driver builds from
+`src/compiler_rust/target/bootstrap`, `target/release`, and `target/debug`
+before older packaged binaries in `bin/release/`. That keeps focused test runs
+aligned with the current workspace compiler/runtime changes.
+
 ## Writing Tests
 
 Tests use the built-in SSpec BDD framework. No imports needed for `describe`, `it`, `expect`.

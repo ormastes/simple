@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use simple_native_loader::RUNTIME_SYMBOL_NAMES;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, Type, UnitDef};
 
 use crate::aop_config::AopConfig;
@@ -191,6 +192,9 @@ pub(crate) fn initialize_extern_functions() {
         let mut externs = cell.borrow_mut();
         externs.clear();
         for &name in PRELUDE_EXTERN_FUNCTIONS {
+            externs.insert(name.to_string());
+        }
+        for &name in RUNTIME_SYMBOL_NAMES {
             externs.insert(name.to_string());
         }
         for name in plugin_manifest::registered_plugin_symbols() {
@@ -801,7 +805,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 if let Some(ref tgt) = target_name {
                     if let Some(class_def) = classes.get(tgt).cloned() {
                         classes.insert(t.name.clone(), class_def);
-                        env.insert(t.name.clone(), Value::Constructor { class_name: tgt.clone() });
+                        env.insert(
+                            t.name.clone(),
+                            Value::Constructor {
+                                class_name: tgt.clone(),
+                            },
+                        );
                         resolved = true;
                     } else if enums.contains_key(tgt) {
                         env.insert(t.name.clone(), Value::Nil);

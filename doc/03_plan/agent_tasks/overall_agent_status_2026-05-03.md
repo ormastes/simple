@@ -28,7 +28,6 @@
 |-----|--------|--------|
 | `expect_byte_array` rejects `Value::U8` (#115) | Blocks AES-XTS spec + others | Unassigned |
 | Zstd FSE `nb_bits` formula | Blocks FSE encoder round-trip | Unassigned |
-| Bootstrap binary stale | No rt_sha512 in deployed binary | Needs rebuild |
 
 ---
 
@@ -51,7 +50,7 @@ Verify existing files that have no specs:
 2. `msgpack.spl` — write round-trip spec
 3. `protobuf.spl` — write encode/decode spec
 4. `cose.spl` — write Sign1+Mac0 spec
-5. `ocb3.spl` — write AEAD KAT spec
+5. `kmac.spl` / `cshake.spl` — converge KAT spec
 
 ### Wave 40 — Network Extensions (4 agents)
 1. TLS 1.3 KeyUpdate emit/parse
@@ -65,9 +64,9 @@ Verify existing files that have no specs:
 3. LZMA2 encoder
 
 ### Wave 42 — New Crypto (3 agents)
-1. Streebog (GOST R 34.11-2012)
-2. KMAC + cSHAKE spec verification
-3. P-521 ECDSA/ECDH (if P-384 succeeds)
+1. KMAC + cSHAKE spec verification
+2. P-521 ECDSA/ECDH (if P-384 succeeds)
+3. AES-256-CCM spec completion
 
 ---
 
@@ -88,7 +87,7 @@ Verify existing files that have no specs:
 1. **Max 10 concurrent agents** — beyond this, jj lock contention becomes destructive
 2. **Disjoint file scopes** — never 2 agents in same directory
 3. **Push after each wave** — don't accumulate >10 unpushed commits
-4. **Verify before push** — `bin/simple test` on each new spec
+4. **Verify before push** — `bin/simple test` on each new spec; `test` and `os` prefer fresh local binaries ahead of packaged release binaries
 5. **Bootstrap rebuild** — needed after any Rust runtime/interpreter change
 6. **SSH key for push** — `GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac"`
 7. **jj lock cleanup** — `rm -f .git/index.lock` before every jj command

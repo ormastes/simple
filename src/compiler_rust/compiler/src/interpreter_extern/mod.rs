@@ -846,6 +846,7 @@ pub(crate) fn call_extern_function(
         "rt_aes_rcon" => simd::rt_aes_rcon(&evaluated),
         "rt_aes128_encrypt_block_into" => simd::rt_aes128_encrypt_block_into(&evaluated),
         "rt_aes128_encrypt_block_pure" => simd::rt_aes128_encrypt_block_pure(&evaluated),
+        "rt_aes128_decrypt_block_pure" => simd::rt_aes128_decrypt_block_pure(&evaluated),
         "rt_tls13_aes128_gcm_encrypt" => simd::rt_tls13_aes128_gcm_encrypt(&evaluated),
         "rt_tls13_aes128_gcm_decrypt" => simd::rt_tls13_aes128_gcm_decrypt(&evaluated),
         "rt_aes256_encrypt_block_into" => simd::rt_aes256_encrypt_block_into(&evaluated),
