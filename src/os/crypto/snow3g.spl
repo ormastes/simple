@@ -1274,8 +1274,8 @@ fn _snow3g_fsm_step(st: [u32]) -> [u32]:
 # All operations are on 32-bit words.
 # ============================================================================
 
-fn _snow3g_lfsr_init_step(st: [u32], f: u32):
-    """LFSR update in initialization mode — with feedback word F."""
+fn _snow3g_lfsr_init_step(st: [u32], f: u32) -> [u32]:
+    """LFSR update in initialization mode — with feedback word F. Returns updated state."""
     val s0_hi = _b0(st[0])
     val s11_lo = _b3(st[11])
 
@@ -1299,9 +1299,10 @@ fn _snow3g_lfsr_init_step(st: [u32], f: u32):
     st[13] = st[14]
     st[14] = st[15]
     st[15] = v
+    st
 
-fn _snow3g_lfsr_work_step(st: [u32]):
-    """LFSR update in working mode."""
+fn _snow3g_lfsr_work_step(st: [u32]) -> [u32]:
+    """LFSR update in working mode. Returns updated state."""
     val s0_hi = _b0(st[0])
     val s11_lo = _b3(st[11])
 
@@ -1325,31 +1326,22 @@ fn _snow3g_lfsr_work_step(st: [u32]):
     st[13] = st[14]
     st[14] = st[15]
     st[15] = v
+    st
 
 # ============================================================================
 # SNOW 3G initialization — 32 rounds with FSM feedback into LFSR
 # ============================================================================
 
-fn _snow3g_initialize(st: [u32]):
-    """Run 32 initialization rounds."""
+fn _snow3g_initialize(st: [u32]) -> [u32]:
+    """Run 32 initialization rounds. Returns updated state."""
     var round: u64 = 0
+    var s = st
     while round < 32u64:
-        val f = _snow3g_fsm_output(st)
-        _snow3g_fsm_step(st)
-        _snow3g_lfsr_init_step(st, f)
+        val f = _snow3g_fsm_output(s)
+        s = _snow3g_fsm_step(s)
+        s = _snow3g_lfsr_init_step(s, f)
         round = round + 1u64
-
-# ============================================================================
-# SNOW 3G keystream generation — one word at a time
-# ============================================================================
-
-fn _snow3g_keystream_word(st: [u32]) -> u32:
-    """Generate one 32-bit keystream word and advance state."""
-    val f = _snow3g_fsm_output(st)
-    _snow3g_fsm_step(st)
-    val z = f ^ st[0]
-    _snow3g_lfsr_work_step(st)
-    z
+    s
 
 # ============================================================================
 # Public API: snow3g_keystream
@@ -1365,12 +1357,16 @@ fn snow3g_keystream(key: [u8], iv: [u8], num_words: u64) -> [u32]:
 
     Returns: list of num_words u32 keystream words.
     """
-    var st = _snow3g_load_state(key, iv)
-    _snow3g_initialize(st)
+    val st0 = _snow3g_load_state(key, iv)
+    var st = _snow3g_initialize(st0)
     var ks: [u32] = []
     var i: u64 = 0
     while i < num_words:
-        ks.push(_snow3g_keystream_word(st))
+        val f = _snow3g_fsm_output(st)
+        st = _snow3g_fsm_step(st)
+        val z = f ^ st[0]
+        st = _snow3g_lfsr_work_step(st)
+        ks.push(z)
         i = i + 1u64
     ks
 
