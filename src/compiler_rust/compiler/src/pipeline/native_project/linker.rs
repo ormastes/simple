@@ -1331,7 +1331,9 @@ mod linker_tests {
         let contents = std::fs::read_to_string(rsp_path).unwrap();
 
         assert_eq!(contents.lines().count(), object_paths.len());
-        assert!(contents.lines().all(|line| line.starts_with('"') && line.ends_with('"')));
+        assert!(contents
+            .lines()
+            .all(|line| line.starts_with('"') && line.ends_with('"')));
         assert!(contents.contains("\"with space.o\""));
         assert!(contents.contains("quote\\\"slash\\\\name.o"));
     }

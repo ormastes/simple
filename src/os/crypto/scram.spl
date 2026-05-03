@@ -1,10 +1,10 @@
-# SCRAM-SHA-256 — RFC 5802 + RFC 7677
+# SCRAM-SHA-256 / SCRAM-SHA-512 — RFC 5802 + RFC 7677
 #
-# Salted Challenge Response Authentication Mechanism using SHA-256.
+# Salted Challenge Response Authentication Mechanism using SHA-256 or SHA-512.
 # Used by PostgreSQL, MongoDB, XMPP, IMAP/SMTP for mutual authentication.
 #
 # References:
-#   RFC 5802 — SCRAM base protocol
+#   RFC 5802 — SCRAM base protocol (SHA-1 base; SHA-256/512 use same structure)
 #   RFC 7677 — SCRAM-SHA-256 and SCRAM-SHA-256-PLUS (§3 test vectors)
 #   RFC 2104 — HMAC
 #
@@ -34,9 +34,10 @@
 
 mod os.crypto.scram
 
-use std.crypto.pbkdf2.{pbkdf2_sha256_bytes}
-use std.crypto.hmac.{hmac_sha256_bytes}
+use std.crypto.pbkdf2.{pbkdf2_sha256_bytes, pbkdf2_sha512_bytes}
+use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha512_bytes}
 use std.crypto.sha256.{sha256_bytes}
+use std.crypto.sha512.{sha512_bytes}
 use string.{char_from_code}
 
 # rt_black_box prevents Cranelift from rewriting the XOR-accumulate loop
@@ -571,6 +572,188 @@ fn scram_sha256_decode_server_final(server_final: [u8]) -> [u8]:
 
 fn scram_sha256_server_signature_check(server_final: [u8], expected_sig: [u8]) -> bool:
     """Verify the server-final message for mutual auth (RFC 5802 §3).
+
+    server-final format: "v=<base64(ServerSignature)>"
+    Returns true iff the decoded signature matches expected_sig constant-time.
+    """
+    val received_sig = _parse_field_b64_u8(server_final, "v=")
+    _ct_eq_bytes(received_sig, expected_sig)
+
+# ===========================================================================
+# SCRAM-SHA-512 core key derivation (RFC 5802 §3, SHA-512 variant)
+#
+# Identical structure to SCRAM-SHA-256 but uses SHA-512 throughout:
+#   SaltedPassword = PBKDF2-HMAC-SHA-512(password, salt, i, 64)
+#   ClientKey      = HMAC-SHA-512(SaltedPassword, "Client Key")
+#   StoredKey      = SHA-512(ClientKey)
+#   ClientSignature= HMAC-SHA-512(StoredKey, AuthMessage)
+#   ClientProof    = ClientKey XOR ClientSignature
+#   ServerKey      = HMAC-SHA-512(SaltedPassword, "Server Key")
+#   ServerSignature= HMAC-SHA-512(ServerKey, AuthMessage)
+#
+# All keys and proofs are 64 bytes (512 bits).
+# ===========================================================================
+
+fn _scram_sha512_derive(password: [u8], salt: [u8], iterations: i64) -> ([u8], [u8], [u8]):
+    """Derive (salted_password, server_key, client_key) for SCRAM-SHA-512.
+
+    SaltedPassword = PBKDF2-HMAC-SHA-512(password, salt, iterations, 64)
+    ClientKey      = HMAC-SHA-512(SaltedPassword, "Client Key")
+    ServerKey      = HMAC-SHA-512(SaltedPassword, "Server Key")
+    """
+    val pw_list = _u8_to_list(password)
+    val salt_list = _u8_to_list(salt)
+
+    val salted_pw_list = pbkdf2_sha512_bytes(pw_list, salt_list, iterations, 64)
+    val salted_pw = _list_to_u8(salted_pw_list)
+
+    val ck_label = _text_to_list("Client Key")
+    val client_key_list = hmac_sha512_bytes(salted_pw_list, ck_label)
+    val client_key = _list_to_u8(client_key_list)
+
+    val sk_label = _text_to_list("Server Key")
+    val server_key_list = hmac_sha512_bytes(salted_pw_list, sk_label)
+    val server_key = _list_to_u8(server_key_list)
+
+    (salted_pw, server_key, client_key)
+
+fn _scram_sha512_proof_and_server_sig(
+    client_key: [u8],
+    server_key: [u8],
+    auth_message: [u8]
+) -> ([u8], [u8]):
+    """Compute (ClientProof, ServerSignature) given keys and AuthMessage.
+
+    StoredKey       = SHA-512(ClientKey)
+    ClientSignature = HMAC-SHA-512(StoredKey, AuthMessage)
+    ClientProof     = ClientKey XOR ClientSignature
+    ServerSignature = HMAC-SHA-512(ServerKey, AuthMessage)
+    """
+    val ck_list = _u8_to_list(client_key)
+    val stored_key_list = sha512_bytes(ck_list)
+
+    val am_list = _u8_to_list(auth_message)
+    val client_sig_list = hmac_sha512_bytes(stored_key_list, am_list)
+    val client_sig = _list_to_u8(client_sig_list)
+
+    val client_proof = _u8_xor(client_key, client_sig)
+
+    val sk_list = _u8_to_list(server_key)
+    val server_sig_list = hmac_sha512_bytes(sk_list, am_list)
+    val server_sig = _list_to_u8(server_sig_list)
+
+    (client_proof, server_sig)
+
+# ===========================================================================
+# Public API — SCRAM-SHA-512
+# ===========================================================================
+
+fn scram_sha512_client_first(user: [u8], client_nonce: [u8]) -> [u8]:
+    """Build the client-first message for SCRAM-SHA-512 (RFC 5802 §5).
+
+    Format (gs2-header + client-first-bare):
+      "n,,n=<user>,r=<client-nonce>"
+
+    gs2-cbind-flag = 'n' (no channel binding per RFC 5802 §6).
+    `client_nonce` must be random printable ASCII (caller-supplied).
+
+    Returns the complete client-first message as [u8].
+    """
+    val prefix = _text_to_u8("n,,n=")
+    val comma_r = _text_to_u8(",r=")
+    val msg = _u8_concat(_u8_concat(prefix, user), comma_r)
+    _u8_concat(msg, client_nonce)
+
+fn scram_sha512_client_final(
+    client_first: [u8],
+    server_first: [u8],
+    password: [u8],
+    channel_binding: [u8]
+) -> ([u8], [u8]):
+    """Build the client-final message and return the expected ServerSignature.
+
+    Parses server-first to extract combined-nonce, salt (base64), and
+    iteration count. Derives keys and computes ClientProof (64 bytes).
+
+    `channel_binding` should be the raw GS2 header bytes (for no channel
+    binding pass the bytes of 'n,,' = [0x6e, 0x2c, 0x2c]).
+
+    Returns (client_final_message, expected_server_signature).
+    """
+    val sf_text = _u8_to_text(server_first)
+
+    val combined_nonce = _parse_field(sf_text, "r=")
+    val salt = _parse_field_b64(sf_text, "s=")
+    val iter_text = _parse_field(sf_text, "i=")
+    val iterations = _text_to_i64(iter_text)
+
+    # client-final-without-proof: "c=<base64(channel_binding)>,r=<combined_nonce>"
+    val cb_b64 = _base64_encode(channel_binding)
+    val cf_no_proof_text = "c=" + cb_b64 + ",r=" + combined_nonce
+
+    # client-first-bare strips the 3-byte gs2 header "n,,"
+    val cf_bare_text = _u8_to_text_from(client_first, 3)
+
+    # AuthMessage = client-first-bare + "," + server-first + "," + client-final-without-proof
+    val auth_message_text = cf_bare_text + "," + sf_text + "," + cf_no_proof_text
+    val auth_message = _text_to_u8(auth_message_text)
+
+    val (_, server_key, client_key) = _scram_sha512_derive(password, salt, iterations)
+    val (client_proof, server_sig) = _scram_sha512_proof_and_server_sig(
+        client_key, server_key, auth_message
+    )
+
+    val proof_b64 = _base64_encode(client_proof)
+    val cf_text = cf_no_proof_text + ",p=" + proof_b64
+    val client_final = _text_to_u8(cf_text)
+
+    (client_final, server_sig)
+
+fn scram_sha512_server_verify(
+    client_final: [u8],
+    password: [u8],
+    salt: [u8],
+    iterations: i64,
+    auth_message: [u8]
+) -> bool:
+    """Server-side verification of a client-final message (RFC 5802 §3, SHA-512).
+
+    Extracts ClientProof from client-final, recomputes the expected proof
+    from password/salt/iterations, and compares constant-time.
+
+    Returns true if the proof is valid.
+    """
+    val received_proof = _parse_field_b64_u8(client_final, "p=")
+
+    val (_, _, client_key) = _scram_sha512_derive(password, salt, iterations)
+
+    val ck_list = _u8_to_list(client_key)
+    val stored_key_list = sha512_bytes(ck_list)
+
+    val am_list = _u8_to_list(auth_message)
+    val client_sig_list = hmac_sha512_bytes(stored_key_list, am_list)
+    val client_sig = _list_to_u8(client_sig_list)
+
+    # Recover ClientKey = received_proof XOR ClientSignature,
+    # then verify SHA-512(recovered_ck) == StoredKey constant-time.
+    val recovered_ck = _u8_xor(received_proof, client_sig)
+    val rck_list = _u8_to_list(recovered_ck)
+    val recovered_stored = _list_to_u8(sha512_bytes(rck_list))
+    val expected_stored = _list_to_u8(stored_key_list)
+
+    _ct_eq_bytes(recovered_stored, expected_stored)
+
+fn scram_sha512_ct_eq(a: [u8], b: [u8]) -> bool:
+    """Public wrapper for constant-time equality — used by KAT."""
+    _ct_eq_bytes(a, b)
+
+fn scram_sha512_decode_server_final(server_final: [u8]) -> [u8]:
+    """Debug helper: decode the ServerSignature from a server-final message.
+    Exposed for KAT verification only."""
+    _parse_field_b64_u8(server_final, "v=")
+
+fn scram_sha512_server_signature_check(server_final: [u8], expected_sig: [u8]) -> bool:
+    """Verify the server-final message for mutual auth (RFC 5802 §3, SHA-512).
 
     server-final format: "v=<base64(ServerSignature)>"
     Returns true iff the decoded signature matches expected_sig constant-time.
