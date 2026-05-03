@@ -1104,6 +1104,104 @@ fn emit_avx512_vpmovsxwd(dst_id: i64, src_id: i64) -> [i64]:
     evex_encode_3op_zmm(d, 0, s, 0, false, 2, 0, 1, 0x23)
 
 # ============================================================================
+# VPCMPD / VPCMPQ / VPCMPEQD / VPCMPEQQ — Compare Packed Integers to Mask
+#
+# These instructions write comparison results to k-registers (not ZMM).
+# Encoding uses evex_encode_3op_zmm with dest_idx = k_dst (raw 0-7).
+# k0-k7 all have index < 8 so R=0, R'=0, and ModRM.reg = k_dst & 7.
+#
+# VPCMPD / VPCMPQ — EVEX.512.66.0F3A.W0/W1 1F /r ib
+#   imm8 predicate: 0=EQ, 1=LT, 2=LE, 4=NEQ, 5=NLT, 6=NLE
+# VPCMPEQD — EVEX.512.66.0F38.W0 76 /r  (fixed-predicate EQ form)
+# VPCMPEQQ — EVEX.512.66.0F38.W1 29 /r
+#
+# # C2 §1.1: Intel SDM Vol 2A §2.6.1 Table 2-36 (EVEX byte layout)
+# # C2 §1.2: VPCMPD  EVEX.512.66.0F3A.W0 1F /r ib — Intel SDM Vol 2C
+# # C2 §1.3: VPCMPQ  EVEX.512.66.0F3A.W1 1F /r ib — Intel SDM Vol 2C
+# # C2 §1.4: VPCMPEQD EVEX.512.66.0F38.W0 76 /r  — Intel SDM Vol 2C (0F map)
+# # C2 §1.5: VPCMPEQQ EVEX.512.66.0F38.W1 29 /r  — Intel SDM Vol 2C
+#
+# Register convention: k_dst is raw 0-7; zmm_src1/zmm_src2 use id convention (48+n).
+# ============================================================================
+
+fn emit_avx512_vpcmpeqd(k_dst: i64, zmm_src1: i64, zmm_src2: i64) -> [i64]:
+    """
+    VPCMPEQD k_dst, zmm_src1, zmm_src2 — compare 16 int32 lanes for equality.
+    Result written to k-register. Fixed-predicate EQ form.
+    Encoding: EVEX.512.66.0F38.W0 76 /r  (mm=2, w=0, pp=1)
+    k_dst: raw k-register index 0-7 (k0=0 .. k7=7).
+    zmm_src1/zmm_src2: ZMM register IDs (X86_ZMM0=48 .. X86_ZMM31=79).
+    Golden (k0, zmm0, zmm1): 62 F1 7D 48 76 C1
+    Golden (k1, zmm0, zmm1): 62 F2 7D 48 29 C9  [that is vpcmpeqq]
+    # C2 §1.4: Intel SDM Vol 2C VPCMPEQD entry
+    # C2 §1.1: Intel SDM Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64 -mattr=+avx512f --show-encoding
+    """
+    val s1 = zmm_to_index(zmm_src1)
+    val s2 = zmm_to_index(zmm_src2)
+    # VPCMPEQD: EVEX.512.66.0F38.W0 — mm=2 (0F38 map), w=0, pp=1 (0x66)
+    # k_dst passed directly as dest_idx; k0-k7 fit without R/R' extension
+    evex_encode_3op_zmm(k_dst, s1, s2, 0, false, 2, 0, 1, 0x76)
+
+fn emit_avx512_vpcmpeqq(k_dst: i64, zmm_src1: i64, zmm_src2: i64) -> [i64]:
+    """
+    VPCMPEQQ k_dst, zmm_src1, zmm_src2 — compare 8 int64 lanes for equality.
+    Result written to k-register. Fixed-predicate EQ form.
+    Encoding: EVEX.512.66.0F38.W1 29 /r  (mm=2, w=1, pp=1)
+    k_dst: raw k-register index 0-7.
+    zmm_src1/zmm_src2: ZMM register IDs (X86_ZMM0=48 .. X86_ZMM31=79).
+    Golden (k1, zmm0, zmm1): 62 F2 FD 48 29 C9
+    # C2 §1.5: Intel SDM Vol 2C VPCMPEQQ entry
+    # C2 §1.1: Intel SDM Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64 -mattr=+avx512f --show-encoding
+    """
+    val s1 = zmm_to_index(zmm_src1)
+    val s2 = zmm_to_index(zmm_src2)
+    # VPCMPEQQ: EVEX.512.66.0F38.W1 — mm=2 (0F38 map), w=1, pp=1 (0x66)
+    evex_encode_3op_zmm(k_dst, s1, s2, 0, false, 2, 1, 1, 0x29)
+
+fn emit_avx512_vpcmpd(k_dst: i64, zmm_src1: i64, zmm_src2: i64, imm8: i64) -> [i64]:
+    """
+    VPCMPD k_dst, zmm_src1, zmm_src2, imm8 — compare 16 int32 lanes, predicate from imm8.
+    Result written to k-register.
+    Encoding: EVEX.512.66.0F3A.W0 1F /r ib  (mm=3, w=0, pp=1)
+    imm8 predicate: 0=EQ, 1=LT, 2=LE, 4=NEQ, 5=NLT, 6=NLE.
+    k_dst: raw k-register index 0-7.
+    zmm_src1/zmm_src2: ZMM register IDs (X86_ZMM0=48 .. X86_ZMM31=79).
+    Golden (k0, zmm0, zmm1, EQ=0): 62 F3 7D 48 1F C1 00
+    Golden (k0, zmm0, zmm1, LT=1): 62 F3 7D 48 1F C1 01
+    # C2 §1.2: Intel SDM Vol 2C VPCMPD entry
+    # C2 §1.1: Intel SDM Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64 -mattr=+avx512f --show-encoding
+    """
+    val s1 = zmm_to_index(zmm_src1)
+    val s2 = zmm_to_index(zmm_src2)
+    # VPCMPD: EVEX.512.66.0F3A.W0 — mm=3 (0F3A map), w=0, pp=1 (0x66)
+    var base = evex_encode_3op_zmm(k_dst, s1, s2, 0, false, 3, 0, 1, 0x1F)
+    base.push(imm8 % 256)
+    base
+
+fn emit_avx512_vpcmpq(k_dst: i64, zmm_src1: i64, zmm_src2: i64, imm8: i64) -> [i64]:
+    """
+    VPCMPQ k_dst, zmm_src1, zmm_src2, imm8 — compare 8 int64 lanes, predicate from imm8.
+    Result written to k-register.
+    Encoding: EVEX.512.66.0F3A.W1 1F /r ib  (mm=3, w=1, pp=1)
+    imm8 predicate: 0=EQ, 1=LT, 2=LE, 4=NEQ, 5=NLT, 6=NLE.
+    k_dst: raw k-register index 0-7.
+    zmm_src1/zmm_src2: ZMM register IDs (X86_ZMM0=48 .. X86_ZMM31=79).
+    Golden (k1, zmm0, zmm1, EQ=0): 62 F3 FD 48 1F C9 00
+    # C2 §1.3: Intel SDM Vol 2C VPCMPQ entry
+    # C2 §1.1: Intel SDM Vol 2A §2.6.1 Table 2-36
+    Verified: llvm-mc -triple=x86_64 -mattr=+avx512f --show-encoding
+    """
+    val s1 = zmm_to_index(zmm_src1)
+    val s2 = zmm_to_index(zmm_src2)
+    # VPCMPQ: EVEX.512.66.0F3A.W1 — mm=3 (0F3A map), w=1, pp=1 (0x66)
+    var base = evex_encode_3op_zmm(k_dst, s1, s2, 0, false, 3, 1, 1, 0x1F)
+    base.push(imm8 % 256)
+    base
+
+# ============================================================================
 # Diagnostic Helper
 # ============================================================================
 

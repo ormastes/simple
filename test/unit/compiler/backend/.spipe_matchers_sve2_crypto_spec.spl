@@ -1,0 +1,338 @@
+# test/unit/compiler/backend/sve2_crypto_spec.spl
+#
+# Golden byte tests for SVE2 crypto emit functions.
+# Covers: SM4E (SVE2-SM4), SM4EKEY (SVE2-SM4), RAX1 (SVE2-SHA3)
+#
+# ALL byte goldens VERIFIED via:
+#   llvm-mc -triple=aarch64-none-linux-gnu -mattr=+sve2,+sve2-sm4 --show-encoding
+#   llvm-mc -triple=aarch64-none-linux-gnu -mattr=+sve2,+sve2-sha3 --show-encoding
+#   (run 2026-05-03)
+#
+# Architecture reference: ARMv9 ARM §C7.2 SVE2 crypto extensions
+# Register indices: Z0=0..Z31=31 (raw 5-bit field values).
+# Instructions are 4-byte fixed-width, little-endian per ARMv9 ABI.
+
+use compiler.backend.native.arm_sve2.{emit_sm4e_z}
+use compiler.backend.native.arm_sve2.{emit_sm4ekey_z}
+use compiler.backend.native.arm_sve2.{emit_rax1_z}
+
+# ============================================================================
+# SM4E Zd.S, Zd.S, Zn.S — SVE2-SM4 encryption round (destructive, 2-register)
+# Base opcode (Zn=0, Zd=0): 0x4523E000 → LE [0x00, 0xE0, 0x23, 0x45]
+# Zn in bits[9:5]: Zn*32   Zd in bits[4:0]: Zd
+# ============================================================================
+
+describe "SVE2 emit_sm4e_z golden Z0 Z0":
+    it "SM4E Z0.S Z0.S Z0.S emits 4 bytes":
+        val result = emit_sm4e_z(0, 0)
+        expect result.len() == 4
+
+    it "SM4E Z0.S Z0.S Z0.S byte0 is 0x00":
+        val result = emit_sm4e_z(0, 0)
+        expect result[0] == 0
+
+    it "SM4E Z0.S Z0.S Z0.S byte1 is 0xE0":
+        # bits[15:8]=0xE0: SM4E opcode sub-field
+        val result = emit_sm4e_z(0, 0)
+        expect result[1] == 224
+
+    it "SM4E Z0.S Z0.S Z0.S byte2 is 0x23":
+        # bits[23:16]=0x23: SVE2-SM4 encrypt group fixed field
+        val result = emit_sm4e_z(0, 0)
+        expect result[2] == 35
+
+    it "SM4E Z0.S Z0.S Z0.S byte3 is 0x45":
+        # bits[31:24]=0x45: SVE2 crypto group
+        val result = emit_sm4e_z(0, 0)
+        expect result[3] == 69
+
+describe "SVE2 emit_sm4e_z Zn field Z0 Z1":
+    it "SM4E Z0.S Z0.S Z1.S byte0 encodes Zn":
+        # Zd=0, Zn=1 → byte0 = 1*32 = 32 = 0x20
+        val result = emit_sm4e_z(0, 1)
+        expect result[0] == 32
+
+    it "SM4E Z0.S Z0.S Z1.S byte1 is 0xE0":
+        val result = emit_sm4e_z(0, 1)
+        expect result[1] == 224
+
+    it "SM4E Z0.S Z0.S Z1.S byte2 is 0x23":
+        val result = emit_sm4e_z(0, 1)
+        expect result[2] == 35
+
+    it "SM4E Z0.S Z0.S Z1.S byte3 is 0x45":
+        val result = emit_sm4e_z(0, 1)
+        expect result[3] == 69
+
+describe "SVE2 emit_sm4e_z register fields Z1 Z2":
+    it "SM4E Z1.S Z1.S Z2.S byte0 encodes Zd and Zn":
+        # Zd=1, Zn=2 → byte0 = 2*32 + 1 = 65 = 0x41
+        val result = emit_sm4e_z(1, 2)
+        expect result[0] == 65
+
+    it "SM4E Z1.S Z1.S Z2.S byte1 is 0xE0":
+        val result = emit_sm4e_z(1, 2)
+        expect result[1] == 224
+
+    it "SM4E Z1.S Z1.S Z2.S byte2 is 0x23":
+        val result = emit_sm4e_z(1, 2)
+        expect result[2] == 35
+
+describe "SVE2 emit_sm4e_z Z3 Z5":
+    it "SM4E Z3.S Z3.S Z5.S byte0 is 0xA3":
+        # Zd=3, Zn=5 → 5*32 + 3 = 163 = 0xA3
+        val result = emit_sm4e_z(3, 5)
+        expect result[0] == 163
+
+    it "SM4E Z3.S Z3.S Z5.S byte1 is 0xE0":
+        val result = emit_sm4e_z(3, 5)
+        expect result[1] == 224
+
+    it "SM4E Z3.S Z3.S Z5.S byte2 is 0x23":
+        val result = emit_sm4e_z(3, 5)
+        expect result[2] == 35
+
+    it "SM4E Z3.S Z3.S Z5.S byte3 is 0x45":
+        val result = emit_sm4e_z(3, 5)
+        expect result[3] == 69
+
+describe "SVE2 emit_sm4e_z boundary Z31 Z31":
+    it "SM4E Z31.S Z31.S Z31.S emits 4 bytes":
+        val result = emit_sm4e_z(31, 31)
+        expect result.len() == 4
+
+    it "SM4E Z31.S Z31.S Z31.S byte0 is 0xFF":
+        # Zd=31, Zn=31 → 31*32 + 31 = 1023; 1023 % 256 = 255 = 0xFF
+        val result = emit_sm4e_z(31, 31)
+        expect result[0] == 255
+
+    it "SM4E Z31.S Z31.S Z31.S byte1 is 0xE3":
+        # 0xE0 + carry 3 from Zn=31 overflow (1023/256=3) = 0xE3 = 227
+        val result = emit_sm4e_z(31, 31)
+        expect result[1] == 227
+
+    it "SM4E Z31.S Z31.S Z31.S byte2 is 0x23":
+        val result = emit_sm4e_z(31, 31)
+        expect result[2] == 35
+
+    it "SM4E Z31.S Z31.S Z31.S byte3 is 0x45":
+        val result = emit_sm4e_z(31, 31)
+        expect result[3] == 69
+
+# ============================================================================
+# SM4EKEY Zd.S, Zn.S, Zm.S — SVE2-SM4 key schedule (3-register)
+# Base opcode (Zm=0, Zn=0, Zd=0): 0x4520F000 → LE [0x00, 0xF0, 0x20, 0x45]
+# Zm in bits[20:16]: Zm*65536  Zn in bits[9:5]: Zn*32  Zd in bits[4:0]: Zd
+# ============================================================================
+
+describe "SVE2 emit_sm4ekey_z golden Z0 Z0 Z0":
+    it "SM4EKEY Z0.S Z0.S Z0.S emits 4 bytes":
+        val result = emit_sm4ekey_z(0, 0, 0)
+        expect result.len() == 4
+
+    it "SM4EKEY Z0.S Z0.S Z0.S byte0 is 0x00":
+        val result = emit_sm4ekey_z(0, 0, 0)
+        expect result[0] == 0
+
+    it "SM4EKEY Z0.S Z0.S Z0.S byte1 is 0xF0":
+        # bits[15:8]=0xF0: SM4EKEY opcode sub-field
+        val result = emit_sm4ekey_z(0, 0, 0)
+        expect result[1] == 240
+
+    it "SM4EKEY Z0.S Z0.S Z0.S byte2 is 0x20":
+        # bits[23:16]=0x20: SVE2-SM4 key schedule group fixed field with Zm=0
+        val result = emit_sm4ekey_z(0, 0, 0)
+        expect result[2] == 32
+
+    it "SM4EKEY Z0.S Z0.S Z0.S byte3 is 0x45":
+        val result = emit_sm4ekey_z(0, 0, 0)
+        expect result[3] == 69
+
+describe "SVE2 emit_sm4ekey_z Zm field Z0 Z0 Z1":
+    it "SM4EKEY Z0.S Z0.S Z1.S byte0 is 0x00":
+        val result = emit_sm4ekey_z(0, 0, 1)
+        expect result[0] == 0
+
+    it "SM4EKEY Z0.S Z0.S Z1.S byte1 is 0xF0":
+        val result = emit_sm4ekey_z(0, 0, 1)
+        expect result[1] == 240
+
+    it "SM4EKEY Z0.S Z0.S Z1.S byte2 encodes Zm":
+        # Zm=1 in bits[20:16]: byte2 = 0x20 + 1 = 0x21 = 33
+        val result = emit_sm4ekey_z(0, 0, 1)
+        expect result[2] == 33
+
+    it "SM4EKEY Z0.S Z0.S Z1.S byte3 is 0x45":
+        val result = emit_sm4ekey_z(0, 0, 1)
+        expect result[3] == 69
+
+describe "SVE2 emit_sm4ekey_z register fields Z1 Z2 Z3":
+    it "SM4EKEY Z1.S Z2.S Z3.S byte0 encodes Zn and Zd":
+        # Zd=1, Zn=2 → byte0 = 2*32 + 1 = 65 = 0x41
+        val result = emit_sm4ekey_z(1, 2, 3)
+        expect result[0] == 65
+
+    it "SM4EKEY Z1.S Z2.S Z3.S byte1 is 0xF0":
+        val result = emit_sm4ekey_z(1, 2, 3)
+        expect result[1] == 240
+
+    it "SM4EKEY Z1.S Z2.S Z3.S byte2 encodes Zm":
+        # Zm=3 → byte2 = 0x20 + 3 = 0x23 = 35
+        val result = emit_sm4ekey_z(1, 2, 3)
+        expect result[2] == 35
+
+    it "SM4EKEY Z1.S Z2.S Z3.S byte3 is 0x45":
+        val result = emit_sm4ekey_z(1, 2, 3)
+        expect result[3] == 69
+
+describe "SVE2 emit_sm4ekey_z Z3 Z5 Z7":
+    it "SM4EKEY Z3.S Z5.S Z7.S byte0 is 0xA3":
+        # Zd=3, Zn=5 → 5*32 + 3 = 163 = 0xA3
+        val result = emit_sm4ekey_z(3, 5, 7)
+        expect result[0] == 163
+
+    it "SM4EKEY Z3.S Z5.S Z7.S byte1 is 0xF0":
+        val result = emit_sm4ekey_z(3, 5, 7)
+        expect result[1] == 240
+
+    it "SM4EKEY Z3.S Z5.S Z7.S byte2 is 0x27":
+        # Zm=7 → byte2 = 0x20 + 7 = 0x27 = 39
+        val result = emit_sm4ekey_z(3, 5, 7)
+        expect result[2] == 39
+
+    it "SM4EKEY Z3.S Z5.S Z7.S byte3 is 0x45":
+        val result = emit_sm4ekey_z(3, 5, 7)
+        expect result[3] == 69
+
+describe "SVE2 emit_sm4ekey_z boundary Z31 Z31 Z31":
+    it "SM4EKEY Z31.S Z31.S Z31.S emits 4 bytes":
+        val result = emit_sm4ekey_z(31, 31, 31)
+        expect result.len() == 4
+
+    it "SM4EKEY Z31.S Z31.S Z31.S byte0 is 0xFF":
+        # Zd=31, Zn=31 → 31*32 + 31 = 1023; 1023 % 256 = 255 = 0xFF
+        val result = emit_sm4ekey_z(31, 31, 31)
+        expect result[0] == 255
+
+    it "SM4EKEY Z31.S Z31.S Z31.S byte1 is 0xF3":
+        # 0xF0 + carry 3 from Zn overflow = 0xF3 = 243
+        val result = emit_sm4ekey_z(31, 31, 31)
+        expect result[1] == 243
+
+    it "SM4EKEY Z31.S Z31.S Z31.S byte2 is 0x3F":
+        # Zm=31, base 0x20 → 0x20 + 31 = 0x3F = 63
+        val result = emit_sm4ekey_z(31, 31, 31)
+        expect result[2] == 63
+
+    it "SM4EKEY Z31.S Z31.S Z31.S byte3 is 0x45":
+        val result = emit_sm4ekey_z(31, 31, 31)
+        expect result[3] == 69
+
+# ============================================================================
+# RAX1 Zd.D, Zn.D, Zm.D — SVE2-SHA3 rotate-and-XOR (3-register)
+# Base opcode (Zm=0, Zn=0, Zd=0): 0x4520F400 → LE [0x00, 0xF4, 0x20, 0x45]
+# Zm in bits[20:16]: Zm*65536  Zn in bits[9:5]: Zn*32  Zd in bits[4:0]: Zd
+# ============================================================================
+
+describe "SVE2 emit_rax1_z golden Z0 Z0 Z0":
+    it "RAX1 Z0.D Z0.D Z0.D emits 4 bytes":
+        val result = emit_rax1_z(0, 0, 0)
+        expect result.len() == 4
+
+    it "RAX1 Z0.D Z0.D Z0.D byte0 is 0x00":
+        val result = emit_rax1_z(0, 0, 0)
+        expect result[0] == 0
+
+    it "RAX1 Z0.D Z0.D Z0.D byte1 is 0xF4":
+        # bits[15:8]=0xF4: RAX1 opcode sub-field (differs from SM4EKEY's 0xF0)
+        val result = emit_rax1_z(0, 0, 0)
+        expect result[1] == 244
+
+    it "RAX1 Z0.D Z0.D Z0.D byte2 is 0x20":
+        # bits[23:16]=0x20: SVE2-SHA3 group fixed field with Zm=0
+        val result = emit_rax1_z(0, 0, 0)
+        expect result[2] == 32
+
+    it "RAX1 Z0.D Z0.D Z0.D byte3 is 0x45":
+        val result = emit_rax1_z(0, 0, 0)
+        expect result[3] == 69
+
+describe "SVE2 emit_rax1_z Zm field Z0 Z0 Z1":
+    it "RAX1 Z0.D Z0.D Z1.D byte0 is 0x00":
+        val result = emit_rax1_z(0, 0, 1)
+        expect result[0] == 0
+
+    it "RAX1 Z0.D Z0.D Z1.D byte1 is 0xF4":
+        val result = emit_rax1_z(0, 0, 1)
+        expect result[1] == 244
+
+    it "RAX1 Z0.D Z0.D Z1.D byte2 encodes Zm":
+        # Zm=1 in bits[20:16]: byte2 = 0x20 + 1 = 0x21 = 33
+        val result = emit_rax1_z(0, 0, 1)
+        expect result[2] == 33
+
+    it "RAX1 Z0.D Z0.D Z1.D byte3 is 0x45":
+        val result = emit_rax1_z(0, 0, 1)
+        expect result[3] == 69
+
+describe "SVE2 emit_rax1_z register fields Z1 Z2 Z3":
+    it "RAX1 Z1.D Z2.D Z3.D byte0 encodes Zn and Zd":
+        # Zd=1, Zn=2 → byte0 = 2*32 + 1 = 65 = 0x41
+        val result = emit_rax1_z(1, 2, 3)
+        expect result[0] == 65
+
+    it "RAX1 Z1.D Z2.D Z3.D byte1 is 0xF4":
+        val result = emit_rax1_z(1, 2, 3)
+        expect result[1] == 244
+
+    it "RAX1 Z1.D Z2.D Z3.D byte2 encodes Zm":
+        # Zm=3 → byte2 = 0x20 + 3 = 0x23 = 35
+        val result = emit_rax1_z(1, 2, 3)
+        expect result[2] == 35
+
+    it "RAX1 Z1.D Z2.D Z3.D byte3 is 0x45":
+        val result = emit_rax1_z(1, 2, 3)
+        expect result[3] == 69
+
+describe "SVE2 emit_rax1_z Z3 Z5 Z7":
+    it "RAX1 Z3.D Z5.D Z7.D byte0 is 0xA3":
+        # Zd=3, Zn=5 → 5*32 + 3 = 163 = 0xA3
+        val result = emit_rax1_z(3, 5, 7)
+        expect result[0] == 163
+
+    it "RAX1 Z3.D Z5.D Z7.D byte1 is 0xF4":
+        val result = emit_rax1_z(3, 5, 7)
+        expect result[1] == 244
+
+    it "RAX1 Z3.D Z5.D Z7.D byte2 is 0x27":
+        # Zm=7 → byte2 = 0x20 + 7 = 0x27 = 39
+        val result = emit_rax1_z(3, 5, 7)
+        expect result[2] == 39
+
+    it "RAX1 Z3.D Z5.D Z7.D byte3 is 0x45":
+        val result = emit_rax1_z(3, 5, 7)
+        expect result[3] == 69
+
+describe "SVE2 emit_rax1_z boundary Z31 Z31 Z31":
+    it "RAX1 Z31.D Z31.D Z31.D emits 4 bytes":
+        val result = emit_rax1_z(31, 31, 31)
+        expect result.len() == 4
+
+    it "RAX1 Z31.D Z31.D Z31.D byte0 is 0xFF":
+        # Zd=31, Zn=31 → 31*32 + 31 = 1023; 1023 % 256 = 255 = 0xFF
+        val result = emit_rax1_z(31, 31, 31)
+        expect result[0] == 255
+
+    it "RAX1 Z31.D Z31.D Z31.D byte1 is 0xF7":
+        # 0xF4 + carry 3 from Zn overflow = 0xF7 = 247
+        val result = emit_rax1_z(31, 31, 31)
+        expect result[1] == 247
+
+    it "RAX1 Z31.D Z31.D Z31.D byte2 is 0x3F":
+        # Zm=31, base 0x20 → 0x20 + 31 = 0x3F = 63
+        val result = emit_rax1_z(31, 31, 31)
+        expect result[2] == 63
+
+    it "RAX1 Z31.D Z31.D Z31.D byte3 is 0x45":
+        val result = emit_rax1_z(31, 31, 31)
+        expect result[3] == 69

@@ -341,35 +341,6 @@ pub(crate) fn bind_args_with_values(
         ));
     }
 
-    let coerce_unsigned = |value: Value, ty: Option<&Type>| -> Value {
-        match ty {
-            Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") => {
-                let width: u8 = match type_name.as_str() {
-                    "u8" => 8,
-                    "u16" => 16,
-                    "u32" => 32,
-                    "u64" => 64,
-                    _ => unreachable!(),
-                };
-                match value {
-                    Value::UInt { .. } => value,
-                    Value::Int(i) => {
-                        let masked: u64 = match width {
-                            8 => (i as u8) as u64,
-                            16 => (i as u16) as u64,
-                            32 => (i as u32) as u64,
-                            64 => i as u64,
-                            _ => i as u64,
-                        };
-                        Value::UInt { value: masked, width }
-                    }
-                    other => other,
-                }
-            }
-            _ => value,
-        }
-    };
-
     let mut bound = HashMap::new();
     for (idx, param) in params_to_bind.iter().enumerate() {
         let value = if idx < args.len() {
@@ -390,7 +361,7 @@ pub(crate) fn bind_args_with_values(
             ));
         };
 
-        let value = coerce_unsigned(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
+        let value = wrap_trait_object!(value, param.ty.as_ref());
         validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
         bound.insert(param.name.clone(), value);
     }
