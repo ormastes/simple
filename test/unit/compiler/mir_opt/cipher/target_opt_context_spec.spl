@@ -1,0 +1,310 @@
+# TargetOptContext Unified Optimization Layer — Unit Tests
+#
+# Feature ID: #COMPILER-MIROPT-TARGET-OPT-CONTEXT
+# Category:   Compiler | MIR Optimization | Unified Target Context
+# Status:     Active — covers TargetOptContext, optimize_module_with_context,
+#             OptimizationPipeline.target_ctx, and cipher-rewrite through unified path
+#
+# Tests cover:
+#   - target_opt_context_default() returns all-false caps and cipher_remark=false
+#   - optimizationpipeline_for_level pipeline has target_ctx field
+#   - Aggressive pipeline includes "vectorization" pass
+#   - optimize_module with NoOpt preserves function count
+#   - optimize_module_with_context + AES caps rewrites aes_round_software to Intrinsic
+#   - optimize_module_with_context + no AES caps leaves Call unchanged
+#   - Speed level does NOT run vectorization (cipher stays as Call even with AES caps)
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  The assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+#   All assertions use built-in matchers only: to_equal, to_be_nil, to_be.
+
+use compiler.mir_opt.mir_opt.mod.{
+    TargetOptContext, target_opt_context_default,
+    OptLevel, OptimizationPipeline, optimizationpipeline_for_level,
+    optimize_module, optimize_module_with_context
+}
+use compiler.backend.feature_caps.{X86Caps}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind, MirBuilder, LocalId, BlockId,
+    SymbolId}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirConstValue,
+    MirLocal, LocalKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind,
+    VhdlHardwareMetadata, vhdl_hardware_metadata_default}
+
+# ============================================================================
+# Helpers — minimal MIR construction for tests
+# ============================================================================
+
+fn make_local_id(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn make_block_id(id: i64) -> BlockId:
+    BlockId(id: id)
+
+fn make_driver_manifest_attr_default() -> DriverManifestAttr:
+    DriverManifestAttr(
+        kind:       DriverManifestAttrKind.Driver,
+        driver_class: 0,
+        vendor:     0,
+        device_ids: [],
+        version:    "",
+        abi:        ""
+    )
+
+"""Build a MirOperand that extract_callee_name will recognise as the given name."""
+fn make_callee_operand(callee_name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(callee_name), MirType.unit()))
+
+"""Build a Call instruction whose func operand encodes callee_name."""
+fn make_cipher_call_inst(callee_name: text) -> MirInst:
+    MirInst(kind: MirInstKind.Call(nil, make_callee_operand(callee_name), []))
+
+"""Build a minimal MirBlock with one Call instruction."""
+fn make_call_block(callee_name: text) -> MirBlock:
+    MirBlock(
+        id:           make_block_id(0),
+        label:        nil,
+        instructions: [make_cipher_call_inst(callee_name)],
+        terminator:   MirTerminator.Return(nil)
+    )
+
+"""Build a minimal MirFunction containing one block."""
+fn make_test_mir_function(blocks: [MirBlock]) -> MirFunction:
+    val sig = MirSignature(
+        params:      [],
+        return_type: MirType(kind: MirTypeKind.Unit),
+        is_variadic: false
+    )
+    MirFunction(
+        symbol:                   SymbolId(id: 1),
+        name:                     "test_fn",
+        signature:                sig,
+        locals:                   [],
+        blocks:                   blocks,
+        entry_block:              make_block_id(0),
+        span:                     Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params:           [],
+        is_generic_template:      false,
+        specialization_of:        nil,
+        type_bindings:            {},
+        layout_phase:             nil,
+        is_kernel:                false,
+        is_export_c:              false,
+        export_name:              "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr:     make_driver_manifest_attr_default(),
+        has_vhdl_metadata:        false,
+        vhdl_metadata:            vhdl_hardware_metadata_default(),
+        has_fast_math:            false
+    )
+
+"""Build a MirModule with one function whose body calls callee_name."""
+fn make_call_module(callee_name: text) -> MirModule:
+    val block = make_call_block(callee_name)
+    val func  = make_test_mir_function([block])
+    var b = MirBuilder.new()
+    b.add_function(func)
+    b.module
+
+fn make_x86_caps_aes_only() -> X86Caps:
+    X86Caps(
+        has_aes:    true,
+        has_sha_ni: false,
+        has_sse42:  false,
+        has_pclmul: false,
+        has_avx2:   false,
+        has_avx512: false
+    )
+
+fn make_x86_caps_none() -> X86Caps:
+    X86Caps(
+        has_aes:    false,
+        has_sha_ni: false,
+        has_sse42:  false,
+        has_pclmul: false,
+        has_avx2:   false,
+        has_avx512: false
+    )
+
+# ============================================================================
+# TargetOptContext default
+# ============================================================================
+
+describe "target_opt_context_default — returns all-false caps":
+    it "x86_caps.has_aes is false":
+        val ctx = target_opt_context_default()
+        expect(ctx.x86_caps.has_aes).to_equal(false)
+
+    it "x86_caps.has_sha_ni is false":
+        val ctx = target_opt_context_default()
+        expect(ctx.x86_caps.has_sha_ni).to_equal(false)
+
+    it "x86_caps.has_sse42 is false":
+        val ctx = target_opt_context_default()
+        expect(ctx.x86_caps.has_sse42).to_equal(false)
+
+    it "x86_caps.has_pclmul is false":
+        val ctx = target_opt_context_default()
+        expect(ctx.x86_caps.has_pclmul).to_equal(false)
+
+    it "x86_caps.has_avx2 is false":
+        val ctx = target_opt_context_default()
+        expect(ctx.x86_caps.has_avx2).to_equal(false)
+
+    it "x86_caps.has_avx512 is false":
+        val ctx = target_opt_context_default()
+        expect(ctx.x86_caps.has_avx512).to_equal(false)
+
+    it "cipher_remark is false":
+        val ctx = target_opt_context_default()
+        expect(ctx.cipher_remark).to_equal(false)
+
+# ============================================================================
+# OptimizationPipeline includes target_ctx
+# ============================================================================
+
+describe "optimizationpipeline_for_level — pipeline has target_ctx":
+    it "NoOpt pipeline has target_ctx with all-false caps":
+        val pipeline = optimizationpipeline_for_level(OptLevel.NoOpt)
+        expect(pipeline.target_ctx.x86_caps.has_aes).to_equal(false)
+
+    it "Size pipeline has target_ctx with cipher_remark=false":
+        val pipeline = optimizationpipeline_for_level(OptLevel.Size)
+        expect(pipeline.target_ctx.cipher_remark).to_equal(false)
+
+    it "Speed pipeline has target_ctx with has_avx2=false":
+        val pipeline = optimizationpipeline_for_level(OptLevel.Speed)
+        expect(pipeline.target_ctx.x86_caps.has_avx2).to_equal(false)
+
+    it "Aggressive pipeline has target_ctx with has_aes=false by default":
+        val pipeline = optimizationpipeline_for_level(OptLevel.Aggressive)
+        expect(pipeline.target_ctx.x86_caps.has_aes).to_equal(false)
+
+# ============================================================================
+# Aggressive pipeline includes "vectorization"
+# ============================================================================
+
+describe "optimizationpipeline_for_level(Aggressive) — pass list":
+    it "Aggressive passes include vectorization":
+        val pipeline = optimizationpipeline_for_level(OptLevel.Aggressive)
+        expect(pipeline.passes.contains("vectorization")).to_equal(true)
+
+    it "Speed passes do NOT include vectorization":
+        val pipeline = optimizationpipeline_for_level(OptLevel.Speed)
+        expect(pipeline.passes.contains("vectorization")).to_equal(false)
+
+    it "NoOpt passes list is empty":
+        val pipeline = optimizationpipeline_for_level(OptLevel.NoOpt)
+        expect(pipeline.passes.len()).to_equal(0)
+
+# ============================================================================
+# optimize_module with NoOpt preserves module
+# ============================================================================
+
+describe "optimize_module with NoOpt — module unchanged":
+    it "function count is preserved after NoOpt optimization":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val out = optimize_module(m, OptLevel.NoOpt)
+        expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
+
+    it "block instruction count is preserved with NoOpt":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val out = optimize_module(m, OptLevel.NoOpt)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect(func.blocks[0].instructions.len()).to_equal(1)
+
+# ============================================================================
+# optimize_module_with_context + AES caps — cipher rewrite via unified path
+# ============================================================================
+
+describe "optimize_module_with_context + AES caps — rewrites aes_round_software":
+    it "function count is preserved after rewrite":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val ctx = TargetOptContext(x86_caps: make_x86_caps_aes_only(), cipher_remark: false)
+        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
+
+    it "rewritten block has same instruction count":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val ctx = TargetOptContext(x86_caps: make_x86_caps_aes_only(), cipher_remark: false)
+        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect(func.blocks[0].instructions.len()).to_equal(1)
+
+    it "rewritten instruction is Intrinsic not Call":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val ctx = TargetOptContext(x86_caps: make_x86_caps_aes_only(), cipher_remark: false)
+        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_intrinsic = match inst.kind:
+            case Intrinsic(dest, name, args): true
+            case _: false
+        expect(is_intrinsic).to_equal(true)
+
+    it "intrinsic name is crypto_aes_round after rewrite":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val ctx = TargetOptContext(x86_caps: make_x86_caps_aes_only(), cipher_remark: false)
+        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val intrinsic_name = match inst.kind:
+            case Intrinsic(dest, name, args): name
+            case _: ""
+        expect(intrinsic_name).to_equal("crypto_aes_round")
+
+# ============================================================================
+# optimize_module_with_context + no AES caps — no cipher rewrite
+# ============================================================================
+
+describe "optimize_module_with_context + no AES caps — Call stays Call":
+    it "instruction remains Call when has_aes=false":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val ctx = TargetOptContext(x86_caps: make_x86_caps_none(), cipher_remark: false)
+        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_call = match inst.kind:
+            case Call(dest, func_op, args): true
+            case _: false
+        expect(is_call).to_equal(true)
+
+    it "block instruction count unchanged when no rewrite":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val ctx = TargetOptContext(x86_caps: make_x86_caps_none(), cipher_remark: false)
+        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect(func.blocks[0].instructions.len()).to_equal(1)
+
+# ============================================================================
+# Speed level does NOT run vectorization — cipher stays as Call with AES caps
+# ============================================================================
+
+describe "optimize_module_with_context at Speed level — no cipher rewrite":
+    it "instruction remains Call at Speed level even with has_aes=true":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val ctx = TargetOptContext(x86_caps: make_x86_caps_aes_only(), cipher_remark: false)
+        val out = optimize_module_with_context(m, OptLevel.Speed, ctx)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_call = match inst.kind:
+            case Call(dest, func_op, args): true
+            case _: false
+        expect(is_call).to_equal(true)
+
+    it "function count is preserved at Speed level":
+        val m   = make_call_module("std.common.aes.cipher.aes_round_software")
+        val ctx = TargetOptContext(x86_caps: make_x86_caps_aes_only(), cipher_remark: false)
+        val out = optimize_module_with_context(m, OptLevel.Speed, ctx)
+        expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
