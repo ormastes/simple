@@ -119,6 +119,42 @@ fn _tc4_expected_ct_tag() -> text:
     "45dd69f8f5aae72414054cd1f35d82760b2cd00d2f99bfa9"
 
 # ============================================================================
+# Enum helpers — module-level to avoid interpreter it-block limitations
+# ============================================================================
+
+fn _ocb3_is_err(r: Ocb3Result) -> bool:
+    match r:
+        Ocb3Result.Ok(_): false
+        Ocb3Result.Err(_): true
+
+fn _ocb3_unwrap_ok(r: Ocb3Result) -> [u8]:
+    match r:
+        Ocb3Result.Ok(data): data
+        Ocb3Result.Err(_): []
+
+# Build a tampered copy of ct_tag (last byte flipped) at module level.
+fn _tamper_last_byte(buf: [u8]) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(buf.len().to_i64())
+    var i: u64 = 0
+    while i < buf.len() - 1:
+        out.push(_u8_at(buf, i))
+        i = i + 1
+    out.push(_u8_at(buf, buf.len() - 1) ^ 0xFF)
+    out
+
+fn _tc4_ct_tag() -> [u8]:
+    ocb3_encrypt(_rfc7253_key(), _tc4_nonce(), [], _tc4_pt())
+
+fn _tc4_tampered() -> [u8]:
+    _tamper_last_byte(_tc4_ct_tag())
+
+fn _tc4_decrypt_tampered_is_err() -> bool:
+    _ocb3_is_err(ocb3_decrypt(_rfc7253_key(), _tc4_nonce(), [], _tc4_tampered()))
+
+fn _short_input_is_err() -> bool:
+    _ocb3_is_err(ocb3_decrypt(_rfc7253_key(), _tc1_nonce(), [], [0x01, 0x02]))
+
+# ============================================================================
 # Specs
 # ============================================================================
 
@@ -157,25 +193,7 @@ describe "OCB3 — output length contract":
 describe "OCB3 — decrypt error path":
 
     it "decrypt with tampered tag returns Err":
-        val ct_tag = ocb3_encrypt(_rfc7253_key(), _tc4_nonce(), [], _tc4_pt())
-        # Flip the last byte of the tag
-        var tampered: [u8] = rt_array_new_with_cap(ct_tag.len().to_i64())
-        var i: u64 = 0
-        while i < ct_tag.len() - 1:
-            tampered.push(_u8_at(ct_tag, i))
-            i = i + 1
-        tampered.push(_u8_at(ct_tag, ct_tag.len() - 1) ^ 0xFF)
-        val res = ocb3_decrypt(_rfc7253_key(), _tc4_nonce(), [], tampered)
-        val is_err = if res is Ocb3Result.Err:
-            true
-        else:
-            false
-        expect(is_err).to_equal(true)
+        expect(_tc4_decrypt_tampered_is_err()).to_equal(true)
 
     it "decrypt with too-short input returns Err":
-        val res = ocb3_decrypt(_rfc7253_key(), _tc1_nonce(), [], [0x01, 0x02])
-        val is_err = if res is Ocb3Result.Err:
-            true
-        else:
-            false
-        expect(is_err).to_equal(true)
+        expect(_short_input_is_err()).to_equal(true)

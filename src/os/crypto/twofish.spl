@@ -1,0 +1,518 @@
+# Twofish Block Cipher — Pure Simple Implementation
+#
+# Twofish is a 128-bit symmetric block cipher with 128/192/256-bit key sizes,
+# designed by Schneier et al. as an AES finalist (1998).
+#
+# Supports:
+#   twofish_encrypt_block(key: [u8], plaintext: [u8]) -> [u8]
+#   twofish_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]
+#
+# Key schedule:
+#   - 40 subkeys K[0..39], generated via the h function over Me/Mo halves
+#   - 4 key-dependent S-box words (one per 64-bit key chunk) via RS matrix
+#
+# Round function (16 Feistel rounds):
+#   - g = h function (q0/q1 permutations + MDS multiply)
+#   - PHT: F0 = T0+T1+K, F1 = T0+2*T1+K
+#   - XOR + rotate, swap half-blocks each round
+#
+# References:
+#   - Twofish paper: https://www.schneier.com/academic/twofish/
+#   - Test vectors: Twofish paper Table 4
+
+# ============================================================================
+# GF(2^8) multiply helpers
+# ============================================================================
+
+fn _gf_mul_mds(a: u32, b: u32) -> u32:
+    """Multiply in GF(2^8) with MDS polynomial 0x169."""
+    var p: u32 = 0
+    var av: u32 = a & 0xFF
+    var bv: u32 = b & 0xFF
+    var i: u64 = 0
+    while i < 8:
+        if bv & 1 != 0:
+            p = p ^ av
+        bv = bv >> 1
+        val hi: u32 = av & 0x80
+        av = (av << 1) & 0xFF
+        if hi != 0:
+            av = av ^ 0x69
+        i = i + 1
+    p
+
+fn _gf_mul_rs(a: u32, b: u32) -> u32:
+    """Multiply in GF(2^8) with RS polynomial 0x14D."""
+    var p: u32 = 0
+    var av: u32 = a & 0xFF
+    var bv: u32 = b & 0xFF
+    var i: u64 = 0
+    while i < 8:
+        if bv & 1 != 0:
+            p = p ^ av
+        bv = bv >> 1
+        val hi: u32 = av & 0x80
+        av = (av << 1) & 0xFF
+        if hi != 0:
+            av = av ^ 0x4D
+        i = i + 1
+    p
+
+# ============================================================================
+# MDS matrix multiply
+# ============================================================================
+# MDS matrix (4x4 over GF(2^8)):
+#   | 01 EF 5B 5B |
+#   | 5B EF EF 01 |
+#   | EF 5B 01 EF |
+#   | EF 01 EF 5B |
+
+fn _mds_col(b0: u32, b1: u32, b2: u32, b3: u32, row: u64) -> u32:
+    """Compute one row of the MDS matrix multiply."""
+    if row == 0:
+        _gf_mul_mds(0x01, b0) ^ _gf_mul_mds(0xEF, b1) ^ _gf_mul_mds(0x5B, b2) ^ _gf_mul_mds(0x5B, b3)
+    else if row == 1:
+        _gf_mul_mds(0x5B, b0) ^ _gf_mul_mds(0xEF, b1) ^ _gf_mul_mds(0xEF, b2) ^ _gf_mul_mds(0x01, b3)
+    else if row == 2:
+        _gf_mul_mds(0xEF, b0) ^ _gf_mul_mds(0x5B, b1) ^ _gf_mul_mds(0x01, b2) ^ _gf_mul_mds(0xEF, b3)
+    else:
+        _gf_mul_mds(0xEF, b0) ^ _gf_mul_mds(0x01, b1) ^ _gf_mul_mds(0xEF, b2) ^ _gf_mul_mds(0x5B, b3)
+
+fn _mds_multiply_word(b0: u32, b1: u32, b2: u32, b3: u32) -> u32:
+    """Apply MDS 4x4 multiply to bytes b0..b3, pack result into a 32-bit word."""
+    val r0 = _mds_col(b0, b1, b2, b3, 0)
+    val r1 = _mds_col(b0, b1, b2, b3, 1)
+    val r2 = _mds_col(b0, b1, b2, b3, 2)
+    val r3 = _mds_col(b0, b1, b2, b3, 3)
+    r0 | (r1 << 8) | (r2 << 16) | (r3 << 24)
+
+# ============================================================================
+# RS matrix multiply (for S-box generation from key bytes)
+# ============================================================================
+# RS matrix (4x8 over GF(2^8)):
+#   | 01 A4 55 87 5A 58 DB 9E |
+#   | A4 56 82 F3 1E C6 68 E5 |
+#   | 02 A1 FC C1 47 AE 3D 19 |
+#   | A4 55 87 5A 58 DB 9E 03 |
+
+fn _rs_row(m0: u32, m1: u32, m2: u32, m3: u32, m4: u32, m5: u32, m6: u32, m7: u32, row: u64) -> u32:
+    """Compute one row of the RS matrix multiply."""
+    if row == 0:
+        _gf_mul_rs(0x01, m0) ^ _gf_mul_rs(0xA4, m1) ^ _gf_mul_rs(0x55, m2) ^ _gf_mul_rs(0x87, m3) ^
+        _gf_mul_rs(0x5A, m4) ^ _gf_mul_rs(0x58, m5) ^ _gf_mul_rs(0xDB, m6) ^ _gf_mul_rs(0x9E, m7)
+    else if row == 1:
+        _gf_mul_rs(0xA4, m0) ^ _gf_mul_rs(0x56, m1) ^ _gf_mul_rs(0x82, m2) ^ _gf_mul_rs(0xF3, m3) ^
+        _gf_mul_rs(0x1E, m4) ^ _gf_mul_rs(0xC6, m5) ^ _gf_mul_rs(0x68, m6) ^ _gf_mul_rs(0xE5, m7)
+    else if row == 2:
+        _gf_mul_rs(0x02, m0) ^ _gf_mul_rs(0xA1, m1) ^ _gf_mul_rs(0xFC, m2) ^ _gf_mul_rs(0xC1, m3) ^
+        _gf_mul_rs(0x47, m4) ^ _gf_mul_rs(0xAE, m5) ^ _gf_mul_rs(0x3D, m6) ^ _gf_mul_rs(0x19, m7)
+    else:
+        _gf_mul_rs(0xA4, m0) ^ _gf_mul_rs(0x55, m1) ^ _gf_mul_rs(0x87, m2) ^ _gf_mul_rs(0x5A, m3) ^
+        _gf_mul_rs(0x58, m4) ^ _gf_mul_rs(0xDB, m5) ^ _gf_mul_rs(0x9E, m6) ^ _gf_mul_rs(0x03, m7)
+
+fn _rs_word(chunk: [u8], offset: u64) -> u32:
+    """Apply RS matrix to 8 bytes at chunk[offset..offset+8], return packed 32-bit word."""
+    val m0 = chunk[offset + 0].to_u32()
+    val m1 = chunk[offset + 1].to_u32()
+    val m2 = chunk[offset + 2].to_u32()
+    val m3 = chunk[offset + 3].to_u32()
+    val m4 = chunk[offset + 4].to_u32()
+    val m5 = chunk[offset + 5].to_u32()
+    val m6 = chunk[offset + 6].to_u32()
+    val m7 = chunk[offset + 7].to_u32()
+    val r0 = _rs_row(m0, m1, m2, m3, m4, m5, m6, m7, 0)
+    val r1 = _rs_row(m0, m1, m2, m3, m4, m5, m6, m7, 1)
+    val r2 = _rs_row(m0, m1, m2, m3, m4, m5, m6, m7, 2)
+    val r3 = _rs_row(m0, m1, m2, m3, m4, m5, m6, m7, 3)
+    r0 | (r1 << 8) | (r2 << 16) | (r3 << 24)
+
+# ============================================================================
+# q0 permutation table (256 entries)
+# ============================================================================
+
+fn _q0(x: u64) -> u32:
+    """q0 fixed 8-bit permutation lookup."""
+    val table0: [u32] = [
+        0xA9, 0x67, 0xB3, 0xE8, 0x04, 0xFD, 0xA3, 0x76, 0x9A, 0x92, 0x80, 0x78, 0xE4, 0xDD, 0xD1, 0x38,
+        0x0D, 0xC6, 0x35, 0x98, 0x18, 0xF7, 0xEC, 0x6C, 0x43, 0x75, 0x37, 0x26, 0xFA, 0x13, 0x94, 0x48,
+        0xF2, 0xD0, 0x8B, 0x30, 0x84, 0x54, 0xDF, 0x23, 0x19, 0x5B, 0x3D, 0x59, 0xF3, 0xAE, 0xA2, 0x82,
+        0x63, 0x01, 0x83, 0x2E, 0xD9, 0x51, 0x9B, 0x7C, 0xA6, 0xEB, 0xA5, 0xBE, 0x16, 0x0C, 0xE3, 0x61,
+        0xC0, 0x8C, 0x3A, 0xF5, 0x73, 0x2C, 0x25, 0x0B, 0xBB, 0x4E, 0x89, 0x6B, 0x53, 0x6A, 0xB4, 0xF1,
+        0xE1, 0xE6, 0xBD, 0x45, 0xE2, 0xF4, 0xB6, 0x66, 0xCC, 0x95, 0x03, 0x56, 0xD4, 0x1C, 0x1E, 0xD7,
+        0xFB, 0xC3, 0x8E, 0xB5, 0xE9, 0xCF, 0xBF, 0xBA, 0xEA, 0x77, 0x39, 0xAF, 0x33, 0xC9, 0x62, 0x71,
+        0x81, 0x79, 0x09, 0xAD, 0x24, 0xCD, 0xF9, 0xD8, 0xE5, 0xC5, 0xB9, 0x4D, 0x44, 0x08, 0x86, 0xE7,
+        0xA1, 0x1D, 0xAA, 0xED, 0x06, 0x70, 0xB2, 0xD2, 0x41, 0x7B, 0xA0, 0x11, 0x31, 0xC2, 0x27, 0x90,
+        0x20, 0xF6, 0x60, 0xFF, 0x96, 0x5C, 0xB1, 0xAB, 0x9E, 0x9C, 0x52, 0x1B, 0x5F, 0x93, 0x0A, 0xEF,
+        0x91, 0x85, 0x49, 0xEE, 0x2D, 0x4F, 0x8F, 0x3B, 0x47, 0x87, 0x6D, 0x46, 0xD6, 0x3E, 0x69, 0x64,
+        0x2A, 0xCE, 0xCB, 0x2F, 0xFC, 0x97, 0x05, 0x7A, 0xAC, 0x7F, 0xD5, 0x1A, 0x4B, 0x0E, 0xA7, 0x5A,
+        0x28, 0x14, 0x3F, 0x29, 0x88, 0x3C, 0x4C, 0x02, 0xB8, 0xDA, 0xB0, 0x17, 0x55, 0x1F, 0x8A, 0x7D,
+        0x57, 0xC7, 0x8D, 0x74, 0xB7, 0xC4, 0x9F, 0x72, 0x7E, 0x15, 0x22, 0x12, 0x58, 0x07, 0x99, 0x34,
+        0x6E, 0x50, 0xDE, 0x68, 0x65, 0xBC, 0xDB, 0xF8, 0xC8, 0xA8, 0x2B, 0x40, 0xDC, 0xFE, 0x32, 0xA4,
+        0xCA, 0x10, 0x21, 0xF0, 0xD3, 0x5D, 0x0F, 0x00, 0x6F, 0x9D, 0x36, 0x42, 0x4A, 0x5E, 0xC1, 0xE0
+    ]
+    table0[x]
+
+# ============================================================================
+# q1 permutation table (256 entries)
+# ============================================================================
+
+fn _q1(x: u64) -> u32:
+    """q1 fixed 8-bit permutation lookup."""
+    val table1: [u32] = [
+        0x75, 0xF3, 0xC6, 0xF4, 0xDB, 0x7B, 0xFB, 0xC8, 0x4A, 0xD3, 0xE6, 0x6B, 0x45, 0x7D, 0xE8, 0x4B,
+        0xD6, 0x32, 0xD8, 0xFD, 0x37, 0x71, 0xF1, 0xE1, 0x30, 0x0F, 0xF8, 0x1B, 0x87, 0xFA, 0x06, 0x3F,
+        0x5E, 0xBA, 0xAE, 0x5B, 0x8A, 0x00, 0xBC, 0x9D, 0x6D, 0xC1, 0xB1, 0x0E, 0x80, 0x5D, 0xD2, 0xD5,
+        0xA0, 0x84, 0x07, 0x14, 0xB5, 0x90, 0x2C, 0xA3, 0xB2, 0x73, 0x4C, 0x54, 0x92, 0x74, 0x36, 0x51,
+        0x38, 0xB0, 0xBD, 0x5A, 0xFC, 0x60, 0x62, 0x96, 0x6C, 0x42, 0xF7, 0x10, 0x7C, 0x28, 0x27, 0x8C,
+        0x13, 0x95, 0x9C, 0xC7, 0x24, 0x46, 0x3B, 0x70, 0xCA, 0xE3, 0x85, 0xCB, 0x11, 0xD0, 0x93, 0xB8,
+        0xA6, 0x83, 0x20, 0xFF, 0x9F, 0x77, 0xC3, 0xCC, 0x03, 0x6F, 0x08, 0xBF, 0x40, 0xE7, 0x2B, 0xE2,
+        0x79, 0x0C, 0xAA, 0x82, 0x41, 0x3A, 0xEA, 0xB9, 0xE4, 0x9A, 0xA4, 0x97, 0x7E, 0xDA, 0x7A, 0x17,
+        0x66, 0x94, 0xA1, 0x1D, 0x3D, 0xF0, 0xDE, 0xB3, 0x0B, 0x72, 0xA7, 0x1C, 0xEF, 0xD1, 0x53, 0x3E,
+        0x8F, 0x33, 0x26, 0x5F, 0xEC, 0x76, 0x2A, 0x49, 0x81, 0x88, 0xEE, 0x21, 0xC4, 0x1A, 0xEB, 0xD9,
+        0xC5, 0x39, 0x99, 0xCD, 0xAD, 0x31, 0x8B, 0x01, 0x18, 0x23, 0xDD, 0x1F, 0x4E, 0x2D, 0xF9, 0x48,
+        0x4F, 0xF2, 0x65, 0x8E, 0x78, 0x5C, 0x58, 0x19, 0x8D, 0xE5, 0x98, 0x57, 0x67, 0x7F, 0x05, 0x64,
+        0xAF, 0x63, 0xB6, 0xFE, 0xF5, 0xB7, 0x3C, 0xA5, 0xCE, 0xE9, 0x68, 0x44, 0xE0, 0x4D, 0x43, 0x69,
+        0x29, 0x2E, 0xAC, 0x15, 0x59, 0xA8, 0x0A, 0x9E, 0x6E, 0x47, 0xDF, 0x34, 0x35, 0x6A, 0xCF, 0xDC,
+        0x22, 0xC9, 0xC0, 0x9B, 0x89, 0xD4, 0xED, 0xAB, 0x12, 0xA2, 0x0D, 0x52, 0xBB, 0x02, 0x2F, 0xA9,
+        0xD7, 0x61, 0x1E, 0xB4, 0x50, 0x04, 0xF6, 0xC2, 0x16, 0x25, 0x86, 0x56, 0x55, 0x09, 0xBE, 0x91
+    ]
+    table1[x]
+
+# ============================================================================
+# h function — key-dependent substitution + MDS
+# ============================================================================
+# h(x, L, k):
+#   x is a 32-bit word; L is the S-box words (k/8 entries); k is key byte count.
+#   Apply successive q0/q1 permutations, XOR with key bytes, then MDS multiply.
+#
+# 128-bit key (k=16, 2 S-box words L[0], L[1]):
+#   b[0] = q1(q0(q0(b[0]) ^ L1_b0) ^ L0_b0)
+#   b[1] = q0(q0(q1(b[1]) ^ L1_b1) ^ L0_b1)
+#   b[2] = q1(q1(q0(b[2]) ^ L1_b2) ^ L0_b2)
+#   b[3] = q0(q1(q1(b[3]) ^ L1_b3) ^ L0_b3)
+#
+# 256-bit key (k=32, 4 S-box words L[0..3]):
+#   First apply q1/q0/q0/q1 with L[3], then q1/q1/q0/q0 with L[2], then 128-bit path
+
+fn _h_128(x: u32, s0: u32, s1: u32) -> u32:
+    """h function for 128-bit key (2 S-box words)."""
+    val b0 = (x >> 0) & 0xFF
+    val b1 = (x >> 8) & 0xFF
+    val b2 = (x >> 16) & 0xFF
+    val b3 = (x >> 24) & 0xFF
+    val s0b0 = (s0 >> 0) & 0xFF
+    val s0b1 = (s0 >> 8) & 0xFF
+    val s0b2 = (s0 >> 16) & 0xFF
+    val s0b3 = (s0 >> 24) & 0xFF
+    val s1b0 = (s1 >> 0) & 0xFF
+    val s1b1 = (s1 >> 8) & 0xFF
+    val s1b2 = (s1 >> 16) & 0xFF
+    val s1b3 = (s1 >> 24) & 0xFF
+    val c0 = _q1(_q0(_q0(b0.to_u64()).to_u64() ^ s1b0.to_u64()).to_u64() ^ s0b0.to_u64())
+    val c1 = _q0(_q0(_q1(b1.to_u64()).to_u64() ^ s1b1.to_u64()).to_u64() ^ s0b1.to_u64())
+    val c2 = _q1(_q1(_q0(b2.to_u64()).to_u64() ^ s1b2.to_u64()).to_u64() ^ s0b2.to_u64())
+    val c3 = _q0(_q1(_q1(b3.to_u64()).to_u64() ^ s1b3.to_u64()).to_u64() ^ s0b3.to_u64())
+    _mds_multiply_word(c0, c1, c2, c3)
+
+fn _h_192(x: u32, s0: u32, s1: u32, s2: u32) -> u32:
+    """h function for 192-bit key (3 S-box words)."""
+    val b0 = (x >> 0) & 0xFF
+    val b1 = (x >> 8) & 0xFF
+    val b2 = (x >> 16) & 0xFF
+    val b3 = (x >> 24) & 0xFF
+    val s2b0 = (s2 >> 0) & 0xFF
+    val s2b1 = (s2 >> 8) & 0xFF
+    val s2b2 = (s2 >> 16) & 0xFF
+    val s2b3 = (s2 >> 24) & 0xFF
+    # Apply L[2] layer first (q1,q1,q0,q0)
+    val a0 = _q1(b0.to_u64()) ^ s2b0
+    val a1 = _q1(b1.to_u64()) ^ s2b1
+    val a2 = _q0(b2.to_u64()) ^ s2b2
+    val a3 = _q0(b3.to_u64()) ^ s2b3
+    # Then 128-bit path with s0, s1
+    val packed = a0 | (a1 << 8) | (a2 << 16) | (a3 << 24)
+    _h_128(packed, s0, s1)
+
+fn _h_256(x: u32, s0: u32, s1: u32, s2: u32, s3: u32) -> u32:
+    """h function for 256-bit key (4 S-box words)."""
+    val b0 = (x >> 0) & 0xFF
+    val b1 = (x >> 8) & 0xFF
+    val b2 = (x >> 16) & 0xFF
+    val b3 = (x >> 24) & 0xFF
+    val s3b0 = (s3 >> 0) & 0xFF
+    val s3b1 = (s3 >> 8) & 0xFF
+    val s3b2 = (s3 >> 16) & 0xFF
+    val s3b3 = (s3 >> 24) & 0xFF
+    # Apply L[3] layer (q1,q0,q0,q1)
+    val a0 = _q1(b0.to_u64()) ^ s3b0
+    val a1 = _q0(b1.to_u64()) ^ s3b1
+    val a2 = _q0(b2.to_u64()) ^ s3b2
+    val a3 = _q1(b3.to_u64()) ^ s3b3
+    # Then 192-bit path with s0, s1, s2
+    val packed = a0 | (a1 << 8) | (a2 << 16) | (a3 << 24)
+    _h_192(packed, s0, s1, s2)
+
+# ============================================================================
+# Key schedule
+# ============================================================================
+
+fn _load_le32(buf: [u8], offset: u64) -> u32:
+    """Load 4 bytes from buf[offset] as a little-endian 32-bit word."""
+    buf[offset].to_u32() |
+    (buf[offset + 1].to_u32() << 8) |
+    (buf[offset + 2].to_u32() << 16) |
+    (buf[offset + 3].to_u32() << 24)
+
+fn _rol32(v: u32, n: u32) -> u32:
+    """32-bit rotate left."""
+    ((v << n) | (v >> (32 - n))) & 0xFFFFFFFF
+
+fn _ror32(v: u32, n: u32) -> u32:
+    """32-bit rotate right."""
+    ((v >> n) | (v << (32 - n))) & 0xFFFFFFFF
+
+fn _twofish_key_schedule(key: [u8]) -> [u32]:
+    """Generate 40 subkeys followed by the S-box words.
+
+    Returns a flat array: [K0..K39, S0..S_{N/2-1}]
+    where N/2 is 2 (128-bit), 3 (192-bit), or 4 (256-bit).
+    """
+    val klen: u64 = key.len()
+    val n_words: u64 = klen / 4       # 4, 6, or 8
+    val n_half: u64 = n_words / 2     # 2, 3, or 4
+
+    # Load key as 32-bit little-endian words
+    var m: [u32] = []
+    var wi: u64 = 0
+    while wi < n_words:
+        m.push(_load_le32(key, wi * 4))
+        wi = wi + 1
+
+    # Me = even words, Mo = odd words
+    var m_even: [u32] = []
+    var m_odd: [u32] = []
+    var pi: u64 = 0
+    while pi < n_half:
+        m_even.push(m[pi * 2])
+        m_odd.push(m[pi * 2 + 1])
+        pi = pi + 1
+
+    # S-box words via RS matrix (one 32-bit word per 8-byte chunk, reversed order)
+    var s_words: [u32] = []
+    var si: u64 = 0
+    while si < n_half:
+        s_words.push(_rs_word(key, si * 8))
+        si = si + 1
+    # Reverse s_words in place
+    var lo: u64 = 0
+    var hi2: u64 = s_words.len().to_u64() - 1
+    while lo < hi2:
+        val tmp = s_words[lo]
+        s_words[lo] = s_words[hi2]
+        s_words[hi2] = tmp
+        lo = lo + 1
+        hi2 = hi2 - 1
+
+    # Generate 40 subkeys using the h function
+    val rho: u32 = 0x01010101
+    var subkeys: [u32] = []
+    var ri: u64 = 0
+    while ri < 20:
+        val a_arg: u32 = (2 * ri.to_u32()) * rho
+        val b_arg: u32 = (2 * ri.to_u32() + 1) * rho
+        var a: u32 = 0
+        var b: u32 = 0
+        if n_half == 4:
+            a = _h_256(a_arg, m_even[0], m_even[1], m_even[2], m_even[3])
+            b = _h_256(b_arg, m_odd[0], m_odd[1], m_odd[2], m_odd[3])
+        else if n_half == 3:
+            a = _h_192(a_arg, m_even[0], m_even[1], m_even[2])
+            b = _h_192(b_arg, m_odd[0], m_odd[1], m_odd[2])
+        else:
+            a = _h_128(a_arg, m_even[0], m_even[1])
+            b = _h_128(b_arg, m_odd[0], m_odd[1])
+        b = _rol32(b, 8)
+        val k_even = (a + b) & 0xFFFFFFFF
+        val k_odd_raw = (a + 2 * b) & 0xFFFFFFFF
+        val k_odd = _rol32(k_odd_raw, 9)
+        subkeys.push(k_even)
+        subkeys.push(k_odd)
+        ri = ri + 1
+
+    # Append S-box words after the 40 subkeys
+    var sei: u64 = 0
+    while sei < s_words.len().to_u64():
+        subkeys.push(s_words[sei])
+        sei = sei + 1
+
+    subkeys
+
+# ============================================================================
+# Round g function dispatch
+# ============================================================================
+
+fn _g_128(x: u32, sched: [u32]) -> u32:
+    """g function for 128-bit key (S words at sched[40] and sched[41])."""
+    _h_128(x, sched[40], sched[41])
+
+fn _g_192(x: u32, sched: [u32]) -> u32:
+    """g function for 192-bit key (S words at sched[40..42])."""
+    _h_192(x, sched[40], sched[41], sched[42])
+
+fn _g_256(x: u32, sched: [u32]) -> u32:
+    """g function for 256-bit key (S words at sched[40..43])."""
+    _h_256(x, sched[40], sched[41], sched[42], sched[43])
+
+fn _g(x: u32, sched: [u32], klen: u64) -> u32:
+    """g function — dispatch on key length."""
+    if klen == 32:
+        _g_256(x, sched)
+    else if klen == 24:
+        _g_192(x, sched)
+    else:
+        _g_128(x, sched)
+
+# ============================================================================
+# Encrypt one 16-byte block
+# ============================================================================
+
+fn twofish_encrypt_block(key: [u8], plaintext: [u8]) -> [u8]:
+    """Encrypt a 16-byte block with a 16/24/32-byte key.
+
+    Args:
+        key: 16, 24, or 32 byte key.
+        plaintext: 16-byte plaintext block.
+
+    Returns: 16-byte ciphertext block.
+    """
+    val klen = key.len().to_u64()
+    val sched = _twofish_key_schedule(key)
+
+    # Load plaintext as 4 little-endian 32-bit words
+    var r0 = _load_le32(plaintext, 0) ^ sched[0]
+    var r1 = _load_le32(plaintext, 4) ^ sched[1]
+    var r2 = _load_le32(plaintext, 8) ^ sched[2]
+    var r3 = _load_le32(plaintext, 12) ^ sched[3]
+
+    # 16 Feistel rounds
+    var rnd: u64 = 0
+    while rnd < 16:
+        val t0 = _g(r0, sched, klen)
+        val t1 = _g(_rol32(r1, 8), sched, klen)
+        val f0 = (t0 + t1 + sched[2 * rnd + 8]) & 0xFFFFFFFF
+        val f1 = (t0 + 2 * t1 + sched[2 * rnd + 9]) & 0xFFFFFFFF
+        r2 = _ror32(r2 ^ f0, 1)
+        r3 = _rol32(r3, 1) ^ f1
+        # Swap half-blocks
+        val tmp0 = r0
+        val tmp1 = r1
+        r0 = r2
+        r1 = r3
+        r2 = tmp0
+        r3 = tmp1
+        rnd = rnd + 1
+
+    # Undo final swap
+    val out0 = r2 ^ sched[4]
+    val out1 = r3 ^ sched[5]
+    val out2 = r0 ^ sched[6]
+    val out3 = r1 ^ sched[7]
+
+    # Store as little-endian bytes
+    var result: [u8] = []
+    result.push(((out0 >> 0) & 0xFF).to_u8())
+    result.push(((out0 >> 8) & 0xFF).to_u8())
+    result.push(((out0 >> 16) & 0xFF).to_u8())
+    result.push(((out0 >> 24) & 0xFF).to_u8())
+    result.push(((out1 >> 0) & 0xFF).to_u8())
+    result.push(((out1 >> 8) & 0xFF).to_u8())
+    result.push(((out1 >> 16) & 0xFF).to_u8())
+    result.push(((out1 >> 24) & 0xFF).to_u8())
+    result.push(((out2 >> 0) & 0xFF).to_u8())
+    result.push(((out2 >> 8) & 0xFF).to_u8())
+    result.push(((out2 >> 16) & 0xFF).to_u8())
+    result.push(((out2 >> 24) & 0xFF).to_u8())
+    result.push(((out3 >> 0) & 0xFF).to_u8())
+    result.push(((out3 >> 8) & 0xFF).to_u8())
+    result.push(((out3 >> 16) & 0xFF).to_u8())
+    result.push(((out3 >> 24) & 0xFF).to_u8())
+    result
+
+# ============================================================================
+# Decrypt one 16-byte block
+# ============================================================================
+
+fn twofish_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]:
+    """Decrypt a 16-byte block with a 16/24/32-byte key.
+
+    Args:
+        key: 16, 24, or 32 byte key.
+        ciphertext: 16-byte ciphertext block.
+
+    Returns: 16-byte plaintext block.
+    """
+    val klen = key.len().to_u64()
+    val sched = _twofish_key_schedule(key)
+
+    # Load ciphertext and undo output whitening
+    val c0 = _load_le32(ciphertext, 0) ^ sched[4]
+    val c1 = _load_le32(ciphertext, 4) ^ sched[5]
+    val c2 = _load_le32(ciphertext, 8) ^ sched[6]
+    val c3 = _load_le32(ciphertext, 12) ^ sched[7]
+
+    # After output whitening+undo-last-swap the state is:
+    #   [R0_r15_in, R1_r15_in, R2_r15_out, R3_r15_out]
+    # Re-apply final swap to recover the post-round-15 Feistel state
+    var r0 = c2
+    var r1 = c3
+    var r2 = c0
+    var r3 = c1
+
+    # 16 rounds in reverse
+    var rnd: u64 = 15
+    var done: u64 = 0
+    while done == 0:
+        # T0/T1 use the pre-round inputs (positions 2,3 after swap)
+        val t0 = _g(r2, sched, klen)
+        val t1 = _g(_rol32(r3, 8), sched, klen)
+        val f0 = (t0 + t1 + sched[2 * rnd + 8]) & 0xFFFFFFFF
+        val f1 = (t0 + 2 * t1 + sched[2 * rnd + 9]) & 0xFFFFFFFF
+        # Undo swap: [mixed_L, mixed_R, orig_L, orig_R] -> [orig_L, orig_R, mixed_L, mixed_R]
+        val tmp0 = r0
+        val tmp1 = r1
+        r0 = r2
+        r1 = r3
+        r2 = tmp0
+        r3 = tmp1
+        # Undo mix: inverse of ROR(r2^f0, 1) and ROL(r3,1)^f1
+        r2 = _rol32(r2, 1) ^ f0
+        r3 = _ror32(r3 ^ f1, 1)
+        if rnd == 0:
+            done = 1
+        else:
+            rnd = rnd - 1
+
+    # Undo input whitening
+    var result: [u8] = []
+    val p0 = r0 ^ sched[0]
+    val p1 = r1 ^ sched[1]
+    val p2 = r2 ^ sched[2]
+    val p3 = r3 ^ sched[3]
+
+    result.push(((p0 >> 0) & 0xFF).to_u8())
+    result.push(((p0 >> 8) & 0xFF).to_u8())
+    result.push(((p0 >> 16) & 0xFF).to_u8())
+    result.push(((p0 >> 24) & 0xFF).to_u8())
+    result.push(((p1 >> 0) & 0xFF).to_u8())
+    result.push(((p1 >> 8) & 0xFF).to_u8())
+    result.push(((p1 >> 16) & 0xFF).to_u8())
+    result.push(((p1 >> 24) & 0xFF).to_u8())
+    result.push(((p2 >> 0) & 0xFF).to_u8())
+    result.push(((p2 >> 8) & 0xFF).to_u8())
+    result.push(((p2 >> 16) & 0xFF).to_u8())
+    result.push(((p2 >> 24) & 0xFF).to_u8())
+    result.push(((p3 >> 0) & 0xFF).to_u8())
+    result.push(((p3 >> 8) & 0xFF).to_u8())
+    result.push(((p3 >> 16) & 0xFF).to_u8())
+    result.push(((p3 >> 24) & 0xFF).to_u8())
+    result

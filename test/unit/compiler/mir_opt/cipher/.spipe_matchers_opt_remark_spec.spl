@@ -1,0 +1,212 @@
+# Opt-Remark Cipher Spec — tests cipher remark emission from pattern dispatch
+#
+# Feature ID: #COMPILER-MIROPT-OPT-REMARK-CIPHER
+# Category:   Compiler | MIR Optimization | Opt Remark
+
+use compiler.mir_opt.mir_opt.pattern_dispatch.{
+    PatternIdiomStats, pattern_idiom_stats_zero, pattern_idiom_stats_with_remark,
+    run_pattern_idiom_pass_x86, idiom_for_intrinsic
+}
+use compiler.mir_opt.mir_opt.pattern.rules_crypto.{lookup_rule_for_callee}
+use compiler.backend.feature_caps.{X86Caps, TargetIdiom}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind, MirBuilder, LocalId, BlockId,
+    SymbolId}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirConstValue,
+    MirLocal, LocalKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind,
+    VhdlHardwareMetadata, vhdl_hardware_metadata_default}
+
+# ============================================================================
+# Helpers — minimal MIR construction for tests
+# ============================================================================
+
+fn make_local_id(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn make_block_id(id: i64) -> BlockId:
+    BlockId(id: id)
+
+fn make_driver_manifest_attr_default() -> DriverManifestAttr:
+    DriverManifestAttr(
+        DriverManifestAttrKind.Driver,
+        0, 0, [], "", ""
+    )
+
+fn make_callee_operand(callee_name: text) -> MirOperand:
+    MirOperand(MirOperandKind.Const(MirConstValue.Str(callee_name), MirType.unit()))
+
+fn make_cipher_call_inst(callee_name: text) -> MirInst:
+    MirInst(MirInstKind.Call(nil, make_callee_operand(callee_name), []))
+
+fn make_call_block(callee_name: text) -> MirBlock:
+    MirBlock(
+        make_block_id(0),
+        nil,
+        [make_cipher_call_inst(callee_name)],
+        MirTerminator.Return(nil)
+    )
+
+fn make_test_mir_function(blocks: [MirBlock]) -> MirFunction:
+    val sig = MirSignature([], MirType(MirTypeKind.Unit), false)
+    MirFunction(
+        SymbolId(id: 1), "test_fn", sig, [], blocks,
+        make_block_id(0),
+        Span(0, 0, 1, 1),
+        [], false, nil, {}, nil, false, false, "",
+        false, make_driver_manifest_attr_default(),
+        false, vhdl_hardware_metadata_default(),
+        false
+    )
+
+fn make_call_module(callee_name: text) -> MirModule:
+    val block = make_call_block(callee_name)
+    val func  = make_test_mir_function([block])
+    var b = MirBuilder.new()
+    b.add_function(func)
+    b.module
+
+fn make_x86_caps_aes() -> X86Caps:
+    X86Caps(true, false, false, false, false, false)
+
+fn make_x86_caps_none() -> X86Caps:
+    X86Caps(false, false, false, false, false, false)
+
+fn make_x86_caps_sha_ni() -> X86Caps:
+    X86Caps(false, true, false, false, false, false)
+
+fn make_x86_caps_sse42() -> X86Caps:
+    X86Caps(false, false, true, false, false, false)
+
+# ============================================================================
+# Stats builders: cipher_remark field
+# ============================================================================
+
+describe "pattern_idiom_stats_with_remark — cipher_remark=true":
+    it "returns stats with cipher_remark set to true":
+        val s = pattern_idiom_stats_with_remark()
+        expect s.cipher_remark == true
+
+    it "starts with zero cipher_hits":
+        val s = pattern_idiom_stats_with_remark()
+        expect s.cipher_hits == 0
+
+describe "pattern_idiom_stats_zero — cipher_remark=false":
+    it "returns stats with cipher_remark set to false":
+        val s = pattern_idiom_stats_zero()
+        expect s.cipher_remark == false
+
+# ============================================================================
+# Remark path: AES call rewritten to Intrinsic with cipher_remark=true
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — cipher_remark=true + AES caps + AES callee":
+    it "instruction becomes Intrinsic when cipher_remark=true":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_aes()
+        val out  = run_pattern_idiom_pass_x86(m, caps, true)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_intrinsic = match inst.kind:
+            case Intrinsic(dest, name, args): true
+            case _: false
+        expect is_intrinsic == true
+
+    it "intrinsic name is crypto_aes_round when cipher_remark=true":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_aes()
+        val out  = run_pattern_idiom_pass_x86(m, caps, true)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val intrinsic_name = match inst.kind:
+            case Intrinsic(dest, name, args): name
+            case _: ""
+        expect intrinsic_name == "crypto_aes_round"
+
+# ============================================================================
+# Same rewrite with cipher_remark=false (no remark printed, but still rewrites)
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — cipher_remark=false + AES caps + AES callee":
+    it "instruction still becomes Intrinsic when cipher_remark=false":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_aes()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_intrinsic = match inst.kind:
+            case Intrinsic(dest, name, args): true
+            case _: false
+        expect is_intrinsic == true
+
+# ============================================================================
+# No caps: no rewrite even with cipher_remark=true
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — cipher_remark=true + no caps + AES callee":
+    it "instruction stays Call when caps lack AES":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_none()
+        val out  = run_pattern_idiom_pass_x86(m, caps, true)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_call = match inst.kind:
+            case Call(dest, func_op, args): true
+            case _: false
+        expect is_call == true
+
+# ============================================================================
+# Non-cipher callee: no rewrite even with AES caps + cipher_remark=true
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — cipher_remark=true + AES caps + non-cipher callee":
+    it "instruction stays Call for non-cipher callee":
+        val m    = make_call_module("std.io.print")
+        val caps = make_x86_caps_aes()
+        val out  = run_pattern_idiom_pass_x86(m, caps, true)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_call = match inst.kind:
+            case Call(dest, func_op, args): true
+            case _: false
+        expect is_call == true
+
+# ============================================================================
+# SHA256 callee + sha_ni caps + cipher_remark=true
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — SHA256 callee + sha_ni caps + cipher_remark=true":
+    it "SHA256 call becomes Intrinsic with sha_ni caps and cipher_remark=true":
+        val m    = make_call_module("std.common.crypto.sha256.compress_block")
+        val caps = make_x86_caps_sha_ni()
+        val out  = run_pattern_idiom_pass_x86(m, caps, true)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_intrinsic = match inst.kind:
+            case Intrinsic(dest, name, args): true
+            case _: false
+        expect is_intrinsic == true
+
+# ============================================================================
+# CRC32 callee + sse42 caps + cipher_remark=true
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — CRC32 callee + sse42 caps + cipher_remark=true":
+    it "CRC32 call becomes Intrinsic with sse42 caps and cipher_remark=true":
+        val m    = make_call_module("std.common.crypto.crc32.update_byte")
+        val caps = make_x86_caps_sse42()
+        val out  = run_pattern_idiom_pass_x86(m, caps, true)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_intrinsic = match inst.kind:
+            case Intrinsic(dest, name, args): true
+            case _: false
+        expect is_intrinsic == true

@@ -1,16 +1,17 @@
 #![allow(unnamed_duplicate_typed_args)]
 # Canonical Simple web stack verification sample app.
 
-use std.database.{SdnRow, SdnDatabase, load_sdn_database, new_sdn_database}
+use std.database.core.{SdnRow, SdnDatabase, load_sdn_database, new_sdn_database}
 use std.database.sql.codec.{DbCodec}
 use std.database.sql.schema.{TableSchema}
 use std.database.sql.types.{DbValue, DbRow, DbError}
 use std.database.sql.connection.{Database}
 use std.database.sql.repository.{Repository}
-use std.time.{now_iso8601}
 use std.crypto.hmac.{hmac_sha256}
 use std.web_framework.persistence.{SimpleDbRecordAdapter, WebRecordStore}
 use std.web_framework.session.{SessionStore}
+
+extern fn rt_time_now_unix_micros() -> i64
 
 class SampleUser:
     id: i64
@@ -203,6 +204,9 @@ fn sample_item_adapter() -> SimpleDbRecordAdapter<SampleItem>:
         field_text_fn: sample_item_field
     )
 
+fn sample_timestamp() -> text:
+    "{rt_time_now_unix_micros()}"
+
 fn open_web_stack_sample(backend_kind: text, path: text) -> Result<WebStackSampleApp, text>:
     if backend_kind == "sqlite":
         val db_result = if path == ":memory:":
@@ -271,26 +275,31 @@ impl WebStackSampleApp:
             return Err("Email must contain @")
         if password.len() < 8:
             return Err("Password must be at least 8 characters")
-        if self.users.find_by_field_equals("username", clean_username)?.len() > 0:
+        val existing_usernames = self.users.find_by_field_equals("username", clean_username)?
+        if existing_usernames.len() > 0:
             return Err("Username is already registered")
-        if self.users.find_by_field_equals("email", clean_email)?.len() > 0:
+        val existing_emails = self.users.find_by_field_equals("email", clean_email)?
+        if existing_emails.len() > 0:
             return Err("Email is already registered")
+        val password_hash = hash_password(password)
         val user = SampleUser(
             id: 0,
             username: clean_username,
             email: clean_email,
-            password_hash: hash_password(password),
-            created_at: now_iso8601()
+            password_hash: password_hash,
+            created_at: sample_timestamp()
         )
         val id = self.users.insert(user)?
         val saved = self.users.find_by_id(id)?
         if saved.?:
-            return Ok(saved.unwrap())
+            val saved_user = saved.unwrap()
+            return Ok(saved_user)
         Err("Failed to reload registered user")
 
     me post_register(username: text, email: text, password: text) -> Result<SampleResponse, text>:
         val user = self.register_user(username, email, password)?
-        val session_id = self.sessions.create("{user.id}")?
+        val user_id_text = "{user.id}"
+        val session_id = self.sessions.create(user_id_text)?
         Ok(SampleResponse(
             status: 302,
             redirect_to: "/items",
@@ -304,7 +313,8 @@ impl WebStackSampleApp:
         if found.len() == 0:
             return Ok(nil)
         val user = found[0]
-        if user.password_hash != hash_password(password):
+        val password_hash = hash_password(password)
+        if user.password_hash != password_hash:
             return Ok(nil)
         Ok(Some(user))
 
@@ -350,7 +360,7 @@ impl WebStackSampleApp:
         val clean_title = title.trim()
         if clean_title.len() == 0:
             return Err("Title is required")
-        val now = now_iso8601()
+        val now = sample_timestamp()
         val item = SampleItem(
             id: 0,
             user_id: user.id,
@@ -388,7 +398,7 @@ impl WebStackSampleApp:
             title: clean_title,
             details: details.trim(),
             created_at: item.created_at,
-            updated_at: now_iso8601()
+            updated_at: sample_timestamp()
         )
         self.items.update(item_id, updated)?
         val user = self.require_user(session_id)?
