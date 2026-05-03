@@ -1,0 +1,433 @@
+# CBOR Encoder / Decoder
+# Implements RFC 8949: Concise Binary Object Representation
+# https://www.rfc-editor.org/rfc/rfc8949
+#
+# Major types (high 3 bits of first byte):
+#   0 (0x00): Unsigned integer
+#   1 (0x20): Negative integer (value = -1 - n)
+#   2 (0x40): Byte string
+#   3 (0x60): Text string
+#   4 (0x80): Array
+#   5 (0xA0): Map
+#   6 (0xC0): Tag
+#   7 (0xE0): Simple / float
+#
+# Additional info (low 5 bits):
+#   0-23:  value is in the same byte
+#   24:    1-byte follows
+#   25:    2-byte follows (big-endian)
+#   26:    4-byte follows (big-endian)
+#   27:    8-byte follows (big-endian)
+#   31:    indefinite-length (not supported here)
+#
+# NOTE: String encoding uses ASCII (ch.ord()) per character.
+# Full multi-byte UTF-8 codepoint encoding is deferred — it requires
+# a unicode codepoint API. ASCII covers the common test-vector cases.
+#
+# NOTE: All numeric types are stored as i64 internally for interpreter
+# compatibility.
+#
+# NOTE: CBOR is BIG-ENDIAN (network byte order) throughout.
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# Usage:
+#   use std.encoding.cbor.{cbor_encode_int, cbor_encode_bytes,
+#       cbor_encode_text, cbor_encode_array_header, cbor_encode_map_header,
+#       cbor_decode_type, cbor_decode_int, cbor_decode_text,
+#       cbor_encode_bool, cbor_encode_null}
+
+# ============================================================================
+# Bit helpers (interpreter-safe, big-endian oriented)
+# ============================================================================
+# The interpreter uses arithmetic right-shift (sign-extending). Mask the
+# top bits explicitly so sign-extension doesn't pollute bytes we care about.
+
+fn _cb_mask8(x: i64) -> i64:
+    x & 0xFF
+
+fn _cb_shr8(x: i64) -> i64:
+    (x >> 8) & 0xFFFFFFFFFFFFFF
+
+fn _cb_shr16(x: i64) -> i64:
+    (x >> 16) & 0xFFFFFFFFFFFF
+
+fn _cb_shr24(x: i64) -> i64:
+    (x >> 24) & 0xFFFFFFFFFF
+
+fn _cb_shr32(x: i64) -> i64:
+    (x >> 32) & 0xFFFFFFFF
+
+fn _cb_shr40(x: i64) -> i64:
+    (x >> 40) & 0xFFFFFF
+
+fn _cb_shr48(x: i64) -> i64:
+    (x >> 48) & 0xFFFF
+
+fn _cb_shr56(x: i64) -> i64:
+    (x >> 56) & 0xFF
+
+fn _cb_read_u8(data: [u8], pos: i64) -> i64:
+    data[pos].to_i64() & 0xFF
+
+# ============================================================================
+# Internal big-endian integer helpers
+# ============================================================================
+
+fn _cb_encode_u16_be(v: i64) -> [u8]:
+    """Encode a 16-bit value in big-endian order (2 bytes)."""
+    var result: [u8] = []
+    result.push(_cb_mask8(_cb_shr8(v)))
+    result.push(_cb_mask8(v))
+    result
+
+fn _cb_encode_u32_be(v: i64) -> [u8]:
+    """Encode a 32-bit value in big-endian order (4 bytes)."""
+    var result: [u8] = []
+    result.push(_cb_mask8(_cb_shr24(v)))
+    result.push(_cb_mask8(_cb_shr16(v)))
+    result.push(_cb_mask8(_cb_shr8(v)))
+    result.push(_cb_mask8(v))
+    result
+
+fn _cb_encode_u64_be(v: i64) -> [u8]:
+    """Encode a 64-bit value in big-endian order (8 bytes)."""
+    var result: [u8] = []
+    result.push(_cb_mask8(_cb_shr56(v)))
+    result.push(_cb_mask8(_cb_shr48(v)))
+    result.push(_cb_mask8(_cb_shr40(v)))
+    result.push(_cb_mask8(_cb_shr32(v)))
+    result.push(_cb_mask8(_cb_shr24(v)))
+    result.push(_cb_mask8(_cb_shr16(v)))
+    result.push(_cb_mask8(_cb_shr8(v)))
+    result.push(_cb_mask8(v))
+    result
+
+fn _cb_decode_u16_be(data: [u8], pos: i64) -> i64:
+    """Read 2 bytes big-endian as unsigned 16-bit value."""
+    (_cb_read_u8(data, pos) << 8) | _cb_read_u8(data, pos + 1)
+
+fn _cb_decode_u32_be(data: [u8], pos: i64) -> i64:
+    """Read 4 bytes big-endian as unsigned 32-bit value."""
+    (_cb_read_u8(data, pos) << 24) |
+    (_cb_read_u8(data, pos + 1) << 16) |
+    (_cb_read_u8(data, pos + 2) << 8) |
+    _cb_read_u8(data, pos + 3)
+
+fn _cb_decode_u64_be(data: [u8], pos: i64) -> i64:
+    """Read 8 bytes big-endian as i64 (positive range only; high bit ignored)."""
+    val hi = _cb_decode_u32_be(data, pos)
+    val lo = _cb_decode_u32_be(data, pos + 4)
+    (hi << 32) | lo
+
+fn _cb_append(dest: [u8], src: [u8]):
+    """Append all bytes from src into dest in-place."""
+    var i = 0
+    while i < src.len():
+        dest.push(src[i])
+        i = i + 1
+
+# ============================================================================
+# Internal: encode an argument value with a given major type
+# ============================================================================
+# Encodes (major_type | additional_info) header + optional extra bytes
+# for a non-negative integer argument n.
+# major_type must already be the high-3-bit value shifted left (e.g., 0x00, 0x20, 0x40 ...)
+
+fn _cb_encode_head(major: i64, n: i64) -> [u8]:
+    """Encode CBOR head byte(s) for major type + argument n.
+
+    major: one of 0x00, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0, 0xE0
+    n: the argument (non-negative integer)
+
+    Packs as:
+      n in [0, 23]        → 1 byte:  major | n
+      n in [24, 255]      → 2 bytes: major | 24, n
+      n in [256, 65535]   → 3 bytes: major | 25, n (BE16)
+      n in [65536, 2^32-1] → 5 bytes: major | 26, n (BE32)
+      else                → 9 bytes: major | 27, n (BE64)
+    """
+    var result: [u8] = []
+    if n <= 23:
+        result.push(_cb_mask8(major | n))
+    elif n <= 255:
+        result.push(_cb_mask8(major | 24))
+        result.push(_cb_mask8(n))
+    elif n <= 65535:
+        result.push(_cb_mask8(major | 25))
+        _cb_append(result, _cb_encode_u16_be(n))
+    elif n <= 4294967295:
+        result.push(_cb_mask8(major | 26))
+        _cb_append(result, _cb_encode_u32_be(n))
+    else:
+        result.push(_cb_mask8(major | 27))
+        _cb_append(result, _cb_encode_u64_be(n))
+    result
+
+# ============================================================================
+# Public encoder functions
+# ============================================================================
+
+fn cbor_encode_uint(n: i64) -> [u8]:
+    """Encode a non-negative integer as CBOR major type 0.
+
+    Uses the most compact representation:
+      [0, 23]           → 1 byte
+      [24, 255]         → 2 bytes
+      [256, 65535]      → 3 bytes
+      [65536, 2^32-1]   → 5 bytes
+      larger            → 9 bytes
+    """
+    _cb_encode_head(0x00, n)
+
+fn cbor_encode_int(n: i64) -> [u8]:
+    """Encode a signed integer as CBOR.
+
+    Non-negative → major type 0 (unsigned int).
+    Negative     → major type 1 (negative int); value stored as -1 - n.
+    """
+    if n >= 0:
+        _cb_encode_head(0x00, n)
+    else:
+        _cb_encode_head(0x20, -1 - n)
+
+fn cbor_encode_bytes(data: [u8]) -> [u8]:
+    """Encode a byte string as CBOR major type 2 (bstr).
+
+    Encodes the length header followed by the raw bytes.
+    """
+    val dlen = data.len()
+    var result: [u8] = []
+    _cb_append(result, _cb_encode_head(0x40, dlen))
+    _cb_append(result, data)
+    result
+
+fn cbor_encode_text(s: text) -> [u8]:
+    """Encode a text string as CBOR major type 3 (tstr).
+
+    Uses ASCII encoding (ch.ord() per character). Full multi-byte UTF-8
+    codepoint encoding is deferred pending a unicode codepoint API.
+    """
+    var body: [u8] = []
+    val slen = s.length()
+    var i = 0
+    while i < slen:
+        val ch = s[i]
+        body.push(_cb_mask8(ch.ord()))
+        i = i + 1
+    val blen = body.len()
+    var result: [u8] = []
+    _cb_append(result, _cb_encode_head(0x60, blen))
+    _cb_append(result, body)
+    result
+
+fn cbor_encode_array_header(len: i64) -> [u8]:
+    """Encode a definite-length array header for major type 4.
+
+    The caller is responsible for appending exactly `len` encoded items.
+    """
+    _cb_encode_head(0x80, len)
+
+fn cbor_encode_map_header(len: i64) -> [u8]:
+    """Encode a definite-length map header for major type 5.
+
+    The caller is responsible for appending exactly `len` key-value pairs.
+    """
+    _cb_encode_head(0xA0, len)
+
+fn cbor_encode_tag(tag_number: i64) -> [u8]:
+    """Encode a tag (major type 6).
+
+    The caller is responsible for appending the tagged data item.
+    """
+    _cb_encode_head(0xC0, tag_number)
+
+fn cbor_encode_bool(v: bool) -> [u8]:
+    """Encode a boolean as CBOR simple value (major type 7).
+
+    false → 0xF4 (simple value 20)
+    true  → 0xF5 (simple value 21)
+    """
+    var result: [u8] = []
+    if v:
+        result.push(0xF5)
+    else:
+        result.push(0xF4)
+    result
+
+fn cbor_encode_null() -> [u8]:
+    """Encode CBOR null (simple value 22 = 0xF6)."""
+    var result: [u8] = []
+    result.push(0xF6)
+    result
+
+fn cbor_encode_undefined() -> [u8]:
+    """Encode CBOR undefined (simple value 23 = 0xF7)."""
+    var result: [u8] = []
+    result.push(0xF7)
+    result
+
+# ============================================================================
+# Public decoder functions
+# ============================================================================
+
+fn cbor_decode_type(data: [u8], offset: i64) -> list:
+    """Decode the CBOR item header at the given offset.
+
+    Returns a list: [major_type, additional, value, bytes_consumed]
+      major_type:     0-7 (the high 3 bits of the first byte)
+      additional:     0-31 (the low 5 bits of the first byte)
+      value:          the decoded argument integer (length, integer value, etc.)
+      bytes_consumed: number of bytes consumed by this header (1, 2, 3, 5, or 9)
+
+    For negative integers (major_type 1), value is the raw encoded argument;
+    the true integer value is -1 - value.
+
+    On error returns [-1, -1, -1, 0].
+    """
+    var result = []
+    if offset >= data.len():
+        result.push(-1)
+        result.push(-1)
+        result.push(-1)
+        result.push(0)
+        return result
+    val fb = _cb_read_u8(data, offset)
+    val major = (fb >> 5) & 0x07
+    val additional = fb & 0x1F
+    if additional <= 23:
+        result.push(major)
+        result.push(additional)
+        result.push(additional)
+        result.push(1)
+    elif additional == 24:
+        if offset + 1 >= data.len():
+            result.push(-1)
+            result.push(-1)
+            result.push(-1)
+            result.push(0)
+        else:
+            result.push(major)
+            result.push(24)
+            result.push(_cb_read_u8(data, offset + 1))
+            result.push(2)
+    elif additional == 25:
+        if offset + 2 >= data.len():
+            result.push(-1)
+            result.push(-1)
+            result.push(-1)
+            result.push(0)
+        else:
+            result.push(major)
+            result.push(25)
+            result.push(_cb_decode_u16_be(data, offset + 1))
+            result.push(3)
+    elif additional == 26:
+        if offset + 4 >= data.len():
+            result.push(-1)
+            result.push(-1)
+            result.push(-1)
+            result.push(0)
+        else:
+            result.push(major)
+            result.push(26)
+            result.push(_cb_decode_u32_be(data, offset + 1))
+            result.push(5)
+    elif additional == 27:
+        if offset + 8 >= data.len():
+            result.push(-1)
+            result.push(-1)
+            result.push(-1)
+            result.push(0)
+        else:
+            result.push(major)
+            result.push(27)
+            result.push(_cb_decode_u64_be(data, offset + 1))
+            result.push(9)
+    else:
+        # unsupported additional info (28-31: reserved / indefinite)
+        result.push(-1)
+        result.push(-1)
+        result.push(-1)
+        result.push(0)
+    result
+
+fn cbor_decode_int(data: [u8], offset: i64) -> list:
+    """Decode a CBOR integer (major type 0 or 1) at offset.
+
+    Returns [value, bytes_consumed].
+    For major type 0: value >= 0.
+    For major type 1: value = -1 - raw_argument (so value <= -1).
+    On error returns [-1, 0].
+    """
+    var result = []
+    val r = cbor_decode_type(data, offset)
+    val major = r[0]
+    val raw = r[2]
+    val consumed = r[3]
+    if consumed == 0:
+        result.push(-1)
+        result.push(0)
+    elif major == 0:
+        result.push(raw)
+        result.push(consumed)
+    elif major == 1:
+        result.push(-1 - raw)
+        result.push(consumed)
+    else:
+        result.push(-1)
+        result.push(0)
+    result
+
+fn cbor_decode_text(data: [u8], offset: i64) -> list:
+    """Decode a CBOR text string (major type 3) at offset.
+
+    Returns [decoded_text, bytes_consumed_total] where bytes_consumed_total
+    includes both the header and the payload.
+    Decodes bytes as ASCII characters (b.chr()). Multi-byte UTF-8 is deferred.
+    On error returns ["", 0].
+    """
+    var result = []
+    val r = cbor_decode_type(data, offset)
+    val major = r[0]
+    val blen = r[2]
+    val hdr_consumed = r[3]
+    if hdr_consumed == 0 or major != 3:
+        result.push("")
+        result.push(0)
+        return result
+    val payload_start = offset + hdr_consumed
+    var parts: [text] = []
+    var i = 0
+    while i < blen:
+        val b = _cb_read_u8(data, payload_start + i)
+        parts.push(b.chr())
+        i = i + 1
+    result.push(parts.join(""))
+    result.push(hdr_consumed + blen)
+    result
+
+fn cbor_decode_bytes(data: [u8], offset: i64) -> list:
+    """Decode a CBOR byte string (major type 2) at offset.
+
+    Returns [payload_as_u8_array, bytes_consumed_total].
+    bytes_consumed_total includes header and payload.
+    On error returns an empty list.
+    """
+    var result = []
+    val r = cbor_decode_type(data, offset)
+    val major = r[0]
+    val blen = r[2]
+    val hdr_consumed = r[3]
+    if hdr_consumed == 0 or major != 2:
+        return result
+    val payload_start = offset + hdr_consumed
+    var payload: [u8] = []
+    var i = 0
+    while i < blen:
+        payload.push(data[payload_start + i])
+        i = i + 1
+    result.push(payload)
+    result.push(hdr_consumed + blen)
+    result
