@@ -283,6 +283,7 @@ fn detect_native_test_project_root(source: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_common::Target;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
@@ -438,7 +439,7 @@ mod tests {
         fs::write(
             &config_path,
             render_cpu_config(
-                simple_target::Target::host().triple_str(),
+                Target::host().triple_str(),
                 active_tier.as_str(),
                 support_sets,
                 simple_fallbacks,

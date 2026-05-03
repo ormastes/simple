@@ -92,6 +92,93 @@ pub(crate) fn compile_builtin_method<M: Module>(
     args: &[VReg],
 ) -> InstrResult<()> {
     let receiver_val = ctx.get_vreg(&receiver)?;
+    if method.starts_with("to_u") || method.starts_with("to_i") || method.starts_with("to_f") || method == "to_int" {
+        let from_ty = ctx.vreg_types.get(&receiver).copied().unwrap_or(TypeId::I64);
+        let to_ty = match method {
+            "to_u8" => TypeId::U8,
+            "to_u16" => TypeId::U16,
+            "to_u32" => TypeId::U32,
+            "to_u64" => TypeId::U64,
+            "to_i8" => TypeId::I8,
+            "to_i16" => TypeId::I16,
+            "to_i32" => TypeId::I32,
+            "to_i64" | "to_int" => TypeId::I64,
+            "to_f32" => TypeId::F32,
+            "to_f64" | "to_float" => TypeId::F64,
+            _ => from_ty,
+        };
+        let src_ty = builder.func.dfg.value_type(receiver_val);
+        let from_signed = matches!(from_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+        let actual_is_float = src_ty == types::F32 || src_ty == types::F64;
+        let to_is_int = matches!(
+            to_ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+        );
+        let converted = if from_ty == to_ty {
+            receiver_val
+        } else if actual_is_float && to_is_int {
+            let to_signed = matches!(to_ty, TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64);
+            let widened = if to_signed {
+                builder.ins().fcvt_to_sint(types::I64, receiver_val)
+            } else {
+                builder.ins().fcvt_to_uint(types::I64, receiver_val)
+            };
+            match to_ty {
+                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, widened),
+                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, widened),
+                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, widened),
+                _ => widened,
+            }
+        } else if actual_is_float && matches!(to_ty, TypeId::F32 | TypeId::F64) {
+            if src_ty == types::F32 && to_ty == TypeId::F64 {
+                builder.ins().fpromote(types::F64, receiver_val)
+            } else if src_ty == types::F64 && to_ty == TypeId::F32 {
+                builder.ins().fdemote(types::F32, receiver_val)
+            } else {
+                receiver_val
+            }
+        } else {
+            match to_ty {
+                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, receiver_val),
+                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, receiver_val),
+                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, receiver_val),
+                TypeId::U64 | TypeId::I64 => match src_ty {
+                    types::I8 | types::I16 | types::I32 => {
+                        if from_signed {
+                            builder.ins().sextend(types::I64, receiver_val)
+                        } else {
+                            builder.ins().uextend(types::I64, receiver_val)
+                        }
+                    }
+                    _ => receiver_val,
+                },
+                TypeId::F32 | TypeId::F64 => {
+                    let float_val = if from_signed {
+                        builder.ins().fcvt_from_sint(types::F64, receiver_val)
+                    } else {
+                        builder.ins().fcvt_from_uint(types::F64, receiver_val)
+                    };
+                    if to_ty == TypeId::F32 {
+                        builder.ins().fdemote(types::F32, float_val)
+                    } else {
+                        float_val
+                    }
+                }
+                _ => receiver_val,
+            }
+        };
+        if let Some(d) = dest {
+            ctx.vreg_values.insert(*d, converted);
+        }
+        return Ok(());
+    }
     let result = match (receiver_type, method) {
         ("Array", "push") | ("array", "push") => {
             let arg_val = ctx.get_vreg(&args[0])?;

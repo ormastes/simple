@@ -2,8 +2,8 @@
 //!
 //! Exposes runtime externs for AES block encryption/decryption using an already
 //! expanded key schedule. Dispatch is keyed off the canonical SIMD profile:
-//! x86_64 AVX2 tier uses an AES-NI fast path when available, AArch64 NEON tier
-//! uses the ARM AES path when available, and RISC-V RVV or unsupported hosts
+//! `x86_64` AVX2 tier uses an `AES-NI` fast path when available, `AArch64` NEON tier
+//! uses the ARM AES path when available, and `RISC-V` RVV or unsupported hosts
 //! fall back to the scalar implementation.
 
 use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push};

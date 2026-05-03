@@ -372,3 +372,45 @@ Interpretation:
   narrow binary by roughly **71%**
 - the registry should remain opt-in for loader/test scenarios rather than
   always-on for ordinary static native applications
+
+## 12. Additional May 2026 Forced-Retention Cleanup
+
+Further inspection of a current-source unstripped narrow hello binary on
+**2026-05-03** showed that the next avoidable root was not broad dependency
+closure, but a small set of explicitly retained runtime exports:
+
+- `src/compiler_rust/runtime/src/lib.rs` contained `#[used]` statics for:
+  - `rt_decision_probe`
+  - `rt_condition_probe`
+  - `rt_path_probe`
+  - `rt_raw_u64_to_string`
+  - torch bit-tensor shim exports
+- these roots were preserved even when `runtime-symbol-table` was disabled
+- in the narrow lane, that forced otherwise-unused probe/helper code to survive
+  section GC
+
+The fix was to gate those `#[used]` roots behind the same
+`runtime-symbol-table` feature as static runtime symbol registration.
+
+Measured result against the current-source bootstrap runtime lane:
+
+- before gating retained roots:
+  - stripped narrow hello: **447,840 bytes**
+  - `.text`: **311,128**
+  - `.rodata`: **51,968**
+- after gating retained roots:
+  - stripped narrow hello: **423,024 bytes**
+  - stripped narrow minimal TUI: **427,120 bytes**
+  - `.text`: **294,712**
+  - `.rodata`: **50,384**
+
+Interpretation:
+
+- the retained exports were not the dominant remaining root, but they still
+  cost roughly **24.8 KB** in the default narrow hello binary
+- after removing them, the remaining floor is mostly standard-library panic /
+  backtrace support (`backtrace`, `gimli`, `addr2line`) rather than unrelated
+  runtime services
+- current-source narrow bootstrap apps are now back near the earlier
+  `~423 KB` plateau, but this time from current artifacts rather than stale
+  archives
