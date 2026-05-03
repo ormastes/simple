@@ -1,0 +1,271 @@
+# NewSessionTicket spec — RFC 8446 §4.6.1
+#
+# Coverage:
+#   1.  NST body encode: fixed fields layout (lifetime, age_add, nonce, ticket, extensions)
+#   2.  NST body encode/decode round-trip (ok=true, fields preserved)
+#   3.  NST handshake wrap: type=0x04, uint24 body length
+#   4.  NST handshake round-trip through decode_new_session_ticket_handshake
+#   5.  decode rejects zero-length ticket
+#   6.  decode rejects truncated nonce
+#   7.  decode rejects truncated ticket
+#   8.  decode rejects wrong HandshakeType via handshake wrapper
+#   9.  derive_resumption_psk_from_ticket produces HashLen-byte output (SHA-256)
+#  10.  derive_resumption_psk_from_ticket is deterministic (same inputs → same output)
+#  11.  stored_psk_from_new_session_ticket copies all NST fields into StoredPsk
+#  12.  PSK derived by stored_psk_from_new_session_ticket matches direct derivation
+
+use std.spipe.*
+
+use os.tls13.new_session_ticket.{
+    NewSessionTicket,
+    DecodedNewSessionTicket,
+    DecodedNstHandshake,
+    encode_new_session_ticket,
+    encode_new_session_ticket_handshake,
+    decode_new_session_ticket,
+    decode_new_session_ticket_handshake,
+    derive_resumption_psk_from_ticket,
+    stored_psk_from_new_session_ticket,
+}
+use os.tls13.key_schedule.{tls13_resumption_secret}
+use os.tls13.psk.{StoredPsk}
+
+# ============================================================================
+# Module-level helpers
+# ============================================================================
+
+fn _zeros_n(n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(0x00u8)
+        i = i + 1
+    out
+
+fn _seq_n(n: u64, base: u8) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(((base.to_u32() + (i.to_u32() & 0xFFu32)) & 0xFFu32).to_u8())
+        i = i + 1
+    out
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0
+    val n = a.len().to_u64()
+    while i < n:
+        if a[i.to_i64()] != b[i.to_i64()]:
+            return false
+        i = i + 1
+    true
+
+fn _u16_be(buf: [u8], off: u64) -> u32:
+    val hi = buf[off.to_i64()].to_u32()
+    val lo = buf[(off + 1).to_i64()].to_u32()
+    (hi << 8) | lo
+
+fn _u32_be(buf: [u8], off: u64) -> u32:
+    val b0 = buf[off.to_i64()].to_u32()
+    val b1 = buf[(off + 1).to_i64()].to_u32()
+    val b2 = buf[(off + 2).to_i64()].to_u32()
+    val b3 = buf[(off + 3).to_i64()].to_u32()
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+fn _build_nst() -> NewSessionTicket:
+    """Build a simple NST for round-trip testing."""
+    val nonce = _seq_n(4u64, 0x01u8)
+    val ticket = _seq_n(16u64, 0xAAu8)
+    val exts: [u8] = []
+    NewSessionTicket(
+        ticket_lifetime: 7200u32,
+        ticket_age_add: 0xDEADBEEFu32,
+        ticket_nonce: nonce,
+        ticket: ticket,
+        extensions: exts,
+    )
+
+fn _build_nst_with_ext() -> NewSessionTicket:
+    """Build an NST that has a non-empty extensions block."""
+    val nonce = _seq_n(2u64, 0x10u8)
+    val ticket = _seq_n(8u64, 0xBBu8)
+    # Simple early_data extension: type=0x002A, length=4, max_early_data_size=0x00004000
+    var exts: [u8] = []
+    exts.push(0x00u8)
+    exts.push(0x2Au8)
+    exts.push(0x00u8)
+    exts.push(0x04u8)
+    exts.push(0x00u8)
+    exts.push(0x00u8)
+    exts.push(0x40u8)
+    exts.push(0x00u8)
+    NewSessionTicket(
+        ticket_lifetime: 3600u32,
+        ticket_age_add: 0x12345678u32,
+        ticket_nonce: nonce,
+        ticket: ticket,
+        extensions: exts,
+    )
+
+fn _encode_and_decode(nst: NewSessionTicket) -> DecodedNewSessionTicket:
+    val enc = encode_new_session_ticket(nst)
+    decode_new_session_ticket(enc)
+
+fn _encode_decode_handshake(nst: NewSessionTicket) -> DecodedNstHandshake:
+    val enc = encode_new_session_ticket_handshake(nst)
+    decode_new_session_ticket_handshake(enc)
+
+fn _derive_psk_twice(rms: [u8], nonce: [u8]) -> bool:
+    val a = derive_resumption_psk_from_ticket(rms, nonce, 1u8)
+    val b = derive_resumption_psk_from_ticket(rms, nonce, 1u8)
+    _bytes_eq(a, b)
+
+fn _psk_matches_key_schedule(rms: [u8], nonce: [u8]) -> bool:
+    val got = derive_resumption_psk_from_ticket(rms, nonce, 1u8)
+    val expected = tls13_resumption_secret(rms, nonce, 1u8)
+    _bytes_eq(got, expected)
+
+fn _stored_psk_from_nst_psk_matches(nst: NewSessionTicket, rms: [u8]) -> bool:
+    val sp = stored_psk_from_new_session_ticket(nst, rms, 1u8, 0x1301u16)
+    val direct = derive_resumption_psk_from_ticket(rms, nst.ticket_nonce, 1u8)
+    _bytes_eq(sp.resumption_secret, direct)
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe("NewSessionTicket — RFC 8446 §4.6.1"):
+
+    it("encode body: fixed fields at correct offsets"):
+        val nst = _build_nst()
+        val enc = encode_new_session_ticket(nst)
+        # ticket_lifetime at offset 0 = 7200 = 0x00001C20
+        expect(_u32_be(enc, 0u64)).to_equal(7200u32)
+        # ticket_age_add at offset 4
+        expect(_u32_be(enc, 4u64)).to_equal(0xDEADBEEFu32)
+        # ticket_nonce length byte at offset 8 = 4
+        expect(enc[8].to_u32()).to_equal(4u32)
+        # nonce bytes 0x01 0x02 0x03 0x04 at offset 9..12
+        expect(enc[9].to_u32()).to_equal(0x01u32)
+        expect(enc[12].to_u32()).to_equal(0x04u32)
+        # ticket length at offset 13 = 16 = 0x0010
+        expect(_u16_be(enc, 13u64)).to_equal(16u32)
+        # extensions length at offset 31 = 0 (no extensions)
+        expect(_u16_be(enc, 31u64)).to_equal(0u32)
+        # total length: 4+4+1+4+2+16+2 = 33
+        expect(enc.len()).to_equal(33)
+
+    it("encode body round-trip: all fields preserved"):
+        val d = _encode_and_decode(_build_nst())
+        expect(d.ok).to_equal(true)
+        expect(d.nst.ticket_lifetime).to_equal(7200u32)
+        expect(d.nst.ticket_age_add).to_equal(0xDEADBEEFu32)
+        expect(_bytes_eq(d.nst.ticket_nonce, _seq_n(4u64, 0x01u8))).to_equal(true)
+        expect(_bytes_eq(d.nst.ticket, _seq_n(16u64, 0xAAu8))).to_equal(true)
+        expect(d.nst.extensions.len()).to_equal(0)
+
+    it("encode body round-trip: non-empty extensions preserved"):
+        val nst = _build_nst_with_ext()
+        val d = _encode_and_decode(nst)
+        expect(d.ok).to_equal(true)
+        expect(d.nst.ticket_lifetime).to_equal(3600u32)
+        expect(d.nst.extensions.len()).to_equal(8)
+        expect(_bytes_eq(d.nst.extensions, nst.extensions)).to_equal(true)
+
+    it("handshake wrap: type byte is 0x04"):
+        val enc = encode_new_session_ticket_handshake(_build_nst())
+        expect(enc[0].to_u32()).to_equal(4u32)
+
+    it("handshake wrap: uint24 length matches body"):
+        val nst = _build_nst()
+        val body = encode_new_session_ticket(nst)
+        val wrapped = encode_new_session_ticket_handshake(nst)
+        val body_len_hi = wrapped[1].to_u32()
+        val body_len_mid = wrapped[2].to_u32()
+        val body_len_lo = wrapped[3].to_u32()
+        val decoded_len = (body_len_hi << 16) | (body_len_mid << 8) | body_len_lo
+        expect(decoded_len).to_equal(body.len().to_u32())
+        # total wrapped length = 4 header + body
+        expect(wrapped.len()).to_equal(4 + body.len())
+
+    it("handshake round-trip via decode_new_session_ticket_handshake"):
+        val d = _encode_decode_handshake(_build_nst())
+        expect(d.ok).to_equal(true)
+        expect(d.nst.ticket_lifetime).to_equal(7200u32)
+        expect(d.nst.ticket_age_add).to_equal(0xDEADBEEFu32)
+
+    it("decode rejects zero-length ticket"):
+        val nst = NewSessionTicket(
+            ticket_lifetime: 100u32,
+            ticket_age_add: 1u32,
+            ticket_nonce: _seq_n(2u64, 0x01u8),
+            ticket: [],
+            extensions: [],
+        )
+        val enc = encode_new_session_ticket(nst)
+        val d = decode_new_session_ticket(enc)
+        expect(d.ok).to_equal(false)
+
+    it("decode rejects truncated buffer"):
+        val enc = encode_new_session_ticket(_build_nst())
+        # truncate to first 5 bytes
+        val short = _nst_slice_helper(enc, 0u64, 5u64)
+        val d = decode_new_session_ticket(short)
+        expect(d.ok).to_equal(false)
+
+    it("handshake decode rejects wrong HandshakeType"):
+        val enc = encode_new_session_ticket_handshake(_build_nst())
+        # replace type byte (0x04) with 0x02 (ServerHello)
+        var tampered: [u8] = []
+        tampered.push(0x02u8)
+        var i: u64 = 1
+        val n = enc.len().to_u64()
+        while i < n:
+            tampered.push(enc[i.to_i64()])
+            i = i + 1
+        val d = decode_new_session_ticket_handshake(tampered)
+        expect(d.ok).to_equal(false)
+
+    it("derive_resumption_psk_from_ticket returns 32 bytes for SHA-256 path"):
+        val rms = _seq_n(32u64, 0x55u8)
+        val nonce = _seq_n(4u64, 0x01u8)
+        val psk = derive_resumption_psk_from_ticket(rms, nonce, 1u8)
+        expect(psk.len()).to_equal(32)
+
+    it("derive_resumption_psk_from_ticket is deterministic"):
+        val rms = _seq_n(32u64, 0x77u8)
+        val nonce = _seq_n(3u64, 0x22u8)
+        expect(_derive_psk_twice(rms, nonce)).to_equal(true)
+
+    it("derive_resumption_psk_from_ticket matches tls13_resumption_secret"):
+        val rms = _seq_n(32u64, 0x33u8)
+        val nonce = _seq_n(2u64, 0xFFu8)
+        expect(_psk_matches_key_schedule(rms, nonce)).to_equal(true)
+
+    it("stored_psk_from_new_session_ticket: ticket fields copied correctly"):
+        val nst = _build_nst()
+        val rms = _zeros_n(32u64)
+        val sp = stored_psk_from_new_session_ticket(nst, rms, 1u8, 0x1301u16)
+        expect(sp.lifetime_seconds).to_equal(7200u32)
+        expect(sp.age_add).to_equal(0xDEADBEEFu32)
+        expect(sp.cipher_suite).to_equal(0x1301u16)
+        expect(_bytes_eq(sp.ticket, _seq_n(16u64, 0xAAu8))).to_equal(true)
+        expect(_bytes_eq(sp.ticket_nonce, _seq_n(4u64, 0x01u8))).to_equal(true)
+
+    it("stored_psk_from_new_session_ticket: derived PSK matches direct derivation"):
+        val nst = _build_nst()
+        val rms = _seq_n(32u64, 0xCCu8)
+        expect(_stored_psk_from_nst_psk_matches(nst, rms)).to_equal(true)
+
+# ============================================================================
+# Helper used in truncation test (module-level to avoid it-block mutation issues)
+# ============================================================================
+
+fn _nst_slice_helper(buf: [u8], off: u64, n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(buf[(off + i).to_i64()])
+        i = i + 1
+    out

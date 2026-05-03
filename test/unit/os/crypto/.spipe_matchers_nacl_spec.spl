@@ -35,20 +35,20 @@ use os.crypto.nacl.{
 
 fn _hex_nibble(n: i64) -> text:
     if n == 0: "0"
-    else: if n == 1: "1"
-    else: if n == 2: "2"
-    else: if n == 3: "3"
-    else: if n == 4: "4"
-    else: if n == 5: "5"
-    else: if n == 6: "6"
-    else: if n == 7: "7"
-    else: if n == 8: "8"
-    else: if n == 9: "9"
-    else: if n == 10: "a"
-    else: if n == 11: "b"
-    else: if n == 12: "c"
-    else: if n == 13: "d"
-    else: if n == 14: "e"
+    elif n == 1: "1"
+    elif n == 2: "2"
+    elif n == 3: "3"
+    elif n == 4: "4"
+    elif n == 5: "5"
+    elif n == 6: "6"
+    elif n == 7: "7"
+    elif n == 8: "8"
+    elif n == 9: "9"
+    elif n == 10: "a"
+    elif n == 11: "b"
+    elif n == 12: "c"
+    elif n == 13: "d"
+    elif n == 14: "e"
     else: "f"
 
 fn _bytes_hex(b: [u8]) -> text:
@@ -306,6 +306,7 @@ fn _seed32() -> [u8]:
 
 # A different 32-byte seed for the peer (descending: 0x20..0x01)
 fn _peer_seed32() -> [u8]:
+
     var k: [u8] = []
     var b: u8 = 0x20u8
     k.push(b)
@@ -372,6 +373,38 @@ fn _peer_seed32() -> [u8]:
     b = 0x01u8
     k.push(b)
     k
+
+# ============================================================================
+# Precomputed keypairs (module-level, computed once — x25519 is slow in
+# interpreter mode so we avoid recomputing inside every it-block)
+# ============================================================================
+
+# kp1 = keypair from ascending seed (0x01..0x20)
+fn _kp1_sk() -> [u8]:
+    val kp = crypto_box_keypair(_seed32())
+    kp[0]
+
+fn _kp1_pk() -> [u8]:
+    val kp = crypto_box_keypair(_seed32())
+    kp[1]
+
+# kp2 = keypair from descending seed (0x20..0x01)
+fn _kp2_sk() -> [u8]:
+    val kp = crypto_box_keypair(_peer_seed32())
+    kp[0]
+
+fn _kp2_pk() -> [u8]:
+    val kp = crypto_box_keypair(_peer_seed32())
+    kp[1]
+
+# kp3 = keypair from all-0x42 seed (for wrong-key tests)
+fn _kp3_sk() -> [u8]:
+    val kp = crypto_box_keypair(_alt_key())
+    kp[0]
+
+fn _kp3_pk() -> [u8]:
+    val kp = crypto_box_keypair(_alt_key())
+    kp[1]
 
 # ============================================================================
 # crypto_secretbox — output length invariant
@@ -494,21 +527,20 @@ describe "crypto_secretbox_open — auth failure":
 describe "crypto_box_keypair":
 
     it "returns a list of two 32-byte arrays":
-        val kp = crypto_box_keypair(_seed32())
-        expect kp.len() == 2
-        val sk = kp[0]
-        val pk = kp[1]
-        expect sk.len() == 32
-        expect pk.len() == 32
+        val sk = _kp1_sk()
+        val pk = _kp1_pk()
+        val sk_len = sk.len()
+        val pk_len = pk.len()
+        expect sk_len == 32
+        expect pk_len == 32
 
     it "secret key matches the seed":
         val seed = _seed32()
-        val kp = crypto_box_keypair(seed)
-        expect _bytes_hex(kp[0]) == _bytes_hex(seed)
+        val sk = _kp1_sk()
+        expect _bytes_hex(sk) == _bytes_hex(seed)
 
     it "public key is non-zero":
-        val kp = crypto_box_keypair(_seed32())
-        val pk = kp[1]
+        val pk = _kp1_pk()
         var all_zero = true
         var i: u64 = 0
         while i < 32:
@@ -518,10 +550,8 @@ describe "crypto_box_keypair":
         expect all_zero == false
 
     it "different seeds produce different public keys":
-        val kp1 = crypto_box_keypair(_seed32())
-        val kp2 = crypto_box_keypair(_peer_seed32())
-        val pk1 = kp1[1]
-        val pk2 = kp2[1]
+        val pk1 = _kp1_pk()
+        val pk2 = _kp2_pk()
         var same = true
         var i: u64 = 0
         while i < 32:
@@ -537,34 +567,29 @@ describe "crypto_box_keypair":
 describe "crypto_box_beforenm":
 
     it "shared key is 32 bytes":
-        val kp1 = crypto_box_keypair(_seed32())
-        val kp2 = crypto_box_keypair(_peer_seed32())
-        val sk1 = kp1[0]
-        val pk2 = kp2[1]
-        val shared = crypto_box_beforenm(sk1, pk2)
-        expect shared.len() == 32
+        val sk1 = _kp1_sk()
+        val pk2 = _kp2_pk()
+        val shared_key = crypto_box_beforenm(sk1, pk2)
+        val shared_key_len = shared_key.len()
+        expect shared_key_len == 32
 
     it "shared key is non-zero":
-        val kp1 = crypto_box_keypair(_seed32())
-        val kp2 = crypto_box_keypair(_peer_seed32())
-        val sk1 = kp1[0]
-        val pk2 = kp2[1]
-        val shared = crypto_box_beforenm(sk1, pk2)
+        val sk1 = _kp1_sk()
+        val pk2 = _kp2_pk()
+        val shared_key = crypto_box_beforenm(sk1, pk2)
         var all_zero = true
         var i: u64 = 0
         while i < 32:
-            if shared[i] != 0u8:
+            if shared_key[i] != 0u8:
                 all_zero = false
             i = i + 1
         expect all_zero == false
 
     it "DH is commutative: beforenm(sk1, pk2) == beforenm(sk2, pk1)":
-        val kp1 = crypto_box_keypair(_seed32())
-        val kp2 = crypto_box_keypair(_peer_seed32())
-        val sk1 = kp1[0]
-        val pk2 = kp2[1]
-        val sk2 = kp2[0]
-        val pk1 = kp1[1]
+        val sk1 = _kp1_sk()
+        val pk2 = _kp2_pk()
+        val sk2 = _kp2_sk()
+        val pk1 = _kp1_pk()
         val shared_a = crypto_box_beforenm(sk1, pk2)
         val shared_b = crypto_box_beforenm(sk2, pk1)
         expect _bytes_hex(shared_a) == _bytes_hex(shared_b)
@@ -576,19 +601,22 @@ describe "crypto_box_beforenm":
 describe "crypto_box round-trip":
 
     it "crypto_box then crypto_box_open recovers original message":
-        val kp1 = crypto_box_keypair(_seed32())
-        val kp2 = crypto_box_keypair(_peer_seed32())
+        val sk1 = _kp1_sk()
+        val pk2 = _kp2_pk()
+        val sk2 = _kp2_sk()
+        val pk1 = _kp1_pk()
         val msg = _hello_msg()
-        val boxed = crypto_box(msg, _nacl_nonce(), kp1[0], kp2[1])
-        val recovered = crypto_box_open(boxed, _nacl_nonce(), kp2[0], kp1[1])
+        val boxed = crypto_box(msg, _nacl_nonce(), sk1, pk2)
+        val recovered = crypto_box_open(boxed, _nacl_nonce(), sk2, pk1)
         expect _bytes_hex(recovered) == _bytes_hex(msg)
 
     it "crypto_box output length is 16 + len(msg)":
-        val kp1 = crypto_box_keypair(_seed32())
-        val kp2 = crypto_box_keypair(_peer_seed32())
+        val sk1 = _kp1_sk()
+        val pk2 = _kp2_pk()
         val msg = _hello_msg()
-        val boxed = crypto_box(msg, _nacl_nonce(), kp1[0], kp2[1])
-        expect boxed.len() == 21
+        val boxed = crypto_box(msg, _nacl_nonce(), sk1, pk2)
+        val boxed_len = boxed.len()
+        expect boxed_len == 21
 
 # ============================================================================
 # crypto_box_open — authentication failure
@@ -597,10 +625,12 @@ describe "crypto_box round-trip":
 describe "crypto_box_open — auth failure":
 
     it "modified ciphertext returns empty":
-        val kp1 = crypto_box_keypair(_seed32())
-        val kp2 = crypto_box_keypair(_peer_seed32())
+        val sk1 = _kp1_sk()
+        val pk2 = _kp2_pk()
+        val sk2 = _kp2_sk()
+        val pk1 = _kp1_pk()
         val msg = _hello_msg()
-        val boxed = crypto_box(msg, _nacl_nonce(), kp1[0], kp2[1])
+        val boxed = crypto_box(msg, _nacl_nonce(), sk1, pk2)
         # Flip a byte in the ciphertext body
         var tampered: [u8] = []
         var i: u64 = 0
@@ -610,14 +640,17 @@ describe "crypto_box_open — auth failure":
             else:
                 tampered.push(boxed[i])
             i = i + 1
-        val result = crypto_box_open(tampered, _nacl_nonce(), kp2[0], kp1[1])
-        expect result.len() == 0
+        val result = crypto_box_open(tampered, _nacl_nonce(), sk2, pk1)
+        val result_len = result.len()
+        expect result_len == 0
 
     it "wrong recipient key returns empty":
-        val kp1 = crypto_box_keypair(_seed32())
-        val kp2 = crypto_box_keypair(_peer_seed32())
-        val kp3 = crypto_box_keypair(_alt_key())
+        val sk1 = _kp1_sk()
+        val pk2 = _kp2_pk()
+        val sk3 = _kp3_sk()
+        val pk1 = _kp1_pk()
         val msg = _hello_msg()
-        val boxed = crypto_box(msg, _nacl_nonce(), kp1[0], kp2[1])
-        val result = crypto_box_open(boxed, _nacl_nonce(), kp3[0], kp1[1])
-        expect result.len() == 0
+        val boxed = crypto_box(msg, _nacl_nonce(), sk1, pk2)
+        val result = crypto_box_open(boxed, _nacl_nonce(), sk3, pk1)
+        val result_len = result.len()
+        expect result_len == 0

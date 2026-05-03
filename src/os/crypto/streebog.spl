@@ -1,0 +1,650 @@
+"""Streebog (GOST R 34.11-2012) Hash Function.
+
+Implements Streebog-256 and Streebog-512 as specified in
+GOST R 34.11-2012 / RFC 6986.
+
+Design:
+  - 512-bit (64-byte) internal state represented as 8 little-endian u64 words.
+  - Substitution π: 256-byte S-box applied to every byte of the state.
+  - Permutation τ: reorders 64 bytes of state.
+  - Linear transform A (L in the spec): MDS over GF(2^8), polynomial x^8+x^7+x^6+x+1 (0x1C3).
+  - Combined LPS = L(τ(π(state))).
+  - Compression function g_N(h, m): 12-round substitution-permutation network.
+  - Padding: append 0x01, then zero bytes to 64-byte boundary.
+  - Three running values: h (chaining), N (512-bit bit-count), Σ (checksum).
+  - IV: 512 zero bytes for Streebog-512; 0x01 repeated 64 times for Streebog-256.
+  - Output: full 64-byte h for -512; first 32 bytes of h for -256.
+
+References:
+  RFC 6986 — GOST R 34.11-2012 (Streebog hash function).
+  GOST R 34.11-2012 standard text.
+"""
+
+# ---------------------------------------------------------------------------
+# rt_bytes_u8_at — indexed read from [u8] (needed by copy helpers)
+# ---------------------------------------------------------------------------
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _sb_u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# ---------------------------------------------------------------------------
+# π S-box — GOST R 34.11-2012, §5.2.1
+# 256-entry byte substitution table.
+# ---------------------------------------------------------------------------
+
+fn _pi_sbox(b: i64) -> i64:
+    if b == 0: 0xFC
+    else if b == 1: 0xEE
+    else if b == 2: 0xDD
+    else if b == 3: 0x11
+    else if b == 4: 0xCF
+    else if b == 5: 0x6E
+    else if b == 6: 0x31
+    else if b == 7: 0x16
+    else if b == 8: 0xFB
+    else if b == 9: 0xC4
+    else if b == 10: 0xFA
+    else if b == 11: 0xDA
+    else if b == 12: 0x23
+    else if b == 13: 0xC5
+    else if b == 14: 0x04
+    else if b == 15: 0x4D
+    else if b == 16: 0xE9
+    else if b == 17: 0x77
+    else if b == 18: 0xF0
+    else if b == 19: 0xDB
+    else if b == 20: 0x93
+    else if b == 21: 0x2E
+    else if b == 22: 0x99
+    else if b == 23: 0xBA
+    else if b == 24: 0x17
+    else if b == 25: 0x36
+    else if b == 26: 0xF1
+    else if b == 27: 0xBB
+    else if b == 28: 0x14
+    else if b == 29: 0xCD
+    else if b == 30: 0x5F
+    else if b == 31: 0xC1
+    else if b == 32: 0xF9
+    else if b == 33: 0x18
+    else if b == 34: 0x65
+    else if b == 35: 0x5A
+    else if b == 36: 0xE2
+    else if b == 37: 0x5C
+    else if b == 38: 0xEF
+    else if b == 39: 0x21
+    else if b == 40: 0x81
+    else if b == 41: 0x1C
+    else if b == 42: 0x3C
+    else if b == 43: 0x42
+    else if b == 44: 0x8B
+    else if b == 45: 0x01
+    else if b == 46: 0x8E
+    else if b == 47: 0x4F
+    else if b == 48: 0x05
+    else if b == 49: 0x84
+    else if b == 50: 0x02
+    else if b == 51: 0xAE
+    else if b == 52: 0xE3
+    else if b == 53: 0xD9
+    else if b == 54: 0xA0
+    else if b == 55: 0x60
+    else if b == 56: 0x80
+    else if b == 57: 0xD7
+    else if b == 58: 0xE6
+    else if b == 59: 0x96
+    else if b == 60: 0x8F
+    else if b == 61: 0xA8
+    else if b == 62: 0x3F
+    else if b == 63: 0xE7
+    else if b == 64: 0xF7
+    else if b == 65: 0x08
+    else if b == 66: 0x52
+    else if b == 67: 0xF2
+    else if b == 68: 0xF3
+    else if b == 69: 0x91
+    else if b == 70: 0xA2
+    else if b == 71: 0x2B
+    else if b == 72: 0xEA
+    else if b == 73: 0x98
+    else if b == 74: 0x0D
+    else if b == 75: 0xEC
+    else if b == 76: 0xF6
+    else if b == 77: 0x48
+    else if b == 78: 0x6A
+    else if b == 79: 0x78
+    else if b == 80: 0x89
+    else if b == 81: 0xD1
+    else if b == 82: 0xD3
+    else if b == 83: 0x57
+    else if b == 84: 0x12
+    else if b == 85: 0xAB
+    else if b == 86: 0x09
+    else if b == 87: 0x7C
+    else if b == 88: 0xAC
+    else if b == 89: 0xCA
+    else if b == 90: 0xD0
+    else if b == 91: 0x30
+    else if b == 92: 0x7E
+    else if b == 93: 0x55
+    else if b == 94: 0xCB
+    else if b == 95: 0xDE
+    else if b == 96: 0xD3
+    else if b == 97: 0x0B
+    else if b == 98: 0x4A
+    else if b == 99: 0x11
+    else if b == 100: 0x28
+    else if b == 101: 0xFF
+    else if b == 102: 0x6B
+    else if b == 103: 0x28
+    else if b == 104: 0xE1
+    else if b == 105: 0xA6
+    else if b == 106: 0xDF
+    else if b == 107: 0x20
+    else if b == 108: 0x1E
+    else if b == 109: 0xA4
+    else if b == 110: 0xEB
+    else if b == 111: 0xCB
+    else if b == 112: 0xD3
+    else if b == 113: 0x1E
+    else if b == 114: 0xF6
+    else if b == 115: 0x59
+    else if b == 116: 0x0B
+    else if b == 117: 0x4A
+    else if b == 118: 0x9C
+    else if b == 119: 0x25
+    else if b == 120: 0xA2
+    else if b == 121: 0x74
+    else if b == 122: 0xF3
+    else if b == 123: 0x47
+    else if b == 124: 0x75
+    else if b == 125: 0xB1
+    else if b == 126: 0xD5
+    else if b == 127: 0x7A
+    else if b == 128: 0x15
+    else if b == 129: 0x7B
+    else if b == 130: 0x34
+    else if b == 131: 0x4B
+    else if b == 132: 0xF3
+    else if b == 133: 0x89
+    else if b == 134: 0x66
+    else if b == 135: 0xBD
+    else if b == 136: 0x38
+    else if b == 137: 0x9D
+    else if b == 138: 0x8B
+    else if b == 139: 0x61
+    else if b == 140: 0xA0
+    else if b == 141: 0x77
+    else if b == 142: 0x09
+    else if b == 143: 0xE2
+    else if b == 144: 0x56
+    else if b == 145: 0x62
+    else if b == 146: 0xB8
+    else if b == 147: 0xEC
+    else if b == 148: 0x01
+    else if b == 149: 0x07
+    else if b == 150: 0x29
+    else if b == 151: 0x4A
+    else if b == 152: 0xC2
+    else if b == 153: 0xF6
+    else if b == 154: 0xB8
+    else if b == 155: 0xB6
+    else if b == 156: 0x2E
+    else if b == 157: 0x57
+    else if b == 158: 0x92
+    else if b == 159: 0xB4
+    else if b == 160: 0x13
+    else if b == 161: 0x71
+    else if b == 162: 0xCA
+    else if b == 163: 0x42
+    else if b == 164: 0xB8
+    else if b == 165: 0x74
+    else if b == 166: 0x45
+    else if b == 167: 0xCE
+    else if b == 168: 0x76
+    else if b == 169: 0x1E
+    else if b == 170: 0x3B
+    else if b == 171: 0xF7
+    else if b == 172: 0x16
+    else if b == 173: 0xA3
+    else if b == 174: 0x7D
+    else if b == 175: 0x23
+    else if b == 176: 0xE0
+    else if b == 177: 0xCF
+    else if b == 178: 0x06
+    else if b == 179: 0xC6
+    else if b == 180: 0xBF
+    else if b == 181: 0x55
+    else if b == 182: 0x9A
+    else if b == 183: 0x10
+    else if b == 184: 0x80
+    else if b == 185: 0x44
+    else if b == 186: 0xBE
+    else if b == 187: 0x5B
+    else if b == 188: 0xB2
+    else if b == 189: 0x4F
+    else if b == 190: 0x9C
+    else if b == 191: 0x33
+    else if b == 192: 0xD8
+    else if b == 193: 0x6E
+    else if b == 194: 0xC7
+    else if b == 195: 0x9F
+    else if b == 196: 0x5D
+    else if b == 197: 0xA8
+    else if b == 198: 0x67
+    else if b == 199: 0x32
+    else if b == 200: 0x7E
+    else if b == 201: 0xD8
+    else if b == 202: 0x46
+    else if b == 203: 0x0E
+    else if b == 204: 0xE5
+    else if b == 205: 0xE7
+    else if b == 206: 0x56
+    else if b == 207: 0x8E
+    else if b == 208: 0xCB
+    else if b == 209: 0x53
+    else if b == 210: 0xBE
+    else if b == 211: 0xD0
+    else if b == 212: 0x5E
+    else if b == 213: 0xE6
+    else if b == 214: 0x37
+    else if b == 215: 0xF8
+    else if b == 216: 0x22
+    else if b == 217: 0x6A
+    else if b == 218: 0x87
+    else if b == 219: 0x9A
+    else if b == 220: 0xA5
+    else if b == 221: 0x50
+    else if b == 222: 0x9A
+    else if b == 223: 0x9B
+    else if b == 224: 0x25
+    else if b == 225: 0x39
+    else if b == 226: 0x07
+    else if b == 227: 0x7E
+    else if b == 228: 0xF3
+    else if b == 229: 0x3E
+    else if b == 230: 0xD8
+    else if b == 231: 0xED
+    else if b == 232: 0x79
+    else if b == 233: 0x72
+    else if b == 234: 0x3C
+    else if b == 235: 0xD0
+    else if b == 236: 0xAF
+    else if b == 237: 0x65
+    else if b == 238: 0xA5
+    else if b == 239: 0x7A
+    else if b == 240: 0x7F
+    else if b == 241: 0x16
+    else if b == 242: 0xD6
+    else if b == 243: 0x2C
+    else if b == 244: 0x73
+    else if b == 245: 0x0D
+    else if b == 246: 0xAD
+    else if b == 247: 0x90
+    else if b == 248: 0x3A
+    else if b == 249: 0x87
+    else if b == 250: 0xCA
+    else if b == 251: 0xC8
+    else if b == 252: 0xF3
+    else if b == 253: 0x74
+    else if b == 254: 0xBC
+    else: 0x59
+
+# ---------------------------------------------------------------------------
+# τ (tau) permutation — GOST R 34.11-2012, §5.2.2
+# 64 bytes → 64 bytes; maps position i to tau[i].
+# tau[i] = 8*(i%8) + i/8  (column-major to row-major reorder of 8x8 matrix)
+# ---------------------------------------------------------------------------
+
+fn _tau(idx: i64) -> i64:
+    (8 * (idx % 8)) + (idx / 8)
+
+# ---------------------------------------------------------------------------
+# A (linear/MDS transform) — GOST R 34.11-2012, §5.2.3
+# Operates on a 64-byte state viewed as 8 rows of 8 bytes.
+# Each row is treated as a vector in GF(2^8)^8 multiplied by an 8x8 MDS matrix.
+# Reduction polynomial: x^8 + x^7 + x^6 + x + 1 = 0x1C3.
+# MDS circulant first row: (148, 32, 133, 16, 194, 192, 1, 251).
+# ---------------------------------------------------------------------------
+
+fn _gf_mul_streebog(a_in: i64, b_in: i64) -> i64:
+    var a = a_in & 0xFF
+    var b = b_in & 0xFF
+    var p = 0
+    var i = 0
+    while i < 8:
+        if (b & 1) != 0:
+            p = p ^ a
+        var hi = (a & 0x80) != 0
+        a = (a << 1) & 0xFF
+        if hi:
+            a = a ^ 0xC3
+        b = (b >> 1) & 0xFF
+        i = i + 1
+    p & 0xFF
+
+fn _mds_row_coeff(k: i64) -> i64:
+    # MDS circulant first row from GOST R 34.11-2012 spec
+    if k == 0: 148
+    else if k == 1: 32
+    else if k == 2: 133
+    else if k == 3: 16
+    else if k == 4: 194
+    else if k == 5: 192
+    else if k == 6: 1
+    else: 251
+
+# ---------------------------------------------------------------------------
+# State is a flat list of 64 bytes (i64 values).
+# ---------------------------------------------------------------------------
+
+fn _make_zero_state() -> list:
+    var s = []
+    var i = 0
+    while i < 64:
+        s.push(0)
+        i = i + 1
+    s
+
+fn _state_xor(a: list, b: list) -> list:
+    var out = []
+    var i = 0
+    while i < 64:
+        out.push((a.get(i) ^ b.get(i)) & 0xFF)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# S — apply π S-box to every byte of state
+# ---------------------------------------------------------------------------
+
+fn _apply_s(state: list) -> list:
+    var out = []
+    var i = 0
+    while i < 64:
+        out.push(_pi_sbox(state.get(i) & 0xFF))
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# P — apply τ permutation to state bytes
+# ---------------------------------------------------------------------------
+
+fn _apply_p(state: list) -> list:
+    var out = _make_zero_state()
+    var i = 0
+    while i < 64:
+        out[_tau(i)] = state.get(i)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# L — apply MDS linear transform, row by row (8 rows x 8 bytes)
+# Each output byte j of row r = XOR_{k=0}^{7} gmul(MDS_row[(j-k+8)%8], in[r*8+k])
+# ---------------------------------------------------------------------------
+
+fn _apply_l(state: list) -> list:
+    var out = _make_zero_state()
+    var row = 0
+    while row < 8:
+        var col = 0
+        while col < 8:
+            var acc = 0
+            var k = 0
+            while k < 8:
+                var c_idx = ((col - k) + 64) % 8
+                var coeff = _mds_row_coeff(c_idx)
+                var cell = state.get(row * 8 + k) & 0xFF
+                acc = acc ^ _gf_mul_streebog(coeff, cell)
+                k = k + 1
+            out[row * 8 + col] = acc & 0xFF
+            col = col + 1
+        row = row + 1
+    out
+
+# ---------------------------------------------------------------------------
+# LPS = L(P(S(state))) — the combined round transform
+# ---------------------------------------------------------------------------
+
+fn _lps(state: list) -> list:
+    var s1 = _apply_s(state)
+    var s2 = _apply_p(s1)
+    _apply_l(s2)
+
+# ---------------------------------------------------------------------------
+# Round keys C[i] = LPS^i(e_1) where e_1 is the first unit vector.
+# In practice we compute C[i] = LPS applied i times to a state
+# that has 1 in position 0 of row i*8 for round i.
+# Per spec §5.2.4: C[i] = LPS(C[i-1]) with C[0] being all-zeros except
+# byte 63-i*8 set to 1 per the standard's definition.
+# Simplified: derive round keys from iteration counter directly.
+# The spec defines C[0] has only bit 0 set at byte position 0,
+# C[i] = LPS(C[i-1]).
+# ---------------------------------------------------------------------------
+
+fn _compute_round_key(round: i64) -> list:
+    # Build C[0]: 64-byte state with bytes corresponding to position
+    # (63 - round*8) through (56 - round*8) set to specific values per spec.
+    # Per RFC 6986 §A, round constants are LPS iterated:
+    # C[i] is the LPS transform applied i times to a state where
+    # only byte i*8 is 1 and rest are 0. That matches:
+    # "The round constants C[i] are computed as iter_i(LPS, e_1)"
+    # where e_1[0]=1, e_1[j]=0 for j>0.
+    var base = _make_zero_state()
+    base[round * 8] = 1
+    _lps(base)
+
+# Pre-compute all 12 round constants using an iterated approach.
+# Returns flat list of 12*64 = 768 bytes.
+fn _all_round_keys() -> list:
+    var keys = []
+    # Start with base state for round 0
+    var prev = _make_zero_state()
+    prev[0] = 1
+    var round = 0
+    while round < 12:
+        var cur = _lps(prev)
+        var i = 0
+        while i < 64:
+            keys.push(cur.get(i))
+            i = i + 1
+        prev = cur
+        round = round + 1
+    keys
+
+fn _get_round_key(keys: list, round: i64) -> list:
+    var k = []
+    var i = 0
+    while i < 64:
+        k.push(keys.get(round * 64 + i))
+        i = i + 1
+    k
+
+# ---------------------------------------------------------------------------
+# E — encryption (key schedule + 12 rounds) — used inside g_N
+# E_K(m) where K is the key (h XOR N) and m is the message block.
+# ---------------------------------------------------------------------------
+
+fn _streebog_encrypt(key: list, msg: list) -> list:
+    var rkeys = _all_round_keys()
+    # Initial whitening: state = msg XOR key
+    var state = _state_xor(msg, key)
+    var round = 0
+    while round < 12:
+        # Apply LPS
+        state = _lps(state)
+        # XOR with round key
+        var rk = _get_round_key(rkeys, round)
+        state = _state_xor(state, rk)
+        # XOR with key XOR-shifted (key schedule: K_i = LPS(K_{i-1}) XOR C[i])
+        # Note: in Streebog the key schedule is iterated separately
+        round = round + 1
+    state
+
+# ---------------------------------------------------------------------------
+# g_N — compression function
+# g_N(h, m) = E_{h XOR N}(m) XOR h XOR m
+# h, m, N are all 64-byte states.
+# ---------------------------------------------------------------------------
+
+fn _g_N(h: list, m: list, N: list) -> list:
+    # key = h XOR N
+    var key = _state_xor(h, N)
+    # encrypt m under key using 12-round E
+    var rkeys = _all_round_keys()
+    # Key schedule: K[0] = key, K[i+1] = LPS(K[i]) XOR C[i]
+    var K = key
+    var state = _state_xor(m, K)
+    var i = 0
+    while i < 12:
+        state = _lps(state)
+        K = _lps(K)
+        var rk = _get_round_key(rkeys, i)
+        K = _state_xor(K, rk)
+        state = _state_xor(state, K)
+        i = i + 1
+    # Result = E XOR h XOR m
+    var tmp = _state_xor(state, h)
+    _state_xor(tmp, m)
+
+# ---------------------------------------------------------------------------
+# 512-bit modular addition (mod 2^512) for the N accumulator.
+# Both operands are 64-byte little-endian states.
+# ---------------------------------------------------------------------------
+
+fn _add512(a: list, b: list) -> list:
+    var out = _make_zero_state()
+    var carry = 0
+    var i = 0
+    while i < 64:
+        var sum = (a.get(i) & 0xFF) + (b.get(i) & 0xFF) + carry
+        out[i] = sum & 0xFF
+        carry = (sum >> 8) & 0xFF
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Build a 512-bit integer from a single i64 value (little-endian).
+# Used to represent the 512-bit message-length counter.
+# ---------------------------------------------------------------------------
+
+fn _u64_to_state(v: i64) -> list:
+    var s = _make_zero_state()
+    s[0] = v & 0xFF
+    s[1] = (v >> 8) & 0xFF
+    s[2] = (v >> 16) & 0xFF
+    s[3] = (v >> 24) & 0xFF
+    s[4] = (v >> 32) & 0xFF
+    s[5] = (v >> 40) & 0xFF
+    s[6] = (v >> 48) & 0xFF
+    s[7] = (v >> 56) & 0xFF
+    s
+
+# ---------------------------------------------------------------------------
+# Copy a 64-byte block from a [u8] buffer at given offset into a state list.
+# ---------------------------------------------------------------------------
+
+fn _block_to_state(data: [u8], offset: u64) -> list:
+    var s = []
+    var i: u64 = 0
+    while i < 64:
+        s.push(_sb_u8_at(data, offset + i).to_i64())
+        i = i + 1
+    s
+
+fn _state_to_bytes(state: list) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 64:
+        out.push((state.get(i) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Padding: append 0x01, then zeros to reach 64-byte boundary.
+# ---------------------------------------------------------------------------
+
+fn _pad_message(data: [u8]) -> [u8]:
+    var data_len = data.len().to_u64()
+    var padded: [u8] = []
+    var i: u64 = 0
+    while i < data_len:
+        padded.push(_sb_u8_at(data, i))
+        i = i + 1
+    # Append 0x01
+    padded.push(0x01u8)
+    # Zero-pad to next 64-byte boundary
+    var cur_len = padded.len().to_u64()
+    while (cur_len % 64) != 0:
+        padded.push(0x00u8)
+        cur_len = cur_len + 1
+    padded
+
+# ---------------------------------------------------------------------------
+# Core Streebog hash (parametrized by IV and output length)
+# ---------------------------------------------------------------------------
+
+fn _streebog_hash(data: [u8], iv: list, out_len: u64) -> [u8]:
+    var padded = _pad_message(data)
+    var num_blocks = padded.len().to_u64() / 64
+
+    var h = iv
+    var N = _make_zero_state()    # bit counter (little-endian 512-bit)
+    var sigma = _make_zero_state() # checksum (mod 2^512)
+
+    # Process all blocks except the last one (which is the padded tail)
+    # The last block of padded data may be a padding-only block; all get processed.
+    # We process from the LAST block toward the first per the Streebog spec.
+    # Actually: process blocks in order but feed data blocks through g_N(h, m_i, N_i)
+    # then update N = N + 512, sigma = sigma + m_i.
+    # Final: h = g_0(g_N(h, len_block, N), sigma)
+    # Per RFC 6986 §2.3: process last block first (from the end).
+
+    # We reverse: walk from end toward start for data blocks.
+    # But actually per the Streebog spec, blocks are processed RIGHT-TO-LEFT
+    # (the last padded 64-byte block first), updating h each time.
+    # N starts at 0, incremented by 512 per block.
+
+    # Process blocks right-to-left
+    var block_idx = num_blocks
+    while block_idx > 0:
+        block_idx = block_idx - 1
+        var offset = block_idx * 64
+        var m = _block_to_state(padded, offset)
+        h = _g_N(h, m, N)
+        N = _add512(N, _u64_to_state(512))
+        sigma = _add512(sigma, m)
+
+    # Finalization: g_N(h, N, 0) then g_N(h, sigma, 0)
+    var zero_n = _make_zero_state()
+    h = _g_N(h, N, zero_n)
+    h = _g_N(h, sigma, zero_n)
+
+    # Extract output: first out_len bytes
+    var result: [u8] = []
+    var j: u64 = 0
+    while j < out_len:
+        result.push((h.get(j.to_i64()) & 0xFF).to_u8())
+        j = j + 1
+    result
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn streebog_512(data: [u8]) -> [u8]:
+    """Compute Streebog-512 (GOST R 34.11-2012) hash. Returns 64-byte digest."""
+    var iv = _make_zero_state()
+    _streebog_hash(data, iv, 64)
+
+fn streebog_256(data: [u8]) -> [u8]:
+    """Compute Streebog-256 (GOST R 34.11-2012) hash. Returns 32-byte digest."""
+    # IV for -256: all bytes = 0x01
+    var iv = []
+    var i = 0
+    while i < 64:
+        iv.push(0x01)
+        i = i + 1
+    _streebog_hash(data, iv, 32)

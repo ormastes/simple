@@ -1,0 +1,642 @@
+"""STUN RFC 8489 (and RFC 5389) — pure-Simple parse + emit.
+
+No I/O; all functions operate on byte arrays ([u8]).
+
+Header (20 bytes):
+  2 bytes: message type (bits[15:14]=00, class+method interleaved)
+  2 bytes: message length (body only, must be multiple of 4)
+  4 bytes: magic cookie (0x2112A442)
+ 12 bytes: transaction ID (random, opaque)
+
+Attribute TLV:
+  2 bytes: type
+  2 bytes: value length (not including TLV header or padding)
+  N bytes: value
+  (4 - N%4)%4 bytes: zero padding
+
+Message-type encoding (RFC 8489 §5):
+  Bits 15-14: always 00
+  Bit  13:    class bit C1
+  Bits 12-8:  method bits M11..M7
+  Bit   7:    class bit C0
+  Bits  6-4:  method bits M6..M4
+  Bits  3-0:  method bits M3..M0
+
+Implementation note: all [u8] builders follow the poly1305.spl pattern —
+use rt_bytes_u8_at for indexed reads (interpreter-safe).
+[u8] literal push via .push(v.to_u8()) is the correct pattern.
+"""
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+val STUN_MAGIC_COOKIE: i64 = 0x2112A442
+val STUN_HEADER_LEN:   i64 = 20
+
+# Attribute type codes (RFC 8489 §18.3)
+val STUN_ATTR_MAPPED_ADDRESS:     i64 = 0x0001
+val STUN_ATTR_USERNAME:           i64 = 0x0006
+val STUN_ATTR_MESSAGE_INTEGRITY:  i64 = 0x0008
+val STUN_ATTR_ERROR_CODE:         i64 = 0x0009
+val STUN_ATTR_UNKNOWN_ATTRIBUTES: i64 = 0x000A
+val STUN_ATTR_REALM:              i64 = 0x0014
+val STUN_ATTR_NONCE:              i64 = 0x0015
+val STUN_ATTR_XOR_MAPPED_ADDRESS: i64 = 0x0020
+# Note: RFC assigns SOFTWARE = 0x8022; using correct value here.
+val STUN_ATTR_SOFTWARE:           i64 = 0x8022
+val STUN_ATTR_ALTERNATE_SERVER:   i64 = 0x8023
+val STUN_ATTR_FINGERPRINT:        i64 = 0x8028
+
+# =============================================================================
+# Public types
+# =============================================================================
+
+enum StunClass:
+    """STUN message class (2 bits, encoded in interleaved positions)."""
+    Request
+    Indication
+    SuccessResp
+    ErrorResp
+
+enum StunMethod:
+    """STUN method (12 bits, encoded in interleaved positions)."""
+    Binding
+
+enum StunAttr:
+    """Decoded STUN attribute."""
+    Username(value: text)
+    MessageIntegrity(hmac: [u8])
+    XorMappedAddress(family: i64, addr: [u8], port: i64)
+    MappedAddress(family: i64, addr: [u8], port: i64)
+    ErrorCode(code: i64, reason: text)
+    Unknown(type_code: i64, value: [u8])
+
+enum StunError:
+    """STUN parse errors."""
+    TooShort
+    BadMagic
+    LengthNotAligned
+    BadMessageType
+    BadAttrLength
+
+# Parse result (named-field Ok/Err following os/ convention)
+enum StunParseResult:
+    Ok(msg: StunMessage)
+    Err(reason: StunError)
+
+# =============================================================================
+# StunMessage class
+# =============================================================================
+
+class StunMessage:
+    """Decoded STUN message."""
+    class_: StunClass
+    method: StunMethod
+    transaction_id: [u8]
+    attributes: [StunAttr]
+
+# =============================================================================
+# Private helpers — bit manipulation
+# =============================================================================
+
+fn _mask8(x: i64) -> i64:
+    x & 0xFF
+
+fn _mask16(x: i64) -> i64:
+    x & 0xFFFF
+
+fn _shr8(x: i64) -> i64:
+    (x >> 8) & 0xFF
+
+fn _shr16(x: i64) -> i64:
+    (x >> 16) & 0xFFFF
+
+fn _shr24(x: i64) -> i64:
+    (x >> 24) & 0xFF
+
+# =============================================================================
+# Private helpers — byte readers (big-endian)
+# =============================================================================
+
+fn _read_u8(data: [u8], pos: i64) -> i64:
+    rt_bytes_u8_at(data, pos) & 0xFF
+
+fn _read_u16_be(data: [u8], pos: i64) -> i64:
+    (_read_u8(data, pos) << 8) | _read_u8(data, pos + 1)
+
+fn _read_u32_be(data: [u8], pos: i64) -> i64:
+    (_read_u8(data, pos) << 24) |
+    (_read_u8(data, pos + 1) << 16) |
+    (_read_u8(data, pos + 2) << 8) |
+    _read_u8(data, pos + 3)
+
+fn _need(data: [u8], pos: i64, n: i64) -> bool:
+    data.len().to_i64() >= pos + n
+
+# =============================================================================
+# Private helpers — byte writers
+# =============================================================================
+
+fn _pb(buf: [u8], v: i64) -> [u8]:
+    """Push one byte (low 8 bits of v) onto buf; return buf."""
+    buf.push((v & 0xFF).to_u8())
+    buf
+
+fn _push_u16_be(buf: [u8], v: i64) -> [u8]:
+    var b = buf
+    b = _pb(b, (v >> 8) & 0xFF)
+    b = _pb(b, v & 0xFF)
+    b
+
+fn _push_u32_be(buf: [u8], v: i64) -> [u8]:
+    var b = buf
+    b = _pb(b, (v >> 24) & 0xFF)
+    b = _pb(b, (v >> 16) & 0xFF)
+    b = _pb(b, (v >> 8) & 0xFF)
+    b = _pb(b, v & 0xFF)
+    b
+
+fn _append_bytes(buf: [u8], src: [u8]) -> [u8]:
+    var b = buf
+    var i: i64 = 0
+    while i < src.len().to_i64():
+        b.push(rt_bytes_u8_at(src, i).to_u8())
+        i = i + 1
+    b
+
+# =============================================================================
+# Message type encode / decode
+# =============================================================================
+
+val _COOKIE_B0: i64 = (0x2112A442 >> 24) & 0xFF  # 0x21
+val _COOKIE_B1: i64 = (0x2112A442 >> 16) & 0xFF  # 0x12
+val _COOKIE_B2: i64 = (0x2112A442 >> 8)  & 0xFF  # 0xa4
+val _COOKIE_B3: i64 = 0x2112A442 & 0xFF           # 0x42
+
+fn _class_to_i64(c: StunClass) -> i64:
+    if val StunClass.Request = c:
+        return 0
+    if val StunClass.Indication = c:
+        return 1
+    if val StunClass.SuccessResp = c:
+        return 2
+    3  # ErrorResp
+
+fn _method_to_i64(m: StunMethod) -> i64:
+    # Only Binding (0x001) defined in this impl
+    1
+
+fn stun_encode_msg_type(class_: StunClass, method: StunMethod) -> i64:
+    """Encode class + method into the 14-bit message-type field."""
+    val c = _class_to_i64(class_)
+    val m = _method_to_i64(method)
+    # Class bits: C1 → bit 8, C0 → bit 4
+    val c1 = (c >> 1) & 1
+    val c0 = c & 1
+    # Method bits: M11..M7 → bits 13..9, M6..M4 → bits 7..5, M3..M0 → bits 3..0
+    val m_hi  = (m >> 7) & 0x1F   # bits 11..7 of method  → bits 13..9
+    val m_mid = (m >> 4) & 0x07   # bits 6..4 of method   → bits 7..5
+    val m_lo  = m & 0x0F           # bits 3..0 of method   → bits 3..0
+    (m_hi << 9) | (c1 << 8) | (m_mid << 5) | (c0 << 4) | m_lo
+
+fn _decode_class(tc: i64) -> i64:
+    val c1 = (tc >> 8) & 1
+    val c0 = (tc >> 4) & 1
+    (c1 << 1) | c0
+
+fn _decode_method(tc: i64) -> i64:
+    val m_hi  = (tc >> 9) & 0x1F
+    val m_mid = (tc >> 5) & 0x07
+    val m_lo  = tc & 0x0F
+    (m_hi << 7) | (m_mid << 4) | m_lo
+
+fn _i64_to_class(c: i64) -> StunClass?:
+    if c == 0:
+        return StunClass.Request
+    if c == 1:
+        return StunClass.Indication
+    if c == 2:
+        return StunClass.SuccessResp
+    if c == 3:
+        return StunClass.ErrorResp
+    null
+
+fn _i64_to_method(m: i64) -> StunMethod?:
+    if m == 1:
+        return StunMethod.Binding
+    null
+
+# =============================================================================
+# XOR-MAPPED-ADDRESS helpers
+# RFC 8489 §14.2:
+#   X-Port = port XOR (cookie >> 16)
+#   X-Addr (IPv4) = addr XOR cookie (4 bytes, big-endian)
+#   X-Addr (IPv6) = addr XOR (cookie || txn_id)
+# Encode == decode (symmetric XOR)
+# =============================================================================
+
+fn stun_xor_address_decode(family: i64, addr: [u8], port: i64, txn_id: [u8]) -> [u8]:
+    """XOR-decode an address from the wire.
+
+    Returns the decoded IP bytes only; decoded port = port XOR (cookie >> 16).
+    Symmetric: encode == decode."""
+    var result: [u8] = []
+    if family == 0x01:
+        # IPv4: XOR each of the 4 addr bytes with the magic cookie bytes
+        val c0 = (_COOKIE_B0) & 0xFF
+        val c1 = (_COOKIE_B1) & 0xFF
+        val c2 = (_COOKIE_B2) & 0xFF
+        val c3 = (_COOKIE_B3) & 0xFF
+        result = _pb(result, rt_bytes_u8_at(addr, 0) ^ c0)
+        result = _pb(result, rt_bytes_u8_at(addr, 1) ^ c1)
+        result = _pb(result, rt_bytes_u8_at(addr, 2) ^ c2)
+        result = _pb(result, rt_bytes_u8_at(addr, 3) ^ c3)
+    else:
+        # IPv6: XOR with cookie (bytes 0..3) followed by txn_id (bytes 4..15)
+        val c0 = (_COOKIE_B0) & 0xFF
+        val c1 = (_COOKIE_B1) & 0xFF
+        val c2 = (_COOKIE_B2) & 0xFF
+        val c3 = (_COOKIE_B3) & 0xFF
+        result = _pb(result, rt_bytes_u8_at(addr, 0) ^ c0)
+        result = _pb(result, rt_bytes_u8_at(addr, 1) ^ c1)
+        result = _pb(result, rt_bytes_u8_at(addr, 2) ^ c2)
+        result = _pb(result, rt_bytes_u8_at(addr, 3) ^ c3)
+        var i: i64 = 0
+        while i < 12:
+            result = _pb(result, rt_bytes_u8_at(addr, 4 + i) ^ rt_bytes_u8_at(txn_id, i))
+            i = i + 1
+    result
+
+fn _xor_port(port: i64) -> i64:
+    # X-Port = port XOR (magic_cookie >> 16)
+    port ^ ((STUN_MAGIC_COOKIE >> 16) & 0xFFFF)
+
+# =============================================================================
+# Attribute parser
+# =============================================================================
+
+class _AttrParseResult:
+    attr: StunAttr
+    next_pos: i64
+
+fn _parse_one_attr(data: [u8], pos: i64, txn_id: [u8]) -> _AttrParseResult?:
+    """Parse one TLV attribute at `pos`. Returns null if out of bounds."""
+    if not _need(data, pos, 4):
+        return null
+    val attr_type = _read_u16_be(data, pos)
+    val attr_len  = _read_u16_be(data, pos + 2)
+    val value_pos = pos + 4
+    if not _need(data, value_pos, attr_len):
+        return null
+    val pad = (4 - (attr_len % 4)) % 4
+    val next_pos = value_pos + attr_len + pad
+
+    if attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS:
+        if attr_len < 4:
+            return null
+        val family    = _read_u8(data, value_pos + 1)
+        val xport_raw = _read_u16_be(data, value_pos + 2)
+        val xport     = _xor_port(xport_raw)
+        var xip: [u8] = []
+        if family == 0x01:
+            # IPv4: 4 bytes at value_pos + 4
+            if attr_len < 8:
+                return null
+            var j: i64 = 0
+            while j < 4:
+                xip = _pb(xip, _read_u8(data, value_pos + 4 + j))
+                j = j + 1
+        else:
+            # IPv6: 16 bytes at value_pos + 4
+            if attr_len < 20:
+                return null
+            var j: i64 = 0
+            while j < 16:
+                xip = _pb(xip, _read_u8(data, value_pos + 4 + j))
+                j = j + 1
+        val plain_ip = stun_xor_address_decode(family, xip, xport, txn_id)
+        return _AttrParseResult {
+            attr: StunAttr.XorMappedAddress(family: family, addr: plain_ip, port: xport),
+            next_pos: next_pos
+        }
+
+    if attr_type == STUN_ATTR_MAPPED_ADDRESS:
+        if attr_len < 4:
+            return null
+        val family    = _read_u8(data, value_pos + 1)
+        val port      = _read_u16_be(data, value_pos + 2)
+        var ip: [u8] = []
+        if family == 0x01:
+            if attr_len < 8:
+                return null
+            var j: i64 = 0
+            while j < 4:
+                ip = _pb(ip, _read_u8(data, value_pos + 4 + j))
+                j = j + 1
+        else:
+            if attr_len < 20:
+                return null
+            var j: i64 = 0
+            while j < 16:
+                ip = _pb(ip, _read_u8(data, value_pos + 4 + j))
+                j = j + 1
+        return _AttrParseResult {
+            attr: StunAttr.MappedAddress(family: family, addr: ip, port: port),
+            next_pos: next_pos
+        }
+
+    if attr_type == STUN_ATTR_USERNAME:
+        # UTF-8 text
+        var chars: [u8] = []
+        var j: i64 = 0
+        while j < attr_len:
+            chars = _pb(chars, _read_u8(data, value_pos + j))
+            j = j + 1
+        # Convert [u8] to text via rt_bytes_to_text
+        var uname = ""
+        var k: i64 = 0
+        while k < chars.len().to_i64():
+            val byte_val = rt_bytes_u8_at(chars, k)
+            # Build text from bytes: ASCII range
+            if byte_val >= 0x20 and byte_val <= 0x7E:
+                val ch = byte_val.to_i32().to_char()
+                uname = uname + ch
+            k = k + 1
+        return _AttrParseResult {
+            attr: StunAttr.Username(value: uname),
+            next_pos: next_pos
+        }
+
+    if attr_type == STUN_ATTR_MESSAGE_INTEGRITY:
+        if attr_len != 20:
+            return null
+        var hmac: [u8] = []
+        var j: i64 = 0
+        while j < 20:
+            hmac = _pb(hmac, _read_u8(data, value_pos + j))
+            j = j + 1
+        return _AttrParseResult {
+            attr: StunAttr.MessageIntegrity(hmac: hmac),
+            next_pos: next_pos
+        }
+
+    if attr_type == STUN_ATTR_ERROR_CODE:
+        if attr_len < 4:
+            return null
+        val class_byte  = _read_u8(data, value_pos + 2) & 0x7
+        val number_byte = _read_u8(data, value_pos + 3)
+        val code = class_byte * 100 + number_byte
+        # Reason phrase: bytes 4..attr_len
+        var reason = ""
+        var j: i64 = 4
+        while j < attr_len:
+            val byte_val = _read_u8(data, value_pos + j)
+            if byte_val >= 0x20 and byte_val <= 0x7E:
+                val ch = byte_val.to_i32().to_char()
+                reason = reason + ch
+            j = j + 1
+        return _AttrParseResult {
+            attr: StunAttr.ErrorCode(code: code, reason: reason),
+            next_pos: next_pos
+        }
+
+    # Unknown attribute — capture raw value bytes
+    var raw_val: [u8] = []
+    var j: i64 = 0
+    while j < attr_len:
+        raw_val = _pb(raw_val, _read_u8(data, value_pos + j))
+        j = j + 1
+    _AttrParseResult {
+        attr: StunAttr.Unknown(type_code: attr_type, value: raw_val),
+        next_pos: next_pos
+    }
+
+# =============================================================================
+# Public parse API
+# =============================================================================
+
+fn stun_parse(bytes: [u8]) -> StunParseResult:
+    """Parse a STUN message from raw bytes.
+
+    Returns StunParseResult.Ok(msg) on success or StunParseResult.Err(reason).
+
+    Error cases:
+      TooShort        — fewer than 20 bytes
+      BadMagic        — magic cookie at bytes[4..7] != 0x2112A442
+      LengthNotAligned — body length not a multiple of 4
+      BadMessageType  — bits 15-14 not zero, or unknown class/method
+    """
+    if bytes.len().to_i64() < STUN_HEADER_LEN:
+        return StunParseResult.Err(reason: StunError.TooShort)
+
+    val type_code  = _read_u16_be(bytes, 0)
+    val msg_len    = _read_u16_be(bytes, 2)
+    val cookie     = _read_u32_be(bytes, 4)
+
+    if cookie != STUN_MAGIC_COOKIE:
+        return StunParseResult.Err(reason: StunError.BadMagic)
+
+    if (msg_len % 4) != 0:
+        return StunParseResult.Err(reason: StunError.LengthNotAligned)
+
+    # Bits 15-14 must be 00
+    if (type_code & 0xC000) != 0:
+        return StunParseResult.Err(reason: StunError.BadMessageType)
+
+    # Decode class and method from type_code
+    val class_int  = _decode_class(type_code)
+    val method_int = _decode_method(type_code)
+
+    val maybe_class  = _i64_to_class(class_int)
+    val maybe_method = _i64_to_method(method_int)
+
+    if val null = maybe_class:
+        return StunParseResult.Err(reason: StunError.BadMessageType)
+    if val null = maybe_method:
+        return StunParseResult.Err(reason: StunError.BadMessageType)
+
+    # Extract transaction ID (12 bytes at offset 8)
+    var txn_id: [u8] = []
+    var i: i64 = 0
+    while i < 12:
+        txn_id = _pb(txn_id, _read_u8(bytes, 8 + i))
+        i = i + 1
+
+    # Parse attributes
+    var attrs: [StunAttr] = []
+    var pos: i64 = STUN_HEADER_LEN
+    val end_pos = STUN_HEADER_LEN + msg_len
+
+    while pos < end_pos:
+        val maybe_attr = _parse_one_attr(bytes, pos, txn_id)
+        if val null = maybe_attr:
+            # Attribute parse failed — stop (be lenient, return what we have)
+            pos = end_pos
+        else:
+            if val _AttrParseResult { attr: a, next_pos: np } = maybe_attr:
+                attrs.push(a)
+                pos = np
+
+    if val StunClass.Request = maybe_class:
+        if val StunMethod.Binding = maybe_method:
+            return StunParseResult.Ok(msg: StunMessage {
+                class_: StunClass.Request,
+                method: StunMethod.Binding,
+                transaction_id: txn_id,
+                attributes: attrs
+            })
+
+    if val StunClass.Indication = maybe_class:
+        if val StunMethod.Binding = maybe_method:
+            return StunParseResult.Ok(msg: StunMessage {
+                class_: StunClass.Indication,
+                method: StunMethod.Binding,
+                transaction_id: txn_id,
+                attributes: attrs
+            })
+
+    if val StunClass.SuccessResp = maybe_class:
+        if val StunMethod.Binding = maybe_method:
+            return StunParseResult.Ok(msg: StunMessage {
+                class_: StunClass.SuccessResp,
+                method: StunMethod.Binding,
+                transaction_id: txn_id,
+                attributes: attrs
+            })
+
+    if val StunClass.ErrorResp = maybe_class:
+        if val StunMethod.Binding = maybe_method:
+            return StunParseResult.Ok(msg: StunMessage {
+                class_: StunClass.ErrorResp,
+                method: StunMethod.Binding,
+                transaction_id: txn_id,
+                attributes: attrs
+            })
+
+    StunParseResult.Err(reason: StunError.BadMessageType)
+
+# =============================================================================
+# Public build API
+# =============================================================================
+
+fn _emit_attr_header(buf: [u8], attr_type: i64, value_len: i64) -> [u8]:
+    var b = buf
+    b = _push_u16_be(b, attr_type)
+    b = _push_u16_be(b, value_len)
+    b
+
+fn _emit_attr_padding(buf: [u8], value_len: i64) -> [u8]:
+    var b = buf
+    val pad = (4 - (value_len % 4)) % 4
+    var j: i64 = 0
+    while j < pad:
+        b = _pb(b, 0)
+        j = j + 1
+    b
+
+fn _emit_attr(buf: [u8], attr: StunAttr, txn_id: [u8]) -> [u8]:
+    var b = buf
+    if val StunAttr.Username(value) = attr:
+        # Encode text as UTF-8 bytes (ASCII only in this impl)
+        var uname_bytes: [u8] = []
+        var ci: i64 = 0
+        while ci < value.len():
+            val ch = value[ci:ci+1]
+            val cp = ch.ord()
+            uname_bytes = _pb(uname_bytes, cp & 0xFF)
+            ci = ci + 1
+        val vlen = uname_bytes.len().to_i64()
+        b = _emit_attr_header(b, STUN_ATTR_USERNAME, vlen)
+        b = _append_bytes(b, uname_bytes)
+        b = _emit_attr_padding(b, vlen)
+        return b
+
+    if val StunAttr.MessageIntegrity(hmac) = attr:
+        b = _emit_attr_header(b, STUN_ATTR_MESSAGE_INTEGRITY, 20)
+        b = _append_bytes(b, hmac)
+        b = _emit_attr_padding(b, 20)
+        return b
+
+    if val StunAttr.XorMappedAddress(family, ip, port) = attr:
+        val xport = _xor_port(port)
+        # XOR-encode == XOR-decode (symmetric)
+        val xip = stun_xor_address_decode(family, ip, port, txn_id)
+        val addr_len: i64 = if family == 0x01: 4 else: 16
+        val vlen = 4 + addr_len
+        b = _emit_attr_header(b, STUN_ATTR_XOR_MAPPED_ADDRESS, vlen)
+        b = _pb(b, 0)          # reserved
+        b = _pb(b, family)
+        b = _push_u16_be(b, xport)
+        b = _append_bytes(b, xip)
+        b = _emit_attr_padding(b, vlen)
+        return b
+
+    if val StunAttr.MappedAddress(family, ip, port) = attr:
+        val addr_len: i64 = if family == 0x01: 4 else: 16
+        val vlen = 4 + addr_len
+        b = _emit_attr_header(b, STUN_ATTR_MAPPED_ADDRESS, vlen)
+        b = _pb(b, 0)          # reserved
+        b = _pb(b, family)
+        b = _push_u16_be(b, port)
+        b = _append_bytes(b, ip)
+        b = _emit_attr_padding(b, vlen)
+        return b
+
+    if val StunAttr.ErrorCode(code, reason) = attr:
+        val cls_byte = (code / 100) & 0x7
+        val num_byte = code % 100
+        var reason_bytes: [u8] = []
+        var ri: i64 = 0
+        while ri < reason.len():
+            val ch = reason[ri:ri+1]
+            reason_bytes = _pb(reason_bytes, ch.ord() & 0xFF)
+            ri = ri + 1
+        val vlen = 4 + reason_bytes.len().to_i64()
+        b = _emit_attr_header(b, STUN_ATTR_ERROR_CODE, vlen)
+        b = _pb(b, 0)
+        b = _pb(b, 0)
+        b = _pb(b, cls_byte)
+        b = _pb(b, num_byte)
+        b = _append_bytes(b, reason_bytes)
+        b = _emit_attr_padding(b, vlen)
+        return b
+
+    if val StunAttr.Unknown(type_code, value) = attr:
+        val vlen = value.len().to_i64()
+        b = _emit_attr_header(b, type_code, vlen)
+        b = _append_bytes(b, value)
+        b = _emit_attr_padding(b, vlen)
+        return b
+
+    b
+
+fn stun_build(msg: StunMessage) -> [u8]:
+    """Serialize a StunMessage to bytes.
+
+    Emits a correct 20-byte STUN header followed by all attributes.
+    Padding bytes are 0x00 (RFC 8489 §5 SHOULD).
+    Returns the complete wire-format byte array.
+    """
+    val txn_id = msg.transaction_id
+
+    # Build attribute body first to get its length
+    var body: [u8] = []
+    var ai: i64 = 0
+    while ai < msg.attributes.len().to_i64():
+        body = _emit_attr(body, msg.attributes[ai], txn_id)
+        ai = ai + 1
+
+    val body_len = body.len().to_i64()
+    val type_code = stun_encode_msg_type(msg.class_, msg.method)
+
+    # Emit header
+    var out: [u8] = []
+    out = _push_u16_be(out, type_code)
+    out = _push_u16_be(out, body_len)
+    out = _push_u32_be(out, STUN_MAGIC_COOKIE)
+    out = _append_bytes(out, txn_id)
+    out = _append_bytes(out, body)
+    out
