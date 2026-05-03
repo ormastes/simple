@@ -14,6 +14,8 @@
 #   crc32_u64                 args=[rd, rn, rm]          -> 3  (CRC32X, 4 bytes)
 #   clmul_lo                  args=[rd, rn, rm]          -> 3  (PMULL, 4 bytes)
 #   clmul_hi                  args=[rd, rn, rm]          -> 3  (PMULL2, 4 bytes)
+#   bit_bswap                 args=[rd, rn]              -> 2  (REV, 4 bytes)
+#   bit_clz                   args=[rd, rn]              -> 2  (CLZ, 4 bytes)
 
 use compiler.backend.lowering.intrinsic_lowering_x86.{LoweringResult}
 use compiler.backend.backend.native.encode_aarch64_crypto.{
@@ -68,9 +70,9 @@ fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
         case RotateLeft:            true
         case RotateRight:           true
         case Popcount:              true
-        case CountLeadingZeros:     true
+        case CountLeadingZeros:     false
         case CountTrailingZeros:    true
-        case ByteSwap:              true
+        case ByteSwap:              false
         case BitReverse:            true
         case MatrixDot:             true
         case MatrixOuterProduct:    true
@@ -84,6 +86,25 @@ fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
 """Concatenate two 4-element [i64] byte arrays into an 8-element array."""
 fn _concat8(a: [i64], b: [i64]) -> [i64]:
     [a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]]
+
+fn emit_u32_le_aarch64(value: i64) -> [i64]:
+    var masked = value
+    if masked < 0:
+        masked = masked + 4294967296
+    [
+        masked % 256,
+        (masked / 256) % 256,
+        (masked / 65536) % 256,
+        (masked / 16777216) % 256
+    ]
+
+fn emit_rev_x(rd: i64, rn: i64) -> [i64]:
+    val encoding = 0xDAC00C00 or (bit_shl(rn, 5)) or rd
+    emit_u32_le_aarch64(encoding)
+
+fn emit_clz_x(rd: i64, rn: i64) -> [i64]:
+    val encoding = 0xDAC01000 or (bit_shl(rn, 5)) or rd
+    emit_u32_le_aarch64(encoding)
 
 # ============================================================================
 # lower_cipher_intrinsic_aarch64 — main lowering entry point
@@ -191,6 +212,18 @@ fn lower_cipher_intrinsic_aarch64(name: text, args: [i64], caps: Aarch64Caps) ->
                     if args.length != 3:
                         return LoweringResult(empty, false, "bad-arity")
                     var bytes = emit_pmull2(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_bswap":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_rev_x(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_clz":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_clz_x(args[0], args[1])
                     LoweringResult(bytes, true, "")
 
                 case _:

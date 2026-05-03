@@ -306,9 +306,9 @@ fn _tau(idx: i64) -> i64:
 # ---------------------------------------------------------------------------
 # A (linear/MDS transform) — GOST R 34.11-2012, §5.2.3
 # Operates on a 64-byte state viewed as 8 rows of 8 bytes.
-# Each row is treated as a vector in GF(2^8)^8 multiplied by an 8x8 MDS matrix.
-# Reduction polynomial: x^8 + x^7 + x^6 + x + 1 = 0x1C3.
-# MDS circulant first row: (148, 32, 133, 16, 194, 192, 1, 251).
+# Each row is multiplied by the 8x8 MDS matrix M over GF(2^8).
+# Reduction polynomial: x^8 + x^4 + x^3 + x^2 + 1 = 0x11D.
+# MDS matrix M[in_col][out_row] extracted from gostcrypto T-table.
 # ---------------------------------------------------------------------------
 
 fn _gf_mul_streebog(a_in: i64, b_in: i64) -> i64:
@@ -329,17 +329,42 @@ fn _gf_mul_streebog(a_in: i64, b_in: i64) -> i64:
         i = i + 1
     p & 0xFF
 
-fn _mds_row_coeff(k: i64) -> i64:
-    # MDS circulant first row — GOST R 34.11-2012 §5.2.3.
-    # Values verified against gostcrypto T-table derivation (poly 0x11D).
-    if k == 0: 0x83
-    else if k == 1: 0xE0
-    else if k == 2: 0x8E
-    else if k == 3: 0x2B
-    else if k == 4: 0x4B
-    else if k == 5: 0x31
-    else if k == 6: 0x1C
-    else: 0x64
+fn _mds_coeff(in_col: i64, out_row: i64) -> i64:
+    # MDS matrix M[in_col][out_row] — full 8x8 matrix over GF(2^8).
+    # Extracted from gostcrypto T-table: T[in_col][pi^{-1}[1]].bytes[out_row].
+    # Row 0 of in_col 0: 83 e0 8e 2b 4b 31 1c 64
+    if in_col == 0:
+        if out_row == 0: 0x83  else if out_row == 1: 0xE0  else if out_row == 2: 0x8E
+        else if out_row == 3: 0x2B  else if out_row == 4: 0x4B  else if out_row == 5: 0x31
+        else if out_row == 6: 0x1C  else: 0x64
+    else if in_col == 1:
+        if out_row == 0: 0x18  else if out_row == 1: 0xDC  else if out_row == 2: 0xF5
+        else if out_row == 3: 0x9E  else if out_row == 4: 0x4F  else if out_row == 5: 0x47
+        else if out_row == 6: 0x8B  else: 0xA4
+    else if in_col == 2:
+        if out_row == 0: 0x28  else if out_row == 1: 0x77  else if out_row == 2: 0x32
+        else if out_row == 3: 0x8A  else if out_row == 4: 0xD9  else if out_row == 5: 0x86
+        else if out_row == 6: 0x7D  else: 0xF9
+    else if in_col == 3:
+        if out_row == 0: 0x9E  else if out_row == 1: 0xA8  else if out_row == 2: 0x10
+        else if out_row == 3: 0x18  else if out_row == 4: 0x65  else if out_row == 5: 0x8C
+        else if out_row == 6: 0x06  else: 0x5B
+    else if in_col == 4:
+        if out_row == 0: 0x38  else if out_row == 1: 0xC1  else if out_row == 2: 0x93
+        else if out_row == 3: 0xBA  else if out_row == 4: 0x8C  else if out_row == 5: 0x65
+        else if out_row == 6: 0x21  else: 0x03
+    else if in_col == 5:
+        if out_row == 0: 0x50  else if out_row == 1: 0x89  else if out_row == 2: 0x8A
+        else if out_row == 3: 0x32  else if out_row == 4: 0xA9  else if out_row == 5: 0x9C
+        else if out_row == 6: 0xCC  else: 0xAC
+    else if in_col == 6:
+        if out_row == 0: 0x8E  else if out_row == 1: 0x98  else if out_row == 2: 0x83
+        else if out_row == 3: 0x1A  else if out_row == 4: 0x01  else if out_row == 5: 0x0F
+        else if out_row == 6: 0xB6  else: 0x46
+    else:
+        if out_row == 0: 0x64  else if out_row == 1: 0x87  else if out_row == 2: 0x46
+        else if out_row == 3: 0xB2  else if out_row == 4: 0x07  else if out_row == 5: 0x8B
+        else if out_row == 6: 0x47  else: 0x83
 
 # ---------------------------------------------------------------------------
 # State is a flat list of 64 bytes (i64 values).
@@ -387,25 +412,25 @@ fn _apply_p(state: list) -> list:
 
 # ---------------------------------------------------------------------------
 # L — apply MDS linear transform, row by row (8 rows x 8 bytes)
-# Each output byte j of row r = XOR_{k=0}^{7} gmul(MDS_row[(j-k+8)%8], in[r*8+k])
+# Each output byte out_row of row r:
+#   result[r*8 + out_row] = XOR_{in_col=0}^{7} MDS[in_col][out_row] * state[r*8 + in_col]
 # ---------------------------------------------------------------------------
 
 fn _apply_l(state: list) -> list:
     var out = _make_zero_state()
     var row = 0
     while row < 8:
-        var col = 0
-        while col < 8:
+        var out_row = 0
+        while out_row < 8:
             var acc = 0
-            var k = 0
-            while k < 8:
-                var c_idx = ((col - k) + 64) % 8
-                var coeff = _mds_row_coeff(c_idx)
-                var cell = state.get(row * 8 + k) & 0xFF
+            var in_col = 0
+            while in_col < 8:
+                var coeff = _mds_coeff(in_col, out_row)
+                var cell = state.get(row * 8 + in_col) & 0xFF
                 acc = acc ^ _gf_mul_streebog(coeff, cell)
-                k = k + 1
-            out[row * 8 + col] = acc & 0xFF
-            col = col + 1
+                in_col = in_col + 1
+            out[row * 8 + out_row] = acc & 0xFF
+            out_row = out_row + 1
         row = row + 1
     out
 

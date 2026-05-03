@@ -1,0 +1,260 @@
+# HTTP/3 SETTINGS + h3_write_frame Round-Trip — Compiled-Mode Spec
+#
+# **Feature IDs:** #HTTP3-FRAME-001
+# **Category:** Stdlib / HTTP/3
+# **Difficulty:** 3/5
+# **Status:** Draft
+#
+# ## Overview
+# These tests exercise h3_settings_encode/decode and h3_write_frame which
+# involve nested push-loop functions. They time out in interpreter mode
+# (>60s) but will pass under compiled mode (R2-broader).
+#
+# TODO: Move back to unit spec once compiled-mode test execution lands.
+# Bug: interpreter perf on nested push-loop functions (h3_settings_encode
+# calls h3_varint_encode which builds [u8] via push loops — O(n^2) alloc
+# pattern triggers 60s watchdog).
+
+use std.spipe.*
+
+use std.http.h3.h3_frame.{
+    H3Frame, H3DataFrame, H3HeadersFrame, H3CancelPushFrame,
+    H3SettingsFrame, H3Setting, H3PushPromiseFrame, H3GoawayFrame,
+    H3MaxPushIdFrame,
+    H3VarintResult, H3VarintOk, H3FrameResult, H3FrameOk,
+    H3_FRAME_DATA, H3_FRAME_HEADERS, H3_FRAME_CANCEL_PUSH,
+    H3_FRAME_SETTINGS, H3_FRAME_PUSH_PROMISE, H3_FRAME_GOAWAY,
+    H3_FRAME_MAX_PUSH_ID,
+    h3_varint_encode, h3_varint_decode,
+    h3_frame_emit, h3_frame_parse,
+    h3_settings_encode, h3_settings_decode,
+    h3_write_frame
+}
+
+# ============================================================================
+# Helpers — module-level fns to avoid it-block interpreter perf issues
+# ============================================================================
+
+fn _test_settings_single() -> bool:
+    """Encode/decode a single H3Setting and verify round-trip."""
+    var settings: [H3Setting] = []
+    settings.push(H3Setting(identifier: 1, value: 32))
+    val encoded = h3_settings_encode(settings)
+    val decoded = h3_settings_decode(encoded)
+    if decoded.len() != 1:
+        return false
+    if decoded[0].identifier != 1:
+        return false
+    if decoded[0].value != 32:
+        return false
+    return true
+
+fn _test_settings_two() -> bool:
+    """Encode/decode two H3Settings and verify round-trip."""
+    var settings: [H3Setting] = []
+    settings.push(H3Setting(identifier: 1, value: 16))
+    settings.push(H3Setting(identifier: 7, value: 10))
+    val encoded = h3_settings_encode(settings)
+    val decoded = h3_settings_decode(encoded)
+    if decoded.len() != 2:
+        return false
+    if decoded[0].identifier != 1:
+        return false
+    if decoded[0].value != 16:
+        return false
+    if decoded[1].identifier != 7:
+        return false
+    if decoded[1].value != 10:
+        return false
+    return true
+
+fn _test_settings_truncated() -> bool:
+    """Decode gracefully on truncated payload."""
+    var buf: [u8] = []
+    buf.push(0x01)
+    val decoded = h3_settings_decode(buf)
+    return decoded.len() == 0
+
+fn _test_write_data_frame() -> bool:
+    """Write+parse DATA frame via h3_write_frame."""
+    var payload: [u8] = []
+    payload.push(0xaa)
+    payload.push(0xbb)
+    val frame = H3Frame.Data(H3DataFrame(payload: payload))
+    val wire = h3_write_frame(frame)
+    val result = h3_frame_parse(wire, 0)
+    match result:
+        case Ok(ok):
+            if ok.frame_type != H3_FRAME_DATA:
+                return false
+            if ok.payload.len() != 2:
+                return false
+            if ok.payload[0] != 0xaa:
+                return false
+            return true
+        case Err(_):
+            return false
+    return false
+
+fn _test_write_settings_frame() -> bool:
+    """Write+parse SETTINGS frame via h3_write_frame."""
+    var settings: [H3Setting] = []
+    settings.push(H3Setting(identifier: 1, value: 32))
+    val frame = H3Frame.Settings(H3SettingsFrame(settings: settings))
+    val wire = h3_write_frame(frame)
+    val result = h3_frame_parse(wire, 0)
+    match result:
+        case Ok(ok):
+            if ok.frame_type != H3_FRAME_SETTINGS:
+                return false
+            val decoded = h3_settings_decode(ok.payload)
+            if decoded.len() != 1:
+                return false
+            if decoded[0].value != 32:
+                return false
+            return true
+        case Err(_):
+            return false
+    return false
+
+fn _test_write_goaway_frame() -> bool:
+    """Write+parse GOAWAY frame via h3_write_frame."""
+    val frame = H3Frame.Goaway(H3GoawayFrame(id: 42))
+    val wire = h3_write_frame(frame)
+    val result = h3_frame_parse(wire, 0)
+    match result:
+        case Ok(ok):
+            if ok.frame_type != H3_FRAME_GOAWAY:
+                return false
+            val id_r = h3_varint_decode(ok.payload, 0)
+            match id_r:
+                case Ok(id_ok):
+                    return id_ok.value == 42
+                case Err(_):
+                    return false
+        case Err(_):
+            return false
+    return false
+
+fn _test_write_max_push_id_frame() -> bool:
+    """Write+parse MAX_PUSH_ID frame via h3_write_frame."""
+    val frame = H3Frame.MaxPushId(H3MaxPushIdFrame(push_id: 15))
+    val wire = h3_write_frame(frame)
+    val result = h3_frame_parse(wire, 0)
+    match result:
+        case Ok(ok):
+            if ok.frame_type != H3_FRAME_MAX_PUSH_ID:
+                return false
+            val id_r = h3_varint_decode(ok.payload, 0)
+            match id_r:
+                case Ok(id_ok):
+                    return id_ok.value == 15
+                case Err(_):
+                    return false
+        case Err(_):
+            return false
+    return false
+
+fn _test_write_cancel_push_frame() -> bool:
+    """Write+parse CANCEL_PUSH frame via h3_write_frame."""
+    val frame = H3Frame.CancelPush(H3CancelPushFrame(push_id: 3))
+    val wire = h3_write_frame(frame)
+    val result = h3_frame_parse(wire, 0)
+    match result:
+        case Ok(ok):
+            if ok.frame_type != H3_FRAME_CANCEL_PUSH:
+                return false
+            val id_r = h3_varint_decode(ok.payload, 0)
+            match id_r:
+                case Ok(id_ok):
+                    return id_ok.value == 3
+                case Err(_):
+                    return false
+        case Err(_):
+            return false
+    return false
+
+fn _test_write_headers_frame() -> bool:
+    """Write+parse HEADERS frame via h3_write_frame."""
+    var fields: [u8] = []
+    fields.push(0x01)
+    fields.push(0x02)
+    fields.push(0x03)
+    val frame = H3Frame.Headers(H3HeadersFrame(encoded_fields: fields))
+    val wire = h3_write_frame(frame)
+    val result = h3_frame_parse(wire, 0)
+    match result:
+        case Ok(ok):
+            if ok.frame_type != H3_FRAME_HEADERS:
+                return false
+            if ok.payload.len() != 3:
+                return false
+            return ok.payload[0] == 0x01
+        case Err(_):
+            return false
+    return false
+
+fn _test_write_push_promise_frame() -> bool:
+    """Write+parse PUSH_PROMISE frame via h3_write_frame."""
+    var fields: [u8] = []
+    fields.push(0xde)
+    fields.push(0xad)
+    val frame = H3Frame.PushPromise(H3PushPromiseFrame(push_id: 5, encoded_fields: fields))
+    val wire = h3_write_frame(frame)
+    val result = h3_frame_parse(wire, 0)
+    match result:
+        case Ok(ok):
+            if ok.frame_type != H3_FRAME_PUSH_PROMISE:
+                return false
+            val id_r = h3_varint_decode(ok.payload, 0)
+            match id_r:
+                case Ok(id_ok):
+                    return id_ok.value == 5
+                case Err(_):
+                    return false
+        case Err(_):
+            return false
+    return false
+
+# ============================================================================
+# Test Group 1: SETTINGS encode/decode round-trip (RFC 9114 §7.2.4)
+# ============================================================================
+
+describe "H3 SETTINGS round-trip (compiled mode)":
+
+    it "round-trips a single setting":
+        expect _test_settings_single() == true
+
+    it "round-trips two settings":
+        expect _test_settings_two() == true
+
+    it "decode gracefully handles truncated payload":
+        expect _test_settings_truncated() == true
+
+
+# ============================================================================
+# Test Group 2: h3_write_frame round-trip (RFC 9114 §7.2)
+# ============================================================================
+
+describe "H3 write_frame round-trip (compiled mode)":
+
+    it "write+parse DATA frame":
+        expect _test_write_data_frame() == true
+
+    it "write+parse SETTINGS frame":
+        expect _test_write_settings_frame() == true
+
+    it "write+parse GOAWAY frame":
+        expect _test_write_goaway_frame() == true
+
+    it "write+parse MAX_PUSH_ID frame":
+        expect _test_write_max_push_id_frame() == true
+
+    it "write+parse CANCEL_PUSH frame":
+        expect _test_write_cancel_push_frame() == true
+
+    it "write+parse HEADERS frame":
+        expect _test_write_headers_frame() == true
+
+    it "write+parse PUSH_PROMISE frame":
+        expect _test_write_push_promise_frame() == true

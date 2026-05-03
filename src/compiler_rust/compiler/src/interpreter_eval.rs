@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, UnitDef};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, Type, UnitDef};
 
 use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
@@ -791,9 +791,26 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 );
             }
             Node::TypeAlias(t) => {
-                // Type aliases are handled at type-check time
-                // Store the alias name for reference
-                env.insert(t.name.clone(), Value::Nil);
+                // Resolve type alias: if target is a known class, register alias as constructor
+                let target_name = match &t.ty {
+                    Type::Simple(name) => Some(name.clone()),
+                    Type::Generic { name, .. } => Some(name.clone()),
+                    _ => None,
+                };
+                let mut resolved = false;
+                if let Some(ref tgt) = target_name {
+                    if let Some(class_def) = classes.get(tgt).cloned() {
+                        classes.insert(t.name.clone(), class_def);
+                        env.insert(t.name.clone(), Value::Constructor { class_name: tgt.clone() });
+                        resolved = true;
+                    } else if enums.contains_key(tgt) {
+                        env.insert(t.name.clone(), Value::Nil);
+                        resolved = true;
+                    }
+                }
+                if !resolved {
+                    env.insert(t.name.clone(), Value::Nil);
+                }
             }
             Node::Unit(u) => {
                 // Unit types define a newtype wrapper with a literal suffix
