@@ -112,14 +112,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
         let actual_is_float = src_ty == types::F32 || src_ty == types::F64;
         let to_is_int = matches!(
             to_ty,
-            TypeId::I8
-                | TypeId::I16
-                | TypeId::I32
-                | TypeId::I64
-                | TypeId::U8
-                | TypeId::U16
-                | TypeId::U32
-                | TypeId::U64
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
         );
         let converted = if from_ty == to_ty {
             receiver_val

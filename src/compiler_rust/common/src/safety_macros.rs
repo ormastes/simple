@@ -2,22 +2,7 @@
 //!
 //! This module provides convenient macros that wrap the safety infrastructure.
 
-/// Safe arithmetic operation macro
-///
-/// # Examples
-///
-/// ```
-/// use simple_common::safe_add;
-///
-/// let result = safe_add(5, 10);
-/// assert_eq!(result.unwrap(), 15);
-///
-/// let overflow = safe_add(i32::MAX, 1);
-/// assert!(overflow.is_err());
-/// ```
-///
-/// Note: Use the functions directly (safe_add, safe_sub, safe_mul, safe_div)
-/// instead of macros for better type inference and error messages.
+// Safe arithmetic helpers are functions rather than macros.
 ///
 /// Safe array indexing macro
 ///
@@ -94,17 +79,7 @@ macro_rules! checked_expect {
     };
 }
 
-/// Assert with safe arithmetic
-///
-/// # Examples
-///
-/// ```
-/// use simple_common::safe_add;
-///
-/// assert_eq!(safe_add(10, 20).unwrap(), 30);
-/// ```
-///
-/// Note: Use the functions directly with assert_eq! for better error messages.
+// Assert with the safe arithmetic functions directly for better error messages.
 
 #[cfg(test)]
 mod tests {

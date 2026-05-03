@@ -529,7 +529,7 @@ fn on_click():
         let result = parser.parse().unwrap();
 
         assert_eq!(result.client_blocks.len(), 1);
-        assert!(result.client_blocks[0].exports.len() > 0);
+        assert!(!result.client_blocks[0].exports.is_empty());
         assert_eq!(result.client_blocks[0].exports[0], "on_click");
     }
 

@@ -76,16 +76,14 @@ pub fn compile_cast<M: Module>(
         let data_ptr = builder.inst_results(data_call)[0];
 
         let zero = builder.ins().iconst(types::I64, 0);
-        let has_data = builder
-            .ins()
-            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, len_val, zero);
-        let first_byte = builder.ins().load(types::I8, MemFlags::new(), data_ptr, 0);
-        let widened_first_byte = builder.ins().uextend(types::I64, first_byte);
-        let code_i64 = builder.ins().select(
-            has_data,
-            widened_first_byte,
+        let has_data = builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
+            len_val,
             zero,
         );
+        let first_byte = builder.ins().load(types::I8, MemFlags::new(), data_ptr, 0);
+        let widened_first_byte = builder.ins().uextend(types::I64, first_byte);
+        let code_i64 = builder.ins().select(has_data, widened_first_byte, zero);
 
         if is_to_float {
             if to_ty == TypeId::F32 {

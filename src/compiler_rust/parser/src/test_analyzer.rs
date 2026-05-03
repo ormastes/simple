@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_extract_simple_test() {
-        let statements = vec![make_test_call("it", "my test")];
+        let statements = [make_test_call("it", "my test")];
 
         let meta = extract_file_test_meta(&statements, None);
 
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_extract_slow_test() {
-        let statements = vec![make_test_call("slow_it", "slow test")];
+        let statements = [make_test_call("slow_it", "slow test")];
 
         let meta = extract_file_test_meta(&statements, None);
 
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn test_extract_skipped_test() {
-        let statements = vec![make_test_call("skip_it", "skipped test")];
+        let statements = [make_test_call("skip_it", "skipped test")];
 
         let meta = extract_file_test_meta(&statements, None);
 
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn test_extract_test_group() {
         let inner_tests = vec![make_test_call("it", "test 1"), make_test_call("slow_it", "test 2")];
-        let statements = vec![make_group_call("describe", "Math", inner_tests)];
+        let statements = [make_group_call("describe", "Math", inner_tests)];
 
         let meta = extract_file_test_meta(&statements, None);
 
@@ -474,7 +474,7 @@ mod tests {
     fn test_extract_nested_groups() {
         let inner_tests = vec![make_test_call("it", "inner test")];
         let inner_group = make_group_call("context", "nested", inner_tests);
-        let outer = vec![make_group_call("describe", "outer", vec![inner_group])];
+        let outer = [make_group_call("describe", "outer", vec![inner_group])];
 
         let meta = extract_file_test_meta(&outer, None);
 
@@ -504,7 +504,7 @@ mod tests {
     fn test_full_test_path() {
         let inner = vec![make_test_call("it", "adds numbers")];
         let group = make_group_call("describe", "Math", inner);
-        let meta = extract_file_test_meta(&vec![group], None);
+        let meta = extract_file_test_meta(&[group], None);
 
         let test = &meta.groups[0].tests[0];
         assert_eq!(test.full_name(), "Math > adds numbers");

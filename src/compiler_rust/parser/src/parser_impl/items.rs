@@ -391,13 +391,15 @@ impl<'a> Parser<'a> {
                     && decorators
                         .iter()
                         .all(|decorator| matches!(&decorator.name, Expr::Identifier(name) if name == "simd"));
-                if all_simd_decorators && attributes.is_empty() && effects.is_empty() {
-                    if matches!(self.current.kind, TokenKind::For | TokenKind::While | TokenKind::Loop) {
-                        return self.parse_simd_annotated_loop(
-                            simd_decorator_span.unwrap_or(self.current.span),
-                            decorators.len(),
-                        );
-                    }
+                if all_simd_decorators
+                    && attributes.is_empty()
+                    && effects.is_empty()
+                    && matches!(self.current.kind, TokenKind::For | TokenKind::While | TokenKind::Loop)
+                {
+                    return self.parse_simd_annotated_loop(
+                        simd_decorator_span.unwrap_or(self.current.span),
+                        decorators.len(),
+                    );
                 }
 
                 // Check if decorators are followed by impl (e.g., @some_decorator impl Trait for T:)
