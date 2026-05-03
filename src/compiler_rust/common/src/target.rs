@@ -239,9 +239,10 @@ impl fmt::Display for NativeCodegenBackendParseError {
 impl std::error::Error for NativeCodegenBackendParseError {}
 
 /// CPU selection policy for native compilation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum TargetCpu {
     /// Backend/arch-specific default.
+    #[default]
     Default,
     /// Host-native CPU and features.
     Native,
@@ -295,12 +296,6 @@ impl TargetCpu {
             TargetCpu::Custom(value) => Some(value.as_str()),
             _ => None,
         }
-    }
-}
-
-impl Default for TargetCpu {
-    fn default() -> Self {
-        Self::Default
     }
 }
 

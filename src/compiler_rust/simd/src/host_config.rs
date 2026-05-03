@@ -149,8 +149,8 @@ fn load_or_initialize_config(path: &Path) -> Result<HostCpuConfig, HostCpuConfig
 fn config_file_source(path: &Path) -> Result<Option<String>, HostCpuConfigError> {
     match fs::read_to_string(path) {
         Ok(source) => Ok(Some(source)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err.into()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
     }
 }
 

@@ -660,29 +660,6 @@ fn _lfsr_feedback(s: [u32]) -> u64:
     val s0  = s[0].to_u64()
     (s15 << 15) + (s13 << 17) + (s10 << 21) + (s4 << 20) + (s0 << 8) + s0
 
-fn _lfsr_with_init_mode(s: [u32], u: u32):
-    """LFSR update in initialization mode with feedback word u.
-    Inlined shift to avoid 2-level array mutation issue in interpreter."""
-    val fb = _lfsr_feedback(s) + (u & 0x7FFFFFFFu32).to_u64()
-    val new_s = _mod31(fb)
-    var i: u64 = 0
-    while i < 15:
-        s[i] = s[i + 1u64]
-        i = i + 1
-    s[15] = new_s
-
-fn _lfsr_with_work_mode(s: [u32]):
-    """LFSR update in working mode (no external feedback).
-    Inlined shift to avoid 2-level array mutation issue in interpreter."""
-    val fb = _lfsr_feedback(s)
-    var new_s = _mod31(fb)
-    if new_s == 0u32:
-        new_s = 0x7FFFFFFFu32
-    var i: u64 = 0
-    while i < 15:
-        s[i] = s[i + 1u64]
-        i = i + 1
-    s[15] = new_s
 
 # ============================================================================
 # Bit reorganization BR (TS 35.221 §3.1)
@@ -768,8 +745,14 @@ fn _zuc_initialize(state: [u32]):
         val w = _f_out_w(x[0u64], r1, r2)
         val nr = _f_update(x[1u64], x[2u64], r1, r2)
 
-        # Init mode: feed (W >> 1) back into LFSR
-        _lfsr_with_init_mode(state, w >> 1)
+        # Init mode: feed (W >> 1) back into LFSR (inlined to preserve array mutations)
+        val _fb_i = _lfsr_feedback(state) + ((w >> 1) & 0x7FFFFFFFu32).to_u64()
+        val _new_s_i = _mod31(_fb_i)
+        var _li: u64 = 0
+        while _li < 15:
+            state[_li] = state[_li + 1u64]
+            _li = _li + 1
+        state[15] = _new_s_i
 
         state[16] = nr[0u64]
         state[17] = nr[1u64]
@@ -781,7 +764,16 @@ fn _zuc_initialize(state: [u32]):
     val ri2 = state[17]
     val xi = _bit_reorg(state)
     val nri = _f_update(xi[1u64], xi[2u64], ri1, ri2)
-    _lfsr_with_work_mode(state)
+    # Inline _lfsr_with_work_mode to preserve array mutations
+    val _fb_w1 = _lfsr_feedback(state)
+    var _new_s_w1 = _mod31(_fb_w1)
+    if _new_s_w1 == 0u32:
+        _new_s_w1 = 0x7FFFFFFFu32
+    var _lw1: u64 = 0
+    while _lw1 < 15:
+        state[_lw1] = state[_lw1 + 1u64]
+        _lw1 = _lw1 + 1
+    state[15] = _new_s_w1
     state[16] = nri[0u64]
     state[17] = nri[1u64]
 
@@ -797,7 +789,16 @@ fn _zuc_run_32(state: [u32]) -> u32:
     # Keystream word = W XOR X3
     val z = w ^ x[3u64]
 
-    _lfsr_with_work_mode(state)
+    # Inline _lfsr_with_work_mode to preserve array mutations
+    val _fb_w2 = _lfsr_feedback(state)
+    var _new_s_w2 = _mod31(_fb_w2)
+    if _new_s_w2 == 0u32:
+        _new_s_w2 = 0x7FFFFFFFu32
+    var _lw2: u64 = 0
+    while _lw2 < 15:
+        state[_lw2] = state[_lw2 + 1u64]
+        _lw2 = _lw2 + 1
+    state[15] = _new_s_w2
 
     state[16] = nr[0u64]
     state[17] = nr[1u64]

@@ -958,46 +958,26 @@ where
 }
 
 fn compare_values(a: RuntimeValue, b: RuntimeValue) -> i32 {
+    fn ordering_to_i32(ordering: Option<std::cmp::Ordering>) -> i32 {
+        match ordering {
+            Some(std::cmp::Ordering::Less) => -1,
+            Some(std::cmp::Ordering::Greater) => 1,
+            Some(std::cmp::Ordering::Equal) | None => 0,
+        }
+    }
+
     if a.is_int() && b.is_int() {
-        let ai = a.as_int();
-        let bi = b.as_int();
-        if ai < bi {
-            -1
-        } else if ai > bi {
-            1
-        } else {
-            0
-        }
+        ordering_to_i32(Some(a.as_int().cmp(&b.as_int())))
     } else if a.is_float() && b.is_float() {
-        let af = a.as_float();
-        let bf = b.as_float();
-        if af < bf {
-            -1
-        } else if af > bf {
-            1
-        } else {
-            0
-        }
+        ordering_to_i32(a.as_float().partial_cmp(&b.as_float()))
     } else if a.is_int() && b.is_float() {
         let af = a.as_int() as f64;
         let bf = b.as_float();
-        if af < bf {
-            -1
-        } else if af > bf {
-            1
-        } else {
-            0
-        }
+        ordering_to_i32(af.partial_cmp(&bf))
     } else if a.is_float() && b.is_int() {
         let af = a.as_float();
         let bf = b.as_int() as f64;
-        if af < bf {
-            -1
-        } else if af > bf {
-            1
-        } else {
-            0
-        }
+        ordering_to_i32(af.partial_cmp(&bf))
     } else {
         0
     }

@@ -1,0 +1,157 @@
+# AArch64 SVE2 Predicate Byte Emitter — Pure Simple
+#
+# Emits 4-byte little-endian instruction words for ARM SVE2 predicate operations.
+# All return [i64] of length 4 (LE bytes, byte0=bits[7:0]).
+#
+# Register encoding:
+#   Predicate registers P0-P15 use a 4-bit field.
+#   Scalar registers X0-X30 use a 5-bit field (Xn/Xm in WHILELT/WHILELE).
+#
+# Reference: ARM Architecture Reference Manual, ARMv9-A,
+#            SVE supplement §C7 (SVE/SVE2 instructions).
+
+# ============================================================================
+# Helper — pack a 32-bit word into 4 LE bytes
+# ============================================================================
+
+"""Pack a 32-bit instruction word into a 4-element little-endian [i64] array.
+
+Bit 0 of w goes into index 0 (lowest address), bit 31 into index 3.
+"""
+fn _sve2_word_to_bytes(w: i64) -> [i64]:
+    [w & 0xFF, (w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF]
+
+# ============================================================================
+# PTRUE — set all predicate lanes active
+# ============================================================================
+
+"""Emit PTRUE Pd.S — set all predicate bits for 32-bit (S) lanes.
+
+Opcode base: 0x2518E000 | Pd
+size bits[23:22]=10 (.S), pattern bits[9:5]=11111 (all-active, POW2 pattern=ALL).
+ARMv9-A ARM SVE §C7.2.PTRUE.
+"""
+fn emit_ptrue_s(pd: i64) -> [i64]:
+    var w = 0x2518E000 | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# PFALSE — clear all predicate bits
+# ============================================================================
+
+"""Emit PFALSE Pd.B — clear all predicate bits (element-size agnostic).
+
+Opcode base: 0x2518E400 | Pd
+ARMv9-A ARM SVE §C7.2.PFALSE.
+"""
+fn emit_pfalse(pd: i64) -> [i64]:
+    var w = 0x2518E400 | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# WHILELT — while less-than predicate loop init
+# ============================================================================
+
+"""Emit WHILELT Pd.S, Xn, Xm — while-less-than predicate for 32-bit lanes.
+
+Opcode base: 0x25A00400 | (Rm << 16) | (Rn << 5) | Pd
+sf=1 (64-bit scalar comparison), size bits[23:22]=10 (.S elements).
+ARMv9-A ARM SVE §C7.2.WHILELT.
+"""
+fn emit_whilelt_s(pd: i64, rn: i64, rm: i64) -> [i64]:
+    var w = 0x25A00400 | (rm << 16) | (rn << 5) | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# WHILELE — while less-or-equal predicate loop init
+# ============================================================================
+
+"""Emit WHILELE Pd.S, Xn, Xm — while-less-or-equal predicate for 32-bit lanes.
+
+Opcode base: 0x25A00C00 | (Rm << 16) | (Rn << 5) | Pd
+sf=1 (64-bit scalar comparison), size bits[23:22]=10 (.S elements).
+ARMv9-A ARM SVE §C7.2.WHILELE.
+"""
+fn emit_whilele_s(pd: i64, rn: i64, rm: i64) -> [i64]:
+    var w = 0x25A00C00 | (rm << 16) | (rn << 5) | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# AND predicate — logical AND of two predicates under governing predicate
+# ============================================================================
+
+"""Emit AND Pd.B, Pg/Z, Pn.B, Pm.B — predicate logical AND.
+
+Opcode base: 0x25004000 | (Pm << 16) | (Pg << 10) | (Pn << 5) | Pd
+ARMv9-A ARM SVE §C7.2.AND (predicate form).
+"""
+fn emit_and_pred(pd: i64, pg: i64, pn: i64, pm: i64) -> [i64]:
+    var w = 0x25004000 | (pm << 16) | (pg << 10) | (pn << 5) | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# ORR predicate — logical OR of two predicates
+# ============================================================================
+
+"""Emit ORR Pd.B, Pg/Z, Pn.B, Pm.B — predicate logical OR.
+
+Opcode base: 0x25804000 | (Pm << 16) | (Pg << 10) | (Pn << 5) | Pd
+ARMv9-A ARM SVE §C7.2.ORR (predicate form).
+"""
+fn emit_orr_pred(pd: i64, pg: i64, pn: i64, pm: i64) -> [i64]:
+    var w = 0x25804000 | (pm << 16) | (pg << 10) | (pn << 5) | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# EOR predicate — logical XOR of two predicates
+# ============================================================================
+
+"""Emit EOR Pd.B, Pg/Z, Pn.B, Pm.B — predicate logical XOR.
+
+Opcode base: 0x25004200 | (Pm << 16) | (Pg << 10) | (Pn << 5) | Pd
+ARMv9-A ARM SVE §C7.2.EOR (predicate form).
+"""
+fn emit_eor_pred(pd: i64, pg: i64, pn: i64, pm: i64) -> [i64]:
+    var w = 0x25004200 | (pm << 16) | (pg << 10) | (pn << 5) | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# NOT predicate — bitwise invert predicate (EOR with all-true)
+# ============================================================================
+
+"""Emit NOT Pd.B, Pg/Z, Pn.B — predicate logical NOT (EOR Pd against PTRUE).
+
+Opcode base: 0x25004210 | (Pg << 10) | (Pn << 5) | Pd
+This is the NOT alias of EOR with an implicit all-true second source.
+ARMv9-A ARM SVE §C7.2.NOT (predicate form).
+"""
+fn emit_not_pred(pd: i64, pg: i64, pn: i64) -> [i64]:
+    var w = 0x25004210 | (pg << 10) | (pn << 5) | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# BRKA — break after first true predicate element
+# ============================================================================
+
+"""Emit BRKA Pd.B, Pg/Z, Pn.B — break after first true in predicate.
+
+Opcode base: 0x25104000 | (Pg << 10) | (Pn << 5) | Pd
+ARMv9-A ARM SVE §C7.2.BRKA.
+"""
+fn emit_brka(pd: i64, pg: i64, pn: i64) -> [i64]:
+    var w = 0x25104000 | (pg << 10) | (pn << 5) | pd
+    _sve2_word_to_bytes(w)
+
+# ============================================================================
+# PNEXT — advance to next active predicate element
+# ============================================================================
+
+"""Emit PNEXT Pd.S, Pg, Pd.S — next active predicate for 32-bit lanes.
+
+Opcode base: 0x2519C400 | (Pg << 5) | Pd
+Pd is both source and destination (in-place update).
+ARMv9-A ARM SVE §C7.2.PNEXT.
+"""
+fn emit_pnext_s(pd: i64, pg: i64) -> [i64]:
+    var w = 0x2519C400 | (pg << 5) | pd
+    _sve2_word_to_bytes(w)
