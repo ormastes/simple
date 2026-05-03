@@ -1158,6 +1158,59 @@ fn _sq_word(x: u32) -> u32:
     _make32(_sq(_b0(x)), _sq(_b1(x)), _sq(_b2(x)), _sq(_b3(x)))
 
 # ============================================================================
+# GF(2^8) multiply — MULx per TS 35.216 §3.1.1
+# MULx(V, c) = (V & 0x80) ? ((V << 1) ^ c) : (V << 1)
+# ============================================================================
+
+fn _mul_gf8(v: u8, c: u8) -> u8:
+    """GF(2^8) multiply: if high bit set, shift and XOR with reduction poly c."""
+    val vw = v.to_u32()
+    val shifted = (vw << 1) & 0xFFu32
+    if (vw & 0x80u32) != 0u32:
+        (shifted ^ c.to_u32()).to_u8()
+    else:
+        shifted.to_u8()
+
+# ============================================================================
+# S1: AES SubBytes (S_R) + MDS MixColumns with reduction 0x1b (TS 35.216 §3.3.1)
+# S2: SNOW S_Q SubBytes + MDS with reduction 0x69        (TS 35.216 §3.3.2)
+#
+# Both use the same MDS structure (same as AES MixColumns shape):
+#   r0 = MULx(s0,p) ^ s1 ^ s2 ^ (MULx(s3,p) ^ s3)
+#   r1 = (MULx(s0,p) ^ s0) ^ MULx(s1,p) ^ s2 ^ s3
+#   r2 = s0 ^ (MULx(s1,p) ^ s1) ^ MULx(s2,p) ^ s3
+#   r3 = s0 ^ s1 ^ (MULx(s2,p) ^ s2) ^ MULx(s3,p)
+# where p=0x1b for S1, p=0x69 for S2.
+# Input bytes: b0=bits[31:24], b1=bits[23:16], b2=bits[15:8], b3=bits[7:0]
+# ============================================================================
+
+fn _s1_word(w: u32) -> u32:
+    """S1 box: AES SubBytes then MDS with poly 0x1b (TS 35.216 §3.3.1)."""
+    val s0 = _sr(_b0(w))
+    val s1 = _sr(_b1(w))
+    val s2 = _sr(_b2(w))
+    val s3 = _sr(_b3(w))
+    val p: u8 = 0x1bu8
+    val r0 = _mul_gf8(s0, p) ^ s1 ^ s2 ^ (_mul_gf8(s3, p) ^ s3)
+    val r1 = (_mul_gf8(s0, p) ^ s0) ^ _mul_gf8(s1, p) ^ s2 ^ s3
+    val r2 = s0 ^ (_mul_gf8(s1, p) ^ s1) ^ _mul_gf8(s2, p) ^ s3
+    val r3 = s0 ^ s1 ^ (_mul_gf8(s2, p) ^ s2) ^ _mul_gf8(s3, p)
+    _make32(r0, r1, r2, r3)
+
+fn _s2_word(w: u32) -> u32:
+    """S2 box: SNOW S_Q SubBytes then MDS with poly 0x69 (TS 35.216 §3.3.2)."""
+    val s0 = _sq(_b0(w))
+    val s1 = _sq(_b1(w))
+    val s2 = _sq(_b2(w))
+    val s3 = _sq(_b3(w))
+    val p: u8 = 0x69u8
+    val r0 = _mul_gf8(s0, p) ^ s1 ^ s2 ^ (_mul_gf8(s3, p) ^ s3)
+    val r1 = (_mul_gf8(s0, p) ^ s0) ^ _mul_gf8(s1, p) ^ s2 ^ s3
+    val r2 = s0 ^ (_mul_gf8(s1, p) ^ s1) ^ _mul_gf8(s2, p) ^ s3
+    val r3 = s0 ^ s1 ^ (_mul_gf8(s2, p) ^ s2) ^ _mul_gf8(s3, p)
+    _make32(r0, r1, r2, r3)
+
+# ============================================================================
 # SNOW 3G LFSR state initialization (TS 35.216 §3.3.1)
 #
 # State array layout: lfsr[0..15] = LFSR cells (s0..s15)
@@ -1239,28 +1292,20 @@ fn _snow3g_fsm_output(st: [u32]) -> u32:
 fn _snow3g_fsm_step(st: [u32]) -> [u32]:
     """Update FSM registers R1, R2, R3 and return updated state.
 
-    r3_new = S_Q(R3_lo || R2_hi)   (S_Q applied to 32-bit word)
-    r2_new = S_R(R2_lo || R1_hi)
-    r1_new = R3 XOR s[5]
-    where hi = upper 16 bits, lo = lower 16 bits of register.
-
-    Per TS 35.216 §3.3.2:
-    r2 = S_R((R1 << 16) | (R2 >> 16))
-    r3 = S_Q((R2 << 16) | (R3 >> 16))
-    r1 = R3 XOR s[5]
+    Per TS 35.216 §3.4.6 (ClockFSM):
+      r     = (R2 + (R3 XOR s[5])) mod 2^32   # saved first using OLD values
+      R3_new = S2(R2)                           # S2 applied to OLD R2
+      R2_new = S1(R1)                           # S1 applied to OLD R1
+      R1_new = r
     """
     val r1 = st[16]
     val r2 = st[17]
     val r3 = st[18]
 
-    val r2_shift = (r2.to_u64() >> 16u64).to_u32() & 0xFFFFu32
-    val r1_shift = (r1 << 16)
-    val r3_shift = (r3.to_u64() >> 16u64).to_u32() & 0xFFFFu32
-    val r2_shift2 = (r2 << 16)
-
-    val r2_new = _sr_word(r1_shift | r2_shift)
-    val r3_new = _sq_word(r2_shift2 | r3_shift)
-    val r1_new = r3 ^ st[5]
+    val r = _add32(r2, r3 ^ st[5])
+    val r3_new = _s2_word(r2)
+    val r2_new = _s1_word(r1)
+    val r1_new = r
 
     st[16] = r1_new
     st[17] = r2_new

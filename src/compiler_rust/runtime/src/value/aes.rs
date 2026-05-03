@@ -539,7 +539,7 @@ fn expand_key_aes128(key: &[u8; AES_BLOCK_LEN]) -> [u8; 176] {
             expanded[prev + 2],
             expanded[prev + 3],
         ];
-        if word_index % NK == 0 {
+        if word_index.is_multiple_of(NK) {
             // RotWord
             let r0 = t[1];
             let r1 = t[2];
@@ -1301,7 +1301,7 @@ mod tests {
                 expanded[prev_start + 2],
                 expanded[prev_start + 3],
             ];
-            if word_index % nk == 0 {
+            if word_index.is_multiple_of(nk) {
                 temp = sub_word(rotate_word(temp));
                 temp[0] ^= RCON[word_index / nk];
             } else if key.len() == 32 && word_index % nk == 4 {
