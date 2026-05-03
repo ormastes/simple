@@ -1,0 +1,240 @@
+# P-256 ECDSA/ECDH Known-Answer Test — RFC 6979 §A.2.5
+#
+# Verifies the pure-Simple P-256 implementation against the deterministic
+# ECDSA test vector from RFC 6979 Appendix A.2.5 (NIST P-256, SHA-256).
+#
+# Test vector:
+#   Private key:  C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721
+#   Message:      "sample"
+#   k (RFC 6979): A6E3C57DD01ABE90086538398355DD4C3B17AA873382B0F24D6129493D8AAD60
+#   r:            EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716
+#   s:            F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8
+#
+# References:
+#   * RFC 6979 §A.2.5
+#   * FIPS 186-4 §6.4 (ECDSA)
+#   * SEC2 v2.0 §2.4.2 (P-256)
+
+use std.spipe.*
+use os.crypto.p256.{
+    p256_ecdsa_sign, p256_ecdsa_verify,
+    p256_keygen, p256_ecdh,
+    p256_point_on_curve, p256_add, p256_mul
+}
+use os.crypto.sha256.{sha256}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0: "0"
+    else if n == 1: "1"
+    else if n == 2: "2"
+    else if n == 3: "3"
+    else if n == 4: "4"
+    else if n == 5: "5"
+    else if n == 6: "6"
+    else if n == 7: "7"
+    else if n == 8: "8"
+    else if n == 9: "9"
+    else if n == 10: "a"
+    else if n == 11: "b"
+    else if n == 12: "c"
+    else if n == 13: "d"
+    else if n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    while i < b.len().to_u64():
+        val byte = b[i]
+        s = s + _hex_nibble((byte >> 4) & 0x0F)
+        s = s + _hex_nibble(byte & 0x0F)
+        i = i + 1
+    s
+
+fn _rfc6979_privkey() -> [u8]:
+    """RFC 6979 A.2.5 private key."""
+    var k: [u8] = []
+    k.push(0xC9); k.push(0xAF); k.push(0xA9); k.push(0xD8)
+    k.push(0x45); k.push(0xBA); k.push(0x75); k.push(0x16)
+    k.push(0x6B); k.push(0x5C); k.push(0x21); k.push(0x57)
+    k.push(0x67); k.push(0xB1); k.push(0xD6); k.push(0x93)
+    k.push(0x4E); k.push(0x50); k.push(0xC3); k.push(0xDB)
+    k.push(0x36); k.push(0xE8); k.push(0x9B); k.push(0x12)
+    k.push(0x7B); k.push(0x8A); k.push(0x62); k.push(0x2B)
+    k.push(0x12); k.push(0x0F); k.push(0x67); k.push(0x21)
+    k
+
+fn _sample_msg() -> [u8]:
+    """The message 'sample' as bytes."""
+    var m: [u8] = []
+    m.push(0x73)  # 's'
+    m.push(0x61)  # 'a'
+    m.push(0x6D)  # 'm'
+    m.push(0x70)  # 'p'
+    m.push(0x6C)  # 'l'
+    m.push(0x65)  # 'e'
+    m
+
+# ============================================================================
+# Test Suite
+# ============================================================================
+
+describe "P-256 ECDSA/ECDH — RFC 6979 known-answer tests":
+
+    it "keygen produces 65-byte uncompressed pubkey":
+        val priv = _rfc6979_privkey()
+        val pub_key = p256_keygen(priv)
+        expect(pub_key.len()).to_equal(65)
+        expect(pub_key[0u64]).to_equal(0x04u8)
+
+    it "generated pubkey is on curve":
+        val priv = _rfc6979_privkey()
+        val pub_key = p256_keygen(priv)
+        var px: [u8] = []
+        var py: [u8] = []
+        var i: u64 = 0
+        while i < 32:
+            px.push(pub_key[1 + i])
+            i = i + 1
+        i = 0
+        while i < 32:
+            py.push(pub_key[33 + i])
+            i = i + 1
+        expect(p256_point_on_curve(px, py)).to_equal(true)
+
+    it "ECDSA sign produces 64-byte signature":
+        val priv = _rfc6979_privkey()
+        val msg = _sample_msg()
+        val msg_hash = sha256(msg)
+        val sig = p256_ecdsa_sign(priv, msg_hash)
+        expect(sig.len()).to_equal(64)
+
+    it "ECDSA sign matches RFC 6979 A.2.5 r value":
+        val priv = _rfc6979_privkey()
+        val msg = _sample_msg()
+        val msg_hash = sha256(msg)
+        val sig = p256_ecdsa_sign(priv, msg_hash)
+        # Extract r (first 32 bytes)
+        var r_bytes: [u8] = []
+        var i: u64 = 0
+        while i < 32:
+            r_bytes.push(sig[i])
+            i = i + 1
+        expect(_bytes_hex(r_bytes)).to_equal(
+            "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716"
+        )
+
+    it "ECDSA sign matches RFC 6979 A.2.5 s value":
+        val priv = _rfc6979_privkey()
+        val msg = _sample_msg()
+        val msg_hash = sha256(msg)
+        val sig = p256_ecdsa_sign(priv, msg_hash)
+        # Extract s (last 32 bytes)
+        var s_bytes: [u8] = []
+        var i: u64 = 0
+        while i < 32:
+            s_bytes.push(sig[32 + i])
+            i = i + 1
+        expect(_bytes_hex(s_bytes)).to_equal(
+            "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8"
+        )
+
+    it "ECDSA verify accepts valid RFC 6979 signature":
+        val priv = _rfc6979_privkey()
+        val pub_key = p256_keygen(priv)
+        val msg = _sample_msg()
+        val msg_hash = sha256(msg)
+        val sig = p256_ecdsa_sign(priv, msg_hash)
+        expect(p256_ecdsa_verify(pub_key, msg_hash, sig)).to_equal(true)
+
+    it "ECDSA verify rejects corrupted signature":
+        val priv = _rfc6979_privkey()
+        val pub_key = p256_keygen(priv)
+        val msg = _sample_msg()
+        val msg_hash = sha256(msg)
+        val sig = p256_ecdsa_sign(priv, msg_hash)
+        # Corrupt one byte of r
+        sig[0u64] = (sig[0u64] ^ 0x01u8)
+        expect(p256_ecdsa_verify(pub_key, msg_hash, sig)).to_equal(false)
+
+    it "ECDSA verify rejects wrong message":
+        val priv = _rfc6979_privkey()
+        val pub_key = p256_keygen(priv)
+        val msg = _sample_msg()
+        val msg_hash = sha256(msg)
+        val sig = p256_ecdsa_sign(priv, msg_hash)
+        # Hash a different message
+        var other: [u8] = []
+        other.push(0x74)  # 't'
+        other.push(0x65)  # 'e'
+        other.push(0x73)  # 's'
+        other.push(0x74)  # 't'
+        val wrong_hash = sha256(other)
+        expect(p256_ecdsa_verify(pub_key, wrong_hash, sig)).to_equal(false)
+
+    it "ECDH shared secret is 32 bytes":
+        val priv = _rfc6979_privkey()
+        val pub_key = p256_keygen(priv)
+        # Self-ECDH for validation
+        val shared = p256_ecdh(priv, pub_key)
+        expect(shared.len()).to_equal(32)
+
+    it "ECDH is commutative (alice*Bob == bob*Alice)":
+        # Use two different private keys
+        val alice_priv = _rfc6979_privkey()
+        var bob_priv: [u8] = []
+        bob_priv.push(0x01); bob_priv.push(0x02); bob_priv.push(0x03); bob_priv.push(0x04)
+        bob_priv.push(0x05); bob_priv.push(0x06); bob_priv.push(0x07); bob_priv.push(0x08)
+        bob_priv.push(0x09); bob_priv.push(0x0A); bob_priv.push(0x0B); bob_priv.push(0x0C)
+        bob_priv.push(0x0D); bob_priv.push(0x0E); bob_priv.push(0x0F); bob_priv.push(0x10)
+        bob_priv.push(0x11); bob_priv.push(0x12); bob_priv.push(0x13); bob_priv.push(0x14)
+        bob_priv.push(0x15); bob_priv.push(0x16); bob_priv.push(0x17); bob_priv.push(0x18)
+        bob_priv.push(0x19); bob_priv.push(0x1A); bob_priv.push(0x1B); bob_priv.push(0x1C)
+        bob_priv.push(0x1D); bob_priv.push(0x1E); bob_priv.push(0x1F); bob_priv.push(0x20)
+        val alice_pub = p256_keygen(alice_priv)
+        val bob_pub = p256_keygen(bob_priv)
+        val shared_ab = p256_ecdh(alice_priv, bob_pub)
+        val shared_ba = p256_ecdh(bob_priv, alice_pub)
+        expect(_bytes_hex(shared_ab)).to_equal(_bytes_hex(shared_ba))
+
+    it "p256_add(1, 1) mod p == 2":
+        var one: [u8] = []
+        var i: u64 = 0
+        while i < 31:
+            one.push(0x00)
+            i = i + 1
+        one.push(0x01)
+        val two_bytes = p256_add(one, one)
+        var expected: [u8] = []
+        i = 0
+        while i < 31:
+            expected.push(0x00)
+            i = i + 1
+        expected.push(0x02)
+        expect(_bytes_hex(two_bytes)).to_equal(_bytes_hex(expected))
+
+    it "p256_mul(2, 3) mod p == 6":
+        var two: [u8] = []
+        var i: u64 = 0
+        while i < 31:
+            two.push(0x00)
+            i = i + 1
+        two.push(0x02)
+        var three: [u8] = []
+        i = 0
+        while i < 31:
+            three.push(0x00)
+            i = i + 1
+        three.push(0x03)
+        val six_bytes = p256_mul(two, three)
+        var expected: [u8] = []
+        i = 0
+        while i < 31:
+            expected.push(0x00)
+            i = i + 1
+        expected.push(0x06)
+        expect(_bytes_hex(six_bytes)).to_equal(_bytes_hex(expected))
