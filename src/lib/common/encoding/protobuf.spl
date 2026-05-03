@@ -1,0 +1,260 @@
+# Protobuf Wire-Format Encoder / Decoder
+#
+# Implements the Protocol Buffers binary wire format (proto3 subset):
+#   Wire types: 0=varint, 1=64-bit, 2=length-delimited, 5=32-bit
+#   Field tag:  (field_number << 3) | wire_type, encoded as varint
+#   Varint:     7 bits per byte, MSB=continuation bit, little-endian
+#   ZigZag:     (n << 1) ^ (n >> 63)  for signed integers
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# NOTE: Interpreter uses arithmetic right-shift (sign-extending).  For
+# logical right-shifts we mask the top bits explicitly so sign-extension
+# doesn't pollute the lower bytes we care about.
+#
+# NOTE: push(<literal>) on a [u8] may silently write 0 in the interpreter.
+# Always route pushes through _pb_push(buf, n: i64) which casts via to_u8().
+#
+# Usage:
+#   use std.encoding.protobuf.{pb_encode_varint, pb_decode_varint,
+#       pb_encode_zigzag, pb_decode_zigzag,
+#       pb_encode_tag, pb_encode_field_varint,
+#       pb_encode_field_bytes, pb_encode_field_string,
+#       pb_encode_fixed32, pb_encode_fixed64, pb_decode_field}
+
+# ============================================================================
+# Bit helpers (interpreter-safe)
+# ============================================================================
+
+fn _pb_mask8(x: i64) -> i64:
+    x & 0xFF
+
+fn _pb_shr7(x: i64) -> i64:
+    (x >> 7) & 0x1FFFFFFFFFFFFFF
+
+fn _pb_shr8(x: i64) -> i64:
+    (x >> 8) & 0xFFFFFFFFFFFFFF
+
+fn _pb_shr16(x: i64) -> i64:
+    (x >> 16) & 0xFFFFFFFFFFFF
+
+fn _pb_shr24(x: i64) -> i64:
+    (x >> 24) & 0xFFFFFFFFFF
+
+fn _pb_shr32(x: i64) -> i64:
+    (x >> 32) & 0xFFFFFFFF
+
+fn _pb_shr40(x: i64) -> i64:
+    (x >> 40) & 0xFFFFFF
+
+fn _pb_shr48(x: i64) -> i64:
+    (x >> 48) & 0xFFFF
+
+fn _pb_shr56(x: i64) -> i64:
+    (x >> 56) & 0xFF
+
+# ============================================================================
+# Safe [u8] push helper (workaround: push(literal) writes 0 in interpreter)
+# ============================================================================
+
+fn _pb_push(buf: [u8], n: i64) -> [u8]:
+    """Append a single byte (low 8 bits of n) to buf and return buf."""
+    var b: u8 = _pb_mask8(n).to_u8()
+    buf.push(b)
+    buf
+
+# ============================================================================
+# [u8] concatenation helper
+# ============================================================================
+
+fn _pb_concat(a: [u8], b: [u8]) -> [u8]:
+    """Concatenate two byte arrays, appending b onto a in-place and returning a."""
+    var i = 0
+    while i < b.len():
+        var bv: u8 = b[i].to_i64().to_u8()
+        a.push(bv)
+        i = i + 1
+    a
+
+# ============================================================================
+# Read a single byte from [u8] at pos, returning 0 if out of bounds
+# ============================================================================
+
+fn _pb_read8(data: [u8], pos: i64) -> i64:
+    if pos < 0:
+        return 0
+    if pos >= data.len():
+        return 0
+    data[pos].to_i64()
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn pb_encode_varint(value: i64) -> [u8]:
+    """Encode value as a protobuf varint (little-endian, 7 bits/byte, MSB=more)."""
+    var result: [u8] = []
+    var v = value
+    # Treat as unsigned 64-bit: loop up to 10 times (max varint bytes)
+    var done = false
+    var iterations = 0
+    while not done:
+        val low7 = v & 0x7F
+        val rest = _pb_shr7(v)
+        if rest == 0:
+            result = _pb_push(result, low7)
+            done = true
+        else:
+            result = _pb_push(result, low7 | 0x80)
+            v = rest
+        iterations = iterations + 1
+        if iterations >= 10:
+            done = true
+    result
+
+fn pb_decode_varint(data: [u8], pos: i64) -> [list]:
+    """Decode a varint from data starting at pos.
+    Returns [value, new_pos] where new_pos is pos after the varint bytes."""
+    var result: i64 = 0
+    var shift = 0
+    var cur = pos
+    var done = false
+    while not done:
+        val b = _pb_read8(data, cur)
+        val bits = b & 0x7F
+        result = result | (bits << shift)
+        cur = cur + 1
+        shift = shift + 7
+        if (b & 0x80) == 0:
+            done = true
+        if shift >= 70:
+            done = true
+    [result, cur]
+
+fn pb_encode_zigzag(n: i64) -> i64:
+    """ZigZag encode a signed integer: maps 0->0, -1->1, 1->2, -2->3, ..."""
+    (n << 1) ^ (n >> 63)
+
+fn pb_decode_zigzag(n: i64) -> i64:
+    """ZigZag decode: inverse of pb_encode_zigzag."""
+    (n >> 1) ^ (-(n & 1))
+
+fn pb_encode_tag(field_num: i64, wire_type: i64) -> [u8]:
+    """Encode a field tag as varint: (field_num << 3) | wire_type."""
+    val tag = (field_num << 3) | wire_type
+    pb_encode_varint(tag)
+
+fn pb_encode_field_varint(field_num: i64, value: i64) -> [u8]:
+    """Encode a complete varint field (tag + value)."""
+    var out: [u8] = []
+    out = _pb_concat(out, pb_encode_tag(field_num, 0))
+    out = _pb_concat(out, pb_encode_varint(value))
+    out
+
+fn pb_encode_field_bytes(field_num: i64, data: [u8]) -> [u8]:
+    """Encode a complete length-delimited field (tag + length varint + bytes)."""
+    var out: [u8] = []
+    out = _pb_concat(out, pb_encode_tag(field_num, 2))
+    out = _pb_concat(out, pb_encode_varint(data.len()))
+    out = _pb_concat(out, data)
+    out
+
+fn pb_encode_field_string(field_num: i64, s: text) -> [u8]:
+    """Encode a complete string field as UTF-8 length-delimited bytes."""
+    var body: [u8] = []
+    var i = 0
+    val slen = s.length()
+    while i < slen:
+        var ch = s[i]
+        body = _pb_push(body, ch.ord())
+        i = i + 1
+    pb_encode_field_bytes(field_num, body)
+
+fn pb_encode_fixed32(value: i64) -> [u8]:
+    """Encode value as 4 little-endian bytes (wire type 5)."""
+    var result: [u8] = []
+    result = _pb_push(result, _pb_mask8(value))
+    result = _pb_push(result, _pb_mask8(_pb_shr8(value)))
+    result = _pb_push(result, _pb_mask8(_pb_shr16(value)))
+    result = _pb_push(result, _pb_mask8(_pb_shr24(value)))
+    result
+
+fn pb_encode_fixed64(value: i64) -> [u8]:
+    """Encode value as 8 little-endian bytes (wire type 1)."""
+    var result: [u8] = []
+    result = _pb_push(result, _pb_mask8(value))
+    result = _pb_push(result, _pb_mask8(_pb_shr8(value)))
+    result = _pb_push(result, _pb_mask8(_pb_shr16(value)))
+    result = _pb_push(result, _pb_mask8(_pb_shr24(value)))
+    result = _pb_push(result, _pb_mask8(_pb_shr32(value)))
+    result = _pb_push(result, _pb_mask8(_pb_shr40(value)))
+    result = _pb_push(result, _pb_mask8(_pb_shr48(value)))
+    result = _pb_push(result, _pb_mask8(_pb_shr56(value)))
+    result
+
+fn _pb_decode_len_delimited(data: [u8], pos: i64) -> [u8]:
+    """Decode a length-delimited value: read length varint then that many bytes."""
+    val lv = pb_decode_varint(data, pos)
+    val length = lv[0]
+    val data_start = lv[1]
+    var body: [u8] = []
+    var i: i64 = 0
+    while i < length:
+        val idx = data_start + i
+        if idx < data.len():
+            var bv: u8 = data[idx].to_i64().to_u8()
+            body.push(bv)
+        i = i + 1
+    body
+
+fn pb_decode_field(data: [u8], pos: i64) -> [list]:
+    """Decode a single field from data at pos.
+    Returns [field_num, wire_type, value_or_bytes, new_pos].
+    value_or_bytes is an i64 for wire types 0/1/5, or [u8] for wire type 2."""
+    val tag_result = pb_decode_varint(data, pos)
+    val tag = tag_result[0]
+    val after_tag = tag_result[1]
+    val field_num = (tag >> 3) & 0x1FFFFFFFFFFFFFFF
+    val wire_type = tag & 0x7
+
+    if wire_type == 0:
+        val vr = pb_decode_varint(data, after_tag)
+        val value = vr[0]
+        val new_pos = vr[1]
+        return [field_num, wire_type, value, new_pos]
+    elif wire_type == 1:
+        # 64-bit fixed
+        val v = _pb_read8(data, after_tag) |
+            (_pb_read8(data, after_tag + 1) << 8) |
+            (_pb_read8(data, after_tag + 2) << 16) |
+            (_pb_read8(data, after_tag + 3) << 24) |
+            (_pb_read8(data, after_tag + 4) << 32) |
+            (_pb_read8(data, after_tag + 5) << 40) |
+            (_pb_read8(data, after_tag + 6) << 48) |
+            (_pb_read8(data, after_tag + 7) << 56)
+        return [field_num, wire_type, v, after_tag + 8]
+    elif wire_type == 2:
+        # length-delimited
+        val lv = pb_decode_varint(data, after_tag)
+        val length = lv[0]
+        val data_start = lv[1]
+        var body: [u8] = []
+        var i: i64 = 0
+        while i < length:
+            val idx = data_start + i
+            if idx < data.len():
+                var bv: u8 = data[idx].to_i64().to_u8()
+                body.push(bv)
+            i = i + 1
+        val new_pos = data_start + length
+        return [field_num, wire_type, body, new_pos]
+    elif wire_type == 5:
+        # 32-bit fixed
+        val v32 = _pb_read8(data, after_tag) |
+            (_pb_read8(data, after_tag + 1) << 8) |
+            (_pb_read8(data, after_tag + 2) << 16) |
+            (_pb_read8(data, after_tag + 3) << 24)
+        return [field_num, wire_type, v32, after_tag + 4]
+    else:
+        return [field_num, wire_type, 0, after_tag]
