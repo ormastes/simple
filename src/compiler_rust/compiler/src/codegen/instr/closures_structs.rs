@@ -194,10 +194,28 @@ pub(crate) fn compile_method_call_static<M: Module>(
     };
     let lookup_name = lookup_name_storage.as_deref().unwrap_or(func_name);
     let receiver_ty = ctx.vreg_types.get(&receiver).copied();
-    let allow_qualified_builtin = matches!(receiver_ty, Some(TypeId::STRING));
+    let allow_qualified_builtin = matches!(
+        receiver_ty,
+        Some(
+            TypeId::BOOL
+                | TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+                | TypeId::STRING
+                | TypeId::CHAR
+        )
+    );
 
     // First check if this is a builtin method (String, Array methods)
-    // Try to compile as builtin - these have runtime function implementations
+    // Try to compile as builtin for unqualified names, plus qualified builtin
+    // names on actual builtin scalar/string receiver types like `i64.to_float`.
     if !lookup_name.contains('.') || allow_qualified_builtin {
         if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
             if let Some(d) = dest {
