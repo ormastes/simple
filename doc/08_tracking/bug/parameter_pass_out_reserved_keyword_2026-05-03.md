@@ -1,6 +1,8 @@
 # Function parameters named `pass` or `out` silently misbehave
 
-**Status:** OPEN. Reproduced multiple times across the W17–W29 cohort. Severity: silent miscompute.
+**Status:** FIXED. Parser rejects reserved keywords as parameter names at parse time with clear error.
+**Fixed in:** `is_reserved_parameter_name` check in `parse_parameters` (function params) + lambda param paths (`parse_lambda_params`, `parse_pipe_lambda_params`, `parse_remaining_lambda_params`).
+**Previously:** Reproduced multiple times across the W17-W29 cohort. Severity: silent miscompute.
 **Path:** `bug` track. Compiler/parser.
 
 ## Symptom

@@ -12,12 +12,19 @@ impl<'a> Parser<'a> {
         while self.check(&TokenKind::Comma) {
             self.advance();
             // Support wildcard parameter: \x, _: or |x, _|
+            let param_span = self.current.span;
             let name = if self.check(&TokenKind::Underscore) {
                 self.advance();
                 "_".to_string()
             } else {
                 self.expect_identifier()?
             };
+            if Self::is_reserved_parameter_name(name.as_str()) {
+                return Err(ParseError::syntax_error_with_span(
+                    format!("reserved keyword '{}' cannot be used as a parameter name", name),
+                    param_span,
+                ));
+            }
             params.push(LambdaParam { name, ty: None });
         }
         Ok(())

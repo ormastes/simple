@@ -1,19 +1,4 @@
 # P-384 ECDSA/ECDH Known-Answer Test
-#
-# Verifies the pure-Simple P-384 implementation against standard test vectors.
-#
-# Tests:
-#   1. Field arithmetic (add, mul)
-#   2. Generator G is on the P-384 curve
-#   3. Keygen produces valid 97-byte uncompressed pubkey
-#   4. Generated pubkey is on curve
-#   5. ECDSA sign/verify round-trip
-#   6. ECDSA verify rejects corrupted signature
-#   7. ECDH shared secret consistency (commutativity)
-#
-# References:
-#   * FIPS 186-4 / SEC2 v2.0 §2.5.1 (P-384 parameters)
-#   * RFC 6979 §A.2.6 (ECDSA with P-384 and SHA-384)
 
 use std.spipe.*
 use os.crypto.p384.{
@@ -22,10 +7,6 @@ use os.crypto.p384.{
     p384_point_on_curve, p384_add, p384_mul
 }
 use os.crypto.sha384.{sha384}
-
-# ============================================================================
-# Helpers
-# ============================================================================
 
 fn _hex_nibble(n: u8) -> text:
     if n == 0: "0"
@@ -49,120 +30,22 @@ fn _bytes_hex(b: [u8]) -> text:
     var s: text = ""
     var i: u64 = 0
     while i < b.len().to_u64():
-        val byte = b[i]
-        s = s + _hex_nibble((byte >> 4) & 0x0F)
-        s = s + _hex_nibble(byte & 0x0F)
+        val bv = b[i]
+        s = s + _hex_nibble((bv >> 4) & 0x0F)
+        s = s + _hex_nibble(bv & 0x0F)
         i = i + 1
     s
 
-fn _test_privkey_a() -> [u8]:
-    """A 48-byte test private key (arbitrary but valid)."""
+fn _make_48_byte_key(seed: u8) -> [u8]:
     var k: [u8] = []
-    k.push(0x6B)
-    k.push(0x9D)
-    k.push(0x3D)
-    k.push(0xAD)
-    k.push(0x2E)
-    k.push(0x1B)
-    k.push(0x8C)
-    k.push(0x1C)
-    k.push(0x05)
-    k.push(0xB1)
-    k.push(0x9D)
-    k.push(0xC9)
-    k.push(0x7C)
-    k.push(0x1E)
-    k.push(0x69)
-    k.push(0x82)
-    k.push(0x33)
-    k.push(0x1E)
-    k.push(0xFE)
-    k.push(0xFB)
-    k.push(0x24)
-    k.push(0x41)
-    k.push(0x69)
-    k.push(0xBD)
-    k.push(0xC6)
-    k.push(0xCD)
-    k.push(0x86)
-    k.push(0xE7)
-    k.push(0x43)
-    k.push(0xF4)
-    k.push(0x67)
-    k.push(0xDF)
-    k.push(0x94)
-    k.push(0x71)
-    k.push(0xB5)
-    k.push(0xDD)
-    k.push(0x50)
-    k.push(0xE8)
-    k.push(0x23)
-    k.push(0x45)
-    k.push(0x0C)
-    k.push(0x7C)
-    k.push(0xAA)
-    k.push(0x42)
-    k.push(0x7D)
-    k.push(0x10)
-    k.push(0x11)
-    k.push(0x03)
-    k
-
-fn _test_privkey_b() -> [u8]:
-    """A second 48-byte test private key for ECDH."""
-    var k: [u8] = []
-    k.push(0x01)
-    k.push(0x02)
-    k.push(0x03)
-    k.push(0x04)
-    k.push(0x05)
-    k.push(0x06)
-    k.push(0x07)
-    k.push(0x08)
-    k.push(0x09)
-    k.push(0x0A)
-    k.push(0x0B)
-    k.push(0x0C)
-    k.push(0x0D)
-    k.push(0x0E)
-    k.push(0x0F)
-    k.push(0x10)
-    k.push(0x11)
-    k.push(0x12)
-    k.push(0x13)
-    k.push(0x14)
-    k.push(0x15)
-    k.push(0x16)
-    k.push(0x17)
-    k.push(0x18)
-    k.push(0x19)
-    k.push(0x1A)
-    k.push(0x1B)
-    k.push(0x1C)
-    k.push(0x1D)
-    k.push(0x1E)
-    k.push(0x1F)
-    k.push(0x20)
-    k.push(0x21)
-    k.push(0x22)
-    k.push(0x23)
-    k.push(0x24)
-    k.push(0x25)
-    k.push(0x26)
-    k.push(0x27)
-    k.push(0x28)
-    k.push(0x29)
-    k.push(0x2A)
-    k.push(0x2B)
-    k.push(0x2C)
-    k.push(0x2D)
-    k.push(0x2E)
-    k.push(0x2F)
-    k.push(0x30)
+    var i: u64 = 0
+    while i < 48:
+        val v: u8 = ((seed.to_u64() + i * 7 + 3) & 0xFF).to_u8()
+        k.push(v)
+        i = i + 1
     k
 
 fn _gx_bytes() -> [u8]:
-    """P-384 generator x-coordinate as 48 bytes."""
     var b: [u8] = []
     b.push(0xAA)
     b.push(0x87)
@@ -215,7 +98,6 @@ fn _gx_bytes() -> [u8]:
     b
 
 fn _gy_bytes() -> [u8]:
-    """P-384 generator y-coordinate as 48 bytes."""
     var b: [u8] = []
     b.push(0x36)
     b.push(0x17)
@@ -267,24 +149,9 @@ fn _gy_bytes() -> [u8]:
     b.push(0x5F)
     b
 
-fn _sample_msg() -> [u8]:
-    """The message 'sample' as bytes."""
-    var m: [u8] = []
-    m.push(0x73)
-    m.push(0x61)
-    m.push(0x6D)
-    m.push(0x70)
-    m.push(0x6C)
-    m.push(0x65)
-    m
+describe "P-384":
 
-# ============================================================================
-# Test Suite
-# ============================================================================
-
-describe "P-384 ECDSA/ECDH known-answer tests":
-
-    it "p384_add(1, 1) mod p == 2":
+    it "p384_add 1 plus 1 mod p equals 2":
         var one: [u8] = []
         var i: u64 = 0
         while i < 47:
@@ -300,7 +167,7 @@ describe "P-384 ECDSA/ECDH known-answer tests":
         expected.push(0x02)
         expect _bytes_hex(two_bytes) == _bytes_hex(expected)
 
-    it "p384_mul(2, 3) mod p == 6":
+    it "p384_mul 2 times 3 mod p equals 6":
         var two: [u8] = []
         var i: u64 = 0
         while i < 47:
@@ -326,13 +193,13 @@ describe "P-384 ECDSA/ECDH known-answer tests":
         expect p384_point_on_curve(_gx_bytes(), _gy_bytes()) == true
 
     it "keygen produces 97-byte uncompressed pubkey":
-        val sk = _test_privkey_a()
+        val sk = _make_48_byte_key(0x6B)
         val pub_key = p384_keygen(sk)
         expect pub_key.len() == 97
         expect pub_key[0u64] == 0x04u8
 
     it "generated pubkey is on curve":
-        val sk = _test_privkey_a()
+        val sk = _make_48_byte_key(0x6B)
         val pub_key = p384_keygen(sk)
         var px: [u8] = []
         var py: [u8] = []
@@ -347,38 +214,35 @@ describe "P-384 ECDSA/ECDH known-answer tests":
         expect p384_point_on_curve(px, py) == true
 
     it "ECDSA sign produces 96-byte signature":
-        val sk = _test_privkey_a()
-        val msg = _sample_msg()
-        val msg_hash = sha384(msg)
+        val sk = _make_48_byte_key(0x6B)
+        val msg_hash = sha384(_make_48_byte_key(0x01))
         val sig = p384_ecdsa_sign(sk, msg_hash)
         expect sig.len() == 96
 
     it "ECDSA verify accepts valid signature":
-        val sk = _test_privkey_a()
+        val sk = _make_48_byte_key(0x6B)
         val pub_key = p384_keygen(sk)
-        val msg = _sample_msg()
-        val msg_hash = sha384(msg)
+        val msg_hash = sha384(_make_48_byte_key(0x01))
         val sig = p384_ecdsa_sign(sk, msg_hash)
         expect p384_ecdsa_verify(pub_key, msg_hash, sig) == true
 
     it "ECDSA verify rejects corrupted signature":
-        val sk = _test_privkey_a()
+        val sk = _make_48_byte_key(0x6B)
         val pub_key = p384_keygen(sk)
-        val msg = _sample_msg()
-        val msg_hash = sha384(msg)
+        val msg_hash = sha384(_make_48_byte_key(0x01))
         val sig = p384_ecdsa_sign(sk, msg_hash)
         sig[0u64] = (sig[0u64] ^ 0x01u8)
         expect p384_ecdsa_verify(pub_key, msg_hash, sig) == false
 
     it "ECDH shared secret is 48 bytes":
-        val sk = _test_privkey_a()
+        val sk = _make_48_byte_key(0x6B)
         val pub_key = p384_keygen(sk)
         val shared = p384_ecdh(sk, pub_key)
         expect shared.len() == 48
 
-    it "ECDH is commutative (alice*Bob == bob*Alice)":
-        val alice_priv = _test_privkey_a()
-        val bob_priv = _test_privkey_b()
+    it "ECDH is commutative":
+        val alice_priv = _make_48_byte_key(0x6B)
+        val bob_priv = _make_48_byte_key(0x01)
         val alice_pub = p384_keygen(alice_priv)
         val bob_pub = p384_keygen(bob_priv)
         val shared_ab = p384_ecdh(alice_priv, bob_pub)
