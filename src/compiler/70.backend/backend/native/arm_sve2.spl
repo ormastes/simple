@@ -581,3 +581,141 @@ fn emit_smullt_z_d(zd: i64, zn: i64, zm: i64) -> [i64]:
     # Canonical bytes (zd=0, zn=1, zm=2): 0x20 0x74 0xC2 0x45  [VERIFIED llvm-mc]
     """
     _sve2_encode_wmul(zd, zn, zm, SVE2_SMULLT_BASE_D)
+
+# ============================================================================
+# SVE2 Crypto — SM4E / SM4EKEY / RAX1
+# ============================================================================
+#
+# These instructions are part of optional SVE2 extension groups:
+#   SM4E, SM4EKEY — SVE2-SM4 (Chinese national block cipher)
+#   RAX1           — SVE2-SHA3 (SHA-3/Keccak rotate-and-XOR)
+#
+# ALL encodings VERIFIED via:
+#   llvm-mc -triple=aarch64-none-linux-gnu -mattr=+sve2,+sve2-sm4 --show-encoding
+#   llvm-mc -triple=aarch64-none-linux-gnu -mattr=+sve2,+sve2-sha3 --show-encoding
+#   (run 2026-05-03)
+#
+# ============================================================================
+# SM4E Zd.S, Zd.S, Zn.S — SVE2-SM4 one round of SM4 encryption (destructive)
+# ============================================================================
+#
+# SM4E is a 2-register destructive instruction. The asm form shows 3 operands
+# (Zd, Zd, Zn) but the encoding only has two distinct register fields because
+# Zd is both the accumulator and the result.
+#
+# Encoding (ARMv9 ARM §C7.2, SVE2-SM4):
+#   bits[31:16] = 0x4523  (SVE2-SM4 encrypt group, fixed)
+#   bits[15:10] = 111000  (SM4E opcode = 0xE0 in bits[15:8] when regs=0)
+#   bits[9:5]   = Zn      (key/round input)
+#   bits[4:0]   = Zd      (state in/out — destructive)
+#
+# Base opcode (Zn=0, Zd=0): 0x4523E000 → LE [0x00, 0xE0, 0x23, 0x45]
+# Verified:
+#   sm4e z0.s, z0.s, z1.s → [0x20, 0xE0, 0x23, 0x45]  (Zn=1→+32, Zd=0)
+#   sm4e z1.s, z1.s, z2.s → [0x41, 0xE0, 0x23, 0x45]  (Zn=2→+64, Zd=1)
+#
+# Zn in bits[9:5]:  add Zn * 32
+# Zd in bits[4:0]:  add Zd
+
+val SVE2_SM4E_BASE = 0x4523E000
+
+fn emit_sm4e_z(zd: i64, zn: i64) -> [i64]:
+    """
+    Emit SM4E Zd.S, Zd.S, Zn.S — SVE2-SM4 one round of encryption (destructive).
+    Zd holds the 4-word state and is updated in place; Zn provides the round key.
+    Parameters: zd = Z state/dest (0-31), zn = Z round key source (0-31).
+
+    # ARMv9 ARM §C7.2 SM4E (SVE2-SM4)
+    # Canonical bytes (zd=0, zn=0): 0x00 0xE0 0x23 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=1): 0x20 0xE0 0x23 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=1, zn=2): 0x41 0xE0 0x23 0x45  [VERIFIED llvm-mc]
+    """
+    var word = SVE2_SM4E_BASE
+    word = word + _sve2_pack_5bit(zn, 5)
+    word = word + _sve2_pack_5bit(zd, 0)
+    _sve2_word_to_bytes(word)
+
+# ============================================================================
+# SM4EKEY Zd.S, Zn.S, Zm.S — SVE2-SM4 key schedule (3-register)
+# ============================================================================
+#
+# SM4EKEY generates round keys; all three register fields are independent.
+#
+# Encoding (ARMv9 ARM §C7.2, SVE2-SM4):
+#   bits[31:24] = 0x45  (SVE2 crypto group)
+#   bits[23:21] = 010   (SM4EKEY sub-group within SVE2-SM4)
+#   bits[20:16] = Zm    (second source)
+#   bits[15:10] = 111100 (SM4EKEY opcode = 0xF0 in bits[15:8] when regs=0)
+#   bits[9:5]   = Zn    (first source)
+#   bits[4:0]   = Zd    (destination)
+#
+# Base opcode (Zm=0, Zn=0, Zd=0): 0x4520F000 → LE [0x00, 0xF0, 0x20, 0x45]
+# Verified:
+#   sm4ekey z0.s, z0.s, z1.s → [0x00, 0xF0, 0x21, 0x45]  (Zm=1→+65536)
+#   sm4ekey z1.s, z2.s, z3.s → [0x41, 0xF0, 0x23, 0x45]  (Zm=3,Zn=2,Zd=1)
+#
+# Zm in bits[20:16]: add Zm * 65536
+# Zn in bits[9:5]:   add Zn * 32
+# Zd in bits[4:0]:   add Zd
+
+val SVE2_SM4EKEY_BASE = 0x4520F000
+
+fn emit_sm4ekey_z(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit SM4EKEY Zd.S, Zn.S, Zm.S — SVE2-SM4 key schedule.
+    Produces the next set of round keys from current key state.
+    Parameters: zd = Z dest (0-31), zn/zm = Z key sources (0-31).
+
+    # ARMv9 ARM §C7.2 SM4EKEY (SVE2-SM4)
+    # Canonical bytes (zd=0, zn=0, zm=0): 0x00 0xF0 0x20 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=0, zm=1): 0x00 0xF0 0x21 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=1, zn=2, zm=3): 0x41 0xF0 0x23 0x45  [VERIFIED llvm-mc]
+    """
+    var word = SVE2_SM4EKEY_BASE
+    word = word + _sve2_pack_5bit(zm, 16)
+    word = word + _sve2_pack_5bit(zn, 5)
+    word = word + _sve2_pack_5bit(zd, 0)
+    _sve2_word_to_bytes(word)
+
+# ============================================================================
+# RAX1 Zd.D, Zn.D, Zm.D — SVE2-SHA3 rotate-and-XOR (3-register)
+# ============================================================================
+#
+# RAX1 computes: Zd[i] = Zn[i] XOR ROL(Zm[i], 1)
+# Used in SHA-3/Keccak θ step. Operates on 64-bit (D) elements.
+#
+# Encoding (ARMv9 ARM §C7.2, SVE2-SHA3):
+#   bits[31:24] = 0x45  (SVE2 crypto group)
+#   bits[23:21] = 010   (SHA3 sub-group)
+#   bits[20:16] = Zm    (second source)
+#   bits[15:10] = 111101 (RAX1 opcode = 0xF4 in bits[15:8] when regs=0)
+#   bits[9:5]   = Zn    (first source)
+#   bits[4:0]   = Zd    (destination)
+#
+# Base opcode (Zm=0, Zn=0, Zd=0): 0x4520F400 → LE [0x00, 0xF4, 0x20, 0x45]
+# Verified:
+#   rax1 z0.d, z0.d, z1.d → [0x00, 0xF4, 0x21, 0x45]  (Zm=1→+65536)
+#   rax1 z1.d, z2.d, z3.d → [0x41, 0xF4, 0x23, 0x45]  (Zm=3,Zn=2,Zd=1)
+#
+# Zm in bits[20:16]: add Zm * 65536
+# Zn in bits[9:5]:   add Zn * 32
+# Zd in bits[4:0]:   add Zd
+
+val SVE2_RAX1_BASE = 0x4520F400
+
+fn emit_rax1_z(zd: i64, zn: i64, zm: i64) -> [i64]:
+    """
+    Emit RAX1 Zd.D, Zn.D, Zm.D — SVE2-SHA3 rotate-and-XOR for Keccak θ step.
+    Semantics: Zd[i] = Zn[i] XOR ROL64(Zm[i], 1)
+    Parameters: zd = Z dest (0-31), zn/zm = Z sources (0-31).
+
+    # ARMv9 ARM §C7.2 RAX1 (SVE2-SHA3)
+    # Canonical bytes (zd=0, zn=0, zm=0): 0x00 0xF4 0x20 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=0, zn=0, zm=1): 0x00 0xF4 0x21 0x45  [VERIFIED llvm-mc]
+    # Canonical bytes (zd=1, zn=2, zm=3): 0x41 0xF4 0x23 0x45  [VERIFIED llvm-mc]
+    """
+    var word = SVE2_RAX1_BASE
+    word = word + _sve2_pack_5bit(zm, 16)
+    word = word + _sve2_pack_5bit(zn, 5)
+    word = word + _sve2_pack_5bit(zd, 0)
+    _sve2_word_to_bytes(word)
