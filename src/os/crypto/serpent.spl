@@ -1,0 +1,483 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Serpent Block Cipher — Pure Simple Implementation
+#
+# 128-bit block, 128/192/256-bit key. AES finalist (1998).
+# 32 rounds using 8 S-boxes (S0-S7 cycling), bitsliced on 32-bit words.
+#
+# Key schedule: pad key to 256 bits, expand to 132 × 32-bit subkey words
+# using a linear recurrence with PHI = 0x9E3779B9, then apply S-boxes to
+# produce 33 × 128-bit round keys.
+#
+# Byte order: little-endian (Serpent-1 / NESSIE / AES submission convention).
+#
+# Reference: R. Anderson, E. Biham, L. Knudsen — "Serpent: A Proposal for
+#   the Advanced Encryption Standard" (AES submission, 1998)
+#   https://www.cl.cam.ac.uk/~rja14/serpent.html
+#
+# S-box lookup tables from the Serpent specification Appendix A.
+# Bitsliced application: for each of 32 bit-positions, extract nibble from
+# the 4 state words, look up in table, scatter result bits back.
+#
+# Exposed API:
+#   serpent_encrypt_block(key: [u8], plaintext: [u8]) -> [u8]
+#   serpent_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]
+#
+# No SFFI/Rust FFI — pure Simple, suitable for baremetal.
+
+# ============================================================================
+# PHI constant for key schedule
+# ============================================================================
+
+fn _phi() -> u32: 0x9E3779B9
+
+# ============================================================================
+# 32-bit rotation helpers
+# ============================================================================
+
+fn _rotl32(x: u32, n: u32) -> u32:
+    """Left-rotate x by n bits (32-bit)."""
+    ((x << n) | (x >> (32 - n))) & 0xFFFFFFFF
+
+fn _rotr32(x: u32, n: u32) -> u32:
+    """Right-rotate x by n bits (32-bit)."""
+    ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+
+# ============================================================================
+# S-box tables (from Serpent spec Appendix A, S0..S7)
+# Each S-box maps a 4-bit nibble input to a 4-bit nibble output.
+# ============================================================================
+
+fn _sbox0() -> [u8]:
+    var t: [u8] = []
+    t.push(3)  t.push(8)  t.push(15) t.push(1)
+    t.push(10) t.push(6)  t.push(5)  t.push(11)
+    t.push(14) t.push(13) t.push(4)  t.push(2)
+    t.push(7)  t.push(0)  t.push(9)  t.push(12)
+    t
+
+fn _sbox1() -> [u8]:
+    var t: [u8] = []
+    t.push(15) t.push(12) t.push(2)  t.push(7)
+    t.push(9)  t.push(0)  t.push(5)  t.push(10)
+    t.push(1)  t.push(11) t.push(14) t.push(8)
+    t.push(6)  t.push(13) t.push(3)  t.push(4)
+    t
+
+fn _sbox2() -> [u8]:
+    var t: [u8] = []
+    t.push(8)  t.push(6)  t.push(7)  t.push(9)
+    t.push(3)  t.push(12) t.push(10) t.push(15)
+    t.push(13) t.push(1)  t.push(14) t.push(4)
+    t.push(0)  t.push(11) t.push(5)  t.push(2)
+    t
+
+fn _sbox3() -> [u8]:
+    var t: [u8] = []
+    t.push(0)  t.push(15) t.push(11) t.push(8)
+    t.push(12) t.push(9)  t.push(6)  t.push(3)
+    t.push(13) t.push(1)  t.push(2)  t.push(4)
+    t.push(10) t.push(7)  t.push(5)  t.push(14)
+    t
+
+fn _sbox4() -> [u8]:
+    var t: [u8] = []
+    t.push(1)  t.push(15) t.push(8)  t.push(3)
+    t.push(12) t.push(0)  t.push(11) t.push(6)
+    t.push(2)  t.push(5)  t.push(4)  t.push(10)
+    t.push(9)  t.push(14) t.push(7)  t.push(13)
+    t
+
+fn _sbox5() -> [u8]:
+    var t: [u8] = []
+    t.push(15) t.push(5)  t.push(2)  t.push(11)
+    t.push(4)  t.push(10) t.push(9)  t.push(12)
+    t.push(0)  t.push(3)  t.push(14) t.push(8)
+    t.push(13) t.push(6)  t.push(7)  t.push(1)
+    t
+
+fn _sbox6() -> [u8]:
+    var t: [u8] = []
+    t.push(7)  t.push(2)  t.push(12) t.push(5)
+    t.push(8)  t.push(4)  t.push(6)  t.push(11)
+    t.push(14) t.push(9)  t.push(1)  t.push(15)
+    t.push(13) t.push(3)  t.push(10) t.push(0)
+    t
+
+fn _sbox7() -> [u8]:
+    var t: [u8] = []
+    t.push(1)  t.push(13) t.push(15) t.push(0)
+    t.push(14) t.push(8)  t.push(2)  t.push(11)
+    t.push(7)  t.push(4)  t.push(12) t.push(10)
+    t.push(9)  t.push(3)  t.push(5)  t.push(6)
+    t
+
+# Inverse S-boxes (computed from the forward tables)
+fn _sbox0_inv() -> [u8]:
+    var t: [u8] = []
+    t.push(13) t.push(3)  t.push(11) t.push(0)
+    t.push(10) t.push(6)  t.push(5)  t.push(12)
+    t.push(1)  t.push(14) t.push(4)  t.push(7)
+    t.push(15) t.push(9)  t.push(8)  t.push(2)
+    t
+
+fn _sbox1_inv() -> [u8]:
+    var t: [u8] = []
+    t.push(5)  t.push(8)  t.push(2)  t.push(14)
+    t.push(15) t.push(6)  t.push(12) t.push(3)
+    t.push(11) t.push(4)  t.push(7)  t.push(9)
+    t.push(1)  t.push(13) t.push(10) t.push(0)
+    t
+
+fn _sbox2_inv() -> [u8]:
+    var t: [u8] = []
+    t.push(12) t.push(9)  t.push(15) t.push(4)
+    t.push(11) t.push(14) t.push(1)  t.push(2)
+    t.push(0)  t.push(3)  t.push(6)  t.push(13)
+    t.push(5)  t.push(8)  t.push(7)  t.push(10)
+    t
+
+fn _sbox3_inv() -> [u8]:
+    var t: [u8] = []
+    t.push(0)  t.push(9)  t.push(10) t.push(7)
+    t.push(11) t.push(14) t.push(6)  t.push(13)
+    t.push(3)  t.push(5)  t.push(12) t.push(2)
+    t.push(4)  t.push(8)  t.push(15) t.push(1)
+    t
+
+fn _sbox4_inv() -> [u8]:
+    var t: [u8] = []
+    t.push(5)  t.push(0)  t.push(8)  t.push(3)
+    t.push(10) t.push(9)  t.push(7)  t.push(14)
+    t.push(2)  t.push(12) t.push(11) t.push(6)
+    t.push(4)  t.push(15) t.push(13) t.push(1)
+    t
+
+fn _sbox5_inv() -> [u8]:
+    var t: [u8] = []
+    t.push(8)  t.push(15) t.push(2)  t.push(9)
+    t.push(4)  t.push(1)  t.push(13) t.push(14)
+    t.push(11) t.push(6)  t.push(5)  t.push(3)
+    t.push(7)  t.push(12) t.push(10) t.push(0)
+    t
+
+fn _sbox6_inv() -> [u8]:
+    var t: [u8] = []
+    t.push(15) t.push(10) t.push(1)  t.push(13)
+    t.push(5)  t.push(3)  t.push(6)  t.push(0)
+    t.push(4)  t.push(9)  t.push(14) t.push(7)
+    t.push(2)  t.push(12) t.push(8)  t.push(11)
+    t
+
+fn _sbox7_inv() -> [u8]:
+    var t: [u8] = []
+    t.push(3)  t.push(0)  t.push(6)  t.push(13)
+    t.push(9)  t.push(14) t.push(15) t.push(8)
+    t.push(5)  t.push(12) t.push(11) t.push(7)
+    t.push(10) t.push(1)  t.push(4)  t.push(2)
+    t
+
+# ============================================================================
+# Bitsliced S-box application
+# Apply a 4-bit S-box to 32 nibbles packed across 4 × u32 words.
+# For each bit position j (0..31): extract nibble from (w0[j], w1[j], w2[j], w3[j]),
+# look up in table, scatter the 4 result bits back.
+# ============================================================================
+
+fn _sbox_apply(tbl: [u8], w0: u32, w1: u32, w2: u32, w3: u32, out: [u32]):
+    """Apply bitsliced S-box; pushes 4 result words onto out."""
+    var r0: u32 = 0
+    var r1: u32 = 0
+    var r2: u32 = 0
+    var r3: u32 = 0
+    var bit: u32 = 0
+    while bit < 32:
+        val b0 = (w0 >> bit) & 1
+        val b1 = (w1 >> bit) & 1
+        val b2 = (w2 >> bit) & 1
+        val b3 = (w3 >> bit) & 1
+        val nibble = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3)
+        val o = tbl[nibble.to_i64()].to_u32()
+        r0 = r0 | (((o >> 0) & 1) << bit)
+        r1 = r1 | (((o >> 1) & 1) << bit)
+        r2 = r2 | (((o >> 2) & 1) << bit)
+        r3 = r3 | (((o >> 3) & 1) << bit)
+        bit = bit + 1
+    out.push(r0)
+    out.push(r1)
+    out.push(r2)
+    out.push(r3)
+
+# ============================================================================
+# Linear transform (forward and inverse)
+# ============================================================================
+
+fn _linear_transform(state: [u32]):
+    """Apply Serpent linear transform in-place to state[0..3]."""
+    var b0 = state[0]
+    var b1 = state[1]
+    var b2 = state[2]
+    var b3 = state[3]
+    b0 = _rotl32(b0, 13)
+    b2 = _rotl32(b2, 3)
+    b1 = b1 ^ b0 ^ b2
+    b3 = b3 ^ b2 ^ ((b0 << 3) & 0xFFFFFFFF)
+    b1 = _rotl32(b1, 1)
+    b3 = _rotl32(b3, 7)
+    b0 = b0 ^ b1 ^ b3
+    b2 = b2 ^ b3 ^ ((b1 << 7) & 0xFFFFFFFF)
+    b0 = _rotl32(b0, 5)
+    b2 = _rotl32(b2, 22)
+    state[0] = b0
+    state[1] = b1
+    state[2] = b2
+    state[3] = b3
+
+fn _linear_transform_inv(state: [u32]):
+    """Apply inverse Serpent linear transform in-place to state[0..3]."""
+    var b0 = state[0]
+    var b1 = state[1]
+    var b2 = state[2]
+    var b3 = state[3]
+    b2 = _rotr32(b2, 22)
+    b0 = _rotr32(b0, 5)
+    b2 = b2 ^ b3 ^ ((b1 << 7) & 0xFFFFFFFF)
+    b0 = b0 ^ b1 ^ b3
+    b3 = _rotr32(b3, 7)
+    b1 = _rotr32(b1, 1)
+    b3 = b3 ^ b2 ^ ((b0 << 3) & 0xFFFFFFFF)
+    b1 = b1 ^ b0 ^ b2
+    b2 = _rotr32(b2, 3)
+    b0 = _rotr32(b0, 13)
+    state[0] = b0
+    state[1] = b1
+    state[2] = b2
+    state[3] = b3
+
+# ============================================================================
+# Key schedule — expand key to 33 × 4 × u32 subkeys (132 words)
+# ============================================================================
+
+fn _key_schedule(key: [u8]) -> [u32]:
+    """Expand key to 132 subkey words (33 round keys × 4 words each).
+
+    Key is padded to 256 bits: append 0x01 then zeros.
+    Pre-key words w[0..7] loaded little-endian from key.
+    Recurrence: w[i] = rotl11(w[i-8] ^ w[i-5] ^ w[i-3] ^ w[i-1] ^ PHI ^ (i-8))
+    Round key i uses S-box (35-i) mod 8 applied to w[4i..4i+3].
+    """
+    # Pad key to 32 bytes
+    var kb: [u8] = []
+    var ki: i64 = 0
+    while ki < key.len():
+        kb.push(key[ki])
+        ki = ki + 1
+    if kb.len() < 32:
+        kb.push(1)
+        while kb.len() < 32:
+            kb.push(0)
+
+    # Load 8 key words (little-endian u32)
+    var w: [u32] = []
+    var wi: i64 = 0
+    while wi < 8:
+        val base = wi * 4
+        val word = kb[base].to_u32() |
+                   (kb[base + 1].to_u32() << 8) |
+                   (kb[base + 2].to_u32() << 16) |
+                   (kb[base + 3].to_u32() << 24)
+        w.push(word)
+        wi = wi + 1
+
+    # Extend to 140 words (indices 0..139)
+    while w.len() < 140:
+        val idx = w.len()
+        val prev = w[idx - 1] ^ w[idx - 3] ^ w[idx - 5] ^ w[idx - 8] ^ _phi() ^ (idx - 8).to_u32()
+        w.push(_rotl32(prev, 11))
+
+    # Build 33 round keys by applying S-boxes
+    # Round key i uses S-box (35 - i) mod 8
+    var subkeys: [u32] = []
+    var si: i64 = 0
+    while si < 33:
+        val sb_idx = (35 - si) & 7  # mod 8
+        val base4 = si * 4
+        val w0 = w[base4]
+        val w1 = w[base4 + 1]
+        val w2 = w[base4 + 2]
+        val w3 = w[base4 + 3]
+        if sb_idx == 0:
+            _sbox_apply(_sbox0(), w0, w1, w2, w3, subkeys)
+        else if sb_idx == 1:
+            _sbox_apply(_sbox1(), w0, w1, w2, w3, subkeys)
+        else if sb_idx == 2:
+            _sbox_apply(_sbox2(), w0, w1, w2, w3, subkeys)
+        else if sb_idx == 3:
+            _sbox_apply(_sbox3(), w0, w1, w2, w3, subkeys)
+        else if sb_idx == 4:
+            _sbox_apply(_sbox4(), w0, w1, w2, w3, subkeys)
+        else if sb_idx == 5:
+            _sbox_apply(_sbox5(), w0, w1, w2, w3, subkeys)
+        else if sb_idx == 6:
+            _sbox_apply(_sbox6(), w0, w1, w2, w3, subkeys)
+        else:
+            _sbox_apply(_sbox7(), w0, w1, w2, w3, subkeys)
+        si = si + 1
+
+    subkeys
+
+# ============================================================================
+# Block I/O — little-endian byte ↔ u32 word conversion
+# ============================================================================
+
+fn _load_block_le(b: [u8]) -> [u32]:
+    """Load 16 bytes as 4 u32 words, little-endian."""
+    var out: [u32] = []
+    var i: i64 = 0
+    while i < 4:
+        val base = i * 4
+        val word = b[base].to_u32() |
+                   (b[base + 1].to_u32() << 8) |
+                   (b[base + 2].to_u32() << 16) |
+                   (b[base + 3].to_u32() << 24)
+        out.push(word)
+        i = i + 1
+    out
+
+fn _store_block_le(words: [u32]) -> [u8]:
+    """Store 4 u32 words as 16 bytes, little-endian."""
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < 4:
+        val w = words[i]
+        out.push((w & 0xFF).to_u8())
+        out.push(((w >> 8) & 0xFF).to_u8())
+        out.push(((w >> 16) & 0xFF).to_u8())
+        out.push(((w >> 24) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+# ============================================================================
+# XOR state with round key
+# ============================================================================
+
+fn _xor_subkey(state: [u32], subkeys: [u32], round: i64):
+    """XOR state[0..3] with subkeys[round*4..(round*4)+3] in-place."""
+    val base = round * 4
+    state[0] = state[0] ^ subkeys[base]
+    state[1] = state[1] ^ subkeys[base + 1]
+    state[2] = state[2] ^ subkeys[base + 2]
+    state[3] = state[3] ^ subkeys[base + 3]
+
+# ============================================================================
+# Apply S-box round in-place (forward)
+# ============================================================================
+
+fn _apply_sbox_round(state: [u32], round_mod8: i64):
+    """Apply S-box (round_mod8 % 8) bitsliced to state[0..3] in-place."""
+    var tmp: [u32] = []
+    val w0 = state[0]
+    val w1 = state[1]
+    val w2 = state[2]
+    val w3 = state[3]
+    if round_mod8 == 0:
+        _sbox_apply(_sbox0(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 1:
+        _sbox_apply(_sbox1(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 2:
+        _sbox_apply(_sbox2(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 3:
+        _sbox_apply(_sbox3(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 4:
+        _sbox_apply(_sbox4(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 5:
+        _sbox_apply(_sbox5(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 6:
+        _sbox_apply(_sbox6(), w0, w1, w2, w3, tmp)
+    else:
+        _sbox_apply(_sbox7(), w0, w1, w2, w3, tmp)
+    state[0] = tmp[0]
+    state[1] = tmp[1]
+    state[2] = tmp[2]
+    state[3] = tmp[3]
+
+# ============================================================================
+# Apply inverse S-box round in-place
+# ============================================================================
+
+fn _apply_sbox_inv_round(state: [u32], round_mod8: i64):
+    """Apply inverse S-box (round_mod8 % 8) bitsliced to state[0..3] in-place."""
+    var tmp: [u32] = []
+    val w0 = state[0]
+    val w1 = state[1]
+    val w2 = state[2]
+    val w3 = state[3]
+    if round_mod8 == 0:
+        _sbox_apply(_sbox0_inv(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 1:
+        _sbox_apply(_sbox1_inv(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 2:
+        _sbox_apply(_sbox2_inv(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 3:
+        _sbox_apply(_sbox3_inv(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 4:
+        _sbox_apply(_sbox4_inv(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 5:
+        _sbox_apply(_sbox5_inv(), w0, w1, w2, w3, tmp)
+    else if round_mod8 == 6:
+        _sbox_apply(_sbox6_inv(), w0, w1, w2, w3, tmp)
+    else:
+        _sbox_apply(_sbox7_inv(), w0, w1, w2, w3, tmp)
+    state[0] = tmp[0]
+    state[1] = tmp[1]
+    state[2] = tmp[2]
+    state[3] = tmp[3]
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn serpent_encrypt_block(key: [u8], plaintext: [u8]) -> [u8]:
+    """Encrypt a 16-byte block using the given key (128, 192, or 256 bits).
+
+    Both key and plaintext must be exactly 16 bytes (key padded internally to
+    256 bits per the Serpent specification).
+    Returns 16 ciphertext bytes.
+    """
+    val subkeys = _key_schedule(key)
+    var state = _load_block_le(plaintext)
+
+    # 32 rounds: XOR subkey, S-box, linear transform (omit LT on round 31)
+    var r: i64 = 0
+    while r < 32:
+        _xor_subkey(state, subkeys, r)
+        _apply_sbox_round(state, r & 7)
+        if r < 31:
+            _linear_transform(state)
+        r = r + 1
+
+    # Final key whitening
+    _xor_subkey(state, subkeys, 32)
+
+    _store_block_le(state)
+
+fn serpent_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]:
+    """Decrypt a 16-byte block using the given key (128, 192, or 256 bits).
+
+    Returns 16 plaintext bytes.
+    """
+    val subkeys = _key_schedule(key)
+    var state = _load_block_le(ciphertext)
+
+    # Undo final key whitening
+    _xor_subkey(state, subkeys, 32)
+
+    # 32 rounds in reverse: inverse S-box, XOR subkey, inverse linear transform
+    var r: i64 = 31
+    while r >= 0:
+        _apply_sbox_inv_round(state, r & 7)
+        _xor_subkey(state, subkeys, r)
+        if r > 0:
+            _linear_transform_inv(state)
+        r = r - 1
+
+    _store_block_le(state)
