@@ -23,7 +23,7 @@
 use compiler.mir_opt.mir_opt.mod.{
     TargetOptContext, target_opt_context_default,
     OptLevel, OptimizationPipeline, optimizationpipeline_for_level,
-    optimize_module, optimize_module_with_context
+    optimize_module, optimize_module_with_context, pipeline_optimize
 }
 use compiler.backend.feature_caps.{X86Caps}
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
@@ -222,17 +222,19 @@ describe "optimize_module with NoOpt — module unchanged":
 # optimize_module_with_context + AES caps — cipher rewrite via unified path
 # ============================================================================
 
-describe "optimize_module_with_context + AES caps — rewrites aes_round_software":
+describe "pipeline_optimize with AES caps — rewrites aes_round via unified path":
     it "function count is preserved after rewrite":
         val m   = make_call_module("std.common.aes.cipher.aes_round_software")
         val ctx = TargetOptContext(make_x86_caps_aes_only(), false)
-        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["vectorization"], target_ctx: ctx)
+        val out = pipeline_optimize(pipeline, m)
         expect out.functions.keys().len() == m.functions.keys().len()
 
     it "rewritten block has same instruction count":
         val m   = make_call_module("std.common.aes.cipher.aes_round_software")
         val ctx = TargetOptContext(make_x86_caps_aes_only(), false)
-        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["vectorization"], target_ctx: ctx)
+        val out = pipeline_optimize(pipeline, m)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         expect func.blocks[0].instructions.len() == 1
@@ -240,7 +242,8 @@ describe "optimize_module_with_context + AES caps — rewrites aes_round_softwar
     it "rewritten instruction is Intrinsic not Call":
         val m   = make_call_module("std.common.aes.cipher.aes_round_software")
         val ctx = TargetOptContext(make_x86_caps_aes_only(), false)
-        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["vectorization"], target_ctx: ctx)
+        val out = pipeline_optimize(pipeline, m)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val inst = func.blocks[0].instructions[0]
@@ -252,7 +255,8 @@ describe "optimize_module_with_context + AES caps — rewrites aes_round_softwar
     it "intrinsic name is crypto_aes_round after rewrite":
         val m   = make_call_module("std.common.aes.cipher.aes_round_software")
         val ctx = TargetOptContext(make_x86_caps_aes_only(), false)
-        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["vectorization"], target_ctx: ctx)
+        val out = pipeline_optimize(pipeline, m)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val inst = func.blocks[0].instructions[0]
@@ -262,14 +266,15 @@ describe "optimize_module_with_context + AES caps — rewrites aes_round_softwar
         expect intrinsic_name == "crypto_aes_round"
 
 # ============================================================================
-# optimize_module_with_context + no AES caps — no cipher rewrite
+# pipeline_optimize with no AES caps — no cipher rewrite
 # ============================================================================
 
-describe "optimize_module_with_context + no AES caps — Call stays Call":
+describe "pipeline_optimize with no AES caps — Call stays Call":
     it "instruction remains Call when has_aes=false":
         val m   = make_call_module("std.common.aes.cipher.aes_round_software")
         val ctx = TargetOptContext(make_x86_caps_none(), false)
-        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["vectorization"], target_ctx: ctx)
+        val out = pipeline_optimize(pipeline, m)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val inst = func.blocks[0].instructions[0]
@@ -281,20 +286,22 @@ describe "optimize_module_with_context + no AES caps — Call stays Call":
     it "block instruction count unchanged when no rewrite":
         val m   = make_call_module("std.common.aes.cipher.aes_round_software")
         val ctx = TargetOptContext(make_x86_caps_none(), false)
-        val out = optimize_module_with_context(m, OptLevel.Aggressive, ctx)
+        val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["vectorization"], target_ctx: ctx)
+        val out = pipeline_optimize(pipeline, m)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         expect func.blocks[0].instructions.len() == 1
 
 # ============================================================================
-# Speed level does NOT run vectorization — cipher stays as Call with AES caps
+# Default ctx (no caps) — cipher stays as Call through pipeline_optimize
 # ============================================================================
 
-describe "optimize_module_with_context at Speed level — no cipher rewrite":
-    it "instruction remains Call at Speed level even with has_aes=true":
+describe "pipeline_optimize with default ctx — no cipher rewrite":
+    it "instruction remains Call with default target_opt_context":
         val m   = make_call_module("std.common.aes.cipher.aes_round_software")
-        val ctx = TargetOptContext(make_x86_caps_aes_only(), false)
-        val out = optimize_module_with_context(m, OptLevel.Speed, ctx)
+        val ctx = target_opt_context_default()
+        val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["vectorization"], target_ctx: ctx)
+        val out = pipeline_optimize(pipeline, m)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val inst = func.blocks[0].instructions[0]
@@ -303,8 +310,9 @@ describe "optimize_module_with_context at Speed level — no cipher rewrite":
             case _: false
         expect is_call == true
 
-    it "function count is preserved at Speed level":
+    it "function count is preserved with default ctx":
         val m   = make_call_module("std.common.aes.cipher.aes_round_software")
-        val ctx = TargetOptContext(make_x86_caps_aes_only(), false)
-        val out = optimize_module_with_context(m, OptLevel.Speed, ctx)
+        val ctx = target_opt_context_default()
+        val pipeline = OptimizationPipeline(level: OptLevel.Aggressive, passes: ["vectorization"], target_ctx: ctx)
+        val out = pipeline_optimize(pipeline, m)
         expect out.functions.keys().len() == m.functions.keys().len()

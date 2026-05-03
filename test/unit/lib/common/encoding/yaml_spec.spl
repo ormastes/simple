@@ -1,0 +1,315 @@
+# YAML parser/writer specification
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+
+use std.spipe.*
+use std.common.encoding.yaml.{yaml_parse, yaml_parse_mapping,
+    yaml_get, yaml_get_list, yaml_encode_mapping, yaml_encode_scalar}
+use std.common.yaml.{yaml_get_scalar_content, is_yaml_null, is_yaml_boolean,
+    is_yaml_sequence, is_yaml_mapping, yaml_get_sequence_items, yaml_get_mapping_pairs}
+
+# ============================================================================
+# Parse mapping helpers
+# ============================================================================
+
+fn _parse_kv_count() -> i64:
+    var content = "name: Alice\nage: 30\n"
+    var entries = yaml_parse_mapping(content)
+    entries.length()
+
+fn _parse_kv_name() -> text:
+    var content = "name: Alice\nage: 30\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "name")
+
+fn _parse_kv_age() -> text:
+    var content = "name: Alice\nage: 30\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "age")
+
+fn _parse_kv_missing() -> text:
+    var content = "name: Alice\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "missing")
+
+# ============================================================================
+# Parse integer and boolean helpers
+# ============================================================================
+
+fn _parse_int_value() -> text:
+    var content = "count: 42\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "count")
+
+fn _parse_bool_true() -> text:
+    var content = "enabled: true\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "enabled")
+
+fn _parse_bool_false() -> text:
+    var content = "debug: false\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "debug")
+
+# ============================================================================
+# Parse sequence helpers
+# ============================================================================
+
+fn _parse_seq_count() -> i64:
+    var content = "- apple\n- banana\n- cherry\n"
+    var node = yaml_parse(content)
+    var node_type = node.0
+    var result: i64 = 0
+    if node_type == "sequence":
+        var items = yaml_get_sequence_items(node)
+        result = items.length()
+    result
+
+fn _parse_seq_first() -> text:
+    var content = "- apple\n- banana\n- cherry\n"
+    var node = yaml_parse(content)
+    var items = yaml_get_sequence_items(node)
+    var first = items.get(0)
+    yaml_get_scalar_content(first)
+
+fn _parse_seq_under_key_count() -> i64:
+    var content = "fruits:\n  - apple\n  - banana\n"
+    var entries = yaml_parse_mapping(content)
+    var items = yaml_get_list(entries, "fruits")
+    items.length()
+
+# ============================================================================
+# Parse nested mapping helpers
+# ============================================================================
+
+fn _parse_nested_count() -> i64:
+    var content = "server:\n  host: localhost\n  port: 8080\n"
+    var entries = yaml_parse_mapping(content)
+    entries.length()
+
+fn _parse_nested_key_exists() -> bool:
+    var content = "server:\n  host: localhost\n  port: 8080\n"
+    var entries = yaml_parse_mapping(content)
+    var i = 0
+    var found = false
+    while i < entries.length():
+        var pair = entries.get(i)
+        var k = pair.0
+        if k == "server":
+            found = true
+        i = i + 1
+    found
+
+# ============================================================================
+# Flow sequence helpers
+# ============================================================================
+
+fn _parse_flow_seq_count() -> i64:
+    var content = "[a, b, c]"
+    var node = yaml_parse(content)
+    var node_type = node.0
+    var result: i64 = 0
+    if node_type == "sequence":
+        var items = yaml_get_sequence_items(node)
+        result = items.length()
+    result
+
+fn _parse_flow_seq_first() -> text:
+    var content = "[alpha, beta, gamma]"
+    var node = yaml_parse(content)
+    var items = yaml_get_sequence_items(node)
+    var first = items.get(0)
+    yaml_get_scalar_content(first)
+
+# ============================================================================
+# Flow mapping helpers
+# ============================================================================
+
+fn _parse_flow_map_count() -> i64:
+    var content = "{x: 1, y: 2}"
+    var node = yaml_parse(content)
+    var node_type = node.0
+    var result: i64 = 0
+    if node_type == "mapping":
+        var pairs = yaml_get_mapping_pairs(node)
+        result = pairs.length()
+    result
+
+fn _parse_flow_map_get() -> text:
+    var content = "{name: Bob, role: admin}"
+    var node = yaml_parse(content)
+    var pairs = yaml_get_mapping_pairs(node)
+    var entries = yaml_parse_mapping("{name: Bob, role: admin}")
+    yaml_get(entries, "name")
+
+# ============================================================================
+# Comments helpers
+# ============================================================================
+
+fn _parse_comment_count() -> i64:
+    var content = "# this is a comment\nkey: value\n"
+    var entries = yaml_parse_mapping(content)
+    entries.length()
+
+fn _parse_comment_value() -> text:
+    var content = "# leading comment\nkey: hello\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "key")
+
+# ============================================================================
+# Quoted string helpers
+# ============================================================================
+
+fn _parse_double_quoted() -> text:
+    var content = "greeting: \"hello world\"\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "greeting")
+
+fn _parse_single_quoted() -> text:
+    var content = "msg: 'foo bar'\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "msg")
+
+# ============================================================================
+# Encode helpers
+# ============================================================================
+
+fn _encode_simple_round_trip() -> text:
+    var pairs: list = []
+    pairs.push(("name", "Alice"))
+    pairs.push(("age", "30"))
+    yaml_encode_mapping(pairs)
+
+fn _encode_scalar_plain() -> text:
+    yaml_encode_scalar("hello")
+
+fn _encode_scalar_with_colon() -> text:
+    yaml_encode_scalar("key: value")
+
+fn _encode_scalar_bool() -> text:
+    yaml_encode_scalar("true")
+
+fn _encode_scalar_empty() -> text:
+    yaml_encode_scalar("")
+
+# ============================================================================
+# Get by key helpers
+# ============================================================================
+
+fn _get_by_key_found() -> text:
+    var content = "city: Tokyo\ncountry: Japan\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "city")
+
+fn _get_by_key_missing_empty() -> text:
+    var content = "city: Tokyo\n"
+    var entries = yaml_parse_mapping(content)
+    yaml_get(entries, "country")
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "YAML parse — simple key-value mapping":
+
+    it "parses two key-value pairs into two entries":
+        expect(_parse_kv_count()).to_equal(2)
+
+    it "gets value for key 'name'":
+        expect(_parse_kv_name()).to_equal("Alice")
+
+    it "gets value for key 'age'":
+        expect(_parse_kv_age()).to_equal("30")
+
+    it "returns empty string for missing key":
+        expect(_parse_kv_missing()).to_equal("")
+
+describe "YAML parse — integer and boolean values":
+
+    it "parses integer value as text '42'":
+        expect(_parse_int_value()).to_equal("42")
+
+    it "parses boolean true":
+        expect(_parse_bool_true()).to_equal("true")
+
+    it "parses boolean false":
+        expect(_parse_bool_false()).to_equal("false")
+
+describe "YAML parse — sequence (list items with -)":
+
+    it "parses three sequence items":
+        expect(_parse_seq_count()).to_equal(3)
+
+    it "first sequence item is 'apple'":
+        expect(_parse_seq_first()).to_equal("apple")
+
+    it "parses sequence under a key with two items":
+        expect(_parse_seq_under_key_count()).to_equal(2)
+
+describe "YAML parse — nested mapping":
+
+    it "nested mapping produces one top-level entry":
+        expect(_parse_nested_count()).to_equal(1)
+
+    it "nested mapping has key 'server'":
+        expect(_parse_nested_key_exists()).to_equal(true)
+
+describe "YAML parse — flow sequence [a, b, c]":
+
+    it "flow sequence has three items":
+        expect(_parse_flow_seq_count()).to_equal(3)
+
+    it "first item of flow sequence is 'alpha'":
+        expect(_parse_flow_seq_first()).to_equal("alpha")
+
+describe "YAML parse — flow mapping {k: v}":
+
+    it "flow mapping has two pairs":
+        expect(_parse_flow_map_count()).to_equal(2)
+
+    it "get 'name' from flow mapping returns 'Bob'":
+        expect(_parse_flow_map_get()).to_equal("Bob")
+
+describe "YAML parse — comments ignored":
+
+    it "comment line does not produce an entry":
+        expect(_parse_comment_count()).to_equal(1)
+
+    it "value after comment is correct":
+        expect(_parse_comment_value()).to_equal("hello")
+
+describe "YAML parse — quoted strings":
+
+    it "double-quoted string with spaces":
+        expect(_parse_double_quoted()).to_equal("hello world")
+
+    it "single-quoted string with spaces":
+        expect(_parse_single_quoted()).to_equal("foo bar")
+
+describe "YAML encode — round-trip for simple mappings":
+
+    it "encodes two pairs as YAML lines":
+        expect(_encode_simple_round_trip()).to_equal("name: Alice\nage: 30")
+
+describe "YAML encode — scalar quoting":
+
+    it "plain scalar needs no quotes":
+        expect(_encode_scalar_plain()).to_equal("hello")
+
+    it "scalar with colon gets quoted":
+        expect(_encode_scalar_with_colon()).to_equal("\"key: value\"")
+
+    it "boolean keyword gets quoted":
+        expect(_encode_scalar_bool()).to_equal("\"true\"")
+
+    it "empty string gets quoted":
+        expect(_encode_scalar_empty()).to_equal("\"\"")
+
+describe "YAML get by key":
+
+    it "get existing key returns correct value":
+        expect(_get_by_key_found()).to_equal("Tokyo")
+
+    it "get missing key returns empty string":
+        expect(_get_by_key_missing_empty()).to_equal("")
