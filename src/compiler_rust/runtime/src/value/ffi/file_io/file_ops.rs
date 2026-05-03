@@ -470,20 +470,28 @@ pub unsafe extern "C" fn rt_bytes_from_raw(ptr: i64, len: i64) -> RuntimeValue {
     array_handle
 }
 
-/// Convert a UTF-8 text buffer to a byte array ([u8]).
+/// Convert a text RuntimeValue to a byte array ([u8]).
 #[no_mangle]
-pub unsafe extern "C" fn rt_text_to_bytes(text_ptr: *const u8, text_len: u64) -> RuntimeValue {
-    if text_ptr.is_null() || text_len == 0 {
+pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
+    let text_len = rt_string_len(text);
+    if text_len <= 0 {
         return rt_array_new(0);
     }
 
-    let bytes = std::slice::from_raw_parts(text_ptr, text_len as usize);
-    let array_handle = rt_array_new(text_len);
-    for &byte in bytes {
-        let byte_value = RuntimeValue::from_int(byte as i64);
-        rt_array_push(array_handle, byte_value);
+    let text_ptr = rt_string_data(text);
+    if text_ptr.is_null() {
+        return rt_array_new(0);
     }
-    array_handle
+
+    unsafe {
+        let bytes = std::slice::from_raw_parts(text_ptr, text_len as usize);
+        let array_handle = rt_array_new(text_len as u64);
+        for &byte in bytes {
+            let byte_value = RuntimeValue::from_int(byte as i64);
+            rt_array_push(array_handle, byte_value);
+        }
+        array_handle
+    }
 }
 
 /// Convert a byte array ([u8]) to a UTF-8 text value.

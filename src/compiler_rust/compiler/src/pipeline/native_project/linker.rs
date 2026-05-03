@@ -798,7 +798,21 @@ int main(int argc, char** argv) {
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&output_result.stderr);
-            Err(format!("link failed: {}", stderr))
+            if selected_runtime
+                .as_ref()
+                .is_some_and(|(_, is_native_all)| !is_native_all)
+                && self.runtime_bundle_prefers_core_c_lane()
+            {
+                Err(format!(
+                    "link failed: {}\
+\nnote: the default native app lane is `core-c` and links `libsimple_runtime.a` only. \
+If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bundle hosted` \
+(legacy alias: `--runtime-bundle all`).",
+                    stderr
+                ))
+            } else {
+                Err(format!("link failed: {}", stderr))
+            }
         }
     }
 

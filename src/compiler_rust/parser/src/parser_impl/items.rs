@@ -396,10 +396,8 @@ impl<'a> Parser<'a> {
                     && effects.is_empty()
                     && matches!(self.current.kind, TokenKind::For | TokenKind::While | TokenKind::Loop)
                 {
-                    return self.parse_simd_annotated_loop(
-                        simd_decorator_span.unwrap_or(self.current.span),
-                        decorators.len(),
-                    );
+                    return self
+                        .parse_simd_annotated_loop(simd_decorator_span.unwrap_or(self.current.span), decorators.len());
                 }
 
                 // Check if decorators are followed by impl (e.g., @some_decorator impl Trait for T:)

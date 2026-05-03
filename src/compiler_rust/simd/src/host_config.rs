@@ -163,10 +163,8 @@ fn detected_config() -> HostCpuConfig {
         .filter(|value| support_instruction_sets.iter().any(|supported| supported == value))
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let enabled_instruction_sets = intersect_instruction_sets_in_canonical_order(
-        &support_instruction_sets,
-        &simple_support_instruction_sets,
-    );
+    let enabled_instruction_sets =
+        intersect_instruction_sets_in_canonical_order(&support_instruction_sets, &simple_support_instruction_sets);
 
     HostCpuConfig {
         version: 1,
@@ -601,14 +599,14 @@ mod tests {
             let rewritten = host_cpu_config().unwrap();
             let allowed = allowed_instruction_sets_in_canonical_order(&detected);
             assert_eq!(rewritten.enabled.instruction_sets, allowed);
-            assert_eq!(rewritten.simple_support.instruction_sets, detected.simple_support.instruction_sets);
+            assert_eq!(
+                rewritten.simple_support.instruction_sets,
+                detected.simple_support.instruction_sets
+            );
 
             let source = fs::read_to_string(&path).unwrap();
             if !allowed.is_empty() {
-                assert!(source.contains(&format!(
-                    "instruction_sets: {}",
-                    render_string_list(&allowed)
-                )));
+                assert!(source.contains(&format!("instruction_sets: {}", render_string_list(&allowed))));
             }
             assert!(!source.contains("wasm128"));
         });
@@ -618,7 +616,10 @@ mod tests {
     fn simple_support_excludes_unimplemented_host_only_instruction_sets() {
         let avx512_host = simple_supported_tiers_for_host(SimdTier::X86_64Avx512);
         let avx512_sets = supported_instruction_sets_for_tiers(&avx512_host);
-        assert_eq!(avx512_host, vec![SimdTier::X86_64Avx2, SimdTier::X86_64Sse2, SimdTier::Scalar]);
+        assert_eq!(
+            avx512_host,
+            vec![SimdTier::X86_64Avx2, SimdTier::X86_64Sse2, SimdTier::Scalar]
+        );
         assert_eq!(avx512_sets, vec!["sse2", "avx2"]);
 
         let sve2_host = simple_supported_tiers_for_host(SimdTier::Aarch64Sve2);

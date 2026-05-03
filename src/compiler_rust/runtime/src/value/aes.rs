@@ -648,8 +648,7 @@ fn xor_block_in_place(dst: &mut [u8; AES_BLOCK_LEN], src: &[u8; AES_BLOCK_LEN]) 
 fn gf128_mul(x: &[u8; AES_BLOCK_LEN], y: &[u8; AES_BLOCK_LEN]) -> [u8; AES_BLOCK_LEN] {
     let mut z = [0u8; AES_BLOCK_LEN];
     let mut v = *y;
-    for i in 0..16 {
-        let xb = x[i];
+    for xb in x.iter().copied() {
         for bit in 0..8 {
             // MSB first
             if (xb >> (7 - bit)) & 1 == 1 {

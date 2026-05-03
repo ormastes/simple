@@ -116,7 +116,11 @@ fn single_file_prefers_runtime_only(source_path: Option<&Path>, options: &crate:
     if options.target != Target::host() || options.shared {
         return false;
     }
-    if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").as_deref() == Ok("all") {
+    if std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+        .ok()
+        .as_deref()
+        .is_some_and(|value| matches!(value, "all" | "hosted" | "rust-hosted"))
+    {
         return false;
     }
     source_path.is_some_and(|path| !is_compiler_like_native_source(path))
@@ -999,6 +1003,25 @@ mod tests {
     fn single_file_runtime_bundle_keeps_native_all_when_env_requests_all() {
         let previous = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").ok();
         std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", "all");
+
+        let options = NativeBinaryOptions::new()
+            .target(Target::host())
+            .shared(false)
+            .library("simple_native_all");
+        let filtered = filter_single_file_runtime_bundle(Some(std::path::Path::new("/tmp/demo.spl")), options);
+
+        match previous {
+            Some(value) => std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", value),
+            None => std::env::remove_var("SIMPLE_NATIVE_RUNTIME_BUNDLE"),
+        }
+
+        assert!(filtered.libraries.iter().any(|lib| lib == "simple_native_all"));
+    }
+
+    #[test]
+    fn single_file_runtime_bundle_keeps_native_all_when_env_requests_hosted() {
+        let previous = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").ok();
+        std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", "hosted");
 
         let options = NativeBinaryOptions::new()
             .target(Target::host())

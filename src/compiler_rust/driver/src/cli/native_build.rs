@@ -17,7 +17,7 @@
 //!   --cache-dir <dir>   Cache directory for incremental builds
 //!   --no-mangle         Disable name mangling (enabled by default for symbol collision avoidance)
 //!   --backend <name>    Compilation backend (cranelift, llvm)
-//!   --runtime-bundle <mode> Runtime libs to link (auto, runtime, all)
+//!   --runtime-bundle <mode> Runtime lane to link (auto, core-c/runtime, hosted/all)
 //!   --entry-closure     Compile only modules reachable from --entry
 //!   --help              Show help
 
@@ -25,6 +25,13 @@ use std::path::PathBuf;
 
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
+
+fn is_valid_runtime_bundle(value: &str) -> bool {
+    matches!(
+        value,
+        "auto" | "runtime" | "core" | "core-c" | "core_c" | "hosted" | "rust-hosted" | "all"
+    )
+}
 
 pub fn handle_native_build(args: &[String]) -> i32 {
     let mut source_dirs: Vec<PathBuf> = Vec::new();
@@ -175,7 +182,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     runtime_bundle = args[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!("error: --runtime-bundle requires a value (auto, runtime, all)");
+                    eprintln!("error: --runtime-bundle requires a value (auto, core-c/runtime, hosted/all)");
                     return 1;
                 }
             }
@@ -244,6 +251,14 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 i += 1;
             }
         }
+    }
+
+    if !is_valid_runtime_bundle(&runtime_bundle) {
+        eprintln!(
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, core-c, runtime, hosted, rust-hosted, all",
+            runtime_bundle
+        );
+        return 1;
     }
 
     // Defaults
@@ -431,7 +446,7 @@ fn print_help() {
     println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
     println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
     println!("  --list-optimizations Print implemented optimization groups and levels");
-    println!("  --runtime-bundle <mode> Runtime libs to link (auto, runtime, all)");
+    println!("  --runtime-bundle <mode> Runtime lane to link (auto, core-c/runtime, hosted/all)");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");
     println!();

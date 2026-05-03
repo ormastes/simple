@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::codegen::common_backend::module_prefix_from_path;
 use crate::incremental::SourceInfo;
+use simple_simd::{host_cpu_config, HostCpuConfig, SimdTier};
 use super::*;
 
 fn simd_tier_env_lock() -> &'static Mutex<()> {
@@ -61,20 +62,63 @@ fn with_simd_envs<T>(simd_tier: Option<&str>, cpu_config_path: Option<&Path>, f:
     result
 }
 
-fn config_document(enabled_tier: &str, instruction_sets: &str) -> String {
+fn render_string_list(values: &[String]) -> String {
+    format!("[{}]", values.join(", "))
+}
+
+fn render_tier_list(values: &[SimdTier]) -> String {
+    format!(
+        "[{}]",
+        values.iter().map(|value| value.as_str()).collect::<Vec<_>>().join(", ")
+    )
+}
+
+fn instruction_sets_for_tier(tier: SimdTier) -> &'static [&'static str] {
+    match tier {
+        SimdTier::Scalar => &[],
+        SimdTier::X86_64Sse2 => &["sse2"],
+        SimdTier::X86_64Avx2 => &["sse2", "avx2"],
+        SimdTier::X86_64Avx512 => &["sse2", "avx2", "avx512f"],
+        SimdTier::Aarch64Neon => &["neon"],
+        SimdTier::Aarch64Sve => &["neon", "sve"],
+        SimdTier::Aarch64Sve2 => &["neon", "sve", "sve2"],
+        SimdTier::Riscv64Rvv => &["rvv"],
+        SimdTier::Wasm128 => &["wasm128"],
+    }
+}
+
+fn config_document(base: &HostCpuConfig, enabled_tier: SimdTier) -> String {
+    let enabled_instruction_sets = instruction_sets_for_tier(enabled_tier)
+        .iter()
+        .filter(|instruction_set| {
+            base.simple_support
+                .instruction_sets
+                .iter()
+                .any(|supported| supported == **instruction_set)
+        })
+        .map(|instruction_set| (*instruction_set).to_string())
+        .collect::<Vec<_>>();
+
     format!(
         "version: 1\n\
-target_triple: test-triple\n\
+target_triple: {}\n\
 generated_by: \"test\"\n\
 support:\n\
-    simd_tier: x86_64_avx2\n\
-    instruction_sets: [sse2, avx2]\n\
+    simd_tier: {}\n\
+    instruction_sets: {}\n\
 simple_support:\n\
-    simd_tier_fallbacks: [x86_64_avx2, x86_64_sse2, scalar]\n\
-    instruction_sets: [sse2, avx2]\n\
+    simd_tier_fallbacks: {}\n\
+    instruction_sets: {}\n\
 enabled:\n\
-    simd_tier: {enabled_tier}\n\
-    instruction_sets: [{instruction_sets}]\n"
+    simd_tier: {}\n\
+    instruction_sets: {}\n",
+        base.target_triple,
+        base.support.simd_tier.as_str(),
+        render_string_list(&base.support.instruction_sets),
+        render_tier_list(&base.simple_support.simd_tier_fallbacks),
+        render_string_list(&base.simple_support.instruction_sets),
+        enabled_tier.as_str(),
+        render_string_list(&enabled_instruction_sets),
     )
 }
 
@@ -200,19 +244,30 @@ fn test_object_cache_key_separates_simd_tiers() {
 #[test]
 fn test_object_cache_key_separates_configured_active_tiers_without_override() {
     let temp = tempfile::tempdir().unwrap();
-    let scalar_path = temp.path().join("scalar_cpu_config.sdn");
-    let sse2_path = temp.path().join("sse2_cpu_config.sdn");
-    fs::write(&scalar_path, config_document("scalar", "")).unwrap();
-    fs::write(&sse2_path, config_document("x86_64_sse2", "sse2")).unwrap();
+    let base_path = temp.path().join("cpu_config.sdn");
+    let detected = with_simd_envs(None, Some(&base_path), || host_cpu_config().unwrap());
+    let configured_tiers = &detected.simple_support.simd_tier_fallbacks;
+    let Some(high_tier) = configured_tiers.first().copied() else {
+        panic!("host config did not expose any supported SIMD tiers");
+    };
+    let Some(low_tier) = configured_tiers.iter().rev().copied().find(|tier| *tier != high_tier) else {
+        return;
+    };
 
-    let scalar = with_simd_envs(None, Some(&scalar_path), || {
+    let high_path = temp.path().join("high_cpu_config.sdn");
+    let low_path = temp.path().join("low_cpu_config.sdn");
+    fs::write(&high_path, config_document(&detected, high_tier)).unwrap();
+    fs::write(&low_path, config_document(&detected, low_tier)).unwrap();
+
+    let high = with_simd_envs(None, Some(&high_path), || {
         object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
     });
-    let sse2 = with_simd_envs(None, Some(&sse2_path), || {
+    let low = with_simd_envs(None, Some(&low_path), || {
         object_cache_key("fn main(): return 42", true, "cranelift", false, "app__main")
     });
 
-    assert_ne!(scalar, sse2);
+    assert_ne!(high_tier, low_tier);
+    assert_ne!(high, low);
 }
 
 #[test]
@@ -380,7 +435,7 @@ fn test_discover_files_from_entry_uses_matching_source_root() {
 }
 
 #[test]
-fn test_runtime_bundle_auto_prefers_runtime_for_non_compiler_entry() {
+fn test_runtime_bundle_auto_prefers_core_c_runtime_for_non_compiler_entry() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -405,7 +460,7 @@ fn test_runtime_bundle_auto_prefers_runtime_for_non_compiler_entry() {
 }
 
 #[test]
-fn test_runtime_bundle_auto_prefers_native_all_for_compiler_entry() {
+fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_entry() {
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -470,12 +525,62 @@ fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
     let err = builder
         .reject_unexpected_native_all(selected_runtime.as_ref())
         .unwrap_err();
-    assert!(err.contains("refused oversized runtime bundle"));
+    assert!(err.contains("default core-c entry"));
+    assert!(err.contains("--runtime-bundle hosted"));
     assert!(err.contains("tool_runner.spl"));
 }
 
 #[test]
-fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
+fn test_runtime_bundle_hosted_allows_native_all_for_non_compiler_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "hosted".to_string();
+
+    let mut builder = NativeProjectBuilder::new(
+        PathBuf::from("/project"),
+        PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"),
+    )
+    .config(config);
+    builder.entry_file = Some(PathBuf::from(
+        "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
+    ));
+
+    let selected_runtime = builder.selected_runtime_library(temp.path());
+    builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
+}
+
+#[test]
+fn test_runtime_bundle_core_c_alias_prefers_runtime_for_non_compiler_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("libsimple_runtime.a");
+    let native_all = temp.path().join("libsimple_native_all.a");
+    std::fs::write(&runtime, b"runtime").unwrap();
+    std::fs::write(&native_all, b"all").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "core-c".to_string();
+
+    let mut builder =
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_mcp_native"))
+            .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
+
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
+    assert_eq!(selected, runtime);
+    assert!(!is_native_all);
+}
+
+#[test]
+fn test_runtime_bundle_legacy_all_alias_allows_native_all_for_non_compiler_entry() {
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
@@ -491,9 +596,7 @@ fn test_runtime_bundle_all_allows_native_all_for_non_compiler_entry() {
         PathBuf::from("/project/bin/t32_lsp_mcp_tool_runner"),
     )
     .config(config);
-    builder.entry_file = Some(PathBuf::from(
-        "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
-    ));
+    builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
     let selected_runtime = builder.selected_runtime_library(temp.path());
     builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();

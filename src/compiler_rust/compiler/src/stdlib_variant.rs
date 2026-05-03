@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use simple_simd::{active_simd_tier as resolved_active_simd_tier, host_cpu_config, SimdTier};
+use simple_simd::{active_simd_tier as resolved_active_simd_tier, SimdTier};
 
 pub fn active_simd_tier() -> SimdTier {
     resolved_active_simd_tier()
@@ -174,8 +174,8 @@ enabled:\n\
         fs::write(&path, config_document("scalar")).unwrap();
 
         with_simd_envs(None, Some(&path), || {
-            assert_eq!(host_cpu_config().unwrap().enabled.simd_tier, SimdTier::Scalar);
             assert_eq!(active_simd_tier(), SimdTier::Scalar);
+            assert_eq!(active_simd_tier_name(), "scalar");
         });
     }
 
@@ -186,8 +186,8 @@ enabled:\n\
         fs::write(&path, config_document("scalar")).unwrap();
 
         with_simd_envs(Some("x86_64_sse2"), Some(&path), || {
-            assert_eq!(host_cpu_config().unwrap().enabled.simd_tier, SimdTier::Scalar);
             assert_eq!(active_simd_tier(), SimdTier::X86_64Sse2);
+            assert_eq!(active_simd_tier_name(), "x86_64_sse2");
         });
     }
 
@@ -198,8 +198,8 @@ enabled:\n\
         fs::write(&path, config_document("scalar")).unwrap();
 
         with_simd_envs(Some("definitely-not-a-tier"), Some(&path), || {
-            assert_eq!(host_cpu_config().unwrap().enabled.simd_tier, SimdTier::Scalar);
             assert_eq!(active_simd_tier(), SimdTier::Scalar);
+            assert_eq!(active_simd_tier_name(), "scalar");
         });
     }
 
@@ -210,6 +210,7 @@ enabled:\n\
         fs::write(&path, config_document("x86_64_sse2")).unwrap();
 
         with_simd_envs(None, Some(&path), || {
+            assert_eq!(active_simd_tier(), SimdTier::X86_64Sse2);
             let roots = stdlib_root_candidates(Path::new("/tmp/proj/src/lib/std/src"));
             assert_eq!(
                 roots,

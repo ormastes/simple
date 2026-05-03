@@ -23,6 +23,7 @@ All notable changes to Simple Language will be documented in this file.
 - **x86_64 kernel build** — root-cause analysis for cross-arch riscv inline-asm leak (use `--entry-closure`)
 
 ### Changed
+- **Native-build runtime lanes** — non-compiler host binaries now default to the narrow `core-c` lane (`libsimple_runtime.a`), while the broad Rust-hosted lane requires `--runtime-bundle hosted` (legacy alias: `all`) or a compiler-like entrypoint
 - **MCP wrapper default** — runs from `.spl` by default; SMF cache strictly opt-in via `SIMPLE_MCP_USE_CACHE=1`
 - **`bin/simple build`** — clarified that `build` falls through wrapper whitelist; new externs require `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`
 - **SSpec compile pipeline** — documented limitations; `--mode=smf` / `--compile` still produce false-greens; verify in interpreter mode until R2-broader lands
@@ -355,4 +356,3 @@ _Merged into 0.8.0 — see above._
 - 100% Pure Simple (Rust source removed)
 - Self-hosting parser
 - Pre-built runtime
-

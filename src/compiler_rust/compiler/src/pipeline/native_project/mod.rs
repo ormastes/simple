@@ -172,7 +172,7 @@ pub struct NativeBuildConfig {
     pub backend: String,
     /// Explicit runtime library directory (overrides env var and auto-discovery).
     pub runtime_path: Option<PathBuf>,
-    /// Runtime bundle selection: "auto", "runtime", or "all".
+    /// Runtime bundle selection: "auto", "runtime"/"core-c", or "hosted"/"all".
     pub runtime_bundle: String,
     /// Discover files from the explicit entrypoint's reachable import closure.
     pub entry_closure: bool,

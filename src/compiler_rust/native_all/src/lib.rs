@@ -124,7 +124,9 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --backend <name>    Codegen backend: llvm (default when available) or cranelift");
                 println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
                 println!("  --list-optimizations Print implemented optimization groups and levels");
-                println!("  --runtime-bundle <mode> Runtime libs to link: auto (default), runtime, or all");
+                println!(
+                    "  --runtime-bundle <mode> Runtime lane to link: auto (default), core-c/runtime, or hosted/all"
+                );
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
                 println!("  --target <triple>   Cross-compilation target (e.g. x86_64-unknown-none)");
@@ -236,7 +238,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     runtime_bundle = args_vec[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!("error: --runtime-bundle requires a value (auto, runtime, all)");
+                    eprintln!("error: --runtime-bundle requires a value (auto, core-c/runtime, hosted/all)");
                     return 1;
                 }
             }

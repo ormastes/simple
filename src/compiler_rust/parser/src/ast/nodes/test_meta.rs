@@ -518,10 +518,7 @@ mod tests {
 
         let mut group = TestGroupMeta::new("Group".to_string(), span);
         group.add_test(TestMeta::new("test1".to_string(), span), &[]);
-        group.add_test(
-            TestMeta::with_kind("test2".to_string(), span, TestKind::Skipped),
-            &[],
-        );
+        group.add_test(TestMeta::with_kind("test2".to_string(), span, TestKind::Skipped), &[]);
 
         file_meta.add_group(group);
 

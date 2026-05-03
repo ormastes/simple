@@ -97,14 +97,14 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
 /// Find the Simple runtime library.
 pub(crate) fn find_runtime_library() -> Option<PathBuf> {
     if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
-        for name in &["libsimple_runtime.a", "libsimple_native_all.a"] {
+        for name in &["libsimple_runtime.a"] {
             let lib = dir.join(name);
             if has_nonempty_archive_payload(&lib) {
                 return Some(lib);
             }
         }
         #[cfg(target_os = "windows")]
-        for name in &["simple_runtime.lib", "simple_native_all.lib"] {
+        for name in &["simple_runtime.lib"] {
             let lib = dir.join(name);
             if has_nonempty_archive_payload(&lib) {
                 return Some(lib);
@@ -114,7 +114,7 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
 
     if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
         let p = PathBuf::from(&path);
-        for name in &["libsimple_runtime.a", "libsimple_native_all.a"] {
+        for name in &["libsimple_runtime.a"] {
             let lib = p.join(name);
             if has_nonempty_archive_payload(&lib) {
                 return Some(lib);
