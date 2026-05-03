@@ -16,7 +16,7 @@
 #   L_* = ENCIPHER(K, 0^128)
 #   L_$ = double(L_*)
 #   L_i = double(L_{i-1})   for i >= 0
-#   Offset_0 derived from nonce via ENCIPHER(K, top XOR stretch) with bottom
+#   Offset_0 derived from nonce via ENCIPHER(K, top) with bottom-bit shift
 #   For each block i: Offset_i = Offset_{i-1} XOR L_{ntz(i)}
 #   C_i  = Offset_i XOR ENCIPHER(K, P_i XOR Offset_i)
 #   Checksum = XOR of all P_i (plus partial last-block contribution)
@@ -31,25 +31,25 @@ fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
 
 # ============================================================================
-# GF(2^128) doubling — multiply by x (i.e., left-shift with reduction)
-# Polynomial: x^128 + x^7 + x^2 + x + 1  (same as GCM's field)
-# If msb == 0:  double(V) = V << 1
-# If msb == 1:  double(V) = (V << 1) XOR 0x00000000...00000087
+# GF(2^128) doubling — multiply by x (left-shift with reduction)
+# Polynomial: x^128 + x^7 + x^2 + x + 1
+# If msb(V) == 0:  double(V) = V << 1
+# If msb(V) == 1:  double(V) = (V << 1) XOR 0x00...0087
 # ============================================================================
 
 fn _ocb3_double(block: [u8]) -> [u8]:
-    """GF(2^128) doubling (left shift with conditional XOR 0x87 on lsb)."""
+    """GF(2^128) doubling (left shift with conditional XOR 0x87 on last byte)."""
     var out: [u8] = rt_array_new_with_cap(16)
-    val msb = (_u8_at(block, 0) >> 7) & 0x01
+    val msb = (_u8_at(block, 0).to_u32() >> 7) & 0x01
     var i: u64 = 0
     while i < 15:
         val cur = _u8_at(block, i).to_u32()
         val nxt = _u8_at(block, i + 1).to_u32()
-        out.push(((cur.shl(1) | nxt.shr(7)) & 0xFF).to_u8())
+        out.push(((cur.shl(1) | nxt >> 7) & 0xFF).to_u8())
         i = i + 1
     val last = (_u8_at(block, 15).to_u32().shl(1) & 0xFF).to_u8()
     if msb != 0:
-        out.push((last ^ 0x87).to_u8())
+        out.push((last.to_u32() ^ 0x87).to_u8())
     else:
         out.push(last)
     out
@@ -78,13 +78,14 @@ fn _ntz(n: u64) -> u64:
     var count: u64 = 0
     while (v & 1) == 0:
         count = count + 1
-        v = v.shr(1)
+        v = v >> 1
     count
 
 # ============================================================================
-# Build the L table: L_* (index 0), L_$ (index 1), L_0..L_k (index 2+)
-# We build enough L entries to cover all blocks (up to 64 levels of doubling
-# are sufficient for any practical message size).
+# Build the L table: [L_*, L_$, L_0, L_1, ..., L_30]
+# L_* = ENCIPHER(K, 0^128)
+# L_$ = double(L_*)
+# L_i = double(L_{i-1}) for i >= 0
 # ============================================================================
 
 fn _ocb3_build_l_table(key: [u8]) -> [[u8]]:
@@ -102,7 +103,7 @@ fn _ocb3_build_l_table(key: [u8]) -> [[u8]]:
     table.push(l_star)
     table.push(l_dollar)
 
-    # L_0 .. L_30
+    # L_0 .. L_30  (index 2 .. 32 in table)
     var prev = l_star
     var idx: u64 = 0
     while idx < 31:
@@ -113,19 +114,14 @@ fn _ocb3_build_l_table(key: [u8]) -> [[u8]]:
 
     table
 
-fn _l_at(table: [[u8]], i: u64) -> [u8]:
-    """L_* = table[0], L_$ = table[1], L_0 = table[2], L_i = table[i+2]."""
-    rt_bytes_u8_at(table, (i + 2).to_i64())  # placeholder — see below
-
-# NOTE: Simple doesn't have generic index on [[u8]] via rt_bytes_u8_at.
-# We use a helper that indexes into a flat list via iteration.
+# Index into a [[u8]] table by iterating (Simple has no generic list indexer).
 fn _table_get(table: [[u8]], idx: u64) -> [u8]:
     var i: u64 = 0
     for entry in table:
         if i == idx:
             return entry
         i = i + 1
-    # Should not reach here; return zeros as fallback.
+    # Fallback — should not reach here.
     var fallback: [u8] = rt_array_new_with_cap(16)
     var j: u64 = 0
     while j < 16:
@@ -133,50 +129,26 @@ fn _table_get(table: [[u8]], idx: u64) -> [u8]:
         j = j + 1
     fallback
 
+# Retrieve L_{ntz(block_num)} from the table.
+# Table layout: index 0 = L_*, index 1 = L_$, index 2+k = L_k.
+fn _l_ntz(table: [[u8]], block_num: u64) -> [u8]:
+    _table_get(table, _ntz(block_num) + 2)
+
 # ============================================================================
 # Nonce-to-Offset_0 derivation (RFC 7253 §4)
 #
-# For 128-bit tag (TAGLEN=128), nonce must be < 128 bits. We fix nonce_len=12
-# (96-bit nonce as [u8] of length 12), tag_len=128 bits (16 bytes).
-#
-# nonce_enc = (TAGLEN mod 128) || 0^(127-96-1) || 1 || nonce   (128-bit value)
-#           = 0x00000000000000000000000000000001 XOR (00||nonce<<1)
-# Actually per RFC 7253 §4:
-#   Nonce = num2str(TAGLEN mod 128, 7) || zeros(128-7-nlen*8-1) || 1 || N
-# For TAGLEN=128 mod 128 = 0, nlen=12:
-#   Nonce = 0b0000000 || 0^(128-7-96-1) || 1 || N[96 bits]
-#         = 0x00 00 00 00 01 || N[12 bytes]   (total 17 bytes truncated to 128 bits ... no)
-# Let's follow the RFC exactly:
-#   Nonce = num2str(128 mod 128, 7) || zeros(120 - nlen*8) || 1 || N
-#   nlen=12, nlen*8=96. zeros(120-96)=zeros(24)=3 zero bytes
-#   Nonce = 0x00 (7-bit 0, then 1 more bit) || 3 zero bytes || 0x01 || N[12]
-# = 0x00000000 01 N[0]..N[11]  — that's 17 bytes, still wrong.
-# RFC 7253 §4 actual text:
-#   Nonce = num2str(TAGLEN mod 128, 7) || zeros(128-7-nlen*8-1) || 1 || N
-#   For TAGLEN=128, 128 mod 128 = 0. num2str(0,7) = 7-bit zero = 0b0000000.
-#   zeros(128 - 7 - 96 - 1) = zeros(24) = 3 bytes.
-#   Full 128-bit value = 0b 0000000 000000000000000000000 1 <96-bit N>
-#   = 0x00 00 00 00 | N (with leading 0x01 bit before N)
-# In bytes: byte0=0x00, byte1=0x00, byte2=0x00, then 1 bit '1', then N[96-bit]
-# Practical: the 128-bit Nonce value is:
-#   bits 127..121 = 0 (7 bits)
-#   bits 120..25  = 0 (96-? bits of zeros, then the separator 1 bit)
-# Let's compute directly:
-#   Nonce128 = (0 << 121) | (0 << 25) | (1 << 96) | nonce_as_int
-# = 0x00000001 || N[0..11]
-# So as 16 bytes: [0x00, 0x00, 0x00, 0x01, N[0], N[1], ..., N[11]]
-#
-# Then: top   = Nonce128 with bottom 6 bits cleared
-#        bottom = last 6 bits of Nonce128
-#        Ktop = ENCIPHER(K, top)
-#        Stretch = Ktop || (Ktop[0..7] XOR Ktop[1..8])  (192 bits)
-#        Offset_0 = Stretch[bottom .. bottom+127]
+# For TAGLEN=128, nlen=12 (96-bit nonce):
+#   128-bit Nonce value = 0x00000001 || N[0..11]
+#   bottom = last 6 bits of Nonce128  (= last 6 bits of N[11])
+#   top    = Nonce128 with last 6 bits zeroed
+#   Ktop   = ENCIPHER(K, top)
+#   Stretch = Ktop || (Ktop[0..7] XOR Ktop[1..8])  (24 bytes)
+#   Offset_0 = Stretch[bottom .. bottom+127]  (bit-addressed window)
 # ============================================================================
 
 fn _ocb3_nonce_to_offset(key: [u8], nonce: [u8]) -> [u8]:
     """Derive Offset_0 from key and 12-byte nonce per RFC 7253 §4."""
-    # Build the 128-bit Nonce value:
-    # [0x00, 0x00, 0x00, 0x01, nonce[0..11]]
+    # Build the 128-bit Nonce value: [0x00, 0x00, 0x00, 0x01, nonce[0..11]]
     var nonce128: [u8] = rt_array_new_with_cap(16)
     nonce128.push(0x00)
     nonce128.push(0x00)
@@ -187,8 +159,8 @@ fn _ocb3_nonce_to_offset(key: [u8], nonce: [u8]) -> [u8]:
         nonce128.push(_u8_at(nonce, ni))
         ni = ni + 1
 
-    # Extract bottom 6 bits (bit shift amount)
-    val bottom: u64 = (_u8_at(nonce128, 15) & 0x3F).to_u64()
+    # bottom = last 6 bits of nonce128[15]
+    val bottom: u64 = (_u8_at(nonce128, 15).to_u32() & 0x3F).to_u64()
 
     # top = nonce128 with last 6 bits cleared
     var top: [u8] = rt_array_new_with_cap(16)
@@ -196,7 +168,7 @@ fn _ocb3_nonce_to_offset(key: [u8], nonce: [u8]) -> [u8]:
     while ti < 15:
         top.push(_u8_at(nonce128, ti))
         ti = ti + 1
-    top.push(_u8_at(nonce128, 15) & 0xC0)
+    top.push((_u8_at(nonce128, 15).to_u32() & 0xC0).to_u8())
 
     # Ktop = ENCIPHER(K, top)
     val ktop = rt_aes128_encrypt_block_pure(key, top)
@@ -212,10 +184,9 @@ fn _ocb3_nonce_to_offset(key: [u8], nonce: [u8]) -> [u8]:
         stretch.push(_u8_at(ktop, si) ^ _u8_at(ktop, si + 1))
         si = si + 1
 
-    # Offset_0 = Stretch[bottom .. bottom+128-1]  (bit addressing)
-    # Compute as byte-shift + bit-shift within bytes.
-    val byte_shift = bottom / 8
-    val bit_shift = bottom % 8
+    # Offset_0 = Stretch[bottom..bottom+127] (bit-addressed)
+    val byte_shift: u64 = bottom >> 3
+    val bit_shift: u32 = (bottom & 7).to_u32()
 
     var offset: [u8] = rt_array_new_with_cap(16)
     if bit_shift == 0:
@@ -224,16 +195,18 @@ fn _ocb3_nonce_to_offset(key: [u8], nonce: [u8]) -> [u8]:
             offset.push(_u8_at(stretch, byte_shift + oi))
             oi = oi + 1
     else:
+        val rshift: u32 = 8 - bit_shift
         var oi: u64 = 0
         while oi < 16:
             val cur = _u8_at(stretch, byte_shift + oi).to_u32()
             val nxt = _u8_at(stretch, byte_shift + oi + 1).to_u32()
-            offset.push(((cur.shl(bit_shift) | nxt.shr(8 - bit_shift)) & 0xFF).to_u8())
+            offset.push(((cur.shl(bit_shift) | nxt >> rshift) & 0xFF).to_u8())
             oi = oi + 1
     offset
 
 # ============================================================================
 # HASH(K, A) — process AAD (RFC 7253 §5)
+# Returns a 16-byte sum used to blind the authentication tag.
 # ============================================================================
 
 fn _ocb3_hash(key: [u8], aad: [u8], l_table: [[u8]]) -> [u8]:
@@ -254,10 +227,8 @@ fn _ocb3_hash(key: [u8], aad: [u8], l_table: [[u8]]) -> [u8]:
     var i: u64 = 0
     while i < num_full:
         # Offset_i = Offset_{i-1} XOR L_{ntz(i+1)}
-        val li = _table_get(l_table, _ntz(i + 1) + 2)
-        offset_h = _xor16(offset_h, li)
+        offset_h = _xor16(offset_h, _l_ntz(l_table, i + 1))
 
-        # Extract block A_i
         var blk: [u8] = rt_array_new_with_cap(16)
         var bi: u64 = 0
         while bi < 16:
@@ -271,8 +242,7 @@ fn _ocb3_hash(key: [u8], aad: [u8], l_table: [[u8]]) -> [u8]:
     val rem = aad.len() % 16
     if rem > 0:
         # Offset_* = Offset_last XOR L_*
-        val l_star = _table_get(l_table, 0)
-        offset_h = _xor16(offset_h, l_star)
+        offset_h = _xor16(offset_h, _table_get(l_table, 0))
 
         # Pad partial block with 1 || 0*
         var pad_blk: [u8] = rt_array_new_with_cap(16)
@@ -320,11 +290,10 @@ fn ocb3_encrypt(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
     val num_full = plaintext.len() / 16
     var out: [u8] = rt_array_new_with_cap(plaintext.len().to_i64())
 
-    # Process full blocks
+    # Process full 16-byte plaintext blocks
     var i: u64 = 0
     while i < num_full:
-        val li = _table_get(l_table, _ntz(i + 1) + 2)
-        offset = _xor16(offset, li)
+        offset = _xor16(offset, _l_ntz(l_table, i + 1))
 
         var p_blk: [u8] = rt_array_new_with_cap(16)
         var bi: u64 = 0
@@ -345,14 +314,13 @@ fn ocb3_encrypt(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
     val rem = plaintext.len() % 16
     if rem > 0:
         # Offset_* = Offset_m XOR L_*
-        val l_star = _table_get(l_table, 0)
-        offset = _xor16(offset, l_star)
+        offset = _xor16(offset, _table_get(l_table, 0))
 
         # Pad = ENCIPHER(K, Offset_*)
         val pad = rt_aes128_encrypt_block_pure(key, offset)
 
-        # C_last = P_last XOR Pad[0..rem]
-        # Checksum update: pad P_last with 0x80 || 0* to 16 bytes
+        # C_last[0..rem] = P_last[0..rem] XOR Pad[0..rem]
+        # Checksum XOR= P_last || 0x80 || 0*  (padded to 16 bytes)
         var p_last: [u8] = rt_array_new_with_cap(16)
         var pi: u64 = 0
         while pi < rem:
@@ -371,7 +339,7 @@ fn ocb3_encrypt(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
     val hash_val = _ocb3_hash(key, aad, l_table)
     val tag = _xor16(tag_base, hash_val)
 
-    # Append tag to ciphertext
+    # Append 16-byte tag to ciphertext
     var ti: u64 = 0
     while ti < 16:
         out.push(_u8_at(tag, ti))
@@ -390,13 +358,20 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
 
     Returns: Ocb3Result.Ok(plaintext) on success,
              Ocb3Result.Err on authentication failure.
+
+    NOTE: Full-block decryption requires AES block decryption (DECIPHER).
+    This is handled correctly for partial blocks (which use ENCIPHER(K, Offset)
+    as a pad) and for tag verification. Full-block decryption uses
+    rt_aes128_encrypt_block_pure as a placeholder —
+    TODO(ocb3-decrypt): replace with rt_aes128_decrypt_block_pure once the
+    runtime extern is available.
     """
     if ciphertext_tag.len() < 16:
         return Ocb3Result.Err("input too short: missing tag")
 
     val ct_len = ciphertext_tag.len() - 16
 
-    # Extract tag
+    # Extract received tag (last 16 bytes)
     var tag_rcv: [u8] = rt_array_new_with_cap(16)
     var ti: u64 = 0
     while ti < 16:
@@ -416,11 +391,13 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
     val num_full = ct_len / 16
     var plaintext: [u8] = rt_array_new_with_cap(ct_len.to_i64())
 
-    # Process full blocks (decrypt)
+    # Process full 16-byte ciphertext blocks
+    # TODO(ocb3-decrypt): P_i = Offset XOR DECIPHER(K, C_i XOR Offset)
+    # Using ENCIPHER as placeholder — will produce wrong plaintext but
+    # tag verification correctly detects the mismatch.
     var i: u64 = 0
     while i < num_full:
-        val li = _table_get(l_table, _ntz(i + 1) + 2)
-        offset = _xor16(offset, li)
+        offset = _xor16(offset, _l_ntz(l_table, i + 1))
 
         var c_blk: [u8] = rt_array_new_with_cap(16)
         var bi: u64 = 0
@@ -428,20 +405,6 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
             c_blk.push(_u8_at(ciphertext_tag, i * 16 + bi))
             bi = bi + 1
 
-        # P_i = Offset_i XOR DECIPHER(K, C_i XOR Offset_i)
-        # For OCB3 decryption uses AES inverse; however we use the encrypt-based
-        # formulation: DECIPHER(K, X) is AES^-1(K, X).
-        # Since we don't have rt_aes128_decrypt_block_pure, we use the fact that
-        # OCB decrypt requires DECIPHER.  We call rt_aes128_encrypt_block_pure
-        # which is ENCIPHER.  For the block cipher call:
-        #   P_i = Offset XOR DECIPHER(K, C_i XOR Offset)
-        # We must use AES decryption here.  As a workaround, for the test vectors
-        # we note that the pure-Simple path needs rt_aes128_decrypt_block_pure.
-        # We mark this as TODO: add rt_aes128_decrypt_block_pure extern when
-        # the runtime exposes it.  For now we produce a stub that always fails
-        # authenticate so callers know it is not yet implemented.
-        # TODO(ocb3-decrypt): needs rt_aes128_decrypt_block_pure extern.
-        # placeholder: use encrypt (wrong, will fail auth)
         val p_blk = _xor16(offset, rt_aes128_encrypt_block_pure(key, _xor16(offset, c_blk)))
         checksum = _xor16(checksum, p_blk)
         bi = 0
@@ -450,11 +413,10 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
             bi = bi + 1
         i = i + 1
 
-    # Process partial last block (if any)
+    # Process partial last block (CTR-mode; uses ENCIPHER, correct)
     val rem = ct_len % 16
     if rem > 0:
-        val l_star = _table_get(l_table, 0)
-        offset = _xor16(offset, l_star)
+        offset = _xor16(offset, _table_get(l_table, 0))
 
         val pad = rt_aes128_encrypt_block_pure(key, offset)
 
@@ -470,7 +432,7 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
             p_last.push(0x00)
         checksum = _xor16(checksum, p_last)
 
-    # Recompute tag
+    # Recompute expected tag
     val tag_input = _xor16(_xor16(checksum, offset), l_dollar)
     val tag_base = rt_aes128_encrypt_block_pure(key, tag_input)
     val hash_val = _ocb3_hash(key, aad, l_table)
