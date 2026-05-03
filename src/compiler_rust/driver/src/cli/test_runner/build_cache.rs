@@ -149,7 +149,10 @@ impl BuildCache {
             .filter(|candidate| candidate.exists())
             .unwrap_or_else(|| source.to_path_buf());
 
-        let project = ProjectContext::detect(&project_source)
+        let project_root = detect_native_test_project_root(&project_source)
+            .or_else(|| ProjectContext::detect(&project_source).ok().map(|ctx| ctx.root))
+            .ok_or_else(|| format!("Failed to detect project root for {}", source.display()))?;
+        let project = ProjectContext::new(project_root)
             .map_err(|e| format!("Failed to detect project for {}: {}", source.display(), e))?;
 
         let mut config = NativeBuildConfig {
@@ -227,6 +230,19 @@ fn native_test_source_dirs(project_root: &Path) -> Vec<PathBuf> {
     }
 
     dirs
+}
+
+fn detect_native_test_project_root(source: &Path) -> Option<PathBuf> {
+    let mut current = source.parent();
+    while let Some(dir) = current {
+        let src_dir = dir.join("src");
+        let test_dir = dir.join("test");
+        if src_dir.is_dir() && test_dir.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 #[cfg(test)]
