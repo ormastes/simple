@@ -16,6 +16,10 @@ Exposed API:
   sm4_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]
 
 No SFFI/Rust FFI — pure Simple, suitable for baremetal.
+
+Interpreter note: local [u32] var push is broken in the interpreter; all
+array-building uses the parameter-push workaround (push into a parameter
+array, not a local var). See feedback_it_block_var_mutation.md.
 """
 
 # ============================================================================
@@ -67,12 +71,11 @@ fn _sm4_sbox() -> [u8]:
     ]
 
 # ============================================================================
-# System parameters FK and constant key CK
+# FK and CK array builders — use parameter pattern to avoid local-push bug
 # ============================================================================
 
-fn _sm4_fk() -> [u32]:
-    """FK system parameters (GB/T 32907-2016 §6.2)."""
-    var fk: [u32] = []
+fn _sm4_fill_fk(fk: [u32]):
+    """Fill FK system parameters into parameter array."""
     var v: u32 = 0xA3B1BAC6
     fk.push(v)
     v = 0x56AA3350
@@ -81,12 +84,9 @@ fn _sm4_fk() -> [u32]:
     fk.push(v)
     v = 0xB27022DC
     fk.push(v)
-    fk
 
-fn _sm4_ck() -> [u32]:
-    """CK constant key array (GM/T 0002-2012 §6.2 Table 2), 32 words.
-    CK[i]: byte j = (4i+j)*7 mod 256, packed big-endian."""
-    var ck: [u32] = []
+fn _sm4_fill_ck(ck: [u32]):
+    """Fill CK constant key array (32 words) into parameter array."""
     var v: u32 = 0x00070E15
     ck.push(v)
     v = 0x1C232A31
@@ -151,7 +151,6 @@ fn _sm4_ck() -> [u32]:
     ck.push(v)
     v = 0x646B7279
     ck.push(v)
-    ck
 
 # ============================================================================
 # tau: apply S-box to each byte of a u32 word
@@ -166,32 +165,24 @@ fn _sm4_tau(sbox: [u8], word: u32) -> u32:
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 # ============================================================================
-# Linear transform L (round function)
-# L(B) = B XOR (B<<<2) XOR (B<<<10) XOR (B<<<18) XOR (B<<<24)
+# Linear transforms
 # ============================================================================
 
 fn _sm4_L(b: u32) -> u32:
-    """SM4 linear transform L for the round function."""
+    """SM4 linear transform L for the round function.
+    L(B) = B XOR (B<<<2) XOR (B<<<10) XOR (B<<<18) XOR (B<<<24)"""
     val r2 = _sm4_rotl32(b, 2)
     val r10 = _sm4_rotl32(b, 10)
     val r18 = _sm4_rotl32(b, 18)
     val r24 = _sm4_rotl32(b, 24)
     b ^ r2 ^ r10 ^ r18 ^ r24
 
-# ============================================================================
-# Linear transform L' (key expansion)
-# L'(B) = B XOR (B<<<13) XOR (B<<<23)
-# ============================================================================
-
 fn _sm4_L_prime(b: u32) -> u32:
-    """SM4 linear transform L' for the key schedule."""
+    """SM4 linear transform L' for the key schedule.
+    L'(B) = B XOR (B<<<13) XOR (B<<<23)"""
     val r13 = _sm4_rotl32(b, 13)
     val r23 = _sm4_rotl32(b, 23)
     b ^ r13 ^ r23
-
-# ============================================================================
-# T and T' transforms
-# ============================================================================
 
 fn _sm4_T(sbox: [u8], a: u32) -> u32:
     """Full nonlinear transform T = L(tau(A)) for the round function."""
@@ -202,12 +193,11 @@ fn _sm4_T_prime(sbox: [u8], a: u32) -> u32:
     _sm4_L_prime(_sm4_tau(sbox, a))
 
 # ============================================================================
-# Block I/O — big-endian byte <-> u32 word conversion (SM4 is big-endian)
+# Block I/O — big-endian byte <-> u32 word conversion
 # ============================================================================
 
-fn _sm4_load_block_be(b: [u8]) -> [u32]:
-    """Load 16 bytes as 4 u32 words, big-endian."""
-    var out: [u32] = []
+fn _sm4_fill_block_be(b: [u8], out: [u32]):
+    """Load 16 bytes as 4 big-endian u32 words into parameter array."""
     var i: i64 = 0
     while i < 4:
         val base = i * 4
@@ -217,20 +207,58 @@ fn _sm4_load_block_be(b: [u8]) -> [u32]:
                    b[base + 3].to_u32()
         out.push(word)
         i = i + 1
-    out
 
-fn _sm4_store_block_be(words: [u32]) -> [u8]:
-    """Store 4 u32 words as 16 bytes, big-endian."""
-    var out: [u8] = []
+fn _sm4_fill_bytes_be(words: [u32], idx0: i64, idx1: i64, idx2: i64, idx3: i64, out: [u8]):
+    """Store 4 words (by explicit indices) as 16 big-endian bytes into parameter array."""
+    val w0 = words[idx0]
+    val w1 = words[idx1]
+    val w2 = words[idx2]
+    val w3 = words[idx3]
+    out.push(((w0 >> 24) & 0xFF).to_u8())
+    out.push(((w0 >> 16) & 0xFF).to_u8())
+    out.push(((w0 >> 8) & 0xFF).to_u8())
+    out.push((w0 & 0xFF).to_u8())
+    out.push(((w1 >> 24) & 0xFF).to_u8())
+    out.push(((w1 >> 16) & 0xFF).to_u8())
+    out.push(((w1 >> 8) & 0xFF).to_u8())
+    out.push((w1 & 0xFF).to_u8())
+    out.push(((w2 >> 24) & 0xFF).to_u8())
+    out.push(((w2 >> 16) & 0xFF).to_u8())
+    out.push(((w2 >> 8) & 0xFF).to_u8())
+    out.push((w2 & 0xFF).to_u8())
+    out.push(((w3 >> 24) & 0xFF).to_u8())
+    out.push(((w3 >> 16) & 0xFF).to_u8())
+    out.push(((w3 >> 8) & 0xFF).to_u8())
+    out.push((w3 & 0xFF).to_u8())
+
+# ============================================================================
+# Key expansion helpers — all use parameter-push pattern
+# ============================================================================
+
+fn _sm4_fill_K_init(mk: [u32], fk: [u32], K: [u32]):
+    """Fill K[0..3] = MK[i] XOR FK[i] into parameter array K."""
     var i: i64 = 0
     while i < 4:
-        val w = words[i]
-        out.push(((w >> 24) & 0xFF).to_u8())
-        out.push(((w >> 16) & 0xFF).to_u8())
-        out.push(((w >> 8) & 0xFF).to_u8())
-        out.push((w & 0xFF).to_u8())
+        var v: u32 = mk[i] ^ fk[i]
+        K.push(v)
         i = i + 1
-    out
+
+fn _sm4_fill_rk(sbox: [u8], K: [u32], ck: [u32], rk: [u32]):
+    """Generate 32 round keys into parameter array rk; extends K as well."""
+    var i: i64 = 0
+    while i < 32:
+        var v: u32 = K[i] ^ _sm4_T_prime(sbox, K[i + 1] ^ K[i + 2] ^ K[i + 3] ^ ck[i])
+        rk.push(v)
+        K.push(v)
+        i = i + 1
+
+fn _sm4_fill_rk_reversed(rk_fwd: [u32], rk_rev: [u32]):
+    """Fill rk_rev with reversed round keys from rk_fwd."""
+    var i: i64 = 31
+    while i >= 0:
+        var v: u32 = rk_fwd[i]
+        rk_rev.push(v)
+        i = i - 1
 
 # ============================================================================
 # Key expansion — expand 128-bit key to 32 round keys
@@ -245,33 +273,26 @@ fn sm4_key_expand(key: [u8]) -> [u32]:
     3. rk[i] = K[i+4] = K[i] XOR T'(K[i+1] XOR K[i+2] XOR K[i+3] XOR CK[i])
     """
     val sbox = _sm4_sbox()
-    val fk = _sm4_fk()
-    val ck = _sm4_ck()
 
-    # Load key as big-endian u32
-    val mk = _sm4_load_block_be(key)
+    var fk: [u32] = []
+    _sm4_fill_fk(fk)
 
-    # Initialize K[0..3] = MK XOR FK
+    var ck: [u32] = []
+    _sm4_fill_ck(ck)
+
+    var mk: [u32] = []
+    _sm4_fill_block_be(key, mk)
+
     var K: [u32] = []
-    var ki: i64 = 0
-    while ki < 4:
-        K.push(mk[ki] ^ fk[ki])
-        ki = ki + 1
+    _sm4_fill_K_init(mk, fk, K)
 
-    # Generate 32 round keys
     var rk: [u32] = []
-    var i: i64 = 0
-    while i < 32:
-        val t = K[i] ^ _sm4_T_prime(sbox, K[i + 1] ^ K[i + 2] ^ K[i + 3] ^ ck[i])
-        rk.push(t)
-        K.push(t)
-        i = i + 1
+    _sm4_fill_rk(sbox, K, ck, rk)
 
     rk
 
 # ============================================================================
-# Core encrypt/decrypt function — takes pre-expanded round keys
-# Decrypt uses reversed round keys (rk[31..0])
+# Core encrypt/decrypt function
 # ============================================================================
 
 fn _sm4_crypt_core(sbox: [u8], rk: [u32], block: [u8]) -> [u8]:
@@ -279,23 +300,20 @@ fn _sm4_crypt_core(sbox: [u8], rk: [u32], block: [u8]) -> [u8]:
 
     Output is (X[35], X[34], X[33], X[32]) — SM4 R-transform reversal.
     """
-    var X = _sm4_load_block_be(block)
+    var X: [u32] = []
+    _sm4_fill_block_be(block, X)
 
-    # 32 rounds
+    # 32 rounds — push new word onto X each round
     var r: i64 = 0
     while r < 32:
-        val t = X[r] ^ _sm4_T(sbox, X[r + 1] ^ X[r + 2] ^ X[r + 3] ^ rk[r])
-        X.push(t)
+        var v: u32 = X[r] ^ _sm4_T(sbox, X[r + 1] ^ X[r + 2] ^ X[r + 3] ^ rk[r])
+        X.push(v)
         r = r + 1
 
-    # R-transform: output = (X[35], X[34], X[33], X[32])
-    var result: [u32] = []
-    result.push(X[35])
-    result.push(X[34])
-    result.push(X[33])
-    result.push(X[32])
-
-    _sm4_store_block_be(result)
+    # R-transform: output = (X[35], X[34], X[33], X[32]) big-endian
+    var result: [u8] = []
+    _sm4_fill_bytes_be(X, 35, 34, 33, 32, result)
+    result
 
 # ============================================================================
 # Public API
@@ -320,11 +338,7 @@ fn sm4_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]:
     val sbox = _sm4_sbox()
     val rk_fwd = sm4_key_expand(key)
 
-    # Reverse round keys
     var rk: [u32] = []
-    var i: i64 = 31
-    while i >= 0:
-        rk.push(rk_fwd[i])
-        i = i - 1
+    _sm4_fill_rk_reversed(rk_fwd, rk)
 
     _sm4_crypt_core(sbox, rk, ciphertext)

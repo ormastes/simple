@@ -249,3 +249,114 @@ fn emit_pclmulqdq(dst: i64, src: i64, imm8: i64) -> [i64]:
         [0x66, rex, 0x0F, 0x3A, 0x44, modrm, imm8]
     else:
         [0x66, 0x0F, 0x3A, 0x44, modrm, imm8]
+
+# ============================================================================
+# VEX-encoded AES and PCLMULQDQ Instructions (3-operand, non-destructive)
+#
+# VEX 3-byte prefix (C4h) encoding for 128-bit XMM forms (L=0, W=0):
+#
+#   Byte 0: 0xC4
+#   Byte 1: ~R  ~X  ~B  m4 m3 m2 m1 m0
+#     ~R   = 1 when dst  < 8, else 0  (inverted REX.R — extends ModRM.reg)
+#     ~X   = 1 (no SIB index for register-register operands)
+#     ~B   = 1 when src2 < 8, else 0  (inverted REX.B — extends ModRM.rm)
+#     mmmmm= 00010 (2) for 0F 38 map; 00011 (3) for 0F 3A map
+#   Byte 2: W  ~v3 ~v2 ~v1 ~v0  L  p1 p0
+#     W    = 0 (128-bit integer form)
+#     ~vvvv= inverted 4-bit src1 index (15 - src1 for src1 in 0..15)
+#     L    = 0 (128-bit vector length)
+#     pp   = 01 (66h mandatory prefix)
+#   Byte 3: opcode
+#   Byte 4: ModRM — mod=11, reg=dst%8, rm=src2%8
+#
+# Arithmetic used for bit-packing (per project rule — no bit-shift ops):
+#   byte1_0f38(dst, src2) = 128*(1 - dst/8) + 64 + 32*(1 - src2/8) + 2
+#                         = 226 - 128*(dst/8) - 32*(src2/8)
+#   byte1_0f3a(dst, src2) = 226 - 128*(dst/8) - 32*(src2/8) + 1
+#                         = 227 - 128*(dst/8) - 32*(src2/8)
+#   byte2(src1)           = (15 - src1)*8 + 1
+#
+# Reference: Intel SDM Vol 2A §2.3.5 (VEX Prefix), Table 2-9.
+# ============================================================================
+
+fn _vex_byte1_0f38(dst: i64, src2: i64) -> i64:
+    """
+    VEX Byte 1 for 0F 38 map (mmmmm=2), register-register.
+    ~R=1-dst/8, ~X=1, ~B=1-src2/8, mmmmm=2.
+    """
+    226 - (dst / 8) * 128 - (src2 / 8) * 32
+
+fn _vex_byte1_0f3a(dst: i64, src2: i64) -> i64:
+    """
+    VEX Byte 1 for 0F 3A map (mmmmm=3), register-register.
+    ~R=1-dst/8, ~X=1, ~B=1-src2/8, mmmmm=3.
+    """
+    227 - (dst / 8) * 128 - (src2 / 8) * 32
+
+fn _vex_byte2(src1: i64) -> i64:
+    """
+    VEX Byte 2: W=0, ~vvvv=(15-src1), L=0, pp=01 (66h prefix).
+    = (15 - src1)*8 + 1
+    """
+    (15 - src1) * 8 + 1
+
+fn _emit_vaesni_0f38(dst: i64, src1: i64, src2: i64, opcode: i64) -> [i64]:
+    """
+    Core helper for VEX-encoded AES-NI ops: VEX.128.66.0F38 <opcode> /r
+    dst, src1, src2: XMM register indices 0..15.
+    """
+    val b1 = _vex_byte1_0f38(dst, src2)
+    val b2 = _vex_byte2(src1)
+    val modrm = _modrm_direct(dst, src2)
+    [0xC4, b1, b2, opcode, modrm]
+
+fn emit_vaesenc(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    VAESENC dst, src1, src2 — VEX 3-operand AES encryption round.
+    Encoding: VEX.128.66.0F38 DC /r
+    Non-destructive: dst ← AesRound(src1, src2); src1 unchanged.
+    dst, src1, src2: XMM register indices 0..15.
+    Example: emit_vaesenc(1, 2, 3) → [0xC4, 0xE2, 0x69, 0xDC, 0xCB]
+    """
+    _emit_vaesni_0f38(dst, src1, src2, 0xDC)
+
+fn emit_vaesenclast(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    VAESENCLAST dst, src1, src2 — VEX final AES encryption round.
+    Encoding: VEX.128.66.0F38 DD /r
+    Non-destructive: dst ← AesRoundLast(src1, src2).
+    dst, src1, src2: XMM register indices 0..15.
+    """
+    _emit_vaesni_0f38(dst, src1, src2, 0xDD)
+
+fn emit_vaesdec(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    VAESDEC dst, src1, src2 — VEX AES decryption round.
+    Encoding: VEX.128.66.0F38 DE /r
+    Non-destructive: dst ← AesInvRound(src1, src2).
+    dst, src1, src2: XMM register indices 0..15.
+    """
+    _emit_vaesni_0f38(dst, src1, src2, 0xDE)
+
+fn emit_vaesdeclast(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    VAESDECLAST dst, src1, src2 — VEX final AES decryption round.
+    Encoding: VEX.128.66.0F38 DF /r
+    Non-destructive: dst ← AesInvRoundLast(src1, src2).
+    dst, src1, src2: XMM register indices 0..15.
+    """
+    _emit_vaesni_0f38(dst, src1, src2, 0xDF)
+
+fn emit_vpclmulqdq(dst: i64, src1: i64, src2: i64, imm8: i64) -> [i64]:
+    """
+    VPCLMULQDQ dst, src1, src2, imm8 — VEX carry-less quadword multiply.
+    Encoding: VEX.128.66.0F3A 44 /r ib
+    Non-destructive 3-operand form: dst ← Clmul(src1, src2, imm8).
+    dst, src1, src2: XMM register indices 0..15.
+    imm8: lane selector (0x00=LowxLow, 0x01=LowxHigh, 0x10=HighxLow, 0x11=HighxHigh).
+    Example: emit_vpclmulqdq(1, 2, 3, 0x00) → [0xC4, 0xE2, 0x69, 0x44, 0xCB, 0x00]
+    """
+    val b1 = _vex_byte1_0f3a(dst, src2)
+    val b2 = _vex_byte2(src1)
+    val modrm = _modrm_direct(dst, src2)
+    [0xC4, b1, b2, 0x44, modrm, imm8]

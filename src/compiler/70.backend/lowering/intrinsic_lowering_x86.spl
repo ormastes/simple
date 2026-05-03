@@ -3,22 +3,35 @@
 # Maps canonical MirInstKind.Intrinsic `name` strings to x86_64 byte sequences
 # via the emit_* helpers in encode_x86_64_crypto.spl, gated by X86Caps.supports.
 #
+# When caps.has_avx is true, AES and PCLMULQDQ intrinsics are lowered to VEX
+# 3-operand forms (non-destructive: dst ← op(src1, src2)).  When has_avx is
+# false (legacy SSE), the 2-operand destructive forms are used instead.
+#
 # Arity contract (positional args list):
-#   crypto_aes_round          args=[dst, src]             -> 2
-#   crypto_aes_round_last     args=[dst, src]             -> 2
-#   crypto_aes_inv_round      args=[dst, src]             -> 2
-#   crypto_aes_inv_round_last args=[dst, src]             -> 2
-#   crypto_aes_imc            args=[dst, src]             -> 2
-#   crypto_aes_keygen_assist  args=[dst, src, rcon_u8]   -> 3
-#   crypto_sha256_rounds2     args=[dst, src, _implicit]  -> 3
-#     (third arg is implicit XMM0 in hardware; encoder takes dst+src only)
-#   crypto_sha256_msg1        args=[dst, src]             -> 2
-#   crypto_sha256_msg2        args=[dst, src]             -> 2
-#   crc32_u8                  args=[dst, src]             -> 2
-#   crc32_u32                 args=[dst, src]             -> 2
-#   crc32_u64                 args=[dst, src]             -> 2
-#   clmul_lo                  args=[dst, src]  imm8=0x00  -> 2
-#   clmul_hi                  args=[dst, src]  imm8=0x11  -> 2
+#   VEX path (has_avx=true):
+#     crypto_aes_round          args=[dst, src1, src2]             -> 3
+#     crypto_aes_round_last     args=[dst, src1, src2]             -> 3
+#     crypto_aes_inv_round      args=[dst, src1, src2]             -> 3
+#     crypto_aes_inv_round_last args=[dst, src1, src2]             -> 3
+#     clmul_lo                  args=[dst, src1, src2]  imm8=0x00  -> 3
+#     clmul_hi                  args=[dst, src1, src2]  imm8=0x11  -> 3
+#   Legacy SSE path (has_avx=false):
+#     crypto_aes_round          args=[dst, src]             -> 2
+#     crypto_aes_round_last     args=[dst, src]             -> 2
+#     crypto_aes_inv_round      args=[dst, src]             -> 2
+#     crypto_aes_inv_round_last args=[dst, src]             -> 2
+#     clmul_lo                  args=[dst, src]  imm8=0x00  -> 2
+#     clmul_hi                  args=[dst, src]  imm8=0x11  -> 2
+#   Common (arity unchanged):
+#     crypto_aes_imc            args=[dst, src]             -> 2
+#     crypto_aes_keygen_assist  args=[dst, src, rcon_u8]   -> 3
+#     crypto_sha256_rounds2     args=[dst, src, _implicit]  -> 3
+#       (third arg is implicit XMM0 in hardware; encoder takes dst+src only)
+#     crypto_sha256_msg1        args=[dst, src]             -> 2
+#     crypto_sha256_msg2        args=[dst, src]             -> 2
+#     crc32_u8                  args=[dst, src]             -> 2
+#     crc32_u32                 args=[dst, src]             -> 2
+#     crc32_u64                 args=[dst, src]             -> 2
 
 use compiler.mir.intrinsics.{
     CRYPTO_AES_ROUND, CRYPTO_AES_ROUND_LAST,
@@ -34,7 +47,9 @@ use compiler.backend.backend.native.encode_x86_64_crypto.{
     emit_aesimc, emit_aeskeygenassist,
     emit_sha256rnds2, emit_sha256msg1, emit_sha256msg2,
     emit_crc32_r32_r8, emit_crc32_r32_r32, emit_crc32_r64_r64,
-    emit_pclmulqdq
+    emit_pclmulqdq,
+    emit_vaesenc, emit_vaesenclast, emit_vaesdec, emit_vaesdeclast,
+    emit_vpclmulqdq
 }
 
 # ============================================================================
@@ -104,31 +119,57 @@ fn lower_cipher_intrinsic_x86(name: text, args: [i64], caps: X86Caps) -> Lowerin
             if not caps.supports(idiom):
                 return LoweringResult(empty, false, "no-cap")
 
-            # Step 3 + 4: arity check then emit
+            # Step 3 + 4: arity check then emit.
+            # AES round and CLMUL ops use VEX 3-operand forms when has_avx,
+            # otherwise fall back to legacy SSE 2-operand (destructive) forms.
             match name:
                 case "crypto_aes_round":
-                    if args.length != 2:
-                        return LoweringResult(empty, false, "bad-arity")
-                    var bytes = emit_aesenc(args[0], args[1])
-                    LoweringResult(bytes, true, "")
+                    if caps.has_avx:
+                        if args.length != 3:
+                            return LoweringResult(empty, false, "bad-arity")
+                        var bytes = emit_vaesenc(args[0], args[1], args[2])
+                        LoweringResult(bytes, true, "")
+                    else:
+                        if args.length != 2:
+                            return LoweringResult(empty, false, "bad-arity")
+                        var bytes = emit_aesenc(args[0], args[1])
+                        LoweringResult(bytes, true, "")
 
                 case "crypto_aes_round_last":
-                    if args.length != 2:
-                        return LoweringResult(empty, false, "bad-arity")
-                    var bytes = emit_aesenclast(args[0], args[1])
-                    LoweringResult(bytes, true, "")
+                    if caps.has_avx:
+                        if args.length != 3:
+                            return LoweringResult(empty, false, "bad-arity")
+                        var bytes = emit_vaesenclast(args[0], args[1], args[2])
+                        LoweringResult(bytes, true, "")
+                    else:
+                        if args.length != 2:
+                            return LoweringResult(empty, false, "bad-arity")
+                        var bytes = emit_aesenclast(args[0], args[1])
+                        LoweringResult(bytes, true, "")
 
                 case "crypto_aes_inv_round":
-                    if args.length != 2:
-                        return LoweringResult(empty, false, "bad-arity")
-                    var bytes = emit_aesdec(args[0], args[1])
-                    LoweringResult(bytes, true, "")
+                    if caps.has_avx:
+                        if args.length != 3:
+                            return LoweringResult(empty, false, "bad-arity")
+                        var bytes = emit_vaesdec(args[0], args[1], args[2])
+                        LoweringResult(bytes, true, "")
+                    else:
+                        if args.length != 2:
+                            return LoweringResult(empty, false, "bad-arity")
+                        var bytes = emit_aesdec(args[0], args[1])
+                        LoweringResult(bytes, true, "")
 
                 case "crypto_aes_inv_round_last":
-                    if args.length != 2:
-                        return LoweringResult(empty, false, "bad-arity")
-                    var bytes = emit_aesdeclast(args[0], args[1])
-                    LoweringResult(bytes, true, "")
+                    if caps.has_avx:
+                        if args.length != 3:
+                            return LoweringResult(empty, false, "bad-arity")
+                        var bytes = emit_vaesdeclast(args[0], args[1], args[2])
+                        LoweringResult(bytes, true, "")
+                    else:
+                        if args.length != 2:
+                            return LoweringResult(empty, false, "bad-arity")
+                        var bytes = emit_aesdeclast(args[0], args[1])
+                        LoweringResult(bytes, true, "")
 
                 case "crypto_aes_imc":
                     if args.length != 2:
