@@ -1,0 +1,86 @@
+"""
+# LZ4 Block Compression Round-Trip Tests
+
+**Feature IDs:** #COMPRESS-LZ4
+**Category:** Compression
+**Status:** Implemented
+"""
+
+use std.spec
+use compress.lz4.{lz4_compress_block, lz4_decompress_block}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn _make_repeated_bytes(byte_val: u8, count: i64) -> [u8]:
+    var result: [u8] = []
+    var idx = 0
+    while idx < count:
+        result.push(byte_val)
+        idx = idx + 1
+    result
+
+fn _make_hello_world_bytes() -> [u8]:
+    var data: [u8] = [0x48u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8, 0x2cu8, 0x20u8, 0x57u8, 0x6fu8, 0x72u8, 0x6cu8, 0x64u8, 0x21u8]
+    data
+
+fn _make_sequential_bytes(count: i64) -> [u8]:
+    var result: [u8] = []
+    var idx = 0
+    while idx < count:
+        val byte_val = (idx % 256).to_u8()
+        result.push(byte_val)
+        idx = idx + 1
+    result
+
+describe "LZ4 block compression":
+    it "round-trip Hello World":
+        val data = _make_hello_world_bytes()
+        val compressed = lz4_compress_block(data)
+        val result = lz4_decompress_block(compressed)
+        check(result.is_ok())
+        val decompressed = result.unwrap()
+        check(decompressed.len() == 13)
+        check(decompressed[0] == 0x48u8)
+        check(decompressed[1] == 0x65u8)
+        check(decompressed[4] == 0x6fu8)
+        check(decompressed[12] == 0x21u8)
+
+    it "round-trip repeated data compresses":
+        val data = _make_repeated_bytes(0x41u8, 10)
+        val compressed = lz4_compress_block(data)
+        val result = lz4_decompress_block(compressed)
+        check(result.is_ok())
+        val decompressed = result.unwrap()
+        check(decompressed.len() == 10)
+        check(decompressed[0] == 0x41u8)
+        check(decompressed[9] == 0x41u8)
+
+    it "round-trip empty input":
+        var empty: [u8] = []
+        val compressed = lz4_compress_block(empty)
+        val result = lz4_decompress_block(compressed)
+        check(result.is_ok())
+        val decompressed = result.unwrap()
+        check(decompressed.len() == 0)
+
+    it "round-trip longer data 128 bytes":
+        val data = _make_sequential_bytes(128)
+        val compressed = lz4_compress_block(data)
+        val result = lz4_decompress_block(compressed)
+        check(result.is_ok())
+        val decompressed = result.unwrap()
+        check(decompressed.len() == 128)
+        check(decompressed[0] == 0x00u8)
+        check(decompressed[127] == 0x7fu8)
+
+    it "repeated data compressed is smaller":
+        val data = _make_repeated_bytes(0x42u8, 1000)
+        val compressed = lz4_compress_block(data)
+        check(compressed.len() < 1000)
+        val result = lz4_decompress_block(compressed)
+        check(result.is_ok())
+        val decompressed = result.unwrap()
+        check(decompressed.len() == 1000)
+        check(decompressed[0] == 0x42u8)
+        check(decompressed[999] == 0x42u8)
