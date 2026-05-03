@@ -348,9 +348,9 @@ pub struct ResourceEntry {
 /// Calculate CRC32 checksum.
 pub fn crc32(data: &[u8]) -> u32 {
     // Simple CRC32 implementation (IEEE polynomial)
-    const POLYNOMIAL: u32 = 0xEDB88320;
+    const POLYNOMIAL: u32 = 0xEDB8_8320;
 
-    let mut crc = 0xFFFFFFFF;
+    let mut crc = 0xFFFF_FFFF;
     for &byte in data {
         crc ^= byte as u32;
         for _ in 0..8 {
