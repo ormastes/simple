@@ -921,7 +921,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn is_reserved_parameter_name(name: &str) -> bool {
+    pub(crate) fn is_reserved_parameter_name(name: &str) -> bool {
         matches!(
             name,
             "pass"

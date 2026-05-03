@@ -969,6 +969,105 @@ fn emit_bfcvtn2_v8bf16(rd: i64, rn: i64) -> [i64]:
     _bf16_2reg_encode(0x4EA16800, rd, rn)
 
 # ============================================================================
+# FCVTN / FCVTL / FCVTZS / FCVTZU — FP16 Conversion Instructions (ARMv8.2-A)
+# ============================================================================
+#
+# These are 2-register (Vd, Vn) Advanced SIMD instructions.
+# Encoding: base + (rn % 32) * 32 + (rd % 32) → 4 LE bytes.
+# All accept raw register indices 0-31 and return [i64] (4 bytes, little-endian).
+#
+# ARMv8.2-A FP16 extension required for FCVTN/FCVTL .4H/.8H variants.
+# FCVTZS/FCVTZU operate on .4S (f32→int32) and do not require FP16 extension.
+
+fn _fp16_2reg_encode(base: i64, rd: i64, rn: i64) -> [i64]:
+    """Encode 2-register FP16 conversion: base + Rn*32 + Rd → 4 LE bytes."""
+    val word = base + (rn % 32) * 32 + (rd % 32)
+    val b0 = word % 256
+    val b1 = (word / 256) % 256
+    val b2 = (word / 65536) % 256
+    val b3 = (word / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn emit_fcvtn_4h(rd: i64, rn: i64) -> [i64]:
+    """
+    Emit FCVTN Vd.4H, Vn.4S — narrow float32→float16 into lower half (Q=0).
+    Base opcode 0x0E216800: Q=0, U=0, sz=0, opcode=10110.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.67 FCVTN (vector, .4H form)
+    # Encoding: 0_Q_0_01110_0_sz_10001_11010_00_Rn_Rd
+    # Q=0 (64-bit result), sz=0 (fp16 output from fp32 input)
+    # Base word: 0x0E216800 → LE: 0x00 0x68 0x21 0x0E
+    # Canonical: FCVTN V0.4H, V0.4S → [0x00, 0x68, 0x21, 0x0E]
+    """
+    _fp16_2reg_encode(0x0E216800, rd, rn)
+
+fn emit_fcvtn2_8h(rd: i64, rn: i64) -> [i64]:
+    """
+    Emit FCVTN2 Vd.8H, Vn.4S — narrow float32→float16 into upper half (Q=1).
+    Base opcode 0x4E216800: Q=1, U=0, sz=0, opcode=10110.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.67 FCVTN (vector, .8H form, FCVTN2)
+    # Q=1 (128-bit, writes upper half of Vd.8H)
+    # Base word: 0x4E216800 → LE: 0x00 0x68 0x21 0x4E
+    # Canonical: FCVTN2 V0.8H, V0.4S → [0x00, 0x68, 0x21, 0x4E]
+    """
+    _fp16_2reg_encode(0x4E216800, rd, rn)
+
+fn emit_fcvtl_4s(rd: i64, rn: i64) -> [i64]:
+    """
+    Emit FCVTL Vd.4S, Vn.4H — widen float16→float32 from lower half (Q=0).
+    Base opcode 0x0E217800: Q=0, U=0, sz=0, opcode=10111.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.66 FCVTL (vector, .4S form)
+    # Q=0 (reads lower 4 lanes of Vn.4H, widens to Vd.4S)
+    # Base word: 0x0E217800 → LE: 0x00 0x78 0x21 0x0E
+    # Canonical: FCVTL V0.4S, V0.4H → [0x00, 0x78, 0x21, 0x0E]
+    """
+    _fp16_2reg_encode(0x0E217800, rd, rn)
+
+fn emit_fcvtl2_4s(rd: i64, rn: i64) -> [i64]:
+    """
+    Emit FCVTL2 Vd.4S, Vn.8H — widen float16→float32 from upper half (Q=1).
+    Base opcode 0x4E217800: Q=1, U=0, sz=0, opcode=10111.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.66 FCVTL (vector, .4S form, FCVTL2)
+    # Q=1 (reads upper 4 lanes of Vn.8H, widens to Vd.4S)
+    # Base word: 0x4E217800 → LE: 0x00 0x78 0x21 0x4E
+    # Canonical: FCVTL2 V0.4S, V0.8H → [0x00, 0x78, 0x21, 0x4E]
+    """
+    _fp16_2reg_encode(0x4E217800, rd, rn)
+
+fn emit_fcvtzs_4s(rd: i64, rn: i64) -> [i64]:
+    """
+    Emit FCVTZS Vd.4S, Vn.4S — float32→signed int32, truncate toward zero, 4 lanes.
+    Base opcode 0x4EA1B800: Q=1, U=0, sz=1 (f32), opcode=11011.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.68 FCVTZS (vector, integer, .4S form)
+    # Q=1 (128-bit), U=0 (signed), sz=1 (single-precision input)
+    # Base word: 0x4EA1B800 → LE: 0x00 0xB8 0xA1 0x4E
+    # Canonical: FCVTZS V0.4S, V0.4S → [0x00, 0xB8, 0xA1, 0x4E]
+    """
+    _fp16_2reg_encode(0x4EA1B800, rd, rn)
+
+fn emit_fcvtzu_4s(rd: i64, rn: i64) -> [i64]:
+    """
+    Emit FCVTZU Vd.4S, Vn.4S — float32→unsigned int32, truncate toward zero, 4 lanes.
+    Base opcode 0x6EA1B800: Q=1, U=1, sz=1 (f32), opcode=11011.
+    Raw register indices 0-31.
+
+    # ARMv8 ARM §C7.2.69 FCVTZU (vector, integer, .4S form)
+    # Q=1 (128-bit), U=1 (unsigned), sz=1 (single-precision input)
+    # Base word: 0x6EA1B800 → LE: 0x00 0xB8 0xA1 0x6E
+    # Canonical: FCVTZU V0.4S, V0.4S → [0x00, 0xB8, 0xA1, 0x6E]
+    """
+    _fp16_2reg_encode(0x6EA1B800, rd, rn)
+
+# ============================================================================
 # Exports
 # ============================================================================
 

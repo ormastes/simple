@@ -1,7 +1,8 @@
 # Parser: 64-bit hex literals lose precision (silent truncation)
 
-**Status:** OPEN. Severity: silent miscompute. Affects any code that needs
-exact 64-bit constants (crypto IVs, MASKS, S-boxes, large primes).
+**Status:** RESOLVED (already fixed). The lexer at `src/compiler_rust/parser/src/lexer/numbers.rs:57-64`
+already special-cases `NumericSuffix::U64` with `u64::from_str_radix`, preserving the full 64-bit
+pattern. Regression spec added at `test/unit/compiler/u64_hex_literal_precision_spec.spl`.
 **Path:** `bug` track. Parser/lexer.
 
 ## Symptom
