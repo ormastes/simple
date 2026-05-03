@@ -1,0 +1,179 @@
+# gzip (RFC 1952) Encoder/Decoder — Pure Simple Implementation
+#
+# Wraps raw DEFLATE (RFC 1951) with a 10-byte header, CRC-32, and ISIZE footer.
+#
+# Header layout (10 bytes):
+#   [0-1]  Magic: 0x1F 0x8B
+#   [2]    CM = 8 (deflate)
+#   [3]    FLG = 0 (no extra fields)
+#   [4-7]  MTIME = 0
+#   [8]    XFL = 0
+#   [9]    OS = 0xFF (unknown)
+#
+# Footer layout (8 bytes):
+#   [0-3]  CRC-32 of uncompressed data (LE)
+#   [4-7]  ISIZE = uncompressed size mod 2^32 (LE)
+#
+# Reference: RFC 1952 — GZIP file format specification version 4.3
+# ============================================================================
+
+use compress.deflate.{deflate_compress, deflate_decompress}
+use compress.utilities.{crc32_bytes}
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn gzip_crc32(data: [u8]) -> u32:
+    """Compute CRC-32 (IEEE 802.3) for gzip footer verification."""
+    crc32_bytes(data)
+
+fn gzip_compress(data: [u8]) -> [u8]:
+    """Compress data into gzip format (RFC 1952).
+
+    Produces a valid gzip stream: 10-byte header + DEFLATE body + 8-byte footer.
+    """
+    var result: [u8] = []
+
+    # Header (10 bytes)
+    var magic0: u8 = 0x1Fu8
+    result.push(magic0)
+    var magic1: u8 = 0x8Bu8
+    result.push(magic1)
+    var cm: u8 = 0x08u8
+    result.push(cm)
+    var flg: u8 = 0x00u8
+    result.push(flg)
+    # MTIME (4 bytes, all zero)
+    var zero: u8 = 0x00u8
+    result.push(zero)
+    var zero1: u8 = 0x00u8
+    result.push(zero1)
+    var zero2: u8 = 0x00u8
+    result.push(zero2)
+    var zero3: u8 = 0x00u8
+    result.push(zero3)
+    # XFL
+    var xfl: u8 = 0x00u8
+    result.push(xfl)
+    # OS = unknown
+    var os_byte: u8 = 0xFFu8
+    result.push(os_byte)
+
+    # DEFLATE body
+    val deflated = deflate_compress(data)
+    var di = 0
+    while di < deflated.len():
+        var db: u8 = deflated[di]
+        result.push(db)
+        di = di + 1
+
+    # Footer: CRC-32 (LE)
+    val crc: u32 = crc32_bytes(data)
+    var crc_b0: u8 = (crc & 0xFFu32).to_u8()
+    result.push(crc_b0)
+    var crc_b1: u8 = ((crc >> 8) & 0xFFu32).to_u8()
+    result.push(crc_b1)
+    var crc_b2: u8 = ((crc >> 16) & 0xFFu32).to_u8()
+    result.push(crc_b2)
+    var crc_b3: u8 = ((crc >> 24) & 0xFFu32).to_u8()
+    result.push(crc_b3)
+
+    # Footer: ISIZE (LE) — uncompressed size mod 2^32
+    val isize_val: u32 = data.len().to_u32()
+    var is_b0: u8 = (isize_val & 0xFFu32).to_u8()
+    result.push(is_b0)
+    var is_b1: u8 = ((isize_val >> 8) & 0xFFu32).to_u8()
+    result.push(is_b1)
+    var is_b2: u8 = ((isize_val >> 16) & 0xFFu32).to_u8()
+    result.push(is_b2)
+    var is_b3: u8 = ((isize_val >> 24) & 0xFFu32).to_u8()
+    result.push(is_b3)
+
+    result
+
+fn gzip_decompress(data: [u8]) -> [u8]:
+    """Decompress a gzip stream (RFC 1952).
+
+    Returns the uncompressed payload, or an empty [u8] on any format error
+    (bad magic, unsupported CM, CRC mismatch, truncated stream).
+    """
+    # Minimum gzip: 10 header + 0 body + 8 footer = 18 bytes
+    if data.len() < 18:
+        return []
+
+    # Validate magic bytes
+    if data[0] != 0x1Fu8:
+        return []
+    if data[1] != 0x8Bu8:
+        return []
+
+    # Validate compression method = DEFLATE (8)
+    if data[2] != 0x08u8:
+        return []
+
+    val flg: u8 = data[3]
+
+    # Compute start of DEFLATE stream (skip optional header fields)
+    var offset: i64 = 10
+
+    # FEXTRA (bit 2)
+    if (flg.to_u32() & 0x04u32) != 0x00u32:
+        if offset + 2 > data.len():
+            return []
+        val xlen: i64 = data[offset].to_i64() + data[offset + 1].to_i64() * 256
+        offset = offset + 2 + xlen
+
+    # FNAME (bit 3) — null-terminated string
+    if (flg.to_u32() & 0x08u32) != 0x00u32:
+        while offset < data.len():
+            if data[offset] == 0x00u8:
+                offset = offset + 1
+                break
+            offset = offset + 1
+
+    # FCOMMENT (bit 4) — null-terminated string
+    if (flg.to_u32() & 0x10u32) != 0x00u32:
+        while offset < data.len():
+            if data[offset] == 0x00u8:
+                offset = offset + 1
+                break
+            offset = offset + 1
+
+    # FHCRC (bit 1) — 2-byte header CRC
+    if (flg.to_u32() & 0x02u32) != 0x00u32:
+        offset = offset + 2
+
+    # Bounds check after skipping header extensions
+    if offset + 8 > data.len():
+        return []
+
+    # Extract DEFLATE stream (everything between header and last 8 bytes)
+    val footer_start: i64 = data.len() - 8
+    var deflate_stream: [u8] = []
+    var si = offset
+    while si < footer_start:
+        var sb: u8 = data[si]
+        deflate_stream.push(sb)
+        si = si + 1
+
+    # Decompress DEFLATE
+    val decompressed = deflate_decompress(deflate_stream)
+
+    # Read stored CRC-32 from footer (little-endian)
+    val stored_crc: u32 = data[footer_start].to_u32() | (data[footer_start + 1].to_u32() << 8) | (data[footer_start + 2].to_u32() << 16) | (data[footer_start + 3].to_u32() << 24)
+
+    # Read stored ISIZE from footer (little-endian)
+    val stored_isize: u32 = data[footer_start + 4].to_u32() | (data[footer_start + 5].to_u32() << 8) | (data[footer_start + 6].to_u32() << 16) | (data[footer_start + 7].to_u32() << 24)
+
+    # Verify CRC-32
+    val computed_crc: u32 = crc32_bytes(decompressed)
+    if computed_crc != stored_crc:
+        return []
+
+    # Verify ISIZE
+    val computed_isize: u32 = decompressed.len().to_u32()
+    if computed_isize != stored_isize:
+        return []
+
+    decompressed
