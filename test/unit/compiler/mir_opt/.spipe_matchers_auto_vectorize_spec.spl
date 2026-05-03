@@ -26,6 +26,8 @@ use compiler.mir_opt.mir_opt.auto_vectorize.{
     VectorRecipeKind, VectorRecipe,
     mir_pattern_match_elementwise_loop,
     mir_pattern_match_reduction,
+    mir_pattern_match_matrix_kernel,
+    supports_elementwise_rewrite,
     run_auto_vectorize
 }
 use compiler.mir_opt.auto_vectorize_analysis.{LoopBounds, detect_bounds_from_block}
@@ -41,7 +43,7 @@ fn make_local(id: i64) -> LocalId:
     LocalId(id: id)
 
 fn make_block_id(id: i64) -> BlockId:
-    BlockId(id: id)
+    BlockId.new(id)
 
 fn make_const_op(val_text: text) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const("i64", val_text))
@@ -161,6 +163,20 @@ fn make_reduction_mul_block() -> MirBlock:
         make_add_const_inst(5, 4)
     ]
     MirBlock(id: make_block_id(6), label: nil, instructions: insts, terminator: make_jump_terminator())
+
+fn make_matrix_dot_block() -> MirBlock:
+    """
+    Simulates body of: acc = acc + a[i] * b[i]
+    One mul, one add, one induction increment, no store.
+    """
+    val insts = [
+        make_load_inst(10, 1),
+        make_load_inst(11, 2),
+        make_binop_inst(12, MirBinOp.Mul, 10, 11),
+        make_binop_inst(13, MirBinOp.Add, 9, 12),
+        make_add_const_inst(5, 4)
+    ]
+    MirBlock(id: make_block_id(7), label: nil, instructions: insts, terminator: make_jump_terminator())
 
 fn make_block_with_call() -> MirBlock:
     """§8 failure: function call in body — must prevent vectorisation."""
@@ -286,6 +302,22 @@ describe "AutoVectorize reduction pattern matcher — positive cases":
         val recipe = result.unwrap()
         expect recipe.vector_width > 0 == true
 
+describe "AutoVectorize matrix-kernel pattern matcher — positive cases":
+    it "recognises a canonical dot-product inner loop with fast_math":
+        val block = make_matrix_dot_block()
+        val result = mir_pattern_match_matrix_kernel(block, true)
+        expect result.? == true
+
+    it "matrix kernel recipe kind is MatrixKernel":
+        val block = make_matrix_dot_block()
+        val result = mir_pattern_match_matrix_kernel(block, true)
+        expect result.? == true
+        val recipe = result.unwrap()
+        val is_matrix = match recipe.kind:
+            case MatrixKernel: true
+            case _: false
+        expect is_matrix == true
+
 # ============================================================================
 # Negative cases — §8 failure modes
 # ============================================================================
@@ -371,6 +403,13 @@ describe "AutoVectorize W-recipe — elementwise recipe fields":
         expect result.? == true
         val recipe = result.unwrap()
         expect recipe.chunk_width > 0 == true
+
+    it "elementwise recipe index_locals tracks the induction variable":
+        val block = make_elementwise_block_add()
+        val result = mir_pattern_match_elementwise_loop(block)
+        expect result.? == true
+        val recipe = result.unwrap()
+        expect recipe.index_locals.len() == 1
 
 describe "AutoVectorize W-recipe — reduction recipe fields":
     it "reduction sum recipe accumulator is Some":
@@ -647,7 +686,9 @@ fn make_elementwise_add_recipe_for_rewrite() -> VectorRecipe:
         input_bases:   [make_local(10), make_local(11)],
         output_base:   Some(make_local(12)),
         accumulator:   nil,
-        chunk_width:   4
+        chunk_width:   4,
+        index_locals:  [make_local(4)],
+        store_value:   nil
     )
 
 fn make_elementwise_add_recipe_dynamic_n() -> VectorRecipe:
@@ -664,11 +705,13 @@ fn make_elementwise_add_recipe_dynamic_n() -> VectorRecipe:
         input_bases:   [make_local(10), make_local(11)],
         output_base:   Some(make_local(12)),
         accumulator:   nil,
-        chunk_width:   4
+        chunk_width:   4,
+        index_locals:  [make_local(4)],
+        store_value:   nil
     )
 
 fn make_elementwise_mul_recipe() -> VectorRecipe:
-    """Recipe for: for i in 0..16: out[i] = a[i] * b[i]  — mul, not add"""
+    """Recipe for: for i in 0..16: out[i] = a[i] * b[i]"""
     VectorRecipe(
         kind:          VectorRecipeKind.Elementwise,
         header_block:  make_block_id(1),
@@ -681,7 +724,28 @@ fn make_elementwise_mul_recipe() -> VectorRecipe:
         input_bases:   [make_local(10), make_local(11)],
         output_base:   Some(make_local(12)),
         accumulator:   nil,
-        chunk_width:   4
+        chunk_width:   4,
+        index_locals:  [make_local(4)],
+        store_value:   nil
+    )
+
+fn make_unsupported_div_recipe() -> VectorRecipe:
+    """Recipe for an unsupported div rewrite in phase 1."""
+    VectorRecipe(
+        kind:          VectorRecipeKind.Elementwise,
+        header_block:  make_block_id(1),
+        induction_var: make_local(4),
+        trip_count:    16,
+        element_type:  "f32",
+        vector_width:  4,
+        op_name:       "div_elementwise",
+        note:          "test recipe div",
+        input_bases:   [make_local(10), make_local(11)],
+        output_base:   Some(make_local(12)),
+        accumulator:   nil,
+        chunk_width:   4,
+        index_locals:  [make_local(4)],
+        store_value:   nil
     )
 
 fn make_elementwise_add_recipe_f32_no_fastmath() -> VectorRecipe:
@@ -698,7 +762,9 @@ fn make_elementwise_add_recipe_f32_no_fastmath() -> VectorRecipe:
         input_bases:   [make_local(10), make_local(11)],
         output_base:   Some(make_local(12)),
         accumulator:   nil,
-        chunk_width:   4
+        chunk_width:   4,
+        index_locals:  [make_local(4)],
+        store_value:   nil
     )
 
 # ============================================================================
@@ -730,14 +796,14 @@ describe "AutoVectorize N1-rewrite — elementwise-add divisible trip count (0..
     it "vec_loop block for i32x4 recipe has label vec_loop":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
-            [make_local(10), make_local(11)], make_local(12))
+            [make_local(10), make_local(11)], make_local(12), "add_elementwise")
         expect bb.label.? == true
         expect bb.label.unwrap() == "vec_loop"
 
     it "vec_loop block for i32x4 has >= 4 SIMD instructions":
         val ctx = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 1)
         val bb  = create_vector_loop_block(ctx, 1,
-            [make_local(10), make_local(11)], make_local(12))
+            [make_local(10), make_local(11)], make_local(12), "add_elementwise")
         # load_a + load_b + simd_add + simd_store + vi_inc = 5 instructions
         expect bb.instructions.len() >= 4 == true
 
@@ -817,34 +883,37 @@ describe "AutoVectorize N1-rewrite — refuses trip count < chunk_width (0..3, V
             input_bases:   [make_local(10), make_local(11)],
             output_base:   Some(make_local(12)),
             accumulator:   nil,
-            chunk_width:   4
+            chunk_width:   4,
+            index_locals:  [make_local(4)],
+            store_value:   nil
         )
         val result = rewrite_elementwise_add(recipe, func)
         expect result.blocks.len() == func.blocks.len()
 
 # ============================================================================
-# N1 negative: mul pattern → rewriter refuses (only add is rewritten in N1)
+# N1 negative: unsupported elementwise op → rewriter refuses
 # ============================================================================
 
-describe "AutoVectorize N1-rewrite — refuses elementwise-mul (N1-followup scope)":
-    it "mul recipe op_name does not contain add → function returned unchanged":
+describe "AutoVectorize N1-rewrite — refuses unsupported elementwise div":
+    it "div recipe is outside the phase-1 rewrite set":
         val orig_block = make_elementwise_block_mul()
         val func       = make_test_mir_function([orig_block], false)
-        val recipe     = make_elementwise_mul_recipe()
+        val recipe     = make_unsupported_div_recipe()
         val result     = rewrite_elementwise_add(recipe, func)
         expect result.blocks.len() == func.blocks.len()
 
+describe "AutoVectorize N1-rewrite — elementwise mul is in the phase-1 rewrite set":
+    it "mul recipe is accepted by the phase-1 rewrite gate":
+        expect supports_elementwise_rewrite("mul_elementwise") == true
+
 # ============================================================================
-# N1 negative: f32 without has_fast_math → rewriter refuses (conservative guard)
+# N1 positive: elementwise FP ops do not require fast-math
 # ============================================================================
 
-describe "AutoVectorize N1-rewrite — refuses f32 add without has_fast_math":
-    it "f32 elementwise-add with has_fast_math=false returns function unchanged":
-        val orig_block = make_elementwise_block_add()
-        val func       = make_test_mir_function([orig_block], false)
-        val recipe     = make_elementwise_add_recipe_f32_no_fastmath()
-        val result     = rewrite_elementwise_add(recipe, func)
-        expect result.blocks.len() == func.blocks.len()
+describe "AutoVectorize N1-rewrite — elementwise f32 add does not require fast_math":
+    it "f32 elementwise-add remains in the supported rewrite set without fast_math":
+        val recipe = make_elementwise_add_recipe_f32_no_fastmath()
+        expect supports_elementwise_rewrite(recipe.op_name) == true
 
 # ============================================================================
 # N1 codegen helper: create_vector_loop_block
@@ -853,11 +922,11 @@ describe "AutoVectorize N1-rewrite — refuses f32 add without has_fast_math":
 describe "AutoVectorize N1-codegen — create_vector_loop_block":
     it "produces a block with label vec_loop":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12))
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "add_elementwise")
         expect bb.label.? == true
         expect bb.label.unwrap() == "vec_loop"
 
     it "vec_loop block contains >= 4 instructions (load_a, load_b, add, store)":
         val ctx   = VectorizeContext(vector_width: 4, element_type: "i32", next_local: 100)
-        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12))
+        val bb    = create_vector_loop_block(ctx, 100, [make_local(10), make_local(11)], make_local(12), "xor_elementwise")
         expect bb.instructions.len() >= 4 == true

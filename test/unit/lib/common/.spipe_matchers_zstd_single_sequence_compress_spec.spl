@@ -1,0 +1,137 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.{CompressionCodec, CompressionLevel, CompressionOptions, CompressionError, default_compression_options}
+use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
+
+val HOST_VALID_FRESH_TABLE_FRAME: [u8] = [
+    0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8, 0x24u8, 0x86u8, 0xF5u8, 0x01u8,
+    0x00u8, 0x32u8, 0x04u8, 0x0Du8, 0x13u8, 0xC0u8, 0x25u8, 0x1Du8,
+    0x00u8, 0x24u8, 0x19u8, 0xB7u8, 0x14u8, 0x08u8, 0x49u8, 0x78u8,
+    0xBAu8, 0xFDu8, 0xFAu8, 0x6Bu8, 0x6Bu8, 0xD7u8, 0x3Cu8, 0x01u8,
+    0x0Cu8, 0x5Cu8, 0x31u8, 0xC5u8, 0x1Cu8, 0x36u8, 0xF4u8, 0xF5u8,
+    0x2Fu8, 0xE1u8, 0xE8u8, 0xA7u8, 0xA5u8, 0x47u8, 0x7Au8, 0x05u8,
+    0x58u8, 0x61u8, 0xBDu8, 0xD5u8, 0x24u8, 0x17u8, 0x19u8, 0xACu8,
+    0xFCu8, 0x01u8, 0xC8u8, 0x1Cu8, 0xBAu8, 0xE8u8, 0x22u8, 0x21u8,
+    0x01u8, 0x00u8, 0x03u8, 0x18u8, 0x68u8, 0x88u8, 0x02u8, 0xBBu8,
+    0x59u8, 0x9Fu8, 0xC9u8
+]
+
+fn _repeated_tail_payload() -> [u8]:
+    [
+        0x61u8, 0x62u8, 0x63u8,
+        0x61u8, 0x62u8, 0x63u8,
+        0x61u8, 0x62u8, 0x63u8,
+        0x61u8, 0x62u8, 0x63u8
+    ]
+
+fn _with_level(base: CompressionOptions, level_value: i64) -> CompressionOptions:
+    CompressionOptions(
+        codec: base.codec,
+        level: CompressionLevel(value: level_value),
+        checksum: base.checksum,
+        block_mode: base.block_mode,
+        dictionary_bytes: base.dictionary_bytes,
+        dictionary_id: base.dictionary_id,
+        content_size: base.content_size
+    )
+
+fn _with_checksum(base: CompressionOptions, checksum: bool) -> CompressionOptions:
+    CompressionOptions(
+        codec: base.codec,
+        level: base.level,
+        checksum: checksum,
+        block_mode: base.block_mode,
+        dictionary_bytes: base.dictionary_bytes,
+        dictionary_id: base.dictionary_id,
+        content_size: base.content_size
+    )
+
+fn _compressed_block(payload: [u8]) -> [u8]:
+    val header = 1 | (2 << 1) | (payload.len() << 3)
+    [
+        (header & 0xFF).to_u8(),
+        ((header >> 8) & 0xFF).to_u8(),
+        ((header >> 16) & 0xFF).to_u8()
+    ] + payload
+
+fn _host_rejected_direct_huf_frame() -> [u8]:
+    [
+        0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8,
+        0xA0u8,
+        0x04u8, 0x00u8, 0x00u8, 0x00u8
+    ] + _compressed_block([
+        0x42u8, 0x80u8, 0x01u8,
+        0x84u8, 0x43u8, 0x20u8, 0x10u8,
+        0x80u8, 0x0Du8,
+        0x00u8
+    ])
+
+fn _expect_compression_error(err: CompressionError, kind: text, message_part: text):
+    match err:
+        CompressionError.InvalidHeader(message):
+            expect kind == "InvalidHeader"
+            expect (message).contains(message_part)
+        CompressionError.UnsupportedFeature(message):
+            expect kind == "UnsupportedFeature"
+            expect (message).contains(message_part)
+        CompressionError.TruncatedInput(message):
+            expect kind == "TruncatedInput"
+            expect (message).contains(message_part)
+        CompressionError.ChecksumMismatch(message):
+            expect kind == "ChecksumMismatch"
+            expect (message).contains(message_part)
+        CompressionError.CorruptStream(message):
+            expect kind == "CorruptStream"
+            expect (message).contains(message_part)
+        CompressionError.SizeLimitExceeded(limit):
+            expect kind == "SizeLimitExceeded"
+            expect limit >= 0 == true
+
+describe "zstd repeated-tail encoder fallback":
+    it "keeps repeated tails on the raw-block path until a host-valid sequence encoder exists":
+        val payload = _repeated_tail_payload()
+        val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
+        expect (encoded[6] & 0x07u8) == 0x01u8
+        expect encoded.len() == 6 + 3 + payload.len()
+        expect zstd_decompress_frame(encoded).unwrap() == payload
+
+    it "fails closed on an exact host-zstd fresh-table single-stream frame with one predefined-table sequence":
+        expect HOST_VALID_FRESH_TABLE_FRAME[9] & 0x03u8 == 0x02u8
+        expect (HOST_VALID_FRESH_TABLE_FRAME[9] >> 2u8) & 0x03u8 == 0x00u8
+        expect HOST_VALID_FRESH_TABLE_FRAME[64] == 0x01u8
+        val decoded = zstd_decompress_frame(HOST_VALID_FRESH_TABLE_FRAME)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")
+
+    it "emits the exact raw-block frame bytes for repeated tails":
+        val payload = _repeated_tail_payload()
+        val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
+        expect(encoded).to_equal([
+            0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8,
+            0x20u8,
+            0x0Cu8,
+            0x61u8, 0x00u8, 0x00u8,
+            0x61u8, 0x62u8, 0x63u8,
+            0x61u8, 0x62u8, 0x63u8,
+            0x61u8, 0x62u8, 0x63u8,
+            0x61u8, 0x62u8, 0x63u8
+        ])
+
+    it "keeps level 1 on the raw-block fallback":
+        val payload = _repeated_tail_payload()
+        val options = _with_level(default_compression_options(CompressionCodec.zstd), 1)
+        val encoded = zstd_compress_frame(payload, options)
+        expect (encoded[6] & 0x07u8) == 0x01u8
+        expect zstd_decompress_frame(encoded).unwrap() == payload
+
+    it "preserves checksum on the repeated-tail raw-block fallback":
+        val payload = _repeated_tail_payload()
+        val options = _with_checksum(default_compression_options(CompressionCodec.zstd), true)
+        val encoded = zstd_compress_frame(payload, options)
+        expect (encoded[6] & 0x07u8) == 0x01u8
+        expect zstd_decompress_frame(encoded).unwrap() == payload
+
+    it "rejects the known host-invalid direct-Huffman single-stream fixture instead of accepting it internally":
+        val frame = _host_rejected_direct_huf_frame()
+        val decoded = zstd_decompress_frame(frame)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "UnsupportedFeature", "fresh-table compressed literals")

@@ -122,6 +122,14 @@ fn _zstd_append_single_segment_content_size(buf: [u8], content_size: i64) -> [u8
         return write_u32_le(buf, content_size.to_u32())
     write_u64_le(buf, content_size.to_u64())
 
+fn _zstd_append_block_header(buf: [u8], last_block: bool, block_type: i64, block_size: i64) -> [u8]:
+    val header = ((if last_block: 1 else: 0) | (block_type << 1) | (block_size << 3)).to_u32()
+    var next = buf
+    next.push((header & 0xFFu32).to_u8())
+    next.push(((header >> 8u32) & 0xFFu32).to_u8())
+    next.push(((header >> 16u32) & 0xFFu32).to_u8())
+    next
+
 fn zstd_compress_frame_for_tier(input: [u8], options: CompressionOptions, tier: CompressionSimdTier) -> [u8]:
     var out: [u8] = []
     out = write_u32_le(out, ZSTD_MAGIC)
@@ -138,16 +146,10 @@ fn zstd_compress_frame_for_tier(input: [u8], options: CompressionOptions, tier: 
         return out
     val all_same = _zstd_all_same(input)
     if all_same:
-        val header = (1 | (1 << 1) | (input.len() << 3)).to_u32()
-        out.push((header & 0xFFu32).to_u8())
-        out.push(((header >> 8u32) & 0xFFu32).to_u8())
-        out.push(((header >> 16u32) & 0xFFu32).to_u8())
+        out = _zstd_append_block_header(out, true, 1, input.len())
         out.push(input[0])
     else:
-        val header = (1 | (0 << 1) | (input.len() << 3)).to_u32()
-        out.push((header & 0xFFu32).to_u8())
-        out.push(((header >> 8u32) & 0xFFu32).to_u8())
-        out.push(((header >> 16u32) & 0xFFu32).to_u8())
+        out = _zstd_append_block_header(out, true, 0, input.len())
         out = append_bytes(out, input)
     if options.checksum:
         val checksum = (_zstd_xxh64_bytes_for_tier(input, 0u64, tier) & 0xFFFFFFFFu64).to_u32()
@@ -1045,31 +1047,23 @@ fn _zstd_parse_literals_section(input: [u8], block_start: i64, block_end: i64, p
     val payload_end = payload_start + compressed_size
     if payload_end > block_end:
         return Err(CompressionError.TruncatedInput("zstd compressed literals payload"))
-    var table_state: ZstdHufTableState? = previous_table_state
-    var data_start = payload_start
     if literals_type == 2:
-        if size_format == 0 or size_format == 2:
+        # Bounded support: accept only the host-pinned 3-byte-header single
+        # stream that carries direct Huffman weights in-band. Keep FSE-compressed
+        # weights, 4-byte headers, and all four-stream forms fenced off.
+        if size_format == 0 and input[payload_start].to_i64() >= 128:
             val literals_res = _zstd_decode_huffman_literals(input, payload_start, payload_end, regenerated_size)
             if literals_res.is_err():
                 return Err(literals_res.unwrap_err())
             val decoded = literals_res.unwrap()
             return Ok((ZstdLiteralsSection(literals: decoded.literals, bytes_used: header_size + compressed_size), decoded.table_state))
-        val weights_res = _zstd_parse_direct_weights(input, payload_start, payload_end)
-        if weights_res.is_err():
-            return Err(weights_res.unwrap_err())
-        val (weights, tree_size) = weights_res.unwrap()
-        val stream_table_res = _zstd_huf_build_table_from_weights(weights)
-        if stream_table_res.is_err():
-            return Err(stream_table_res.unwrap_err())
-        val stream_table = stream_table_res.unwrap()
-        table_state = Some(stream_table)
-        data_start = payload_start + tree_size
-        val four_stream_res = _zstd_decode_huffman_4streams(input, data_start, payload_end, regenerated_size, stream_table)
-        if four_stream_res.is_err():
-            return Err(four_stream_res.unwrap_err())
-        return Ok((ZstdLiteralsSection(literals: four_stream_res.unwrap(), bytes_used: header_size + compressed_size), table_state))
+        if size_format == 0 or size_format == 2:
+            return Err(CompressionError.UnsupportedFeature("zstd fresh-table compressed literals beyond the host-pinned single-stream direct-weight fixture are unsupported"))
+        return Err(CompressionError.UnsupportedFeature("zstd fresh-table compressed literals (four-stream) are not host-validated"))
     if previous_table_state == nil:
         return Err(CompressionError.UnsupportedFeature("zstd treeless literals need a prior Huffman table"))
+    var table_state: ZstdHufTableState? = previous_table_state
+    var data_start = payload_start
     table_state = previous_table_state
     val active_table = table_state ?? ZstdHufTableState(table_bits: 0, table: [])
     if size_format == 0 or size_format == 2:

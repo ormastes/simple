@@ -4,23 +4,17 @@
 **Feature IDs:** #PSFM-001
 **Category:** Compiler Backend
 **Difficulty:** 3/5
-**Status:** Draft (Phase 2 — awaiting Phase 5 implementation)
-**Requirements:** doc/02_requirements/feature/portable_simd_fp_modules.md
-**Plan:** doc/03_plan/agent_tasks/portable_simd_fp_modules.md
-**Design:** doc/05_design/portable_simd_fp_modules.md
-**Research:** N/A
-**Artifacts:** N/A
+**Status:** Active
+**Requirements:** doc/02_requirements/feature/simd_fixed_and_scalable_vectors.md
+**Plan:** doc/03_plan/agent_tasks/simd_fixed_and_scalable_vectors.md
+**Design:** doc/05_design/simd_fixed_and_scalable_vectors.md
 
 ## Overview
 
 Tests that:
 1. `ScalableVec(element, min_lanes)` is a valid `MirTypeKind` variant (Phase 2 scenario #1)
-2. Native lowering of a `riscv_v`-capable preset returns the deferred diagnostic
-   `"riscv_v_native_lowering_deferred"` rather than panicking or silently emitting code
-   (Phase 2 scenario #6 — AC-5 negative guard)
-
-These tests produce semantic failures (missing field/variant) until Phase 5 SA-3/SA-4
-implement the architecture deliverables.
+2. Native adapter guardrails report scalable-vector lowering status explicitly
+   before RV64 ISel can panic.
 
 Run in interpreter mode only (no --mode flag):
   bin/simple test --no-cache test/unit/compiler/scalable_vec_mir_scaffolding_spec.spl
@@ -30,8 +24,50 @@ Compile-mode regressions: file a separate FR; do not normalize (AC-6 policy).
 
 use std.spipe.*
 use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirSignature, MirLocal, LocalId, LocalKind, BlockId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.hir.hir_types.{SymbolId}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompileOptions, OptimizationLevel}
 use compiler.backend.backend.native_codegen_adapter.{NativeCodegenAdapter}
+
+
+fn make_scalable_mir_module() -> MirModule:
+    val scalable_ty = MirType.scalable_vec(MirType.i64(), 4)
+    val func = MirFunction(
+        symbol: SymbolId(id: 1),
+        name: "simd_scalable_probe",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [
+            MirLocal(
+                id: LocalId(id: 0),
+                name: Some("sv"),
+                type_: scalable_ty,
+                kind: LocalKind.Var
+            )
+        ],
+        blocks: [],
+        entry_block: BlockId(id: 0),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        driver_manifest_attr: nil,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+    MirModule(
+        name: "scalable_probe",
+        functions: {SymbolId(id: 1): func},
+        statics: {},
+        constants: {},
+        types: {}
+    )
 
 
 # ============================================================================
@@ -43,9 +79,8 @@ describe "ScalableVec MIR type scaffolding":
     """
     ## AC-5 Scalable Vector MIR Type
 
-    After Phase 5 SA-4 adds `ScalableVec(element: MirType, min_lanes: i64)` to
-    `MirTypeKind`, these tests confirm the type can be constructed and accessed.
-    Tests produce semantic failures until the variant is added to mir_types.spl.
+    Confirms the explicit scalable MIR type remains available for semantic and
+    backend planning work even though native scalable lowering is deferred.
     """
 
     context "MirTypeKind.ScalableVec variant":
@@ -57,57 +92,50 @@ describe "ScalableVec MIR type scaffolding":
         """
 
         it "AC-5/P2-1: ScalableVec MirType can be constructed and pattern-matched":
-            # Arrange: build a scalable-vector MIR type wrapping I64 with min_lanes=4
             val elem = MirType.i64()
-            # FAILS semantically until Phase 5 SA-4 adds ScalableVec variant to MirTypeKind
             val sv = MirType(kind: MirTypeKind.ScalableVec(element: elem, min_lanes: 4))
-            # Assert: the kind field matches the new variant
             expect(sv.kind).to_equal(MirTypeKind.ScalableVec(element: elem, min_lanes: 4))
 
 
 # ============================================================================
-# Phase 2 Scenario #6 (negative) — compile_native_riscv64 with ScalableVec
-# returns deferred-diagnostic, NOT silent code or panic
-# AC-5: deferred diagnostic guard in NativeCodegenAdapter
+# Native adapter guardrails for scalable vectors
 # ============================================================================
 
-describe "riscv_v native lowering deferred diagnostic":
+describe "NativeCodegenAdapter scalable diagnostics":
     """
-    ## AC-5 Negative Guard: riscv_v lowering not yet implemented
+    ## Explicit scalable-vector native status
 
-    When `NativeCodegenAdapter` is instantiated with a `riscv_v`-capable preset
-    and the MIR module contains a `ScalableVec`-typed value, `compile_module()`
-    must return `Ok` with `diagnostics` containing `"riscv_v_native_lowering_deferred"`.
-    It must NOT panic or silently emit empty code without the diagnostic.
-
-    Tests produce semantic failures until Phase 5 SA-3 adds the plan field and
-    the riscv_v deferred-diagnostic guard to NativeCodegenAdapter.
+    The adapter must expose a deterministic status query for scalable vectors.
+    The current default RV64 target lacks scalable-vector capability, so it
+    must not pretend the deferred RVV lowering path is selected.
     """
 
-    context "riscv_v-capable preset with ScalableVec MIR local":
-        """
-        ### Scenario: Deferred diagnostic is non-vacuous
+    it "reports lack-of-capability for default riscv64 target when MIR uses ScalableVec":
+        val opts = CompileOptions(
+            target: CodegenTarget.Riscv64,
+            opt_level: OptimizationLevel.Speed,
+            debug_info: false,
+            emit_assembly: false,
+            emit_llvm_ir: false,
+            emit_mir: false,
+            verify_output: true
+        )
+        val adapter = NativeCodegenAdapter(options: opts)
+        val diagnostics = adapter.scalable_lowering_diagnostics(make_scalable_mir_module())
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_equal("scalable_vector_target_lacks_native_capability")
 
-        Passes a real `MirModule` containing a `ScalableVec`-typed local through
-        `NativeCodegenAdapter` configured with arch `rv64gcv`. The guard fires at
-        adapter level (before `native_compile_result` dispatch), returning empty
-        bytes plus the diagnostic string, not an error or panic.
-        """
-
-        it "AC-5/P2-6: compile_module on riscv_v preset with ScalableVec local returns deferred diagnostic":
-            # Arrange: adapter with riscv64 preset (riscv_v guard triggers when plan has riscv_v)
-            val opts = CompileOptions(
-                target: CodegenTarget.Riscv64,
-                opt_level: OptimizationLevel.Speed,
-                debug_info: false,
-                emit_assembly: false,
-                emit_llvm_ir: false,
-                emit_mir: false,
-                verify_output: true
-            )
-            val adapter = NativeCodegenAdapter(options: opts)
-            # Assert: plan field exists — FAILS semantically until Phase 5 SA-3 adds plan field
-            # When riscv_v is in lowering_modules, the guard emits "riscv_v_native_lowering_deferred"
-            expect(adapter.plan.capabilities.has_riscv_v).to_equal(false)
-            # Full end-to-end assertion (Phase 5 SA-3 + SA-4):
-            # compile_module() must return Ok with diagnostics containing "riscv_v_native_lowering_deferred"
+    it "reports no scalable diagnostic when MIR module does not use ScalableVec":
+        val opts = CompileOptions(
+            target: CodegenTarget.Riscv64,
+            opt_level: OptimizationLevel.Speed,
+            debug_info: false,
+            emit_assembly: false,
+            emit_llvm_ir: false,
+            emit_mir: false,
+            verify_output: true
+        )
+        val adapter = NativeCodegenAdapter(options: opts)
+        val empty_module = MirModule(name: "empty", functions: {}, statics: {}, constants: {}, types: {})
+        val diagnostics = adapter.scalable_lowering_diagnostics(empty_module)
+        expect(diagnostics.len()).to_equal(0)

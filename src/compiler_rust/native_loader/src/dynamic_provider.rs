@@ -4,6 +4,7 @@
 //! Includes ABI version checking and symbol caching.
 
 use libloading::{Library, Symbol};
+use simple_simd::{active_simd_tier, SimdTier};
 use simple_runtime_abi::{AbiVersion, RUNTIME_SYMBOL_NAMES, RuntimeSymbolProvider};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -57,6 +58,25 @@ impl DynamicSymbolProvider {
     /// The library must export a `simple_runtime_abi_version` function that
     /// returns a u32 encoding the ABI version (major << 16 | minor).
     pub fn load(path: &Path) -> Result<Self, DynLoadError> {
+        if Self::uses_default_runtime_name(path) {
+            let mut missing_error = None;
+            for candidate in Self::runtime_library_candidates(path, active_simd_tier()) {
+                match Self::load_exact(&candidate) {
+                    Ok(provider) => return Ok(provider),
+                    Err(DynLoadError::LibraryNotFound(_)) => {
+                        missing_error = Some(DynLoadError::LibraryNotFound(candidate));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+
+            return Err(missing_error.unwrap_or_else(|| DynLoadError::LibraryNotFound(path.to_path_buf())));
+        }
+
+        Self::load_exact(path)
+    }
+
+    fn load_exact(path: &Path) -> Result<Self, DynLoadError> {
         let library = unsafe {
             Library::new(path).map_err(|e| {
                 if path.exists() {
@@ -99,6 +119,65 @@ impl DynamicSymbolProvider {
     /// - Windows: `simple_runtime.dll`
     pub fn load_default() -> Result<Self, DynLoadError> {
         Self::load(Path::new(Self::default_library_name()))
+    }
+
+    fn uses_default_runtime_name(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value == Self::default_library_name())
+            .unwrap_or(false)
+    }
+
+    fn runtime_library_candidates(path: &Path, simd_tier: SimdTier) -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        for variant in Self::runtime_variant_tiers(simd_tier) {
+            candidates.push(parent.join(Self::variant_library_name(variant)));
+        }
+        candidates.push(path.to_path_buf());
+        candidates
+    }
+
+    fn runtime_variant_tiers(simd_tier: SimdTier) -> Vec<SimdTier> {
+        let mut variants = Vec::new();
+        for fallback in simd_tier.best_available_implementation().compatible_fallbacks() {
+            if let Some(runtime_variant) = Self::dynamic_runtime_variant(*fallback) {
+                if !variants.contains(&runtime_variant) {
+                    variants.push(runtime_variant);
+                }
+            }
+        }
+        variants
+    }
+
+    fn dynamic_runtime_variant(simd_tier: SimdTier) -> Option<SimdTier> {
+        match simd_tier.best_available_implementation() {
+            SimdTier::X86_64Avx2 => Some(SimdTier::X86_64Avx2),
+            SimdTier::X86_64Sse2 => Some(SimdTier::X86_64Sse2),
+            SimdTier::Aarch64Neon => Some(SimdTier::Aarch64Neon),
+            SimdTier::Riscv64Rvv => Some(SimdTier::Riscv64Rvv),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn variant_library_name(simd_tier: SimdTier) -> String {
+        format!("libsimple_runtime.{}.so", simd_tier.as_str())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn variant_library_name(simd_tier: SimdTier) -> String {
+        format!("libsimple_runtime.{}.dylib", simd_tier.as_str())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn variant_library_name(simd_tier: SimdTier) -> String {
+        format!("simple_runtime.{}.dll", simd_tier.as_str())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    fn variant_library_name(simd_tier: SimdTier) -> String {
+        format!("libsimple_runtime.{}.so", simd_tier.as_str())
     }
 
     /// Get the default library name for the current platform.
@@ -173,6 +252,7 @@ impl RuntimeSymbolProvider for DynamicSymbolProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_default_library_name() {
@@ -197,5 +277,41 @@ mod tests {
             Err(DynLoadError::LibraryNotFound(_)) | Err(DynLoadError::LoadError(_)) => (),
             _ => panic!("Expected LibraryNotFound or LoadError"),
         }
+    }
+
+    #[test]
+    fn test_runtime_library_candidates_try_variants_before_scalar() {
+        let temp = tempfile::tempdir().unwrap();
+        let default_path = temp.path().join(DynamicSymbolProvider::default_library_name());
+        let candidates = DynamicSymbolProvider::runtime_library_candidates(&default_path, SimdTier::X86_64Avx512);
+        let names = candidates
+            .iter()
+            .map(|value| value.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                DynamicSymbolProvider::variant_library_name(SimdTier::X86_64Avx2),
+                DynamicSymbolProvider::variant_library_name(SimdTier::X86_64Sse2),
+                DynamicSymbolProvider::default_library_name().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_load_prefers_best_available_sibling_variant() {
+        let temp = tempfile::tempdir().unwrap();
+        let avx2 = temp
+            .path()
+            .join(DynamicSymbolProvider::variant_library_name(SimdTier::X86_64Avx2));
+        let scalar = temp.path().join(DynamicSymbolProvider::default_library_name());
+        fs::write(&avx2, b"not a library").unwrap();
+        fs::write(&scalar, b"not a library either").unwrap();
+
+        let err = match DynamicSymbolProvider::load(&scalar) {
+            Ok(_) => panic!("expected variant-aware load failure"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, DynLoadError::LoadError(_)));
     }
 }

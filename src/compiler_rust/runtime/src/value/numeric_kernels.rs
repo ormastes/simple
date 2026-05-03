@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 
 use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push};
 use super::core::RuntimeValue;
-use simple_simd::{detect_profile, SimdTier};
+use simple_simd::{active_simd_tier, SimdTier};
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
@@ -37,6 +37,21 @@ struct NumericKernelProvider {
 
 fn provider_for_tier(tier: SimdTier) -> NumericKernelProvider {
     match tier {
+        SimdTier::X86_64Sse2 => NumericKernelProvider {
+            tier: SimdTier::X86_64Sse2,
+            add_f32: scalar_add_f32,
+            mul_f32: scalar_mul_f32,
+            fma_f32: scalar_fma_f32,
+            dot_f32: scalar_dot_f32,
+            sum_f32: scalar_sum_f32,
+            min_f32: scalar_min_f32,
+            max_f32: scalar_max_f32,
+            add_f64: scalar_add_f64,
+            mul_f64: scalar_mul_f64,
+            fma_f64: scalar_fma_f64,
+            sum_f64: scalar_sum_f64,
+            dot_f64: scalar_dot_f64,
+        },
         SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => NumericKernelProvider {
             tier: SimdTier::X86_64Avx2,
             add_f32: avx2_add_f32,
@@ -87,7 +102,7 @@ fn provider_for_tier(tier: SimdTier) -> NumericKernelProvider {
 
 fn numeric_kernel_provider() -> &'static NumericKernelProvider {
     static PROVIDER: OnceLock<NumericKernelProvider> = OnceLock::new();
-    PROVIDER.get_or_init(|| provider_for_tier(detect_profile().best_available_implementation()))
+    PROVIDER.get_or_init(|| provider_for_tier(active_simd_tier()))
 }
 
 pub(crate) fn active_numeric_kernel_tier() -> SimdTier {
@@ -1136,6 +1151,18 @@ mod tests {
         assert!(should_use_packed_f32(PACK_THRESHOLD_F32));
         assert!(!should_use_packed_f64(PACK_THRESHOLD_F64 - 1));
         assert!(should_use_packed_f64(PACK_THRESHOLD_F64));
+    }
+
+    #[test]
+    fn sse2_tier_keeps_scalar_kernels_without_rewriting_active_tier() {
+        let provider = provider_for_tier(SimdTier::X86_64Sse2);
+        assert_eq!(provider.tier, SimdTier::X86_64Sse2);
+
+        let lhs = [1.0f32, 2.0, 3.0];
+        let rhs = [4.0f32, 5.0, 6.0];
+        let mut out = [0.0f32; 3];
+        (provider.add_f32)(&lhs, &rhs, &mut out);
+        assert_eq!(out, [5.0, 7.0, 9.0]);
     }
 
     #[test]

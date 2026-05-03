@@ -378,13 +378,17 @@ fn _build_lit_codes(nsym: i64) -> [i64]:
 # LZ77 single-backreference path (RFC 7932 §5/§7.3 + §4 distance code)
 #
 # Try to encode `data` as a single insert-and-copy command:
-#   - Insert literals: data[0..p]   (p in 0..=7 so insert_length code <= 7)
+#   - Insert literals: data[0..p]   (p in 0..=130 so we can reach ILC 16,
+#                                   the minimum insert bucket that unlocks
+#                                   the next decoder-supported copy bucket)
 #   - Copy:            data[p..n] from distance d   (no overlap detection)
 # For NSYM<=4 simple prefix codes we restrict to:
 #   - distinct(literals in data[0..p]) <= 4 (literal tree NSYM<=4)
 #   - ICP tree NSYM=1 (single command per meta block)
 #   - distance tree NSYM=1
-#   - kind 4 (cop_code 0..7) or kind 5 (cop_code 8..15) so cop_kind <= 1
+#   - kinds 4/5 for insert codes 0..7, kinds 6/7 for 8..15, kinds 8/9 for
+#     insert codes 16..23 with copy codes 0..15, and kind 10 for the next
+#     decoder-supported copy buckets (copy codes 16..17 -> copy lengths 70..133)
 # Returns Some(bytes) on success, None when no usable backreference found.
 # -------------------------------------------------------------------------
 
@@ -415,7 +419,7 @@ fn _encode_distance_regular(d: i64) -> Option<_DistEnc>:
         sym = sym + 1
     None
 
-# Pick a copy-length code (with cop_kind <= 1) that covers `cop_len`.
+# Pick a copy-length code in the verified single-command subset.
 # Returns Some((cop_code, extra_bits, extra_value, cop_kind)) or None.
 struct _CopEnc:
     code: i64
@@ -424,26 +428,29 @@ struct _CopEnc:
     cop_kind: i64
 
 fn _pick_copy_length_code(cop_len: i64) -> Option<_CopEnc>:
-    # Bases/extras for codes 0..15 (cop_kind 0 covers 0..7 -> length 2..9;
-    # cop_kind 1 covers 8..15 -> length 10..69).  We deliberately skip
-    # cop_kind=2 (codes 16..23) because that requires kind 8/9/10 which
-    # forces ins_code >= 16 (large insert).
+    # Bases/extras for codes 0..17 in the verified subset:
+    #   cop_kind 0 covers codes 0..7   -> lengths 2..9
+    #   cop_kind 1 covers codes 8..15  -> lengths 10..69
+    #   cop_kind 2 covers codes 16..17 -> lengths 70..133 via ICP kind 10,
+    #                                     which in turn requires ins_code >= 16.
     val bases: [i64] = [
         2, 3, 4, 5, 6, 7, 8, 9,
-        10, 12, 14, 18, 22, 30, 38, 54
+        10, 12, 14, 18, 22, 30, 38, 54, 70, 102
     ]
     val extras: [i64] = [
         0, 0, 0, 0, 0, 0, 0, 0,
-        1, 1, 2, 2, 3, 3, 4, 4
+        1, 1, 2, 2, 3, 3, 4, 4, 5, 5
     ]
     var c = 0
-    while c < 16:
+    while c < 18:
         val b = bases[c]
         val e = extras[c]
         val span = 1 << e
         if cop_len >= b and cop_len < b + span:
             var kind = 0
-            if c >= 8:
+            if c >= 16:
+                kind = 2
+            elif c >= 8:
                 kind = 1
             return Some(_CopEnc(code: c, extra_bits: e, extra_value: cop_len - b, cop_kind: kind))
         c = c + 1
@@ -484,22 +491,24 @@ fn _try_encode_lz77(data: [u8]) -> Option<[u8]>:
             b2 = b2 + 1
         a = a + 1
 
-    # Find the smallest prefix length p (0..=7) and distance d (1..=p) such
+    # Find the smallest prefix length p (0..=130) and distance d (1..=p) such
     # that data[p+i] == data[p+i-d] for all i in [0, n-p) AND cop_len = n-p
-    # is encodable with cop_kind <= 1 (i.e. cop_len in 2..=69).
-    # We also require d <= 7 (small distance, regular distance code 16..23
-    # has small extra bits so encoded distance is cheap).
+    # is encodable in the verified copy subset (i.e. cop_len in 2..=133,
+    # where 70..133 additionally requires ins_code >= 16).
+    # We only use ordinary RFC §4 distances; among multiple matches this loop
+    # still prefers the earliest usable prefix, which keeps the emitted command
+    # bounded even when the first valid distance is larger than 7.
     var best_p = -1
     var best_d = 0
     var p = 1
-    while p <= 7:
+    while p <= 130:
         if p >= n:
             break
         val cop_len = n - p
         if cop_len < 2:
             p = p + 1
             continue
-        if cop_len > 69:
+        if cop_len > 133:
             p = p + 1
             continue
         var d = 1
@@ -527,12 +536,14 @@ fn _try_encode_lz77(data: [u8]) -> Option<[u8]>:
     val cop_len = n - best_p
     val dist = best_d
 
-    # Encode ICP: ins_code from ins_len (must be in 0..=7).
+    # Encode ICP using the single-command distance-following kinds the decoder
+    # already supports: 4/5 for ins 0..7, 6/7 for ins 8..15, 8/9 for ins 16..23
+    # with copy codes 0..15, and kind 10 for copy codes 16..17.
     val ilc_pick = _pick_insert_length_code(ins_len)
     if ilc_pick.code < 0:
         return None
     val ilc = ilc_pick.code
-    if ilc > 7:
+    if ilc > 23:
         return None
     val ilc_extra_value = ilc_pick.extra_value
     val ilc_extra_bits = _enc_insert_length_extra_bits(ilc)
@@ -547,10 +558,25 @@ fn _try_encode_lz77(data: [u8]) -> Option<[u8]>:
     val cop_extra_value = cop_enc.extra_value
     val cop_kind = cop_enc.cop_kind
 
-    # ICP kind = 4 (cop_kind=0) or 5 (cop_kind=1), ins_kind=0.
+    # Map (insert-kind, copy-kind) onto the RFC §5 kind groups we support.
     var icp_kind = 4
-    if cop_kind == 1:
-        icp_kind = 5
+    if ilc <= 7:
+        if cop_kind == 1:
+            icp_kind = 5
+        elif cop_kind == 2:
+            return None
+    elif ilc <= 15:
+        icp_kind = 6
+        if cop_kind == 1:
+            icp_kind = 7
+        elif cop_kind == 2:
+            return None
+    else:
+        icp_kind = 8
+        if cop_kind == 1:
+            icp_kind = 9
+        elif cop_kind == 2:
+            icp_kind = 10
     val ilc_low = ilc & 0x07
     val clc_low = clc & 0x07
     val icp_symbol = (icp_kind * 64) + (clc_low * 8) + ilc_low

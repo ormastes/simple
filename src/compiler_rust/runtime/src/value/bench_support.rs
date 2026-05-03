@@ -3,10 +3,10 @@ use super::aes::{
 };
 use super::byte_kernels::{byte_find_for_tier, byte_rfind_for_tier, byte_split_ranges_for_tier};
 use super::utf8_kernels::{count_codepoints_for_tier, find_invalid_for_tier, validate_for_tier};
-use simple_simd::{detect_profile, SimdTier};
+use simple_simd::{active_simd_tier, SimdTier};
 
 pub fn host_simd_tier() -> SimdTier {
-    detect_profile()
+    active_simd_tier()
 }
 
 pub fn host_text_utf8_bench_tiers() -> Vec<SimdTier> {

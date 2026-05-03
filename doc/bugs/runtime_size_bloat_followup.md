@@ -217,3 +217,124 @@ Follow-up expectation:
 - keep `packaging-compression` optional in `src/compiler_rust/runtime/Cargo.toml`
 - verify the default runtime archive no longer references `lzma_*`
 - continue with Option B feature-gating for other heavy optional subsystems
+
+---
+
+## 8. Additional May 2026 TUI-Lane Evidence
+
+On **2026-05-03**, the app-layer TUI split landed:
+
+- `app.ui.render.widgets` was reduced to a compatibility shim
+- TUI rendering moved to `src/app/ui.render/tui_widgets.spl`
+- HTML rendering moved to `src/app/ui.render/html_widgets.spl`
+- generated native TUI entries now target `app.ui.tui.standalone.run_standalone_tui`
+- `scripts/check-tui-standalone-closure.shs` now guards the no-web/no-HTML import lane
+
+Measured with `scripts/check-ui-native-size-audit.shs` and recorded in
+`doc/09_report/tui_app_size_reduction_2026-05-03.md`:
+
+- stripped Simple hello: **14,041,944 bytes**
+- stripped Simple minimal TUI app: **14,041,944 bytes**
+- stripped C hello: **14,472 bytes**
+
+Important interpretation:
+
+- the app-layer TUI dependency cleanup was necessary and is now enforced
+- it was **not sufficient** to move binary size on its own
+- the minimal TUI binary still carries the same heavy anchor set as plain hello (`rustls`, `ureq`,
+  `regex`, `sha1`, `sha256`, plus a `browser` string anchor)
+- this directly confirms that the dominant remaining size root is still the runtime/native-build
+  closure described in Sections 1-7, not the TUI/web renderer split
+
+This strengthens the recommendation ordering rather than weakening it:
+
+- keep the TUI app-lane split as a correctness guard
+- prioritize runtime feature-gating and native-build root narrowing next
+
+## 9. Additional May 2026 Runtime-Gating Evidence
+
+Later on **2026-05-03**, the first runtime-root reduction pass also landed:
+
+- `simple-runtime` now has default-off feature gates for:
+  - `runtime-regex`
+  - `runtime-http`
+  - `runtime-tls`
+  - `packaging-compression`
+- `simple-native-all` now has a minimal default lane and a compatibility lane:
+  - default build no longer depends on `simple-driver`
+  - `--features driver-compat` restores the previous bootstrap/runtime behavior where needed
+
+Verification evidence from the same date:
+
+- `cargo check -p simple-runtime --no-default-features`: pass
+- `cargo check -p simple-native-all --no-default-features`: pass
+- `cargo tree -p simple-runtime --no-default-features -e normal` no longer includes:
+  - `regex`
+  - `ureq`
+  - `rustls`
+  - `webpki-roots`
+  - `base64`
+- `cargo tree -p simple-native-all --no-default-features -e normal` no longer includes `simple-driver`
+- `cargo tree -p simple-native-all --no-default-features --features driver-compat -e normal` does include `simple-driver`
+
+Important measured result:
+
+- rerunning `scripts/check-ui-native-size-audit.shs` after the runtime-gating changes still produced:
+  - stripped Simple hello: **14,041,944 bytes**
+  - stripped Simple minimal TUI app: **14,041,944 bytes**
+
+Interpretation:
+
+- the runtime dependency tree is now demonstrably narrower
+- but the shipped native artifacts measured by the audit did **not** shrink yet
+- this means the remaining size root is no longer explained only by direct Cargo dependency presence
+- there is still at least one additional broad native-build/runtime anchoring mechanism keeping the heavy code and strings reachable in final binaries
+
+That narrows the next investigation target:
+
+- inspect which archive and feature set `native-build` is actually linking in the audited path
+- verify whether the seed/bootstrap build still bakes in the broad runtime lane
+- continue from feature-gating into actual archive-root and registration-root elimination
+
+## 10. Additional May 2026 Runtime-Bundle Selection Evidence
+
+The next investigation step identified the immediate reason the first post-gating
+audit stayed flat at ~14 MB.
+
+Root cause:
+
+- the audited caller passed `--source src/compiler` even for tiny app binaries
+- `native-build` currently treats that source-root shape as compiler-like when
+  choosing the runtime bundle
+- that caused it to select `libsimple_native_all.a` instead of `libsimple_runtime.a`
+- as a result, the audit was still measuring the broad native-all lane rather
+  than the intended narrow app lane
+
+Concrete evidence:
+
+- `scripts/check-ui-native-size-audit.shs` originally passed:
+  - `--source src/compiler`
+  - `--source src/lib`
+  - `--source src/app`
+- `src/compiler_rust/compiler/src/pipeline/native_project/config.rs`
+  prefers the broad bundle when the source dirs look compiler-like
+- removing `src/compiler` and forcing `--runtime-bundle runtime` changed the
+  measured binaries on **2026-05-03** to:
+  - stripped Simple hello: **423,016 bytes**
+  - stripped Simple minimal TUI app: **427,112 bytes**
+  - stripped C hello: **14,472 bytes**
+
+Interpretation:
+
+- the TUI split and runtime feature-gating work were both necessary
+- the remaining giant size result was largely a caller-side bundle-selection issue
+- the minimal app lane now reaches roughly **0.4 MB**, which is about:
+  - **97% smaller** than the previous 14.0 MB result
+  - about **29x** the plain C baseline instead of roughly **970x**
+
+Follow-on implication:
+
+- keep compiler-capable lanes on `libsimple_native_all.a`
+- route minimal app/native UI lanes explicitly through `--runtime-bundle runtime`
+- avoid passing `src/compiler` to narrow app builds unless the entry actually
+  requires compiler services

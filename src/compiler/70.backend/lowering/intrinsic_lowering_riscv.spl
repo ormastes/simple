@@ -47,7 +47,32 @@ fn intrinsic_to_target_idiom_riscv(name: text) -> TargetIdiom?:
         case "crypto_sha256_rnds2":         Some(TargetIdiom.Sha256Rounds2)
         case "clmul_lo":                    Some(TargetIdiom.ClmulLo)
         case "clmul_hi":                    Some(TargetIdiom.ClmulHi)
+        case "bit_rotate_left":             Some(TargetIdiom.RotateLeft)
+        case "bit_rotate_right":            Some(TargetIdiom.RotateRight)
+        case "bit_popcount":                Some(TargetIdiom.Popcount)
+        case "bit_clz":                     Some(TargetIdiom.CountLeadingZeros)
+        case "bit_ctz":                     Some(TargetIdiom.CountTrailingZeros)
+        case "bit_bswap":                   Some(TargetIdiom.ByteSwap)
+        case "bit_bitreverse":              Some(TargetIdiom.BitReverse)
+        case "crypto_clmul":                Some(TargetIdiom.ClmulLo)
+        case "matrix_dot":                  Some(TargetIdiom.MatrixDot)
+        case "matrix_outer_product":        Some(TargetIdiom.MatrixOuterProduct)
+        case "matrix_fma_kernel":           Some(TargetIdiom.MatrixFmaKernel)
         case _:                             nil
+
+fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
+    match idiom:
+        case RotateLeft:            true
+        case RotateRight:           true
+        case Popcount:              true
+        case CountLeadingZeros:     true
+        case CountTrailingZeros:    true
+        case ByteSwap:              true
+        case BitReverse:            true
+        case MatrixDot:             true
+        case MatrixOuterProduct:    true
+        case MatrixFmaKernel:       true
+        case _:                     false
 
 # ============================================================================
 # lower_cipher_intrinsic_riscv — main lowering entry point
@@ -58,8 +83,10 @@ fn intrinsic_to_target_idiom_riscv(name: text) -> TargetIdiom?:
 Steps:
   1. Resolve name -> TargetIdiom; unknown names return reason="unknown".
   2. Check caps.supports(idiom); unsupported targets return reason="no-cap".
-  3. Validate args arity; mismatches return reason="bad-arity".
-  4. Dispatch to the matching emit_* helper and return the bytes.
+  3. Return reason="unimplemented" for recognised portable intrinsics whose
+     backend encoder has not landed yet.
+  4. Validate args arity; mismatches return reason="bad-arity".
+  5. Dispatch to the matching emit_* helper and return the bytes.
 
 For crypto_sha256_rnds2 the result is vsha2cl.vv + vsha2ch.vv concatenated
 (8 bytes total) because the SHA-2 round pair requires both low and high halves.
@@ -74,8 +101,10 @@ fn lower_cipher_intrinsic_riscv(name: text, args: [i64], caps: Rv64Caps) -> Lowe
             # Step 2: capability gate
             if not caps.supports(idiom):
                 return LoweringResult(empty, false, "no-cap")
+            if intrinsic_requires_placeholder_lowering(idiom):
+                return LoweringResult(empty, false, "unimplemented")
 
-            # Step 3 + 4: arity check then emit
+            # Step 4 + 5: arity check then emit
             match name:
                 case "crypto_aes_round":
                     if args.length != 2:

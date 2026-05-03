@@ -31,11 +31,12 @@
 #   auto_vectorize_codegen.spl  - Phase 4: vector code generation
 
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
+use compiler.backend.feature_caps.{x86_caps_from_target, preferred_lane_count_x86}
 
 # Shared types (cycle-free base module)
 use compiler.mir_opt.auto_vectorize_types.{LoopInfo, ArrayAccess}
 # Re-import from sub-modules for coordinator use and re-export
-use compiler.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses}
+use compiler.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local}
 use compiler.mir_opt.auto_vectorize_validate.{VectorizabilityResult, check_vectorizability, get_vectorizable_type}
 use compiler.mir_opt.auto_vectorize_cost.{CostEstimate, estimate_vectorization_cost, should_vectorize_loop}
 use compiler.mir_opt.auto_vectorize_codegen.{VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
@@ -199,18 +200,21 @@ fn replace_loop_blocks(blocks: [MirBlock], loop: LoopInfo, vectorized: Vectorize
 
 fn get_simd_width(element_type: text) -> i64:
     """
-    Get optimal SIMD width for target platform.
-    This would query target features in real implementation.
+    Get the preferred SIMD lane count from the capability model rather than
+    hardcoding AVX2 widths in the pass.
+
+    Phase 1 uses the compiler's portable x86_64-v3 planning profile as the
+    fixed-width default until TargetOptContext plumbs the real target triple
+    through MIR auto-vectorization.
     """
-    # Simplified: assume AVX2 available
+    val caps = x86_caps_from_target("x86_64-v3")
     if element_type == "f32":
-        8  # 8x f32 = 256 bits
+        return preferred_lane_count_x86(caps, 32)
     elif element_type == "f64":
-        4  # 4x f64 = 256 bits
+        return preferred_lane_count_x86(caps, 64)
     elif element_type == "i32":
-        8  # 8x i32 = 256 bits
-    else:
-        4  # Conservative fallback
+        return preferred_lane_count_x86(caps, 32)
+    preferred_lane_count_x86(caps, 64)
 
 # ============================================================================
 # K3 Wave — VectorRecipe: pattern-match result record
@@ -224,6 +228,7 @@ enum VectorRecipeKind:
     """What kind of vectorisable pattern was recognised."""
     Elementwise   # out[i] = f(a[i], b[i])  — no cross-iter dependency
     Reduction     # var s; for i: s = s op a[i]  — horizontal accumulation
+    MatrixKernel  # dot / outer-product / matvec micro-kernel
 
 struct VectorRecipe:
     """
@@ -250,6 +255,8 @@ struct VectorRecipe:
                        None for elementwise)
       chunk_width   — SIMD lane count as u32 (power-of-two; same value as vector_width
                        but typed as i64 here for uniformity; e.g. 4 for Vec4i)
+      index_locals  — Locals used as stride-1 indices for each memory access
+      store_value   — LocalId stored back to memory (Some for elementwise / outer-product)
     """
     kind:          VectorRecipeKind
     header_block:  BlockId
@@ -264,6 +271,8 @@ struct VectorRecipe:
     output_base:   LocalId?
     accumulator:   LocalId?
     chunk_width:   i64
+    index_locals:  [LocalId]
+    store_value:   LocalId?
 
 # ============================================================================
 # K3 Wave — Pattern matcher: trivial elementwise loop
@@ -389,7 +398,9 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
         input_bases:   input_bases,
         output_base:   output_base,
         accumulator:   nil,
-        chunk_width:   elem_width
+        chunk_width:   elem_width,
+        index_locals:  [induction],
+        store_value:   nil
     ))
 
 # ============================================================================
@@ -527,7 +538,85 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
         input_bases:   input_bases,
         output_base:   nil,
         accumulator:   accumulator_dest,
-        chunk_width:   red_width
+        chunk_width:   red_width,
+        index_locals:  [induction],
+        store_value:   nil
+    ))
+
+fn mir_pattern_match_matrix_kernel(block: MirBlock, has_fast_math: bool) -> VectorRecipe?:
+    """
+    Structural matcher for phase-1 matrix kernels.
+
+    Recognises the canonical dot-product / matvec inner shape:
+      - at least 2 loads
+      - exactly 1 Mul and 1 Add data op
+      - no Call / CallIndirect
+      - either a register accumulator (dot product) or one store (outer-product update)
+    """
+    var load_count = 0
+    var store_count = 0
+    var mul_count = 0
+    var add_count = 0
+    var call_count = 0
+    var induction_local: LocalId? = nil
+    var accumulator_dest: LocalId? = nil
+
+    for inst in block.instructions:
+        match inst.kind:
+            case Load(_, _):
+                load_count = load_count + 1
+            case Store(_, value):
+                store_count = store_count + 1
+                val maybe_store = get_operand_local(value)
+                if maybe_store.?:
+                    accumulator_dest = maybe_store
+            case BinOp(dest, op, left, right):
+                if _is_index_increment(op, left, right):
+                    induction_local = Some(dest)
+                elif op == MirBinOp.Mul:
+                    mul_count = mul_count + 1
+                elif op == MirBinOp.Add:
+                    add_count = add_count + 1
+                    accumulator_dest = Some(dest)
+            case Call(_, _, _):
+                call_count = call_count + 1
+            case CallIndirect(_, _, _, _):
+                call_count = call_count + 1
+            case _:
+                pass_do_nothing
+
+    if call_count > 0 or load_count < 2 or mul_count != 1 or add_count != 1:
+        return nil
+    if not induction_local.?:
+        return nil
+    if store_count == 0 and not has_fast_math:
+        return nil
+
+    val induction = induction_local.unwrap()
+    val accesses = detect_array_accesses(block)
+    var input_bases: [LocalId] = []
+    var output_base: LocalId? = nil
+    for access in accesses:
+        if access.is_load:
+            input_bases.push(access.base_array)
+        else:
+            output_base = Some(access.base_array)
+
+    Some(VectorRecipe(
+        kind:          VectorRecipeKind.MatrixKernel,
+        header_block:  block.id,
+        induction_var: induction,
+        trip_count:    -1,
+        element_type:  "f32",
+        vector_width:  get_simd_width("f32"),
+        op_name:       if store_count > 0: "matrix_outer_product" else: "matrix_dot",
+        note:          "matrix-kernel structural match: loads={load_count}, stores={store_count}",
+        input_bases:   input_bases,
+        output_base:   output_base,
+        accumulator:   accumulator_dest,
+        chunk_width:   get_simd_width("f32"),
+        index_locals:  [induction],
+        store_value:   accumulator_dest
     ))
 
 # ============================================================================
@@ -578,6 +667,11 @@ fn run_auto_vectorize(module: MirModule) -> MirModule:
             val red = mir_pattern_match_reduction(block, cur_func.has_fast_math)
             if red.?:
                 val r = red.unwrap()
+                _log_recipe(cur_func.name, r)
+
+            val matrix = mir_pattern_match_matrix_kernel(block, cur_func.has_fast_math)
+            if matrix.?:
+                val r = matrix.unwrap()
                 _log_recipe(cur_func.name, r)
 
         if module_modified:
@@ -634,7 +728,8 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
     """
     N1 Wave — MIR rewriter for the elementwise-add pattern.
 
-    Given a VectorRecipe with kind=Elementwise and op_name containing "add",
+    Given a VectorRecipe with kind=Elementwise and op_name in the supported
+    elementwise set, replaces the matched loop header block with four new blocks:
     replaces the matched loop header block with four new blocks:
       1. alignment-check BB  — computes mismatch = (upper - lower) % VF;
                                branches: mismatch==0 → vec_loop, else → peel_loop
@@ -644,10 +739,8 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
 
     Refuse conditions (return func unchanged):
       R1: recipe.kind != Elementwise
-      R2: recipe.op_name does not contain "add"  (mul/sub/div are N1-followup)
+      R2: recipe.op_name is not one of {add,sub,mul,xor}_elementwise
       R3: trip_count >= 0 && trip_count < recipe.chunk_width  (too short to vectorize)
-      R4: recipe.element_type == "f32" and func.has_fast_math == false
-              (defense-in-depth: FP elementwise-add is bit-exact, but guard is conservative)
       R5: recipe.output_base is nil  (no output — not an elementwise loop)
       R6: recipe.input_bases has fewer than 2 entries (need a and b)
 
@@ -660,7 +753,7 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
       The vector loop processes floor(n/VF)*VF elements via SIMD;
       the peel block handles the remaining n%VF elements via the original
       scalar path.  The combined output is identical to the scalar loop for
-      all integer element types and for f32 only when has_fast_math is set.
+      all supported elementwise ops because no reassociation is introduced.
     """
     # R1: only Elementwise
     val is_ew = match recipe.kind:
@@ -669,17 +762,12 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
     if not is_ew:
         return func
 
-    # R2: only add operation (op_name from elementwise matcher is "<op>_elementwise")
-    # N1 scope: only "add_elementwise" is rewritten; mul/sub/div are N1-followup.
-    if recipe.op_name != "add_elementwise":
+    # R2: supported elementwise ops only
+    if not supports_elementwise_rewrite(recipe.op_name):
         return func
 
     # R3: static trip count too short (skip if unknown, i.e. -1)
     if recipe.trip_count >= 0 and recipe.trip_count < recipe.chunk_width:
-        return func
-
-    # R4: f32 without fast_math (conservative FP guard)
-    if recipe.element_type == "f32" and not func.has_fast_math:
         return func
 
     # R5: need an output base
@@ -714,7 +802,7 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
 
     # Create the four new BBs
     val align_block  = create_alignment_check_block(ctx, loop_info)
-    val vec_block    = create_vector_loop_block(ctx, recipe.header_block.id, recipe.input_bases, out_base)
+    val vec_block    = create_vector_loop_block(ctx, recipe.header_block.id, recipe.input_bases, out_base, recipe.op_name)
     val peel_block   = create_peeling_block(ctx, loop_info)
 
     # Splice: replace header block; keep blocks before it and all blocks after it
@@ -735,6 +823,16 @@ fn rewrite_elementwise_add(recipe: VectorRecipe, func: MirFunction) -> MirFuncti
             new_blocks.push(block)
 
     MirFunction(..func, blocks: new_blocks)
+
+fn supports_elementwise_rewrite(op_name: text) -> bool:
+    """
+    Phase-1 auto-application supports the hot scalar idioms that map cleanly to
+    elementwise vector ops without reassociation.
+    """
+    op_name == "add_elementwise" or
+    op_name == "sub_elementwise" or
+    op_name == "mul_elementwise" or
+    op_name == "xor_elementwise"
 
 fn _log_recipe(func_name: text, recipe: VectorRecipe):
     """

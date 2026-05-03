@@ -332,7 +332,10 @@ include!("net_tcp.rs");
 // ============================================================================
 // TLS transport FFI shims (extracted to net_tls.rs)
 // ============================================================================
+#[cfg(feature = "runtime-tls")]
 include!("net_tls.rs");
+#[cfg(not(feature = "runtime-tls"))]
+include!("net_tls_stub.rs");
 
 // ============================================================================
 // UDP FFI functions (extracted to net_udp.rs)
@@ -342,7 +345,10 @@ include!("net_udp.rs");
 // ============================================================================
 // HTTP FFI functions (extracted to net_http.rs)
 // ============================================================================
+#[cfg(feature = "runtime-http")]
 include!("net_http.rs");
+#[cfg(not(feature = "runtime-http"))]
+include!("net_http_stub.rs");
 
 // ============================================================================
 // Unix-domain socket FFI functions (extracted to net_uds.rs)

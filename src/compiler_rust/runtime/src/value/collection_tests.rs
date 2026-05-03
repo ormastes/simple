@@ -1638,11 +1638,17 @@ fn test_rt_contains_dict() {
 #[test]
 fn test_rt_contains_string() {
     let s = rt_string_new("Hello".as_ptr(), 5);
+    let ell = rt_string_new("ell".as_ptr(), 3);
+    let world = rt_string_new("world".as_ptr(), 5);
+    let empty = rt_string_new("".as_ptr(), 0);
 
     // Check if character 'H' (72) is in string
     assert_eq!(rt_contains(s, RuntimeValue::from_int(72)), 1); // 'H'
     assert_eq!(rt_contains(s, RuntimeValue::from_int(101)), 1); // 'e'
     assert_eq!(rt_contains(s, RuntimeValue::from_int(90)), 0); // 'Z'
+    assert_eq!(rt_contains(s, ell), 1);
+    assert_eq!(rt_contains(s, world), 0);
+    assert_eq!(rt_contains(s, empty), 1);
 }
 
 #[test]

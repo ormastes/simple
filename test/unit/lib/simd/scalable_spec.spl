@@ -1,35 +1,121 @@
 # @cover src/lib/nogc_sync_mut/simd/scalable.spl 80%
 """
-# ScalableVec<T> Compatibility Anchors
+# ScalableVec<T> Unit Tests
 
 **Feature IDs:** #SIMD-SCALABLE
 **Category:** Stdlib
 **Difficulty:** 3/5
 **Status:** In Progress
-**Design:** doc/04_architecture/simd_unified_architecture_detail.md §1.3 §4
+**Design:** doc/05_design/simd_fixed_and_scalable_vectors.md
 
 ## Overview
 
-Compatibility-anchor test for scalable-vector minimum-lane semantics in
-interpreter mode. Corresponds to D5 trait-surface kickoff test ID S-01.
-
-The current interpreter surface does not expose a callable `ScalableVec<f32>`
-constructor path from spec code, so the test validates the same user-visible
-four-lane minimum through the reachable array surface instead.
+Executable coverage for the interpreter-visible `ScalableVec<T>` surface.
+This replaces the earlier compatibility anchor now that `ScalableVec`
+construction and methods are callable from spec code.
 """
 
 use std.spipe.*
+use std.simd.scalable.{ScalableVec}
+use std.simd.fixed.{fixedvec_from_array}
+use std.simd.{
+    scalablevec_splat,
+    scalablevec_splat_n,
+    scalablevec_min_lanes,
+    scalablevec_from_array,
+    scalablevec_from_fixed
+}
 
 
-describe "ScalableVec construction":
-    """
-    ## ScalableVec<T> compatibility anchor — D5 trait-surface unit test S-01
+fn make_scalable_1234() -> ScalableVec<f32>:
+    scalablevec_from_array([1.0, 2.0, 3.0, 4.0])
 
-    Tests that the reachable four-lane payload used to model the minimum
-    `ScalableVec<f32>` construction preserves a length of 4.
-    """
+fn make_scalable_rhs() -> ScalableVec<f32>:
+    scalablevec_from_array([10.0, 20.0, 30.0, 40.0])
 
-    it "S-01: four-element scalable payload preserves lane count 4":
-        val v = [1.0, 1.0, 1.0, 1.0]
-        val n = v.len()
-        expect(n).to_equal(4)
+fn make_scalable_i32() -> ScalableVec<i32>:
+    scalablevec_from_array([1, 5, 2, 7])
+
+
+describe "ScalableVec construction and arithmetic":
+    it "S-01: splat uses the architectural minimum lane count":
+        val v = scalablevec_splat(1.5)
+        expect(v.lanes()).to_equal(scalablevec_min_lanes())
+        expect(v.lane(0)).to_equal(1.5)
+        expect(v.lane(3)).to_equal(1.5)
+
+    it "S-02: splat_n creates runtime-sized vectors and zero-values remain explicit":
+        val splat = scalablevec_splat_n(9, 6)
+        expect(splat.lanes()).to_equal(6)
+        expect(splat.lane(5)).to_equal(9)
+
+        val zero = scalablevec_splat_n(0, scalablevec_min_lanes())
+        expect(zero.lanes()).to_equal(4)
+        expect(zero.lane(0)).to_equal(0)
+        expect(zero.lane(3)).to_equal(0)
+
+    it "S-03: lane access, set_lane, from_array, and to_array are callable":
+        val v = scalablevec_from_array([1.0, 2.0, 3.0, 4.0, 5.0])
+        expect(v.lanes()).to_equal(5)
+        expect(v.lane(1)).to_equal(2.0)
+
+        val updated = v.set_lane(3, 99.0)
+        val arr = updated.to_array()
+        expect(arr[0]).to_equal(1.0)
+        expect(arr[3]).to_equal(99.0)
+        expect(arr[4]).to_equal(5.0)
+
+    it "S-04: add, sub, mul, and div operate lane-wise":
+        val lhs = make_scalable_1234()
+        val rhs = make_scalable_rhs()
+
+        val add = lhs.add(rhs).to_array()
+        expect(add[0]).to_equal(11.0)
+        expect(add[3]).to_equal(44.0)
+
+        val sub = rhs.sub(lhs).to_array()
+        expect(sub[0]).to_equal(9.0)
+        expect(sub[3]).to_equal(36.0)
+
+        val mul = lhs.mul(scalablevec_from_array([2.0, 3.0, 4.0, 5.0])).to_array()
+        expect(mul[0]).to_equal(2.0)
+        expect(mul[3]).to_equal(20.0)
+
+        val div = rhs.div(scalablevec_from_array([2.0, 4.0, 5.0, 8.0])).to_array()
+        expect(div[0]).to_equal(5.0)
+        expect(div[3]).to_equal(5.0)
+
+    it "S-05: min, max, reductions, and comparisons preserve scalable semantics":
+        val ints = make_scalable_i32()
+        val rhs = scalablevec_from_array([2, 4, 8, 6])
+
+        val min_arr = ints.min(rhs).to_array()
+        expect(min_arr[0]).to_equal(1)
+        expect(min_arr[2]).to_equal(2)
+
+        val max_arr = ints.max(rhs).to_array()
+        expect(max_arr[1]).to_equal(5)
+        expect(max_arr[2]).to_equal(8)
+
+        expect(ints.reduce_sum()).to_equal(15)
+        expect(ints.reduce_min()).to_equal(1)
+        expect(ints.reduce_max()).to_equal(7)
+
+        val mask = ints.cmp_gt(rhs)
+        expect(mask.lane_active(0)).to_equal(false)
+        expect(mask.lane_active(1)).to_equal(true)
+        expect(mask.lane_active(2)).to_equal(false)
+        expect(mask.lane_active(3)).to_equal(true)
+
+    it "S-06: from_fixed always succeeds and try_to_fixed is explicit":
+        val fixed = fixedvec_from_array([1.0, 2.0, 3.0, 4.0])
+        val scalable = scalablevec_from_fixed(fixed)
+        expect(scalable.lanes()).to_equal(4)
+        expect(scalable.lane(2)).to_equal(3.0)
+
+        val narrowed = scalable.try_to_fixed(4)
+        expect(narrowed.is_some()).to_equal(true)
+        expect(narrowed.unwrap().lane(3)).to_equal(4.0)
+
+        val mismatch = scalable.try_to_fixed(8)
+        expect(mismatch.is_none()).to_equal(true)

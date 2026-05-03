@@ -377,17 +377,18 @@ fn create_vector_loop_block(
     ctx: VectorizeContext,
     base_block_id: i64,
     input_bases: [LocalId],
-    output_base: LocalId
+    output_base: LocalId,
+    op_name: text
 ) -> MirBlock:
     """
-    Create the SIMD vector-loop block for an elementwise-add pattern.
+    Create the SIMD vector-loop block for a supported elementwise pattern.
 
     Emits (for chunk_width=4, element_type=f32):
       BB_vec_loop:
         %va  = Intrinsic("simd_load_f32x4", [a_base, vi])
         %vb  = Intrinsic("simd_load_f32x4", [b_base, vi])
-        %vsum = SimdAddF32x4(%va, %vb)
-        Intrinsic("simd_store_f32x4", [out_base, vi, %vsum])
+        %vres = Intrinsic("simd_<op>_f32x4", [%va, %vb])
+        Intrinsic("simd_store_f32x4", [out_base, vi, %vres])
         %vi1  = BinOp(Add, %vi, chunk_width_const)    # vi += chunk_width
         Goto(BB_vec_loop)    # loop back (guard not included; alignment_check handles entry)
 
@@ -404,7 +405,7 @@ fn create_vector_loop_block(
     val vi_local  = LocalId(id: base_block_id + 200)  # vector index (chunk-scaled)
     val va_local  = LocalId(id: base_block_id + 201)  # loaded vector a
     val vb_local  = LocalId(id: base_block_id + 202)  # loaded vector b
-    val vsum_local = LocalId(id: base_block_id + 203) # result vector
+    val vres_local = LocalId(id: base_block_id + 203) # result vector
     val vi1_local  = LocalId(id: base_block_id + 204) # updated vector index
 
     # Choose base arrays (default to sentinel locals if input_bases is short)
@@ -413,7 +414,7 @@ fn create_vector_loop_block(
 
     val load_name  = "simd_load_{ctx.element_type}x{ctx.vector_width}"
     val store_name = "simd_store_{ctx.element_type}x{ctx.vector_width}"
-    val add_name   = "simd_add_{ctx.element_type}x{ctx.vector_width}"
+    val vec_op_name = "simd_{_elementwise_op_stem(op_name)}_{ctx.element_type}x{ctx.vector_width}"
 
     # %va = simd_load(a_base, vi)
     val load_a = MirInst(
@@ -435,24 +436,24 @@ fn create_vector_loop_block(
         ),
         span: nil
     )
-    # %vsum = simd_add(va, vb)  — use Intrinsic to stay type-agnostic; backend lowers it
-    val add_inst = MirInst(
+    # %vres = simd_<op>(va, vb) — use Intrinsic to stay type-agnostic; backend lowers it
+    val op_inst = MirInst(
         kind: MirInstKind.Intrinsic(
-            Some(vsum_local),
-            add_name,
+            Some(vres_local),
+            vec_op_name,
             [MirOperand(kind: MirOperandKind.Copy(va_local)),
              MirOperand(kind: MirOperandKind.Copy(vb_local))]
         ),
         span: nil
     )
-    # simd_store(out_base, vi, vsum)
+    # simd_store(out_base, vi, vres)
     val store_inst = MirInst(
         kind: MirInstKind.Intrinsic(
             nil,
             store_name,
             [MirOperand(kind: MirOperandKind.Copy(output_base)),
              MirOperand(kind: MirOperandKind.Copy(vi_local)),
-             MirOperand(kind: MirOperandKind.Copy(vsum_local))]
+             MirOperand(kind: MirOperandKind.Copy(vres_local))]
         ),
         span: nil
     )
@@ -474,11 +475,20 @@ fn create_vector_loop_block(
     MirBlock(
         id:           block_id,
         label:        Some("vec_loop"),
-        instructions: [load_a, load_b, add_inst, store_inst, inc_inst],
+        instructions: [load_a, load_b, op_inst, store_inst, inc_inst],
         terminator:   terminator
     )
+
+fn _elementwise_op_stem(op_name: text) -> text:
+    """Map recipe operation names to the vector intrinsic stem."""
+    if op_name == "sub_elementwise":
+        return "sub"
+    if op_name == "mul_elementwise":
+        return "mul"
+    if op_name == "xor_elementwise":
+        return "xor"
+    "add"
 
 # ============================================================================
 # Exports
 # ============================================================================
-

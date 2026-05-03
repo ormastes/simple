@@ -31,10 +31,11 @@ struct Series:
     dtype: DType
 
     static fn from_values(name: Symbol, values: [Float64]) -> Series:
-        Series(name: name, values: array(values), dtype: DType.F64)
-
-    static fn from_values(name: Symbol, values: [Int64]) -> Series:
-        Series(name: name, values: array(values), dtype: DType.I64)
+        match infer_series_dtype(values):
+            case DType.I64:
+                Series(name: name, values: array_i64(coerce_i64_values(values)), dtype: DType.I64)
+            case _:
+                Series(name: name, values: array(values), dtype: DType.F64)
 
     fn len(self) -> Index:
         self.values.len()
@@ -103,11 +104,10 @@ struct DataFrame:
         var order: [Symbol] = []
         var kinds: {text: DType} = {}
         var row = 0
-        while row < rows.len():
-            var col = 0
-            while col < rows[row].len():
-                val key = rows[row][col].key
-                val value = rows[row][col].value
+        for current_row in rows:
+            for entry in current_row:
+                val key = entry.key
+                val value = entry.value
                 if row == 0:
                     order.push(key)
                     kinds[key.text] = dtype_of(value)
@@ -117,12 +117,15 @@ struct DataFrame:
                         cols_i64[key.text] = []
                 match value:
                     case DfValue.F64(v):
-                        cols_f64[key.text].push(v)
+                        var column = cols_f64[key.text]
+                        column.push(v)
+                        cols_f64[key.text] = column
                     case DfValue.I64(v):
-                        cols_i64[key.text].push(v)
+                        var column = cols_i64[key.text]
+                        column.push(v)
+                        cols_i64[key.text] = column
                     case _:
                         return Err(DfError.ShapeMismatch)
-                col = col + 1
             row = row + 1
         var built: [SeriesErased] = []
         var i = 0
@@ -214,6 +217,22 @@ fn dtype_of(value: DfValue) -> DType:
         case _:
             DType.Bool
 
+fn infer_series_dtype(values: [Float64]) -> DType:
+    if values.len() == 0:
+        return DType.F64
+    val raw = values[0].value
+    if values[0] == Int64.new(raw as i64):
+        return DType.I64
+    DType.F64
+
+fn coerce_i64_values(values: [Float64]) -> [Int64]:
+    var out: [Int64] = []
+    var i = 0
+    while i < values.len():
+        out.push(Int64.new(values[i].value as i64))
+        i = i + 1
+    out
+
 fn column_index(columns: [Series], name: Symbol) -> i64:
     var i = 0
     while i < columns.len():
@@ -270,4 +289,4 @@ fn to_i64_series(series: Series) -> Series:
     while i < series.values.data_f64.len():
         out.push(Int64.new(series.values.data_f64[i].value as i64))
         i = i + 1
-    Series(name: series.name, values: array(out), dtype: DType.I64)
+    Series(name: series.name, values: array_i64(out), dtype: DType.I64)

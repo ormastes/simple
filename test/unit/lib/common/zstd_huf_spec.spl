@@ -1,6 +1,7 @@
 use std.spec.{describe, it, expect}
 use std.common.compress.zstd_huf.{
     ZstdHufCanonicalEntry,
+    zstd_huf_encode_literals,
     zstd_huf_complete_weights,
     zstd_huf_weights_to_symbols,
     zstd_huf_build_canonical_entries,
@@ -98,3 +99,35 @@ describe "zstd huffman helpers":
         val under = zstd_huf_weights_to_symbols([2, 1])
         expect(under.is_err()).to_equal(true)
         _expect_compression_error(under.unwrap_err(), "CorruptStream", "incomplete")
+
+    it "encodes a two-symbol alphabet with a one-bit tree":
+        val literals: [u8] = [0x41u8, 0x42u8, 0x41u8, 0x42u8, 0x41u8, 0x41u8]
+        val encoded_res = zstd_huf_encode_literals(literals)
+        expect(encoded_res.is_err()).to_equal(false)
+        val (_bitstream, weights) = encoded_res.unwrap()
+        expect(weights[0x41].to_i64()).to_equal(1)
+        expect(weights[0x42].to_i64()).to_equal(1)
+        val entries_res = zstd_huf_build_canonical_entries(weights)
+        expect(entries_res.is_err()).to_equal(false)
+        val entries = entries_res.unwrap()
+        expect(entries.len()).to_equal(2)
+        _expect_entry(entries[0], 65, 1, 1, 0u32)
+        _expect_entry(entries[1], 66, 1, 1, 1u32)
+
+    it "encodes a one-symbol literal stream via a bounded synthetic partner":
+        val literals: [u8] = [
+            0x5Au8, 0x5Au8, 0x5Au8, 0x5Au8,
+            0x5Au8, 0x5Au8, 0x5Au8, 0x5Au8,
+            0x5Au8, 0x5Au8, 0x5Au8, 0x5Au8
+        ]
+        val encoded_res = zstd_huf_encode_literals(literals)
+        expect(encoded_res.is_err()).to_equal(false)
+        val (_bitstream, weights) = encoded_res.unwrap()
+        expect(weights[0x5A].to_i64()).to_equal(1)
+        expect(weights[0].to_i64()).to_equal(1)
+        val entries_res = zstd_huf_build_canonical_entries(weights)
+        expect(entries_res.is_err()).to_equal(false)
+        val entries = entries_res.unwrap()
+        expect(entries.len()).to_equal(2)
+        _expect_entry(entries[0], 0, 1, 1, 0u32)
+        _expect_entry(entries[1], 90, 1, 1, 1u32)

@@ -10,9 +10,12 @@
 #   executed.  Compiled-mode execution will exercise them.
 
 use compiler.backend.feature_caps.{
-    TargetIdiom,
+    TargetIdiom, TargetFeatureClass,
     X86Caps, Aarch64Caps, Rv64Caps,
-    x86_caps_from_target, aarch64_caps_from_target, rv64_caps_from_target
+    x86_caps_from_target, aarch64_caps_from_target, rv64_caps_from_target,
+    idiom_feature_class,
+    x86_supports_feature_class, aarch64_supports_feature_class, rv64_supports_feature_class,
+    preferred_lane_count_x86, preferred_lane_count_aarch64, preferred_lane_count_rv64
 }
 
 # ============================================================================
@@ -142,3 +145,40 @@ describe "TargetCaps — preferred_vector_width_bits":
     it "X86Caps baseline returns 128":
         val caps = x86_caps_from_target("x86_64-v1")
         expect caps.preferred_vector_width_bits() == 128
+
+# ============================================================================
+# Feature-class helpers for SIMD / bit / crypto / matrix planning
+# ============================================================================
+
+describe "TargetCaps — feature-class helpers":
+    it "MatrixDot is classified as Matrix":
+        expect idiom_feature_class(TargetIdiom.MatrixDot) == TargetFeatureClass.Matrix
+
+    it "RotateLeft is classified as BitManip":
+        expect idiom_feature_class(TargetIdiom.RotateLeft) == TargetFeatureClass.BitManip
+
+    it "x86 v3 supports scalable-simd planning class":
+        val caps = x86_caps_from_target("x86_64-v3")
+        expect x86_supports_feature_class(caps, TargetFeatureClass.ScalableSimd) == true
+
+    it "aarch64 neon-only supports fixed-width simd but not scalable-simd":
+        val caps = aarch64_caps_from_target("aarch64")
+        expect aarch64_supports_feature_class(caps, TargetFeatureClass.FixedWidthSimd) == true
+        expect aarch64_supports_feature_class(caps, TargetFeatureClass.ScalableSimd) == false
+
+    it "rv64gcv supports matrix class when V is present":
+        val caps = rv64_caps_from_target("rv64gcv")
+        expect rv64_supports_feature_class(caps, TargetFeatureClass.Matrix) == true
+
+describe "TargetCaps — preferred lane count helpers":
+    it "x86 v3 prefers 8 lanes for f32":
+        val caps = x86_caps_from_target("x86_64-v3")
+        expect preferred_lane_count_x86(caps, 32) == 8
+
+    it "aarch64 neon prefers 4 lanes for f32":
+        val caps = aarch64_caps_from_target("aarch64")
+        expect preferred_lane_count_aarch64(caps, 32) == 4
+
+    it "rv64gcv_v256 prefers 8 lanes for f32":
+        val caps = rv64_caps_from_target("rv64gcv_v256")
+        expect preferred_lane_count_rv64(caps, 32) == 8

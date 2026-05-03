@@ -19,6 +19,8 @@ pub(crate) use core::{
 };
 
 use std::sync::Arc;
+use std::borrow::Borrow;
+use std::io::Write;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
@@ -36,11 +38,17 @@ type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 const METHOD_SELF: &str = "self";
 
 fn value_type_matches_name(value: &Value, expected: &str) -> bool {
-    match value {
-        Value::Object { class, .. } => class == expected,
-        Value::Enum { enum_name, .. } => enum_name == expected,
-        _ => value.type_name() == expected,
+    let matched = value.type_name() == expected
+        || value.matches_type(expected)
+        || matches!((value, expected), (Value::Str(_), "text"));
+    if std::env::var_os("SIMPLE_DEBUG_OVERLOAD_SELECT").is_some() {
+        println!(
+            "[type-match] expected={expected} runtime={} display={} matched={matched}",
+            value.type_name(),
+            value.to_display_string()
+        );
     }
+    matched
 }
 
 fn value_matches_type(value: &Value, ty: &Type) -> bool {
@@ -61,10 +69,24 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
         return None;
     }
 
+    let debug_overloads = std::env::var_os("SIMPLE_DEBUG_OVERLOAD_SELECT").is_some();
     let mut score = 0usize;
     for (param, value) in func.params.iter().zip(values.iter()) {
+        if debug_overloads {
+            println!(
+                "[overload] fn={} param={} ty={:?} value_type={} value={}",
+                func.name,
+                param.name,
+                param.ty,
+                value.type_name(),
+                value.to_display_string()
+            );
+        }
         if let Some(ty) = &param.ty {
             if !value_matches_type(value, ty) {
+                if debug_overloads {
+                    println!("[overload]   -> no match");
+                }
                 return None;
             }
             score += match ty {
@@ -73,6 +95,9 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
                 _ => 1,
             };
         }
+    }
+    if debug_overloads {
+        println!("[overload]   -> score={score}");
     }
     Some(score)
 }
@@ -88,6 +113,58 @@ fn select_overload(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<
         }
     }
     best.map(|(_, func)| func)
+}
+
+fn select_named_static_overload<'a, I, F>(
+    candidates: I,
+    method_name: &str,
+    values: &[Value],
+) -> Option<Arc<FunctionDef>>
+where
+    I: IntoIterator<Item = &'a F>,
+    F: Borrow<FunctionDef> + 'a,
+{
+    let named: Vec<Arc<FunctionDef>> = candidates
+        .into_iter()
+        .filter_map(|func| {
+            let func = func.borrow();
+            let is_static = func.is_static || !func.params.iter().any(|param| param.name == METHOD_SELF);
+            if func.name == method_name && is_static {
+                Some(Arc::new(func.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if std::env::var_os("SIMPLE_DEBUG_OVERLOAD_SELECT").is_some() {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/simple_overload_debug.log")
+        {
+            let _ = writeln!(
+                file,
+                "method={method_name} candidates={} values={:?}",
+                named.len(),
+                values.iter().map(|v| v.type_name()).collect::<Vec<_>>()
+            );
+            for func in &named {
+                let _ = writeln!(
+                    file,
+                    "  fn={} params={:?}",
+                    func.name,
+                    func.params.iter().map(|p| &p.ty).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    match named.len() {
+        0 => None,
+        1 => named.into_iter().next(),
+        _ => select_overload(&named, values),
+    }
 }
 
 #[allow(clippy::borrowed_box)] // reason: Box<dyn Trait> is the required storage type for this dispatch point
@@ -361,14 +438,26 @@ pub(crate) fn evaluate_call(
                 .cloned()
                 .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(module_name).cloned()));
             if let Some(methods) = impl_methods_for_type {
-                if let Some(func) = methods.iter().find(|m| &m.name == field) {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(func) = select_named_static_overload(methods.iter(), field, &evaluated_args) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = field == "new";
                     if is_new_method {
                         eprintln!("[WARN] Deprecated: {}.new() should be replaced with {}(). Use direct construction instead.", module_name, module_name);
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(module_name.to_string()));
                     }
-                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    let result = core::exec_function_with_values(
+                        &func,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(module_name));
                     }
@@ -377,14 +466,26 @@ pub(crate) fn evaluate_call(
             }
             // Check for class static methods
             if let Some(class_def) = classes.get(module_name).cloned() {
-                if let Some(func) = class_def.methods.iter().find(|m| &m.name == field) {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(func) = select_named_static_overload(class_def.methods.iter(), field, &evaluated_args) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = field == "new";
                     if is_new_method {
                         eprintln!("[WARN] Deprecated: {}.new() should be replaced with {}(). Use direct construction instead.", module_name, module_name);
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(module_name.to_string()));
                     }
-                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    let result = core::exec_function_with_values(
+                        &func,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(module_name));
                     }
@@ -600,13 +701,25 @@ pub(crate) fn evaluate_call(
                 .cloned()
                 .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(type_name).cloned()));
             if let Some(methods) = path_impl_methods {
-                if let Some(func) = methods.iter().find(|m| m.name == *method_name) {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(func) = select_named_static_overload(methods.iter(), method_name, &evaluated_args) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = method_name == "new";
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
                     }
-                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    let result = core::exec_function_with_values(
+                        &func,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
                     }
@@ -616,13 +729,26 @@ pub(crate) fn evaluate_call(
 
             // Check for class associated function (static method)
             if let Some(class_def) = classes.get(type_name).cloned() {
-                if let Some(func) = class_def.methods.iter().find(|m| m.name == *method_name) {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(func) = select_named_static_overload(class_def.methods.iter(), method_name, &evaluated_args)
+                {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = method_name == "new";
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
                     }
-                    let result = core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    let result = core::exec_function_with_values(
+                        &func,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
                     if is_new_method {
                         core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
                     }
@@ -736,23 +862,22 @@ pub(crate) fn evaluate_call(
 
             // Check class methods for static methods
             if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
-                if let Some(method) = class_def.methods.iter().find(|m| m.name == *method_name && m.is_static) {
-                    let mut local_env = env.clone();
-                    let non_self_params: Vec<_> = method.params.iter().filter(|p| p.name != "self").collect();
-                    for (i, param) in non_self_params.iter().enumerate() {
-                        if let Some(arg) = args.get(i) {
-                            let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
-                            local_env.insert(param.name.clone(), val);
-                        }
-                    }
-                    let result =
-                        super::exec_block_fn(&method.body, &mut local_env, functions, classes, enums, impl_methods);
-                    return match result {
-                        Ok((super::Control::Return(v), _)) => Ok(v),
-                        Ok((_, Some(v))) => Ok(v),
-                        Ok((_, None)) => Ok(Value::Nil),
-                        Err(e) => Err(e),
-                    };
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(method) =
+                    select_named_static_overload(class_def.methods.iter(), method_name, &evaluated_args)
+                {
+                    return core::exec_function_with_values(
+                        &method,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
                 }
             }
 
@@ -762,23 +887,20 @@ pub(crate) fn evaluate_call(
                 .cloned()
                 .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(type_name.as_str()).cloned()));
             if let Some(methods) = path_static_impl_methods {
-                if let Some(method) = methods.iter().find(|m| m.name == *method_name && m.is_static) {
-                    let mut local_env = env.clone();
-                    let non_self_params: Vec<_> = method.params.iter().filter(|p| p.name != "self").collect();
-                    for (i, param) in non_self_params.iter().enumerate() {
-                        if let Some(arg) = args.get(i) {
-                            let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
-                            local_env.insert(param.name.clone(), val);
-                        }
-                    }
-                    let result =
-                        super::exec_block_fn(&method.body, &mut local_env, functions, classes, enums, impl_methods);
-                    return match result {
-                        Ok((super::Control::Return(v), _)) => Ok(v),
-                        Ok((_, Some(v))) => Ok(v),
-                        Ok((_, None)) => Ok(Value::Nil),
-                        Err(e) => Err(e),
-                    };
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(method) = select_named_static_overload(methods.iter(), method_name, &evaluated_args) {
+                    return core::exec_function_with_values(
+                        &method,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
                 }
             }
 

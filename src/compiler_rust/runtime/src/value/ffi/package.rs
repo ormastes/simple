@@ -51,6 +51,16 @@ fn calculate_sha256(file_path: &str) -> io::Result<String> {
     Ok(format!("{:x}", result))
 }
 
+fn packaging_compression_unavailable() -> io::Error {
+    io::Error::other("packaging compression support is disabled in this runtime build")
+}
+
+fn package_compression_unavailable(name: &str) {
+    eprintln!(
+        "Runtime error: {name} is unavailable in this runtime build (enable Cargo feature `packaging-compression`)"
+    );
+}
+
 /// Create a tarball from a directory
 ///
 /// # Safety
@@ -59,27 +69,39 @@ fn calculate_sha256(file_path: &str) -> io::Result<String> {
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
 pub unsafe extern "C" fn rt_package_create_tarball(source_dir: *const c_char, output_path: *const c_char) -> i32 {
-    if source_dir.is_null() || output_path.is_null() {
+    #[cfg(not(feature = "packaging-compression"))]
+    {
+        let _ = source_dir;
+        let _ = output_path;
+        package_compression_unavailable("rt_package_create_tarball");
         return -1;
     }
 
-    let source = match CStr::from_ptr(source_dir).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
+    #[cfg(feature = "packaging-compression")]
+    {
+        if source_dir.is_null() || output_path.is_null() {
+            return -1;
+        }
 
-    let output = match CStr::from_ptr(output_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
+        let source = match CStr::from_ptr(source_dir).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
 
-    match create_tarball(source, output) {
-        Ok(_) => 0,
-        Err(_) => -1,
+        let output = match CStr::from_ptr(output_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        match create_tarball(source, output) {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
     }
 }
 
 /// Create a tarball from a directory (internal)
+#[cfg(feature = "packaging-compression")]
 fn create_tarball(source_dir: &str, output_path: &str) -> io::Result<()> {
     use flate2::write::GzEncoder;
     use flate2::Compression;
@@ -95,6 +117,13 @@ fn create_tarball(source_dir: &str, output_path: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "packaging-compression"))]
+fn create_tarball(source_dir: &str, output_path: &str) -> io::Result<()> {
+    let _ = source_dir;
+    let _ = output_path;
+    Err(packaging_compression_unavailable())
+}
+
 /// Extract a tarball to a directory
 ///
 /// # Safety
@@ -103,27 +132,39 @@ fn create_tarball(source_dir: &str, output_path: &str) -> io::Result<()> {
 /// - Returns 0 on success, -1 on error
 #[no_mangle]
 pub unsafe extern "C" fn rt_package_extract_tarball(tarball_path: *const c_char, dest_dir: *const c_char) -> i32 {
-    if tarball_path.is_null() || dest_dir.is_null() {
+    #[cfg(not(feature = "packaging-compression"))]
+    {
+        let _ = tarball_path;
+        let _ = dest_dir;
+        package_compression_unavailable("rt_package_extract_tarball");
         return -1;
     }
 
-    let tarball = match CStr::from_ptr(tarball_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
+    #[cfg(feature = "packaging-compression")]
+    {
+        if tarball_path.is_null() || dest_dir.is_null() {
+            return -1;
+        }
 
-    let dest = match CStr::from_ptr(dest_dir).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
+        let tarball = match CStr::from_ptr(tarball_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
 
-    match extract_tarball(tarball, dest) {
-        Ok(_) => 0,
-        Err(_) => -1,
+        let dest = match CStr::from_ptr(dest_dir).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        match extract_tarball(tarball, dest) {
+            Ok(_) => 0,
+            Err(_) => -1,
+        }
     }
 }
 
 /// Extract a tarball to a directory (internal)
+#[cfg(feature = "packaging-compression")]
 fn extract_tarball(tarball_path: &str, dest_dir: &str) -> io::Result<()> {
     use flate2::read::GzDecoder;
     use tar::Archive;
@@ -135,6 +176,13 @@ fn extract_tarball(tarball_path: &str, dest_dir: &str) -> io::Result<()> {
     archive.unpack(dest_dir)?;
 
     Ok(())
+}
+
+#[cfg(not(feature = "packaging-compression"))]
+fn extract_tarball(tarball_path: &str, dest_dir: &str) -> io::Result<()> {
+    let _ = tarball_path;
+    let _ = dest_dir;
+    Err(packaging_compression_unavailable())
 }
 
 /// Get file size
@@ -382,6 +430,7 @@ mod tests {
         assert_eq!(hash, "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f");
     }
 
+    #[cfg(feature = "packaging-compression")]
     #[test]
     fn test_create_and_extract_tarball() {
         let temp_dir = TempDir::new().unwrap();

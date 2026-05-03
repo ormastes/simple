@@ -4,6 +4,7 @@
 # Delegates to compile_native() in native/mod.spl.
 
 use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_types.{MirTypeKind}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, CompileOptions, CompileError}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.native.mod.{native_compile_result}
@@ -21,6 +22,26 @@ impl NativeCodegenAdapter:
     fn plan() -> PortableNumericLoweringPlan:
         portable_numeric_default_plan_for_target(self.options.target)
 
+    fn scalable_lowering_diagnostics(module: MirModule) -> [text]:
+        if not native_module_has_scalable_vec(module):
+            return []
+
+        val plan = self.plan()
+        if plan.lowering_modules_csv().contains("riscv_v"):
+            return ["riscv_v_native_lowering_deferred"]
+
+        ["scalable_vector_target_lacks_native_capability"]
+
+fn native_module_has_scalable_vec(module: MirModule) -> bool:
+    for func in module.functions.values():
+        for local in func.locals:
+            match local.type_.kind:
+                case MirTypeKind.ScalableVec(_, _):
+                    return true
+                case _:
+                    ()
+    false
+
 impl Codegen for NativeCodegenAdapter:
     fn backend_kind() -> BackendKind: BackendKind.Native
     fn backend_name() -> text: "native"
@@ -35,6 +56,10 @@ impl Codegen for NativeCodegenAdapter:
     fn output_kind() -> CodegenOutputKind: CodegenOutputKind.ObjectCode
 
     fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
+        val scalable_diags = self.scalable_lowering_diagnostics(module)
+        if scalable_diags.len() > 0:
+            return Ok(CodegenOutput.object(module.name, []))
+
         val compiled = native_compile_result(module, self.options.target)
         val bytes = if compiled.object_code.?: compiled.object_code.unwrap() else: []
         Ok(CodegenOutput.object(module.name, bytes))
@@ -42,4 +67,3 @@ impl Codegen for NativeCodegenAdapter:
 # ============================================================================
 # Exports
 # ============================================================================
-

@@ -1536,6 +1536,45 @@ mod tests {
     }
 
     #[test]
+    fn debug_static_overload_param_types() {
+        let source = r#"class InlineStaticOverload:
+    static fn select(value: i64) -> text:
+        return "inline-i64"
+
+    static fn select(value: text) -> text:
+        return "inline-text"
+
+class ImplStaticOverload:
+    marker: text
+
+impl ImplStaticOverload:
+    static fn select(value: i64) -> text:
+        return "impl-i64"
+
+    static fn select(value: text) -> text:
+        return "impl-text"
+"#;
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("Should parse static overload source");
+
+        for item in module.items {
+            match item {
+                crate::ast::Node::Class(class) => {
+                    if class.name == "InlineStaticOverload" {
+                        eprintln!("inline methods: {:?}", class.methods);
+                    }
+                }
+                crate::ast::Node::Impl(imp) => {
+                    if imp.target_type == crate::ast::Type::Simple("ImplStaticOverload".to_string()) {
+                        eprintln!("impl methods: {:?}", imp.methods);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
     fn test_parse_at_extern_as_attribute_on_function() {
         let source = r#"@extern("runtime", "rt_print")
 fn rt_print(msg: text):

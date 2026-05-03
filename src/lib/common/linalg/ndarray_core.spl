@@ -1,0 +1,246 @@
+enum Device:
+    CPU
+    CUDA(index: i64)
+
+    static fn cpu() -> Device:
+        Device.CPU
+
+enum Layout:
+    RowMajor
+    ColumnMajor
+    Strided
+    Broadcast
+
+enum KernelProfile:
+    ScalarOnly
+    SimdReady
+    BackendAccel
+
+struct Index:
+    value: i64
+
+    static fn new(value: i64) -> Index:
+        Index(value: value)
+
+struct Axis:
+    value: i64
+
+    static fn new(value: i64) -> Axis:
+        Axis(value: value)
+
+struct Shape:
+    dims: [Index]
+
+    static fn new(dims: [Index]) -> Shape:
+        Shape(dims: dims)
+
+    fn ndim(self) -> i64:
+        self.dims.len()
+
+    fn numel(self) -> Index:
+        var total = 1
+        var i = 0
+        while i < self.dims.len():
+            total = total * self.dims[i].value
+            i = i + 1
+        Index.new(total)
+
+struct Stride:
+    dims: [Index]
+
+    static fn new(dims: [Index]) -> Stride:
+        Stride(dims: dims)
+
+struct SliceSpec:
+    start: Index
+    stop: Index
+    step: Index
+
+    static fn new(start: Index, stop: Index, step: Index) -> SliceSpec:
+        SliceSpec(start: start, stop: stop, step: step)
+
+struct BroadcastPlan:
+    shape: Shape
+    left: Stride
+    right: Stride
+    uses_zero_stride: bool
+
+enum NdarrayError:
+    InvalidShape
+    InvalidStep
+    InvalidLinspace
+    ShapeMismatch
+    IndexOutOfBounds
+    InvalidAxis
+    InvalidSlice
+    UnsupportedDType
+
+fn derive_row_major_strides(shape: Shape) -> Stride:
+    if shape.dims.len() == 0:
+        return Stride.new([])
+    var strides: [Index] = []
+    var i = 0
+    while i < shape.dims.len():
+        strides.push(Index.new(0))
+        i = i + 1
+    var running = 1
+    i = shape.dims.len() - 1
+    while i >= 0:
+        strides[i] = Index.new(running)
+        running = running * shape.dims[i].value
+        i = i - 1
+    Stride.new(strides)
+
+fn is_row_major_contiguous(shape: Shape, strides: Stride) -> bool:
+    if shape.dims.len() != strides.dims.len():
+        return false
+    derive_row_major_strides(shape) == strides
+
+fn normalize_index(index: Index, length: i64) -> Result<Index, NdarrayError>:
+    var pos = index.value
+    if pos < 0:
+        pos = length + pos
+    if pos < 0 or pos >= length:
+        return Err(NdarrayError.IndexOutOfBounds)
+    Ok(Index.new(pos))
+
+fn try_resolve_offset(shape: Shape, strides: Stride, offset: Index, indices: [Index]) -> Result<Index, NdarrayError>:
+    if indices.len() != shape.dims.len():
+        return Err(NdarrayError.ShapeMismatch)
+    var pos = offset.value
+    var axis = 0
+    while axis < indices.len():
+        val idx = normalize_index(indices[axis], shape.dims[axis].value)?
+        pos = pos + idx.value * strides.dims[axis].value
+        axis = axis + 1
+    Ok(Index.new(pos))
+
+fn resolve_offset(shape: Shape, strides: Stride, offset: Index, indices: [Index]) -> Index:
+    try_resolve_offset(shape, strides, offset, indices).unwrap()
+
+fn normalize_axis(axis: Axis, ndim: i64) -> Result<Axis, NdarrayError>:
+    var value = axis.value
+    if value < 0:
+        value = ndim + value
+    if value < 0 or value >= ndim:
+        return Err(NdarrayError.InvalidAxis)
+    Ok(Axis.new(value))
+
+fn transpose_shape(shape: Shape, axis_a: Axis, axis_b: Axis) -> Result<Shape, NdarrayError>:
+    val left = normalize_axis(axis_a, shape.ndim())?
+    val right = normalize_axis(axis_b, shape.ndim())?
+    var dims = shape.dims
+    val tmp = dims[left.value]
+    dims[left.value] = dims[right.value]
+    dims[right.value] = tmp
+    Ok(Shape.new(dims))
+
+fn transpose_strides(strides: Stride, axis_a: Axis, axis_b: Axis) -> Result<Stride, NdarrayError>:
+    val left = normalize_axis(axis_a, strides.dims.len())?
+    val right = normalize_axis(axis_b, strides.dims.len())?
+    var dims = strides.dims
+    val tmp = dims[left.value]
+    dims[left.value] = dims[right.value]
+    dims[right.value] = tmp
+    Ok(Stride.new(dims))
+
+fn squeeze_shape(shape: Shape) -> Shape:
+    var dims: [Index] = []
+    var i = 0
+    while i < shape.dims.len():
+        if shape.dims[i].value != 1:
+            dims.push(shape.dims[i])
+        i = i + 1
+    Shape.new(dims)
+
+fn align_strides(shape: Shape, strides: Stride, target_rank: i64) -> Stride:
+    var aligned: [Index] = []
+    var prefix = target_rank - shape.dims.len()
+    var i = 0
+    while i < prefix:
+        aligned.push(Index.new(0))
+        i = i + 1
+    i = 0
+    while i < shape.dims.len():
+        if shape.dims[i].value == 1:
+            aligned.push(Index.new(0))
+        else:
+            aligned.push(strides.dims[i])
+        i = i + 1
+    Stride.new(aligned)
+
+fn broadcast_shapes(left: Shape, right: Shape) -> Result<Shape, NdarrayError>:
+    val rank = if left.dims.len() > right.dims.len(): left.dims.len() else: right.dims.len()
+    var dims: [Index] = []
+    var i = 0
+    while i < rank:
+        dims.push(Index.new(1))
+        i = i + 1
+    i = 0
+    while i < rank:
+        val left_axis = left.dims.len() - 1 - i
+        val right_axis = right.dims.len() - 1 - i
+        val left_dim = if left_axis >= 0: left.dims[left_axis].value else: 1
+        val right_dim = if right_axis >= 0: right.dims[right_axis].value else: 1
+        if left_dim != right_dim and left_dim != 1 and right_dim != 1:
+            return Err(NdarrayError.ShapeMismatch)
+        dims[rank - 1 - i] = Index.new(if left_dim > right_dim: left_dim else: right_dim)
+        i = i + 1
+    Ok(Shape.new(dims))
+
+fn make_broadcast_plan(left_shape: Shape, left_strides: Stride, right_shape: Shape, right_strides: Stride) -> Result<BroadcastPlan, NdarrayError>:
+    val shape = broadcast_shapes(left_shape, right_shape)?
+    val left_aligned = align_strides(left_shape, left_strides, shape.dims.len())
+    val right_aligned = align_strides(right_shape, right_strides, shape.dims.len())
+    var uses_zero_stride = false
+    var i = 0
+    while i < shape.dims.len():
+        if left_aligned.dims[i].value == 0 or right_aligned.dims[i].value == 0:
+            uses_zero_stride = true
+        i = i + 1
+    Ok(BroadcastPlan(shape: shape, left: left_aligned, right: right_aligned, uses_zero_stride: uses_zero_stride))
+
+fn unravel_index(linear: i64, shape: Shape) -> [Index]:
+    if shape.dims.len() == 0:
+        return []
+    var coords: [Index] = []
+    var i = 0
+    while i < shape.dims.len():
+        coords.push(Index.new(0))
+        i = i + 1
+    var remaining = linear
+    val row_major = derive_row_major_strides(shape)
+    i = 0
+    while i < shape.dims.len():
+        val stride = row_major.dims[i].value
+        if stride == 0:
+            coords[i] = Index.new(0)
+        else:
+            coords[i] = Index.new(remaining / stride)
+            remaining = remaining % stride
+        i = i + 1
+    coords
+
+fn slice_len(spec: SliceSpec, size: i64) -> Result<Index, NdarrayError>:
+    if spec.step.value == 0:
+        return Err(NdarrayError.InvalidStep)
+    var start = spec.start.value
+    var stop = spec.stop.value
+    val step = spec.step.value
+    if start < 0:
+        start = size + start
+    if stop < 0:
+        stop = size + stop
+    if start < 0 or start > size or stop < 0 or stop > size:
+        return Err(NdarrayError.IndexOutOfBounds)
+    var count = 0
+    var cursor = start
+    if step > 0:
+        while cursor < stop:
+            count = count + 1
+            cursor = cursor + step
+    else:
+        while cursor > stop:
+            count = count + 1
+            cursor = cursor + step
+    Ok(Index.new(count))

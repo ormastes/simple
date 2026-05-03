@@ -12,6 +12,11 @@ fn simd_tier_env_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn process_dir_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
     let _guard = simd_tier_env_lock().lock().unwrap();
     let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
@@ -21,6 +26,15 @@ fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
         Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
         None => std::env::remove_var("SIMPLE_SIMD_TIER"),
     }
+    result
+}
+
+fn with_current_dir<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
+    let _guard = process_dir_lock().lock().unwrap();
+    let previous = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir).unwrap();
+    let result = f();
+    std::env::set_current_dir(previous).unwrap();
     result
 }
 
@@ -346,6 +360,26 @@ fn test_runtime_bundle_auto_prefers_native_all_for_compiler_entry() {
 }
 
 #[test]
+fn test_find_native_all_library_skips_empty_debug_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let debug_dir = temp.path().join("src/compiler_rust/target/debug");
+    let release_dir = temp.path().join("src/compiler_rust/target/release");
+    std::fs::create_dir_all(&debug_dir).unwrap();
+    std::fs::create_dir_all(&release_dir).unwrap();
+
+    let empty_debug = debug_dir.join("libsimple_native_all.a");
+    let release = release_dir.join("libsimple_native_all.a");
+    std::fs::write(&empty_debug, b"").unwrap();
+    std::fs::write(&release, b"real archive").unwrap();
+
+    let selected = with_current_dir(temp.path(), find_native_all_library).unwrap();
+    assert_eq!(
+        selected,
+        PathBuf::from("src/compiler_rust/target/release/libsimple_native_all.a")
+    );
+}
+
+#[test]
 fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -517,16 +551,8 @@ fn test_duplicate_struct_sidecar_resolves_unique_compiler_context_handle() {
     let handle_ctx = compiler_root.join("99.loader/loader/compiler_ffi.spl");
     let consumer = compiler_root.join("70.backend/linker/obj_taker.spl");
 
-    std::fs::write(
-        &alive_ctx,
-        "class CompilerContext:\n    alive: bool\n",
-    )
-    .unwrap();
-    std::fs::write(
-        &handle_ctx,
-        "struct CompilerContext:\n    handle: i64\n",
-    )
-    .unwrap();
+    std::fs::write(&alive_ctx, "class CompilerContext:\n    alive: bool\n").unwrap();
+    std::fs::write(&handle_ctx, "struct CompilerContext:\n    handle: i64\n").unwrap();
     std::fs::write(
         &consumer,
         "struct ObjTaker:\n    compiler_ctx: CompilerContext\n\nfn handle_of(t: ObjTaker) -> i64:\n    return t.compiler_ctx.handle\n",

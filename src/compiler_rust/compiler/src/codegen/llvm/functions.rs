@@ -403,36 +403,10 @@ impl LlvmBackend {
                 // Store any newly defined vreg to its alloca (for cross-block access)
                 if let Some(d) = inst.dest() {
                     if let (Some(&alloca), Some(&val)) = (vreg_allocas.get(&d), vreg_map.get(&d)) {
-                        // Coerce value to RuntimeValue int width before storing
                         let rv_type = self.runtime_int_type();
-                        let rv_width = rv_type.get_bit_width();
-                        let i64_val = match val {
-                            inkwell::values::BasicValueEnum::IntValue(iv) => {
-                                let bw = iv.get_type().get_bit_width();
-                                if bw == rv_width {
-                                    val
-                                } else if bw < rv_width {
-                                    builder
-                                        .build_int_z_extend(iv, rv_type, "vext")
-                                        .map(|v| v.into())
-                                        .unwrap_or(val)
-                                } else {
-                                    builder
-                                        .build_int_truncate(iv, rv_type, "vtrunc")
-                                        .map(|v| v.into())
-                                        .unwrap_or(val)
-                                }
-                            }
-                            inkwell::values::BasicValueEnum::PointerValue(pv) => builder
-                                .build_ptr_to_int(pv, rv_type, "vp2i")
-                                .map(|v| v.into())
-                                .unwrap_or(val),
-                            inkwell::values::BasicValueEnum::FloatValue(fv) => builder
-                                .build_float_to_signed_int(fv, rv_type, "vf2i")
-                                .map(|v| v.into())
-                                .unwrap_or(val),
-                            _ => val,
-                        };
+                        let i64_val = self
+                            .coerce_value_to_type(val, Some(rv_type.into()), builder)
+                            .unwrap_or(val);
                         let _ = builder.build_store(alloca, i64_val);
                     }
                 }
@@ -472,7 +446,7 @@ impl LlvmBackend {
                 }
                 _ => {}
             }
-            self.compile_terminator(&block.terminator, &llvm_blocks, &vreg_map, builder)?;
+            self.compile_terminator(&block.terminator, func.return_type, &llvm_blocks, &vreg_map, builder)?;
         }
 
         // Debug: dump LLVM IR to file for selected functions.

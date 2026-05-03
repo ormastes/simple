@@ -6,12 +6,55 @@ use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
-use simple_parser::ast::{Argument, ClassDef, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, FunctionDef, Type};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 // Import IN_NEW_METHOD from interpreter_call module
 use crate::interpreter::IN_NEW_METHOD;
+
+fn constructor_value_type_matches_name(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object { class, .. } => class == expected,
+        Value::Enum { enum_name, .. } => enum_name == expected,
+        Value::Str(_) => matches!(expected, "str" | "text" | "String" | "Str"),
+        _ => value.type_name() == expected || value.matches_type(expected),
+    }
+}
+
+fn constructor_value_matches_type(value: &Value, ty: &Type) -> bool {
+    match ty {
+        Type::Simple(name) | Type::Generic { name, .. } => constructor_value_type_matches_name(value, name),
+        Type::Array { element, .. } => match value {
+            Value::Array(items) => items.iter().all(|item| constructor_value_matches_type(item, element)),
+            Value::FrozenArray(items) => items.iter().all(|item| constructor_value_matches_type(item, element)),
+            Value::Tuple(items) => items.iter().all(|item| constructor_value_matches_type(item, element)),
+            _ => false,
+        },
+        _ => true,
+    }
+}
+
+fn constructor_overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
+    if func.params.len() != values.len() {
+        return None;
+    }
+
+    let mut score = 0usize;
+    for (param, value) in func.params.iter().zip(values.iter()) {
+        if let Some(ty) = &param.ty {
+            if !constructor_value_matches_type(value, ty) {
+                return None;
+            }
+            score += match ty {
+                Type::Array { .. } => 4,
+                Type::Simple(_) | Type::Generic { .. } => 2,
+                _ => 1,
+            };
+        }
+    }
+    Some(score)
+}
 
 #[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: Box<dyn Trait> dispatch with ABI-locked entry; refactoring deferred
 pub fn handle_trait_object_methods(
@@ -87,17 +130,58 @@ pub fn handle_constructor_methods(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     if let Some(class_def) = classes.get(class_name).cloned() {
-        // Find static method (no self parameter)
-        if let Some(method_def) = class_def.methods.iter().find(|m| m.name == method) {
+        let evaluated_args: Vec<(Option<String>, Value)> = args
+            .iter()
+            .map(|arg| {
+                evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)
+                    .map(|value| (arg.name.clone(), value))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let positional_values: Vec<Value> = evaluated_args.iter().map(|(_, value)| value.clone()).collect();
+        let mut candidates: Vec<&FunctionDef> = class_def
+            .methods
+            .iter()
+            .filter(|m| m.name == method && (m.is_static || !m.params.iter().any(|p| p.name == "self")))
+            .collect();
+        if let Some(extra_methods) = impl_methods.get(class_name) {
+            candidates.extend(
+                extra_methods
+                    .iter()
+                    .filter(|m| m.name == method && (m.is_static || !m.params.iter().any(|p| p.name == "self")))
+                    .map(|m| m.as_ref()),
+            );
+        }
+        eprintln!(
+            "[debug static overload] {}.{} candidates={} arg_types={:?}",
+            class_name,
+            method,
+            candidates.len(),
+            positional_values.iter().map(|v| v.type_name()).collect::<Vec<_>>()
+        );
+        for candidate in &candidates {
+            eprintln!(
+                "[debug static overload] candidate params={:?} tys={:?}",
+                candidate.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+                candidate.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>()
+            );
+        }
+
+        if let Some(method_def) = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                constructor_overload_score(candidate, &positional_values).map(|score| (score, candidate))
+            })
+            .max_by_key(|(score, _)| *score)
+            .map(|(_, candidate)| candidate)
+        {
             // Execute without self - start with empty local_env to avoid shadowing defaults
             let mut local_env: Env = Env::new();
             let mut positional_idx = 0;
 
             // Bind provided arguments
-            for arg in args {
-                let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
-                if let Some(name) = &arg.name {
-                    local_env.insert(name.clone(), val);
+            for (arg_name, val) in evaluated_args {
+                if let Some(name) = arg_name {
+                    local_env.insert(name, val);
                 } else if positional_idx < method_def.params.len() {
                     let param = &method_def.params[positional_idx];
                     local_env.insert(param.name.clone(), val);

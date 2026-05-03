@@ -930,7 +930,7 @@ pub use simd_aes_ops::{rt_simd_aes_round_last_u8x16, rt_simd_aes_round_u8x16};
 pub use simd_clmul_ops::{rt_simd_clmul_hi_u64, rt_simd_clmul_lo_u64, rt_simd_xor_u64x2};
 
 // Re-export regex FFI functions
-pub use ffi::regex::{
+pub use ffi::{
     ffi_regex_captures, ffi_regex_find, ffi_regex_find_all, ffi_regex_is_match, ffi_regex_replace,
     ffi_regex_replace_all, ffi_regex_split, ffi_regex_split_n,
 };
@@ -988,7 +988,7 @@ pub use hpcollections::hashmap::clear_hashmap_registry;
 pub use hpcollections::hashset::clear_hashset_registry;
 pub use hpcollections::btreemap::clear_btreemap_registry;
 pub use hpcollections::btreeset::clear_btreeset_registry;
-pub use ffi::regex::clear_regex_cache;
+pub use ffi::clear_regex_cache;
 pub use ffi::sync::clear_sync_registries;
 pub use ffi::atomic::clear_atomic_registries;
 pub use ffi::hash::clear_hash_registries;

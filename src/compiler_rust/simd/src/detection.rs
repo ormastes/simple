@@ -387,9 +387,19 @@ pub fn detect_profile() -> SimdTier {
     SimdFeatures::detect().detect_profile()
 }
 
+/// Resolve the active SIMD tier after env/config downscoping.
+pub fn active_profile() -> SimdTier {
+    crate::host_config::active_simd_tier()
+}
+
 /// Get the canonical SIMD tier name for the current host.
 pub fn profile_name() -> &'static str {
     detect_profile().as_str()
+}
+
+/// Get the active SIMD tier name after env/config downscoping.
+pub fn active_profile_name() -> &'static str {
+    active_profile().as_str()
 }
 
 /// Check if AVX (256-bit) is available.

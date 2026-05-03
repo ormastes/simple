@@ -6,7 +6,7 @@
 //! preserve broader runtime semantics.
 
 use super::core::RuntimeValue;
-use simple_simd::{detect_profile, SimdTier};
+use simple_simd::{active_simd_tier, SimdTier};
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -112,7 +112,8 @@ fn take_test_kernel() -> Option<TestKernelPath> {
 #[inline]
 pub const fn dispatch_for_tier(tier: SimdTier) -> PrimitiveSortDispatch {
     match tier {
-        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => PrimitiveSortDispatch::Avx2,
+        SimdTier::X86_64Sse2 => PrimitiveSortDispatch::Scalar,
+        SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => PrimitiveSortDispatch::Avx2,
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => PrimitiveSortDispatch::Neon,
         SimdTier::Scalar | SimdTier::Riscv64Rvv | SimdTier::Wasm128 => PrimitiveSortDispatch::Scalar,
     }
@@ -120,7 +121,7 @@ pub const fn dispatch_for_tier(tier: SimdTier) -> PrimitiveSortDispatch {
 
 #[inline]
 pub fn sort_runtime_values_auto(values: &mut [RuntimeValue]) -> PrimitiveSortReport {
-    sort_runtime_values(values, detect_profile())
+    sort_runtime_values(values, active_simd_tier())
 }
 
 pub fn sort_runtime_values(values: &mut [RuntimeValue], tier: SimdTier) -> PrimitiveSortReport {
@@ -666,6 +667,7 @@ mod tests {
     #[test]
     fn dispatch_mapping_tracks_simd_tier() {
         assert_eq!(dispatch_for_tier(SimdTier::Scalar), PrimitiveSortDispatch::Scalar);
+        assert_eq!(dispatch_for_tier(SimdTier::X86_64Sse2), PrimitiveSortDispatch::Scalar);
         assert_eq!(dispatch_for_tier(SimdTier::X86_64Avx2), PrimitiveSortDispatch::Avx2);
         assert_eq!(dispatch_for_tier(SimdTier::Aarch64Neon), PrimitiveSortDispatch::Neon);
         assert_eq!(dispatch_for_tier(SimdTier::Riscv64Rvv), PrimitiveSortDispatch::Scalar);

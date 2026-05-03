@@ -103,7 +103,10 @@ pub mod utils;
 pub mod config;
 
 // Phase 12: Regular expressions
+#[cfg(feature = "runtime-regex")]
 pub mod regex;
+#[cfg(not(feature = "runtime-regex"))]
+pub mod regex_stub;
 
 // Phase 13: Sandbox operations
 pub mod sandbox;
@@ -173,7 +176,10 @@ pub use utils::*;
 pub use config::*;
 
 // Phase 12
+#[cfg(feature = "runtime-regex")]
 pub use regex::*;
+#[cfg(not(feature = "runtime-regex"))]
+pub use regex_stub::*;
 
 // Phase 13
 pub use sandbox::*;

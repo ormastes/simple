@@ -760,10 +760,7 @@ fn pack_vec2u64(lanes: [u64; 2]) -> Value {
 
 fn unpack_u64_array(name: &str, value: &Value) -> Result<Vec<u64>, CompileError> {
     match value {
-        Value::Array(items) => items
-            .iter()
-            .map(|item| require_u64_value(name, item))
-            .collect(),
+        Value::Array(items) => items.iter().map(|item| require_u64_value(name, item)).collect(),
         other => Err(CompileError::runtime(format!(
             "{name}: expected [u64] array, got {:?}",
             other
@@ -773,7 +770,8 @@ fn unpack_u64_array(name: &str, value: &Value) -> Result<Vec<u64>, CompileError>
 
 fn pack_u64_array(words: Vec<u64>) -> Value {
     Value::array(
-        words.into_iter()
+        words
+            .into_iter()
             .map(|word| Value::UInt { value: word, width: 64 })
             .collect(),
     )

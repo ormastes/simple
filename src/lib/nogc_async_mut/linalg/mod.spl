@@ -1,0 +1,188 @@
+use std.ndarray.*
+
+enum LinalgError:
+    DimensionMismatch
+    Singular
+
+fn vector_from(values: [Float64]) -> NDArray:
+    make_f64_array(values, Shape.new([Index.new(values.len())]))
+
+fn matrix_from_rows(rows) -> NDArray:
+    val row_count = rows.len()
+    var col_count = 0
+    if row_count > 0:
+        col_count = rows[0].len()
+    var flat: [Float64] = []
+    var size = 0
+    while size < row_count * col_count:
+        flat.push(Float64.new(0.0))
+        size = size + 1
+    var row = 0
+    while row < row_count:
+        var col = 0
+        while col < col_count:
+            flat[row * col_count + col] = rows[row][col]
+            col = col + 1
+        row = row + 1
+    make_f64_array(flat, Shape.new([Index.new(row_count), Index.new(col_count)]))
+
+fn zeros_matrix(rows: Index, cols: Index) -> NDArray:
+    zeros(Shape.new([rows, cols]))
+
+fn full_matrix(rows: Index, cols: Index, fill: Float64) -> NDArray:
+    full(Shape.new([rows, cols]), fill)
+
+fn eye_matrix(size: Index) -> NDArray:
+    eye(size)
+
+fn dot(left: NDArray, right: NDArray) -> Result<Float64, LinalgError>:
+    if left.len() != right.len():
+        return Err(LinalgError.DimensionMismatch)
+    var total = 0.0
+    var i = 0
+    while i < left.len().value:
+        total = total + left.get_f64(Index.new(i)).value * right.get_f64(Index.new(i)).value
+        i = i + 1
+    Ok(Float64.new(total))
+
+fn axpy(alpha: Float64, x: NDArray, y: NDArray) -> NDArray:
+    try_axpy(alpha, x, y).unwrap()
+
+fn try_axpy(alpha: Float64, x: NDArray, y: NDArray) -> Result<NDArray, LinalgError>:
+    if x.shape != y.shape:
+        return Err(LinalgError.DimensionMismatch)
+    Ok(x.mul_scalar(alpha).add(y))
+
+fn gemv(matrix: NDArray, vector: NDArray) -> Result<NDArray, LinalgError>:
+    if matrix.cols() != vector.len():
+        return Err(LinalgError.DimensionMismatch)
+    var out: [Float64] = []
+    var row = 0
+    while row < matrix.rows().value:
+        var total = 0.0
+        var col = 0
+        while col < matrix.cols().value:
+            total = total + matrix.get_f64_at([Index.new(row), Index.new(col)]).value * vector.get_f64(Index.new(col)).value
+            col = col + 1
+        out.push(Float64.new(total))
+        row = row + 1
+    Ok(make_f64_array(out, Shape.new([matrix.rows()])))
+
+fn gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> NDArray:
+    try_gemm(alpha, a, b, beta, c_in).unwrap()
+
+fn try_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> Result<NDArray, LinalgError>:
+    if a.cols() != b.rows():
+        return Err(LinalgError.DimensionMismatch)
+    if c_in.rows() != a.rows() or c_in.cols() != b.cols():
+        return Err(LinalgError.DimensionMismatch)
+    val rows = a.rows().value
+    val cols = b.cols().value
+    val inner = a.cols().value
+    var out: [Float64] = []
+    var i = 0
+    while i < rows * cols:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    i = 0
+    while i < rows:
+        var j = 0
+        while j < cols:
+            var total = beta.value * c_in.get_f64_at([Index.new(i), Index.new(j)]).value
+            var k = 0
+            while k < inner:
+                total = total + alpha.value
+                    * a.get_f64_at([Index.new(i), Index.new(k)]).value
+                    * b.get_f64_at([Index.new(k), Index.new(j)]).value
+                k = k + 1
+            out[i * cols + j] = Float64.new(total)
+            j = j + 1
+        i = i + 1
+    Ok(make_f64_array(out, Shape.new([a.rows(), b.cols()])))
+
+fn norm(input: NDArray) -> Float64:
+    Float64.new(dot(input, input).unwrap().value)
+
+fn solve(a: NDArray, b: NDArray) -> Result<NDArray, LinalgError>:
+    val n = a.rows().value
+    if a.rows() != a.cols():
+        return Err(LinalgError.DimensionMismatch)
+    if b.len().value != n:
+        return Err(LinalgError.DimensionMismatch)
+    var mat: [f64] = []
+    var rhs: [f64] = []
+    var row = 0
+    while row < n:
+        var col = 0
+        while col < n:
+            mat.push(a.get_f64_at([Index.new(row), Index.new(col)]).value)
+            col = col + 1
+        rhs.push(b.get_f64(Index.new(row)).value)
+        row = row + 1
+    var pivot = 0
+    while pivot < n:
+        var pivot_row = pivot
+        var max_abs = if mat[pivot * n + pivot] < 0.0: -mat[pivot * n + pivot] else: mat[pivot * n + pivot]
+        var probe = pivot + 1
+        while probe < n:
+            val candidate = mat[probe * n + pivot]
+            val candidate_abs = if candidate < 0.0: -candidate else: candidate
+            if candidate_abs > max_abs:
+                max_abs = candidate_abs
+                pivot_row = probe
+            probe = probe + 1
+        if max_abs == 0.0:
+            return Err(LinalgError.Singular)
+        if pivot_row != pivot:
+            var swap_col = 0
+            while swap_col < n:
+                val pivot_idx = pivot * n + swap_col
+                val pivot_row_idx = pivot_row * n + swap_col
+                val tmp = mat[pivot_idx]
+                mat[pivot_idx] = mat[pivot_row_idx]
+                mat[pivot_row_idx] = tmp
+                swap_col = swap_col + 1
+            val rhs_tmp = rhs[pivot]
+            rhs[pivot] = rhs[pivot_row]
+            rhs[pivot_row] = rhs_tmp
+        var lower = pivot + 1
+        while lower < n:
+            val factor = mat[lower * n + pivot] / mat[pivot * n + pivot]
+            var col = pivot
+            while col < n:
+                mat[lower * n + col] = mat[lower * n + col] - factor * mat[pivot * n + col]
+                col = col + 1
+            rhs[lower] = rhs[lower] - factor * rhs[pivot]
+            lower = lower + 1
+        pivot = pivot + 1
+    var x: [f64] = []
+    var i = 0
+    while i < n:
+        x.push(0.0)
+        i = i + 1
+    i = n - 1
+    while i >= 0:
+        var total = rhs[i]
+        var col = i + 1
+        while col < n:
+            total = total - mat[i * n + col] * x[col]
+            col = col + 1
+        val diag = mat[i * n + i]
+        if diag == 0.0:
+            return Err(LinalgError.Singular)
+        x[i] = total / diag
+        i = i - 1
+    var out: [Float64] = []
+    i = 0
+    while i < n:
+        var value = x[i]
+        val nearest_i = if value >= 0.0: (value + 0.5) as i64 else: (value - 0.5) as i64
+        val nearest = nearest_i as f64
+        var diff = value - nearest
+        if diff < 0.0:
+            diff = -diff
+        if diff <= 1e-9:
+            value = nearest
+        out.push(Float64.new(value))
+        i = i + 1
+    Ok(make_f64_array(out, Shape.new([Index.new(n)])))

@@ -12,7 +12,7 @@ fn build_boundary_scan_values() -> [text]:
     var values: [text] = []
     var idx = 0
     while idx < 70:
-        if idx == 0 or idx == 63 or idx == 64 or idx == 69:
+        if idx == 0 or idx == 31 or idx == 32 or idx == 63 or idx == 64 or idx == 69:
             values.push("src/hit.spl")
         else:
             values.push("doc/miss.md")
@@ -38,61 +38,64 @@ describe "DB accel — bitmap operations":
         expect either.count() == 4
         expect only_lhs.count() == 1
 
-    it "supports full, get, and clear without changing bitmap semantics":
-        val bitmap = RowBitmap.full(70)
-        expect bitmap.count() == 70
+    it "supports full, get, and clear across 31/32 and 63/64 boundaries":
+        val bitmap = RowBitmap.full(65)
+        expect bitmap.count() == 65
         expect bitmap.get(0) == true
-        expect bitmap.get(69) == true
-        expect bitmap.get(70) == false
+        expect bitmap.get(31) == true
+        expect bitmap.get(32) == true
+        expect bitmap.get(64) == true
+        expect bitmap.get(65) == false
 
         bitmap.clear(0)
-        bitmap.clear(69)
+        bitmap.clear(31)
+        bitmap.clear(32)
+        bitmap.clear(64)
         expect bitmap.get(0) == false
         expect bitmap.get(1) == true
-        expect bitmap.get(69) == false
-        expect bitmap.count() == 68
+        expect bitmap.get(31) == false
+        expect bitmap.get(32) == false
+        expect bitmap.get(64) == false
+        expect bitmap.count() == 61
 
-    it "keeps and/or parity across multiword tails and unequal lengths":
-        val lhs = RowBitmap.empty(321)
+    it "keeps and/or parity across mixed 31/32/63/64 boundaries":
+        val lhs = RowBitmap.empty(96)
         lhs.set(0)
+        lhs.set(31)
+        lhs.set(32)
         lhs.set(63)
         lhs.set(64)
-        lhs.set(127)
-        lhs.set(128)
-        lhs.set(255)
-        lhs.set(320)
+        lhs.set(95)
 
-        val rhs = RowBitmap.empty(280)
+        val rhs = RowBitmap.empty(70)
         rhs.set(0)
+        rhs.set(32)
+        rhs.set(62)
+        rhs.set(63)
         rhs.set(64)
-        rhs.set(126)
-        rhs.set(128)
-        rhs.set(190)
-        rhs.set(255)
 
         val both = lhs.and_with(rhs)
         val either = lhs.or_with(rhs)
 
-        expect both.row_count == 280
+        expect both.row_count == 70
         expect both.count() == 4
         expect both.get(0) == true
+        expect both.get(31) == false
+        expect both.get(32) == true
+        expect both.get(62) == false
+        expect both.get(63) == true
         expect both.get(64) == true
-        expect both.get(128) == true
-        expect both.get(255) == true
-        expect both.get(63) == false
-        expect both.get(320) == false
+        expect both.get(95) == false
 
-        expect either.row_count == 321
-        expect either.count() == 9
+        expect either.row_count == 96
+        expect either.count() == 7
         expect either.get(0) == true
+        expect either.get(31) == true
+        expect either.get(32) == true
+        expect either.get(62) == true
         expect either.get(63) == true
         expect either.get(64) == true
-        expect either.get(126) == true
-        expect either.get(127) == true
-        expect either.get(128) == true
-        expect either.get(190) == true
-        expect either.get(255) == true
-        expect either.get(320) == true
+        expect either.get(95) == true
 
 describe "DB accel — text predicates":
     it "matches prefix and token boundaries":
@@ -138,16 +141,18 @@ describe "DB accel — batched scalar scans":
         expect stats.candidates_kept == 3
         expect stats.rows_scanned == 4
 
-    it "preserves matches across 64-row bitmap word boundaries":
+    it "preserves matches across 31/32 and 63/64 bitmap boundaries":
         val values = build_boundary_scan_values()
         val predicate = ScanPredicate(kind: ScanPredicateKind.Contains, text_value: "src/", key_value: 0)
         val (bitmap, stats) = scan_text_values(values, predicate)
         expect bitmap.get(0) == true
+        expect bitmap.get(31) == true
+        expect bitmap.get(32) == true
         expect bitmap.get(63) == true
         expect bitmap.get(64) == true
         expect bitmap.get(69) == true
-        expect bitmap.count() == 4
-        expect stats.candidates_kept == 4
+        expect bitmap.count() == 6
+        expect stats.candidates_kept == 6
 
 describe "DB accel — capability report":
     it "reports runtime tier and keeps scalar fallback available":

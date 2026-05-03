@@ -40,6 +40,25 @@ fn _write_bytes(path: text, data: [u8]):
 fn _read_bytes(path: text) -> [u8]:
     rt_file_read_bytes(path) ?? []
 
+fn _hex_encode(data: [u8]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while i < data.len():
+        val byte = data[i]
+        out = out + hex_chars.char_at(((byte >> 4u8) & 0x0Fu8).to_i64())
+        out = out + hex_chars.char_at((byte & 0x0Fu8).to_i64())
+        i = i + 1
+    out
+
+fn _write_bytes_via_hex_shell(path: text, data: [u8]):
+    val hex = _hex_encode(data)
+    val run = shell("sh -c \"printf '%s' '" + hex + "' | xxd -r -p > '" + path + "'\"")
+    if run.exit_code != 0:
+        print(run.stdout)
+        print(run.stderr)
+    expect run.exit_code == 0
+
 fn _ensure_tmp_root():
     val result = shell("mkdir -p '" + TMP_ROOT + "'")
     expect result.exit_code == 0
@@ -49,6 +68,14 @@ fn _payload(size: i64) -> [u8]:
     var i = 0
     while i < size:
         out.push((((i * 17) + (i / 13) + 23) % 251).to_u8())
+        i = i + 1
+    out
+
+fn _repeat_byte(byte: u8, size: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < size:
+        out.push(byte)
         i = i + 1
     out
 
@@ -111,6 +138,18 @@ fn _first_block_check_pos(data: [u8]) -> i64:
         pos = pos + 1
     pos
 
+fn _read_u32_le_local(data: [u8], pos: i64) -> u32:
+    data[pos].to_u32() |
+        (data[pos + 1].to_u32() << 8) |
+        (data[pos + 2].to_u32() << 16) |
+        (data[pos + 3].to_u32() << 24)
+
+fn _single_stream_crc64_check_pos(data: [u8]) -> i64:
+    val footer_start = data.len() - 12
+    val backward_size = ((_read_u32_le_local(data, footer_start + 4).to_i64()) + 1) * 4
+    val index_start = footer_start - backward_size
+    index_start - 8
+
 describe "xz lzma2 codec":
     it "round-trips and host-xz decodes a framed stream":
         _ensure_tmp_root()
@@ -122,14 +161,17 @@ describe "xz lzma2 codec":
         expect decoded.unwrap() == input
 
         val compressed_path = TMP_ROOT + "/multiblock.xz"
+        val input_path = TMP_ROOT + "/multiblock.input"
         val output_path = TMP_ROOT + "/multiblock.out"
-        _write_bytes(compressed_path, encoded)
-        val run = shell("xz -q -d -f -c '" + compressed_path + "' > '" + output_path + "'")
+        _write_bytes_via_hex_shell(compressed_path, encoded)
+        _write_bytes_via_hex_shell(input_path, input)
+        val run = shell(
+            "sh -c \"xz -q -d -f -c '" + compressed_path + "' > '" + output_path + "' && cmp -s '" + input_path + "' '" + output_path + "'\""
+        )
         if run.exit_code != 0:
             print(run.stdout)
             print(run.stderr)
         expect run.exit_code == 0
-        expect _read_bytes(output_path) == input
 
     it "keeps xz framing and decode parity across scalar avx2 and neon tiers":
         val input = _payload(2048)
@@ -143,6 +185,30 @@ describe "xz lzma2 codec":
         expect lzma2_decompress_xz_for_tier(scalar, CompressionSimdTier.scalar).unwrap() == input
         expect lzma2_decompress_xz_for_tier(scalar, CompressionSimdTier.avx2).unwrap() == input
         expect lzma2_decompress_xz_for_tier(scalar, CompressionSimdTier.neon).unwrap() == input
+
+    it "emits a real compressed lzma2 chunk for repeated-byte runs when that beats the raw chunk":
+        _ensure_tmp_root()
+        val input = _repeat_byte(65u8, 275)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        expect encoded[_first_block_data_start(encoded)] == 0xE0u8
+        expect _first_block_declared_compressed_size(encoded) < input.len() == true
+        val decoded = lzma2_decompress_xz(encoded)
+        expect decoded.is_err() == false
+        expect decoded.unwrap() == input
+
+        val compressed_path = TMP_ROOT + "/repeat-byte-run.xz"
+        val input_path = TMP_ROOT + "/repeat-byte-run.input"
+        val output_path = TMP_ROOT + "/repeat-byte-run.out"
+        _write_bytes_via_hex_shell(compressed_path, encoded)
+        _write_bytes_via_hex_shell(input_path, input)
+        val run = shell(
+            "sh -c \"xz -q -d -f -c '" + compressed_path + "' > '" + output_path + "' && cmp -s '" + input_path + "' '" + output_path + "'\""
+        )
+        if run.exit_code != 0:
+            print(run.stdout)
+            print(run.stderr)
+        expect run.exit_code == 0
 
     it "rejects misaligned xz stream padding":
         val options = default_compression_options(CompressionCodec.lzma2)
@@ -268,6 +334,24 @@ describe "xz lzma2 codec":
         expect decoded.is_err() == true
         _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "xz block crc32")
 
+    it "reports host-default crc64 block corruption as a checksum mismatch":
+        _ensure_tmp_root()
+        val input = _payload(256)
+        val input_path = TMP_ROOT + "/crc64-check-input.bin"
+        val compressed_path = TMP_ROOT + "/crc64-check.xz"
+        _write_bytes(input_path, input)
+        val run = shell("xz -q -z -f -c '" + input_path + "' > '" + compressed_path + "'")
+        if run.exit_code != 0:
+            print(run.stdout)
+            print(run.stderr)
+        expect run.exit_code == 0
+        var encoded = _read_bytes(compressed_path)
+        val check_pos = _single_stream_crc64_check_pos(encoded)
+        encoded[check_pos] = encoded[check_pos] ^ 0x01u8
+        val decoded = lzma2_decompress_xz(encoded)
+        expect decoded.is_err() == true
+        _expect_compression_error(decoded.unwrap_err(), "ChecksumMismatch", "xz block crc64")
+
     it "reports index crc corruption as a checksum mismatch":
         val options = default_compression_options(CompressionCodec.lzma2)
         var encoded = lzma2_compress_xz(_payload(128), options)
@@ -289,16 +373,12 @@ describe "xz lzma2 codec":
         _expect_compression_error(decoded.unwrap_err(), "TruncatedInput", "xz block check")
 
     it "decodes host-generated compressed xz streams via the pure-Simple range decoder":
-        # The pure-Simple decoder only accepts XZ streams that use CRC32 as
-        # their integrity check (default `xz` emits CRC64). Force CRC32 here
-        # so the round-trip exercises the new range decoder rather than
-        # bouncing on `_xz_check_size`.
         _ensure_tmp_root()
         val input = _payload(256)
         val input_path = TMP_ROOT + "/host-generated-input.bin"
         val compressed_path = TMP_ROOT + "/host-generated.xz"
         _write_bytes(input_path, input)
-        val run = shell("xz -q -z -f --check=crc32 -c '" + input_path + "' > '" + compressed_path + "'")
+        val run = shell("xz -q -z -f -c '" + input_path + "' > '" + compressed_path + "'")
         if run.exit_code != 0:
             print(run.stdout)
             print(run.stderr)

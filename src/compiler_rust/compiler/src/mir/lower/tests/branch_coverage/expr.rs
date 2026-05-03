@@ -98,8 +98,8 @@ fn print_float_boxing() {
 
 #[test]
 fn print_u64_uses_raw_string_bridge() {
-    let mir =
-        compile_to_mir("fn test() -> i64:\n    val x: u64 = 0xFFFFFFFFFFFFFFFFu64\n    print x\n    return 42\n").unwrap();
+    let mir = compile_to_mir("fn test() -> i64:\n    val x: u64 = 0xFFFFFFFFFFFFFFFFu64\n    print x\n    return 42\n")
+        .unwrap();
     assert!(has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_raw_u64_to_string"))
     }));

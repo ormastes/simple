@@ -6,6 +6,13 @@ pub struct VariantMetadata {
     pub simd_tier: SimdTier,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeVariantResource {
+    pub target_triple: String,
+    pub simd_tier: SimdTier,
+    pub resource_path: String,
+}
+
 impl Default for VariantMetadata {
     fn default() -> Self {
         Self {
@@ -36,4 +43,20 @@ impl VariantMetadata {
 
         Ok(())
     }
+}
+
+pub fn select_best_runtime_variant<'a>(
+    variants: &'a [RuntimeVariantResource],
+    target_triple: &str,
+    simd_tier: SimdTier,
+) -> Option<&'a RuntimeVariantResource> {
+    for fallback in simd_tier.compatible_fallbacks() {
+        let fallback = fallback.best_available_implementation();
+        if let Some(entry) = variants.iter().find(|entry| {
+            entry.target_triple == target_triple && entry.simd_tier.best_available_implementation() == fallback
+        }) {
+            return Some(entry);
+        }
+    }
+    None
 }

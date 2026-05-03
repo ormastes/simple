@@ -10,6 +10,7 @@ use crate::error::{codes, typo, ErrorContext};
 use crate::hir;
 use crate::hir::{BinOp as HirBinOp, HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 use crate::mir;
+use crate::stdlib_variant::active_simd_tier;
 use crate::verification_checker::VerificationChecker;
 use crate::CompileError;
 
@@ -285,7 +286,7 @@ impl CompilerPipeline {
         }
 
         let host_tier = detect_profile();
-        let selected_tier = host_tier.best_available_implementation();
+        let selected_tier = active_simd_tier();
         eprintln!(
             "simd-report: host_tier={} selected_runtime_tier={}",
             host_tier, selected_tier

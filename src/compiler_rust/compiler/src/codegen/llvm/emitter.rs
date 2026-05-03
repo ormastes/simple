@@ -214,7 +214,8 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_const_bool(&mut self, dest: VReg, value: bool) -> Result<(), String> {
-        let val = self.backend.context.bool_type().const_int(value as u64, false);
+        let bits = if value { 11u64 } else { 19u64 };
+        let val = self.backend.runtime_int_type().const_int(bits, false);
         self.set(dest, val.into());
         Ok(())
     }

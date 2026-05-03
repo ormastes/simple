@@ -313,6 +313,18 @@ fn _extract_range_n(line: text) -> text:
         return "n"
     rest.slice(0, end)
 
+fn _is_literal_lane_bound(n: text) -> bool:
+    val trimmed = n.trim()
+    if trimmed.len() == 0:
+        return false
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.slice(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
 # ============================================================================
 # L-SIMD-001: Element-wise add loop
 # ============================================================================
@@ -355,12 +367,21 @@ pub fn lint_simd_elementwise_add(source: text, path: text) -> [SimdOpportunityWa
                     # Extract array names from pattern: out[i] = a[i] + b[i]
                     val eq_idx = _find_substr(body, "[{lvar}] = ")
                     val out_arr = if eq_idx > 0: body.slice(0, eq_idx).trim() else: "out"
+                    val use_scalable_hint = not _is_literal_lane_bound(n)
+                    val hint = if use_scalable_hint:
+                        "use FixedVec.add for fixed-width chunks, or ScalableVec.add when the loop bound is runtime-sized"
+                    else:
+                        "use FixedVec.add for this fixed-width lane count"
+                    val fix = if use_scalable_hint:
+                        "val {out_arr} = fixedvec_from_slice(a).add(fixedvec_from_slice(b)).to_array()  # ScalableVec variant fits runtime-sized bounds"
+                    else:
+                        "val {out_arr} = fixedvec_from_slice(a).add(fixedvec_from_slice(b)).to_array()"
                     warnings.push(SimdOpportunityWarning(
                         code: "L-SIMD-001",
                         severity: "info",
                         message: "scalar element-wise add loop over {n} elements can be SIMDified",
-                        hint: "use FixedVec.add for compile-time-known lane count, or ScalableVec.add for runtime-sized arrays",
-                        fix: "val {out_arr} = fixedvec_from_slice(a).add(fixedvec_from_slice(b)).to_array()  # or ScalableVec variant for large/runtime n",
+                        hint: hint,
+                        fix: fix,
                         line_num: cl.line_num,
                         file_path: path
                     ))

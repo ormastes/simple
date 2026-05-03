@@ -1,0 +1,490 @@
+use std.common.linalg.ndarray_core.*
+
+struct Float64:
+    value: f64
+
+    static fn new(value: f64) -> Float64:
+        Float64(value: value)
+
+struct Int64:
+    value: i64
+
+    static fn new(value: i64) -> Int64:
+        Int64(value: value)
+
+struct Bool:
+    value: bool
+
+    static fn new(value: bool) -> Bool:
+        Bool(value: value)
+
+enum DType:
+    F64
+    I64
+    Bool
+
+struct NDArray:
+    data_f64: [Float64]
+    data_i64: [Int64]
+    data_bool: [Bool]
+    shape: Shape
+    strides: Stride
+    offset: Index
+    dtype: DType
+    device: Device
+    layout: Layout
+    kernel_profile: KernelProfile
+
+struct Matrix<T>:
+    inner: NDArray
+
+struct Vector<T>:
+    inner: NDArray
+
+struct Slice:
+    start: Index
+    stop: Index
+    step: Index
+
+    static fn new(start: Index, stop: Index, step: Index) -> Slice:
+        Slice(start: start, stop: stop, step: step)
+
+fn raw_array_len(dtype: DType, data_f64: [Float64], data_i64: [Int64], data_bool: [Bool]) -> i64:
+    match dtype:
+        case DType.F64:
+            data_f64.len()
+        case DType.I64:
+            data_i64.len()
+        case DType.Bool:
+            data_bool.len()
+
+fn make_array(data_f64: [Float64], data_i64: [Int64], data_bool: [Bool], shape: Shape, dtype: DType) -> NDArray:
+    NDArray(
+        data_f64: data_f64,
+        data_i64: data_i64,
+        data_bool: data_bool,
+        shape: shape,
+        strides: derive_row_major_strides(shape),
+        offset: Index.new(0),
+        dtype: dtype,
+        device: Device.cpu(),
+        layout: Layout.RowMajor,
+        kernel_profile: KernelProfile.SimdReady
+    )
+
+fn make_f64_array(values: [Float64], shape: Shape) -> NDArray:
+    make_array(values, [], [], shape, DType.F64)
+
+fn make_i64_array(values: [Int64], shape: Shape) -> NDArray:
+    make_array([], values, [], shape, DType.I64)
+
+fn make_bool_array(values: [Bool], shape: Shape) -> NDArray:
+    make_array([], [], values, shape, DType.Bool)
+
+fn array(values: [Float64]) -> NDArray:
+    from_seq(values)
+
+fn from_seq(values: [Float64]) -> NDArray:
+    make_f64_array(values, Shape.new([Index.new(values.len())]))
+
+fn array_i64(values: [Int64]) -> NDArray:
+    make_i64_array(values, Shape.new([Index.new(values.len())]))
+
+fn array_bool(values: [Bool]) -> NDArray:
+    make_bool_array(values, Shape.new([Index.new(values.len())]))
+
+fn try_zeros(shape: Shape) -> Result<NDArray, NdarrayError>:
+    var i = 0
+    while i < shape.dims.len():
+        if shape.dims[i].value < 0:
+            return Err(NdarrayError.InvalidShape)
+        i = i + 1
+    var out: [Float64] = []
+    i = 0
+    while i < shape.numel().value:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    Ok(make_f64_array(out, shape))
+
+fn zeros(shape: Shape) -> NDArray:
+    try_zeros(shape).unwrap()
+
+fn ones(shape: Shape) -> NDArray:
+    full(shape, Float64.new(1.0))
+
+fn full(shape: Shape, fill: Float64) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i < shape.numel().value:
+        out.push(fill)
+        i = i + 1
+    make_f64_array(out, shape)
+
+fn empty(shape: Shape) -> NDArray:
+    zeros(shape)
+
+fn eye(size: Index) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i < size.value * size.value:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    i = 0
+    while i < size.value:
+        out[i * size.value + i] = Float64.new(1.0)
+        i = i + 1
+    make_f64_array(out, Shape.new([size, size]))
+
+fn try_arange(start: Float64, stop: Float64, step: Float64) -> Result<NDArray, NdarrayError>:
+    if step.value == 0.0:
+        return Err(NdarrayError.InvalidStep)
+    var out: [Float64] = []
+    var cursor = start.value
+    if step.value > 0.0:
+        while cursor < stop.value:
+            out.push(Float64.new(cursor))
+            cursor = cursor + step.value
+    else:
+        while cursor > stop.value:
+            out.push(Float64.new(cursor))
+            cursor = cursor + step.value
+    Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+
+fn arange(start: Float64, stop: Float64, step: Float64) -> NDArray:
+    try_arange(start, stop, step).unwrap()
+
+fn try_linspace(start: Float64, stop: Float64, count: Index) -> Result<NDArray, NdarrayError>:
+    if count.value <= 0:
+        return Err(NdarrayError.InvalidLinspace)
+    if count.value == 1:
+        return Ok(make_f64_array([start], Shape.new([Index.new(1)])))
+    val step = (stop.value - start.value) / (count.value - 1)
+    var out: [Float64] = []
+    var i = 0
+    while i < count.value:
+        out.push(Float64.new(start.value + step * i))
+        i = i + 1
+    Ok(make_f64_array(out, Shape.new([count])))
+
+fn linspace(start: Float64, stop: Float64, count: Index) -> NDArray:
+    try_linspace(start, stop, count).unwrap()
+
+impl NDArray:
+    fn len(self) -> Index:
+        self.shape.numel()
+
+    fn numel(self) -> Index:
+        self.shape.numel()
+
+    fn rows(self) -> Index:
+        if self.shape.dims.len() == 0:
+            return Index.new(0)
+        self.shape.dims[0]
+
+    fn cols(self) -> Index:
+        if self.shape.dims.len() < 2:
+            return Index.new(0)
+        self.shape.dims[1]
+
+    fn ndim(self) -> i64:
+        self.shape.ndim()
+
+    fn is_contiguous(self) -> bool:
+        is_row_major_contiguous(self.shape, self.strides)
+
+    fn reshape(self, shape: Shape) -> NDArray:
+        if shape.numel() != self.shape.numel():
+            panic("called reshape with mismatched element count")
+        NDArray(
+            data_f64: self.data_f64,
+            data_i64: self.data_i64,
+            data_bool: self.data_bool,
+            shape: shape,
+            strides: derive_row_major_strides(shape),
+            offset: self.offset,
+            dtype: self.dtype,
+            device: self.device,
+            layout: Layout.RowMajor,
+            kernel_profile: self.kernel_profile
+        )
+
+    fn flatten(self) -> NDArray:
+        self.to_contiguous().reshape(Shape.new([self.len()]))
+
+    fn squeeze(self) -> NDArray:
+        NDArray(
+            data_f64: self.data_f64,
+            data_i64: self.data_i64,
+            data_bool: self.data_bool,
+            shape: squeeze_shape(self.shape),
+            strides: self.strides,
+            offset: self.offset,
+            dtype: self.dtype,
+            device: self.device,
+            layout: self.layout,
+            kernel_profile: self.kernel_profile
+        )
+
+    fn transpose(self) -> NDArray:
+        self.transpose_axes(Axis.new(0), Axis.new(1))
+
+    fn transpose_axes(self, left: Axis, right: Axis) -> NDArray:
+        NDArray(
+            data_f64: self.data_f64,
+            data_i64: self.data_i64,
+            data_bool: self.data_bool,
+            shape: transpose_shape(self.shape, left, right).unwrap(),
+            strides: transpose_strides(self.strides, left, right).unwrap(),
+            offset: self.offset,
+            dtype: self.dtype,
+            device: self.device,
+            layout: Layout.Strided,
+            kernel_profile: self.kernel_profile
+        )
+
+    fn get(self, index: Index) -> Any:
+        self.get_at([index])
+
+    fn try_get(self, index: Index) -> Result<Any, NdarrayError>:
+        if index.value < 0:
+            return Err(NdarrayError.IndexOutOfBounds)
+        self.try_get_at([index])
+
+    fn get_at(self, indices: [Index]) -> Any:
+        self.try_get_at(indices).unwrap()
+
+    fn try_get_at(self, indices: [Index]) -> Result<Any, NdarrayError>:
+        val pos = try_resolve_offset(self.shape, self.strides, self.offset, indices)?
+        match self.dtype:
+            case DType.F64:
+                Ok(self.data_f64[pos.value])
+            case DType.I64:
+                Ok(self.data_i64[pos.value])
+            case DType.Bool:
+                Ok(self.data_bool[pos.value])
+
+    fn get_f64(self, index: Index) -> Float64:
+        self.get_f64_at([index])
+
+    fn flat_f64(self, linear: i64) -> Float64:
+        if self.shape.dims.len() <= 1:
+            return self.get_f64(Index.new(linear))
+        self.get_f64_at(unravel_index(linear, self.shape))
+
+    fn get_f64_at(self, indices: [Index]) -> Float64:
+        val pos = resolve_offset(self.shape, self.strides, self.offset, indices)
+        self.data_f64[pos.value]
+
+    fn to_f64_values(self) -> [Float64]:
+        var out: [Float64] = []
+        var i = 0
+        while i < self.len().value:
+            out.push(self.get_f64(Index.new(i)))
+            i = i + 1
+        out
+
+    fn to_contiguous(self) -> NDArray:
+        if self.dtype != DType.F64:
+            return self
+        var out: [Float64] = []
+        var i = 0
+        while i < self.len().value:
+            out.push(self.flat_f64(i))
+            i = i + 1
+        make_f64_array(out, self.shape)
+
+    fn try_slice(self, spec: Slice) -> Result<NDArray, NdarrayError>:
+        if self.shape.dims.len() != 1:
+            return Err(NdarrayError.ShapeMismatch)
+        val size = self.shape.dims[0].value
+        val count = slice_len(spec, size)?
+        var start = spec.start.value
+        if start < 0:
+            start = size + start
+        Ok(NDArray(
+            data_f64: self.data_f64,
+            data_i64: self.data_i64,
+            data_bool: self.data_bool,
+            shape: Shape.new([count]),
+            strides: Stride.new([Index.new(self.strides.dims[0].value * spec.step.value)]),
+            offset: Index.new(self.offset.value + start * self.strides.dims[0].value),
+            dtype: self.dtype,
+            device: self.device,
+            layout: Layout.Strided,
+            kernel_profile: self.kernel_profile
+        ))
+
+    fn slice(self, spec: Slice) -> NDArray:
+        self.try_slice(spec).unwrap()
+
+    fn slice_2d(self, rows: Slice, cols: Slice) -> NDArray:
+        val row_count = slice_len(rows, self.shape.dims[0].value).unwrap()
+        val col_count = slice_len(cols, self.shape.dims[1].value).unwrap()
+        var row_start = rows.start.value
+        var col_start = cols.start.value
+        if row_start < 0:
+            row_start = self.shape.dims[0].value + row_start
+        if col_start < 0:
+            col_start = self.shape.dims[1].value + col_start
+        NDArray(
+            data_f64: self.data_f64,
+            data_i64: self.data_i64,
+            data_bool: self.data_bool,
+            shape: Shape.new([row_count, col_count]),
+            strides: Stride.new([
+                Index.new(self.strides.dims[0].value * rows.step.value),
+                Index.new(self.strides.dims[1].value * cols.step.value)
+            ]),
+            offset: Index.new(self.offset.value + row_start * self.strides.dims[0].value + col_start * self.strides.dims[1].value),
+            dtype: self.dtype,
+            device: self.device,
+            layout: Layout.Strided,
+            kernel_profile: self.kernel_profile
+        )
+
+    fn row(self, row_index: Index) -> NDArray:
+        self.slice_2d(Slice.new(row_index, Index.new(row_index.value + 1), Index.new(1)),
+                      Slice.new(Index.new(0), self.cols(), Index.new(1))).squeeze()
+
+    fn column(self, col_index: Index) -> NDArray:
+        self.slice_2d(Slice.new(Index.new(0), self.rows(), Index.new(1)),
+                      Slice.new(col_index, Index.new(col_index.value + 1), Index.new(1)))
+
+    fn try_gather(self, idx: NDArray) -> Result<NDArray, NdarrayError>:
+        var out: [Float64] = []
+        var i = 0
+        while i < idx.data_i64.len():
+            val pos = idx.data_i64[i].value
+            if pos < 0 or pos >= self.len().value:
+                return Err(NdarrayError.IndexOutOfBounds)
+            out.push(self.get_f64(Index.new(pos)))
+            i = i + 1
+        Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+
+    fn gather(self, idx: NDArray) -> NDArray:
+        self.try_gather(idx).unwrap()
+
+    fn try_mask(self, mask_values: NDArray) -> Result<NDArray, NdarrayError>:
+        if mask_values.data_bool.len() != self.len().value:
+            return Err(NdarrayError.ShapeMismatch)
+        var out: [Float64] = []
+        var i = 0
+        while i < self.len().value:
+            if mask_values.data_bool[i].value:
+                out.push(self.get_f64(Index.new(i)))
+            i = i + 1
+        Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+
+    fn mask(self, mask_values: NDArray) -> NDArray:
+        self.try_mask(mask_values).unwrap()
+
+    fn add(self, other: NDArray) -> NDArray:
+        self.try_binary_f64(other, "add").unwrap()
+
+    fn try_add(self, other: NDArray) -> Result<NDArray, NdarrayError>:
+        self.try_binary_f64(other, "add")
+
+    fn sub(self, other: NDArray) -> NDArray:
+        self.try_binary_f64(other, "sub").unwrap()
+
+    fn mul(self, other: NDArray) -> NDArray:
+        self.try_binary_f64(other, "mul").unwrap()
+
+    fn div(self, other: NDArray) -> NDArray:
+        self.try_binary_f64(other, "div").unwrap()
+
+    fn add_scalar(self, scalar: Float64) -> NDArray:
+        self.scalar_f64(scalar, "add")
+
+    fn sub_scalar(self, scalar: Float64) -> NDArray:
+        self.scalar_f64(scalar, "sub")
+
+    fn mul_scalar(self, scalar: Float64) -> NDArray:
+        self.scalar_f64(scalar, "mul")
+
+    fn div_scalar(self, scalar: Float64) -> NDArray:
+        self.scalar_f64(scalar, "div")
+
+    fn scalar_f64(self, scalar: Float64, op: text) -> NDArray:
+        var out: [Float64] = []
+        var i = 0
+        while i < self.len().value:
+            val value = self.flat_f64(i).value
+            val next = if op == "add":
+                value + scalar.value
+            elif op == "sub":
+                value - scalar.value
+            elif op == "mul":
+                value * scalar.value
+            else:
+                value / scalar.value
+            out.push(Float64.new(next))
+            i = i + 1
+        make_f64_array(out, self.shape)
+
+    fn try_binary_f64(self, other: NDArray, op: text) -> Result<NDArray, NdarrayError>:
+        if self.dtype != DType.F64 or other.dtype != DType.F64:
+            return Err(NdarrayError.UnsupportedDType)
+        val plan = make_broadcast_plan(self.shape, self.strides, other.shape, other.strides)?
+        var out: [Float64] = []
+        var i = 0
+        while i < plan.shape.numel().value:
+            val coords = unravel_index(i, plan.shape)
+            val left_pos = resolve_offset(plan.shape, plan.left, self.offset, coords)
+            val right_pos = resolve_offset(plan.shape, plan.right, other.offset, coords)
+            val left = self.data_f64[left_pos.value].value
+            val right = other.data_f64[right_pos.value].value
+            val next = if op == "add":
+                left + right
+            elif op == "sub":
+                left - right
+            elif op == "mul":
+                left * right
+            else:
+                left / right
+            out.push(Float64.new(next))
+            i = i + 1
+        Ok(make_f64_array(out, plan.shape))
+
+    fn sum(self) -> Float64:
+        var total = 0.0
+        var i = 0
+        while i < self.len().value:
+            total = total + self.flat_f64(i).value
+            i = i + 1
+        Float64.new(total)
+
+    fn mean(self) -> Float64:
+        Float64.new(self.sum().value / self.len().value)
+
+    fn min(self) -> Float64:
+        var best = self.flat_f64(0).value
+        var i = 1
+        while i < self.len().value:
+            val next = self.flat_f64(i).value
+            if next < best:
+                best = next
+            i = i + 1
+        Float64.new(best)
+
+    fn max(self) -> Float64:
+        var best = self.flat_f64(0).value
+        var i = 1
+        while i < self.len().value:
+            val next = self.flat_f64(i).value
+            if next > best:
+                best = next
+            i = i + 1
+        Float64.new(best)
+
+    fn argmax(self) -> Index:
+        var best = self.flat_f64(0).value
+        var best_index = 0
+        var i = 1
+        while i < self.len().value:
+            val next = self.flat_f64(i).value
+            if next > best:
+                best = next
+                best_index = i
+            i = i + 1
+        Index.new(best_index)

@@ -579,7 +579,7 @@ pub extern "C" fn rt_simd_add_i32x8(a: *const i32, b: *const i32, out: *mut i32)
         ];
         let r = add_i32x8(av, bv);
         for i in 0..8 {
-            *out.offset(i as isize) = r[i];
+            *out.add(i) = r[i];
         }
     }
 }
@@ -609,7 +609,7 @@ pub extern "C" fn rt_simd_sub_i32x8(a: *const i32, b: *const i32, out: *mut i32)
         ];
         let r = sub_i32x8(av, bv);
         for i in 0..8 {
-            *out.offset(i as isize) = r[i];
+            *out.add(i) = r[i];
         }
     }
 }
@@ -639,7 +639,7 @@ pub extern "C" fn rt_simd_mul_i32x8(a: *const i32, b: *const i32, out: *mut i32)
         ];
         let r = mul_i32x8(av, bv);
         for i in 0..8 {
-            *out.offset(i as isize) = r[i];
+            *out.add(i) = r[i];
         }
     }
 }
@@ -669,7 +669,7 @@ pub extern "C" fn rt_simd_xor_i32x8(a: *const i32, b: *const i32, out: *mut i32)
         ];
         let r = xor_i32x8(av, bv);
         for i in 0..8 {
-            *out.offset(i as isize) = r[i];
+            *out.add(i) = r[i];
         }
     }
 }
@@ -699,7 +699,7 @@ pub extern "C" fn rt_simd_and_i32x8(a: *const i32, b: *const i32, out: *mut i32)
         ];
         let r = and_i32x8(av, bv);
         for i in 0..8 {
-            *out.offset(i as isize) = r[i];
+            *out.add(i) = r[i];
         }
     }
 }
@@ -729,7 +729,7 @@ pub extern "C" fn rt_simd_or_i32x8(a: *const i32, b: *const i32, out: *mut i32) 
         ];
         let r = or_i32x8(av, bv);
         for i in 0..8 {
-            *out.offset(i as isize) = r[i];
+            *out.add(i) = r[i];
         }
     }
 }
@@ -749,7 +749,7 @@ pub extern "C" fn rt_simd_shl_i32x8(a: *const i32, n: i64, out: *mut i32) {
         ];
         let r = shl_i32x8(av, n);
         for i in 0..8 {
-            *out.offset(i as isize) = r[i];
+            *out.add(i) = r[i];
         }
     }
 }
@@ -769,7 +769,7 @@ pub extern "C" fn rt_simd_shr_i32x8(a: *const i32, n: i64, out: *mut i32) {
         ];
         let r = shr_i32x8(av, n);
         for i in 0..8 {
-            *out.offset(i as isize) = r[i];
+            *out.add(i) = r[i];
         }
     }
 }

@@ -8,7 +8,7 @@
 
 use super::collections::{rt_array_get, rt_array_len, rt_array_new, rt_array_push};
 use super::core::RuntimeValue;
-use simple_simd::{detect_profile, SimdTier};
+use simple_simd::{active_simd_tier, SimdTier};
 
 const AES_BLOCK_LEN: usize = 16;
 
@@ -349,7 +349,7 @@ pub fn encrypt_block_with_expanded_bytes(
     expanded_key: &[u8],
     num_rounds: i64,
 ) -> Option<[u8; AES_BLOCK_LEN]> {
-    encrypt_block_with_expanded_for_tier(detect_profile(), block, expanded_key, num_rounds)
+    encrypt_block_with_expanded_for_tier(active_simd_tier(), block, expanded_key, num_rounds)
 }
 
 pub(crate) fn encrypt_block_with_expanded_for_tier(
@@ -390,7 +390,7 @@ pub fn decrypt_block_with_expanded_bytes(
     expanded_key: &[u8],
     num_rounds: i64,
 ) -> Option<[u8; AES_BLOCK_LEN]> {
-    decrypt_block_with_expanded_for_tier(detect_profile(), block, expanded_key, num_rounds)
+    decrypt_block_with_expanded_for_tier(active_simd_tier(), block, expanded_key, num_rounds)
 }
 
 pub(crate) fn decrypt_block_with_expanded_for_tier(

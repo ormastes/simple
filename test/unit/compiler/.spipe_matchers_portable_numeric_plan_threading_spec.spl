@@ -13,8 +13,8 @@
 
 ## Overview
 
-Tests that `NativeCodegenAdapter` exposes a `plan: PortableNumericLoweringPlan` field that
-is derived once in `create()` from `options.target`.
+Tests that `NativeCodegenAdapter.plan()` exposes the lowering plan derived from
+`options.target`.
 
 This is the AC-3 native-path wiring: the plan must be threaded into `native_compile_result`
 and arch-specific dispatch functions so that capability-aware ISel can gate float and vector
@@ -40,10 +40,8 @@ describe "NativeCodegenAdapter plan field threading":
     """
     ## AC-3 Native Path
 
-    After Phase 5 implementation, `NativeCodegenAdapter.create(options)` must
-    derive `self.plan` from `options.target` exactly once and expose it as a
-    struct field. These tests produce semantic failures until Phase 5 adds the
-    `plan: PortableNumericLoweringPlan` field to `NativeCodegenAdapter`.
+    `NativeCodegenAdapter.plan()` must derive the same portable numeric plan for
+    a given `options.target` each time it is queried.
     """
 
     context "x86_64 target":
@@ -55,7 +53,7 @@ describe "NativeCodegenAdapter plan field threading":
         `lowering_modules` includes `"x86_avx"`.
         """
 
-        it "AC-3/P2-5a: NativeCodegenAdapter for x86_64 carries plan with requires_runtime_simd_probe=true":
+        it "AC-3/P2-5a: NativeCodegenAdapter for x86_64 reports runtime-probe SIMD plan":
             # Arrange: build CompileOptions targeting x86_64 and wrap in adapter
             val opts = CompileOptions(
                 target: CodegenTarget.X86_64,
@@ -67,10 +65,9 @@ describe "NativeCodegenAdapter plan field threading":
                 verify_output: true
             )
             val adapter = NativeCodegenAdapter(options: opts)
-            # Assert: plan field exists and has probe flag set
-            # FAILS semantically until Phase 5 SA-3 adds: plan: PortableNumericLoweringPlan
-            expect adapter.plan.capabilities.requires_runtime_simd_probe == true
-            expect adapter.plan.lowering_modules_csv().contains("x86_avx") == true
+            val plan = adapter.plan()
+            expect plan.capabilities.requires_runtime_simd_probe == true
+            expect plan.lowering_modules_csv().contains("x86_avx") == true
 
     context "riscv64 target":
         """
@@ -81,7 +78,7 @@ describe "NativeCodegenAdapter plan field threading":
         and `has_vector_simd == false`.
         """
 
-        it "AC-3/P2-5b: NativeCodegenAdapter for riscv64 carries plan with has_riscv_f=true and has_vector_simd=false":
+        it "AC-3/P2-5b: NativeCodegenAdapter for riscv64 reports scalar-only default plan":
             # Arrange: build CompileOptions targeting riscv64 and wrap in adapter
             val opts = CompileOptions(
                 target: CodegenTarget.Riscv64,
@@ -93,8 +90,7 @@ describe "NativeCodegenAdapter plan field threading":
                 verify_output: true
             )
             val adapter = NativeCodegenAdapter(options: opts)
-            # Assert: plan field exists and F/D flags set, no vector
-            # FAILS semantically until Phase 5 SA-3 adds: plan: PortableNumericLoweringPlan
-            expect adapter.plan.capabilities.has_riscv_f == true
-            expect adapter.plan.capabilities.has_riscv_d == true
-            expect adapter.plan.capabilities.has_vector_simd == false
+            val plan = adapter.plan()
+            expect plan.capabilities.has_riscv_f == true
+            expect plan.capabilities.has_riscv_d == true
+            expect plan.capabilities.has_vector_simd == false

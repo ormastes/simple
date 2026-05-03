@@ -11,6 +11,15 @@ use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{adapted_call, create_string_constant};
 use super::{InstrContext, InstrResult};
 
+fn clif_int_type_for_bits(bits: u8) -> cranelift_codegen::ir::Type {
+    match bits {
+        0..=8 => types::I8,
+        9..=16 => types::I16,
+        17..=32 => types::I32,
+        _ => types::I64,
+    }
+}
+
 /// Compile a unit bound check instruction.
 /// This checks if a value is within the unit type's allowed range.
 pub(crate) fn compile_unit_bound_check<M: Module>(
@@ -151,6 +160,14 @@ pub(crate) fn compile_unit_narrow<M: Module>(
 
     let min_val = builder.ins().iconst(types::I64, min);
     let max_val = builder.ins().iconst(types::I64, max);
+    let target_ty = clif_int_type_for_bits(to_bits);
+    let narrow_if_needed = |builder: &mut FunctionBuilder, value| {
+        if to_bits < 64 {
+            builder.ins().ireduce(target_ty, value)
+        } else {
+            value
+        }
+    };
 
     match overflow {
         UnitOverflowBehavior::Default | UnitOverflowBehavior::Checked => {
@@ -173,20 +190,20 @@ pub(crate) fn compile_unit_narrow<M: Module>(
             builder.seal_block(continue_block);
 
             // Value is in range, just truncate/keep as is
-            ctx.vreg_values.insert(dest, val);
+            ctx.vreg_values.insert(dest, narrow_if_needed(builder, val));
         }
         UnitOverflowBehavior::Saturate => {
             // Clamp value to [min, max]
             let clamped_high = builder.ins().smin(val, max_val);
             let clamped = builder.ins().smax(clamped_high, min_val);
-            ctx.vreg_values.insert(dest, clamped);
+            ctx.vreg_values.insert(dest, narrow_if_needed(builder, clamped));
         }
         UnitOverflowBehavior::Wrap => {
             // For wrapping, we can use a bitmask for power-of-2 sizes
             let mask = (1i64 << to_bits) - 1;
             let mask_val = builder.ins().iconst(types::I64, mask);
             let wrapped = builder.ins().band(val, mask_val);
-            ctx.vreg_values.insert(dest, wrapped);
+            ctx.vreg_values.insert(dest, narrow_if_needed(builder, wrapped));
         }
     }
 

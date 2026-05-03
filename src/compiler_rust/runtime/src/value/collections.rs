@@ -12,7 +12,7 @@ use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
 use super::heap::{get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
 use super::primitive_sort;
-use simple_simd::{detect_profile, SimdTier};
+use simple_simd::{active_simd_tier, SimdTier};
 
 // ============================================================================
 // Helper macros to reduce FFI boilerplate
@@ -78,8 +78,15 @@ struct CollectionProviders {
 
 fn collection_providers() -> &'static CollectionProviders {
     static PROVIDERS: OnceLock<CollectionProviders> = OnceLock::new();
-    PROVIDERS.get_or_init(|| match detect_profile() {
-        SimdTier::X86_64Sse2 | SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => CollectionProviders {
+    PROVIDERS.get_or_init(|| match active_simd_tier() {
+        SimdTier::X86_64Sse2 => CollectionProviders {
+            array_sort: scalar_array_sort,
+            byte_find: scalar_byte_find,
+            byte_rfind: scalar_byte_rfind,
+            byte_split: scalar_byte_split_ranges,
+            simd_tier: SimdTier::X86_64Sse2,
+        },
+        SimdTier::X86_64Avx2 | SimdTier::X86_64Avx512 => CollectionProviders {
             array_sort: scalar_array_sort,
             byte_find: avx2_byte_find,
             byte_rfind: avx2_byte_rfind,
@@ -2056,14 +2063,27 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
                 }
             }
             HeapObjectType::String => {
-                // For strings, check if value (as string) is a substring
-                // Simplified: only check if value is a single character in the string
+                let str_ptr = ptr as *const RuntimeString;
+                let haystack = (*str_ptr).as_bytes();
+
+                if value.is_heap() {
+                    let needle_ptr = value.as_heap_ptr();
+                    if !needle_ptr.is_null() && (*needle_ptr).object_type == HeapObjectType::String {
+                        let needle = (*(needle_ptr as *const RuntimeString)).as_bytes();
+                        if needle.is_empty() {
+                            return 1;
+                        }
+                        if needle.len() > haystack.len() {
+                            return 0;
+                        }
+                        return haystack.windows(needle.len()).any(|window| window == needle) as u8;
+                    }
+                }
+
                 if value.is_int() {
                     let char_code = value.as_int();
-                    let str_ptr = ptr as *const RuntimeString;
-                    let data = (str_ptr.add(1)) as *const u8;
-                    for i in 0..(*str_ptr).len {
-                        if *data.add(i as usize) as i64 == char_code {
+                    for &byte in haystack {
+                        if byte as i64 == char_code {
                             return 1;
                         }
                     }

@@ -30,6 +30,7 @@ pub use xxhash::*;
 
 /// Clear all hash registries (for test cleanup)
 pub fn clear_hash_registries() {
+    #[cfg(feature = "runtime-sha")]
     sha1::clear_sha1_registry();
     sha256::clear_sha256_registry();
     xxhash::clear_xxhash_registry();

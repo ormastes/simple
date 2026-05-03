@@ -1115,6 +1115,8 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
     let mut in_docstring = false;
     let mut in_top_fn = false;
     let mut top_fn_indent = 0usize;
+    let mut in_import_block = false;
+    let mut import_brace_depth = 0usize;
 
     // Hoisting state: when we encounter a nested `class`/`impl`/`enum`/`type`
     // at indent > 0 inside what would otherwise be body content, we lift the
@@ -1170,6 +1172,11 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
         }
         top.push(String::new());
     };
+    fn brace_balance_delta(line: &str) -> isize {
+        let opens = line.chars().filter(|c| *c == '{').count() as isize;
+        let closes = line.chars().filter(|c| *c == '}').count() as isize;
+        opens - closes
+    }
 
     for raw_line in content.lines() {
         // First, fold the `expect <a> <op> <b>` infix form (legacy specs use
@@ -1183,6 +1190,15 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
         let rewritten_line = rewrite_method_expect_line(&infix_rewritten);
         let line = rewritten_line.as_str();
         let trimmed = line.trim();
+
+        if in_import_block {
+            import_parts.push(line.to_string());
+            import_brace_depth = import_brace_depth.saturating_add_signed(brace_balance_delta(line));
+            if import_brace_depth == 0 {
+                in_import_block = false;
+            }
+            continue;
+        }
 
         if trimmed.starts_with("\"\"\"") {
             in_docstring = !in_docstring;
@@ -1209,6 +1225,11 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
 
         if trimmed.starts_with("import ") || trimmed.starts_with("use ") {
             import_parts.push(line.to_string());
+            let brace_delta = brace_balance_delta(line);
+            if brace_delta > 0 {
+                in_import_block = true;
+                import_brace_depth = brace_delta as usize;
+            }
             continue;
         }
 
@@ -2092,5 +2113,50 @@ describe "infix":
 
         assert!(wrapped_source.contains("expect(value).to_equal(1)"));
         assert!(wrapped_source.contains("expect(output).to_contain(\"ok\")"));
+    }
+
+    #[test]
+    fn test_preprocess_spipe_keeps_multiline_braced_imports_above_main() {
+        let tempdir = tempdir().expect("tempdir");
+        let spec_path = tempdir.path().join("multiline_import_spec.spl");
+        fs::write(
+            &spec_path,
+            r#"use std.db.accel.{
+    RowBitmap,
+    build_bitmap_eq_u32_predicate
+}
+
+fn build_boundary_scan_values() -> Array<u32>:
+    [0u32, 1u32]
+
+describe "bitmap":
+    it "wraps":
+        expect true == true
+"#,
+        )
+        .expect("write spec");
+
+        let wrapped = preprocess_spipe_for_smf(&spec_path).expect("preprocess");
+        let wrapped_source = fs::read_to_string(wrapped).expect("read wrapped");
+
+        let import_idx = wrapped_source.find("use std.db.accel.{").expect("import start");
+        let import_end_idx = wrapped_source
+            .find("}\n\nfn build_boundary_scan_values()")
+            .expect("import end before helper fn");
+        let helper_idx = wrapped_source
+            .find("fn build_boundary_scan_values() -> Array<u32>:")
+            .expect("helper fn");
+        let main_idx = wrapped_source.find("fn main():").expect("main");
+
+        assert!(import_idx < import_end_idx, "import block should be preserved");
+        assert!(
+            import_end_idx < helper_idx,
+            "helper fn should follow the full import block"
+        );
+        assert!(helper_idx < main_idx, "top-level helper fn should stay above fn main()");
+        assert!(
+            wrapped_source.contains("    RowBitmap,\n    build_bitmap_eq_u32_predicate\n}"),
+            "multiline import members should remain inside the braced import block"
+        );
     }
 }

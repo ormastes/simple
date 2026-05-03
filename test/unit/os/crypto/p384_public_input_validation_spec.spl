@@ -1,0 +1,68 @@
+use std.spipe.*
+use os.crypto.p384.{p384_ecdsa_verify, p384_ecdh, p384_scalar_mult, p384_point_on_curve}
+
+fn _hex_value(ch: u8) -> u8:
+    if ch >= 0x30u8 and ch <= 0x39u8:
+        ch - 0x30u8
+    elif ch >= 0x61u8 and ch <= 0x66u8:
+        (ch - 0x61u8) + 10u8
+    elif ch >= 0x41u8 and ch <= 0x46u8:
+        (ch - 0x41u8) + 10u8
+    else:
+        0u8
+
+fn _hex_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    val raw = s.bytes()
+    while i + 1 < raw.len().to_u64():
+        val hi = _hex_value(raw[i])
+        val lo = _hex_value(raw[i + 1])
+        out.push((hi << 4) | lo)
+        i = i + 2
+    out
+
+fn _make_key(seed: u8) -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        val v: u8 = ((seed.to_u64() + i * 7 + 3) & 0xFF).to_u8()
+        k.push(v)
+        i = i + 1
+    k
+
+fn _pub_hex_alice() -> text:
+    "045c1175e56418c0f978034efbdce6453f787b47b722a4c14cceee43653857895a8dce11c025295617adcafa524e07a7a34177b866d0fc47e2d83de93550664524d4cd855e2a1d178336af4a8432df0bae4d4f0e44ad58be2889fb07a13fa6fd45"
+
+fn _tampered_pubkey() -> [u8]:
+    var b = _hex_bytes(_pub_hex_alice())
+    b[96u64] = b[96u64] ^ 0x01u8
+    b
+
+fn _be48_val(last_byte: u8) -> [u8]:
+    var b: [u8] = []
+    var i: u64 = 0
+    while i < 47:
+        b.push(0x00)
+        i = i + 1
+    b.push(last_byte)
+    b
+
+fn _zeros(count: u64) -> [u8]:
+    var b: [u8] = []
+    var i: u64 = 0
+    while i < count:
+        b.push(0x00)
+        i = i + 1
+    b
+
+describe "P-384 public input validation":
+
+    it "rejects off-curve public key in ECDSA verify":
+        val bad_pub = _tampered_pubkey()
+        val verified = p384_ecdsa_verify(bad_pub, _zeros(48), _zeros(96))
+        expect(not verified).to_equal(true)
+
+    it "rejects off-curve peer public key in ECDH":
+        val bad_pub = _tampered_pubkey()
+        expect(p384_ecdh(_make_key(0x6B), bad_pub).len()).to_equal(0)

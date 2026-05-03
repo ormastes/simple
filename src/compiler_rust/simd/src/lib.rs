@@ -26,11 +26,13 @@
 //! ```
 
 mod detection;
+mod host_config;
 mod intrinsics;
 mod ops;
 mod types;
 
 pub use detection::*;
+pub use host_config::*;
 pub use intrinsics::*;
 pub use ops::*;
 pub use types::*;

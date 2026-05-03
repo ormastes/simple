@@ -12,6 +12,7 @@
 // are included in the static library.
 pub use simple_compiler;
 pub use simple_runtime;
+#[cfg(feature = "driver-compat")]
 pub use simple_driver;
 
 // Row 3 hosted-compositor SFFI bindings. This `extern crate` is the
@@ -1540,11 +1541,13 @@ noop_stubs!(
 
 // ============================================================================
 // Test runner FFI — allows self-hosted binaries to run tests via the Rust
-// test runner from simple-driver.
+// test runner from simple-driver. Kept behind `driver-compat` so minimal
+// native lanes do not inherit the driver dependency closure.
 // ============================================================================
 
 /// Run the full test suite.  Called from Simple code as:
 ///   extern fn rt_run_tests(args: [text], gc_log: i64, gc_off: i64) -> i64
+#[cfg(feature = "driver-compat")]
 #[no_mangle]
 pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> i64 {
     let args_vec = extract_rt_string_array(args);
@@ -1581,13 +1584,15 @@ pub extern "C" fn rt_run_tests(args: RuntimeValue, gc_log: i64, gc_off: i64) -> 
 // CLI `run` FFI — executes a single .spl source file in-process via the Rust
 // seed's interpreter. Replaces the runtime-side stub (gated out by the
 // `driver-hooks` feature on simple-runtime) so the self-hosted binary can
-// service `simple run <file>` without recursing through a subprocess.
+// service `simple run <file>` without recursing through a subprocess. Kept
+// behind `driver-compat` so the minimal native lane keeps the runtime stub.
 // ============================================================================
 
 /// Run a Simple source file in-process.
 ///
 /// Simple-side declaration:
 ///   extern fn rt_cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64
+#[cfg(feature = "driver-compat")]
 #[no_mangle]
 pub extern "C" fn rt_cli_run_file(path: RuntimeValue, args: RuntimeValue, gc_log: u8, gc_off: u8) -> i64 {
     let path_str = match extract_rt_string(path) {

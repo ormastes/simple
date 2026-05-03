@@ -373,7 +373,12 @@ fn _fe_mul_wide(a: Fe384, b: Fe384) -> [u64]:
             prod[i + j] = t & MASK32
             carry = (t >> 32) & MASK32
             j = j + 1
-        prod[i + 12] = prod[i + 12] + carry
+        var k: u64 = i + 12
+        while carry != 0 and k < 24:
+            val s: u64 = prod[k] + carry
+            prod[k] = s & MASK32
+            carry = (s >> 32) & MASK32
+            k = k + 1
         i = i + 1
     prod
 
@@ -534,38 +539,34 @@ fn _p_minus_2_bytes() -> [u8]:
     """p - 2 as 48 big-endian bytes."""
     # p = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
     #     FFFFFFFF0000000000000000FFFFFFFF
-    # p-2: last byte 0xFF -> 0xFD
+    # p-2 = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
+    #       FFFFFFFF0000000000000000FFFFFFFD
     var b: [u8] = []
-    # Bytes 0-23: all 0xFF (first 192 bits)
+    # Bytes 0-27: top 224 bits are all 0xFF
     var i: u64 = 0
-    while i < 24:
+    while i < 28:
         b.push(0xFF)
         i = i + 1
-    # Bytes 24-27: 0xFFFFFFFE
+    # Bytes 28-31: 0xFFFFFFFE
     b.push(0xFF)
     b.push(0xFF)
     b.push(0xFF)
     b.push(0xFE)
-    # Bytes 28-31: 0xFFFFFFFF
+    # Bytes 32-35: 0xFFFFFFFF
     b.push(0xFF)
     b.push(0xFF)
     b.push(0xFF)
     b.push(0xFF)
-    # Bytes 32-35: 0x00000000
-    b.push(0x00)
-    b.push(0x00)
-    b.push(0x00)
-    b.push(0x00)
     # Bytes 36-39: 0x00000000
     b.push(0x00)
     b.push(0x00)
     b.push(0x00)
     b.push(0x00)
-    # Bytes 40-43: 0xFFFFFFFF
-    b.push(0xFF)
-    b.push(0xFF)
-    b.push(0xFF)
-    b.push(0xFF)
+    # Bytes 40-43: 0x00000000
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
     # Bytes 44-47: 0xFFFFFFFF - 2 = 0xFFFFFFFD
     b.push(0xFF)
     b.push(0xFF)
@@ -578,19 +579,20 @@ fn _p_minus_2_bytes() -> [u8]:
 # ============================================================================
 
 fn fe_eq(a: Fe384, b: Fe384) -> bool:
-    if a.l0 != b.l0: return false
-    elif a.l1 != b.l1: return false
-    elif a.l2 != b.l2: return false
-    elif a.l3 != b.l3: return false
-    elif a.l4 != b.l4: return false
-    elif a.l5 != b.l5: return false
-    elif a.l6 != b.l6: return false
-    elif a.l7 != b.l7: return false
-    elif a.l8 != b.l8: return false
-    elif a.l9 != b.l9: return false
-    elif a.la != b.la: return false
-    elif a.lb != b.lb: return false
-    else: return true
+    val diff =
+        (a.l0 ^ b.l0) |
+        (a.l1 ^ b.l1) |
+        (a.l2 ^ b.l2) |
+        (a.l3 ^ b.l3) |
+        (a.l4 ^ b.l4) |
+        (a.l5 ^ b.l5) |
+        (a.l6 ^ b.l6) |
+        (a.l7 ^ b.l7) |
+        (a.l8 ^ b.l8) |
+        (a.l9 ^ b.l9) |
+        (a.la ^ b.la) |
+        (a.lb ^ b.lb)
+    (diff & MASK32) == 0
 
 # ============================================================================
 # Jacobian point type
@@ -949,6 +951,21 @@ fn p384_point_on_curve(px: [u8], py: [u8]) -> bool:
     val b_val = _curve_b()
     val rhs = fe_add(fe_add(x3, neg3x), b_val)
     fe_eq(y2, rhs)
+
+fn _valid_uncompressed_pubkey(pubkey: [u8]) -> bool:
+    """Check SEC1 uncompressed P-384 public-key encoding and curve membership."""
+    if pubkey.len() != 97:
+        return false
+    if pubkey[0u64] != 0x04u8:
+        return false
+    var px: [u8] = []
+    var py: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        px.push(pubkey[1 + i])
+        py.push(pubkey[49 + i])
+        i = i + 1
+    p384_point_on_curve(px, py)
 
 # ============================================================================
 # Scalar field arithmetic (mod n) for ECDSA
@@ -1468,13 +1485,11 @@ fn p384_ecdsa_verify(pubkey: [u8], msg_hash: [u8], sig: [u8]) -> bool:
     """Verify ECDSA P-384 signature.
     pubkey: 97 bytes (04||x||y), msg_hash: 48 bytes, sig: 96 bytes (r||s).
     Returns true if valid."""
-    if pubkey.len() != 97:
+    if _valid_uncompressed_pubkey(pubkey) == false:
         return false
     if msg_hash.len() != 48:
         return false
     if sig.len() != 96:
-        return false
-    if pubkey[0u64] != 0x04u8:
         return false
     # Parse r, s
     var r_bytes: [u8] = []
@@ -1550,9 +1565,7 @@ fn p384_ecdh(privkey: [u8], peer_pubkey: [u8]) -> [u8]:
     privkey: 48 bytes, peer_pubkey: 97 bytes (04||x||y)."""
     if privkey.len() != 48:
         return []
-    if peer_pubkey.len() != 97:
-        return []
-    if peer_pubkey[0u64] != 0x04u8:
+    if _valid_uncompressed_pubkey(peer_pubkey) == false:
         return []
     var px_bytes: [u8] = []
     var py_bytes: [u8] = []
@@ -1618,6 +1631,8 @@ fn p384_scalar_mult(k: [u8], px: [u8], py: [u8]) -> [u8]:
     if px.len() != 48:
         return []
     if py.len() != 48:
+        return []
+    if p384_point_on_curve(px, py) == false:
         return []
     val fpx = fe_from_bytes(px)
     val fpy = fe_from_bytes(py)

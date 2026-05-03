@@ -163,6 +163,7 @@ impl BuildCache {
             entry_closure: true,
             incremental: false,
             clean: false,
+            runtime_bundle: "runtime".to_string(),
             opt_level: simple_compiler::optimizations::NativeOptimizationLevel::default_for_native_executable(),
             ..Default::default()
         };
@@ -181,7 +182,7 @@ impl BuildCache {
             .config(config)
             .entry_file(source.to_path_buf());
 
-        for dir in native_test_source_dirs(&project.root) {
+        for dir in native_test_source_dirs(&project.root, &project_source) {
             builder = builder.source_dir(dir);
         }
 
@@ -210,14 +211,41 @@ impl BuildCache {
     }
 }
 
-fn native_test_source_dirs(project_root: &Path) -> Vec<PathBuf> {
-    let candidates = [
-        project_root.join("src"),
-        project_root.join("src/compiler"),
-        project_root.join("src/app"),
-        project_root.join("src/lib"),
-        project_root.join("test"),
-    ];
+fn native_test_source_dirs(project_root: &Path, entry_path: &Path) -> Vec<PathBuf> {
+    let rel_entry = entry_path
+        .strip_prefix(project_root)
+        .ok()
+        .and_then(|path| path.to_str());
+
+    let candidates = if rel_entry
+        .is_some_and(|path| path.starts_with("test/unit/lib/") || path.starts_with("test/integration/lib/"))
+    {
+        vec![project_root.join("src/lib"), project_root.join("test")]
+    } else if rel_entry
+        .is_some_and(|path| path.starts_with("test/unit/compiler/") || path.starts_with("test/integration/compiler/"))
+    {
+        vec![
+            project_root.join("src/compiler"),
+            project_root.join("src/lib"),
+            project_root.join("test"),
+        ]
+    } else if rel_entry
+        .is_some_and(|path| path.starts_with("test/unit/app/") || path.starts_with("test/integration/app/"))
+    {
+        vec![
+            project_root.join("src/app"),
+            project_root.join("src/lib"),
+            project_root.join("test"),
+        ]
+    } else {
+        vec![
+            project_root.join("src"),
+            project_root.join("src/compiler"),
+            project_root.join("src/app"),
+            project_root.join("src/lib"),
+            project_root.join("test"),
+        ]
+    };
 
     let mut dirs = Vec::new();
     for candidate in candidates {
@@ -272,34 +300,51 @@ mod tests {
     }
 
     #[test]
-    fn test_native_test_source_dirs_prefers_standard_roots() {
+    fn test_native_test_source_dirs_prefers_lib_roots_for_lib_specs() {
         let tmp = tempdir().expect("tempdir");
-        fs::create_dir_all(tmp.path().join("src/compiler")).expect("compiler dir");
-        fs::create_dir_all(tmp.path().join("src/app")).expect("app dir");
         fs::create_dir_all(tmp.path().join("src/lib")).expect("lib dir");
         fs::create_dir_all(tmp.path().join("test")).expect("test dir");
+        let entry = tmp.path().join("test/unit/lib/db/accel_spec.spl");
+        fs::create_dir_all(entry.parent().unwrap()).expect("entry dir");
+        fs::write(&entry, "").expect("entry file");
 
-        let dirs = native_test_source_dirs(tmp.path());
+        let dirs = native_test_source_dirs(tmp.path(), &entry);
 
-        assert_eq!(
-            dirs,
-            vec![
-                tmp.path().join("src"),
-                tmp.path().join("src/compiler"),
-                tmp.path().join("src/app"),
-                tmp.path().join("src/lib"),
-                tmp.path().join("test"),
-            ]
-        );
+        assert_eq!(dirs, vec![tmp.path().join("src/lib"), tmp.path().join("test"),]);
     }
 
     #[test]
     fn test_native_test_source_dirs_falls_back_to_src() {
         let tmp = tempdir().expect("tempdir");
         fs::create_dir_all(tmp.path().join("src")).expect("src dir");
+        let entry = tmp.path().join("test/misc/demo_spec.spl");
+        fs::create_dir_all(entry.parent().unwrap()).expect("entry dir");
+        fs::write(&entry, "").expect("entry file");
 
-        let dirs = native_test_source_dirs(tmp.path());
+        let dirs = native_test_source_dirs(tmp.path(), &entry);
 
         assert_eq!(dirs, vec![tmp.path().join("src")]);
+    }
+
+    #[test]
+    fn test_native_test_source_dirs_keeps_compiler_roots_for_compiler_specs() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("src/compiler")).expect("compiler dir");
+        fs::create_dir_all(tmp.path().join("src/lib")).expect("lib dir");
+        fs::create_dir_all(tmp.path().join("test")).expect("test dir");
+        let entry = tmp.path().join("test/unit/compiler/native/foo_spec.spl");
+        fs::create_dir_all(entry.parent().unwrap()).expect("entry dir");
+        fs::write(&entry, "").expect("entry file");
+
+        let dirs = native_test_source_dirs(tmp.path(), &entry);
+
+        assert_eq!(
+            dirs,
+            vec![
+                tmp.path().join("src/compiler"),
+                tmp.path().join("src/lib"),
+                tmp.path().join("test"),
+            ]
+        );
     }
 }

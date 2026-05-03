@@ -162,6 +162,14 @@ fn _repeated_bytes(value: u8, count: i64) -> [u8]:
         i = i + 1
     out
 
+fn _repeated_tail_payload() -> [u8]:
+    [
+        0x61u8, 0x62u8, 0x63u8,
+        0x61u8, 0x62u8, 0x63u8,
+        0x61u8, 0x62u8, 0x63u8,
+        0x61u8, 0x62u8, 0x63u8
+    ]
+
 describe "zstd frame header variants":
     it "keeps the current pure-Simple framed subset in parity across scalar avx2 and neon tiers":
         val payload = [0x61u8, 0x62u8, 0x63u8, 0x64u8, 0x65u8, 0x66u8]
@@ -235,6 +243,21 @@ describe "zstd frame header variants":
         expect(encoded[5]).to_equal((payload.len() & 0xFF).to_u8())
         expect(encoded[6]).to_equal(((payload.len() >> 8) & 0xFF).to_u8())
         expect(zstd_decompress_frame(encoded).unwrap()).to_equal(payload)
+
+    it "host zstd decodes the repeated-tail raw-block fallback":
+        _ensure_tmp_root()
+        val payload = _repeated_tail_payload()
+        val encoded = zstd_compress_frame(payload, default_compression_options(CompressionCodec.zstd))
+        expect((encoded[6] & 0x07u8)).to_equal(0x01u8)
+        val compressed_path = TMP_ROOT + "/repeated_tail_raw.zst"
+        val output_path = TMP_ROOT + "/repeated_tail_raw.zst.out"
+        _write_bytes(compressed_path, encoded)
+        val run = shell("zstd -q -d -f '" + compressed_path + "' -o '" + output_path + "'")
+        if run.exit_code != 0:
+            print(run.stdout)
+            print(run.stderr)
+        expect(run.exit_code).to_equal(0)
+        expect(_read_bytes(output_path)).to_equal(payload)
 
     it "decodes single-segment frames with 1-byte content size":
         val payload = [0x61u8, 0x62u8, 0x63u8]

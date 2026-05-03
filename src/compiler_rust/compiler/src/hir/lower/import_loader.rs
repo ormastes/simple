@@ -33,6 +33,35 @@ impl Lowerer {
             .any(|name| Self::import_target_exports_name(available, name))
     }
 
+    fn resolve_import_target_module_path(module_path: &ModulePath, target: &ImportTarget) -> Option<ModulePath> {
+        match target {
+            ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => {
+                let mut module_segments = module_path.segments.clone();
+                module_segments.push(name.clone());
+                Some(ModulePath::new(module_segments))
+            }
+            _ => None,
+        }
+    }
+
+    fn resolve_imported_module_path(
+        &self,
+        resolver: &crate::module_resolver::ModuleResolver,
+        current_file: &std::path::Path,
+        module_path: &ModulePath,
+        target: &ImportTarget,
+    ) -> LowerResult<crate::module_resolver::ResolvedModule> {
+        if let Some(candidate_path) = Self::resolve_import_target_module_path(module_path, target) {
+            if let Ok(resolved) = resolver.resolve(&candidate_path, current_file) {
+                return Ok(resolved);
+            }
+        }
+
+        resolver
+            .resolve(module_path, current_file)
+            .map_err(|e| LowerError::ModuleResolution(format!("{:?}", e)))
+    }
+
     fn load_reexported_symbols_from_items(&mut self, items: &[Node], target: &ImportTarget) -> LowerResult<usize> {
         let mut imported_count = 0;
 
@@ -641,7 +670,7 @@ impl Lowerer {
         };
 
         // Resolve module path to filesystem location
-        let resolved = match resolver.resolve(module_path, current_file) {
+        let resolved = match self.resolve_imported_module_path(resolver, current_file, module_path, target) {
             Ok(r) => r,
             Err(_) => return Ok(()), // Silently skip unresolvable modules
         };
@@ -661,6 +690,9 @@ impl Lowerer {
             Err(_) => return Ok(()),
         };
 
+        let previous_file = self.current_file.clone();
+        self.current_file = Some(resolved.path.clone());
+
         // Pre-register type names as empty placeholders
         for item in &imported_module.items {
             self.preregister_imported_type_placeholder(item);
@@ -670,6 +702,8 @@ impl Lowerer {
         if resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
             let _ = self.preregister_type_names_from_package_siblings(&resolved.path, target);
         }
+
+        self.current_file = previous_file;
 
         Ok(())
     }
@@ -752,9 +786,7 @@ impl Lowerer {
         };
 
         // Resolve module path to filesystem location
-        let resolved = resolver
-            .resolve(module_path, current_file)
-            .map_err(|e| LowerError::ModuleResolution(format!("{:?}", e)))?;
+        let resolved = self.resolve_imported_module_path(resolver, current_file, module_path, target)?;
 
         // Prevent circular imports
         if self.loaded_modules.contains(&resolved.path) {
@@ -776,13 +808,21 @@ impl Lowerer {
             .parse()
             .map_err(|e| LowerError::ModuleResolution(format!("Failed to parse module: {}", e)))?;
 
-        let imported_count = self.register_imported_symbols_from_items(&imported_module.items, target)?;
+        let previous_file = self.current_file.clone();
+        self.current_file = Some(resolved.path.clone());
 
-        if imported_count == 0 && resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
-            let _ = self.load_imported_symbols_from_package_siblings(&resolved.path, target)?;
-        }
+        let result = (|| {
+            let imported_count = self.register_imported_symbols_from_items(&imported_module.items, target)?;
 
-        Ok(())
+            if imported_count == 0 && resolved.path.file_name().is_some_and(|name| name == "__init__.spl") {
+                let _ = self.load_imported_symbols_from_package_siblings(&resolved.path, target)?;
+            }
+
+            Ok(())
+        })();
+
+        self.current_file = previous_file;
+        result
     }
 
     /// Check if a symbol should be imported based on the import target.

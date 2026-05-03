@@ -4,7 +4,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use simple_simd::SimdTier;
 
-use super::simd_metadata::VariantMetadata;
+use super::simd_metadata::{RuntimeVariantResource, VariantMetadata};
 
 /// Magic number for SPK format: "SPK1"
 pub const SPK_MAGIC: [u8; 4] = *b"SPK1";
@@ -167,6 +167,8 @@ pub struct ManifestSection {
     pub target_triple: Option<String>,
     /// Canonical SIMD tier for this stdlib/package variant.
     pub simd_tier: SimdTier,
+    /// Optional embedded runtime library variants packaged with this payload.
+    pub runtime_variants: Vec<RuntimeVariantResource>,
 }
 
 impl ManifestSection {
@@ -197,12 +199,19 @@ impl ManifestSection {
         data.extend_from_slice(&(tier_bytes.len() as u32).to_le_bytes());
         data.extend_from_slice(tier_bytes);
 
+        data.extend_from_slice(&(self.runtime_variants.len() as u32).to_le_bytes());
+        for variant in &self.runtime_variants {
+            write_string(&mut data, &variant.target_triple);
+            write_string(&mut data, variant.simd_tier.as_str());
+            write_string(&mut data, &variant.resource_path);
+        }
+
         data
     }
 
     /// Parse from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 8 {
+        if bytes.len() < 4 {
             return None;
         }
 
@@ -220,19 +229,26 @@ impl ManifestSection {
         offset += manifest_len;
 
         // Read lock
-        if offset + 4 > bytes.len() {
+        if offset == bytes.len() {
             return Some(Self {
                 manifest_toml,
                 lock_toml: None,
                 target_triple: None,
                 simd_tier: SimdTier::Scalar,
+                runtime_variants: Vec::new(),
             });
+        }
+        if offset + 4 > bytes.len() {
+            return None;
         }
 
         let lock_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
         offset += 4;
 
-        let lock_toml = if lock_len > 0 && offset + lock_len <= bytes.len() {
+        if lock_len > 0 && offset + lock_len > bytes.len() {
+            return None;
+        }
+        let lock_toml = if lock_len > 0 {
             Some(String::from_utf8(bytes[offset..offset + lock_len].to_vec()).ok()?)
         } else {
             None
@@ -241,16 +257,39 @@ impl ManifestSection {
             offset += lock_len;
         }
 
-        let target_triple = read_optional_string(bytes, &mut offset)?;
-        let simd_tier = read_required_string(bytes, &mut offset)
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(SimdTier::Scalar);
+        let target_triple = read_optional_trailing_string(bytes, &mut offset)?;
+        let simd_tier = if offset == bytes.len() {
+            SimdTier::Scalar
+        } else {
+            read_required_string(bytes, &mut offset)?.parse().ok()?
+        };
+        let runtime_variants = if offset == bytes.len() {
+            Vec::new()
+        } else if offset + 4 <= bytes.len() {
+            let count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+            offset += 4;
+            let mut variants = Vec::with_capacity(count);
+            for _ in 0..count {
+                let target_triple = read_required_string(bytes, &mut offset)?;
+                let simd_tier = read_required_string(bytes, &mut offset)?.parse().ok()?;
+                let resource_path = read_required_string(bytes, &mut offset)?;
+                variants.push(RuntimeVariantResource {
+                    target_triple,
+                    simd_tier,
+                    resource_path,
+                });
+            }
+            variants
+        } else {
+            return None;
+        };
 
         Some(Self {
             manifest_toml,
             lock_toml,
             target_triple,
             simd_tier,
+            runtime_variants,
         })
     }
 
@@ -262,9 +301,15 @@ impl ManifestSection {
     }
 }
 
+fn write_string(data: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    data.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    data.extend_from_slice(bytes);
+}
+
 fn read_optional_string(bytes: &[u8], offset: &mut usize) -> Option<Option<String>> {
     if *offset + 4 > bytes.len() {
-        return Some(None);
+        return None;
     }
     let len = u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().ok()?) as usize;
     *offset += 4;
@@ -279,8 +324,15 @@ fn read_optional_string(bytes: &[u8], offset: &mut usize) -> Option<Option<Strin
     Some(Some(value))
 }
 
+fn read_optional_trailing_string(bytes: &[u8], offset: &mut usize) -> Option<Option<String>> {
+    if *offset == bytes.len() {
+        return Some(None);
+    }
+    read_optional_string(bytes, offset)
+}
+
 fn read_required_string(bytes: &[u8], offset: &mut usize) -> Option<String> {
-    read_optional_string(bytes, offset)?.or_else(|| Some("scalar".to_string()))
+    read_optional_string(bytes, offset)?
 }
 
 /// Resource entry in the resources section.
@@ -359,6 +411,11 @@ mod tests {
             lock_toml: Some("[[package]]\nname = \"dep\"".to_string()),
             target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
             simd_tier: SimdTier::X86_64Avx2,
+            runtime_variants: vec![RuntimeVariantResource {
+                target_triple: "x86_64-unknown-linux-gnu".to_string(),
+                simd_tier: SimdTier::X86_64Avx2,
+                resource_path: "runtime/libsimple_runtime.x86_64_avx2.so".to_string(),
+            }],
         };
 
         let bytes = section.to_bytes();
@@ -368,6 +425,7 @@ mod tests {
         assert_eq!(restored.lock_toml, section.lock_toml);
         assert_eq!(restored.target_triple, section.target_triple);
         assert_eq!(restored.simd_tier, section.simd_tier);
+        assert_eq!(restored.runtime_variants, section.runtime_variants);
     }
 
     #[test]
@@ -377,6 +435,7 @@ mod tests {
             lock_toml: None,
             target_triple: None,
             simd_tier: SimdTier::Scalar,
+            runtime_variants: Vec::new(),
         };
 
         let bytes = section.to_bytes();
@@ -394,6 +453,7 @@ mod tests {
             lock_toml: None,
             target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
             simd_tier: SimdTier::X86_64Avx2,
+            runtime_variants: Vec::new(),
         };
 
         let metadata = section.variant_metadata();
@@ -415,6 +475,7 @@ mod tests {
             lock_toml: None,
             target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
             simd_tier: SimdTier::X86_64Sse2,
+            runtime_variants: Vec::new(),
         };
 
         let metadata = section.variant_metadata();
@@ -430,6 +491,7 @@ mod tests {
             lock_toml: None,
             target_triple: None,
             simd_tier: SimdTier::Scalar,
+            runtime_variants: Vec::new(),
         };
 
         let metadata = section.variant_metadata();
@@ -444,5 +506,54 @@ mod tests {
         // Test vector: "123456789" should give 0xCBF43926
         let data = b"123456789";
         assert_eq!(crc32(data), 0xCBF43926);
+    }
+
+    #[test]
+    fn test_manifest_section_backward_compatible_without_runtime_variants() {
+        let section = ManifestSection {
+            manifest_toml: "name = \"legacy\"".to_string(),
+            lock_toml: None,
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            simd_tier: SimdTier::Scalar,
+            runtime_variants: Vec::new(),
+        };
+        let mut bytes = Vec::new();
+        let manifest_bytes = section.manifest_toml.as_bytes();
+        bytes.extend_from_slice(&(manifest_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(manifest_bytes);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        write_string(&mut bytes, section.target_triple.as_deref().unwrap());
+        write_string(&mut bytes, section.simd_tier.as_str());
+
+        let restored = ManifestSection::from_bytes(&bytes).unwrap();
+        assert!(restored.runtime_variants.is_empty());
+        assert_eq!(restored.simd_tier, SimdTier::Scalar);
+    }
+
+    #[test]
+    fn test_manifest_section_rejects_truncated_lock_payload() {
+        let manifest_bytes = b"name = \"broken\"";
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(manifest_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(manifest_bytes);
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(b"short");
+
+        assert!(ManifestSection::from_bytes(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_manifest_section_rejects_partial_runtime_variants_trailer() {
+        let section = ManifestSection {
+            manifest_toml: "name = \"legacy\"".to_string(),
+            lock_toml: None,
+            target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+            simd_tier: SimdTier::Scalar,
+            runtime_variants: Vec::new(),
+        };
+        let mut bytes = section.to_bytes();
+        bytes.push(1);
+
+        assert!(ManifestSection::from_bytes(&bytes).is_none());
     }
 }

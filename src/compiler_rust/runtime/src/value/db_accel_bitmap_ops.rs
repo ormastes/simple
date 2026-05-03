@@ -3,11 +3,15 @@
 //! These operate over `[u64]` words with architecture-specific SIMD fast paths
 //! and a scalar fallback for the tail or unsupported hosts.
 
+use super::collections::{rt_array_new, rt_array_push, RuntimeArray};
+use super::core::RuntimeValue;
+use super::heap::{get_typed_ptr, HeapObjectType};
+
 #[inline]
 pub fn bitmap_and_words(lhs: &[u64], rhs: &[u64]) -> Vec<u64> {
     let len = lhs.len().min(rhs.len());
     let mut out = vec![0_u64; len];
-    bitmap_binop_into(lhs, rhs, &mut out, |a, b| a & b);
+    bitmap_binop_into(&lhs[..len], &rhs[..len], &mut out, |a, b| a & b);
     out
 }
 
@@ -57,6 +61,54 @@ where
     }
 
     bitmap_binop_scalar(lhs, rhs, out, scalar);
+}
+
+#[inline]
+fn unpack_u64_array(value: RuntimeValue) -> Option<Vec<u64>> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let words = unsafe { (*array).as_slice() };
+    let mut out = Vec::with_capacity(words.len());
+    for word in words {
+        if word.is_int() {
+            out.push(word.as_int() as u64);
+        } else if word.is_nil() {
+            out.push(0);
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+#[inline]
+fn pack_u64_array(words: Vec<u64>) -> RuntimeValue {
+    let array = rt_array_new(words.len() as u64);
+    for word in words {
+        rt_array_push(array, RuntimeValue::from_int(word as i64));
+    }
+    array
+}
+
+#[no_mangle]
+pub extern "C" fn rt_db_accel_bitmap_and_words(lhs: RuntimeValue, rhs: RuntimeValue) -> RuntimeValue {
+    let Some(lhs_words) = unpack_u64_array(lhs) else {
+        return RuntimeValue::NIL;
+    };
+    let Some(rhs_words) = unpack_u64_array(rhs) else {
+        return RuntimeValue::NIL;
+    };
+    pack_u64_array(bitmap_and_words(&lhs_words, &rhs_words))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_db_accel_bitmap_or_words(lhs: RuntimeValue, rhs: RuntimeValue) -> RuntimeValue {
+    let Some(lhs_words) = unpack_u64_array(lhs) else {
+        return RuntimeValue::NIL;
+    };
+    let Some(rhs_words) = unpack_u64_array(rhs) else {
+        return RuntimeValue::NIL;
+    };
+    pack_u64_array(bitmap_or_words(&lhs_words, &rhs_words))
 }
 
 #[inline]
@@ -135,4 +187,45 @@ where
         idx += 2;
     }
     bitmap_binop_scalar(&lhs[idx..], &rhs[idx..], &mut out[idx..], scalar);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_runtime_abi::lookup_registered_static_runtime_symbol;
+
+    fn runtime_array(words: &[u64]) -> RuntimeValue {
+        let array = rt_array_new(words.len() as u64);
+        for word in words {
+            rt_array_push(array, RuntimeValue::from_int(*word as i64));
+        }
+        array
+    }
+
+    fn read_runtime_array(value: RuntimeValue) -> Vec<u64> {
+        unpack_u64_array(value).expect("expected array of ints")
+    }
+
+    #[test]
+    fn bitmap_and_export_preserves_min_length() {
+        let lhs = runtime_array(&[0b1111, 0b1010, 0b0011]);
+        let rhs = runtime_array(&[0b1100, 0b0110]);
+        let result = rt_db_accel_bitmap_and_words(lhs, rhs);
+        assert_eq!(read_runtime_array(result), vec![0b1100, 0b0010]);
+    }
+
+    #[test]
+    fn bitmap_or_export_preserves_max_length() {
+        let lhs = runtime_array(&[0b1000, 0b0100]);
+        let rhs = runtime_array(&[0b0011, 0b0001, 0b1111]);
+        let result = rt_db_accel_bitmap_or_words(lhs, rhs);
+        assert_eq!(read_runtime_array(result), vec![0b1011, 0b0101, 0b1111]);
+    }
+
+    #[test]
+    fn bitmap_exports_register_for_static_symbol_resolution() {
+        crate::register_static_runtime_symbols();
+        assert!(lookup_registered_static_runtime_symbol("rt_db_accel_bitmap_and_words").is_some());
+        assert!(lookup_registered_static_runtime_symbol("rt_db_accel_bitmap_or_words").is_some());
+    }
 }

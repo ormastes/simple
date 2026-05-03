@@ -37,11 +37,95 @@ enum TargetIdiom:
     # Carry-less multiply (PCLMULQDQ / PMULL)
     ClmulLo
     ClmulHi
+    # Scalar bit-manip idioms
+    RotateLeft
+    RotateRight
+    Popcount
+    CountLeadingZeros
+    CountTrailingZeros
+    ByteSwap
+    BitReverse
+    # Matrix/vector micro-kernels
+    MatrixDot
+    MatrixOuterProduct
+    MatrixFmaKernel
     # SIMD shapes
     SimdI32x4
     SimdF32x4
     SimdI32x8
     SimdF32x8
+
+"""Coarse-grained capability buckets used by the auto-application planner."""
+enum TargetFeatureClass:
+    FixedWidthSimd
+    ScalableSimd
+    BitManip
+    Crypto
+    Matrix
+
+fn idiom_feature_class(idiom: TargetIdiom) -> TargetFeatureClass:
+    """Classify a target idiom into the plan's capability buckets."""
+    match idiom:
+        case RotateLeft:          TargetFeatureClass.BitManip
+        case RotateRight:         TargetFeatureClass.BitManip
+        case Popcount:            TargetFeatureClass.BitManip
+        case CountLeadingZeros:   TargetFeatureClass.BitManip
+        case CountTrailingZeros:  TargetFeatureClass.BitManip
+        case ByteSwap:            TargetFeatureClass.BitManip
+        case BitReverse:          TargetFeatureClass.BitManip
+        case MatrixDot:           TargetFeatureClass.Matrix
+        case MatrixOuterProduct:  TargetFeatureClass.Matrix
+        case MatrixFmaKernel:     TargetFeatureClass.Matrix
+        case SimdI32x8:           TargetFeatureClass.ScalableSimd
+        case SimdF32x8:           TargetFeatureClass.ScalableSimd
+        case SimdI32x4:           TargetFeatureClass.FixedWidthSimd
+        case SimdF32x4:           TargetFeatureClass.FixedWidthSimd
+        case _:                   TargetFeatureClass.Crypto
+
+fn x86_supports_feature_class(caps: X86Caps, class_: TargetFeatureClass) -> bool:
+    """Class-level query for x86 targets used by auto-vectorize planning."""
+    match class_:
+        case FixedWidthSimd: caps.has_sse42
+        case ScalableSimd:   caps.has_avx2 or caps.has_avx512
+        case BitManip:       caps.has_sse42
+        case Crypto:         caps.has_aes or caps.has_sha_ni or caps.has_pclmul or caps.has_sse42
+        case Matrix:         caps.has_avx2 or caps.has_avx512
+
+fn aarch64_supports_feature_class(caps: Aarch64Caps, class_: TargetFeatureClass) -> bool:
+    """Class-level query for AArch64 targets used by auto-vectorize planning."""
+    match class_:
+        case FixedWidthSimd: caps.has_neon
+        case ScalableSimd:   caps.has_sve2
+        case BitManip:       caps.has_neon
+        case Crypto:         caps.has_aes or caps.has_sha2 or caps.has_pmull or caps.has_crc32
+        case Matrix:         caps.has_neon or caps.has_sve2
+
+fn rv64_supports_feature_class(caps: Rv64Caps, class_: TargetFeatureClass) -> bool:
+    """Class-level query for RV64 targets used by auto-vectorize planning."""
+    match class_:
+        case FixedWidthSimd: caps.has_v
+        case ScalableSimd:   caps.has_v
+        case BitManip:       caps.has_zbb or caps.has_zbkb
+        case Crypto:         caps.has_zvkned or caps.has_zvknh or caps.has_zvkg
+        case Matrix:         caps.has_v
+
+fn preferred_lane_count_for_bits(vector_bits: i64, element_bits: i64) -> i64:
+    """Convert a preferred vector width in bits into a lane count."""
+    if element_bits <= 0:
+        return 1
+    val lanes = vector_bits / element_bits
+    if lanes < 1:
+        return 1
+    lanes
+
+fn preferred_lane_count_x86(caps: X86Caps, element_bits: i64) -> i64:
+    preferred_lane_count_for_bits(caps.preferred_vector_width_bits(), element_bits)
+
+fn preferred_lane_count_aarch64(caps: Aarch64Caps, element_bits: i64) -> i64:
+    preferred_lane_count_for_bits(caps.preferred_vector_width_bits(), element_bits)
+
+fn preferred_lane_count_rv64(caps: Rv64Caps, element_bits: i64) -> i64:
+    preferred_lane_count_for_bits(caps.preferred_vector_width_bits(), element_bits)
 
 # ============================================================================
 # TargetCaps trait
@@ -98,6 +182,16 @@ impl TargetCaps for X86Caps:
             case Crc32U64:         self.has_sse42
             case ClmulLo:          self.has_pclmul
             case ClmulHi:          self.has_pclmul
+            case RotateLeft:       self.has_sse42
+            case RotateRight:      self.has_sse42
+            case Popcount:         self.has_sse42
+            case CountLeadingZeros: self.has_sse42
+            case CountTrailingZeros: self.has_sse42
+            case ByteSwap:         self.has_sse42
+            case BitReverse:       self.has_avx2 or self.has_avx512
+            case MatrixDot:        self.has_avx2 or self.has_avx512
+            case MatrixOuterProduct: self.has_avx2 or self.has_avx512
+            case MatrixFmaKernel:  self.has_avx2 or self.has_avx512
             case SimdI32x4:        self.has_sse42
             case SimdF32x4:        self.has_sse42
             case SimdI32x8:        self.has_avx2
@@ -125,6 +219,16 @@ impl TargetCaps for X86Caps:
             case Crc32U64:         2
             case ClmulLo:          8
             case ClmulHi:          8
+            case RotateLeft:       1
+            case RotateRight:      1
+            case Popcount:         2
+            case CountLeadingZeros: 2
+            case CountTrailingZeros: 2
+            case ByteSwap:         1
+            case BitReverse:       3
+            case MatrixDot:        4
+            case MatrixOuterProduct: 4
+            case MatrixFmaKernel:  4
             case SimdI32x4:        1
             case SimdF32x4:        1
             case SimdI32x8:        1
@@ -225,6 +329,16 @@ impl TargetCaps for Aarch64Caps:
             case Crc32U64:         self.has_crc32
             case ClmulLo:          self.has_pmull
             case ClmulHi:          self.has_pmull
+            case RotateLeft:       self.has_neon
+            case RotateRight:      self.has_neon
+            case Popcount:         self.has_neon
+            case CountLeadingZeros: self.has_neon
+            case CountTrailingZeros: self.has_neon
+            case ByteSwap:         self.has_neon
+            case BitReverse:       self.has_sve2
+            case MatrixDot:        self.has_neon or self.has_sve2
+            case MatrixOuterProduct: self.has_neon or self.has_sve2
+            case MatrixFmaKernel:  self.has_neon or self.has_sve2
             case SimdI32x4:        self.has_neon
             case SimdF32x4:        self.has_neon
             case SimdI32x8:        self.has_sve2
@@ -252,6 +366,16 @@ impl TargetCaps for Aarch64Caps:
             case Crc32U64:         2
             case ClmulLo:          8
             case ClmulHi:          8
+            case RotateLeft:       1
+            case RotateRight:      1
+            case Popcount:         2
+            case CountLeadingZeros: 2
+            case CountTrailingZeros: 2
+            case ByteSwap:         1
+            case BitReverse:       3
+            case MatrixDot:        4
+            case MatrixOuterProduct: 4
+            case MatrixFmaKernel:  4
             case SimdI32x4:        1
             case SimdF32x4:        1
             case SimdI32x8:        2
@@ -322,17 +446,19 @@ fn aarch64_caps_from_target(triple: text) -> Aarch64Caps:
 # Rv64Caps — RV64 concrete impl
 # ============================================================================
 
-"""RV64 capability set derived from ISA string (Zvkned / Zvknh / Zvkg / V)."""
+"""RV64 capability set derived from ISA string (Zvkned / Zvknh / Zvkg / Zbb / Zbkb / V)."""
 struct Rv64Caps:
     has_zvkned: bool
     has_zvknh: bool
     has_zvkg: bool
+    has_zbb: bool
+    has_zbkb: bool
     has_v: bool
     vlen_bits: i64
 
 impl TargetCaps for Rv64Caps:
     fn supports(idiom: TargetIdiom) -> bool:
-        """Map each idiom to the required RV64 Zvk extension."""
+        """Map each idiom to the required RV64 scalar/vector extension."""
         match idiom:
             case AesEnc:           self.has_zvkned
             case AesEncLast:       self.has_zvkned
@@ -348,6 +474,16 @@ impl TargetCaps for Rv64Caps:
             case Crc32U64:         false
             case ClmulLo:          self.has_zvkg
             case ClmulHi:          self.has_zvkg
+            case RotateLeft:       self.has_zbb or self.has_zbkb
+            case RotateRight:      self.has_zbb or self.has_zbkb
+            case Popcount:         self.has_zbb
+            case CountLeadingZeros: self.has_zbb
+            case CountTrailingZeros: self.has_zbb
+            case ByteSwap:         self.has_zbb
+            case BitReverse:       self.has_zbb and self.has_zbkb
+            case MatrixDot:        self.has_v
+            case MatrixOuterProduct: self.has_v
+            case MatrixFmaKernel:  self.has_v
             case SimdI32x4:        self.has_v
             case SimdF32x4:        self.has_v
             case SimdI32x8:        self.has_v
@@ -375,6 +511,16 @@ impl TargetCaps for Rv64Caps:
             case Crc32U64:         -1
             case ClmulLo:          8
             case ClmulHi:          8
+            case RotateLeft:       1
+            case RotateRight:      1
+            case Popcount:         2
+            case CountLeadingZeros: 2
+            case CountTrailingZeros: 2
+            case ByteSwap:         1
+            case BitReverse:       2
+            case MatrixDot:        4
+            case MatrixOuterProduct: 4
+            case MatrixFmaKernel:  4
             case SimdI32x4:        1
             case SimdF32x4:        1
             case SimdI32x8:        1
@@ -404,12 +550,16 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
     var vlen = 128
     if triple.contains("_v256"):
         vlen = 256
+    val has_zbb = triple.contains("_zbb")
+    val has_zbkb = triple.contains("_zbkb")
 
     if triple == "rv64gcv_zvkn_zvknh_zvkg" or triple.contains("_zvknh_zvkg"):
         Rv64Caps(
             has_zvkned: true,
             has_zvknh: true,
             has_zvkg: true,
+            has_zbb: has_zbb,
+            has_zbkb: has_zbkb,
             has_v: true,
             vlen_bits: vlen
         )
@@ -418,6 +568,8 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
             has_zvkned: true,
             has_zvknh: false,
             has_zvkg: false,
+            has_zbb: has_zbb,
+            has_zbkb: has_zbkb,
             has_v: true,
             vlen_bits: vlen
         )
@@ -426,6 +578,8 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
             has_zvkned: false,
             has_zvknh: false,
             has_zvkg: false,
+            has_zbb: has_zbb,
+            has_zbkb: has_zbkb,
             has_v: true,
             vlen_bits: vlen
         )
@@ -434,6 +588,8 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
             has_zvkned: false,
             has_zvknh: false,
             has_zvkg: false,
+            has_zbb: has_zbb,
+            has_zbkb: has_zbkb,
             has_v: false,
             vlen_bits: 128
         )

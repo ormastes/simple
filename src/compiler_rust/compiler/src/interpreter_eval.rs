@@ -471,6 +471,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         let mangled = format!("{}__{}", s.name, method.name);
                         let arc_method = Arc::new(method.clone());
                         functions.insert(mangled.clone(), Arc::clone(&arc_method));
+                        FUNCTION_OVERLOADS.with(|cell| {
+                            cell.borrow_mut()
+                                .entry(mangled.clone())
+                                .or_default()
+                                .push(Arc::clone(&arc_method));
+                        });
                         env.insert(
                             mangled.clone(),
                             Value::Function {
@@ -590,6 +596,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         let mangled = format!("{}__{}", final_class.name, method.name);
                         let arc_method = Arc::new(method.clone());
                         functions.insert(mangled.clone(), Arc::clone(&arc_method));
+                        FUNCTION_OVERLOADS.with(|cell| {
+                            cell.borrow_mut()
+                                .entry(mangled.clone())
+                                .or_default()
+                                .push(Arc::clone(&arc_method));
+                        });
                         env.insert(
                             mangled.clone(),
                             Value::Function {
@@ -645,6 +657,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             let mangled = format!("{}__{}", type_name, method.name);
                             let arc_method = Arc::new(method.clone());
                             functions.insert(mangled.clone(), Arc::clone(&arc_method));
+                            FUNCTION_OVERLOADS.with(|cell| {
+                                cell.borrow_mut()
+                                    .entry(mangled.clone())
+                                    .or_default()
+                                    .push(Arc::clone(&arc_method));
+                            });
                             env.insert(
                                 mangled.clone(),
                                 Value::Function {

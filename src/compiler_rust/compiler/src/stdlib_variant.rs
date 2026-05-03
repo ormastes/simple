@@ -1,24 +1,11 @@
 //! Hardware-aware stdlib variant selection helpers.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
-use simple_simd::{detect_profile, SimdTier};
-
-fn parse_tier_override(raw: &str) -> Option<SimdTier> {
-    raw.parse().ok()
-}
+use simple_simd::{active_simd_tier as resolved_active_simd_tier, host_cpu_config, SimdTier};
 
 pub fn active_simd_tier() -> SimdTier {
-    static DETECTED: OnceLock<SimdTier> = OnceLock::new();
-
-    if let Ok(value) = std::env::var("SIMPLE_SIMD_TIER") {
-        if let Some(tier) = parse_tier_override(&value) {
-            return tier;
-        }
-    }
-
-    *DETECTED.get_or_init(detect_profile)
+    resolved_active_simd_tier()
 }
 
 pub fn active_simd_tier_name() -> &'static str {
@@ -67,6 +54,7 @@ fn append_tier_candidates(out: &mut Vec<PathBuf>, root: &Path, tier: SimdTier) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
@@ -75,19 +63,54 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn with_simd_tier_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+    fn with_simd_envs<T>(simd_tier: Option<&str>, cpu_config_path: Option<&Path>, f: impl FnOnce() -> T) -> T {
         let _guard = simd_tier_env_lock().lock().unwrap();
-        let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
-        match value {
+        let previous_simd_tier = std::env::var("SIMPLE_SIMD_TIER").ok();
+        let previous_cpu_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
+
+        match simd_tier {
             Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
             None => std::env::remove_var("SIMPLE_SIMD_TIER"),
         }
+
+        match cpu_config_path {
+            Some(path) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", path),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+
         let result = f();
-        match previous.as_deref() {
+
+        match previous_simd_tier.as_deref() {
             Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
             None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+
+        match previous_cpu_config_path.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
         }
         result
+    }
+
+    fn with_simd_tier_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        with_simd_envs(value, None, f)
+    }
+
+    fn config_document(enabled_tier: &str) -> String {
+        format!(
+            "version: 1\n\
+target_triple: test-triple\n\
+generated_by: \"test\"\n\
+support:\n\
+    simd_tier: x86_64_avx2\n\
+    instruction_sets: [sse2, avx2]\n\
+simple_support:\n\
+    simd_tier_fallbacks: [x86_64_avx2, x86_64_sse2, scalar]\n\
+    instruction_sets: [sse2, avx2]\n\
+enabled:\n\
+    simd_tier: {enabled_tier}\n\
+    instruction_sets: [sse2, avx2]\n"
+        )
     }
 
     #[test]
@@ -145,9 +168,38 @@ mod tests {
     }
 
     #[test]
-    fn invalid_override_falls_back_to_detected_profile() {
-        with_simd_tier_env(Some("definitely-not-a-tier"), || {
-            assert_eq!(active_simd_tier(), detect_profile());
+    fn config_enabled_tier_is_used_without_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+        fs::write(&path, config_document("scalar")).unwrap();
+
+        with_simd_envs(None, Some(&path), || {
+            assert_eq!(host_cpu_config().unwrap().enabled.simd_tier, SimdTier::Scalar);
+            assert_eq!(active_simd_tier(), SimdTier::Scalar);
+        });
+    }
+
+    #[test]
+    fn explicit_override_takes_precedence_over_config_enabled_tier() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+        fs::write(&path, config_document("scalar")).unwrap();
+
+        with_simd_envs(Some("x86_64_sse2"), Some(&path), || {
+            assert_eq!(host_cpu_config().unwrap().enabled.simd_tier, SimdTier::Scalar);
+            assert_eq!(active_simd_tier(), SimdTier::X86_64Sse2);
+        });
+    }
+
+    #[test]
+    fn invalid_override_falls_back_to_configured_enabled_tier() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+        fs::write(&path, config_document("scalar")).unwrap();
+
+        with_simd_envs(Some("definitely-not-a-tier"), Some(&path), || {
+            assert_eq!(host_cpu_config().unwrap().enabled.simd_tier, SimdTier::Scalar);
+            assert_eq!(active_simd_tier(), SimdTier::Scalar);
         });
     }
 }

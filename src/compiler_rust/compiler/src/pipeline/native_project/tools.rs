@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 
 use super::{safe_canonicalize, RUNTIME_PATH_OVERRIDE};
 
+fn has_nonempty_archive_payload(path: &Path) -> bool {
+    path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
+}
+
 /// Find a C compiler -- delegates to `simple_common::platform::cc_detect`.
 pub(crate) fn find_c_compiler() -> String {
     simple_common::platform::cc_detect::find_c_compiler()
@@ -24,13 +28,13 @@ pub(crate) fn find_cxx_compiler() -> String {
 pub(crate) fn find_native_all_library() -> Option<PathBuf> {
     if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
         let p = dir.join("libsimple_native_all.a");
-        if p.exists() {
+        if has_nonempty_archive_payload(&p) {
             return Some(p);
         }
         #[cfg(target_os = "windows")]
         {
             let p = dir.join("simple_native_all.lib");
-            if p.exists() {
+            if has_nonempty_archive_payload(&p) {
                 return Some(p);
             }
         }
@@ -38,13 +42,13 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
 
     if let Ok(path) = std::env::var("SIMPLE_NATIVE_ALL_PATH") {
         let p = PathBuf::from(&path);
-        if p.exists() {
+        if has_nonempty_archive_payload(&p) {
             return Some(p);
         }
     }
     if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
         let p = PathBuf::from(&path).join("libsimple_native_all.a");
-        if p.exists() {
+        if has_nonempty_archive_payload(&p) {
             return Some(p);
         }
     }
@@ -52,13 +56,13 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let path = dir.join("libsimple_native_all.a");
-            if path.exists() {
+            if has_nonempty_archive_payload(&path) {
                 return Some(path);
             }
             #[cfg(target_os = "windows")]
             {
                 let path = dir.join("simple_native_all.lib");
-                if path.exists() {
+                if has_nonempty_archive_payload(&path) {
                     return Some(path);
                 }
             }
@@ -82,7 +86,7 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
 
     for candidate in &candidates {
         let path = PathBuf::from(candidate);
-        if path.exists() {
+        if has_nonempty_archive_payload(&path) {
             return Some(path);
         }
     }
@@ -95,14 +99,14 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
     if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
         for name in &["libsimple_runtime.a", "libsimple_native_all.a"] {
             let lib = dir.join(name);
-            if lib.exists() {
+            if has_nonempty_archive_payload(&lib) {
                 return Some(lib);
             }
         }
         #[cfg(target_os = "windows")]
         for name in &["simple_runtime.lib", "simple_native_all.lib"] {
             let lib = dir.join(name);
-            if lib.exists() {
+            if has_nonempty_archive_payload(&lib) {
                 return Some(lib);
             }
         }
@@ -112,11 +116,11 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
         let p = PathBuf::from(&path);
         for name in &["libsimple_runtime.a", "libsimple_native_all.a"] {
             let lib = p.join(name);
-            if lib.exists() {
+            if has_nonempty_archive_payload(&lib) {
                 return Some(lib);
             }
         }
-        if p.exists() && p.is_file() {
+        if has_nonempty_archive_payload(&p) {
             return Some(p);
         }
     }
@@ -124,13 +128,13 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let path = dir.join("libsimple_runtime.a");
-            if path.exists() {
+            if has_nonempty_archive_payload(&path) {
                 return Some(path);
             }
             #[cfg(target_os = "windows")]
             {
                 let path = dir.join("simple_runtime.lib");
-                if path.exists() {
+                if has_nonempty_archive_payload(&path) {
                     return Some(path);
                 }
             }
@@ -163,7 +167,7 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
 
     for candidate in &candidates {
         let path = PathBuf::from(candidate);
-        if path.exists() {
+        if has_nonempty_archive_payload(&path) {
             return Some(path);
         }
     }

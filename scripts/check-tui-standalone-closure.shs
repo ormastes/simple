@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+TUI_ROOTS="
+src/app/ui.tui/app.spl
+src/app/ui.tui/async_app.spl
+src/app/ui.tui/backend.spl
+src/app/ui.tui/standalone.spl
+"
+
+BANNED_PATTERNS='app\.ui\.render\.widgets|app\.ui\.render\.html_widgets|app\.ui\.web|app\.ui\.tauri|app\.ui\.electron|app\.ui\.browser|app\.ui\/main|app\.ui\.main|app\.ui\.cli_entry'
+
+echo "tui_standalone_closure_check=true"
+
+if ! rg -Fq 'use app.ui.tui.standalone.{{run_standalone_tui}}' src/app/ui/build.spl; then
+    echo "generated_tui_lane=false"
+    echo "error=src/app/ui/build.spl does not route tui generation through app.ui.tui.standalone"
+    exit 1
+fi
+echo "generated_tui_lane=true"
+
+for file in $TUI_ROOTS; do
+    if rg -n "$BANNED_PATTERNS" "$file" >/tmp/tui_closure_hits.$$ 2>/dev/null; then
+        echo "standalone_lane_clean=false"
+        echo "error=banned_import_in:$file"
+        cat /tmp/tui_closure_hits.$$
+        rm -f /tmp/tui_closure_hits.$$
+        exit 1
+    fi
+done
+rm -f /tmp/tui_closure_hits.$$ 2>/dev/null || true
+
+echo "standalone_lane_clean=true"
+echo "checked_files=$(printf '%s' "$TUI_ROOTS" | tr '\n' ' ' | xargs)"

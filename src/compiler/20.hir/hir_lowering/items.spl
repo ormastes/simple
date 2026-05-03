@@ -5,9 +5,10 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
+use compiler.frontend.parser_types.{Function, ImportItem, Param}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
-use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, FunctionAttr, ExportAttr}
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, FunctionAttr, ExportAttr, DriverManifestAttr, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, LayoutKind, PlatformParseResult, PlatformDiagnosticLevel}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
@@ -34,11 +35,10 @@ fn platform_first_diagnostic_line(platform: PlatformParseResult) -> i64:
         return 0
     platform.diagnostics[0].span().line
 
-fn imported_symbol_local_name(imported_name: text, has_alias: bool, alias: text) -> text:
-    """Return the local symbol name for a named import."""
-    if has_alias:
-        return alias
-    imported_name
+fn function_params(fn_: Function) -> [Param]:
+    match fn_:
+        case Function(_, _, params, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _):
+            params
 
 impl HirLowering:
     me register_imported_type_symbol(imported_mod: any, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
@@ -117,9 +117,11 @@ impl HirLowering:
                     # Named import: register only explicitly listed names
                     var item_idx = 0
                     while item_idx < imp.items.len():
-                        val item = imp.items[item_idx]
+                        val item: ImportItem = imp.items[item_idx]
                         val imported_name = item.name
-                        val local_name = imported_symbol_local_name(imported_name, item.has_alias, item.alias)
+                        val local_name = match item:
+                            case ImportItem(_, true, alias): alias
+                            case ImportItem(_, false, _): imported_name
 
                         self.register_imported_type_symbol(imported_mod, imported_mod_name, imported_name, local_name, import_span)
                         item_idx = item_idx + 1
@@ -146,32 +148,32 @@ impl HirLowering:
         var constants: Dict<SymbolId, HirConst> = {}
 
         for name in module.functions.keys():
-            val fn_ = module.functions[name]
+            val fn_: Function = module.functions[name]
             val hir_fn = self.lower_function(fn_)
             functions[hir_fn.symbol] = hir_fn
 
         for name in module.classes.keys():
-            val class_ = module.classes[name]
+            val class_: Class = module.classes[name]
             val hir_class = self.lower_class(class_)
             classes[hir_class.symbol] = hir_class
 
         for name in module.structs.keys():
-            val struct_ = module.structs[name]
+            val struct_: Struct = module.structs[name]
             val hir_struct = self.lower_struct(struct_)
             structs[hir_struct.symbol] = hir_struct
 
         for name in module.enums.keys():
-            val enum_ = module.enums[name]
+            val enum_: Enum = module.enums[name]
             val hir_enum = self.lower_enum(enum_)
             enums[hir_enum.symbol] = hir_enum
 
         for name in module.bitfields.keys():
-            val bf = module.bitfields[name]
+            val bf: Bitfield = module.bitfields[name]
             val hir_bf = self.lower_bitfield(bf)
             bitfields[hir_bf.symbol] = hir_bf
 
         for name in module.traits.keys():
-            val trait_ = module.traits[name]
+            val trait_: Trait = module.traits[name]
             val hir_trait = self.lower_trait(trait_)
             traits[hir_trait.symbol] = hir_trait
 
@@ -179,7 +181,7 @@ impl HirLowering:
             impls = impls.push(self.lower_impl(impl_))
 
         for name in module.constants.keys():
-            val const_ = module.constants[name]
+            val const_: ConstDecl = module.constants[name]
             val hir_const = self.lower_const(const_)
             constants[hir_const.symbol] = hir_const
 
@@ -255,7 +257,7 @@ impl HirLowering:
         var idx = 0
         while idx < fn_keys.len():
             val name = fn_keys[idx]
-            val fn_ = module.functions[name]
+            val fn_: Function = module.functions[name]
             if fn_ != nil:
                 self.symbols.define(name, SymbolKind.Function, nil, fn_.span, fn_.visibility, false, mod_name)
             idx = idx + 1
@@ -264,34 +266,40 @@ impl HirLowering:
         idx = 0
         while idx < cls_keys.len():
             val name = cls_keys[idx]
-            val class_ = module.classes[name]
+            val class_: Class = module.classes[name]
             if class_ != nil:
-                self.symbols.define(name, SymbolKind.Class, nil, class_.span, class_.visibility, false, mod_name)
+                match class_:
+                    case Class(_, _, _, _, visibility, _, _, _, span):
+                        self.symbols.define(name, SymbolKind.Class, nil, span, visibility, false, mod_name)
             idx = idx + 1
 
         val str_keys = module.structs.keys()
         idx = 0
         while idx < str_keys.len():
             val name = str_keys[idx]
-            val struct_ = module.structs[name]
+            val struct_: Struct = module.structs[name]
             if struct_ != nil:
-                self.symbols.define(name, SymbolKind.Struct, nil, struct_.span, struct_.visibility, false, mod_name)
+                match struct_:
+                    case Struct(_, _, _, visibility, _, _, _, _, span):
+                        self.symbols.define(name, SymbolKind.Struct, nil, span, visibility, false, mod_name)
             idx = idx + 1
 
         val enum_keys = module.enums.keys()
         idx = 0
         while idx < enum_keys.len():
             val name = enum_keys[idx]
-            val enum_ = module.enums[name]
+            val enum_: Enum = module.enums[name]
             if enum_ != nil:
-                self.symbols.define(name, SymbolKind.Enum, nil, enum_.span, enum_.visibility, false, mod_name)
+                match enum_:
+                    case Enum(_, _, _, visibility, _, _, _, span):
+                        self.symbols.define(name, SymbolKind.Enum, nil, span, visibility, false, mod_name)
             idx = idx + 1
 
         val bf_keys = module.bitfields.keys()
         idx = 0
         while idx < bf_keys.len():
             val name = bf_keys[idx]
-            val bf = module.bitfields[name]
+            val bf: Bitfield = module.bitfields[name]
             if bf != nil:
                 self.symbols.define(name, SymbolKind.Struct, nil, bf.span, bf.visibility, false, mod_name)
             idx = idx + 1
@@ -300,7 +308,7 @@ impl HirLowering:
         idx = 0
         while idx < trait_keys.len():
             val name = trait_keys[idx]
-            val trait_ = module.traits[name]
+            val trait_: Trait = module.traits[name]
             if trait_ != nil:
                 self.symbols.define(name, SymbolKind.Trait, nil, trait_.span, trait_.visibility, false, mod_name)
             idx = idx + 1
@@ -309,7 +317,7 @@ impl HirLowering:
         idx = 0
         while idx < const_keys.len():
             val name = const_keys[idx]
-            val const_ = module.constants[name]
+            val const_: ConstDecl = module.constants[name]
             if const_ != nil:
                 self.symbols.define(name, SymbolKind.Const, nil, const_.span, const_.visibility, const_.is_mutable, mod_name)
             idx = idx + 1
@@ -322,7 +330,7 @@ impl HirLowering:
             var mi = 0
             while mi < meth_keys.len():
                 val name = meth_keys[mi]
-                val fn_ = impl_.methods[name]
+                val fn_: Function = impl_.methods[name]
                 self.symbols.define(name, SymbolKind.Method, nil, fn_.span, fn_.visibility, false, mod_name)
                 mi = mi + 1
             impl_idx = impl_idx + 1
@@ -331,11 +339,19 @@ impl HirLowering:
         """Lower import declaration."""
         var items: [HirImportItem] = []
         for item in imp.items:
-            items = items.push(HirImportItem(
-                name: item.name,
-                alias: item.alias,
-                resolved: nil
-            ))
+            match item:
+                case ImportItem(name, true, alias):
+                    items = items.push(HirImportItem(
+                        name: name,
+                        alias: Some(alias),
+                        resolved: nil
+                    ))
+                case ImportItem(name, false, _):
+                    items = items.push(HirImportItem(
+                        name: name,
+                        alias: nil,
+                        resolved: nil
+                    ))
 
         HirImport(
             module_path: imp.module,
@@ -367,9 +383,10 @@ impl HirLowering:
 
         # Lower parameters
         var params: [HirParam] = []
+        val fn_params = function_params(fn_)
         var pi = 0
-        while pi < fn_.params.len():
-            params = params.push(self.lower_param(fn_.params[pi]))
+        while pi < fn_params.len():
+            params = params.push(self.lower_param(fn_params[pi]))
             pi = pi + 1
 
         # Lower return type — use explicit check instead of .map() ?? default
@@ -390,16 +407,16 @@ impl HirLowering:
         val effective_visibility = self.compute_visibility(fn_.name, fn_.visibility)
 
         # Parse function attributes (@entry, @naked, @noreturn, @section, @interrupt)
-        val fa = parse_function_attrs(fn_.attributes)
-        val func_attr_opt: FunctionAttr? = if fa.is_entry or fa.is_naked or fa.is_noreturn or fa.section.? or fa.is_interrupt or fa.is_alloc or fa.is_no_alloc or fa.is_gpu_kernel or fa.is_simd:
+        val fa: FunctionAttr = parse_function_attrs(fn_.attributes)
+        val func_attr_opt: FunctionAttr? = if fa.is_entry or fa.is_naked or fa.is_noreturn or fa.section.? or fa.is_interrupt or fa.is_alloc or fa.is_no_alloc or fa.is_gpu_kernel or fa.is_simd or fa.has_fast_math or fa.simd_enable or fa.simd_disable or fa.simd_prefer_scalable:
             Some(fa)
         else:
             nil
 
         # Parse export attributes (@export("C"))
-        val export = parse_export_attrs(fn_.attributes)
-        val driver_manifest = parse_driver_manifest_attrs(fn_.attributes)
-        val vhdl_metadata = parse_vhdl_hardware_attrs(fn_.attributes)
+        val export: ExportAttr? = parse_export_attrs(fn_.attributes)
+        val driver_manifest: DriverManifestAttr? = parse_driver_manifest_attrs(fn_.attributes)
+        val vhdl_metadata: VhdlHardwareMetadata = parse_vhdl_hardware_attrs(fn_.attributes)
 
         # Seed effects from is_async annotation.
         # The full effect pass (effect_pass.spl) will refine these later.
@@ -452,50 +469,69 @@ impl HirLowering:
 
     me lower_class(class_: Class) -> HirClass:
         """Lower class to HIR."""
-        val symbol = self.symbols.lookup(class_.name).unwrap()
+        val class_name: text
+        val class_type_params: [TypeParam]
+        val class_fields: [Field]
+        val class_methods: Dict<text, Function>
+        val class_visibility: Visibility
+        val class_attributes: [Attribute]
+        val class_doc_comment: text
+        val class_span: Span
+        match class_:
+            case Class(name, type_params, fields, methods, visibility, _, _, doc_comment, attributes, span):
+                class_name = name
+                class_type_params = type_params
+                class_fields = fields
+                class_methods = methods
+                class_visibility = visibility
+                class_attributes = attributes
+                class_doc_comment = doc_comment
+                class_span = span
+
+        val symbol = self.symbols.lookup(class_name).unwrap()
         self.symbols.push_scope(ScopeKind.Class)
 
         var type_params: [HirTypeParam] = []
-        for tp in class_.type_params:
+        for tp in class_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
         var fields: [HirField] = []
-        for f in class_.fields:
+        for f in class_fields:
             fields = fields.push(self.lower_field(f))
 
         var methods: Dict<text, SymbolId> = {}
-        for name in class_.methods.keys():
-            val fn_ = class_.methods[name]
+        for name in class_methods.keys():
+            val fn_: Function = class_methods[name]
             val hir_fn = self.lower_function(fn_)
             methods[name] = hir_fn.symbol
 
         self.symbols.pop_scope()
 
         # Compute effective visibility using filename matching
-        val effective_visibility = self.compute_visibility(class_.name, class_.visibility)
+        val effective_visibility = self.compute_visibility(class_name, class_visibility)
 
         # Parse layout attributes (@repr, @packed, @align)
-        val layout = parse_layout_attrs(class_.attributes)
+        val layout: LayoutAttr = parse_layout_attrs(class_attributes)
         val layout_opt: LayoutAttr? = if layout.layout_kind != LayoutKind.Simple or layout.explicit_align.? or layout.is_packed:
             Some(layout)
         else:
             nil
 
         # Parse export attributes (@export("C"))
-        val export = parse_export_attrs(class_.attributes)
-        val platform = parse_platform_attrs(class_.attributes)
+        val export: ExportAttr? = parse_export_attrs(class_attributes)
+        val platform: PlatformParseResult = parse_platform_attrs(class_attributes)
         val has_platform = platform.variants.len() > 0 or platform.diagnostics.len() > 0
 
         HirClass(
             symbol: symbol,
-            name: class_.name,
+            name: class_name,
             type_params: type_params,
             fields: fields,
             methods: methods,
             visibility: effective_visibility,
             is_public: effective_visibility.is_public(),
-            doc_comment: class_.doc_comment,
-            span: class_.span,
+            doc_comment: class_doc_comment,
+            span: class_span,
             layout_attr: layout_opt,
             export_attr: export,
             has_platform_attr: has_platform,
@@ -510,39 +546,56 @@ impl HirLowering:
 
     me lower_struct(struct_: Struct) -> HirStruct:
         """Lower struct to HIR."""
-        val symbol = self.symbols.lookup(struct_.name).unwrap()
-        if custom_primitive_is_name(struct_.name):
-            custom_primitive_bind_symbol(struct_.name, symbol.id)
+        val struct_name: text
+        val struct_type_params: [TypeParam]
+        val struct_fields: [Field]
+        val struct_visibility: Visibility
+        val struct_attributes: [Attribute]
+        val struct_doc_comment: text
+        val struct_span: Span
+        match struct_:
+            case Struct(name, type_params, fields, visibility, _, _, doc_comment, attributes, span):
+                struct_name = name
+                struct_type_params = type_params
+                struct_fields = fields
+                struct_visibility = visibility
+                struct_attributes = attributes
+                struct_doc_comment = doc_comment
+                struct_span = span
+
+        val symbol = self.symbols.lookup(struct_name).unwrap()
+        if custom_primitive_is_name(struct_name):
+            custom_primitive_bind_symbol(struct_name, symbol.id)
 
         var type_params: [HirTypeParam] = []
-        for tp in struct_.type_params:
+        for tp in struct_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
         var fields: [HirField] = []
-        for f in struct_.fields:
+        for f in struct_fields:
             fields = fields.push(self.lower_field(f))
 
         # Compute effective visibility using filename matching
-        val effective_visibility = self.compute_visibility(struct_.name, struct_.visibility)
+        val effective_visibility = self.compute_visibility(struct_name, struct_visibility)
 
         # Parse layout attributes (@repr, @packed, @align)
-        val layout = parse_layout_attrs(struct_.attributes)
+        val layout: LayoutAttr = parse_layout_attrs(struct_attributes)
         val layout_opt: LayoutAttr? = if layout.layout_kind != LayoutKind.Simple or layout.explicit_align.? or layout.is_packed:
             Some(layout)
         else:
             nil
-        val platform = parse_platform_attrs(struct_.attributes)
+        val platform: PlatformParseResult = parse_platform_attrs(struct_attributes)
         val has_platform = platform.variants.len() > 0 or platform.diagnostics.len() > 0
 
         HirStruct(
             symbol: symbol,
-            name: struct_.name,
+            name: struct_name,
             type_params: type_params,
             fields: fields,
             visibility: effective_visibility,
             is_public: effective_visibility.is_public(),
-            doc_comment: struct_.doc_comment,
-            span: struct_.span,
+            doc_comment: struct_doc_comment,
+            span: struct_span,
             layout_attr: layout_opt,
             has_platform_attr: has_platform,
             platform_has_error: platform_has_diagnostic_level(platform, PlatformDiagnosticLevel.Error),
@@ -581,28 +634,43 @@ impl HirLowering:
 
     me lower_enum(enum_: Enum) -> HirEnum:
         """Lower enum to HIR."""
-        val symbol = self.symbols.lookup(enum_.name).unwrap()
+        val enum_name: text
+        val enum_type_params: [TypeParam]
+        val enum_variants: [Variant]
+        val enum_visibility: Visibility
+        val enum_doc_comment: text
+        val enum_span: Span
+        match enum_:
+            case Enum(name, type_params, variants, visibility, _, _, doc_comment, span):
+                enum_name = name
+                enum_type_params = type_params
+                enum_variants = variants
+                enum_visibility = visibility
+                enum_doc_comment = doc_comment
+                enum_span = span
+
+        val symbol = self.symbols.lookup(enum_name).unwrap()
 
         var type_params: [HirTypeParam] = []
-        for tp in enum_.type_params:
+        for tp in enum_type_params:
             type_params = type_params.push(self.lower_type_param(tp))
 
         var variants: [HirVariant] = []
-        for v in enum_.variants:
+        for v in enum_variants:
             variants = variants.push(self.lower_variant(v))
 
         # Compute effective visibility using filename matching
-        val effective_visibility = self.compute_visibility(enum_.name, enum_.visibility)
+        val effective_visibility = self.compute_visibility(enum_name, enum_visibility)
 
         HirEnum(
             symbol: symbol,
-            name: enum_.name,
+            name: enum_name,
             type_params: type_params,
             variants: variants,
             visibility: effective_visibility,
             is_public: effective_visibility.is_public(),
-            doc_comment: enum_.doc_comment,
-            span: enum_.span,
+            doc_comment: enum_doc_comment,
+            span: enum_span,
             is_generic_template: false,
             specialization_of: nil,
             type_bindings: {}

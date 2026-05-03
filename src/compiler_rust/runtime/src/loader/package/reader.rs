@@ -5,10 +5,10 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use simple_common::Target;
-use simple_simd::{detect_profile, SimdTier};
+use simple_simd::{active_simd_tier, SimdTier};
 
 use super::format::*;
-use super::simd_metadata::VariantMetadata;
+use super::simd_metadata::{select_best_runtime_variant, RuntimeVariantResource, VariantMetadata};
 use super::writer::PackageError;
 
 /// Loaded package information.
@@ -39,7 +39,27 @@ impl LoadedPackage {
     }
 
     pub fn validate_host_variant(&self) -> Result<(), PackageError> {
-        self.validate_variant(Some(Target::host().triple_str()), detect_profile())
+        self.validate_variant(Some(Target::host().triple_str()), active_simd_tier())
+    }
+
+    pub fn select_runtime_variant_resource(
+        &self,
+        target_triple: &str,
+        simd_tier: SimdTier,
+    ) -> Option<&RuntimeVariantResource> {
+        let manifest = self.manifest.as_ref()?;
+        select_best_runtime_variant(&manifest.runtime_variants, target_triple, simd_tier)
+    }
+
+    pub fn select_embedded_runtime_resource(&self, target_triple: &str, simd_tier: SimdTier) -> Option<&ResourceEntry> {
+        let variant = self.select_runtime_variant_resource(target_triple, simd_tier)?;
+        self.resources
+            .iter()
+            .find(|resource| resource.path == variant.resource_path)
+    }
+
+    pub fn select_host_embedded_runtime_resource(&self) -> Option<&ResourceEntry> {
+        self.select_embedded_runtime_resource(Target::host().triple_str(), active_simd_tier())
     }
 }
 
@@ -540,6 +560,7 @@ mod tests {
                 lock_toml: None,
                 target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
                 simd_tier: SimdTier::X86_64Avx2,
+                runtime_variants: Vec::new(),
             }),
             resources: Vec::new(),
         };
@@ -559,6 +580,7 @@ mod tests {
                 lock_toml: None,
                 target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
                 simd_tier: SimdTier::X86_64Avx2,
+                runtime_variants: Vec::new(),
             }),
             resources: Vec::new(),
         };
@@ -579,6 +601,7 @@ mod tests {
                 lock_toml: None,
                 target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
                 simd_tier: SimdTier::X86_64Sse2,
+                runtime_variants: Vec::new(),
             }),
             resources: Vec::new(),
         };
@@ -598,6 +621,7 @@ mod tests {
                 lock_toml: None,
                 target_triple: None,
                 simd_tier: SimdTier::Scalar,
+                runtime_variants: Vec::new(),
             }),
             resources: Vec::new(),
         };
@@ -614,7 +638,8 @@ mod tests {
             manifest_toml: "name = \"demo\"".to_string(),
             lock_toml: None,
             target_triple: Some(Target::host().triple_str().to_string()),
-            simd_tier: detect_profile(),
+            simd_tier: active_simd_tier(),
+            runtime_variants: Vec::new(),
         });
 
         let package = reader.load_host_compatible_from_bytes(&bytes).unwrap();
@@ -632,6 +657,7 @@ mod tests {
             lock_toml: None,
             target_triple: Some("definitely-not-the-host-triple".to_string()),
             simd_tier: SimdTier::Scalar,
+            runtime_variants: Vec::new(),
         });
 
         let err = reader.load_host_compatible_from_bytes(&bytes).unwrap_err();
@@ -646,11 +672,57 @@ mod tests {
             lock_toml: None,
             target_triple: Some(Target::host().triple_str().to_string()),
             simd_tier: SimdTier::Scalar,
+            runtime_variants: Vec::new(),
         });
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();
 
         let package = reader.load_host_compatible(file.path()).unwrap();
         assert_eq!(package.variant_metadata().simd_tier, SimdTier::Scalar);
+    }
+
+    #[test]
+    fn test_selects_best_embedded_runtime_variant() {
+        let package = LoadedPackage {
+            trailer: PackageTrailer::new(),
+            settlement_data: Vec::new(),
+            manifest: Some(ManifestSection {
+                manifest_toml: "name = \"demo\"".to_string(),
+                lock_toml: None,
+                target_triple: Some("x86_64-unknown-linux-gnu".to_string()),
+                simd_tier: SimdTier::Scalar,
+                runtime_variants: vec![
+                    RuntimeVariantResource {
+                        target_triple: "x86_64-unknown-linux-gnu".to_string(),
+                        simd_tier: SimdTier::X86_64Sse2,
+                        resource_path: "runtime/libsimple_runtime.x86_64_sse2.so".to_string(),
+                    },
+                    RuntimeVariantResource {
+                        target_triple: "x86_64-unknown-linux-gnu".to_string(),
+                        simd_tier: SimdTier::X86_64Avx2,
+                        resource_path: "runtime/libsimple_runtime.x86_64_avx2.so".to_string(),
+                    },
+                ],
+            }),
+            resources: vec![
+                ResourceEntry {
+                    path: "runtime/libsimple_runtime.x86_64_sse2.so".to_string(),
+                    data: vec![1],
+                    uncompressed_size: 1,
+                    checksum: 1,
+                },
+                ResourceEntry {
+                    path: "runtime/libsimple_runtime.x86_64_avx2.so".to_string(),
+                    data: vec![2],
+                    uncompressed_size: 1,
+                    checksum: 2,
+                },
+            ],
+        };
+
+        let selected = package
+            .select_embedded_runtime_resource("x86_64-unknown-linux-gnu", SimdTier::X86_64Avx512)
+            .unwrap();
+        assert_eq!(selected.path, "runtime/libsimple_runtime.x86_64_avx2.so");
     }
 }

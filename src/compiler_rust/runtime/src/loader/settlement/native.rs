@@ -304,8 +304,9 @@ impl LoadedNativeLib {
             }
             NativeLibHandle::Process(handle) => {
                 let c_name = CString::new(name).ok()?;
-                lookup(*handle, &c_name)
-                    .or_else(|| simple_runtime_abi::lookup_registered_static_runtime_symbol(name).map(|ptr| ptr as usize))
+                lookup(*handle, &c_name).or_else(|| {
+                    simple_runtime_abi::lookup_registered_static_runtime_symbol(name).map(|ptr| ptr as usize)
+                })
             }
             NativeLibHandle::Dynamic(handle) => {
                 let c_name = CString::new(name).ok()?;
