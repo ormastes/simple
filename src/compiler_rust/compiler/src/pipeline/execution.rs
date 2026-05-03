@@ -942,6 +942,12 @@ mod tests {
     };
     use crate::linker::NativeBinaryOptions;
     use simple_common::target::{Target, TargetArch, TargetOS};
+    use std::sync::{Mutex, OnceLock};
+
+    fn runtime_bundle_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn native_single_file_project_hint_only_applies_to_temp_sources() {
@@ -958,6 +964,7 @@ mod tests {
 
     #[test]
     fn single_file_runtime_bundle_prefers_runtime_only_for_leaf_host_source() {
+        let _guard = runtime_bundle_env_lock().lock().unwrap();
         let options = NativeBinaryOptions::new().target(Target::host()).shared(false);
         assert!(single_file_prefers_runtime_only(
             Some(std::path::Path::new("/tmp/demo.spl")),
@@ -967,6 +974,7 @@ mod tests {
 
     #[test]
     fn single_file_runtime_bundle_keeps_native_all_for_compiler_like_sources() {
+        let _guard = runtime_bundle_env_lock().lock().unwrap();
         let options = NativeBinaryOptions::new().target(Target::host()).shared(false);
         assert!(!single_file_prefers_runtime_only(
             Some(std::path::Path::new("/work/src/compiler/80.driver/main.spl")),
@@ -980,6 +988,7 @@ mod tests {
 
     #[test]
     fn single_file_runtime_bundle_removes_native_all_for_leaf_host_source() {
+        let _guard = runtime_bundle_env_lock().lock().unwrap();
         let options = NativeBinaryOptions::new()
             .target(Target::host())
             .shared(false)
@@ -991,6 +1000,7 @@ mod tests {
 
     #[test]
     fn single_file_runtime_bundle_keeps_native_all_for_cross_targets() {
+        let _guard = runtime_bundle_env_lock().lock().unwrap();
         let options = NativeBinaryOptions::new()
             .target(Target::new(TargetArch::Aarch64, TargetOS::Linux))
             .shared(false)
@@ -1001,6 +1011,7 @@ mod tests {
 
     #[test]
     fn single_file_runtime_bundle_keeps_native_all_when_env_requests_all() {
+        let _guard = runtime_bundle_env_lock().lock().unwrap();
         let previous = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").ok();
         std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", "all");
 
@@ -1020,6 +1031,7 @@ mod tests {
 
     #[test]
     fn single_file_runtime_bundle_keeps_native_all_when_env_requests_hosted() {
+        let _guard = runtime_bundle_env_lock().lock().unwrap();
         let previous = std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE").ok();
         std::env::set_var("SIMPLE_NATIVE_RUNTIME_BUNDLE", "hosted");
 

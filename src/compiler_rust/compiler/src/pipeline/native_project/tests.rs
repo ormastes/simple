@@ -20,6 +20,11 @@ fn process_dir_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn runtime_bundle_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
     let _guard = simd_tier_env_lock().lock().unwrap();
     let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
@@ -436,6 +441,7 @@ fn test_discover_files_from_entry_uses_matching_source_root() {
 
 #[test]
 fn test_runtime_bundle_auto_prefers_core_c_runtime_for_non_compiler_entry() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -461,6 +467,7 @@ fn test_runtime_bundle_auto_prefers_core_c_runtime_for_non_compiler_entry() {
 
 #[test]
 fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_entry() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -503,6 +510,7 @@ fn test_find_native_all_library_skips_empty_debug_archive() {
 
 #[test]
 fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
@@ -532,6 +540,7 @@ fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
 
 #[test]
 fn test_runtime_bundle_hosted_allows_native_all_for_non_compiler_entry() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();
@@ -557,6 +566,7 @@ fn test_runtime_bundle_hosted_allows_native_all_for_non_compiler_entry() {
 
 #[test]
 fn test_runtime_bundle_core_c_alias_prefers_runtime_for_non_compiler_entry() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
     let native_all = temp.path().join("libsimple_native_all.a");
@@ -581,6 +591,7 @@ fn test_runtime_bundle_core_c_alias_prefers_runtime_for_non_compiler_entry() {
 
 #[test]
 fn test_runtime_bundle_legacy_all_alias_allows_native_all_for_non_compiler_entry() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let native_all = temp.path().join("libsimple_native_all.a");
     std::fs::write(&native_all, b"all").unwrap();

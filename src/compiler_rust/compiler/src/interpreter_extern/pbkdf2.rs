@@ -1,4 +1,4 @@
-//! Interpreter-side handlers for native PBKDF2-HMAC-SHA-2 helpers.
+//! Interpreter-side handlers for native PBKDF2-HMAC helpers.
 //!
 //! These mirror `signatures.rs`'s `Value::Array(Arc<Vec<Value::Int>>)`
 //! `[u8]` shape so `bin/simple test` can short-circuit the pure-Simple
@@ -7,11 +7,12 @@
 //! test-runner watchdog.
 //!
 //! See `simple-runtime`'s `value::pbkdf2_native` for the underlying
-//! implementation (RustCrypto `pbkdf2 = 0.11` + `hmac` + `sha2`), and
-//! `doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md`
+//! implementation (RustCrypto `pbkdf2 = 0.11` + `hmac` + `sha1` + `sha2`),
+//! and `doc/02_requirements/feature/pbkdf2_native_runtime_helpers_2026-05-01.md`
 //! for the FR.
 //!
 //! # Symbols
+//! - `rt_pbkdf2_hmac_sha1(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
 //! - `rt_pbkdf2_hmac_sha256(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
 //! - `rt_pbkdf2_hmac_sha384(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
 //! - `rt_pbkdf2_hmac_sha512(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
@@ -47,6 +48,16 @@ fn extract_i64(args: &[Value], index: usize) -> i64 {
 
 fn bytes_to_value(bytes: &[u8]) -> Value {
     Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
+}
+
+/// `rt_pbkdf2_hmac_sha1(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
+pub fn rt_pbkdf2_hmac_sha1(args: &[Value]) -> Result<Value, CompileError> {
+    let password = extract_bytes(args, 0);
+    let salt = extract_bytes(args, 1);
+    let iterations = extract_i64(args, 2);
+    let dk_len = extract_i64(args, 3);
+    let out = pbkdf2_native::pbkdf2_hmac_sha1(&password, &salt, iterations, dk_len);
+    Ok(bytes_to_value(&out))
 }
 
 /// `rt_pbkdf2_hmac_sha256(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]`
