@@ -3,6 +3,10 @@
 # Pure Simple implementation using [u8]-typed API for baremetal SimpleOS.
 # Uses HMAC-SHA-256 from os.crypto.sha256 as the PRF.
 #
+# NOTE: sha256_hmac([u8],[u8]) has a known rt_bytes_u8_at bug in interpreter
+# mode where key bytes read as 0. We use sha256_hmac_from_list(list,list)
+# which is the working path (same as std.crypto.pbkdf2).
+#
 # Public API:
 #   pbkdf2_sha256(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u8]
 #     Derives a key of `dk_len` bytes from `password` using `salt` and
@@ -19,7 +23,30 @@
 # KAT: test/unit/os/crypto/pbkdf2_spec.spl
 # ============================================================================
 
-use os.crypto.sha256.{sha256_hmac}
+use os.crypto.sha256.{sha256_hmac_from_list}
+
+# ============================================================================
+# Helpers — [u8] <-> list conversion
+# ============================================================================
+
+fn _u8_to_list(arr: [u8]) -> list:
+    var lst: list = []
+    var i: i64 = 0
+    while i < arr.len():
+        val byte: u8 = arr[i]
+        lst.push(byte.to_i64())
+        i = i + 1
+    lst
+
+fn _list_to_u8(lst: list) -> [u8]:
+    var arr: [u8] = []
+    var i: i64 = 0
+    while i < lst.len():
+        val v: i64 = lst.get(i)
+        var byte: u8 = v.to_u8()
+        arr.push(byte)
+        i = i + 1
+    arr
 
 # ============================================================================
 # PBKDF2-HMAC-SHA-256
@@ -31,50 +58,48 @@ fn pbkdf2_sha256(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u
     val h_len: i64 = 32
     val blocks_needed: i64 = (dk_len + h_len - 1) / h_len
 
+    # Convert password to list once (reused for every HMAC call)
+    val pwd_list: list = _u8_to_list(password)
+
     var result: [u8] = []
     var block_num: i64 = 1
 
     while block_num <= blocks_needed:
-        # Build salt || INT(block_num) — 4-byte big-endian block index
-        var salt_block: [u8] = []
+        # Build salt || INT(block_num) as list
+        var salt_block: list = []
         var si: i64 = 0
         while si < salt.len():
             val sb: u8 = salt[si]
-            salt_block.push(sb)
+            salt_block.push(sb.to_i64())
             si = si + 1
 
-        var b3: u8 = ((block_num >> 24) & 0xFF).to_u8()
-        var b2: u8 = ((block_num >> 16) & 0xFF).to_u8()
-        var b1: u8 = ((block_num >> 8) & 0xFF).to_u8()
-        var b0: u8 = (block_num & 0xFF).to_u8()
-        salt_block.push(b3)
-        salt_block.push(b2)
-        salt_block.push(b1)
-        salt_block.push(b0)
+        salt_block.push((block_num >> 24) & 0xFF)
+        salt_block.push((block_num >> 16) & 0xFF)
+        salt_block.push((block_num >> 8) & 0xFF)
+        salt_block.push(block_num & 0xFF)
 
         # U_1 = HMAC(password, salt || INT(i))
-        var u: [u8] = sha256_hmac(password, salt_block)
+        # sha256_hmac_from_list returns [u8]
+        var u_arr: [u8] = sha256_hmac_from_list(pwd_list, salt_block)
+        var u_list: list = _u8_to_list(u_arr)
 
-        # t = U_1 (copy)
-        var t: [u8] = []
+        # t = U_1 (copy as list for XOR operations)
+        var t: list = []
         var ti: i64 = 0
         while ti < h_len:
-            val tb: u8 = u[ti]
-            t.push(tb)
+            t.push(u_list.get(ti))
             ti = ti + 1
 
         # U_2 .. U_c: t ^= U_j
         var iteration: i64 = 1
         while iteration < iterations:
-            u = sha256_hmac(password, u)
+            u_arr = sha256_hmac_from_list(pwd_list, u_list)
+            u_list = _u8_to_list(u_arr)
 
             # XOR fold: t ^= u
             var xi: i64 = 0
             while xi < h_len:
-                var tv: u8 = t[xi]
-                var uv: u8 = u[xi]
-                var xv: u8 = tv ^ uv
-                t[xi] = xv
+                t[xi] = t.get(xi) ^ u_list.get(xi)
                 xi = xi + 1
 
             iteration = iteration + 1
@@ -82,7 +107,8 @@ fn pbkdf2_sha256(password: [u8], salt: [u8], iterations: i64, dk_len: i64) -> [u
         # Append T_i to result
         var ri: i64 = 0
         while ri < h_len:
-            val rb: u8 = t[ri]
+            val rv: i64 = t.get(ri)
+            var rb: u8 = rv.to_u8()
             result.push(rb)
             ri = ri + 1
 

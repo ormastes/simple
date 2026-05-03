@@ -1,0 +1,294 @@
+use compress.types.{CompressionError}
+use compress.utilities.{append_bytes, append_self_overlap_copy}
+
+val SNAPPY_HASH_LOG: i64 = 12
+val SNAPPY_HASH_SIZE: i64 = 1 << SNAPPY_HASH_LOG
+val SNAPPY_MIN_MATCH: i64 = 4
+val SNAPPY_MAX_OFFSET_1: i64 = 2047
+val SNAPPY_MAX_OFFSET_2: i64 = 65535
+
+fn _snappy_encode_varint(value: i64) -> [u8]:
+    var result: [u8] = []
+    var remaining = value
+    while remaining >= 0x80:
+        var byte: u8 = ((remaining & 0x7F) | 0x80).to_u8()
+        result.push(byte)
+        remaining = remaining >> 7
+    var last: u8 = (remaining & 0x7F).to_u8()
+    result.push(last)
+    result
+
+fn _snappy_decode_varint(data: [u8], pos: i64) -> [i64]:
+    var result: i64 = 0
+    var shift = 0
+    var idx = pos
+    while idx < data.len():
+        val byte = data[idx].to_i64()
+        result = result | ((byte & 0x7F) << shift)
+        idx = idx + 1
+        if (byte & 0x80) == 0:
+            break
+        shift = shift + 7
+        if shift > 35:
+            break
+    [result, idx]
+
+fn _snappy_hash4(data: [u8], pos: i64) -> i64:
+    val b0 = data[pos].to_i64()
+    val b1 = data[pos + 1].to_i64()
+    val b2 = data[pos + 2].to_i64()
+    val b3 = data[pos + 3].to_i64()
+    val load32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    val hash_raw = load32 * 506832829
+    val shifted = if hash_raw < 0: (hash_raw >> 20) & 0xFFF else: (hash_raw >> 20) & 0xFFF
+    shifted
+
+fn _snappy_match_length(data: [u8], left: i64, right: i64) -> i64:
+    var length = 0
+    while right + length < data.len() and data[left + length] == data[right + length]:
+        length = length + 1
+    length
+
+fn _snappy_repeat_i64(value: i64, count: i64) -> [i64]:
+    var result: [i64] = []
+    var idx = 0
+    while idx < count:
+        result.push(value)
+        idx = idx + 1
+    result
+
+fn _snappy_emit_literal(dst: [u8], data: [u8], start: i64, length: i64) -> [u8]:
+    var result = dst
+    val len_minus_1 = length - 1
+    if len_minus_1 < 60:
+        var tag: u8 = (len_minus_1 << 2).to_u8()
+        result.push(tag)
+    elif len_minus_1 < 256:
+        var tag: u8 = (60 << 2).to_u8()
+        result.push(tag)
+        var extra: u8 = len_minus_1.to_u8()
+        result.push(extra)
+    elif len_minus_1 < 65536:
+        var tag: u8 = (61 << 2).to_u8()
+        result.push(tag)
+        var lo: u8 = (len_minus_1 & 0xFF).to_u8()
+        var hi: u8 = ((len_minus_1 >> 8) & 0xFF).to_u8()
+        result.push(lo)
+        result.push(hi)
+    elif len_minus_1 < 16777216:
+        var tag: u8 = (62 << 2).to_u8()
+        result.push(tag)
+        var b0: u8 = (len_minus_1 & 0xFF).to_u8()
+        var b1: u8 = ((len_minus_1 >> 8) & 0xFF).to_u8()
+        var b2: u8 = ((len_minus_1 >> 16) & 0xFF).to_u8()
+        result.push(b0)
+        result.push(b1)
+        result.push(b2)
+    else:
+        var tag: u8 = (63 << 2).to_u8()
+        result.push(tag)
+        var b0: u8 = (len_minus_1 & 0xFF).to_u8()
+        var b1: u8 = ((len_minus_1 >> 8) & 0xFF).to_u8()
+        var b2: u8 = ((len_minus_1 >> 16) & 0xFF).to_u8()
+        var b3: u8 = ((len_minus_1 >> 24) & 0xFF).to_u8()
+        result.push(b0)
+        result.push(b1)
+        result.push(b2)
+        result.push(b3)
+    result = append_bytes(result, data.slice(start, start + length))
+    result
+
+fn _snappy_emit_copy(dst: [u8], offset: i64, length: i64) -> [u8]:
+    var result = dst
+    var remaining = length
+    while remaining > 0:
+        if remaining >= 4 and remaining <= 11 and offset <= SNAPPY_MAX_OFFSET_1:
+            val len_field = remaining - 4
+            var tag: u8 = (((offset >> 8) << 5) | (len_field << 2) | 1).to_u8()
+            result.push(tag)
+            var off_lo: u8 = (offset & 0xFF).to_u8()
+            result.push(off_lo)
+            remaining = 0
+        elif remaining <= 64 and offset <= SNAPPY_MAX_OFFSET_2:
+            val len_field = remaining - 1
+            var tag: u8 = ((len_field << 2) | 2).to_u8()
+            result.push(tag)
+            var off_lo: u8 = (offset & 0xFF).to_u8()
+            var off_hi: u8 = ((offset >> 8) & 0xFF).to_u8()
+            result.push(off_lo)
+            result.push(off_hi)
+            remaining = 0
+        elif remaining <= 64:
+            val len_field = remaining - 1
+            var tag: u8 = ((len_field << 2) | 3).to_u8()
+            result.push(tag)
+            var b0: u8 = (offset & 0xFF).to_u8()
+            var b1: u8 = ((offset >> 8) & 0xFF).to_u8()
+            var b2: u8 = ((offset >> 16) & 0xFF).to_u8()
+            var b3: u8 = ((offset >> 24) & 0xFF).to_u8()
+            result.push(b0)
+            result.push(b1)
+            result.push(b2)
+            result.push(b3)
+            remaining = 0
+        else:
+            val chunk = if offset <= SNAPPY_MAX_OFFSET_2: 64 else: 64
+            val len_field = chunk - 1
+            if offset <= SNAPPY_MAX_OFFSET_2:
+                var tag: u8 = ((len_field << 2) | 2).to_u8()
+                result.push(tag)
+                var off_lo: u8 = (offset & 0xFF).to_u8()
+                var off_hi: u8 = ((offset >> 8) & 0xFF).to_u8()
+                result.push(off_lo)
+                result.push(off_hi)
+            else:
+                var tag: u8 = ((len_field << 2) | 3).to_u8()
+                result.push(tag)
+                var b0: u8 = (offset & 0xFF).to_u8()
+                var b1: u8 = ((offset >> 8) & 0xFF).to_u8()
+                var b2: u8 = ((offset >> 16) & 0xFF).to_u8()
+                var b3: u8 = ((offset >> 24) & 0xFF).to_u8()
+                result.push(b0)
+                result.push(b1)
+                result.push(b2)
+                result.push(b3)
+            remaining = remaining - chunk
+    result
+
+fn snappy_compress(data: [u8]) -> [u8]:
+    var result: [u8] = []
+    result = append_bytes(result, _snappy_encode_varint(data.len()))
+    if data.len() == 0:
+        return result
+    if data.len() < SNAPPY_MIN_MATCH:
+        result = _snappy_emit_literal(result, data, 0, data.len())
+        return result
+    var table = _snappy_repeat_i64(-1, SNAPPY_HASH_SIZE)
+    var pos = 0
+    var literal_start = 0
+    val last_match_start = data.len() - SNAPPY_MIN_MATCH
+    while pos <= last_match_start:
+        val hash = _snappy_hash4(data, pos)
+        val candidate = table[hash]
+        table[hash] = pos
+        if candidate >= 0:
+            val offset = pos - candidate
+            val valid_offset = offset > 0 and offset <= 65535
+            val bytes_match = valid_offset and data[candidate] == data[pos] and data[candidate + 1] == data[pos + 1] and data[candidate + 2] == data[pos + 2] and data[candidate + 3] == data[pos + 3]
+            if bytes_match:
+                if pos > literal_start:
+                    result = _snappy_emit_literal(result, data, literal_start, pos - literal_start)
+                val match_len = _snappy_match_length(data, candidate, pos)
+                result = _snappy_emit_copy(result, offset, match_len)
+                val next_pos = pos + match_len
+                var insert = pos + 1
+                while insert < next_pos and insert <= last_match_start:
+                    val insert_hash = _snappy_hash4(data, insert)
+                    table[insert_hash] = insert
+                    insert = insert + 1
+                pos = next_pos
+                literal_start = pos
+            else:
+                pos = pos + 1
+        else:
+            pos = pos + 1
+    if literal_start < data.len():
+        result = _snappy_emit_literal(result, data, literal_start, data.len() - literal_start)
+    result
+
+fn try_snappy_decompress(data: [u8]) -> Result<[u8], CompressionError>:
+    if data.len() == 0:
+        return Err(CompressionError.TruncatedInput("snappy empty input"))
+    val varint_result = _snappy_decode_varint(data, 0)
+    val uncompressed_len = varint_result[0]
+    var pos = varint_result[1]
+    if uncompressed_len == 0:
+        var empty: [u8] = []
+        return Ok(empty)
+    if uncompressed_len > 134217728:
+        return Err(CompressionError.SizeLimitExceeded(134217728))
+    var dst: [u8] = []
+    while pos < data.len():
+        val tag = data[pos].to_i64()
+        val element_type = tag & 0x03
+        if element_type == 0:
+            val len_field = (tag >> 2) & 0x3F
+            var literal_len: i64 = 0
+            if len_field < 60:
+                literal_len = len_field + 1
+                pos = pos + 1
+            elif len_field == 60:
+                pos = pos + 1
+                if pos >= data.len():
+                    return Err(CompressionError.TruncatedInput("snappy literal length"))
+                literal_len = data[pos].to_i64() + 1
+                pos = pos + 1
+            elif len_field == 61:
+                pos = pos + 1
+                if pos + 2 > data.len():
+                    return Err(CompressionError.TruncatedInput("snappy literal length"))
+                literal_len = (data[pos].to_i64() | (data[pos + 1].to_i64() << 8)) + 1
+                pos = pos + 2
+            elif len_field == 62:
+                pos = pos + 1
+                if pos + 3 > data.len():
+                    return Err(CompressionError.TruncatedInput("snappy literal length"))
+                literal_len = (data[pos].to_i64() | (data[pos + 1].to_i64() << 8) | (data[pos + 2].to_i64() << 16)) + 1
+                pos = pos + 3
+            else:
+                pos = pos + 1
+                if pos + 4 > data.len():
+                    return Err(CompressionError.TruncatedInput("snappy literal length"))
+                literal_len = (data[pos].to_i64() | (data[pos + 1].to_i64() << 8) | (data[pos + 2].to_i64() << 16) | (data[pos + 3].to_i64() << 24)) + 1
+                pos = pos + 4
+            if pos + literal_len > data.len():
+                return Err(CompressionError.TruncatedInput("snappy literal body"))
+            dst = append_bytes(dst, data.slice(pos, pos + literal_len))
+            pos = pos + literal_len
+        elif element_type == 1:
+            val copy_len = ((tag >> 2) & 0x07) + 4
+            val offset_hi = (tag >> 5) & 0x07
+            pos = pos + 1
+            if pos >= data.len():
+                return Err(CompressionError.TruncatedInput("snappy copy-1 offset"))
+            val offset = (offset_hi << 8) | data[pos].to_i64()
+            pos = pos + 1
+            if offset == 0 or offset > dst.len():
+                return Err(CompressionError.CorruptStream("snappy invalid copy-1 offset"))
+            val copy_res = append_self_overlap_copy(dst, offset, copy_len)
+            if copy_res.is_err():
+                return Err(copy_res.unwrap_err())
+            dst = copy_res.unwrap()
+        elif element_type == 2:
+            val copy_len = ((tag >> 2) & 0x3F) + 1
+            pos = pos + 1
+            if pos + 2 > data.len():
+                return Err(CompressionError.TruncatedInput("snappy copy-2 offset"))
+            val offset = data[pos].to_i64() | (data[pos + 1].to_i64() << 8)
+            pos = pos + 2
+            if offset == 0 or offset > dst.len():
+                return Err(CompressionError.CorruptStream("snappy invalid copy-2 offset"))
+            val copy_res = append_self_overlap_copy(dst, offset, copy_len)
+            if copy_res.is_err():
+                return Err(copy_res.unwrap_err())
+            dst = copy_res.unwrap()
+        else:
+            val copy_len = ((tag >> 2) & 0x3F) + 1
+            pos = pos + 1
+            if pos + 4 > data.len():
+                return Err(CompressionError.TruncatedInput("snappy copy-4 offset"))
+            val offset = data[pos].to_i64() | (data[pos + 1].to_i64() << 8) | (data[pos + 2].to_i64() << 16) | (data[pos + 3].to_i64() << 24)
+            pos = pos + 4
+            if offset == 0 or offset > dst.len():
+                return Err(CompressionError.CorruptStream("snappy invalid copy-4 offset"))
+            val copy_res = append_self_overlap_copy(dst, offset, copy_len)
+            if copy_res.is_err():
+                return Err(copy_res.unwrap_err())
+            dst = copy_res.unwrap()
+    if dst.len() != uncompressed_len:
+        return Err(CompressionError.CorruptStream("snappy decoded length mismatch"))
+    Ok(dst)
+
+fn snappy_decompress(data: [u8]) -> [u8]:
+    val result = try_snappy_decompress(data)
+    result.unwrap()
