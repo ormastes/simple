@@ -1,0 +1,195 @@
+# VEX 3-operand Crypto Emit — Golden Byte Tests
+#
+# Feature ID: #COMPILER-BACKEND-ENCODE-X86-VEX-CRYPTO
+# Category:   Compiler | Backend | x86_64 VEX Byte Emitter
+# Status:     Schema contract — byte golden tests for VAESENC, VAESENCLAST,
+#             VAESDEC, VAESDECLAST, VPCLMULQDQ (VEX.128.66.0F38 / 0F3A forms)
+#
+# ALL byte goldens verified against Intel SDM Vol 2 opcode tables and the
+# VEX encoding formulas in encode_x86_64_crypto.spl:
+#   byte1_0f38(dst,src2) = 226 - (dst/8)*128 - (src2/8)*32
+#   byte1_0f3a(dst,src2) = 227 - (dst/8)*128 - (src2/8)*32
+#   byte2(src1)          = (15-src1)*8 + 1
+#   modrm(dst,src2)      = 192 + (dst%8)*8 + (src2%8)
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  The assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+
+use std.spipe.*
+use compiler.backend.native.encode_x86_64_crypto.{
+    emit_vaesenc,
+    emit_vaesenclast,
+    emit_vaesdec,
+    emit_vaesdeclast,
+    emit_vpclmulqdq,
+    emit_aesenc
+}
+
+fn _list_hex(bytes: [i64]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var s: text = ""
+    var i: u64 = 0
+    while i < bytes.len().to_u64():
+        val b = bytes[i.to_i64()]
+        s = s + hex_chars.char_at(((b / 16) % 16).to_u64())
+        s = s + hex_chars.char_at((b % 16).to_u64())
+        i = i + 1
+    s
+
+# ============================================================================
+# VAESENC — VEX.128.66.0F38 DC /r
+# ============================================================================
+
+describe "emit_vaesenc golden bytes":
+
+    it "vaesenc(0,0,0) — all-zero regs, simplest case":
+        # b1=226=0xE2, b2=121=0x79, modrm=192=0xC0
+        val bytes = emit_vaesenc(0, 0, 0)
+        expect _list_hex(bytes) == "c4e279dcc0"
+
+    it "vaesenc(0,1,2) — typical non-zero regs":
+        # b1=226=0xE2, b2=113=0x71, modrm=194=0xC2
+        val bytes = emit_vaesenc(0, 1, 2)
+        expect _list_hex(bytes) == "c4e271dcc2"
+
+    it "vaesenc(1,2,3) — matches docstring example":
+        # b1=226=0xE2, b2=105=0x69, modrm=203=0xCB
+        val bytes = emit_vaesenc(1, 2, 3)
+        expect _list_hex(bytes) == "c4e269dccb"
+
+    it "vaesenc(8,0,0) — dst>=8 clears ~R bit in byte1":
+        # b1=226-128=98=0x62, b2=0x79, modrm=0xC0
+        val bytes = emit_vaesenc(8, 0, 0)
+        expect _list_hex(bytes) == "c46279dcc0"
+
+    it "vaesenc(0,0,9) — src2>=8 clears ~B bit in byte1, modrm rm=1":
+        # b1=226-32=194=0xC2, b2=0x79, modrm=192+1=193=0xC1
+        val bytes = emit_vaesenc(0, 0, 9)
+        expect _list_hex(bytes) == "c4c279dcc1"
+
+    it "output length is 5 bytes (C4 + byte1 + byte2 + opcode + ModRM)":
+        val bytes = emit_vaesenc(0, 0, 0)
+        expect bytes.len() == 5
+
+    it "byte 0 is 0xC4 (VEX 3-byte prefix marker)":
+        val bytes = emit_vaesenc(0, 1, 2)
+        expect bytes[0] == 0xC4
+
+    it "opcode byte is 0xDC":
+        val bytes = emit_vaesenc(0, 1, 2)
+        expect bytes[3] == 0xDC
+
+# ============================================================================
+# VAESENCLAST — VEX.128.66.0F38 DD /r
+# ============================================================================
+
+describe "emit_vaesenclast golden bytes":
+
+    it "vaesenclast(0,1,2) — same VEX prefix as vaesenc, opcode DD":
+        # b1=0xE2, b2=0x71, modrm=0xC2, opcode=0xDD
+        val bytes = emit_vaesenclast(0, 1, 2)
+        expect _list_hex(bytes) == "c4e271ddc2"
+
+    it "opcode byte is 0xDD":
+        val bytes = emit_vaesenclast(0, 1, 2)
+        expect bytes[3] == 0xDD
+
+    it "output length is 5 bytes":
+        val bytes = emit_vaesenclast(0, 0, 0)
+        expect bytes.len() == 5
+
+# ============================================================================
+# VAESDEC — VEX.128.66.0F38 DE /r
+# ============================================================================
+
+describe "emit_vaesdec golden bytes":
+
+    it "vaesdec(0,1,2) — same VEX prefix, opcode DE":
+        # b1=0xE2, b2=0x71, modrm=0xC2, opcode=0xDE
+        val bytes = emit_vaesdec(0, 1, 2)
+        expect _list_hex(bytes) == "c4e271dec2"
+
+    it "opcode byte is 0xDE":
+        val bytes = emit_vaesdec(0, 1, 2)
+        expect bytes[3] == 0xDE
+
+    it "output length is 5 bytes":
+        val bytes = emit_vaesdec(0, 0, 0)
+        expect bytes.len() == 5
+
+# ============================================================================
+# VAESDECLAST — VEX.128.66.0F38 DF /r
+# ============================================================================
+
+describe "emit_vaesdeclast golden bytes":
+
+    it "vaesdeclast(0,1,2) — same VEX prefix, opcode DF":
+        # b1=0xE2, b2=0x71, modrm=0xC2, opcode=0xDF
+        val bytes = emit_vaesdeclast(0, 1, 2)
+        expect _list_hex(bytes) == "c4e271dfc2"
+
+    it "opcode byte is 0xDF":
+        val bytes = emit_vaesdeclast(0, 1, 2)
+        expect bytes[3] == 0xDF
+
+    it "output length is 5 bytes":
+        val bytes = emit_vaesdeclast(0, 0, 0)
+        expect bytes.len() == 5
+
+# ============================================================================
+# VPCLMULQDQ — VEX.128.66.0F3A 44 /r ib
+# ============================================================================
+
+describe "emit_vpclmulqdq golden bytes":
+
+    it "vpclmulqdq(0,1,2,0x00) — LowxLow":
+        # b1_0f3a(0,2)=227=0xE3, b2(1)=113=0x71, modrm=194=0xC2, imm8=0x00
+        val bytes = emit_vpclmulqdq(0, 1, 2, 0x00)
+        expect _list_hex(bytes) == "c4e37144c200"
+
+    it "vpclmulqdq(0,1,2,0x11) — HighxHigh":
+        # same prefix, imm8=0x11
+        val bytes = emit_vpclmulqdq(0, 1, 2, 0x11)
+        expect _list_hex(bytes) == "c4e37144c211"
+
+    it "output length is 6 bytes (C4 + byte1 + byte2 + opcode + ModRM + imm8)":
+        val bytes = emit_vpclmulqdq(0, 1, 2, 0x00)
+        expect bytes.len() == 6
+
+    it "byte 0 is 0xC4 (VEX 3-byte prefix)":
+        val bytes = emit_vpclmulqdq(0, 1, 2, 0x00)
+        expect bytes[0] == 0xC4
+
+    it "opcode byte is 0x44":
+        val bytes = emit_vpclmulqdq(0, 1, 2, 0x00)
+        expect bytes[3] == 0x44
+
+    it "imm8 is the last byte":
+        val bytes = emit_vpclmulqdq(0, 1, 2, 0x11)
+        expect bytes[5] == 0x11
+
+    it "byte1 uses 0F3A map (mmmmm=3) — differs from AES byte1 by 1":
+        # AES vaesenc(0,1,2): byte1=0xE2; VPCLMULQDQ(0,1,2,...): byte1=0xE3
+        val aes_bytes = emit_vaesenc(0, 1, 2)
+        val pclmul_bytes = emit_vpclmulqdq(0, 1, 2, 0x00)
+        expect pclmul_bytes[1] == aes_bytes[1] + 1
+
+# ============================================================================
+# VEX vs legacy encoding distinguisher
+# ============================================================================
+
+describe "VEX vs legacy AES encoding":
+
+    it "VEX form (emit_vaesenc) starts with 0xC4, legacy (emit_aesenc) starts with 0x66":
+        val vex_bytes = emit_vaesenc(0, 0, 0)
+        val leg_bytes = emit_aesenc(0, 0)
+        expect vex_bytes[0] == 0xC4
+        expect leg_bytes[0] == 0x66
+
+    it "VEX byte1 is 0xE2 (map+extension); legacy byte1 is 0x0F (escape)":
+        val vex_bytes = emit_vaesenc(0, 0, 0)
+        val leg_bytes = emit_aesenc(0, 0)
+        expect vex_bytes[1] == 0xE2
+        expect leg_bytes[1] == 0x0F
