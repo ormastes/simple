@@ -222,6 +222,11 @@ impl NativeProjectBuilder {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn quote_linker_response_path(path: &Path) -> String {
         let raw = path.to_string_lossy();
+        debug_assert!(
+            !raw.contains(['\n', '\r']),
+            "response file paths must not contain newlines: {}",
+            path.display()
+        );
         let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
         format!("\"{escaped}\"")
     }
@@ -229,11 +234,15 @@ impl NativeProjectBuilder {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn write_linker_object_response_file(temp_dir: &Path, object_paths: &[PathBuf]) -> Result<PathBuf, String> {
         let rsp_path = temp_dir.join("spl_objects.rsp");
-        let contents = object_paths
-            .iter()
-            .map(|obj| Self::quote_linker_response_path(obj))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut quoted_paths = Vec::with_capacity(object_paths.len());
+        for obj in object_paths {
+            let raw = obj.to_string_lossy();
+            if raw.contains(['\n', '\r']) {
+                return Err(format!("object path contains unsupported newline: {}", obj.display()));
+            }
+            quoted_paths.push(Self::quote_linker_response_path(obj));
+        }
+        let contents = quoted_paths.join("\n");
         std::fs::write(&rsp_path, format!("{contents}\n")).map_err(|e| format!("write object response file: {e}"))?;
         Ok(rsp_path)
     }
@@ -563,92 +572,87 @@ int main(int argc, char** argv) {
             }
             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
             {
-            let archive_path = temp_dir.join("libspl_objects.a");
-            let ar_tool = find_archive_tool();
-            let is_msvc_lib = ar_tool == "lib";
+                let archive_path = temp_dir.join("libspl_objects.a");
+                let ar_tool = find_archive_tool();
+                let is_msvc_lib = ar_tool == "lib";
 
-            const BATCH_SIZE: usize = 200;
-            let mut ar_ok = true;
-            for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
-                let status = if is_msvc_lib {
-                    let mut lib_cmd = std::process::Command::new(&ar_tool);
-                    lib_cmd.arg(format!("/OUT:{}", archive_path.display()));
-                    if i > 0 {
-                        lib_cmd.arg(&archive_path);
+                const BATCH_SIZE: usize = 200;
+                let mut ar_ok = true;
+                for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                    let status = if is_msvc_lib {
+                        let mut lib_cmd = std::process::Command::new(&ar_tool);
+                        lib_cmd.arg(format!("/OUT:{}", archive_path.display()));
+                        if i > 0 {
+                            lib_cmd.arg(&archive_path);
+                        }
+                        lib_cmd
+                            .args(chunk)
+                            .status()
+                            .map_err(|e| format!("lib batch {i}: {e}"))?
+                    } else {
+                        let flag = if i == 0 { "rcs" } else { "rs" };
+                        std::process::Command::new(&ar_tool)
+                            .arg(flag)
+                            .arg(&archive_path)
+                            .args(chunk)
+                            .status()
+                            .map_err(|e| format!("ar batch {i}: {e}"))?
+                    };
+                    if !status.success() {
+                        ar_ok = false;
+                        break;
                     }
-                    lib_cmd
-                        .args(chunk)
-                        .status()
-                        .map_err(|e| format!("lib batch {i}: {e}"))?
-                } else {
-                    let flag = if i == 0 { "rcs" } else { "rs" };
-                    std::process::Command::new(&ar_tool)
-                        .arg(flag)
-                        .arg(&archive_path)
-                        .args(chunk)
-                        .status()
-                        .map_err(|e| format!("ar batch {i}: {e}"))?
-                };
-                if !status.success() {
-                    ar_ok = false;
-                    break;
                 }
-            }
-            if !ar_ok {
-                #[cfg(target_os = "macos")]
-                {
-                    let mut sub_archives = Vec::new();
-                    for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
-                        let sub = temp_dir.join(format!("_batch_{}.a", i));
+
+                if !ar_ok {
+                    #[cfg(target_os = "macos")]
+                    {
+                        let mut sub_archives = Vec::new();
+                        for (i, chunk) in object_paths.chunks(BATCH_SIZE).enumerate() {
+                            let sub = temp_dir.join(format!("_batch_{}.a", i));
+                            let s = std::process::Command::new("libtool")
+                                .arg("-static")
+                                .arg("-o")
+                                .arg(&sub)
+                                .args(chunk)
+                                .status()
+                                .map_err(|e| format!("libtool batch {i}: {e}"))?;
+                            if !s.success() {
+                                return Err(format!("libtool failed on batch {i}"));
+                            }
+                            sub_archives.push(sub);
+                        }
                         let s = std::process::Command::new("libtool")
                             .arg("-static")
                             .arg("-o")
-                            .arg(&sub)
-                            .args(chunk)
+                            .arg(&archive_path)
+                            .args(&sub_archives)
                             .status()
-                            .map_err(|e| format!("libtool batch {i}: {e}"))?;
+                            .map_err(|e| format!("libtool merge: {e}"))?;
                         if !s.success() {
-                            return Err(format!("libtool failed on batch {i}"));
+                            return Err("libtool merge failed".to_string());
                         }
-                        sub_archives.push(sub);
                     }
-                    let s = std::process::Command::new("libtool")
-                        .arg("-static")
-                        .arg("-o")
-                        .arg(&archive_path)
-                        .args(&sub_archives)
-                        .status()
-                        .map_err(|e| format!("libtool merge: {e}"))?;
-                    if !s.success() {
-                        return Err("libtool merge failed".to_string());
+                    #[cfg(not(target_os = "macos"))]
+                    return Err("ar failed to create archive".to_string());
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    cmd.arg("-Wl,-force_load").arg(&archive_path);
+                    cmd.arg("-Wl,-no_deduplicate");
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    if is_clang_cl {
+                        cmd.arg(&archive_path);
+                    } else if is_msvc {
+                        cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
+                    } else {
+                        cmd.arg("-Wl,--whole-archive")
+                            .arg(&archive_path)
+                            .arg("-Wl,--no-whole-archive");
                     }
                 }
-                #[cfg(not(target_os = "macos"))]
-                return Err("ar failed to create archive".to_string());
-            }
-            #[cfg(target_os = "macos")]
-            {
-                cmd.arg("-Wl,-force_load").arg(&archive_path);
-                cmd.arg("-Wl,-no_deduplicate");
-            }
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            {
-                cmd.arg("-Wl,--whole-archive")
-                    .arg(&archive_path)
-                    .arg("-Wl,--no-whole-archive");
-            }
-            #[cfg(target_os = "windows")]
-            {
-                if is_clang_cl {
-                    cmd.arg(&archive_path);
-                } else if is_msvc {
-                    cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
-                } else {
-                    cmd.arg("-Wl,--whole-archive")
-                        .arg(&archive_path)
-                        .arg("-Wl,--no-whole-archive");
-                }
-            }
             }
         } else {
             for obj in object_paths {
@@ -1306,5 +1310,40 @@ int main(int argc, char** argv) {
             let stderr = String::from_utf8_lossy(&output_result.stderr);
             Err(format!("link failed: {}", stderr))
         }
+    }
+}
+
+#[cfg(test)]
+mod linker_tests {
+    use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn write_linker_object_response_file_quotes_each_object_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_paths = vec![
+            temp.path().join("plain.o"),
+            temp.path().join("with space.o"),
+            temp.path().join("quote\"slash\\name.o"),
+        ];
+
+        let rsp_path = NativeProjectBuilder::write_linker_object_response_file(temp.path(), &object_paths).unwrap();
+        let contents = std::fs::read_to_string(rsp_path).unwrap();
+
+        assert_eq!(contents.lines().count(), object_paths.len());
+        assert!(contents.lines().all(|line| line.starts_with('"') && line.ends_with('"')));
+        assert!(contents.contains("\"with space.o\""));
+        assert!(contents.contains("quote\\\"slash\\\\name.o"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn write_linker_object_response_file_rejects_newlines() {
+        let temp = tempfile::tempdir().unwrap();
+        let object_paths = vec![PathBuf::from("bad\nname.o")];
+
+        let err = NativeProjectBuilder::write_linker_object_response_file(temp.path(), &object_paths).unwrap_err();
+
+        assert!(err.contains("unsupported newline"));
     }
 }
