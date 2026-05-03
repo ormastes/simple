@@ -32,7 +32,28 @@
 
 mod std.common.encoding.yaml
 
-use std.common.yaml.*
+use std.common.yaml.{yaml_parse_flow_sequence, yaml_parse_flow_mapping,
+    yaml_parse_block, yaml_parse_scalar,
+    yaml_get_scalar_content, yaml_get_sequence_items, yaml_get_mapping_pairs,
+    yaml_null, yaml_needs_quotes}
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _yaml_strip_comment_lines(content: text) -> text:
+    """Strip full-line comments (lines whose first non-space char is #)."""
+    var lines = content.split("\n")
+    var out: [text] = []
+    var i = 0
+    while i < lines.length():
+        var line = lines.get(i)
+        var trimmed = line.trim()
+        var is_comment = trimmed.starts_with("#")
+        if not is_comment:
+            out.push(line)
+        i = i + 1
+    out.join("\n")
 
 # ============================================================================
 # Public API
@@ -40,8 +61,19 @@ use std.common.yaml.*
 
 fn yaml_parse(content: text) -> (text, any):
     """Parse YAML content into a node. Returns a (type, value) tuple where
-    type is 'scalar', 'sequence', or 'mapping'."""
-    yaml_parse_block(content)
+    type is 'scalar', 'sequence', or 'mapping'.
+    Handles flow sequences [..], flow mappings {..}, block style, and comments."""
+    var stripped = _yaml_strip_comment_lines(content)
+    var trimmed = stripped.trim()
+    var result = yaml_null()
+    if trimmed.starts_with("["):
+        result = yaml_parse_flow_sequence(trimmed)
+    elif trimmed.starts_with("{"):
+        result = yaml_parse_flow_mapping(trimmed)
+    elif trimmed.length() > 0:
+        # Use block parser for all non-flow content (handles both single and multi-line)
+        result = yaml_parse_block(trimmed)
+    result
 
 fn yaml_parse_mapping(content: text) -> list:
     """Parse YAML content and return the mapping as a list of (key, value) pairs.
