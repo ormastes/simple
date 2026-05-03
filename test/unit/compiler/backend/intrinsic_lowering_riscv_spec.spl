@@ -1,0 +1,236 @@
+# test/unit/compiler/backend/intrinsic_lowering_riscv_spec.spl
+#
+# Tests for RV64 Zvk intrinsic lowering.
+# Covers: name->idiom mapping, full-caps bytes, no-cap, unknown, bad-arity.
+
+use std.spec
+use compiler.backend.feature_caps.{TargetIdiom, Rv64Caps}
+use compiler.backend.lowering.intrinsic_lowering_riscv.{
+    intrinsic_to_target_idiom_riscv,
+    lower_cipher_intrinsic_riscv,
+    LoweringResult
+}
+
+fn full_caps() -> Rv64Caps:
+    Rv64Caps(
+        has_zvkned: true,
+        has_zvknh: true,
+        has_zvkg: true,
+        has_v: true,
+        vlen_bits: 128
+    )
+
+fn aes_only_caps() -> Rv64Caps:
+    Rv64Caps(
+        has_zvkned: true,
+        has_zvknh: false,
+        has_zvkg: false,
+        has_v: true,
+        vlen_bits: 128
+    )
+
+fn bare_caps() -> Rv64Caps:
+    Rv64Caps(
+        has_zvkned: false,
+        has_zvknh: false,
+        has_zvkg: false,
+        has_v: false,
+        vlen_bits: 128
+    )
+
+describe "intrinsic_lowering_riscv — name to TargetIdiom":
+    it "crypto_aes_round maps to AesEnc":
+        var result = intrinsic_to_target_idiom_riscv("crypto_aes_round")
+        match result:
+            case Some(idiom):
+                expect(idiom).to_equal(TargetIdiom.AesEnc)
+            case _:
+                expect(0).to_equal(1)
+
+    it "crypto_aes_round_last maps to AesEncLast":
+        var result = intrinsic_to_target_idiom_riscv("crypto_aes_round_last")
+        match result:
+            case Some(idiom):
+                expect(idiom).to_equal(TargetIdiom.AesEncLast)
+            case _:
+                expect(0).to_equal(1)
+
+    it "crypto_aes_inv_round maps to AesDec":
+        var result = intrinsic_to_target_idiom_riscv("crypto_aes_inv_round")
+        match result:
+            case Some(idiom):
+                expect(idiom).to_equal(TargetIdiom.AesDec)
+            case _:
+                expect(0).to_equal(1)
+
+    it "crypto_aes_inv_round_last maps to AesDecLast":
+        var result = intrinsic_to_target_idiom_riscv("crypto_aes_inv_round_last")
+        match result:
+            case Some(idiom):
+                expect(idiom).to_equal(TargetIdiom.AesDecLast)
+            case _:
+                expect(0).to_equal(1)
+
+    it "crypto_sha256_rnds2 maps to Sha256Rounds2":
+        var result = intrinsic_to_target_idiom_riscv("crypto_sha256_rnds2")
+        match result:
+            case Some(idiom):
+                expect(idiom).to_equal(TargetIdiom.Sha256Rounds2)
+            case _:
+                expect(0).to_equal(1)
+
+    it "clmul_lo maps to ClmulLo":
+        var result = intrinsic_to_target_idiom_riscv("clmul_lo")
+        match result:
+            case Some(idiom):
+                expect(idiom).to_equal(TargetIdiom.ClmulLo)
+            case _:
+                expect(0).to_equal(1)
+
+    it "clmul_hi maps to ClmulHi":
+        var result = intrinsic_to_target_idiom_riscv("clmul_hi")
+        match result:
+            case Some(idiom):
+                expect(idiom).to_equal(TargetIdiom.ClmulHi)
+            case _:
+                expect(0).to_equal(1)
+
+    it "unknown name returns nil":
+        var result = intrinsic_to_target_idiom_riscv("not_a_real_intrinsic")
+        match result:
+            case Some(_):
+                expect(0).to_equal(1)
+            case _:
+                expect(1).to_equal(1)
+
+describe "intrinsic_lowering_riscv — full caps byte results":
+    it "crypto_aes_round lowered with 2 args":
+        # vaesem.vv v1,v2 → [0xD7,0x20,0x20,0xA6]
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("crypto_aes_round", args, full_caps())
+        expect(r.lowered).to_equal(true)
+        expect(r.bytes.length).to_equal(4)
+        expect(r.bytes[0]).to_equal(0xD7)
+        expect(r.bytes[3]).to_equal(0xA6)
+
+    it "crypto_aes_round_last → vaesef.vv bytes":
+        # vaesef.vv v1,v2 → [0xD7,0x20,0x20,0xA2]
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("crypto_aes_round_last", args, full_caps())
+        expect(r.lowered).to_equal(true)
+        expect(r.bytes.length).to_equal(4)
+        expect(r.bytes[3]).to_equal(0xA2)
+
+    it "crypto_aes_inv_round → vaesdm.vv bytes":
+        # vaesdm.vv v1,v2 → [0xD7,0x20,0x20,0xAE]
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("crypto_aes_inv_round", args, full_caps())
+        expect(r.lowered).to_equal(true)
+        expect(r.bytes.length).to_equal(4)
+        expect(r.bytes[3]).to_equal(0xAE)
+
+    it "crypto_aes_inv_round_last → vaesdf.vv bytes":
+        # vaesdf.vv v1,v2 → [0xD7,0x20,0x20,0xAA]
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("crypto_aes_inv_round_last", args, full_caps())
+        expect(r.lowered).to_equal(true)
+        expect(r.bytes.length).to_equal(4)
+        expect(r.bytes[3]).to_equal(0xAA)
+
+    it "crypto_sha256_rnds2 → vsha2cl.vv + vsha2ch.vv (8 bytes)":
+        # vsha2cl.vv v1,v2,v3 + vsha2ch.vv v1,v2,v3
+        var args: [i64] = [1, 2, 3]
+        var r = lower_cipher_intrinsic_riscv("crypto_sha256_rnds2", args, full_caps())
+        expect(r.lowered).to_equal(true)
+        expect(r.bytes.length).to_equal(8)
+        # First 4 bytes: vsha2cl.vv → byte[3]=0xBE
+        expect(r.bytes[0]).to_equal(0xD7)
+        expect(r.bytes[3]).to_equal(0xBE)
+        # Next 4 bytes: vsha2ch.vv → byte[3]=0xBA
+        expect(r.bytes[4]).to_equal(0xD7)
+        expect(r.bytes[7]).to_equal(0xBA)
+
+    it "clmul_lo → vghsh.vv bytes":
+        # vghsh.vv v1,v2,v3 → [0xD7,0xA0,0x21,0xB2]
+        var args: [i64] = [1, 2, 3]
+        var r = lower_cipher_intrinsic_riscv("clmul_lo", args, full_caps())
+        expect(r.lowered).to_equal(true)
+        expect(r.bytes.length).to_equal(4)
+        expect(r.bytes[3]).to_equal(0xB2)
+
+    it "clmul_hi → vgmul.vv bytes":
+        # vgmul.vv v1,v2 → [0xD7,0x20,0x20,0xA6]
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("clmul_hi", args, full_caps())
+        expect(r.lowered).to_equal(true)
+        expect(r.bytes.length).to_equal(4)
+        expect(r.bytes[3]).to_equal(0xA6)
+
+describe "intrinsic_lowering_riscv — no-cap cases":
+    it "crypto_aes_round with bare caps → no-cap":
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("crypto_aes_round", args, bare_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("no-cap")
+
+    it "crypto_sha256_rnds2 with aes_only caps → no-cap":
+        var args: [i64] = [1, 2, 3]
+        var r = lower_cipher_intrinsic_riscv("crypto_sha256_rnds2", args, aes_only_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("no-cap")
+
+    it "clmul_lo with aes_only caps → no-cap":
+        var args: [i64] = [1, 2, 3]
+        var r = lower_cipher_intrinsic_riscv("clmul_lo", args, aes_only_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("no-cap")
+
+    it "clmul_hi with bare caps → no-cap":
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("clmul_hi", args, bare_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("no-cap")
+
+describe "intrinsic_lowering_riscv — unknown intrinsic":
+    it "unknown name returns reason=unknown":
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("crypto_does_not_exist", args, full_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("unknown")
+
+    it "empty name returns reason=unknown":
+        var args: [i64] = []
+        var r = lower_cipher_intrinsic_riscv("", args, full_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("unknown")
+
+describe "intrinsic_lowering_riscv — bad arity":
+    it "crypto_aes_round with 0 args → bad-arity":
+        var args: [i64] = []
+        var r = lower_cipher_intrinsic_riscv("crypto_aes_round", args, full_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("bad-arity")
+
+    it "crypto_aes_round with 3 args → bad-arity":
+        var args: [i64] = [1, 2, 3]
+        var r = lower_cipher_intrinsic_riscv("crypto_aes_round", args, full_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("bad-arity")
+
+    it "crypto_sha256_rnds2 with 2 args → bad-arity":
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("crypto_sha256_rnds2", args, full_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("bad-arity")
+
+    it "clmul_lo with 2 args → bad-arity":
+        var args: [i64] = [1, 2]
+        var r = lower_cipher_intrinsic_riscv("clmul_lo", args, full_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("bad-arity")
+
+    it "clmul_hi with 3 args → bad-arity":
+        var args: [i64] = [1, 2, 3]
+        var r = lower_cipher_intrinsic_riscv("clmul_hi", args, full_caps())
+        expect(r.lowered).to_equal(false)
+        expect(r.reason).to_equal("bad-arity")

@@ -1,0 +1,434 @@
+# Target Capability Interface for Cipher and SIMD Idioms
+#
+# Defines TargetIdiom (the set of recognised cipher / SIMD operations) and the
+# TargetCaps trait (legality + cost query surface). Backend lowering at
+# 70.backend and the MIR pattern-idiom pass at 60.mir_opt both consume this
+# interface without importing backend internals.
+#
+# Concrete impls (X86Caps, Aarch64Caps, Rv64Caps) are derived from a target-
+# triple text string via the *_caps_from_target helpers.
+#
+# To add a new idiom:
+#   1. Add a variant to TargetIdiom.
+#   2. Extend supports/cost in each concrete impl.
+#   3. Add a lowering rule under 70.backend/lowering/.
+
+# ============================================================================
+# TargetIdiom — target-independent cipher / SIMD operation tags
+# ============================================================================
+
+"""Set of recognised cipher and SIMD idioms used to query TargetCaps."""
+enum TargetIdiom:
+    # AES (Advanced Encryption Standard)
+    AesEnc
+    AesEncLast
+    AesDec
+    AesDecLast
+    AesImc
+    AesKeygenAssist
+    # SHA-256
+    Sha256Rounds2
+    Sha256Msg1
+    Sha256Msg2
+    # CRC32 (SSE4.2 / AArch64 CRC32)
+    Crc32U8
+    Crc32U32
+    Crc32U64
+    # Carry-less multiply (PCLMULQDQ / PMULL)
+    ClmulLo
+    ClmulHi
+    # SIMD shapes
+    SimdI32x4
+    SimdF32x4
+    SimdI32x8
+    SimdF32x8
+
+# ============================================================================
+# TargetCaps trait
+# ============================================================================
+
+"""Queries whether a target supports a given cipher/SIMD idiom.
+
+Implementations are derived from the target triple; backend lowering and the
+MIR pattern-idiom pass consume this trait without importing backend internals.
+"""
+trait TargetCaps:
+    """True when the idiom has a native hardware encoding on this target."""
+    fn supports(idiom: TargetIdiom) -> bool
+
+    """Latency-style cost hint for the idiom; lower is better.
+
+    Returns -1 when the idiom is unsupported (supports returns false).
+    Values are placeholder micro-arch estimates — see TODO below.
+    """
+    fn cost(idiom: TargetIdiom) -> i64
+
+    """Preferred vector register width in bits (128 / 256 / 512)."""
+    fn preferred_vector_width_bits() -> i64
+
+# ============================================================================
+# X86Caps — x86_64 concrete impl
+# ============================================================================
+
+"""x86_64 capability set derived from micro-arch level or feature triple."""
+struct X86Caps:
+    has_aes: bool
+    has_sha_ni: bool
+    has_sse42: bool
+    has_pclmul: bool
+    has_avx2: bool
+    has_avx512: bool
+
+impl TargetCaps for X86Caps:
+    fn supports(idiom: TargetIdiom) -> bool:
+        """Map each idiom to the required x86_64 ISA feature flag."""
+        match idiom:
+            case AesEnc:           self.has_aes
+            case AesEncLast:       self.has_aes
+            case AesDec:           self.has_aes
+            case AesDecLast:       self.has_aes
+            case AesImc:           self.has_aes
+            case AesKeygenAssist:  self.has_aes
+            case Sha256Rounds2:    self.has_sha_ni
+            case Sha256Msg1:       self.has_sha_ni
+            case Sha256Msg2:       self.has_sha_ni
+            case Crc32U8:          self.has_sse42
+            case Crc32U32:         self.has_sse42
+            case Crc32U64:         self.has_sse42
+            case ClmulLo:          self.has_pclmul
+            case ClmulHi:          self.has_pclmul
+            case SimdI32x4:        self.has_sse42
+            case SimdF32x4:        self.has_sse42
+            case SimdI32x8:        self.has_avx2
+            case SimdF32x8:        self.has_avx2
+
+    fn cost(idiom: TargetIdiom) -> i64:
+        """Latency hints for x86_64 AES-NI / SHA-NI / CRC32 / PCLMUL.
+
+        TODO(microarch tuning): replace with per-µarch tables from Intel/AMD SOG.
+        """
+        if not self.supports(idiom):
+            return -1
+        match idiom:
+            case AesEnc:           4
+            case AesEncLast:       4
+            case AesDec:           4
+            case AesDecLast:       4
+            case AesImc:           4
+            case AesKeygenAssist:  8
+            case Sha256Rounds2:    6
+            case Sha256Msg1:       4
+            case Sha256Msg2:       4
+            case Crc32U8:          2
+            case Crc32U32:         2
+            case Crc32U64:         2
+            case ClmulLo:          8
+            case ClmulHi:          8
+            case SimdI32x4:        1
+            case SimdF32x4:        1
+            case SimdI32x8:        1
+            case SimdF32x8:        1
+
+    fn preferred_vector_width_bits() -> i64:
+        """Return 512 with AVX-512, 256 with AVX2, else 128."""
+        if self.has_avx512:
+            return 512
+        if self.has_avx2:
+            return 256
+        128
+
+# ============================================================================
+# x86_caps_from_target — derive X86Caps from micro-arch level string
+# ============================================================================
+
+"""Derive X86Caps from a target-triple / micro-arch level preset naself.
+
+Recognised presets (cumulative feature sets):
+  x86_64-v1: baseline — no crypto extensions
+  x86_64-v2: + SSE4.2 (CRC32)
+  x86_64-v3: + AES-NI + PCLMUL + AVX2
+  x86_64-v4: + AVX-512 + SHA-NI
+Unknown triples return all-false (safe software fallback).
+"""
+fn x86_caps_from_target(triple: text) -> X86Caps:
+    if triple == "x86_64-v4":
+        X86Caps(
+            has_aes: true,
+            has_sha_ni: true,
+            has_sse42: true,
+            has_pclmul: true,
+            has_avx2: true,
+            has_avx512: true
+        )
+    elif triple == "x86_64-v3":
+        X86Caps(
+            has_aes: true,
+            has_sha_ni: false,
+            has_sse42: true,
+            has_pclmul: true,
+            has_avx2: true,
+            has_avx512: false
+        )
+    elif triple == "x86_64-v2":
+        X86Caps(
+            has_aes: false,
+            has_sha_ni: false,
+            has_sse42: true,
+            has_pclmul: false,
+            has_avx2: false,
+            has_avx512: false
+        )
+    else:
+        X86Caps(
+            has_aes: false,
+            has_sha_ni: false,
+            has_sse42: false,
+            has_pclmul: false,
+            has_avx2: false,
+            has_avx512: false
+        )
+
+# ============================================================================
+# Aarch64Caps — AArch64 concrete impl
+# ============================================================================
+
+"""AArch64 capability set derived from arch+extension triple."""
+struct Aarch64Caps:
+    has_aes: bool
+    has_sha2: bool
+    has_sha3: bool
+    has_pmull: bool
+    has_crc32: bool
+    has_neon: bool
+    has_sve2: bool
+
+impl TargetCaps for Aarch64Caps:
+    fn supports(idiom: TargetIdiom) -> bool:
+        """Map each idiom to the required AArch64 ISA extension."""
+        match idiom:
+            case AesEnc:           self.has_aes
+            case AesEncLast:       self.has_aes
+            case AesDec:           self.has_aes
+            case AesDecLast:       self.has_aes
+            case AesImc:           self.has_aes
+            case AesKeygenAssist:  self.has_aes
+            case Sha256Rounds2:    self.has_sha2
+            case Sha256Msg1:       self.has_sha2
+            case Sha256Msg2:       self.has_sha2
+            case Crc32U8:          self.has_crc32
+            case Crc32U32:         self.has_crc32
+            case Crc32U64:         self.has_crc32
+            case ClmulLo:          self.has_pmull
+            case ClmulHi:          self.has_pmull
+            case SimdI32x4:        self.has_neon
+            case SimdF32x4:        self.has_neon
+            case SimdI32x8:        self.has_sve2
+            case SimdF32x8:        self.has_sve2
+
+    fn cost(idiom: TargetIdiom) -> i64:
+        """Latency hints for AArch64 crypto / NEON / SVE2.
+
+        TODO(microarch tuning): replace with Cortex/Apple Silicon measured tables.
+        """
+        if not self.supports(idiom):
+            return -1
+        match idiom:
+            case AesEnc:           4
+            case AesEncLast:       4
+            case AesDec:           4
+            case AesDecLast:       4
+            case AesImc:           4
+            case AesKeygenAssist:  8
+            case Sha256Rounds2:    6
+            case Sha256Msg1:       4
+            case Sha256Msg2:       4
+            case Crc32U8:          2
+            case Crc32U32:         2
+            case Crc32U64:         2
+            case ClmulLo:          8
+            case ClmulHi:          8
+            case SimdI32x4:        1
+            case SimdF32x4:        1
+            case SimdI32x8:        2
+            case SimdF32x8:        2
+
+    fn preferred_vector_width_bits() -> i64:
+        """Return 256 with SVE2, else 128 (NEON)."""
+        if self.has_sve2:
+            return 256
+        128
+
+# ============================================================================
+# aarch64_caps_from_target — derive Aarch64Caps from triple string
+# ============================================================================
+
+"""Derive Aarch64Caps from a target-triple / arch+extension preset naself.
+
+Recognised presets (cumulative feature sets):
+  aarch64:                  NEON only
+  aarch64+crypto:           + AES, SHA2, PMULL
+  armv8.2-A+crypto:         + CRC32 (armv8.2 mandates CRC32)
+  armv8.4-A+crypto+sha3:    + SHA3
+Unknown triples return NEON-only.
+"""
+fn aarch64_caps_from_target(triple: text) -> Aarch64Caps:
+    if triple == "armv8.4-A+crypto+sha3":
+        Aarch64Caps(
+            has_aes: true,
+            has_sha2: true,
+            has_sha3: true,
+            has_pmull: true,
+            has_crc32: true,
+            has_neon: true,
+            has_sve2: false
+        )
+    elif triple == "armv8.2-A+crypto":
+        Aarch64Caps(
+            has_aes: true,
+            has_sha2: true,
+            has_sha3: false,
+            has_pmull: true,
+            has_crc32: true,
+            has_neon: true,
+            has_sve2: false
+        )
+    elif triple == "aarch64+crypto":
+        Aarch64Caps(
+            has_aes: true,
+            has_sha2: true,
+            has_sha3: false,
+            has_pmull: true,
+            has_crc32: false,
+            has_neon: true,
+            has_sve2: false
+        )
+    else:
+        Aarch64Caps(
+            has_aes: false,
+            has_sha2: false,
+            has_sha3: false,
+            has_pmull: false,
+            has_crc32: false,
+            has_neon: true,
+            has_sve2: false
+        )
+
+# ============================================================================
+# Rv64Caps — RV64 concrete impl
+# ============================================================================
+
+"""RV64 capability set derived from ISA string (Zvkned / Zvknh / Zvkg / V)."""
+struct Rv64Caps:
+    has_zvkned: bool
+    has_zvknh: bool
+    has_zvkg: bool
+    has_v: bool
+    vlen_bits: i64
+
+impl TargetCaps for Rv64Caps:
+    fn supports(idiom: TargetIdiom) -> bool:
+        """Map each idiom to the required RV64 Zvk extension."""
+        match idiom:
+            case AesEnc:           self.has_zvkned
+            case AesEncLast:       self.has_zvkned
+            case AesDec:           self.has_zvkned
+            case AesDecLast:       self.has_zvkned
+            case AesImc:           self.has_zvkned
+            case AesKeygenAssist:  self.has_zvkned
+            case Sha256Rounds2:    self.has_zvknh
+            case Sha256Msg1:       self.has_zvknh
+            case Sha256Msg2:       self.has_zvknh
+            case Crc32U8:          false
+            case Crc32U32:         false
+            case Crc32U64:         false
+            case ClmulLo:          self.has_zvkg
+            case ClmulHi:          self.has_zvkg
+            case SimdI32x4:        self.has_v
+            case SimdF32x4:        self.has_v
+            case SimdI32x8:        self.has_v
+            case SimdF32x8:        self.has_v
+
+    fn cost(idiom: TargetIdiom) -> i64:
+        """Latency hints for RV64 Zvkned / Zvknh / Zvkg / V.
+
+        TODO(microarch tuning): replace with SiFive/Kendryte measured tables.
+        """
+        if not self.supports(idiom):
+            return -1
+        match idiom:
+            case AesEnc:           4
+            case AesEncLast:       4
+            case AesDec:           4
+            case AesDecLast:       4
+            case AesImc:           4
+            case AesKeygenAssist:  8
+            case Sha256Rounds2:    6
+            case Sha256Msg1:       4
+            case Sha256Msg2:       4
+            case Crc32U8:          -1
+            case Crc32U32:         -1
+            case Crc32U64:         -1
+            case ClmulLo:          8
+            case ClmulHi:          8
+            case SimdI32x4:        1
+            case SimdF32x4:        1
+            case SimdI32x8:        1
+            case SimdF32x8:        1
+
+    fn preferred_vector_width_bits() -> i64:
+        """Return vlen_bits when V extension present, else 128."""
+        if self.has_v:
+            return self.vlen_bits
+        128
+
+# ============================================================================
+# rv64_caps_from_target — derive Rv64Caps from ISA string
+# ============================================================================
+
+"""Derive Rv64Caps from a target-triple / ISA preset naself.
+
+Recognised presets (cumulative feature sets):
+  rv64gc:                         baseline — no vector or crypto
+  rv64gcv:                        + V (VLEN=128 default)
+  rv64gcv_zvkn:                   + Zvkned (AES) — note: zvkn bundle includes zvkned+zvknh+zvkb+zvks
+  rv64gcv_zvkn_zvknh_zvkg:        + Zvknh (SHA) + Zvkg (CLMUL)
+Triples containing _v256 set vlen_bits=256.
+Unknown triples return all-false with vlen_bits=128.
+"""
+fn rv64_caps_from_target(triple: text) -> Rv64Caps:
+    var vlen = 128
+    if triple.contains("_v256"):
+        vlen = 256
+
+    if triple == "rv64gcv_zvkn_zvknh_zvkg" or triple.contains("_zvknh_zvkg"):
+        Rv64Caps(
+            has_zvkned: true,
+            has_zvknh: true,
+            has_zvkg: true,
+            has_v: true,
+            vlen_bits: vlen
+        )
+    elif triple == "rv64gcv_zvkn" or triple.contains("_zvkn"):
+        Rv64Caps(
+            has_zvkned: true,
+            has_zvknh: false,
+            has_zvkg: false,
+            has_v: true,
+            vlen_bits: vlen
+        )
+    elif triple == "rv64gcv" or triple.contains("gcv"):
+        Rv64Caps(
+            has_zvkned: false,
+            has_zvknh: false,
+            has_zvkg: false,
+            has_v: true,
+            vlen_bits: vlen
+        )
+    else:
+        Rv64Caps(
+            has_zvkned: false,
+            has_zvknh: false,
+            has_zvkg: false,
+            has_v: false,
+            vlen_bits: 128
+        )

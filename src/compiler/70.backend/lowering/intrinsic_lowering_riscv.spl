@@ -1,0 +1,149 @@
+# src/compiler/70.backend/lowering/intrinsic_lowering_riscv.spl
+#
+# RV64 Zvk Cipher Intrinsic Lowering — Pure Simple
+#
+# Maps canonical MirInstKind.Intrinsic `name` strings to RVV Zvk byte
+# sequences via the emit_* helpers in encode_rvv_zvk.spl, gated by Rv64Caps.
+#
+# Arity contract (positional args list):
+#   crypto_aes_round          args=[vd, vs2]          -> 2  (vaesem.vv)
+#   crypto_aes_round_last     args=[vd, vs2]          -> 2  (vaesef.vv)
+#   crypto_aes_inv_round      args=[vd, vs2]          -> 2  (vaesdm.vv)
+#   crypto_aes_inv_round_last args=[vd, vs2]          -> 2  (vaesdf.vv)
+#   crypto_sha256_rnds2       args=[vd, vs2, vs1]     -> 3  (vsha2cl.vv + vsha2ch.vv)
+#   clmul_lo                  args=[vd, vs2, vs1]     -> 3  (vghsh.vv)
+#   clmul_hi                  args=[vd, vs2]          -> 2  (vgmul.vv)
+#
+# LoweringResult reasons:
+#   ""          — success; bytes is non-empty
+#   "unknown"   — unrecognised intrinsic name
+#   "no-cap"    — capability not present in Rv64Caps
+#   "bad-arity" — args.length does not match contract
+
+use compiler.backend.feature_caps.{TargetIdiom, Rv64Caps}
+use compiler.backend.lowering.intrinsic_lowering_x86.{LoweringResult}
+use compiler.backend.backend.native.encode_rvv_zvk.{
+    emit_vaesef_vv, emit_vaesem_vv, emit_vaesdf_vv, emit_vaesdm_vv,
+    emit_vsha2ch_vv, emit_vsha2cl_vv,
+    emit_vghsh_vv, emit_vgmul_vv
+}
+
+# ============================================================================
+# TargetIdiom mapping for RV64 Zvk intrinsics
+# ============================================================================
+
+"""Map a canonical cipher intrinsic name to its TargetIdiom tag.
+
+Returns nil for unrecognised names.  Use this to gate capability checks
+before dispatching to an emit_* helper.  Shared with the x86 path; the
+returned idiom is interpreted by Rv64Caps.supports.
+"""
+fn intrinsic_to_target_idiom_riscv(name: text) -> TargetIdiom?:
+    match name:
+        case "crypto_aes_round":            Some(TargetIdiom.AesEnc)
+        case "crypto_aes_round_last":       Some(TargetIdiom.AesEncLast)
+        case "crypto_aes_inv_round":        Some(TargetIdiom.AesDec)
+        case "crypto_aes_inv_round_last":   Some(TargetIdiom.AesDecLast)
+        case "crypto_sha256_rnds2":         Some(TargetIdiom.Sha256Rounds2)
+        case "clmul_lo":                    Some(TargetIdiom.ClmulLo)
+        case "clmul_hi":                    Some(TargetIdiom.ClmulHi)
+        case _:                             nil
+
+# ============================================================================
+# lower_cipher_intrinsic_riscv — main lowering entry point
+# ============================================================================
+
+"""Lower a canonical cipher intrinsic to an RVV Zvk byte sequence.
+
+Steps:
+  1. Resolve name -> TargetIdiom; unknown names return reason="unknown".
+  2. Check caps.supports(idiom); unsupported targets return reason="no-cap".
+  3. Validate args arity; mismatches return reason="bad-arity".
+  4. Dispatch to the matching emit_* helper and return the bytes.
+
+For crypto_sha256_rnds2 the result is vsha2cl.vv + vsha2ch.vv concatenated
+(8 bytes total) because the SHA-2 round pair requires both low and high halves.
+"""
+fn lower_cipher_intrinsic_riscv(name: text, args: [i64], caps: Rv64Caps) -> LoweringResult:
+    var empty: [i64] = []
+
+    # Step 1: name -> idiom
+    var maybe_idiom = intrinsic_to_target_idiom_riscv(name)
+    match maybe_idiom:
+        case Some(idiom):
+            # Step 2: capability gate
+            if not caps.supports(idiom):
+                return LoweringResult(empty, false, "no-cap")
+
+            # Step 3 + 4: arity check then emit
+            match name:
+                case "crypto_aes_round":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_vaesem_vv(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_round_last":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_vaesef_vv(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_inv_round":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_vaesdm_vv(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_aes_inv_round_last":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_vaesdf_vv(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "crypto_sha256_rnds2":
+                    # Emit vsha2cl.vv + vsha2ch.vv (two 4-byte instructions).
+                    # args=[vd, vs2, vs1]; both instructions use the same regs.
+                    if args.length != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var vd = args[0]
+                    var vs2 = args[1]
+                    var vs1 = args[2]
+                    var lo = emit_vsha2cl_vv(vd, vs2, vs1)
+                    var hi = emit_vsha2ch_vv(vd, vs2, vs1)
+                    var bytes: [i64] = []
+                    var i = 0
+                    while i < lo.length:
+                        bytes = bytes + [lo[i]]
+                        i = i + 1
+                    i = 0
+                    while i < hi.length:
+                        bytes = bytes + [hi[i]]
+                        i = i + 1
+                    LoweringResult(bytes, true, "")
+
+                case "clmul_lo":
+                    if args.length != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_vghsh_vv(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
+
+                case "clmul_hi":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_vgmul_vv(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case _:
+                    LoweringResult(empty, false, "unknown")
+
+        case _:
+            LoweringResult(empty, false, "unknown")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export LoweringResult
+export intrinsic_to_target_idiom_riscv
+export lower_cipher_intrinsic_riscv
