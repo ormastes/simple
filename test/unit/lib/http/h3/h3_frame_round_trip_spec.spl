@@ -1,0 +1,507 @@
+# HTTP/3 Frame Layer + QPACK Static Table Round-Trip Specification
+#
+# **Feature IDs:** #HTTP3-FRAME-001
+# **Category:** Stdlib / HTTP/3
+# **Difficulty:** 3/5
+# **Status:** Draft
+#
+# ## Overview
+# Round-trip and correctness tests for the HTTP/3 frame layer (RFC 9114 §7.2)
+# and QPACK static table (RFC 9204 Appendix A).
+#
+# Tests:
+#   - Variable-length integer encoding (RFC 9000 §16) — boundary values
+#   - Frame emit/parse round-trip for each frame type
+#   - SETTINGS payload encode/decode round-trip
+#   - High-level H3Frame serializer round-trip
+#   - QPACK static table: entry count, known-index lookups, find helpers
+
+use std.spipe.*
+
+use std.http.h3.h3_frame.{
+    H3Frame, H3DataFrame, H3HeadersFrame, H3CancelPushFrame,
+    H3SettingsFrame, H3Setting, H3PushPromiseFrame, H3GoawayFrame,
+    H3MaxPushIdFrame,
+    H3VarintResult, H3VarintOk, H3FrameResult, H3FrameOk,
+    H3_FRAME_DATA, H3_FRAME_HEADERS, H3_FRAME_CANCEL_PUSH,
+    H3_FRAME_SETTINGS, H3_FRAME_PUSH_PROMISE, H3_FRAME_GOAWAY,
+    H3_FRAME_MAX_PUSH_ID,
+    H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, H3_SETTINGS_MAX_FIELD_SECTION_SIZE,
+    H3_SETTINGS_QPACK_BLOCKED_STREAMS,
+    h3_varint_encode, h3_varint_decode,
+    h3_frame_emit, h3_frame_parse,
+    h3_settings_encode, h3_settings_decode,
+    h3_write_frame
+}
+
+use std.http.h3.qpack_static.{
+    QpackStaticEntry,
+    qpack_static_table,
+    qpack_static_lookup,
+    qpack_static_find_name,
+    qpack_static_find_exact
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _bytes_eq(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    loop:
+        if i >= a.len():
+            break
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    return true
+
+# ============================================================================
+# Test Group 1: Variable-length integer encoding (RFC 9000 §16)
+# ============================================================================
+
+describe "H3 varint encode/decode (RFC 9000 §16)":
+
+    it "encodes 0 as single byte 0x00":
+        val out = h3_varint_encode(0)
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal(0x00)
+
+    it "encodes 63 as single byte 0x3f (max 1-byte)":
+        val out = h3_varint_encode(63)
+        expect(out.len()).to_equal(1)
+        expect(out[0]).to_equal(0x3f)
+
+    it "encodes 64 as two bytes (2-byte form starts)":
+        val out = h3_varint_encode(64)
+        expect(out.len()).to_equal(2)
+        # 0b01_000000 00_xxxxxx → first byte has prefix 01
+        expect((out[0] >> 6) & 0x03).to_equal(1)
+
+    it "encodes 16383 as two bytes (max 2-byte)":
+        val out = h3_varint_encode(16383)
+        expect(out.len()).to_equal(2)
+
+    it "encodes 16384 as four bytes (4-byte form starts)":
+        val out = h3_varint_encode(16384)
+        expect(out.len()).to_equal(4)
+        expect((out[0] >> 6) & 0x03).to_equal(2)
+
+    it "encodes 1073741823 as four bytes (max 4-byte)":
+        val out = h3_varint_encode(1073741823)
+        expect(out.len()).to_equal(4)
+
+    it "encodes 1073741824 as eight bytes (8-byte form starts)":
+        val out = h3_varint_encode(1073741824)
+        expect(out.len()).to_equal(8)
+        expect((out[0] >> 6) & 0x03).to_equal(3)
+
+    it "round-trips value 0":
+        val encoded = h3_varint_encode(0)
+        val result = h3_varint_decode(encoded, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.value).to_equal(0)
+                expect(ok.consumed).to_equal(1)
+            case Err(_):
+                expect("decode-err").to_equal("Ok")
+
+    it "round-trips value 37 (RFC 9000 §A.1 example)":
+        val encoded = h3_varint_encode(37)
+        val result = h3_varint_decode(encoded, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.value).to_equal(37)
+                expect(ok.consumed).to_equal(1)
+            case Err(_):
+                expect("decode-err").to_equal("Ok")
+
+    it "round-trips value 15293 (RFC 9000 §A.1 example)":
+        val encoded = h3_varint_encode(15293)
+        val result = h3_varint_decode(encoded, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.value).to_equal(15293)
+                expect(ok.consumed).to_equal(2)
+            case Err(_):
+                expect("decode-err").to_equal("Ok")
+
+    it "round-trips value 494878333 (RFC 9000 §A.1 example)":
+        val encoded = h3_varint_encode(494878333)
+        val result = h3_varint_decode(encoded, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.value).to_equal(494878333)
+                expect(ok.consumed).to_equal(4)
+            case Err(_):
+                expect("decode-err").to_equal("Ok")
+
+    it "returns Err on empty buffer":
+        var empty: [u8] = []
+        val result = h3_varint_decode(empty, 0)
+        match result:
+            case Err(_):
+                expect(true).to_equal(true)
+            case Ok(_):
+                expect("unexpected-ok").to_equal("Err")
+
+    it "returns Err when 2-byte varint truncated":
+        var buf: [u8] = []
+        buf.push(0x40)   # prefix 01, needs 2 bytes total
+        val result = h3_varint_decode(buf, 0)
+        match result:
+            case Err(_):
+                expect(true).to_equal(true)
+            case Ok(_):
+                expect("unexpected-ok").to_equal("Err")
+
+
+# ============================================================================
+# Test Group 2: Frame emit/parse round-trip
+# ============================================================================
+
+describe "H3 frame emit/parse round-trip (RFC 9114 §7.2)":
+
+    it "round-trips an empty DATA frame":
+        var payload: [u8] = []
+        val wire = h3_frame_emit(H3_FRAME_DATA, payload)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_DATA)
+                expect(ok.payload.len()).to_equal(0)
+                expect(ok.new_offset).to_equal(wire.len())
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "round-trips DATA frame with 3-byte payload":
+        var payload: [u8] = []
+        payload.push(0x68)
+        payload.push(0x69)
+        payload.push(0x21)
+        val wire = h3_frame_emit(H3_FRAME_DATA, payload)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_DATA)
+                expect(ok.payload.len()).to_equal(3)
+                expect(ok.payload[0]).to_equal(0x68)
+                expect(ok.payload[1]).to_equal(0x69)
+                expect(ok.payload[2]).to_equal(0x21)
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "round-trips HEADERS frame with opaque encoded fields":
+        var fields: [u8] = []
+        fields.push(0x00)
+        fields.push(0x00)
+        fields.push(0x82)
+        fields.push(0x86)
+        val wire = h3_frame_emit(H3_FRAME_HEADERS, fields)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_HEADERS)
+                expect(ok.payload.len()).to_equal(4)
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "round-trips GOAWAY frame":
+        val goaway_payload = h3_varint_encode(100)
+        val wire = h3_frame_emit(H3_FRAME_GOAWAY, goaway_payload)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_GOAWAY)
+                # Decode the stream id from payload
+                val id_r = h3_varint_decode(ok.payload, 0)
+                match id_r:
+                    case Ok(id_ok):
+                        expect(id_ok.value).to_equal(100)
+                    case Err(_):
+                        expect("varint-err").to_equal("Ok")
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "round-trips MAX_PUSH_ID frame":
+        val push_payload = h3_varint_encode(7)
+        val wire = h3_frame_emit(H3_FRAME_MAX_PUSH_ID, push_payload)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_MAX_PUSH_ID)
+                val id_r = h3_varint_decode(ok.payload, 0)
+                match id_r:
+                    case Ok(id_ok):
+                        expect(id_ok.value).to_equal(7)
+                    case Err(_):
+                        expect("varint-err").to_equal("Ok")
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "returns Err on truncated frame":
+        var buf: [u8] = []
+        buf.push(0x00)  # type = DATA
+        buf.push(0x05)  # length = 5 but no payload follows
+        val result = h3_frame_parse(buf, 0)
+        match result:
+            case Err(_):
+                expect(true).to_equal(true)
+            case Ok(_):
+                expect("unexpected-ok").to_equal("Err")
+
+
+# ============================================================================
+# Test Group 3: SETTINGS encode/decode (RFC 9114 §7.2.4)
+# ============================================================================
+
+describe "H3 SETTINGS payload round-trip (RFC 9114 §7.2.4)":
+
+    it "round-trips empty settings list":
+        var settings: [H3Setting] = []
+        val encoded = h3_settings_encode(settings)
+        expect(encoded.len()).to_equal(0)
+        val decoded = h3_settings_decode(encoded)
+        expect(decoded.len()).to_equal(0)
+
+    it "round-trips single setting (QPACK_MAX_TABLE_CAPACITY=32)":
+        var settings: [H3Setting] = []
+        settings.push(H3Setting(identifier: H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, value: 32))
+        val encoded = h3_settings_encode(settings)
+        val decoded = h3_settings_decode(encoded)
+        expect(decoded.len()).to_equal(1)
+        expect(decoded[0].identifier).to_equal(H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY)
+        expect(decoded[0].value).to_equal(32)
+
+    it "round-trips two settings":
+        var settings: [H3Setting] = []
+        settings.push(H3Setting(identifier: H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, value: 16))
+        settings.push(H3Setting(identifier: H3_SETTINGS_QPACK_BLOCKED_STREAMS, value: 10))
+        val encoded = h3_settings_encode(settings)
+        val decoded = h3_settings_decode(encoded)
+        expect(decoded.len()).to_equal(2)
+        expect(decoded[0].identifier).to_equal(H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY)
+        expect(decoded[0].value).to_equal(16)
+        expect(decoded[1].identifier).to_equal(H3_SETTINGS_QPACK_BLOCKED_STREAMS)
+        expect(decoded[1].value).to_equal(10)
+
+    it "decodes gracefully on truncated payload":
+        var buf: [u8] = []
+        buf.push(0x01)  # id varint = 1
+        # no value follows — truncated
+        val decoded = h3_settings_decode(buf)
+        expect(decoded.len()).to_equal(0)
+
+
+# ============================================================================
+# Test Group 4: High-level H3Frame serializer (h3_write_frame)
+# ============================================================================
+
+describe "H3 h3_write_frame serializer round-trip":
+
+    it "writes and parses DATA frame":
+        var payload: [u8] = []
+        payload.push(0xaa)
+        payload.push(0xbb)
+        val frame = H3Frame.Data(H3DataFrame(payload: payload))
+        val wire = h3_write_frame(frame)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_DATA)
+                expect(ok.payload.len()).to_equal(2)
+                expect(ok.payload[0]).to_equal(0xaa)
+                expect(ok.payload[1]).to_equal(0xbb)
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "writes and parses SETTINGS frame":
+        var settings: [H3Setting] = []
+        settings.push(H3Setting(identifier: H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY, value: 32))
+        val frame = H3Frame.Settings(H3SettingsFrame(settings: settings))
+        val wire = h3_write_frame(frame)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_SETTINGS)
+                val decoded = h3_settings_decode(ok.payload)
+                expect(decoded.len()).to_equal(1)
+                expect(decoded[0].identifier).to_equal(H3_SETTINGS_QPACK_MAX_TABLE_CAPACITY)
+                expect(decoded[0].value).to_equal(32)
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "writes and parses GOAWAY frame":
+        val frame = H3Frame.Goaway(H3GoawayFrame(id: 42))
+        val wire = h3_write_frame(frame)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_GOAWAY)
+                val id_r = h3_varint_decode(ok.payload, 0)
+                match id_r:
+                    case Ok(id_ok):
+                        expect(id_ok.value).to_equal(42)
+                    case Err(_):
+                        expect("varint-err").to_equal("Ok")
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "writes and parses MAX_PUSH_ID frame":
+        val frame = H3Frame.MaxPushId(H3MaxPushIdFrame(push_id: 15))
+        val wire = h3_write_frame(frame)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_MAX_PUSH_ID)
+                val id_r = h3_varint_decode(ok.payload, 0)
+                match id_r:
+                    case Ok(id_ok):
+                        expect(id_ok.value).to_equal(15)
+                    case Err(_):
+                        expect("varint-err").to_equal("Ok")
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "writes and parses CANCEL_PUSH frame":
+        val frame = H3Frame.CancelPush(H3CancelPushFrame(push_id: 3))
+        val wire = h3_write_frame(frame)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_CANCEL_PUSH)
+                val id_r = h3_varint_decode(ok.payload, 0)
+                match id_r:
+                    case Ok(id_ok):
+                        expect(id_ok.value).to_equal(3)
+                    case Err(_):
+                        expect("varint-err").to_equal("Ok")
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "writes and parses HEADERS frame":
+        var fields: [u8] = []
+        fields.push(0x01)
+        fields.push(0x02)
+        fields.push(0x03)
+        val frame = H3Frame.Headers(H3HeadersFrame(encoded_fields: fields))
+        val wire = h3_write_frame(frame)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_HEADERS)
+                expect(ok.payload.len()).to_equal(3)
+                expect(ok.payload[0]).to_equal(0x01)
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+    it "writes and parses PUSH_PROMISE frame":
+        var fields: [u8] = []
+        fields.push(0xde)
+        fields.push(0xad)
+        val frame = H3Frame.PushPromise(H3PushPromiseFrame(push_id: 5, encoded_fields: fields))
+        val wire = h3_write_frame(frame)
+        val result = h3_frame_parse(wire, 0)
+        match result:
+            case Ok(ok):
+                expect(ok.frame_type).to_equal(H3_FRAME_PUSH_PROMISE)
+                # First varint in payload is push_id
+                val id_r = h3_varint_decode(ok.payload, 0)
+                match id_r:
+                    case Ok(id_ok):
+                        expect(id_ok.value).to_equal(5)
+                    case Err(_):
+                        expect("varint-err").to_equal("Ok")
+            case Err(_):
+                expect("parse-err").to_equal("Ok")
+
+
+# ============================================================================
+# Test Group 5: QPACK static table (RFC 9204 Appendix A)
+# ============================================================================
+
+describe "QPACK static table (RFC 9204 Appendix A)":
+
+    it "has exactly 99 entries":
+        val table = qpack_static_table()
+        expect(table.len()).to_equal(99)
+
+    it "entry 0 is :authority with empty value":
+        val entry = qpack_static_lookup(0)
+        expect(entry.name).to_equal(":authority")
+        expect(entry.value).to_equal("")
+
+    it "entry 1 is :path with value /":
+        val entry = qpack_static_lookup(1)
+        expect(entry.name).to_equal(":path")
+        expect(entry.value).to_equal("/")
+
+    it "entry 17 is :method GET":
+        val entry = qpack_static_lookup(17)
+        expect(entry.name).to_equal(":method")
+        expect(entry.value).to_equal("GET")
+
+    it "entry 20 is :method POST":
+        val entry = qpack_static_lookup(20)
+        expect(entry.name).to_equal(":method")
+        expect(entry.value).to_equal("POST")
+
+    it "entry 22 is :scheme http":
+        val entry = qpack_static_lookup(22)
+        expect(entry.name).to_equal(":scheme")
+        expect(entry.value).to_equal("http")
+
+    it "entry 23 is :scheme https":
+        val entry = qpack_static_lookup(23)
+        expect(entry.name).to_equal(":scheme")
+        expect(entry.value).to_equal("https")
+
+    it "entry 25 is :status 200":
+        val entry = qpack_static_lookup(25)
+        expect(entry.name).to_equal(":status")
+        expect(entry.value).to_equal("200")
+
+    it "entry 27 is :status 404":
+        val entry = qpack_static_lookup(27)
+        expect(entry.name).to_equal(":status")
+        expect(entry.value).to_equal("404")
+
+    it "entry 46 is content-type application/json":
+        val entry = qpack_static_lookup(46)
+        expect(entry.name).to_equal("content-type")
+        expect(entry.value).to_equal("application/json")
+
+    it "entry 98 is x-frame-options sameorigin (last entry)":
+        val entry = qpack_static_lookup(98)
+        expect(entry.name).to_equal("x-frame-options")
+        expect(entry.value).to_equal("sameorigin")
+
+    it "find_name returns 0 for :authority":
+        val idx = qpack_static_find_name(":authority")
+        expect(idx).to_equal(0)
+
+    it "find_name returns 15 for :method (first occurrence)":
+        val idx = qpack_static_find_name(":method")
+        expect(idx).to_equal(15)
+
+    it "find_name returns -1 for unknown header":
+        val idx = qpack_static_find_name("x-nonexistent-header")
+        expect(idx).to_equal(-1)
+
+    it "find_exact returns 17 for :method GET":
+        val idx = qpack_static_find_exact(":method", "GET")
+        expect(idx).to_equal(17)
+
+    it "find_exact returns 25 for :status 200":
+        val idx = qpack_static_find_exact(":status", "200")
+        expect(idx).to_equal(25)
+
+    it "find_exact returns -1 for name match but wrong value":
+        val idx = qpack_static_find_exact(":method", "PATCH")
+        expect(idx).to_equal(-1)
+
+    it "find_exact returns -1 for unknown header":
+        val idx = qpack_static_find_exact("x-foo", "bar")
+        expect(idx).to_equal(-1)

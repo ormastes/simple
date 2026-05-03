@@ -29,8 +29,9 @@
 mod crypto.types
 mod crypto.hmac
 mod crypto.sha256
+mod crypto.sha1
 
-use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha512_bytes}
+use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha512_bytes, hmac_sha1_bytes}
 use std.crypto.sha256.{sha256_initial_hash, sha256_process_block, sha256_bytes}
 
 # =============================================================================
@@ -291,6 +292,68 @@ fn _pbkdf2_sha512_bytes_pure(password_bytes: list, salt_bytes: list, iterations:
         var iteration = 1
         while iteration < iterations:
             u = hmac_sha512_bytes(password_bytes, u)
+            t = xor_bytes(t, u)
+            iteration = iteration + 1
+
+        i = 0
+        while i < t.len():
+            result.push(t.get(i))
+            i = i + 1
+
+        block_num = block_num + 1
+
+    var final_result = []
+    var i = 0
+    while i < key_length && i < result.len():
+        final_result.push(result.get(i))
+        i = i + 1
+
+    final_result
+
+# =============================================================================
+# PBKDF2-HMAC-SHA1
+# =============================================================================
+# Pure-Simple reference implementation. SHA-1 output is 20 bytes.
+# No native extern — SCRAM-SHA-1 is the primary consumer (RFC 5802).
+
+# PBKDF2-HMAC-SHA1
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_sha1(password: text, salt: text, iterations: i64) -> list:
+    val password_bytes = text_to_bytes(password)
+    val salt_bytes = text_to_bytes(salt)
+    pbkdf2_sha1_bytes(password_bytes, salt_bytes, iterations, 20)
+
+# PBKDF2-HMAC-SHA1 with byte inputs
+# reason: positional crypto pbkdf2 API
+fn pbkdf2_sha1_bytes(password_bytes: list, salt_bytes: list, iterations: i64, key_length: i64) -> list:
+    val hash_len = 20  # SHA-1 output length
+    val blocks_needed = (key_length + hash_len - 1) / hash_len
+
+    var result = []
+    var block_num = 1
+
+    while block_num <= blocks_needed:
+        var salt_with_block = []
+        var i = 0
+        while i < salt_bytes.len():
+            salt_with_block.push(salt_bytes.get(i))
+            i = i + 1
+
+        salt_with_block.push((block_num >> 24) & 0xFF)
+        salt_with_block.push((block_num >> 16) & 0xFF)
+        salt_with_block.push((block_num >> 8) & 0xFF)
+        salt_with_block.push(block_num & 0xFF)
+
+        var u = hmac_sha1_bytes(password_bytes, salt_with_block)
+        var t = []
+        i = 0
+        while i < u.len():
+            t.push(u.get(i))
+            i = i + 1
+
+        var iteration = 1
+        while iteration < iterations:
+            u = hmac_sha1_bytes(password_bytes, u)
             t = xor_bytes(t, u)
             iteration = iteration + 1
 

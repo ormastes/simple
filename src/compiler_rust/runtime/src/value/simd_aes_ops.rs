@@ -139,21 +139,7 @@ fn xor_u8x16(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
 ///   `MixColumns(SubBytes(ShiftRows(state))) XOR key`
 #[inline]
 pub fn aes_round_u8x16(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("aes") {
-            return unsafe { aes_round_x86(state, key) };
-        }
-    }
-    #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
-    unsafe {
-        return aes_round_neon(state, key);
-    }
-    #[allow(unreachable_code)]
-    {
-        let s = mix_columns(sub_bytes(shift_rows(state)));
-        xor_u8x16(s, key)
-    }
+    aes_round_u8x16_impl(state, key)
 }
 
 /// One final AES encryption round, matching `_mm_aesenclast_si128`:
@@ -161,21 +147,53 @@ pub fn aes_round_u8x16(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
 ///   `SubBytes(ShiftRows(state)) XOR key`
 #[inline]
 pub fn aes_round_last_u8x16(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("aes") {
-            return unsafe { aes_round_last_x86(state, key) };
-        }
+    aes_round_last_u8x16_impl(state, key)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn aes_round_u8x16_impl(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
+    if is_x86_feature_detected!("aes") {
+        return unsafe { aes_round_x86(state, key) };
     }
-    #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
-    unsafe {
-        return aes_round_last_neon(state, key);
+    let s = mix_columns(sub_bytes(shift_rows(state)));
+    xor_u8x16(s, key)
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
+#[inline]
+fn aes_round_u8x16_impl(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
+    unsafe { aes_round_neon(state, key) }
+}
+
+#[cfg(not(any(target_arch = "x86_64", all(target_arch = "aarch64", target_feature = "aes"))))]
+#[inline]
+fn aes_round_u8x16_impl(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
+    let s = mix_columns(sub_bytes(shift_rows(state)));
+    xor_u8x16(s, key)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn aes_round_last_u8x16_impl(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
+    if is_x86_feature_detected!("aes") {
+        return unsafe { aes_round_last_x86(state, key) };
     }
-    #[allow(unreachable_code)]
-    {
-        let s = sub_bytes(shift_rows(state));
-        xor_u8x16(s, key)
-    }
+    let s = sub_bytes(shift_rows(state));
+    xor_u8x16(s, key)
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
+#[inline]
+fn aes_round_last_u8x16_impl(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
+    unsafe { aes_round_last_neon(state, key) }
+}
+
+#[cfg(not(any(target_arch = "x86_64", all(target_arch = "aarch64", target_feature = "aes"))))]
+#[inline]
+fn aes_round_last_u8x16_impl(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
+    let s = sub_bytes(shift_rows(state));
+    xor_u8x16(s, key)
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -283,6 +283,7 @@ fn detect_native_test_project_root(source: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_simd::detect_profile;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 

@@ -1,0 +1,430 @@
+# Reed-Solomon Erasure Coding over GF(2^8)
+#
+# Implements systematic Reed-Solomon encoding and erasure-only decoding
+# using Galois Field GF(2^8) with irreducible polynomial 0x11D (CCSDS/JPEG).
+#
+# Erasure-only means positions of lost symbols must be known. This avoids
+# Berlekamp-Massey and keeps the implementation simple while still providing
+# full MDS (Maximum Distance Separable) erasure protection.
+#
+# Constraints:
+#   - data.len() + parity_count <= 255 (GF(2^8) field size)
+#   - erasure_positions.len() <= parity_count
+#
+# Usage:
+#   use std.common.encoding.reed_solomon.{rs_encode, rs_decode, gf_mul, gf_inv}
+#   val encoded = rs_encode(data, 4)   # 4 parity symbols
+#   # Simulate erasures: set positions to 0, provide positions list
+#   val recovered = rs_decode(received, 4, [2, 5])
+#
+# References:
+#   - CCSDS 131.0-B-3 (TM Synchronization and Channel Coding)
+#   - James S. Plank, "A Tutorial on Reed-Solomon Coding"
+#
+# ============================================================================
+
+# ============================================================================
+# GF(2^8) Arithmetic — irreducible poly 0x11D (x^8 + x^4 + x^3 + x^2 + 1)
+# ============================================================================
+
+# Exp table: gf_exp[i] = alpha^i mod p(x), alpha=2, for i in 0..510
+# Log table: gf_log[x] = i such that alpha^i = x, for x in 1..255
+# These are built lazily on first use via module-level init.
+
+var _gf_exp_table: [i64] = []
+var _gf_log_table: [i64] = []
+var _gf_tables_init: bool = false
+
+fn _gf_ensure_tables():
+    """Build exp/log tables if not already initialized."""
+    if _gf_tables_init:
+        return
+
+    # Build exp table (512 entries for wraparound convenience)
+    var exp_t: [i64] = []
+    var log_t: [i64] = []
+
+    # Initialize log table with 256 zeros
+    var li = 0
+    while li < 256:
+        log_t.push(0)
+        li = li + 1
+
+    # Generate exp table: alpha=2, poly=0x11D
+    var x: i64 = 1
+    var i = 0
+    while i < 512:
+        exp_t.push(x)
+        if i < 255:
+            log_t[x] = i
+        # Multiply by alpha (2): shift left 1, reduce if >= 256
+        x = x * 2
+        if x >= 256:
+            x = (x xor 0x11D) & 0xFF
+        i = i + 1
+
+    _gf_exp_table = exp_t
+    _gf_log_table = log_t
+    _gf_tables_init = true
+
+# ============================================================================
+# GF(2^8) public operations
+# ============================================================================
+
+fn gf_mul(a: i64, b: i64) -> i64:
+    """Multiply two GF(2^8) elements using log/exp tables.
+    reason: GF(2^8) multiplication"""
+    if a == 0 or b == 0:
+        return 0
+    _gf_ensure_tables()
+    val log_sum = _gf_log_table[a] + _gf_log_table[b]
+    _gf_exp_table[log_sum % 255]
+
+fn gf_inv(a: i64) -> i64:
+    """Multiplicative inverse in GF(2^8). gf_inv(0) is undefined (returns 0).
+    reason: GF(2^8) inverse"""
+    if a == 0:
+        return 0
+    _gf_ensure_tables()
+    val log_a = _gf_log_table[a]
+    _gf_exp_table[255 - log_a]
+
+fn gf_pow(a: i64, n: i64) -> i64:
+    """Raise a GF(2^8) element to power n (non-negative).
+    reason: GF(2^8) exponentiation"""
+    if n == 0:
+        return 1
+    if a == 0:
+        return 0
+    _gf_ensure_tables()
+    val log_a = _gf_log_table[a]
+    val exp_val = (log_a * n) % 255
+    _gf_exp_table[exp_val]
+
+fn gf_add(a: i64, b: i64) -> i64:
+    """Add two GF(2^8) elements (XOR).
+    reason: GF(2^8) addition"""
+    a xor b
+
+# ============================================================================
+# Matrix operations over GF(2^8)
+# Matrices are stored as flat [i64] arrays in row-major order.
+# ============================================================================
+
+fn _mat_get(mat: [i64], cols: i64, row: i64, col: i64) -> i64:
+    """Get element at (row, col) from a flat row-major matrix."""
+    mat[row * cols + col]
+
+fn _mat_set(mat: [i64], cols: i64, row: i64, col: i64, value: i64) -> [i64]:
+    """Set element at (row, col) in a flat row-major matrix. Returns updated matrix."""
+    var m = mat
+    m[row * cols + col] = value
+    m
+
+fn _mat_create_vandermonde(n_rows: i64, n_cols: i64) -> [i64]:
+    """Create an n_rows x n_cols Vandermonde matrix over GF(2^8).
+    V[i][j] = alpha^(i*j), where alpha = 2.
+    reason: RS encoding matrix construction"""
+    _gf_ensure_tables()
+    var mat: [i64] = []
+    var i = 0
+    while i < n_rows:
+        var j = 0
+        while j < n_cols:
+            # V[i][j] = alpha^(i*j) = exp_table[(i*j) % 255]
+            if i == 0 or j == 0:
+                mat.push(1)
+            else:
+                val exp_val = (i * j) % 255
+                mat.push(_gf_exp_table[exp_val])
+            j = j + 1
+        i = i + 1
+    mat
+
+fn _mat_make_systematic(mat: [i64], n_rows: i64, n_cols: i64) -> [i64]:
+    """Row-reduce a Vandermonde matrix so the top k rows form an identity.
+    Input: n_rows x n_cols matrix (n_rows >= n_cols).
+    Output: same matrix after Gauss-Jordan elimination on first n_cols rows.
+    reason: systematic encoding matrix"""
+    var m = mat
+    val k = n_cols
+
+    var col = 0
+    while col < k:
+        # Find pivot row (row with non-zero entry in this column, starting from col)
+        var pivot_row = col
+        var found_pivot = false
+        while pivot_row < n_rows and not found_pivot:
+            if _mat_get(m, k, pivot_row, col) != 0:
+                found_pivot = true
+            else:
+                pivot_row = pivot_row + 1
+
+        # Swap pivot row with current row
+        if pivot_row != col:
+            var c = 0
+            while c < k:
+                val tmp = _mat_get(m, k, col, c)
+                m = _mat_set(m, k, col, c, _mat_get(m, k, pivot_row, c))
+                m = _mat_set(m, k, pivot_row, c, tmp)
+                c = c + 1
+
+        # Scale pivot row so pivot element becomes 1
+        val pivot_val = _mat_get(m, k, col, col)
+        val pivot_inv = gf_inv(pivot_val)
+        var c2 = 0
+        while c2 < k:
+            val old_val = _mat_get(m, k, col, c2)
+            m = _mat_set(m, k, col, c2, gf_mul(old_val, pivot_inv))
+            c2 = c2 + 1
+
+        # Eliminate this column from all other rows
+        var r = 0
+        while r < n_rows:
+            if r != col:
+                val factor = _mat_get(m, k, r, col)
+                if factor != 0:
+                    var c3 = 0
+                    while c3 < k:
+                        val old_r = _mat_get(m, k, r, c3)
+                        val sub_val = gf_mul(factor, _mat_get(m, k, col, c3))
+                        m = _mat_set(m, k, r, c3, gf_add(old_r, sub_val))
+                        c3 = c3 + 1
+            r = r + 1
+
+        col = col + 1
+    m
+
+fn _mat_invert(mat: [i64], n: i64) -> Result<[i64], text>:
+    """Invert an n x n matrix over GF(2^8) using Gauss-Jordan.
+    Returns Err if matrix is singular.
+    reason: erasure decode matrix inversion"""
+    # Augmented matrix: [mat | I]
+    var aug: [i64] = []
+    var i = 0
+    while i < n:
+        var j = 0
+        while j < n:
+            aug.push(_mat_get(mat, n, i, j))
+            j = j + 1
+        # Append identity row
+        var j2 = 0
+        while j2 < n:
+            if j2 == i:
+                aug.push(1)
+            else:
+                aug.push(0)
+            j2 = j2 + 1
+        i = i + 1
+
+    val aug_cols = n * 2
+
+    # Gauss-Jordan on augmented matrix
+    var col = 0
+    while col < n:
+        # Find pivot
+        var pivot_row = col
+        var found = false
+        while pivot_row < n and not found:
+            if _mat_get(aug, aug_cols, pivot_row, col) != 0:
+                found = true
+            else:
+                pivot_row = pivot_row + 1
+
+        if not found:
+            return Err("singular matrix: cannot invert")
+
+        # Swap
+        if pivot_row != col:
+            var c = 0
+            while c < aug_cols:
+                val tmp = _mat_get(aug, aug_cols, col, c)
+                aug = _mat_set(aug, aug_cols, col, c, _mat_get(aug, aug_cols, pivot_row, c))
+                aug = _mat_set(aug, aug_cols, pivot_row, c, tmp)
+                c = c + 1
+
+        # Scale pivot row
+        val pv = _mat_get(aug, aug_cols, col, col)
+        val pv_inv = gf_inv(pv)
+        var c2 = 0
+        while c2 < aug_cols:
+            val old_val = _mat_get(aug, aug_cols, col, c2)
+            aug = _mat_set(aug, aug_cols, col, c2, gf_mul(old_val, pv_inv))
+            c2 = c2 + 1
+
+        # Eliminate column
+        var r = 0
+        while r < n:
+            if r != col:
+                val factor = _mat_get(aug, aug_cols, r, col)
+                if factor != 0:
+                    var c3 = 0
+                    while c3 < aug_cols:
+                        val old_r = _mat_get(aug, aug_cols, r, c3)
+                        val sub_val = gf_mul(factor, _mat_get(aug, aug_cols, col, c3))
+                        aug = _mat_set(aug, aug_cols, r, c3, gf_add(old_r, sub_val))
+                        c3 = c3 + 1
+            r = r + 1
+
+        col = col + 1
+
+    # Extract right half (the inverse)
+    var inv_mat: [i64] = []
+    var ri = 0
+    while ri < n:
+        var ci = n
+        while ci < aug_cols:
+            inv_mat.push(_mat_get(aug, aug_cols, ri, ci))
+            ci = ci + 1
+        ri = ri + 1
+
+    Ok(inv_mat)
+
+# ============================================================================
+# Reed-Solomon Encode
+# ============================================================================
+
+fn rs_encode(data: [u8], parity_count: i64) -> Result<[u8], text>:
+    """Systematic Reed-Solomon encode: output = data || parity.
+    Total output length = data.len() + parity_count.
+    Returns Err if data.len() + parity_count > 255.
+    reason: Reed-Solomon systematic encode"""
+    val k = data.len()
+    val n = k + parity_count
+
+    if n > 255:
+        return Err("total length exceeds GF(2^8) field size (255)")
+    if k == 0:
+        return Err("data must not be empty")
+
+    _gf_ensure_tables()
+
+    # Build encoding matrix: n x k Vandermonde, then make systematic
+    var vand = _mat_create_vandermonde(n, k)
+    var enc_mat = _mat_make_systematic(vand, n, k)
+
+    # Output: first k bytes are data (systematic), next m bytes are parity
+    var output: [u8] = []
+
+    # Copy data bytes directly (systematic property: top k rows = identity)
+    var i = 0
+    while i < k:
+        output.push(data[i])
+        i = i + 1
+
+    # Compute parity: rows k..n-1 of enc_mat times data vector
+    var p = 0
+    while p < parity_count:
+        val row_idx = k + p
+        var acc: i64 = 0
+        var j = 0
+        while j < k:
+            val mat_val = _mat_get(enc_mat, k, row_idx, j)
+            val data_val = data[j].to_i64() & 0xFF
+            acc = gf_add(acc, gf_mul(mat_val, data_val))
+            j = j + 1
+        output.push(acc & 0xFF)
+        p = p + 1
+
+    Ok(output)
+
+# ============================================================================
+# Reed-Solomon Decode (erasure-only)
+# ============================================================================
+
+fn rs_decode(received: [u8], parity_count: i64, erasure_positions: [i64]) -> Result<[u8], text>:
+    """Decode a Reed-Solomon codeword with known erasure positions.
+    Returns the original data (without parity).
+    Erasure positions index into the full received array (0..n-1).
+    Returns Err if too many erasures or invalid positions.
+    reason: Reed-Solomon erasure decode"""
+    val n = received.len()
+    val k = n - parity_count
+    val num_erasures = erasure_positions.len()
+
+    if k <= 0:
+        return Err("parity_count must be less than received length")
+    if n > 255:
+        return Err("received length exceeds GF(2^8) field size (255)")
+    if num_erasures > parity_count:
+        return Err("too many erasures: cannot recover")
+
+    # Validate erasure positions
+    var ei = 0
+    while ei < num_erasures:
+        val pos = erasure_positions[ei]
+        if pos < 0 or pos >= n:
+            return Err("erasure position out of range")
+        ei = ei + 1
+
+    _gf_ensure_tables()
+
+    # Build the full encoding matrix (same as encode)
+    var vand = _mat_create_vandermonde(n, k)
+    var enc_mat = _mat_make_systematic(vand, n, k)
+
+    # Determine surviving row indices (those NOT in erasure_positions)
+    # We need exactly k surviving rows.
+    var surviving: [i64] = []
+    var si = 0
+    while si < n:
+        var is_erased = false
+        var ej = 0
+        while ej < num_erasures:
+            if erasure_positions[ej] == si:
+                is_erased = true
+            ej = ej + 1
+        if not is_erased:
+            surviving.push(si)
+        si = si + 1
+
+    # We need exactly k surviving positions
+    if surviving.len() < k:
+        return Err("not enough surviving symbols to recover data")
+
+    # Take first k surviving positions
+    var sub_rows: [i64] = []
+    var sri = 0
+    while sri < k:
+        sub_rows.push(surviving[sri])
+        sri = sri + 1
+
+    # Build k x k submatrix from encoding matrix rows at surviving positions
+    var sub_mat: [i64] = []
+    var ri = 0
+    while ri < k:
+        val row_idx = sub_rows[ri]
+        var ci = 0
+        while ci < k:
+            sub_mat.push(_mat_get(enc_mat, k, row_idx, ci))
+            ci = ci + 1
+        ri = ri + 1
+
+    # Build surviving values vector
+    var surv_vals: [i64] = []
+    var vi = 0
+    while vi < k:
+        val row_idx = sub_rows[vi]
+        surv_vals.push(received[row_idx].to_i64() & 0xFF)
+        vi = vi + 1
+
+    # Invert the submatrix
+    val inv_result = _mat_invert(sub_mat, k)
+    if not inv_result.is_ok():
+        return Err(inv_result.unwrap_err())
+    val inv_mat = inv_result.unwrap()
+
+    # Multiply inverse matrix by surviving values to get original data
+    var decoded: [u8] = []
+    var di = 0
+    while di < k:
+        var acc: i64 = 0
+        var j = 0
+        while j < k:
+            val inv_val = _mat_get(inv_mat, k, di, j)
+            acc = gf_add(acc, gf_mul(inv_val, surv_vals[j]))
+            j = j + 1
+        decoded.push(acc & 0xFF)
+        di = di + 1
+
+    Ok(decoded)
