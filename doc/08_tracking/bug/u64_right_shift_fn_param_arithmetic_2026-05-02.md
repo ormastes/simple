@@ -1,6 +1,6 @@
 # `u64 >>` on a fn parameter performs arithmetic (sign-extending) shift
 
-**Status:** OPEN. Discovered 2026-05-02 while debugging `sha384_kat_failure_2026-05-02.md`.
+**Status:** FIXED (2026-05-03). Root cause: `bind_args_with_values` in `interpreter_call/core/arg_binding.rs` was missing the `coerce_unsigned` call present in `bind_args_with_injected`. Values arriving as `Value::Int` through the overload/pre-evaluated-values call path were not coerced to `Value::UInt` based on the parameter's declared type. Discovered 2026-05-02 while debugging `sha384_kat_failure_2026-05-02.md`.
 **Severity:** silent miscompute; affects every pure-Simple module that takes
 a `u64` value through a fn parameter and right-shifts it where the high bit
 may be set. SHA-512 family / arbitrary-precision / fixed-point u64 arithmetic
