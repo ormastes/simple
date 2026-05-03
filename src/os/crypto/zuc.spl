@@ -734,76 +734,6 @@ fn _zuc_load_state(key: [u8], iv: [u8]) -> [u32]:
     state.push(0u32)
     state
 
-fn _zuc_initialize(state: [u32]):
-    """Run 32 initialization rounds then one discarded working round (TS 35.221 §3.4)."""
-    var round: u64 = 0
-    while round < 32:
-        val r1 = state[16]
-        val r2 = state[17]
-
-        val x = _bit_reorg(state)
-        val w = _f_out_w(x[0u64], r1, r2)
-        val nr = _f_update(x[1u64], x[2u64], r1, r2)
-
-        # Init mode: feed (W >> 1) back into LFSR (inlined to preserve array mutations)
-        val _fb_i = _lfsr_feedback(state) + ((w >> 1) & 0x7FFFFFFFu32).to_u64()
-        val _new_s_i = _mod31(_fb_i)
-        var _li: u64 = 0
-        while _li < 15:
-            state[_li] = state[_li + 1u64]
-            _li = _li + 1
-        state[15] = _new_s_i
-
-        state[16] = nr[0u64]
-        state[17] = nr[1u64]
-
-        round = round + 1
-
-    # Discarded post-init round (TS 35.221 §3.4): run F + LFSRWithWorkMode, discard W
-    val ri1 = state[16]
-    val ri2 = state[17]
-    val xi = _bit_reorg(state)
-    val nri = _f_update(xi[1u64], xi[2u64], ri1, ri2)
-    # Inline _lfsr_with_work_mode to preserve array mutations
-    val _fb_w1 = _lfsr_feedback(state)
-    var _new_s_w1 = _mod31(_fb_w1)
-    if _new_s_w1 == 0u32:
-        _new_s_w1 = 0x7FFFFFFFu32
-    var _lw1: u64 = 0
-    while _lw1 < 15:
-        state[_lw1] = state[_lw1 + 1u64]
-        _lw1 = _lw1 + 1
-    state[15] = _new_s_w1
-    state[16] = nri[0u64]
-    state[17] = nri[1u64]
-
-fn _zuc_run_32(state: [u32]) -> u32:
-    """Run one ZUC step in working mode, returning one 32-bit keystream word."""
-    val r1 = state[16]
-    val r2 = state[17]
-
-    val x = _bit_reorg(state)
-    val w = _f_out_w(x[0u64], r1, r2)
-    val nr = _f_update(x[1u64], x[2u64], r1, r2)
-
-    # Keystream word = W XOR X3
-    val z = w ^ x[3u64]
-
-    # Inline _lfsr_with_work_mode to preserve array mutations
-    val _fb_w2 = _lfsr_feedback(state)
-    var _new_s_w2 = _mod31(_fb_w2)
-    if _new_s_w2 == 0u32:
-        _new_s_w2 = 0x7FFFFFFFu32
-    var _lw2: u64 = 0
-    while _lw2 < 15:
-        state[_lw2] = state[_lw2 + 1u64]
-        _lw2 = _lw2 + 1
-    state[15] = _new_s_w2
-
-    state[16] = nr[0u64]
-    state[17] = nr[1u64]
-
-    z
 
 # ============================================================================
 # Public API: zuc_keystream
@@ -819,13 +749,73 @@ fn zuc_keystream(key: [u8], iv: [u8], num_words: u64) -> [u32]:
 
     Returns: list of num_words u32 keystream words (big-endian word order,
              MSB of each word is the first bit of the keystream).
+
+    All state mutations are inlined here to work around interpreter array-mutation
+    boundary limitation (mutations to arrays passed as fn args don't propagate back).
     """
     var state = _zuc_load_state(key, iv)
-    _zuc_initialize(state)
+
+    # === inline _zuc_initialize: 32 init rounds (TS 35.221 §3.4) ===
+    var round: u64 = 0
+    while round < 32:
+        val r1 = state[16]
+        val r2 = state[17]
+        val x = _bit_reorg(state)
+        val w = _f_out_w(x[0u64], r1, r2)
+        val nr = _f_update(x[1u64], x[2u64], r1, r2)
+        # inlined _lfsr_with_init_mode
+        val _fb_i = _lfsr_feedback(state) + ((w >> 1) & 0x7FFFFFFFu32).to_u64()
+        val _new_s_i = _mod31(_fb_i)
+        var _li: u64 = 0
+        while _li < 15:
+            state[_li] = state[_li + 1u64]
+            _li = _li + 1
+        state[15] = _new_s_i
+        state[16] = nr[0u64]
+        state[17] = nr[1u64]
+        round = round + 1
+
+    # post-init discarded round (TS 35.221 §3.4)
+    val ri1 = state[16]
+    val ri2 = state[17]
+    val xi = _bit_reorg(state)
+    val nri = _f_update(xi[1u64], xi[2u64], ri1, ri2)
+    # inlined _lfsr_with_work_mode
+    val _fb_w1 = _lfsr_feedback(state)
+    var _new_s_w1 = _mod31(_fb_w1)
+    if _new_s_w1 == 0u32:
+        _new_s_w1 = 0x7FFFFFFFu32
+    var _lw1: u64 = 0
+    while _lw1 < 15:
+        state[_lw1] = state[_lw1 + 1u64]
+        _lw1 = _lw1 + 1
+    state[15] = _new_s_w1
+    state[16] = nri[0u64]
+    state[17] = nri[1u64]
+
+    # === inline _zuc_run_32: keystream generation loop ===
     var ks: [u32] = []
     var i: u64 = 0
     while i < num_words:
-        ks.push(_zuc_run_32(state))
+        val rr1 = state[16]
+        val rr2 = state[17]
+        val xx = _bit_reorg(state)
+        val ww = _f_out_w(xx[0u64], rr1, rr2)
+        val nrr = _f_update(xx[1u64], xx[2u64], rr1, rr2)
+        val z = ww ^ xx[3u64]
+        # inlined _lfsr_with_work_mode
+        val _fb_w2 = _lfsr_feedback(state)
+        var _new_s_w2 = _mod31(_fb_w2)
+        if _new_s_w2 == 0u32:
+            _new_s_w2 = 0x7FFFFFFFu32
+        var _lw2: u64 = 0
+        while _lw2 < 15:
+            state[_lw2] = state[_lw2 + 1u64]
+            _lw2 = _lw2 + 1
+        state[15] = _new_s_w2
+        state[16] = nrr[0u64]
+        state[17] = nrr[1u64]
+        ks.push(z)
         i = i + 1
     ks
 

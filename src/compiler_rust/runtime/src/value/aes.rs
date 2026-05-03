@@ -235,11 +235,11 @@ unsafe fn x86_encrypt_block_with_expanded(
     }
 
     let load_key = |round: usize| -> __m128i {
-        let ptr = expanded_key[round * AES_BLOCK_LEN..].as_ptr() as *const __m128i;
+        let ptr = expanded_key[round * AES_BLOCK_LEN..].as_ptr().cast::<__m128i>();
         unsafe { _mm_loadu_si128(ptr) }
     };
 
-    let mut state = unsafe { _mm_loadu_si128(block.as_ptr() as *const __m128i) };
+    let mut state = unsafe { _mm_loadu_si128(block.as_ptr().cast::<__m128i>()) };
     state = _mm_xor_si128(state, load_key(0));
     for round in 1..num_rounds {
         state = _mm_aesenc_si128(state, load_key(round));
@@ -247,7 +247,7 @@ unsafe fn x86_encrypt_block_with_expanded(
     state = _mm_aesenclast_si128(state, load_key(num_rounds));
 
     let mut output = [0u8; AES_BLOCK_LEN];
-    unsafe { _mm_storeu_si128(output.as_mut_ptr() as *mut __m128i, state) };
+    unsafe { _mm_storeu_si128(output.as_mut_ptr().cast::<__m128i>(), state) };
     Some(output)
 }
 
@@ -268,11 +268,11 @@ unsafe fn x86_decrypt_block_with_expanded(
     }
 
     let load_key = |round: usize| -> __m128i {
-        let ptr = expanded_key[round * AES_BLOCK_LEN..].as_ptr() as *const __m128i;
+        let ptr = expanded_key[round * AES_BLOCK_LEN..].as_ptr().cast::<__m128i>();
         unsafe { _mm_loadu_si128(ptr) }
     };
 
-    let mut state = unsafe { _mm_loadu_si128(block.as_ptr() as *const __m128i) };
+    let mut state = unsafe { _mm_loadu_si128(block.as_ptr().cast::<__m128i>()) };
     state = _mm_xor_si128(state, load_key(num_rounds));
     for round in (1..num_rounds).rev() {
         state = _mm_aesdec_si128(state, _mm_aesimc_si128(load_key(round)));
@@ -280,7 +280,7 @@ unsafe fn x86_decrypt_block_with_expanded(
     state = _mm_aesdeclast_si128(state, load_key(0));
 
     let mut output = [0u8; AES_BLOCK_LEN];
-    unsafe { _mm_storeu_si128(output.as_mut_ptr() as *mut __m128i, state) };
+    unsafe { _mm_storeu_si128(output.as_mut_ptr().cast::<__m128i>(), state) };
     Some(output)
 }
 

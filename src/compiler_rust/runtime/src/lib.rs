@@ -61,17 +61,26 @@ pub mod parallel;
 pub mod sandbox;
 pub mod value;
 
+// Keep a small set of dynamic-loader exports alive only when static runtime
+// symbol registration is enabled. Tiny standalone binaries do not need these
+// roots, and retaining them defeats section GC in the minimal app lane.
+#[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_DECISION_PROBE: extern "C" fn(u64, bool) = value::rt_decision_probe;
+#[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_CONDITION_PROBE: extern "C" fn(u64, u32, bool) = value::rt_condition_probe;
+#[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_PATH_PROBE: extern "C" fn(u64, u32) = value::rt_path_probe;
+#[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_RAW_U64_TO_STRING: extern "C" fn(i64) -> RuntimeValue = value::rt_raw_u64_to_string;
+#[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_DYN_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i64) -> u64 =
     rt_dyn_torch_tensor_from_bits_1d;
+#[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_PS_TORCH_TENSOR_FROM_BITS_1D: extern "C" fn(*const i64, i64) -> u64 =
     rt_ps_torch_tensor_from_bits_1d;
