@@ -173,8 +173,10 @@ fn test_determine_test_path_with_explicit_path() {
     use simple_driver::cli::test_runner::TestOptions;
     use std::path::PathBuf;
 
-    let mut options = TestOptions::default();
-    options.path = Some(PathBuf::from("custom/path"));
+    let options = TestOptions {
+        path: Some(PathBuf::from("custom/path")),
+        ..Default::default()
+    };
 
     // The function should return the explicit path
     assert!(options.path.is_some());
@@ -268,7 +270,7 @@ fn test_shuffle_with_same_seed_produces_same_order() {
 
 #[test]
 fn test_shuffle_with_different_seed_produces_different_order() {
-    let original = vec![
+    let original = [
         PathBuf::from("a.spl"),
         PathBuf::from("b.spl"),
         PathBuf::from("c.spl"),
@@ -339,8 +341,10 @@ fn test_run_tests_with_no_test_files() {
     let test_dir = temp_dir.path().join("test");
     fs::create_dir_all(&test_dir).unwrap();
 
-    let mut options = TestOptions::default();
-    options.path = Some(test_dir);
+    let options = TestOptions {
+        path: Some(test_dir),
+        ..Default::default()
+    };
 
     // Running with no test files should succeed with 0 tests
     // (Would need to call run_tests - this is a placeholder)
@@ -388,8 +392,10 @@ fn test_run_tests_counts_passed_and_failed() {
 fn test_run_tests_respects_list_flag() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.list = true;
+    let options = TestOptions {
+        list: true,
+        ..Default::default()
+    };
 
     // Should list tests without running
     assert!(options.list);
@@ -399,8 +405,10 @@ fn test_run_tests_respects_list_flag() {
 fn test_run_tests_respects_show_tags_flag() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.show_tags = true;
+    let options = TestOptions {
+        show_tags: true,
+        ..Default::default()
+    };
 
     // Should show tags in output
     assert!(options.show_tags);
@@ -410,8 +418,10 @@ fn test_run_tests_respects_show_tags_flag() {
 fn test_run_tests_safe_mode() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.safe_mode = true;
+    let options = TestOptions {
+        safe_mode: true,
+        ..Default::default()
+    };
 
     // Should run each test file in separate process
     assert!(options.safe_mode);
@@ -421,8 +431,10 @@ fn test_run_tests_safe_mode() {
 fn test_run_tests_parallel_mode() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.parallel = true;
+    let options = TestOptions {
+        parallel: true,
+        ..Default::default()
+    };
 
     // Should run tests in parallel
     assert!(options.parallel);
@@ -432,8 +444,10 @@ fn test_run_tests_parallel_mode() {
 fn test_run_tests_with_safe_mode_timeout() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.safe_mode_timeout = 60; // 60 second timeout
+    let options = TestOptions {
+        safe_mode_timeout: 60, // 60 second timeout
+        ..Default::default()
+    };
 
     // Tests exceeding timeout should fail
     assert_eq!(options.safe_mode_timeout, 60);
@@ -443,8 +457,10 @@ fn test_run_tests_with_safe_mode_timeout() {
 fn test_run_tests_shuffle_mode() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.seed = Some(12345);
+    let options = TestOptions {
+        seed: Some(12345),
+        ..Default::default()
+    };
 
     // Tests should run in shuffled order when seed is set
     assert!(options.seed.is_some());
@@ -454,8 +470,10 @@ fn test_run_tests_shuffle_mode() {
 fn test_run_tests_with_tag_filter() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.tag = Some("integration".to_string());
+    let options = TestOptions {
+        tag: Some("integration".to_string()),
+        ..Default::default()
+    };
 
     // Should only run tests with matching tag
     assert!(options.tag.is_some());
@@ -465,8 +483,10 @@ fn test_run_tests_with_tag_filter() {
 fn test_run_tests_fail_fast() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.fail_fast = true;
+    let options = TestOptions {
+        fail_fast: true,
+        ..Default::default()
+    };
 
     // Should stop after first failure
     assert!(options.fail_fast);
@@ -476,8 +496,10 @@ fn test_run_tests_fail_fast() {
 fn test_run_tests_profile_mode() {
     use simple_driver::cli::test_runner::TestOptions;
 
-    let mut options = TestOptions::default();
-    options.profile = true;
+    let options = TestOptions {
+        profile: true,
+        ..Default::default()
+    };
 
     // Should collect profiling data
     assert!(options.profile);

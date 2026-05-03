@@ -130,9 +130,15 @@ impl DynamicSymbolProvider {
 
     fn runtime_library_candidates(path: &Path, simd_tier: SimdTier) -> Vec<PathBuf> {
         let mut candidates = Vec::new();
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let use_bare_names = path.parent().is_none();
         for variant in Self::runtime_variant_tiers(simd_tier) {
-            candidates.push(parent.join(Self::variant_library_name(variant)));
+            let variant_name = Self::variant_library_name(variant);
+            if use_bare_names {
+                candidates.push(PathBuf::from(variant_name));
+            } else {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                candidates.push(parent.join(variant_name));
+            }
         }
         candidates.push(path.to_path_buf());
         candidates
@@ -287,6 +293,24 @@ mod tests {
         let names = candidates
             .iter()
             .map(|value| value.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                DynamicSymbolProvider::variant_library_name(SimdTier::X86_64Avx2),
+                DynamicSymbolProvider::variant_library_name(SimdTier::X86_64Sse2),
+                DynamicSymbolProvider::default_library_name().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_default_search_path_keeps_variant_probes_as_bare_names() {
+        let default_path = Path::new(DynamicSymbolProvider::default_library_name());
+        let candidates = DynamicSymbolProvider::runtime_library_candidates(default_path, SimdTier::X86_64Avx512);
+        let names = candidates
+            .iter()
+            .map(|value| value.to_string_lossy().to_string())
             .collect::<Vec<_>>();
         assert_eq!(
             names,
