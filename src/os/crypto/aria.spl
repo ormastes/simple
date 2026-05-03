@@ -299,10 +299,10 @@ fn _diffuse(state: [u8]) -> [u8]:
     out.push(b0  ^ b1  ^ b5  ^ b6  ^ b11 ^ b12 ^ b14)
     out.push(b2  ^ b3  ^ b5  ^ b6  ^ b8  ^ b13 ^ b15)
     out.push(b2  ^ b3  ^ b4  ^ b7  ^ b9  ^ b12 ^ b14)
-    out.push(b1  ^ b2  ^ b6  ^ b7  ^ b9  ^ b11 ^ b14)
-    out.push(b0  ^ b3  ^ b6  ^ b7  ^ b8  ^ b10 ^ b15)
-    out.push(b0  ^ b3  ^ b4  ^ b5  ^ b9  ^ b11 ^ b12)
-    out.push(b1  ^ b2  ^ b4  ^ b5  ^ b8  ^ b10 ^ b13)
+    out.push(b1  ^ b2  ^ b6  ^ b7  ^ b9  ^ b11 ^ b12)
+    out.push(b0  ^ b3  ^ b6  ^ b7  ^ b8  ^ b10 ^ b13)
+    out.push(b0  ^ b3  ^ b4  ^ b5  ^ b9  ^ b11 ^ b14)
+    out.push(b1  ^ b2  ^ b4  ^ b5  ^ b8  ^ b10 ^ b15)
     out
 
 # ============================================================================
@@ -643,21 +643,24 @@ fn aria_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]:
     """
     val klen: u64 = key.len().to_u64()
     val nr: u64 = if klen == 16: 12 else if klen == 24: 14 else: 16
+    val nri: i64 = nr.to_i64()
 
     val rks: [[u8]] = _key_schedule(key)
 
-    # Decryption round keys: dk_i = rks[nr+1-i] for i=1..nr+1
-    # dk1 = ek_{nr+1}, dk2 = DL(ek_nr), ... dk_nr = DL(ek_2), dk_{nr+1} = ek_1
-    # The intermediate decryption keys are diffused versions of the encryption keys.
+    # Decryption round keys (RFC 5794 §2.6):
+    # dk1 = ek_{nr+1}
+    # dk_i = A(ek_{nr+2-i})  for i=2..nr
+    # dk_{nr+1} = ek_1
+    # Build dks indexed 0..nr (size nr+1)
     var dks: [[u8]] = []
-    dks.push(rks[nr.to_i64()])
-    var j: u64 = nr - 1
+    # dk1 = rks[nr]  (ek_{nr+1})
+    dks.push(rks[nri])
+    # dk2..dk_nr = diffuse(rks[nr-1]) .. diffuse(rks[1])
+    var j: i64 = nri - 1
     while j >= 1:
-        dks.push(_diffuse(rks[j.to_i64() - 1]))
-        if j == 1:
-            j = 0
-        else:
-            j = j - 1
+        dks.push(_diffuse(rks[j - 1]))
+        j = j - 1
+    # dk_{nr+1} = rks[0]  (ek_1)
     dks.push(rks[0])
 
     var state: [u8] = _new_buf(16)
@@ -666,26 +669,27 @@ fn aria_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]:
         state.push(_u8_at(ciphertext, i))
         i = i + 1
 
-    # Rounds 1..nr-1 with decryption keys and swapped substitution
-    # For decryption, round parity is flipped vs encryption:
-    # encrypt odd rounds use sub_odd; decrypt round 1 uses sub_even (since it's ek_{nr})
-    var round: u64 = 1
-    while round < nr:
-        val rk: [u8] = dks[round.to_i64() - 1]
+    # Rounds 1..nr-1: XOR dk, substitute (using SL inverse of the corresponding enc round), diffuse
+    # In encryption, round r uses SL1 if r%2==1, SL2 if r%2==0.
+    # In decryption, decrypt round d corresponds to encrypt round (nr+1-d).
+    # SL1 and SL2 are inverses of each other only when combined with diffusion.
+    # Actually ARIA decryption uses the same SL1/SL2 (they are not their own inverses),
+    # but the key property is: A(SL1(x)) = SL1(A(x)) — diffusion commutes with substitution.
+    # So decrypt round d applies the same SL as the corresponding encrypt round (nr+1-d).
+    var round: i64 = 1
+    while round < nri:
+        val rk: [u8] = dks[round - 1]
         val after_xor: [u8] = _xor16(state, rk)
-        # Decrypt round parity: if (nr - round + 1) was odd in encryption, use sub_odd
-        # In encryption, round r used sub_odd if r%2==1. In decryption with reversed key order,
-        # the corresponding encrypt round index is (nr+1 - round).
-        # So: if (nr + 1 - round) % 2 == 1 => sub_odd, else sub_even
-        val enc_round: u64 = nr + 1 - round
+        val enc_round: i64 = nri + 1 - round
         val after_sub: [u8] = if (enc_round % 2) == 1: _sub_sl1(after_xor) else: _sub_sl2(after_xor)
         state = _diffuse(after_sub)
         round = round + 1
 
-    # Final round: XOR key, substitute, XOR key (no diffusion)
-    val rk_nr: [u8] = dks[nr.to_i64() - 1]
+    # Final round: XOR dk_nr, substitute, XOR dk_{nr+1} (no diffusion)
+    val rk_nr: [u8] = dks[nri - 1]
     val after_xor_nr: [u8] = _xor16(state, rk_nr)
-    val enc_round_final: u64 = 1
-    val after_sub_nr: [u8] = if (enc_round_final % 2) == 1: _sub_sl1(after_xor_nr) else: _sub_sl2(after_xor_nr)
-    val rk_final: [u8] = dks[nr.to_i64()]
+    # encrypt final round nr: if nr%2==1 use SL1 else SL2
+    # decrypt final round corresponds to enc round 1 (odd → SL1)
+    val after_sub_nr: [u8] = _sub_sl1(after_xor_nr)
+    val rk_final: [u8] = dks[nri]
     _xor16(after_sub_nr, rk_final)

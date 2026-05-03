@@ -1,0 +1,57 @@
+use app.web_stack_sample.{open_web_stack_sample}
+
+extern fn rt_cli_get_args() -> [text]
+
+val USERNAME = "persist_user"
+val EMAIL = "persist@example.com"
+val PASSWORD = "persist-pass-123"
+val TITLE = "Persistent item"
+val DETAILS = "Created before restart and found after restart"
+
+fn usage():
+    print "Usage: web_stack_sample_persistence_runner.spl <seed|verify> <db-path>"
+
+fn main():
+    val args = rt_cli_get_args() ?? []
+    if args.len() < 4:
+        usage()
+        return
+    val mode = args[2]
+    val path = args[3]
+    if mode == "seed":
+        run_seed(path)
+        return
+    if mode == "verify":
+        run_verify(path)
+        return
+    usage()
+
+fn run_seed(path: text):
+    val app = open_web_stack_sample("simpledb", path)?
+    val register = app.post_register(USERNAME, EMAIL, PASSWORD)?
+    if register.status != 302:
+        panic("register status mismatch")
+    if register.session_id.len() == 0:
+        panic("register session id missing")
+    val item = app.create_item(register.session_id, TITLE, DETAILS)?
+    print "PERSISTENCE_SEEDED user={USERNAME} item={item.title} id={item.id}"
+
+fn run_verify(path: text):
+    val app = open_web_stack_sample("simpledb", path)?
+    val login = app.post_login(USERNAME, PASSWORD)?
+    if login.status != 302:
+        panic("login status mismatch")
+    if login.session_id.len() == 0:
+        panic("login session id missing")
+    val search = app.search_items(login.session_id, "Persistent")?
+    if search.status != 200:
+        panic("search status mismatch")
+    if not search.body.contains(TITLE):
+        panic("title missing after restart")
+    if not search.body.contains(DETAILS):
+        panic("details missing after restart")
+    if not search.body.contains("LOGIN-SUCCESS:{USERNAME}"):
+        panic("login marker missing after restart")
+    if not search.body.contains("SEARCH-HIT:{TITLE}"):
+        panic("search marker missing after restart")
+    print "PERSISTENCE_VERIFIED user={USERNAME} item={TITLE}"

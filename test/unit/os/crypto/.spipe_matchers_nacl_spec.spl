@@ -1,0 +1,598 @@
+# NaCl crypto_box + crypto_secretbox Known-Answer and Round-Trip Tests
+#
+# Tests:
+#   1. crypto_secretbox output length invariant
+#   2. crypto_secretbox round-trip: secretbox then secretbox_open recovers plaintext
+#   3. crypto_secretbox_open auth-fail: modified tag returns empty
+#   4. crypto_secretbox_open auth-fail: modified ciphertext body returns empty
+#   5. crypto_box round-trip: encrypt then decrypt recovers original
+#   6. crypto_box_open auth-fail: tampered ciphertext returns empty
+#   7. crypto_box_keypair: public key derives from secret key
+#   8. crypto_box_beforenm: shared key is 32 bytes and non-zero
+#
+# Key/nonce reuse: same NaCl test vectors as xsalsa20_spec.spl
+#   key:   1b27556473e985d462cd51197a9a46c76009549eac6474f206c4ee0844f68389
+#   nonce: 69696ee955b62b73cd62bda875fc73d68219e0036b7a0b37
+#
+# NOTE: per memory/feedback_it_block_var_mutation.md, byte-array inputs are
+# built in module-level fn helpers so loop pushes persist across calls.
+# NOTE: per memory/feedback_compile_mode_false_greens.md this spec is
+# verified in interpreter mode only.
+
+use std.spipe.*
+use os.crypto.nacl.{
+    crypto_box_keypair,
+    crypto_box_beforenm,
+    crypto_box,
+    crypto_box_open,
+    crypto_secretbox,
+    crypto_secretbox_open
+}
+
+# ============================================================================
+# Hex helpers (module-level)
+# ============================================================================
+
+fn _hex_nibble(n: i64) -> text:
+    if n == 0: "0"
+    else: if n == 1: "1"
+    else: if n == 2: "2"
+    else: if n == 3: "3"
+    else: if n == 4: "4"
+    else: if n == 5: "5"
+    else: if n == 6: "6"
+    else: if n == 7: "7"
+    else: if n == 8: "8"
+    else: if n == 9: "9"
+    else: if n == 10: "a"
+    else: if n == 11: "b"
+    else: if n == 12: "c"
+    else: if n == 13: "d"
+    else: if n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s = ""
+    var i: u64 = 0
+    val n = b.len()
+    while i < n:
+        val byte = b[i].to_i64() & 0xFF
+        s = s + _hex_nibble((byte >> 4) & 0xF)
+        s = s + _hex_nibble(byte & 0xF)
+        i = i + 1
+    s
+
+# ============================================================================
+# Test vector helpers (module-level builders)
+# ============================================================================
+
+# NaCl box7.c key (32 bytes):
+#   1b27556473e985d462cd51197a9a46c76009549eac6474f206c4ee0844f68389
+fn _nacl_key() -> [u8]:
+    var k: [u8] = []
+    var b: u8 = 0x1bu8
+    k.push(b)
+    b = 0x27u8
+    k.push(b)
+    b = 0x55u8
+    k.push(b)
+    b = 0x64u8
+    k.push(b)
+    b = 0x73u8
+    k.push(b)
+    b = 0xe9u8
+    k.push(b)
+    b = 0x85u8
+    k.push(b)
+    b = 0xd4u8
+    k.push(b)
+    b = 0x62u8
+    k.push(b)
+    b = 0xcdu8
+    k.push(b)
+    b = 0x51u8
+    k.push(b)
+    b = 0x19u8
+    k.push(b)
+    b = 0x7au8
+    k.push(b)
+    b = 0x9au8
+    k.push(b)
+    b = 0x46u8
+    k.push(b)
+    b = 0xc7u8
+    k.push(b)
+    b = 0x60u8
+    k.push(b)
+    b = 0x09u8
+    k.push(b)
+    b = 0x54u8
+    k.push(b)
+    b = 0x9eu8
+    k.push(b)
+    b = 0xacu8
+    k.push(b)
+    b = 0x64u8
+    k.push(b)
+    b = 0x74u8
+    k.push(b)
+    b = 0xf2u8
+    k.push(b)
+    b = 0x06u8
+    k.push(b)
+    b = 0xc4u8
+    k.push(b)
+    b = 0xeeu8
+    k.push(b)
+    b = 0x08u8
+    k.push(b)
+    b = 0x44u8
+    k.push(b)
+    b = 0xf6u8
+    k.push(b)
+    b = 0x83u8
+    k.push(b)
+    b = 0x89u8
+    k.push(b)
+    k
+
+# NaCl box7.c nonce (24 bytes):
+#   69696ee955b62b73cd62bda875fc73d68219e0036b7a0b37
+fn _nacl_nonce() -> [u8]:
+    var n: [u8] = []
+    var b: u8 = 0x69u8
+    n.push(b)
+    b = 0x69u8
+    n.push(b)
+    b = 0x6eu8
+    n.push(b)
+    b = 0xe9u8
+    n.push(b)
+    b = 0x55u8
+    n.push(b)
+    b = 0xb6u8
+    n.push(b)
+    b = 0x2bu8
+    n.push(b)
+    b = 0x73u8
+    n.push(b)
+    b = 0xcdu8
+    n.push(b)
+    b = 0x62u8
+    n.push(b)
+    b = 0xbdu8
+    n.push(b)
+    b = 0xa8u8
+    n.push(b)
+    b = 0x75u8
+    n.push(b)
+    b = 0xfcu8
+    n.push(b)
+    b = 0x73u8
+    n.push(b)
+    b = 0xd6u8
+    n.push(b)
+    b = 0x82u8
+    n.push(b)
+    b = 0x19u8
+    n.push(b)
+    b = 0xe0u8
+    n.push(b)
+    b = 0x03u8
+    n.push(b)
+    b = 0x6bu8
+    n.push(b)
+    b = 0x7au8
+    n.push(b)
+    b = 0x0bu8
+    n.push(b)
+    b = 0x37u8
+    n.push(b)
+    n
+
+# Short test message: "hello" as bytes (68 65 6c 6c 6f)
+fn _hello_msg() -> [u8]:
+    var m: [u8] = []
+    var b: u8 = 0x68u8
+    m.push(b)
+    b = 0x65u8
+    m.push(b)
+    b = 0x6cu8
+    m.push(b)
+    b = 0x6cu8
+    m.push(b)
+    b = 0x6fu8
+    m.push(b)
+    m
+
+# A second (different) 32-byte key — all 0x42
+fn _alt_key() -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        var b: u8 = 0x42u8
+        k.push(b)
+        i = i + 1
+    k
+
+# A second (different) 24-byte nonce — all 0x01
+fn _alt_nonce() -> [u8]:
+    var n: [u8] = []
+    var i: u64 = 0
+    while i < 24:
+        var b: u8 = 0x01u8
+        n.push(b)
+        i = i + 1
+    n
+
+# Zero bytes of length n
+fn _zeros(n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        var b: u8 = 0u8
+        out.push(b)
+        i = i + 1
+    out
+
+# A 32-byte seed for keypair (ascending bytes 0x01..0x20)
+fn _seed32() -> [u8]:
+    var k: [u8] = []
+    var b: u8 = 0x01u8
+    k.push(b)
+    b = 0x02u8
+    k.push(b)
+    b = 0x03u8
+    k.push(b)
+    b = 0x04u8
+    k.push(b)
+    b = 0x05u8
+    k.push(b)
+    b = 0x06u8
+    k.push(b)
+    b = 0x07u8
+    k.push(b)
+    b = 0x08u8
+    k.push(b)
+    b = 0x09u8
+    k.push(b)
+    b = 0x0au8
+    k.push(b)
+    b = 0x0bu8
+    k.push(b)
+    b = 0x0cu8
+    k.push(b)
+    b = 0x0du8
+    k.push(b)
+    b = 0x0eu8
+    k.push(b)
+    b = 0x0fu8
+    k.push(b)
+    b = 0x10u8
+    k.push(b)
+    b = 0x11u8
+    k.push(b)
+    b = 0x12u8
+    k.push(b)
+    b = 0x13u8
+    k.push(b)
+    b = 0x14u8
+    k.push(b)
+    b = 0x15u8
+    k.push(b)
+    b = 0x16u8
+    k.push(b)
+    b = 0x17u8
+    k.push(b)
+    b = 0x18u8
+    k.push(b)
+    b = 0x19u8
+    k.push(b)
+    b = 0x1au8
+    k.push(b)
+    b = 0x1bu8
+    k.push(b)
+    b = 0x1cu8
+    k.push(b)
+    b = 0x1du8
+    k.push(b)
+    b = 0x1eu8
+    k.push(b)
+    b = 0x1fu8
+    k.push(b)
+    b = 0x20u8
+    k.push(b)
+    k
+
+# A different 32-byte seed for the peer (descending: 0x20..0x01)
+fn _peer_seed32() -> [u8]:
+    var k: [u8] = []
+    var b: u8 = 0x20u8
+    k.push(b)
+    b = 0x1fu8
+    k.push(b)
+    b = 0x1eu8
+    k.push(b)
+    b = 0x1du8
+    k.push(b)
+    b = 0x1cu8
+    k.push(b)
+    b = 0x1bu8
+    k.push(b)
+    b = 0x1au8
+    k.push(b)
+    b = 0x19u8
+    k.push(b)
+    b = 0x18u8
+    k.push(b)
+    b = 0x17u8
+    k.push(b)
+    b = 0x16u8
+    k.push(b)
+    b = 0x15u8
+    k.push(b)
+    b = 0x14u8
+    k.push(b)
+    b = 0x13u8
+    k.push(b)
+    b = 0x12u8
+    k.push(b)
+    b = 0x11u8
+    k.push(b)
+    b = 0x10u8
+    k.push(b)
+    b = 0x0fu8
+    k.push(b)
+    b = 0x0eu8
+    k.push(b)
+    b = 0x0du8
+    k.push(b)
+    b = 0x0cu8
+    k.push(b)
+    b = 0x0bu8
+    k.push(b)
+    b = 0x0au8
+    k.push(b)
+    b = 0x09u8
+    k.push(b)
+    b = 0x08u8
+    k.push(b)
+    b = 0x07u8
+    k.push(b)
+    b = 0x06u8
+    k.push(b)
+    b = 0x05u8
+    k.push(b)
+    b = 0x04u8
+    k.push(b)
+    b = 0x03u8
+    k.push(b)
+    b = 0x02u8
+    k.push(b)
+    b = 0x01u8
+    k.push(b)
+    k
+
+# ============================================================================
+# crypto_secretbox — output length invariant
+# ============================================================================
+
+describe "crypto_secretbox — output length":
+
+    it "secretbox output is 16 + len(msg) bytes":
+        val msg = _hello_msg()
+        val boxed = crypto_secretbox(msg, _nacl_nonce(), _nacl_key())
+        expect boxed.len() == 21
+
+    it "secretbox of empty message is exactly 16 bytes (tag only)":
+        val empty: [u8] = []
+        val boxed = crypto_secretbox(empty, _nacl_nonce(), _nacl_key())
+        expect boxed.len() == 16
+
+    it "secretbox output is not all zeros (non-trivial)":
+        val msg = _hello_msg()
+        val boxed = crypto_secretbox(msg, _nacl_nonce(), _nacl_key())
+        var all_zero = true
+        var i: u64 = 0
+        while i < boxed.len():
+            if boxed[i] != 0u8:
+                all_zero = false
+            i = i + 1
+        expect all_zero == false
+
+# ============================================================================
+# crypto_secretbox + crypto_secretbox_open — round-trip
+# ============================================================================
+
+describe "crypto_secretbox round-trip":
+
+    it "secretbox then secretbox_open recovers original message":
+        val msg = _hello_msg()
+        val boxed = crypto_secretbox(msg, _nacl_nonce(), _nacl_key())
+        val recovered = crypto_secretbox_open(boxed, _nacl_nonce(), _nacl_key())
+        expect _bytes_hex(recovered) == _bytes_hex(msg)
+
+    it "round-trip with empty message":
+        val empty: [u8] = []
+        val boxed = crypto_secretbox(empty, _nacl_nonce(), _nacl_key())
+        val recovered = crypto_secretbox_open(boxed, _nacl_nonce(), _nacl_key())
+        expect recovered.len() == 0
+
+    it "round-trip with alt key and nonce":
+        val msg = _hello_msg()
+        val boxed = crypto_secretbox(msg, _alt_nonce(), _alt_key())
+        val recovered = crypto_secretbox_open(boxed, _alt_nonce(), _alt_key())
+        expect _bytes_hex(recovered) == _bytes_hex(msg)
+
+    it "different keys produce different ciphertexts":
+        val msg = _hello_msg()
+        val boxed1 = crypto_secretbox(msg, _nacl_nonce(), _nacl_key())
+        val boxed2 = crypto_secretbox(msg, _nacl_nonce(), _alt_key())
+        expect _bytes_hex(boxed1) == _bytes_hex(boxed2) == false
+
+# ============================================================================
+# crypto_secretbox_open — authentication failure
+# ============================================================================
+
+describe "crypto_secretbox_open — auth failure":
+
+    it "modified tag byte returns empty":
+        val msg = _hello_msg()
+        val boxed = crypto_secretbox(msg, _nacl_nonce(), _nacl_key())
+        # Flip first byte of tag
+        var tampered: [u8] = []
+        tampered.push(boxed[0] ^ 0x01u8)
+        var i: u64 = 1
+        while i < boxed.len():
+            tampered.push(boxed[i])
+            i = i + 1
+        val result = crypto_secretbox_open(tampered, _nacl_nonce(), _nacl_key())
+        expect result.len() == 0
+
+    it "modified ciphertext body returns empty":
+        val msg = _hello_msg()
+        val boxed = crypto_secretbox(msg, _nacl_nonce(), _nacl_key())
+        # Flip a byte in the ciphertext body (after the 16-byte tag)
+        var tampered: [u8] = []
+        var i: u64 = 0
+        while i < boxed.len():
+            if i == 16:
+                tampered.push(boxed[i] ^ 0xffu8)
+            else:
+                tampered.push(boxed[i])
+            i = i + 1
+        val result = crypto_secretbox_open(tampered, _nacl_nonce(), _nacl_key())
+        expect result.len() == 0
+
+    it "wrong key returns empty":
+        val msg = _hello_msg()
+        val boxed = crypto_secretbox(msg, _nacl_nonce(), _nacl_key())
+        val result = crypto_secretbox_open(boxed, _nacl_nonce(), _alt_key())
+        expect result.len() == 0
+
+    it "wrong nonce returns empty":
+        val msg = _hello_msg()
+        val boxed = crypto_secretbox(msg, _nacl_nonce(), _nacl_key())
+        val result = crypto_secretbox_open(boxed, _alt_nonce(), _nacl_key())
+        expect result.len() == 0
+
+    it "too-short ciphertext returns empty":
+        val short: [u8] = _zeros(10)
+        val result = crypto_secretbox_open(short, _nacl_nonce(), _nacl_key())
+        expect result.len() == 0
+
+# ============================================================================
+# crypto_box_keypair
+# ============================================================================
+
+describe "crypto_box_keypair":
+
+    it "returns a list of two 32-byte arrays":
+        val kp = crypto_box_keypair(_seed32())
+        expect kp.len() == 2
+        expect kp[0].len() == 32
+        expect kp[1].len() == 32
+
+    it "secret key matches the seed":
+        val seed = _seed32()
+        val kp = crypto_box_keypair(seed)
+        expect _bytes_hex(kp[0]) == _bytes_hex(seed)
+
+    it "public key is non-zero":
+        val kp = crypto_box_keypair(_seed32())
+        var all_zero = true
+        var i: u64 = 0
+        while i < 32:
+            if kp[1][i] != 0u8:
+                all_zero = false
+            i = i + 1
+        expect all_zero == false
+
+    it "different seeds produce different public keys":
+        val kp1 = crypto_box_keypair(_seed32())
+        val kp2 = crypto_box_keypair(_peer_seed32())
+        expect _bytes_hex(kp1[1]) == _bytes_hex(kp2[1]) == false
+
+# ============================================================================
+# crypto_box_beforenm
+# ============================================================================
+
+describe "crypto_box_beforenm":
+
+    it "shared key is 32 bytes":
+        val kp1 = crypto_box_keypair(_seed32())
+        val kp2 = crypto_box_keypair(_peer_seed32())
+        val shared = crypto_box_beforenm(kp1[0], kp2[1])
+        expect shared.len() == 32
+
+    it "shared key is non-zero":
+        val kp1 = crypto_box_keypair(_seed32())
+        val kp2 = crypto_box_keypair(_peer_seed32())
+        val shared = crypto_box_beforenm(kp1[0], kp2[1])
+        var all_zero = true
+        var i: u64 = 0
+        while i < 32:
+            if shared[i] != 0u8:
+                all_zero = false
+            i = i + 1
+        expect all_zero == false
+
+    it "DH is commutative: beforenm(sk1, pk2) == beforenm(sk2, pk1)":
+        val kp1 = crypto_box_keypair(_seed32())
+        val kp2 = crypto_box_keypair(_peer_seed32())
+        val shared_a = crypto_box_beforenm(kp1[0], kp2[1])
+        val shared_b = crypto_box_beforenm(kp2[0], kp1[1])
+        expect _bytes_hex(shared_a) == _bytes_hex(shared_b)
+
+# ============================================================================
+# crypto_box + crypto_box_open — round-trip
+# ============================================================================
+
+describe "crypto_box round-trip":
+
+    it "crypto_box then crypto_box_open recovers original message":
+        val kp1 = crypto_box_keypair(_seed32())
+        val kp2 = crypto_box_keypair(_peer_seed32())
+        val msg = _hello_msg()
+        val boxed = crypto_box(msg, _nacl_nonce(), kp1[0], kp2[1])
+        val recovered = crypto_box_open(boxed, _nacl_nonce(), kp2[0], kp1[1])
+        expect _bytes_hex(recovered) == _bytes_hex(msg)
+
+    it "crypto_box output length is 16 + len(msg)":
+        val kp1 = crypto_box_keypair(_seed32())
+        val kp2 = crypto_box_keypair(_peer_seed32())
+        val msg = _hello_msg()
+        val boxed = crypto_box(msg, _nacl_nonce(), kp1[0], kp2[1])
+        expect boxed.len() == 21
+
+# ============================================================================
+# crypto_box_open — authentication failure
+# ============================================================================
+
+describe "crypto_box_open — auth failure":
+
+    it "modified ciphertext returns empty":
+        val kp1 = crypto_box_keypair(_seed32())
+        val kp2 = crypto_box_keypair(_peer_seed32())
+        val msg = _hello_msg()
+        val boxed = crypto_box(msg, _nacl_nonce(), kp1[0], kp2[1])
+        # Flip a byte in the ciphertext body
+        var tampered: [u8] = []
+        var i: u64 = 0
+        while i < boxed.len():
+            if i == 16:
+                tampered.push(boxed[i] ^ 0xffu8)
+            else:
+                tampered.push(boxed[i])
+            i = i + 1
+        val result = crypto_box_open(tampered, _nacl_nonce(), kp2[0], kp1[1])
+        expect result.len() == 0
+
+    it "wrong recipient key returns empty":
+        val kp1 = crypto_box_keypair(_seed32())
+        val kp2 = crypto_box_keypair(_peer_seed32())
+        val kp3 = crypto_box_keypair(_alt_key())
+        val msg = _hello_msg()
+        val boxed = crypto_box(msg, _nacl_nonce(), kp1[0], kp2[1])
+        val result = crypto_box_open(boxed, _nacl_nonce(), kp3[0], kp1[1])
+        expect result.len() == 0

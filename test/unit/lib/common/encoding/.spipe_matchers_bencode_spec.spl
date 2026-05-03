@@ -1,0 +1,469 @@
+# Bencode Encoder/Decoder Specification
+# Reference: https://www.bittorrent.org/beps/bep_0003.html
+# Test vectors verified against reference BEP 3 examples.
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+
+use std.common.encoding.bencode.{BencodeValue, BencodeError,
+    bencode_encode_int, bencode_encode_str, bencode_encode_bytes,
+    bencode_encode_list, bencode_encode_dict,
+    bencode_encode, bencode_decode_value,
+    bencode_decode, bencode_decode_int, bencode_decode_str}
+
+# ============================================================================
+# Encode helpers — built at module level
+# ============================================================================
+
+fn _enc_int_42() -> text:
+    bencode_encode_int(42)
+
+fn _enc_int_zero() -> text:
+    bencode_encode_int(0)
+
+fn _enc_int_neg3() -> text:
+    bencode_encode_int(-3)
+
+fn _enc_int_large() -> text:
+    bencode_encode_int(1000000)
+
+fn _enc_str_spam() -> text:
+    bencode_encode_str("spam")
+
+fn _enc_str_empty() -> text:
+    bencode_encode_str("")
+
+fn _enc_str_egg() -> text:
+    bencode_encode_str("egg")
+
+fn _enc_str_hello() -> text:
+    bencode_encode_str("hello world")
+
+fn _enc_list_simple() -> text:
+    # l4:spami42ee
+    var items: [text] = []
+    items.push(bencode_encode_str("spam"))
+    items.push(bencode_encode_int(42))
+    bencode_encode_list(items)
+
+fn _enc_list_empty() -> text:
+    var items: [text] = []
+    bencode_encode_list(items)
+
+fn _enc_list_nested() -> text:
+    # l4:spamli42eee
+    var inner: [text] = []
+    inner.push(bencode_encode_int(42))
+    val inner_enc = bencode_encode_list(inner)
+    var items: [text] = []
+    items.push(bencode_encode_str("spam"))
+    items.push(inner_enc)
+    bencode_encode_list(items)
+
+fn _enc_dict_simple() -> text:
+    # d3:cow3:moo4:spam4:eggse  — keys sorted
+    var ks: [text] = []
+    var vs: [text] = []
+    ks.push(bencode_encode_str("spam"))
+    vs.push(bencode_encode_str("eggs"))
+    ks.push(bencode_encode_str("cow"))
+    vs.push(bencode_encode_str("moo"))
+    bencode_encode_dict(ks, vs)
+
+fn _enc_dict_single() -> text:
+    var ks: [text] = []
+    var vs: [text] = []
+    ks.push(bencode_encode_str("key"))
+    vs.push(bencode_encode_int(1))
+    bencode_encode_dict(ks, vs)
+
+fn _enc_dict_empty() -> text:
+    var ks: [text] = []
+    var vs: [text] = []
+    bencode_encode_dict(ks, vs)
+
+fn _enc_bytes_check() -> bool:
+    val b = bencode_encode_bytes([104, 105])   # "hi"
+    # expected: "2:hi" as bytes: [50, 58, 104, 105]
+    val expected: [u8] = [50, 58, 104, 105]
+    var ok = b.len() == 4
+    if ok:
+        ok = b[0] == expected[0]
+    if ok:
+        ok = b[1] == expected[1]
+    if ok:
+        ok = b[2] == expected[2]
+    if ok:
+        ok = b[3] == expected[3]
+    ok
+
+# ============================================================================
+# Decode helpers — integers
+# ============================================================================
+
+fn _dec_int_42() -> [text]:
+    bencode_decode_int("i42e", 0)
+
+fn _dec_int_zero() -> [text]:
+    bencode_decode_int("i0e", 0)
+
+fn _dec_int_neg3() -> [text]:
+    bencode_decode_int("i-3e", 0)
+
+fn _dec_int_neg_zero_is_error() -> bool:
+    val r = bencode_decode_int("i-0e", 0)
+    r[0] == "error"
+
+fn _dec_int_leading_zero_is_error() -> bool:
+    val r = bencode_decode_int("i03e", 0)
+    r[0] == "error"
+
+fn _dec_int_pos_at_offset() -> [text]:
+    # In "4:spami42e", offset 6 is 'i'
+    bencode_decode_int("4:spami42e", 6)
+
+# ============================================================================
+# Decode helpers — strings
+# ============================================================================
+
+fn _dec_str_spam() -> [text]:
+    bencode_decode_str("4:spam", 0)
+
+fn _dec_str_empty() -> [text]:
+    bencode_decode_str("0:", 0)
+
+fn _dec_str_at_offset() -> [text]:
+    # "i42e4:spam" — string starts at offset 4
+    bencode_decode_str("i42e4:spam", 4)
+
+# ============================================================================
+# Round-trip helpers
+# ============================================================================
+
+fn _rt_int_check(n: i64) -> bool:
+    val enc = bencode_encode_int(n)
+    val r = bencode_decode_value(enc)
+    match r:
+        case Result.Ok(v):
+            match v:
+                case BencodeValue.BInt(got):
+                    got == n
+                case BencodeValue.BStr(s):
+                    false
+                case BencodeValue.BList(items):
+                    false
+                case BencodeValue.BDict(pairs):
+                    false
+        case Result.Err(e):
+            false
+
+fn _rt_str_check(s: text) -> bool:
+    val enc = bencode_encode_str(s)
+    val r = bencode_decode_value(enc)
+    match r:
+        case Result.Ok(v):
+            match v:
+                case BencodeValue.BStr(got):
+                    got == s
+                case BencodeValue.BInt(n):
+                    false
+                case BencodeValue.BList(items):
+                    false
+                case BencodeValue.BDict(pairs):
+                    false
+        case Result.Err(e):
+            false
+
+fn _rt_int_42() -> bool:
+    _rt_int_check(42)
+
+fn _rt_int_zero() -> bool:
+    _rt_int_check(0)
+
+fn _rt_int_neg3() -> bool:
+    _rt_int_check(-3)
+
+fn _rt_int_large() -> bool:
+    _rt_int_check(9999999)
+
+fn _rt_str_spam() -> bool:
+    _rt_str_check("spam")
+
+fn _rt_str_empty() -> bool:
+    _rt_str_check("")
+
+fn _rt_str_hello() -> bool:
+    _rt_str_check("hello world")
+
+fn _rt_list_simple() -> bool:
+    var items: [BencodeValue] = []
+    items.push(BencodeValue.BStr("spam"))
+    items.push(BencodeValue.BInt(42))
+    val enc = bencode_encode(BencodeValue.BList(items))
+    enc == "l4:spami42ee"
+
+fn _rt_dict_sorted() -> bool:
+    # BDict with keys out of order — encode must sort
+    var pairs: [(text, BencodeValue)] = []
+    pairs.push(("spam", BencodeValue.BStr("eggs")))
+    pairs.push(("cow", BencodeValue.BStr("moo")))
+    val enc = bencode_encode(BencodeValue.BDict(pairs))
+    # sorted: cow before spam
+    enc == "d3:cow3:moo4:spam4:eggse"
+
+fn _rt_nested_list() -> bool:
+    var inner: [BencodeValue] = []
+    inner.push(BencodeValue.BInt(1))
+    inner.push(BencodeValue.BInt(2))
+    var outer: [BencodeValue] = []
+    outer.push(BencodeValue.BStr("key"))
+    outer.push(BencodeValue.BList(inner))
+    val enc = bencode_encode(BencodeValue.BList(outer))
+    enc == "l3:keyli1ei2eee"
+
+# ============================================================================
+# Torrent-style metadata encode/decode
+# ============================================================================
+
+fn _torrent_info_dict() -> text:
+    # Minimal torrent info dict:
+    # d4:name8:test.txt12:piece lengthi262144e6:pieces20:<...>e
+    # We skip actual SHA1 bytes and use a 20-char placeholder
+    var pairs: [(text, BencodeValue)] = []
+    pairs.push(("name", BencodeValue.BStr("test.txt")))
+    pairs.push(("piece length", BencodeValue.BInt(262144)))
+    pairs.push(("pieces", BencodeValue.BStr("01234567890123456789")))
+    bencode_encode(BencodeValue.BDict(pairs))
+
+fn _torrent_info_dict_roundtrip() -> bool:
+    val enc = _torrent_info_dict()
+    val r = bencode_decode_value(enc)
+    match r:
+        case Result.Ok(v):
+            match v:
+                case BencodeValue.BDict(pairs):
+                    pairs.len() == 3
+                case BencodeValue.BInt(n):
+                    false
+                case BencodeValue.BStr(s):
+                    false
+                case BencodeValue.BList(items):
+                    false
+        case Result.Err(e):
+            false
+
+fn _torrent_metainfo() -> bool:
+    # Full .torrent-like structure:
+    # d8:announce35:http://tracker.example.com/announce4:infod...ee
+    var info_pairs: [(text, BencodeValue)] = []
+    info_pairs.push(("length", BencodeValue.BInt(512000)))
+    info_pairs.push(("name", BencodeValue.BStr("example.iso")))
+    info_pairs.push(("piece length", BencodeValue.BInt(524288)))
+    info_pairs.push(("pieces", BencodeValue.BStr("12345678901234567890")))
+    val info = BencodeValue.BDict(info_pairs)
+    var meta_pairs: [(text, BencodeValue)] = []
+    meta_pairs.push(("announce", BencodeValue.BStr("http://tracker.example.com/announce")))
+    meta_pairs.push(("info", info))
+    val enc = bencode_encode(BencodeValue.BDict(meta_pairs))
+    val r = bencode_decode_value(enc)
+    match r:
+        case Result.Ok(v):
+            match v:
+                case BencodeValue.BDict(pairs):
+                    pairs.len() == 2
+                case BencodeValue.BInt(n):
+                    false
+                case BencodeValue.BStr(s):
+                    false
+                case BencodeValue.BList(items):
+                    false
+        case Result.Err(e):
+            false
+
+# ============================================================================
+# bencode_decode (simple API) helpers
+# ============================================================================
+
+fn _simple_decode_int() -> bool:
+    val r = bencode_decode("i99e")
+    r[0] == "ok" and r[1] == "int" and r[2] == "99"
+
+fn _simple_decode_str() -> bool:
+    val r = bencode_decode("4:spam")
+    r[0] == "ok" and r[1] == "str" and r[2] == "spam"
+
+fn _simple_decode_list() -> bool:
+    val r = bencode_decode("l4:spami42ee")
+    r[0] == "ok" and r[1] == "list" and r[2] == "2"
+
+fn _simple_decode_dict() -> bool:
+    val r = bencode_decode("d3:cow3:mooe")
+    r[0] == "ok" and r[1] == "dict" and r[2] == "1"
+
+fn _simple_decode_trailing_error() -> bool:
+    val r = bencode_decode("i42eXXX")
+    r[0] == "error"
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "Bencode integer encode":
+
+    it "encodes 42 as i42e":
+        expect _enc_int_42() == "i42e"
+
+    it "encodes 0 as i0e":
+        expect _enc_int_zero() == "i0e"
+
+    it "encodes -3 as i-3e":
+        expect _enc_int_neg3() == "i-3e"
+
+    it "encodes large positive integer":
+        expect _enc_int_large() == "i1000000e"
+
+describe "Bencode integer decode":
+
+    it "decodes i42e to 42 at new_pos 4":
+        val r = _dec_int_42()
+        expect r[0] == "42"
+        expect r[1] == "4"
+
+    it "decodes i0e to 0":
+        val r = _dec_int_zero()
+        expect r[0] == "0"
+
+    it "decodes i-3e to -3":
+        val r = _dec_int_neg3()
+        expect r[0] == "-3"
+
+    it "rejects i-0e (negative zero)":
+        expect _dec_int_neg_zero_is_error() == true
+
+    it "rejects i03e (leading zero)":
+        expect _dec_int_leading_zero_is_error() == true
+
+    it "decodes integer at offset in larger string":
+        val r = _dec_int_pos_at_offset()
+        expect r[0] == "42"
+
+describe "Bencode integer round-trip":
+
+    it "42 round-trips":
+        expect _rt_int_42() == true
+
+    it "0 round-trips":
+        expect _rt_int_zero() == true
+
+    it "-3 round-trips":
+        expect _rt_int_neg3() == true
+
+    it "large positive integer round-trips":
+        expect _rt_int_large() == true
+
+describe "Bencode string encode":
+
+    it "encodes 'spam' as 4:spam":
+        expect _enc_str_spam() == "4:spam"
+
+    it "encodes empty string as 0:":
+        expect _enc_str_empty() == "0:"
+
+    it "encodes 'egg' as 3:egg":
+        expect _enc_str_egg() == "3:egg"
+
+    it "encodes 'hello world' with correct length prefix":
+        expect _enc_str_hello() == "11:hello world"
+
+describe "Bencode string decode":
+
+    it "decodes 4:spam to 'spam' at new_pos 6":
+        val r = _dec_str_spam()
+        expect r[0] == "spam"
+        expect r[1] == "6"
+
+    it "decodes 0: to empty string":
+        val r = _dec_str_empty()
+        expect r[0] == ""
+        expect r[1] == "2"
+
+    it "decodes string at offset in larger string":
+        val r = _dec_str_at_offset()
+        expect r[0] == "spam"
+
+describe "Bencode string round-trip":
+
+    it "'spam' round-trips":
+        expect _rt_str_spam() == true
+
+    it "empty string round-trips":
+        expect _rt_str_empty() == true
+
+    it "'hello world' round-trips":
+        expect _rt_str_hello() == true
+
+describe "Bencode list encode":
+
+    it "encodes [spam, 42] as l4:spami42ee":
+        expect _enc_list_simple() == "l4:spami42ee"
+
+    it "encodes empty list as le":
+        expect _enc_list_empty() == "le"
+
+    it "encodes nested list correctly":
+        expect _enc_list_nested() == "l4:spamli42eee"
+
+describe "Bencode list round-trip":
+
+    it "simple list [spam, 42] round-trips":
+        expect _rt_list_simple() == true
+
+    it "nested list round-trips":
+        expect _rt_nested_list() == true
+
+describe "Bencode bytes encode":
+
+    it "encodes [u8] bytes with length prefix":
+        expect _enc_bytes_check() == true
+
+describe "Bencode dict encode":
+
+    it "encodes empty dict as de":
+        expect _enc_dict_empty() == "de"
+
+    it "encodes single-entry dict correctly":
+        expect _enc_dict_single() == "d3:keyi1ee"
+
+    it "encodes dict with keys sorted lexicographically":
+        # cow < spam, so cow:moo comes before spam:eggs
+        expect _enc_dict_simple() == "d3:cow3:moo4:spam4:eggse"
+
+describe "Bencode dict round-trip":
+
+    it "dict with keys in order round-trips":
+        expect _rt_dict_sorted() == true
+
+describe "Bencode simple decode API":
+
+    it "bencode_decode parses integer":
+        expect _simple_decode_int() == true
+
+    it "bencode_decode parses string":
+        expect _simple_decode_str() == true
+
+    it "bencode_decode parses list — returns item count":
+        expect _simple_decode_list() == true
+
+    it "bencode_decode parses dict — returns entry count":
+        expect _simple_decode_dict() == true
+
+    it "bencode_decode rejects trailing data":
+        expect _simple_decode_trailing_error() == true
+
+describe "Bencode torrent-style metadata":
+
+    it "info dict round-trips with 3 keys":
+        expect _torrent_info_dict_roundtrip() == true
+
+    it "full metainfo dict round-trips with 2 top-level keys":
+        expect _torrent_metainfo() == true

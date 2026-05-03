@@ -1,0 +1,41 @@
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+val TEST_ROOT = "/tmp/web_stack_sample_persistence_{rt_getpid()}_{rt_time_now_unix_micros()}"
+
+fn test_root() -> text:
+    TEST_ROOT
+
+fn db_path() -> text:
+    test_root() + "/sample.sdn"
+
+fn run_harness(mode: text) -> (text, text, i64):
+    val root = test_root()
+    val stdout_path = root + "/" + mode + ".stdout"
+    val stderr_path = root + "/" + mode + ".stderr"
+    val script =
+        "mkdir -p '" + root + "'; " +
+        "bin/simple run test/integration/app/web_stack_sample_persistence_runner.spl " +
+        mode + " '" + db_path() + "' >'" + stdout_path + "' 2>'" + stderr_path + "'; " +
+        "code=$?; " +
+        "cat '" + stdout_path + "'; " +
+        "cat '" + stderr_path + "' 1>&2; " +
+        "exit $code"
+    rt_process_run("/bin/sh", ["-c", script])
+
+describe "web_stack_sample simpledb restart persistence":
+    it "persists app-surface register create login and search across restart":
+        val seed = run_harness("seed")
+        print "SEED_CODE={seed[2]}"
+        print seed[0]
+        expect(seed[2]).to_equal(0)
+        expect(seed[0]).to_contain("PERSISTENCE_SEEDED")
+        expect(seed[0]).to_contain("item=Persistent item")
+
+        val verify = run_harness("verify")
+        print "VERIFY_CODE={verify[2]}"
+        print verify[0]
+        expect(verify[2]).to_equal(0)
+        expect(verify[0]).to_contain("PERSISTENCE_VERIFIED")
+        expect(verify[0]).to_contain("item=Persistent item")

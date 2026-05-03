@@ -1,0 +1,571 @@
+# Bencode Encoder / Decoder
+# Implements the BitTorrent Bencode format (BEP 3):
+#   https://www.bittorrent.org/beps/bep_0003.html
+#
+# Format summary:
+#   Integer:    i<decimal>e          e.g. i42e, i-3e, i0e
+#   Byte string: <length>:<data>     e.g. 4:spam
+#   List:       l<items>e            e.g. l4:spami42ee
+#   Dictionary: d<key><value>...e    keys are byte strings, sorted lexicographically
+#
+# Strict decoding rules (BEP 3):
+#   - i-0e is invalid (negative zero)
+#   - i03e, i-03e are invalid (leading zeros, except i0e itself)
+#   - Empty byte string 0: is valid
+#   - Dict keys must be byte strings (not integers/lists/dicts)
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# NOTE: `bencode_encode_dict(keys, values)` takes pre-encoded bencode fragments
+# as both keys and values. Keys must be bencode byte-string fragments.
+#
+# Usage:
+#   use std.common.encoding.bencode.{BencodeValue, BencodeError,
+#       bencode_encode, bencode_decode,
+#       bencode_encode_int, bencode_encode_str, bencode_encode_bytes,
+#       bencode_encode_list, bencode_encode_dict,
+#       bencode_decode_int, bencode_decode_str}
+
+# ============================================================================
+# Public types
+# ============================================================================
+
+enum BencodeValue:
+    """Represents any Bencode value.
+
+    Variants (all positional fields):
+      BInt(i64)                       — integer
+      BStr(text)                      — byte string (UTF-8 text)
+      BList([BencodeValue])           — list
+      BDict([(text, BencodeValue)])   — dictionary (key-value pairs, keys are strings)
+    """
+    BInt(i64)
+    BStr(text)
+    BList([BencodeValue])
+    BDict([(text, BencodeValue)])
+
+enum BencodeError:
+    """Represents a Bencode decode error.
+
+    Variants:
+      UnexpectedEnd          — input ends before value is complete
+      InvalidInteger         — malformed integer (leading zeros, negative zero, non-digit)
+      InvalidLength          — byte string length is negative or malformed
+      InvalidChar(i64)       — unexpected character at position
+      InvalidDictKey         — dict key is not a byte string
+      TrailingData           — extra bytes after decoded value
+    """
+    UnexpectedEnd
+    InvalidInteger
+    InvalidLength
+    InvalidChar(i64)
+    InvalidDictKey
+    TrailingData
+
+# ============================================================================
+# Internal decode result struct (avoids enum destructuring in fn body)
+# ============================================================================
+
+struct _BencDecResult:
+    ok: bool
+    value: BencodeValue
+    consumed: i64
+    error: BencodeError
+
+fn _benc_ok(v: BencodeValue, n: i64) -> _BencDecResult:
+    _BencDecResult(ok: true, value: v, consumed: n, error: BencodeError.UnexpectedEnd)
+
+fn _benc_err(e: BencodeError) -> _BencDecResult:
+    _BencDecResult(ok: false, value: BencodeValue.BInt(0), consumed: 0, error: e)
+
+# ============================================================================
+# Text / character helpers
+# ============================================================================
+
+fn _benc_char_at(s: text, i: i64) -> i64:
+    """Return the ordinal of s[i]."""
+    s[i].ord()
+
+fn _benc_is_digit(c: i64) -> bool:
+    c >= 48 and c <= 57
+
+fn _benc_digit_val(c: i64) -> i64:
+    c - 48
+
+fn _benc_char_i() -> i64:
+    105  # 'i'
+
+fn _benc_char_e() -> i64:
+    101  # 'e'
+
+fn _benc_char_l() -> i64:
+    108  # 'l'
+
+fn _benc_char_d() -> i64:
+    100  # 'd'
+
+fn _benc_char_colon() -> i64:
+    58   # ':'
+
+fn _benc_char_minus() -> i64:
+    45   # '-'
+
+fn _benc_char_zero() -> i64:
+    48   # '0'
+
+# ============================================================================
+# Internal sort helper (insertion sort, bytewise lexicographic on text keys)
+# ============================================================================
+
+fn _benc_text_lt(a: text, b: text) -> bool:
+    """Return true if a < b bytewise (ASCII/UTF-8 byte comparison)."""
+    val la = a.length()
+    val lb = b.length()
+    var i = 0
+    var result = false
+    var done = false
+    while (i < la and i < lb and not done):
+        val ca = _benc_char_at(a, i)
+        val cb = _benc_char_at(b, i)
+        if ca < cb:
+            result = true
+            done = true
+        elif ca > cb:
+            done = true
+        else:
+            i = i + 1
+    if not done:
+        result = la < lb
+    result
+
+fn _benc_sort_keys(keys: [text], values: [text]) -> ([text], [text]):
+    """Insertion sort keys (and values in parallel) lexicographically."""
+    val n = keys.len()
+    var sorted_k: [text] = []
+    var sorted_v: [text] = []
+    var i = 0
+    while i < n:
+        sorted_k.push(keys[i])
+        sorted_v.push(values[i])
+        i = i + 1
+    # insertion sort
+    var ii = 1
+    while ii < n:
+        val key_tmp = sorted_k[ii]
+        val val_tmp = sorted_v[ii]
+        var jj = ii - 1
+        while (jj >= 0 and _benc_text_lt(key_tmp, sorted_k[jj])):
+            # shift right — rebuild arrays
+            var nk: [text] = []
+            var nv: [text] = []
+            var kk = 0
+            while kk < sorted_k.len():
+                if kk == jj:
+                    nk.push(sorted_k[jj + 1])
+                    nv.push(sorted_v[jj + 1])
+                elif kk == jj + 1:
+                    nk.push(sorted_k[jj])
+                    nv.push(sorted_v[jj])
+                else:
+                    nk.push(sorted_k[kk])
+                    nv.push(sorted_v[kk])
+                kk = kk + 1
+            sorted_k = nk
+            sorted_v = nv
+            jj = jj - 1
+        ii = ii + 1
+    (sorted_k, sorted_v)
+
+# ============================================================================
+# Encode — text-based API
+# ============================================================================
+
+fn bencode_encode_int(n: i64) -> text:
+    """Encode an integer as bencode: i<n>e"""
+    "i" + n.to_string() + "e"
+
+fn bencode_encode_str(s: text) -> text:
+    """Encode a UTF-8 text value as a bencode byte string: <len>:<s>"""
+    val slen = s.length()
+    slen.to_string() + ":" + s
+
+fn bencode_encode_list(items: [text]) -> text:
+    """Encode a list of pre-encoded bencode fragments: l<items>e"""
+    var result = "l"
+    var i = 0
+    while i < items.len():
+        result = result + items[i]
+        i = i + 1
+    result + "e"
+
+fn bencode_encode_dict(keys: [text], values: [text]) -> text:
+    """Encode a dictionary from pre-encoded bencode key/value fragments.
+    Keys must be bencode byte-string fragments (e.g. '4:spam').
+    Keys are sorted lexicographically by their string content before encoding.
+    Values are pre-encoded bencode fragments."""
+    val sorted = _benc_sort_keys(keys, values)
+    val sorted_k = sorted.0
+    val sorted_v = sorted.1
+    var result = "d"
+    var i = 0
+    while i < sorted_k.len():
+        result = result + sorted_k[i] + sorted_v[i]
+        i = i + 1
+    result + "e"
+
+# ============================================================================
+# Encode — bytes-based API
+# ============================================================================
+
+fn _benc_text_to_bytes(s: text) -> [u8]:
+    """Convert text to [u8] (UTF-8 byte values, masked to 8 bits)."""
+    var result: [u8] = []
+    var i = 0
+    val slen = s.length()
+    while i < slen:
+        val ch = s[i]
+        result.push(ch.ord() & 0xFF)
+        i = i + 1
+    result
+
+fn bencode_encode_bytes(b: [u8]) -> [u8]:
+    """Encode a [u8] slice as a bencode byte string: <len>:<data>"""
+    val blen = b.len()
+    val prefix = blen.to_string() + ":"
+    var result: [u8] = []
+    var i = 0
+    val plen = prefix.length()
+    while i < plen:
+        result.push(prefix[i].ord() & 0xFF)
+        i = i + 1
+    var j = 0
+    while j < blen:
+        result.push(b[j])
+        j = j + 1
+    result
+
+# ============================================================================
+# Decode helpers — integer
+# ============================================================================
+
+fn _benc_decode_int_at(data: text, pos: i64) -> _BencDecResult:
+    """Decode a bencode integer starting at pos (which must be 'i').
+    Returns ok with BInt(value) and consumed = bytes read."""
+    val dlen = data.length()
+    # pos must point to 'i'
+    if pos >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    if _benc_char_at(data, pos) != _benc_char_i():
+        return _benc_err(BencodeError.InvalidChar(pos))
+    val start = pos + 1
+    if start >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    # Parse optional minus sign
+    var cur = start
+    var negative = false
+    if _benc_char_at(data, cur) == _benc_char_minus():
+        negative = true
+        cur = cur + 1
+        if cur >= dlen:
+            return _benc_err(BencodeError.UnexpectedEnd)
+    # Must have at least one digit
+    if not _benc_is_digit(_benc_char_at(data, cur)):
+        return _benc_err(BencodeError.InvalidInteger)
+    # Reject leading zeros: if first digit is '0', next must be 'e'
+    val first_digit = _benc_char_at(data, cur)
+    if first_digit == _benc_char_zero():
+        # i0e is valid, i00e and i-0e are not
+        val next_pos = cur + 1
+        if next_pos >= dlen:
+            return _benc_err(BencodeError.UnexpectedEnd)
+        val next_ch = _benc_char_at(data, next_pos)
+        if next_ch != _benc_char_e():
+            return _benc_err(BencodeError.InvalidInteger)
+        if negative:
+            return _benc_err(BencodeError.InvalidInteger)
+        # i0e => 0
+        val total_consumed = next_pos + 1 - pos
+        return _benc_ok(BencodeValue.BInt(0), total_consumed)
+    # Accumulate digits
+    var n: i64 = 0
+    while (cur < dlen and _benc_is_digit(_benc_char_at(data, cur))):
+        n = n * 10 + _benc_digit_val(_benc_char_at(data, cur))
+        cur = cur + 1
+    # Expect 'e'
+    if cur >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    if _benc_char_at(data, cur) != _benc_char_e():
+        return _benc_err(BencodeError.InvalidInteger)
+    if negative:
+        n = 0 - n
+    val total_consumed = cur + 1 - pos
+    _benc_ok(BencodeValue.BInt(n), total_consumed)
+
+# ============================================================================
+# Decode helpers — byte string
+# ============================================================================
+
+fn _benc_decode_str_at(data: text, pos: i64) -> _BencDecResult:
+    """Decode a bencode byte string starting at pos (which must be a digit).
+    Returns ok with BStr(value) and consumed = bytes read."""
+    val dlen = data.length()
+    if pos >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    if not _benc_is_digit(_benc_char_at(data, pos)):
+        return _benc_err(BencodeError.InvalidChar(pos))
+    # Parse length
+    var cur = pos
+    var slen: i64 = 0
+    while (cur < dlen and _benc_is_digit(_benc_char_at(data, cur))):
+        slen = slen * 10 + _benc_digit_val(_benc_char_at(data, cur))
+        cur = cur + 1
+    # Expect ':'
+    if cur >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    if _benc_char_at(data, cur) != _benc_char_colon():
+        return _benc_err(BencodeError.InvalidLength)
+    cur = cur + 1
+    # Read slen characters
+    if (cur + slen) > dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    val s = data.substring(cur, cur + slen)
+    val total_consumed = cur + slen - pos
+    _benc_ok(BencodeValue.BStr(s), total_consumed)
+
+# ============================================================================
+# Decode helpers — list and dict (forward-declared via mutual recursion workaround)
+# ============================================================================
+
+fn _benc_decode_value_at(data: text, pos: i64) -> _BencDecResult:
+    """Decode any bencode value starting at pos."""
+    val dlen = data.length()
+    if pos >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    val ch = _benc_char_at(data, pos)
+    if ch == _benc_char_i():
+        return _benc_decode_int_at(data, pos)
+    elif ch == _benc_char_l():
+        return _benc_decode_list_at(data, pos)
+    elif ch == _benc_char_d():
+        return _benc_decode_dict_at(data, pos)
+    elif _benc_is_digit(ch):
+        return _benc_decode_str_at(data, pos)
+    else:
+        _benc_err(BencodeError.InvalidChar(pos))
+
+fn _benc_decode_list_at(data: text, pos: i64) -> _BencDecResult:
+    """Decode a bencode list starting at pos (which must be 'l')."""
+    val dlen = data.length()
+    if pos >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    if _benc_char_at(data, pos) != _benc_char_l():
+        return _benc_err(BencodeError.InvalidChar(pos))
+    var cur = pos + 1
+    var items: [BencodeValue] = []
+    var err_result = _benc_err(BencodeError.UnexpectedEnd)
+    var had_error = false
+    while (cur < dlen and _benc_char_at(data, cur) != _benc_char_e() and not had_error):
+        val r = _benc_decode_value_at(data, cur)
+        if not r.ok:
+            err_result = r
+            had_error = true
+        else:
+            items.push(r.value)
+            cur = cur + r.consumed
+    if had_error:
+        return err_result
+    if cur >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    # consume the 'e'
+    val total_consumed = cur + 1 - pos
+    _benc_ok(BencodeValue.BList(items), total_consumed)
+
+fn _benc_decode_dict_at(data: text, pos: i64) -> _BencDecResult:
+    """Decode a bencode dictionary starting at pos (which must be 'd')."""
+    val dlen = data.length()
+    if pos >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    if _benc_char_at(data, pos) != _benc_char_d():
+        return _benc_err(BencodeError.InvalidChar(pos))
+    var cur = pos + 1
+    var pairs: [(text, BencodeValue)] = []
+    var err_result = _benc_err(BencodeError.UnexpectedEnd)
+    var had_error = false
+    while (cur < dlen and _benc_char_at(data, cur) != _benc_char_e() and not had_error):
+        # Key must be a byte string
+        if not _benc_is_digit(_benc_char_at(data, cur)):
+            err_result = _benc_err(BencodeError.InvalidDictKey)
+            had_error = true
+        else:
+            val kr = _benc_decode_str_at(data, cur)
+            if not kr.ok:
+                err_result = kr
+                had_error = true
+            else:
+                val kstr = _benc_extract_str(kr.value)
+                cur = cur + kr.consumed
+                # Now decode value
+                val vr = _benc_decode_value_at(data, cur)
+                if not vr.ok:
+                    err_result = vr
+                    had_error = true
+                else:
+                    pairs.push((kstr, vr.value))
+                    cur = cur + vr.consumed
+    if had_error:
+        return err_result
+    if cur >= dlen:
+        return _benc_err(BencodeError.UnexpectedEnd)
+    val total_consumed = cur + 1 - pos
+    _benc_ok(BencodeValue.BDict(pairs), total_consumed)
+
+fn _benc_extract_str(v: BencodeValue) -> text:
+    """Extract text from BStr; returns empty string for non-BStr (shouldn't occur in dict keys)."""
+    match v:
+        case BencodeValue.BStr(s):
+            s
+        case BencodeValue.BInt(n):
+            ""
+        case BencodeValue.BList(items):
+            ""
+        case BencodeValue.BDict(pairs):
+            ""
+
+# ============================================================================
+# Public decode API
+# ============================================================================
+
+fn bencode_decode_int(data: text, pos: i64) -> [text]:
+    """Decode a bencode integer at pos. Returns [value_as_text, new_pos_as_text]
+    on success, or ["error", error_description] on failure."""
+    val r = _benc_decode_int_at(data, pos)
+    if not r.ok:
+        return ["error", "invalid integer"]
+    val new_pos = pos + r.consumed
+    val v = _benc_int_value(r.value)
+    [v.to_string(), new_pos.to_string()]
+
+fn bencode_decode_str(data: text, pos: i64) -> [text]:
+    """Decode a bencode byte string at pos. Returns [string_value, new_pos_as_text]
+    on success, or ["error", error_description] on failure."""
+    val r = _benc_decode_str_at(data, pos)
+    if not r.ok:
+        return ["error", "invalid string"]
+    val new_pos = pos + r.consumed
+    val s = _benc_extract_str(r.value)
+    [s, new_pos.to_string()]
+
+fn bencode_decode(data: text) -> [text]:
+    """Decode a bencode value from the beginning of data.
+    Returns a flat text representation: ["ok", type, ...fields]
+    where type is "int", "str", "list", or "dict".
+    On error returns ["error", description]."""
+    val r = _benc_decode_value_at(data, 0)
+    if not r.ok:
+        return ["error", "decode failed"]
+    val remaining = data.length() - r.consumed
+    if remaining > 0:
+        return ["error", "trailing data"]
+    _benc_value_to_repr(r.value)
+
+fn _benc_int_value(v: BencodeValue) -> i64:
+    match v:
+        case BencodeValue.BInt(n):
+            n
+        case BencodeValue.BStr(s):
+            0
+        case BencodeValue.BList(items):
+            0
+        case BencodeValue.BDict(pairs):
+            0
+
+fn _benc_value_to_repr(v: BencodeValue) -> [text]:
+    """Convert a BencodeValue to a flat [text] representation."""
+    match v:
+        case BencodeValue.BInt(n):
+            ["ok", "int", n.to_string()]
+        case BencodeValue.BStr(s):
+            ["ok", "str", s]
+        case BencodeValue.BList(items):
+            ["ok", "list", items.len().to_string()]
+        case BencodeValue.BDict(pairs):
+            ["ok", "dict", pairs.len().to_string()]
+
+# ============================================================================
+# Raw-pair sort helper (BEP 3: sort dict keys by raw byte string, not encoded)
+# ============================================================================
+
+fn _benc_sort_pairs(pairs: [(text, BencodeValue)]) -> [(text, BencodeValue)]:
+    """Insertion sort pairs by raw key (bytewise lexicographic), BEP 3 compliant."""
+    val n = pairs.len()
+    var sorted: [(text, BencodeValue)] = []
+    var i = 0
+    while i < n:
+        sorted.push(pairs[i])
+        i = i + 1
+    var ii = 1
+    while ii < n:
+        val key_tmp = sorted[ii].0
+        val val_tmp = sorted[ii].1
+        var jj = ii - 1
+        while (jj >= 0 and _benc_text_lt(key_tmp, sorted[jj].0)):
+            # shift right — rebuild array
+            var ns: [(text, BencodeValue)] = []
+            var kk = 0
+            while kk < sorted.len():
+                if kk == jj:
+                    ns.push(sorted[jj + 1])
+                elif kk == jj + 1:
+                    ns.push(sorted[jj])
+                else:
+                    ns.push(sorted[kk])
+                kk = kk + 1
+            sorted = ns
+            jj = jj - 1
+        ii = ii + 1
+    sorted
+
+# ============================================================================
+# Full-value encode
+# ============================================================================
+
+fn bencode_encode(v: BencodeValue) -> text:
+    """Encode any BencodeValue to a bencode text string."""
+    match v:
+        case BencodeValue.BInt(n):
+            bencode_encode_int(n)
+        case BencodeValue.BStr(s):
+            bencode_encode_str(s)
+        case BencodeValue.BList(items):
+            var parts: [text] = []
+            var i = 0
+            while i < items.len():
+                parts.push(bencode_encode(items[i]))
+                i = i + 1
+            bencode_encode_list(parts)
+        case BencodeValue.BDict(pairs):
+            # Sort pairs by raw key (bytewise) before encoding — BEP 3 requires
+            # lexicographic sort on the raw key bytes, not the pre-encoded form.
+            val sorted_pairs = _benc_sort_pairs(pairs)
+            var result = "d"
+            var i = 0
+            while i < sorted_pairs.len():
+                val p = sorted_pairs[i]
+                result = result + bencode_encode_str(p.0) + bencode_encode(p.1)
+                i = i + 1
+            result + "e"
+
+# ============================================================================
+# Full-value decode
+# ============================================================================
+
+fn bencode_decode_value(data: text) -> Result<BencodeValue, BencodeError>:
+    """Decode a full bencode value, returning Result."""
+    val r = _benc_decode_value_at(data, 0)
+    if not r.ok:
+        return Result.Err(r.error)
+    val remaining = data.length() - r.consumed
+    if remaining > 0:
+        return Result.Err(BencodeError.TrailingData)
+    Result.Ok(r.value)

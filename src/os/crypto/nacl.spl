@@ -1,0 +1,232 @@
+# NaCl crypto_box — Curve25519-XSalsa20-Poly1305
+#
+# Implements the NaCl public-key authenticated encryption API:
+#   crypto_box       = X25519 DH + HSalsa20 subkey + XSalsa20-Poly1305
+#   crypto_secretbox = XSalsa20-Poly1305 symmetric AEAD
+#
+# Construction (Bernstein et al., NaCl 2012):
+#   beforenm(sk, pk)  = HSalsa20(X25519(sk, pk), zero16)
+#   secretbox(m, n, k):
+#     padded = zero32 || m
+#     stream = xsalsa20_encrypt(k, n, padded)
+#     tag    = poly1305_mac(stream[0..32], stream[32..])
+#     output = tag || stream[32..]
+#   secretbox_open(c, n, k):
+#     if len(c) < 16: return []
+#     tag    = c[0..16]; ct = c[16..]
+#     stream = xsalsa20_encrypt(k, n, zero32 || ct)
+#     expected = poly1305_mac(stream[0..32], ct)
+#     if tag != expected: return []
+#     return stream[32..]
+#
+# References:
+#   D.J. Bernstein et al., "The NaCl network and storage library" (2012)
+#   https://nacl.cr.yp.to/box.html
+#   https://nacl.cr.yp.to/secretbox.html
+#
+# NOTE: per memory/feedback_compile_mode_false_greens.md, verify in interpreter mode.
+
+mod os.crypto.nacl
+
+use os.crypto.curve25519.{x25519, x25519_base}
+use os.crypto.xsalsa20.{xsalsa20_encrypt, hsalsa20}
+use os.crypto.poly1305.{poly1305_mac}
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _nacl_zeros(n: u64) -> [u8]:
+    """Return n zero bytes."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        var b: u8 = 0u8
+        out.push(b)
+        i = i + 1
+    out
+
+fn _nacl_copy_range(src: [u8], from: u64, to: u64) -> [u8]:
+    """Copy bytes from src[from..to] into a new array."""
+    var out: [u8] = []
+    var i = from
+    while i < to:
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn _nacl_concat(a: [u8], b: [u8]) -> [u8]:
+    """Concatenate two byte arrays."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < b.len():
+        out.push(b[i])
+        i = i + 1
+    out
+
+fn _nacl_ct_eq(a: [u8], b: [u8]) -> bool:
+    """Constant-time equality check for two byte arrays."""
+    if a.len() != b.len():
+        return false
+    var diff: u8 = 0u8
+    var i: u64 = 0
+    while i < a.len():
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    diff == 0u8
+
+# ============================================================================
+# crypto_box_keypair — derive key pair from 32-byte seed
+# ============================================================================
+
+fn crypto_box_keypair(seed: [u8]) -> [list]:
+    """Derive a Curve25519 key pair from a 32-byte seed.
+
+    Args:
+        seed: 32-byte secret scalar (will be clamped by x25519_base).
+
+    Returns: [secret_key, public_key] where both are 32-byte arrays.
+
+    Example:
+        val kp = crypto_box_keypair(seed32)
+        val sk = kp[0]
+        val pk = kp[1]
+    """
+    val pk = x25519_base(seed)
+    var result: [[u8]] = []
+    result.push(seed)
+    result.push(pk)
+    result
+
+# ============================================================================
+# crypto_box_beforenm — precompute shared key
+# ============================================================================
+
+fn crypto_box_beforenm(sk: [u8], pk: [u8]) -> [u8]:
+    """Precompute the shared key for repeated encryption with the same peer.
+
+    Computes HSalsa20(X25519(sk, pk), zero16).
+
+    Args:
+        sk: 32-byte sender secret key.
+        pk: 32-byte recipient public key.
+
+    Returns: 32-byte shared key.
+
+    Example:
+        val shared = crypto_box_beforenm(my_sk, peer_pk)
+    """
+    val dh = x25519(sk, pk)
+    val zero16 = _nacl_zeros(16)
+    hsalsa20(dh, zero16)
+
+# ============================================================================
+# crypto_secretbox — XSalsa20-Poly1305 symmetric AEAD encrypt
+# ============================================================================
+
+fn crypto_secretbox(msg: [u8], nonce: [u8], key: [u8]) -> [u8]:
+    """Authenticated encryption with XSalsa20-Poly1305 (NaCl secretbox).
+
+    Pads the message with 32 zero bytes, encrypts with XSalsa20, then
+    authenticates the ciphertext body with Poly1305 using the first 32
+    bytes of the keystream as the one-time key.
+
+    Args:
+        msg:   Plaintext bytes.
+        nonce: 24-byte nonce.
+        key:   32-byte symmetric key.
+
+    Returns: 16-byte tag || ciphertext (length = 16 + len(msg)).
+
+    Example:
+        val box = crypto_secretbox(msg, nonce24, key32)
+    """
+    val padded = _nacl_concat(_nacl_zeros(32), msg)
+    val stream = xsalsa20_encrypt(key, nonce, padded)
+    val poly_key = _nacl_copy_range(stream, 0, 32)
+    val ct_body = _nacl_copy_range(stream, 32, stream.len())
+    val tag = poly1305_mac(poly_key, ct_body)
+    _nacl_concat(tag, ct_body)
+
+# ============================================================================
+# crypto_secretbox_open — XSalsa20-Poly1305 symmetric AEAD decrypt
+# ============================================================================
+
+fn crypto_secretbox_open(ct: [u8], nonce: [u8], key: [u8]) -> [u8]:
+    """Authenticated decryption with XSalsa20-Poly1305 (NaCl secretbox_open).
+
+    Verifies the Poly1305 tag, then decrypts with XSalsa20.
+    Returns empty array on authentication failure.
+
+    Args:
+        ct:    Ciphertext: 16-byte tag || encrypted body.
+        nonce: 24-byte nonce.
+        key:   32-byte symmetric key.
+
+    Returns: Plaintext bytes on success, empty array on auth failure.
+
+    Example:
+        val plain = crypto_secretbox_open(boxed, nonce24, key32)
+        if plain.len() == 0: # auth failed
+    """
+    if ct.len() < 16:
+        return _nacl_zeros(0)
+    val tag = _nacl_copy_range(ct, 0, 16)
+    val ct_body = _nacl_copy_range(ct, 16, ct.len())
+    val padded = _nacl_concat(_nacl_zeros(32), ct_body)
+    val stream = xsalsa20_encrypt(key, nonce, padded)
+    val poly_key = _nacl_copy_range(stream, 0, 32)
+    val expected_tag = poly1305_mac(poly_key, ct_body)
+    if not _nacl_ct_eq(tag, expected_tag):
+        return _nacl_zeros(0)
+    _nacl_copy_range(stream, 32, stream.len())
+
+# ============================================================================
+# crypto_box — public-key authenticated encryption
+# ============================================================================
+
+fn crypto_box(msg: [u8], nonce: [u8], sk: [u8], pk: [u8]) -> [u8]:
+    """Public-key authenticated encryption (Curve25519-XSalsa20-Poly1305).
+
+    Equivalent to crypto_secretbox(msg, nonce, crypto_box_beforenm(sk, pk)).
+
+    Args:
+        msg:   Plaintext bytes.
+        nonce: 24-byte nonce.
+        sk:    Sender 32-byte secret key.
+        pk:    Recipient 32-byte public key.
+
+    Returns: 16-byte tag || ciphertext.
+
+    Example:
+        val boxed = crypto_box(msg, nonce24, my_sk, peer_pk)
+    """
+    val shared = crypto_box_beforenm(sk, pk)
+    crypto_secretbox(msg, nonce, shared)
+
+# ============================================================================
+# crypto_box_open — public-key authenticated decryption
+# ============================================================================
+
+fn crypto_box_open(ciphertext: [u8], nonce: [u8], sk: [u8], pk: [u8]) -> [u8]:
+    """Public-key authenticated decryption (Curve25519-XSalsa20-Poly1305).
+
+    Equivalent to crypto_secretbox_open(ciphertext, nonce, crypto_box_beforenm(sk, pk)).
+
+    Args:
+        ciphertext: 16-byte tag || encrypted body.
+        nonce:      24-byte nonce.
+        sk:         Recipient 32-byte secret key.
+        pk:         Sender 32-byte public key.
+
+    Returns: Plaintext bytes on success, empty array on auth failure.
+
+    Example:
+        val plain = crypto_box_open(boxed, nonce24, their_sk, my_pk)
+    """
+    val shared = crypto_box_beforenm(sk, pk)
+    crypto_secretbox_open(ciphertext, nonce, shared)

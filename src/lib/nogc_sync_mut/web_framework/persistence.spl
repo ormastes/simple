@@ -52,10 +52,11 @@ impl WebRecordStore<T>:
                     Err(_e): return Err("Failed to insert record")
             return Err("SQL repository is not configured")
 
-        var db = self.require_simple_db()?
+        var db = self.fresh_simple_db()?
         var table = self.load_or_create_table(db)
         val next_id = self.next_simple_id(table)
-        val row = self.adapter.to_row_fn(next_id, entity)
+        val to_row = self.adapter.to_row_fn
+        val row = to_row(next_id, entity)
         table.add_row(row)
         db.set_table(self.adapter.table_name, table)
         if not db.save():
@@ -72,12 +73,13 @@ impl WebRecordStore<T>:
                     Err(_e): return Err("Failed to update record")
             return Err("SQL repository is not configured")
 
-        var db = self.require_simple_db()?
+        var db = self.fresh_simple_db()?
         var table = self.load_or_create_table(db)
         val key = "{id}"
         if not table.index.has(key):
             return Ok(0)
-        val row = self.adapter.to_row_fn(id, entity)
+        val to_row = self.adapter.to_row_fn
+        val row = to_row(id, entity)
         table.update_row(key, row)
         db.set_table(self.adapter.table_name, table)
         if not db.save():
@@ -94,7 +96,7 @@ impl WebRecordStore<T>:
                     Err(_e): return Err("Failed to delete record")
             return Err("SQL repository is not configured")
 
-        var db = self.require_simple_db()?
+        var db = self.fresh_simple_db()?
         var table = self.load_or_create_table(db)
         val key = "{id}"
         if not table.index.has(key):
@@ -115,7 +117,7 @@ impl WebRecordStore<T>:
                     Err(_e): return Err("Failed to find record")
             return Err("SQL repository is not configured")
 
-        val db = self.require_simple_db()?
+        val db = self.fresh_simple_db()?
         val table = self.lookup_table(db)
         if not table.?:
             return Ok(nil)
@@ -126,7 +128,8 @@ impl WebRecordStore<T>:
         val candidate = row.unwrap()
         if candidate.get("valid") == Some("false"):
             return Ok(nil)
-        val entity = self.adapter.from_row_fn(candidate)?
+        val from_row = self.adapter.from_row_fn
+        val entity = from_row(candidate)?
         Ok(Some(entity))
 
     fn find_all() -> Result<[T], text>:
@@ -138,7 +141,7 @@ impl WebRecordStore<T>:
                     Err(_e): return Err("Failed to load records")
             return Err("SQL repository is not configured")
 
-        val db = self.require_simple_db()?
+        val db = self.fresh_simple_db()?
         val table = self.lookup_table(db)
         if not table.?:
             return Ok([])
@@ -159,7 +162,8 @@ impl WebRecordStore<T>:
         val all = self.find_all()?
         var matches: [T] = []
         for entity in all:
-            if self.adapter.field_text_fn(entity, field) == expected:
+            val field_text = self.adapter.field_text_fn
+            if field_text(entity, field) == expected:
                 matches.push(entity)
         Ok(matches)
 
@@ -168,7 +172,8 @@ impl WebRecordStore<T>:
         val folded = needle.lower()
         var matches: [T] = []
         for entity in all:
-            if self.adapter.field_text_fn(entity, field).lower().contains(folded):
+            val field_text = self.adapter.field_text_fn
+            if field_text(entity, field).lower().contains(folded):
                 matches.push(entity)
         Ok(matches)
 
@@ -188,7 +193,7 @@ impl WebRecordStore<T>:
         ""
 
     me ensure_simple_table() -> Result<(), text>:
-        var db = self.require_simple_db()?
+        var db = self.fresh_simple_db()?
         val table = self.load_or_create_table(db)
         db.set_table(self.adapter.table_name, table)
         if not db.save():
@@ -200,6 +205,10 @@ impl WebRecordStore<T>:
         if val Some(db) = self.simple_db:
             return Ok(db)
         Err("Simple DB is not configured")
+
+    me fresh_simple_db() -> Result<SdnDatabase, text>:
+        self.reload_simple_db(self.simple_db_path())?
+        self.require_simple_db()
 
     fn lookup_table(db: SdnDatabase) -> SdnTable?:
         db.get_table(self.adapter.table_name)
@@ -226,6 +235,7 @@ impl WebRecordStore<T>:
         for row in rows:
             if row.get("valid") == Some("false"):
                 continue
-            val entity = self.adapter.from_row_fn(row)?
+            val from_row = self.adapter.from_row_fn
+            val entity = from_row(row)?
             result.push(entity)
         Ok(result)
