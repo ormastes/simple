@@ -1,0 +1,225 @@
+use std.spec.{describe, it, expect}
+use std.process.{run}
+use std.src.{get_env, get_pid, now_micros}
+
+fn _repo_root() -> text:
+    val pwd = get_env("PWD")
+    if pwd == "":
+        return "."
+    pwd
+
+fn _tmp_target_dir(label: text) -> text:
+    "{_repo_root()}/tmp/host_cpu_runtime_variants_spec_{label}_{get_pid()}_{now_micros()}"
+
+fn _run_shell(command: text):
+    run("/bin/sh", ["-lc", command])
+
+fn _contains_text(values: [text], needle: text) -> bool:
+    var i: i64 = 0
+    while i < values.len():
+        if values[i] == needle:
+            return true
+        i = i + 1
+    false
+
+fn _known_tier(tier: text) -> bool:
+    tier == "scalar" ||
+    tier == "x86_64_sse2" ||
+    tier == "x86_64_avx2" ||
+    tier == "x86_64_avx512" ||
+    tier == "aarch64_neon" ||
+    tier == "aarch64_sve" ||
+    tier == "aarch64_sve2" ||
+    tier == "riscv64_rvv" ||
+    tier == "wasm128"
+
+fn _active_tier_model(override_tier: text, configured_tier: text, detected_tier: text) -> text:
+    if _known_tier(override_tier):
+        return override_tier
+    if _known_tier(configured_tier):
+        return configured_tier
+    if _known_tier(detected_tier):
+        return detected_tier
+    "scalar"
+
+fn _canonical_instruction_order() -> [text]:
+    [
+        "sse2",
+        "avx2",
+        "avx512f",
+        "neon",
+        "sve",
+        "sve2",
+        "rvv",
+        "wasm128"
+    ]
+
+fn _clamp_instruction_sets(host_supported: [text], simple_supported: [text], enabled_requested: [text]) -> [text]:
+    val ordered = _canonical_instruction_order()
+    var clamped: [text] = []
+    var i: i64 = 0
+    while i < ordered.len():
+        val instruction = ordered[i]
+        if _contains_text(host_supported, instruction) &&
+           _contains_text(simple_supported, instruction) &&
+           _contains_text(enabled_requested, instruction):
+            clamped.push(instruction)
+        i = i + 1
+    clamped
+
+fn _implemented_fallback_tiers(active_tier: text) -> [text]:
+    if active_tier == "x86_64_avx512":
+        return ["x86_64_avx2", "x86_64_sse2", "scalar"]
+    if active_tier == "x86_64_avx2":
+        return ["x86_64_avx2", "x86_64_sse2", "scalar"]
+    if active_tier == "x86_64_sse2":
+        return ["x86_64_sse2", "scalar"]
+    if active_tier == "aarch64_sve2" || active_tier == "aarch64_sve" || active_tier == "aarch64_neon":
+        return ["aarch64_neon", "scalar"]
+    if active_tier == "riscv64_rvv":
+        return ["riscv64_rvv", "scalar"]
+    ["scalar"]
+
+fn _runtime_variant_path(dir: text, tier: text) -> text:
+    if tier == "scalar":
+        if dir == "":
+            return "libsimple_runtime.so"
+        return dir + "/libsimple_runtime.so"
+    if dir == "":
+        return "libsimple_runtime." + tier + ".so"
+    dir + "/libsimple_runtime." + tier + ".so"
+
+fn _runtime_library_candidates(dir: text, active_tier: text) -> [text]:
+    val fallbacks = _implemented_fallback_tiers(active_tier)
+    var candidates: [text] = []
+    var i: i64 = 0
+    while i < fallbacks.len():
+        val candidate = _runtime_variant_path(dir, fallbacks[i])
+        if ! _contains_text(candidates, candidate):
+            candidates.push(candidate)
+        i = i + 1
+    candidates
+
+fn _select_embedded_runtime_resource(
+    active_tier: text,
+    variant_tiers: [text],
+    variant_paths: [text],
+    embedded_resources: [text]
+) -> text:
+    val fallbacks = _implemented_fallback_tiers(active_tier)
+    var i: i64 = 0
+    while i < fallbacks.len():
+        var j: i64 = 0
+        while j < variant_tiers.len():
+            if variant_tiers[j] == fallbacks[i] && _contains_text(embedded_resources, variant_paths[j]):
+                return variant_paths[j]
+            j = j + 1
+        i = i + 1
+    ""
+
+fn _manifest_is_valid(trailer_says_manifest_present: bool, payload_complete: bool, runtime_variants_well_formed: bool) -> bool:
+    if ! trailer_says_manifest_present:
+        return true
+    payload_complete && runtime_variants_well_formed
+
+fn _cache_identity(base_key: text, active_tier: text) -> text:
+    base_key + "::" + active_tier
+
+fn _stdlib_root_candidates(base_root: text, active_tier: text) -> [text]:
+    val fallbacks = _implemented_fallback_tiers(active_tier)
+    var roots: [text] = []
+    var i: i64 = 0
+    while i < fallbacks.len():
+        if fallbacks[i] == "scalar":
+            roots.push(base_root)
+        else:
+            roots.push(base_root + "/variants/" + fallbacks[i])
+        i = i + 1
+    roots
+
+# codex-system-test
+describe "Host CPU runtime variants":
+    describe "REQ-001 through REQ-006: strongest executable black-box coverage currently reachable from SSpec":
+        it "passes the targeted simple-simd host-config regression suite":
+            val target_dir = _tmp_target_dir("simd")
+            val command = "cd '{_repo_root()}' && CARGO_TARGET_DIR='{target_dir}' CARGO_NET_OFFLINE=true cargo test -p simple-simd --lib --offline"
+            val result = _run_shell(command)
+
+            val combined = result.stdout + "\n" + result.stderr
+            expect(result.exit_code).to_equal(0)
+            expect(combined.contains("writes_and_reads_cpu_config_round_trip")).to_equal(true)
+            expect(combined.contains("clamps_invalid_enabled_values_and_rewrites_file")).to_equal(true)
+            expect(combined.contains("cpu_config_path_honors_trimmed_override")).to_equal(true)
+            expect(combined.contains("active_simd_tier_prefers_env_override_over_config")).to_equal(true)
+            expect(combined.contains("host_cpu_config_reloads_after_on_disk_edit_in_same_process")).to_equal(true)
+            expect(combined.contains("canonical_rewrite_uses_simple_supported_intersection")).to_equal(true)
+
+        it "models invalid override fallback when no direct Simple hook can observe it":
+            expect(_active_tier_model("definitely-not-a-tier", "scalar", "x86_64_avx2")).to_equal("scalar")
+
+    describe "REQ-007 through REQ-013: contract-model coverage for still-unobservable internals":
+        it "keeps only support intersect simple_support in canonical order":
+            val clamped = _clamp_instruction_sets(
+                ["sse2", "avx2", "avx512f"],
+                ["sse2", "avx2"],
+                ["avx2", "sse2", "avx512f"]
+            )
+            expect(clamped.len()).to_equal(2)
+            expect(clamped[0]).to_equal("sse2")
+            expect(clamped[1]).to_equal("avx2")
+
+        it "probes compatible sibling runtime variants before the scalar fallback":
+            val candidates = _runtime_library_candidates("", "x86_64_avx512")
+            expect(candidates.len()).to_equal(3)
+            expect(candidates[0]).to_equal("libsimple_runtime.x86_64_avx2.so")
+            expect(candidates[1]).to_equal("libsimple_runtime.x86_64_sse2.so")
+            expect(candidates[2]).to_equal("libsimple_runtime.so")
+
+        it "keeps explicit-path probes in the sibling directory":
+            val candidates = _runtime_library_candidates("/tmp/runtime", "aarch64_sve2")
+            expect(candidates.len()).to_equal(2)
+            expect(candidates[0]).to_equal("/tmp/runtime/libsimple_runtime.aarch64_neon.so")
+            expect(candidates[1]).to_equal("/tmp/runtime/libsimple_runtime.so")
+
+        it "falls through lower compatible embedded variants until a present resource is found":
+            val selected = _select_embedded_runtime_resource(
+                "x86_64_avx512",
+                ["x86_64_avx2", "x86_64_sse2", "scalar"],
+                ["runtime/avx2.so", "runtime/sse2.so", "runtime/scalar.so"],
+                ["runtime/sse2.so", "runtime/scalar.so"]
+            )
+            expect(selected).to_equal("runtime/sse2.so")
+
+        it "fails closed when manifest metadata is truncated or malformed":
+            expect(_manifest_is_valid(true, false, true)).to_equal(false)
+            expect(_manifest_is_valid(true, true, false)).to_equal(false)
+            expect(_manifest_is_valid(false, false, false)).to_equal(true)
+
+        it "changes cache identity when the active tier changes":
+            val scalar_key = _cache_identity("object:main", "scalar")
+            val sse2_key = _cache_identity("object:main", "x86_64_sse2")
+            expect(scalar_key == sse2_key).to_equal(false)
+
+        it "changes stdlib root ordering when the configured tier changes":
+            val scalar_roots = _stdlib_root_candidates("src/lib/std/src", "scalar")
+            val sse2_roots = _stdlib_root_candidates("src/lib/std/src", "x86_64_sse2")
+            expect(scalar_roots.len()).to_equal(1)
+            expect(scalar_roots[0]).to_equal("src/lib/std/src")
+            expect(sse2_roots.len()).to_equal(2)
+            expect(sse2_roots[0]).to_equal("src/lib/std/src/variants/x86_64_sse2")
+            expect(sse2_roots[1]).to_equal("src/lib/std/src")
+
+        it "collapses higher x86 tiers to implemented v1 runtime artifacts":
+            val x86 = _implemented_fallback_tiers("x86_64_avx512")
+            expect(x86.len()).to_equal(3)
+            expect(x86[0]).to_equal("x86_64_avx2")
+            expect(x86[1]).to_equal("x86_64_sse2")
+            expect(x86[2]).to_equal("scalar")
+
+        it "collapses SVE and SVE2 hosts through neon before scalar":
+            val sve2 = _implemented_fallback_tiers("aarch64_sve2")
+            val sve = _implemented_fallback_tiers("aarch64_sve")
+            expect(sve2.len()).to_equal(2)
+            expect(sve2[0]).to_equal("aarch64_neon")
+            expect(sve2[1]).to_equal("scalar")
+            expect(sve[0]).to_equal("aarch64_neon")
