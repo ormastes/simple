@@ -1,0 +1,607 @@
+use compress.types.{CompressionError}
+use compress.utilities.{append_bytes}
+
+# ============================================================
+# DEFLATE RFC 1951 — Encoder + Decoder (pure Simple)
+# ============================================================
+
+# --- Bit Reader (LSB-first) ---
+
+struct DeflBitReader:
+    src: [u8]
+    byte_pos: i64
+    bit_pos: i64
+
+fn _defl_new_reader(data: [u8]) -> DeflBitReader:
+    DeflBitReader(src: data, byte_pos: 0, bit_pos: 0)
+
+fn _defl_read_bits(reader: DeflBitReader, n: i64) -> (i64, DeflBitReader):
+    var result = 0
+    var bits_read = 0
+    var bp = reader.byte_pos
+    var bi = reader.bit_pos
+    while bits_read < n:
+        if bp >= reader.src.len():
+            return (result, DeflBitReader(src: reader.src, byte_pos: bp, bit_pos: bi))
+        val byte_val = reader.src[bp].to_i64()
+        val bit = (byte_val >> bi) & 1
+        result = result | (bit << bits_read)
+        bi = bi + 1
+        if bi >= 8:
+            bi = 0
+            bp = bp + 1
+        bits_read = bits_read + 1
+    (result, DeflBitReader(src: reader.src, byte_pos: bp, bit_pos: bi))
+
+fn _defl_align_to_byte(reader: DeflBitReader) -> DeflBitReader:
+    if reader.bit_pos == 0:
+        return reader
+    DeflBitReader(src: reader.src, byte_pos: reader.byte_pos + 1, bit_pos: 0)
+
+# --- Bit Writer (LSB-first) ---
+
+struct DeflBitWriter:
+    buf: [u8]
+    current_byte: i64
+    bit_count: i64
+
+fn _defl_new_writer() -> DeflBitWriter:
+    DeflBitWriter(buf: [], current_byte: 0, bit_count: 0)
+
+fn _defl_write_bits(writer: DeflBitWriter, value: i64, n: i64) -> DeflBitWriter:
+    var cur = writer.current_byte
+    var bc = writer.bit_count
+    var out_buf = writer.buf
+    var bits_written = 0
+    while bits_written < n:
+        val bit = (value >> bits_written) & 1
+        cur = cur | (bit << bc)
+        bc = bc + 1
+        if bc >= 8:
+            var b: u8 = cur.to_u8()
+            out_buf.push(b)
+            cur = 0
+            bc = 0
+        bits_written = bits_written + 1
+    DeflBitWriter(buf: out_buf, current_byte: cur, bit_count: bc)
+
+fn _defl_write_bits_msb(writer: DeflBitWriter, code: i64, length: i64) -> DeflBitWriter:
+    # Write bits MSB-first (for Huffman codes): the highest bit of code is written first
+    var w = writer
+    var i = length - 1
+    while i >= 0:
+        val bit = (code >> i) & 1
+        w = _defl_write_bits(w, bit, 1)
+        i = i - 1
+    w
+
+fn _defl_flush_writer(writer: DeflBitWriter) -> [u8]:
+    if writer.bit_count == 0:
+        return writer.buf
+    var out_buf = writer.buf
+    var b: u8 = writer.current_byte.to_u8()
+    out_buf.push(b)
+    out_buf
+
+# --- Huffman Tree ---
+
+struct DeflHuffNode:
+    symbol: i64     # -1 means internal node
+    left: i64       # index into node array (bit=0)
+    right: i64      # index into node array (bit=1)
+
+fn _defl_build_tree_from_lengths(lengths: [i64], max_symbol: i64) -> [DeflHuffNode]:
+    # RFC 1951 section 3.2.2 canonical Huffman construction
+    # Step 1: count codes per bit length
+    var max_bits = 0
+    var i = 0
+    while i <= max_symbol:
+        if i < lengths.len() and lengths[i] > max_bits:
+            max_bits = lengths[i]
+        i = i + 1
+
+    var bl_count: [i64] = []
+    i = 0
+    while i <= max_bits:
+        bl_count.push(0)
+        i = i + 1
+
+    i = 0
+    while i <= max_symbol:
+        if i < lengths.len() and lengths[i] != 0:
+            bl_count[lengths[i]] = bl_count[lengths[i]] + 1
+        i = i + 1
+
+    # Step 2: find numerical value of smallest code for each length
+    var next_code: [i64] = []
+    i = 0
+    while i <= max_bits + 1:
+        next_code.push(0)
+        i = i + 1
+
+    var code = 0
+    i = 1
+    while i <= max_bits:
+        code = (code + bl_count[i - 1]) << 1
+        next_code[i] = code
+        i = i + 1
+
+    # Build tree: node 0 is root
+    var nodes: [DeflHuffNode] = []
+    nodes.push(DeflHuffNode(symbol: -1, left: -1, right: -1))
+
+    i = 0
+    while i <= max_symbol:
+        if i < lengths.len() and lengths[i] != 0:
+            val bit_len = lengths[i]
+            val sym_code = next_code[bit_len]
+            next_code[bit_len] = next_code[bit_len] + 1
+            # Insert code into tree, reading from MSB to LSB
+            var node_idx = 0
+            var bit_idx = bit_len - 1
+            while bit_idx >= 0:
+                val bit_val = (sym_code >> bit_idx) & 1
+                if bit_val == 0:
+                    if nodes[node_idx].left == -1:
+                        val new_idx = nodes.len()
+                        nodes.push(DeflHuffNode(symbol: -1, left: -1, right: -1))
+                        nodes[node_idx] = DeflHuffNode(symbol: nodes[node_idx].symbol, left: new_idx, right: nodes[node_idx].right)
+                    node_idx = nodes[node_idx].left
+                else:
+                    if nodes[node_idx].right == -1:
+                        val new_idx = nodes.len()
+                        nodes.push(DeflHuffNode(symbol: -1, left: -1, right: -1))
+                        nodes[node_idx] = DeflHuffNode(symbol: nodes[node_idx].symbol, left: nodes[node_idx].left, right: new_idx)
+                    node_idx = nodes[node_idx].right
+                bit_idx = bit_idx - 1
+            nodes[node_idx] = DeflHuffNode(symbol: i, left: nodes[node_idx].left, right: nodes[node_idx].right)
+        i = i + 1
+    nodes
+
+fn _defl_decode_symbol(nodes: [DeflHuffNode], reader: DeflBitReader) -> (i64, DeflBitReader):
+    var node_idx = 0
+    var r = reader
+    while true:
+        if nodes[node_idx].symbol != -1:
+            return (nodes[node_idx].symbol, r)
+        val pair = _defl_read_bits(r, 1)
+        val bit = pair.0
+        r = pair.1
+        if bit == 0:
+            node_idx = nodes[node_idx].left
+        else:
+            node_idx = nodes[node_idx].right
+        if node_idx == -1:
+            return (-1, r)
+    (-1, r)
+
+# --- Fixed Huffman Tables ---
+
+fn _defl_fixed_lit_lengths() -> [i64]:
+    var lengths: [i64] = []
+    var i = 0
+    while i <= 287:
+        if i <= 143:
+            lengths.push(8)
+        elif i <= 255:
+            lengths.push(9)
+        elif i <= 279:
+            lengths.push(7)
+        else:
+            lengths.push(8)
+        i = i + 1
+    lengths
+
+fn _defl_fixed_dist_lengths() -> [i64]:
+    var lengths: [i64] = []
+    var i = 0
+    while i <= 31:
+        lengths.push(5)
+        i = i + 1
+    lengths
+
+fn _defl_build_fixed_lit_tree() -> [DeflHuffNode]:
+    _defl_build_tree_from_lengths(_defl_fixed_lit_lengths(), 287)
+
+fn _defl_build_fixed_dist_tree() -> [DeflHuffNode]:
+    _defl_build_tree_from_lengths(_defl_fixed_dist_lengths(), 31)
+
+# --- Length/Distance Extra Bits Tables (RFC 1951 section 3.2.5) ---
+
+fn _defl_length_base_table() -> [i64]:
+    # Length codes 257-285 -> base lengths 3-258
+    [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+     35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+
+fn _defl_length_extra_table() -> [i64]:
+    # Extra bits for length codes 257-285
+    [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+     3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+
+fn _defl_dist_base_table() -> [i64]:
+    # Distance codes 0-29 -> base distances 1-32768
+    [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+     257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+
+fn _defl_dist_extra_table() -> [i64]:
+    # Extra bits for distance codes 0-29
+    [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+     7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+
+# --- Dynamic Huffman Tree Decoding (BTYPE=10) ---
+
+fn _defl_code_length_order() -> [i64]:
+    [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+
+fn _defl_decode_dynamic_trees(reader: DeflBitReader) -> ([DeflHuffNode], [DeflHuffNode], DeflBitReader):
+    # Read HLIT, HDIST, HCLEN
+    var r = reader
+    val pair_hlit = _defl_read_bits(r, 5)
+    val hlit = pair_hlit.0 + 257
+    r = pair_hlit.1
+
+    val pair_hdist = _defl_read_bits(r, 5)
+    val hdist = pair_hdist.0 + 1
+    r = pair_hdist.1
+
+    val pair_hclen = _defl_read_bits(r, 4)
+    val hclen = pair_hclen.0 + 4
+    r = pair_hclen.1
+
+    # Read code length code lengths
+    val order = _defl_code_length_order()
+    var cl_lengths: [i64] = []
+    var idx = 0
+    while idx < 19:
+        cl_lengths.push(0)
+        idx = idx + 1
+
+    idx = 0
+    while idx < hclen:
+        val pair_cl = _defl_read_bits(r, 3)
+        cl_lengths[order[idx]] = pair_cl.0
+        r = pair_cl.1
+        idx = idx + 1
+
+    # Build code length tree
+    val cl_tree = _defl_build_tree_from_lengths(cl_lengths, 18)
+
+    # Decode literal/length + distance code lengths
+    val total_codes = hlit + hdist
+    var all_lengths: [i64] = []
+    while all_lengths.len() < total_codes:
+        val sym_pair = _defl_decode_symbol(cl_tree, r)
+        val sym = sym_pair.0
+        r = sym_pair.1
+
+        if sym <= 15:
+            all_lengths.push(sym)
+        elif sym == 16:
+            # Repeat previous length 3-6 times
+            val rep_pair = _defl_read_bits(r, 2)
+            val repeat_count = rep_pair.0 + 3
+            r = rep_pair.1
+            val prev_len = if all_lengths.len() > 0: all_lengths[all_lengths.len() - 1] else: 0
+            var rep_i = 0
+            while rep_i < repeat_count:
+                all_lengths.push(prev_len)
+                rep_i = rep_i + 1
+        elif sym == 17:
+            # Repeat 0 for 3-10 times
+            val rep_pair = _defl_read_bits(r, 3)
+            val repeat_count = rep_pair.0 + 3
+            r = rep_pair.1
+            var rep_i = 0
+            while rep_i < repeat_count:
+                all_lengths.push(0)
+                rep_i = rep_i + 1
+        elif sym == 18:
+            # Repeat 0 for 11-138 times
+            val rep_pair = _defl_read_bits(r, 7)
+            val repeat_count = rep_pair.0 + 11
+            r = rep_pair.1
+            var rep_i = 0
+            while rep_i < repeat_count:
+                all_lengths.push(0)
+                rep_i = rep_i + 1
+
+    # Split into literal/length and distance lengths
+    var lit_lengths: [i64] = []
+    idx = 0
+    while idx < hlit:
+        lit_lengths.push(all_lengths[idx])
+        idx = idx + 1
+
+    var dist_lengths: [i64] = []
+    while idx < total_codes:
+        dist_lengths.push(all_lengths[idx])
+        idx = idx + 1
+
+    val lit_tree = _defl_build_tree_from_lengths(lit_lengths, hlit - 1)
+    val dist_tree = _defl_build_tree_from_lengths(dist_lengths, hdist - 1)
+    (lit_tree, dist_tree, r)
+
+# --- Decoder ---
+
+fn _defl_decode_block(lit_tree: [DeflHuffNode], dist_tree: [DeflHuffNode], reader: DeflBitReader, output: [u8]) -> ([u8], DeflBitReader):
+    val len_base = _defl_length_base_table()
+    val len_extra = _defl_length_extra_table()
+    val dist_base = _defl_dist_base_table()
+    val dist_extra = _defl_dist_extra_table()
+    var out_data = output
+    var r = reader
+
+    while true:
+        val sym_pair = _defl_decode_symbol(lit_tree, r)
+        val sym = sym_pair.0
+        r = sym_pair.1
+
+        if sym < 256:
+            # Literal byte
+            var b: u8 = sym.to_u8()
+            out_data.push(b)
+        elif sym == 256:
+            # End of block
+            return (out_data, r)
+        else:
+            # Length/distance pair
+            val len_idx = sym - 257
+            var length = len_base[len_idx]
+            val extra_len_bits = len_extra[len_idx]
+            if extra_len_bits > 0:
+                val extra_pair = _defl_read_bits(r, extra_len_bits)
+                length = length + extra_pair.0
+                r = extra_pair.1
+
+            # Decode distance
+            val dist_sym_pair = _defl_decode_symbol(dist_tree, r)
+            val dist_sym = dist_sym_pair.0
+            r = dist_sym_pair.1
+
+            var distance = dist_base[dist_sym]
+            val extra_dist_bits = dist_extra[dist_sym]
+            if extra_dist_bits > 0:
+                val extra_pair = _defl_read_bits(r, extra_dist_bits)
+                distance = distance + extra_pair.0
+                r = extra_pair.1
+
+            # Copy from sliding window
+            var copy_i = 0
+            while copy_i < length:
+                val src_idx = out_data.len() - distance
+                var b: u8 = out_data[src_idx]
+                out_data.push(b)
+                copy_i = copy_i + 1
+    (out_data, r)
+
+fn deflate_decompress(data: [u8]) -> [u8]:
+    var r = _defl_new_reader(data)
+    var output: [u8] = []
+    var is_final = false
+
+    while not is_final:
+        val bfinal_pair = _defl_read_bits(r, 1)
+        is_final = bfinal_pair.0 == 1
+        r = bfinal_pair.1
+
+        val btype_pair = _defl_read_bits(r, 2)
+        val btype = btype_pair.0
+        r = btype_pair.1
+
+        if btype == 0:
+            # Stored (uncompressed) block
+            r = _defl_align_to_byte(r)
+            val len_pair = _defl_read_bits(r, 16)
+            val block_len = len_pair.0
+            r = len_pair.1
+            # Skip NLEN (complement)
+            val nlen_pair = _defl_read_bits(r, 16)
+            r = nlen_pair.1
+            var ci = 0
+            while ci < block_len:
+                var b: u8 = r.src[r.byte_pos]
+                output.push(b)
+                r = DeflBitReader(src: r.src, byte_pos: r.byte_pos + 1, bit_pos: 0)
+                ci = ci + 1
+        elif btype == 1:
+            # Fixed Huffman
+            val lit_tree = _defl_build_fixed_lit_tree()
+            val dist_tree = _defl_build_fixed_dist_tree()
+            val result = _defl_decode_block(lit_tree, dist_tree, r, output)
+            output = result.0
+            r = result.1
+        elif btype == 2:
+            # Dynamic Huffman
+            val trees = _defl_decode_dynamic_trees(r)
+            val lit_tree = trees.0
+            val dist_tree = trees.1
+            r = trees.2
+            val result = _defl_decode_block(lit_tree, dist_tree, r, output)
+            output = result.0
+            r = result.1
+    output
+
+# --- Encoder (Fixed Huffman, BTYPE=01) ---
+
+# LZ77 hash chain for finding matches
+val _DEFL_HASH_BITS: i64 = 12
+val _DEFL_HASH_SIZE: i64 = 1 << _DEFL_HASH_BITS
+val _DEFL_MIN_MATCH: i64 = 3
+val _DEFL_MAX_MATCH: i64 = 258
+val _DEFL_WINDOW_SIZE: i64 = 32768
+val _DEFL_MAX_SEARCH_DEPTH: i64 = 32
+
+fn _defl_hash3(data: [u8], pos: i64) -> i64:
+    val b0 = data[pos].to_i64()
+    val b1 = data[pos + 1].to_i64()
+    val b2 = data[pos + 2].to_i64()
+    ((b0 * 251) + (b1 * 509) + (b2 * 1021)) % _DEFL_HASH_SIZE
+
+fn _defl_find_match(data: [u8], pos: i64, head: [i64], prev: [i64]) -> (i64, i64):
+    # Returns (length, distance) of best match
+    if pos + _DEFL_MIN_MATCH > data.len():
+        return (0, 0)
+
+    val hash = _defl_hash3(data, pos)
+    var candidate = head[hash]
+    var best_len = 0
+    var best_dist = 0
+    var attempts = 0
+    val max_len = if data.len() - pos < _DEFL_MAX_MATCH: data.len() - pos else: _DEFL_MAX_MATCH
+
+    while candidate >= 0 and attempts < _DEFL_MAX_SEARCH_DEPTH:
+        val dist = pos - candidate
+        if dist > _DEFL_WINDOW_SIZE:
+            break
+        if data[candidate] == data[pos] and data[candidate + 1] == data[pos + 1]:
+            var match_len = 0
+            while match_len < max_len and data[candidate + match_len] == data[pos + match_len]:
+                match_len = match_len + 1
+            if match_len > best_len:
+                best_len = match_len
+                best_dist = dist
+                if best_len >= max_len:
+                    break
+        candidate = prev[candidate % _DEFL_WINDOW_SIZE]
+        attempts = attempts + 1
+    if best_len < _DEFL_MIN_MATCH:
+        return (0, 0)
+    (best_len, best_dist)
+
+fn _defl_length_code(length: i64) -> (i64, i64, i64):
+    # Returns (code 257-285, extra_bits_value, extra_bits_count)
+    val len_base = _defl_length_base_table()
+    val len_extra = _defl_length_extra_table()
+    var i = 0
+    while i < 28:
+        if length >= len_base[i] and length < len_base[i + 1]:
+            val extra_count = len_extra[i]
+            val extra_val = length - len_base[i]
+            return (257 + i, extra_val, extra_count)
+        i = i + 1
+    # Length 258 is code 285
+    (285, 0, 0)
+
+fn _defl_dist_code(distance: i64) -> (i64, i64, i64):
+    # Returns (code 0-29, extra_bits_value, extra_bits_count)
+    val dist_base = _defl_dist_base_table()
+    val dist_extra = _defl_dist_extra_table()
+    var i = 0
+    while i < 29:
+        if distance >= dist_base[i] and distance < dist_base[i + 1]:
+            val extra_count = dist_extra[i]
+            val extra_val = distance - dist_base[i]
+            return (i, extra_val, extra_count)
+        i = i + 1
+    # Last code
+    val extra_count = dist_extra[29]
+    val extra_val = distance - dist_base[29]
+    (29, extra_val, extra_count)
+
+fn _defl_fixed_lit_code(sym: i64) -> (i64, i64):
+    # Returns (code, bit_length) for fixed Huffman literal/length table
+    if sym <= 143:
+        return (0x30 + sym, 8)
+    elif sym <= 255:
+        return (0x190 + (sym - 144), 9)
+    elif sym <= 279:
+        return (sym - 256, 7)
+    else:
+        return (0xC0 + (sym - 280), 8)
+
+fn _defl_emit_literal(writer: DeflBitWriter, sym: i64) -> DeflBitWriter:
+    val code_info = _defl_fixed_lit_code(sym)
+    _defl_write_bits_msb(writer, code_info.0, code_info.1)
+
+fn _defl_emit_length_distance(writer: DeflBitWriter, length: i64, distance: i64) -> DeflBitWriter:
+    # Emit length code
+    val len_info = _defl_length_code(length)
+    val lit_code_info = _defl_fixed_lit_code(len_info.0)
+    var w = _defl_write_bits_msb(writer, lit_code_info.0, lit_code_info.1)
+    # Emit length extra bits (LSB first)
+    if len_info.2 > 0:
+        w = _defl_write_bits(w, len_info.1, len_info.2)
+
+    # Emit distance code (5 bits, MSB first for fixed)
+    val dist_info = _defl_dist_code(distance)
+    w = _defl_write_bits_msb(w, dist_info.0, 5)
+    # Emit distance extra bits (LSB first)
+    if dist_info.2 > 0:
+        w = _defl_write_bits(w, dist_info.1, dist_info.2)
+    w
+
+fn _defl_emit_end_of_block(writer: DeflBitWriter) -> DeflBitWriter:
+    # Symbol 256: 7-bit code 0000000
+    _defl_write_bits_msb(writer, 0, 7)
+
+fn deflate_compress(data: [u8]) -> [u8]:
+    if data.len() == 0:
+        # Emit a single final empty stored block
+        var w = _defl_new_writer()
+        # BFINAL=1, BTYPE=00
+        w = _defl_write_bits(w, 1, 1)
+        w = _defl_write_bits(w, 0, 2)
+        # Align to byte boundary
+        if w.bit_count > 0:
+            var remaining = 8 - w.bit_count
+            w = _defl_write_bits(w, 0, remaining)
+        # LEN=0, NLEN=0xFFFF
+        w = _defl_write_bits(w, 0, 16)
+        w = _defl_write_bits(w, 0xFFFF, 16)
+        return _defl_flush_writer(w)
+
+    # Use fixed Huffman for small data, LZ77 + fixed Huffman for larger
+    var w = _defl_new_writer()
+    # BFINAL=1, BTYPE=01 (fixed Huffman)
+    w = _defl_write_bits(w, 1, 1)
+    w = _defl_write_bits(w, 1, 2)
+
+    if data.len() < _DEFL_MIN_MATCH:
+        # Too short for LZ77, emit all as literals
+        var i = 0
+        while i < data.len():
+            w = _defl_emit_literal(w, data[i].to_i64())
+            i = i + 1
+        w = _defl_emit_end_of_block(w)
+        return _defl_flush_writer(w)
+
+    # LZ77 with hash chain
+    var head: [i64] = []
+    var hi = 0
+    while hi < _DEFL_HASH_SIZE:
+        head.push(-1)
+        hi = hi + 1
+
+    var prev: [i64] = []
+    var pi = 0
+    while pi < _DEFL_WINDOW_SIZE:
+        prev.push(-1)
+        pi = pi + 1
+
+    var pos = 0
+    while pos < data.len():
+        val match_result = _defl_find_match(data, pos, head, prev)
+        val match_len = match_result.0
+        val match_dist = match_result.1
+
+        if match_len >= _DEFL_MIN_MATCH:
+            w = _defl_emit_length_distance(w, match_len, match_dist)
+            # Update hash chain for all positions in match
+            var mi = 0
+            while mi < match_len:
+                if pos + mi + 2 < data.len():
+                    val mh = _defl_hash3(data, pos + mi)
+                    prev[(pos + mi) % _DEFL_WINDOW_SIZE] = head[mh]
+                    head[mh] = pos + mi
+                mi = mi + 1
+            pos = pos + match_len
+        else:
+            w = _defl_emit_literal(w, data[pos].to_i64())
+            if pos + 2 < data.len():
+                val h = _defl_hash3(data, pos)
+                prev[pos % _DEFL_WINDOW_SIZE] = head[h]
+                head[h] = pos
+            pos = pos + 1
+
+    w = _defl_emit_end_of_block(w)
+    _defl_flush_writer(w)

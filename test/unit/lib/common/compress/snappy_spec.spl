@@ -1,0 +1,79 @@
+"""
+# Snappy Block Compression Unit Tests
+
+**Feature IDs:** #COMPRESS-SNAPPY
+**Category:** Compression
+**Status:** Implemented
+"""
+
+use std.spec
+use compress.snappy.{snappy_compress, snappy_decompress, try_snappy_decompress}
+
+fn check(condition: bool):
+    expect condition == true
+
+describe "Snappy block compression":
+    it "round-trip empty input":
+        var empty: [u8] = []
+        val compressed = snappy_compress(empty)
+        check(compressed.len() == 1)
+        check(compressed[0] == 0x00u8)
+        val decompressed = snappy_decompress(compressed)
+        check(decompressed.len() == 0)
+
+    it "round-trip Hello World":
+        var data: [u8] = [0x48u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8, 0x2cu8, 0x20u8, 0x57u8, 0x6fu8, 0x72u8, 0x6cu8, 0x64u8, 0x21u8]
+        val compressed = snappy_compress(data)
+        val decompressed = snappy_decompress(compressed)
+        check(decompressed.len() == 13)
+        check(decompressed[0] == 0x48u8)
+        check(decompressed[1] == 0x65u8)
+        check(decompressed[4] == 0x6fu8)
+        check(decompressed[12] == 0x21u8)
+
+    it "known vector Hello literal":
+        var expected: [u8] = [0x05u8, 0x10u8, 0x48u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        var data: [u8] = [0x48u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val compressed = snappy_compress(data)
+        check(compressed.len() == 7)
+        check(compressed[0] == 0x05u8)
+        check(compressed[1] == 0x10u8)
+        check(compressed[2] == 0x48u8)
+        check(compressed[3] == 0x65u8)
+        check(compressed[4] == 0x6cu8)
+        check(compressed[5] == 0x6cu8)
+        check(compressed[6] == 0x6fu8)
+
+    it "round-trip repeated data compresses well":
+        var data: [u8] = []
+        var idx = 0
+        while idx < 1000:
+            var a_byte: u8 = 0x41u8
+            data.push(a_byte)
+            idx = idx + 1
+        val compressed = snappy_compress(data)
+        check(compressed.len() < 100)
+        val decompressed = snappy_decompress(compressed)
+        check(decompressed.len() == 1000)
+        check(decompressed[0] == 0x41u8)
+        check(decompressed[999] == 0x41u8)
+
+    it "round-trip ABCABCABC has copy elements":
+        var data: [u8] = [0x41u8, 0x42u8, 0x43u8, 0x41u8, 0x42u8, 0x43u8, 0x41u8, 0x42u8, 0x43u8]
+        val compressed = snappy_compress(data)
+        val decompressed = snappy_decompress(compressed)
+        check(decompressed.len() == 9)
+        check(decompressed[0] == 0x41u8)
+        check(decompressed[3] == 0x41u8)
+        check(decompressed[6] == 0x41u8)
+        check(decompressed[8] == 0x43u8)
+
+    it "decompress rejects truncated input":
+        var bad: [u8] = [0x05u8, 0x10u8]
+        val result = try_snappy_decompress(bad)
+        check(result.is_err())
+
+    it "decompress rejects length mismatch":
+        var bad: [u8] = [0x0Au8, 0x10u8, 0x48u8, 0x65u8, 0x6cu8, 0x6cu8, 0x6fu8]
+        val result = try_snappy_decompress(bad)
+        check(result.is_err())

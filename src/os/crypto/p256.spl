@@ -1,0 +1,766 @@
+#![allow(unnamed_duplicate_typed_args)]
+# P-256 (secp256r1) — Pure-Simple ECDSA + ECDH
+#
+# Unified module providing:
+#   - Field arithmetic wrappers (mod p) — delegates to fe_p256
+#   - Scalar-field arithmetic (mod n) — new, for ECDSA
+#   - Point operations — delegates to ecdh_p256 Jacobian routines
+#   - ECDSA sign/verify with RFC 6979 deterministic nonce
+#   - ECDH key exchange
+#
+# No FFI — all arithmetic in pure Simple.
+#
+# Curve: y^2 = x^3 - 3x + b (mod p)
+#   p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+#   n = FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+#
+# References:
+#   * FIPS 186-4 / SEC2 v2.0 §2.4.2 (P-256 parameters)
+#   * RFC 6979 (Deterministic Usage of DSA and ECDSA)
+#   * RFC 5903 §3.1 (ECDH with P-256)
+
+use std.common.math.field.fe_p256.{
+    FeP256,
+    fe_zero, fe_one,
+    fe_add, fe_sub,
+    fe_mul, fe_sq, fe_inv,
+    fe_from_bytes, fe_to_bytes,
+    fe_eq
+}
+
+use os.crypto.ecdh_p256.{
+    JacP256,
+    _jac_inf, _jac_from_affine,
+    _jac_double, _jac_add_mixed,
+    _scalar_mul_affine, _to_affine,
+    _gx, _gy,
+    p256_keypair_pub, p256_ecdh_shared_x
+}
+
+use os.crypto.sha256.{sha256, sha256_hmac}
+
+# ============================================================================
+# Scalar field arithmetic (mod n)
+# ============================================================================
+#
+# n = FFFFFFFF 00000000 FFFFFFFF FFFFFFFF BCE6FAAD A7179E84 F3B9CAC2 FC632551
+# 4 little-endian u64 limbs:
+
+val N_L0: u64 = 0xF3B9CAC2FC632551
+val N_L1: u64 = 0xBCE6FAADA7179E84
+val N_L2: u64 = 0xFFFFFFFFFFFFFFFF
+val N_L3: u64 = 0xFFFFFFFF00000000
+
+val MASK32: u64 = 0xFFFFFFFF
+
+# 256-bit scalar value (mod n) — same 4×u64 LE layout as FeP256 but different modulus
+struct Scalar256:
+    l0: u64
+    l1: u64
+    l2: u64
+    l3: u64
+
+fn scalar_zero() -> Scalar256:
+    Scalar256(l0: 0, l1: 0, l2: 0, l3: 0)
+
+fn scalar_one() -> Scalar256:
+    Scalar256(l0: 1, l1: 0, l2: 0, l3: 0)
+
+fn scalar_from_bytes(b: [u8]) -> Scalar256:
+    """Decode 32 big-endian bytes to scalar (no reduction applied)."""
+    val l3 = _sc_be_load_u64(b, 0)
+    val l2 = _sc_be_load_u64(b, 8)
+    val l1 = _sc_be_load_u64(b, 16)
+    val l0 = _sc_be_load_u64(b, 24)
+    Scalar256(l0: l0, l1: l1, l2: l2, l3: l3)
+
+fn scalar_to_bytes(a: Scalar256) -> [u8]:
+    """Encode scalar as 32 big-endian bytes after reduction."""
+    val r = _sc_reduce(a)
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        result.push(0x00)
+        i = i + 1
+    _sc_be_store_u64(result, 0, r.l3)
+    _sc_be_store_u64(result, 8, r.l2)
+    _sc_be_store_u64(result, 16, r.l1)
+    _sc_be_store_u64(result, 24, r.l0)
+    result
+
+fn _sc_be_load_u64(b: [u8], offset: u64) -> u64:
+    var result: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        if (offset + i) < b.len().to_u64():
+            result = (result << 8) | b[offset + i].to_u64()
+        i = i + 1
+    result
+
+fn _sc_be_store_u64(buf: [u8], offset: u64, value: u64):
+    var i: u64 = 0
+    while i < 8:
+        val shift: u64 = (7 - i) * 8
+        if (offset + i) < buf.len().to_u64():
+            buf[offset + i] = ((value >> shift) & 0xFF).to_u8()
+        i = i + 1
+
+# --- Half-carry add/sub (same pattern as fe_p256) ---
+
+fn _sc_addc(a: u64, b: u64, cin: u64) -> (u64, u64):
+    val a_lo: u64 = a & MASK32
+    val a_hi: u64 = (a >> 32) & MASK32
+    val b_lo: u64 = b & MASK32
+    val b_hi: u64 = (b >> 32) & MASK32
+    val s_lo: u64 = a_lo + b_lo + cin
+    val c_mid: u64 = (s_lo >> 32) & MASK32
+    val s_hi: u64 = a_hi + b_hi + c_mid
+    val cout: u64 = (s_hi >> 32) & MASK32
+    val sum: u64 = ((s_hi & MASK32) << 32) | (s_lo & MASK32)
+    (sum, cout)
+
+fn _sc_subb(a: u64, b: u64, bin: u64) -> (u64, u64):
+    val a_lo: u64 = a & MASK32
+    val a_hi: u64 = (a >> 32) & MASK32
+    val b_lo: u64 = b & MASK32
+    val b_hi: u64 = (b >> 32) & MASK32
+    val s_lo: u64 = (a_lo + (1 << 32)) - b_lo - bin
+    val borrow_lo: u64 = 1 - ((s_lo >> 32) & 1)
+    val s_hi: u64 = (a_hi + (1 << 32)) - b_hi - borrow_lo
+    val borrow_hi: u64 = 1 - ((s_hi >> 32) & 1)
+    val diff: u64 = ((s_hi & MASK32) << 32) | (s_lo & MASK32)
+    (diff, borrow_hi)
+
+# --- Scalar reduction: if a >= n, return a - n; else a ---
+
+fn _sc_sub_n_with_borrow(a: Scalar256) -> (Scalar256, u64):
+    val (r0, b0) = _sc_subb(a.l0, N_L0, 0)
+    val (r1, b1) = _sc_subb(a.l1, N_L1, b0)
+    val (r2, b2) = _sc_subb(a.l2, N_L2, b1)
+    val (r3, b3) = _sc_subb(a.l3, N_L3, b2)
+    (Scalar256(l0: r0, l1: r1, l2: r2, l3: r3), b3)
+
+fn _sc_reduce(a: Scalar256) -> Scalar256:
+    """Reduce a from [0, 2n) to [0, n). Branch-free cond select."""
+    val (sub, borrow) = _sc_sub_n_with_borrow(a)
+    # borrow=0 means a >= n, use sub. borrow=1 means a < n, use a.
+    val take_sub: u64 = 1 - borrow
+    _sc_cond_select(a, sub, take_sub)
+
+fn _sc_cond_select(a: Scalar256, b: Scalar256, take_b: u64) -> Scalar256:
+    val mask: u64 = 0 - take_b
+    Scalar256(
+        l0: a.l0 ^ (mask & (a.l0 ^ b.l0)),
+        l1: a.l1 ^ (mask & (a.l1 ^ b.l1)),
+        l2: a.l2 ^ (mask & (a.l2 ^ b.l2)),
+        l3: a.l3 ^ (mask & (a.l3 ^ b.l3))
+    )
+
+fn sc_add(a: Scalar256, b: Scalar256) -> Scalar256:
+    """Scalar addition mod n."""
+    val (s0, c0) = _sc_addc(a.l0, b.l0, 0)
+    val (s1, c1) = _sc_addc(a.l1, b.l1, c0)
+    val (s2, c2) = _sc_addc(a.l2, b.l2, c1)
+    val (s3, _c3) = _sc_addc(a.l3, b.l3, c2)
+    _sc_reduce(Scalar256(l0: s0, l1: s1, l2: s2, l3: s3))
+
+fn sc_sub(a: Scalar256, b: Scalar256) -> Scalar256:
+    """Scalar subtraction mod n."""
+    val (d0, bw0) = _sc_subb(a.l0, b.l0, 0)
+    val (d1, bw1) = _sc_subb(a.l1, b.l1, bw0)
+    val (d2, bw2) = _sc_subb(a.l2, b.l2, bw1)
+    val (d3, bw3) = _sc_subb(a.l3, b.l3, bw2)
+    var r = Scalar256(l0: d0, l1: d1, l2: d2, l3: d3)
+    # If borrow, add n back
+    if bw3 == 1:
+        val (a0, c0) = _sc_addc(r.l0, N_L0, 0)
+        val (a1, c1) = _sc_addc(r.l1, N_L1, c0)
+        val (a2, c2) = _sc_addc(r.l2, N_L2, c1)
+        val (a3, _c3) = _sc_addc(r.l3, N_L3, c2)
+        r = Scalar256(l0: a0, l1: a1, l2: a2, l3: a3)
+    r
+
+# --- Scalar multiplication mod n (schoolbook 4×4 limbs, split into 32-bit halves) ---
+
+fn _sc_mul_wide(a: Scalar256, b: Scalar256) -> [u64]:
+    """Compute a*b as 8 u64 limbs (512-bit product).
+    Uses 32-bit half-limbs to avoid overflow.
+    a = [a0..a3], each u64 split into (lo32, hi32) => 8 half-limbs.
+    Returns 8 u64 limbs (little-endian)."""
+    # Split into 8 x 32-bit half-limbs
+    var ah: [u64] = []
+    ah.push(a.l0 & MASK32)
+    ah.push((a.l0 >> 32) & MASK32)
+    ah.push(a.l1 & MASK32)
+    ah.push((a.l1 >> 32) & MASK32)
+    ah.push(a.l2 & MASK32)
+    ah.push((a.l2 >> 32) & MASK32)
+    ah.push(a.l3 & MASK32)
+    ah.push((a.l3 >> 32) & MASK32)
+
+    var bh: [u64] = []
+    bh.push(b.l0 & MASK32)
+    bh.push((b.l0 >> 32) & MASK32)
+    bh.push(b.l1 & MASK32)
+    bh.push((b.l1 >> 32) & MASK32)
+    bh.push(b.l2 & MASK32)
+    bh.push((b.l2 >> 32) & MASK32)
+    bh.push(b.l3 & MASK32)
+    bh.push((b.l3 >> 32) & MASK32)
+
+    # Product: 16 half-limbs (32-bit each)
+    var prod: [u64] = []
+    var pi: u64 = 0
+    while pi < 16:
+        prod.push(0)
+        pi = pi + 1
+
+    # Schoolbook: accumulate 32×32 -> 64 bit products
+    var i: u64 = 0
+    while i < 8:
+        var carry: u64 = 0
+        var j: u64 = 0
+        while j < 8:
+            val t: u64 = ah[i] * bh[j] + prod[i + j] + carry
+            prod[i + j] = t & MASK32
+            carry = (t >> 32) & MASK32
+            j = j + 1
+        prod[i + 8] = prod[i + 8] + carry
+        i = i + 1
+
+    # Pack 16 half-limbs into 8 full u64 limbs
+    var result: [u64] = []
+    var k: u64 = 0
+    while k < 8:
+        val lo_idx: u64 = k * 2
+        val hi_idx: u64 = k * 2 + 1
+        result.push((prod[hi_idx] << 32) | prod[lo_idx])
+        k = k + 1
+    result
+
+fn _sc_reduce_wide(w: [u64]) -> Scalar256:
+    """Reduce a 512-bit number (8 u64 LE limbs) mod n using repeated subtraction
+    with shift. Uses Barrett-like approach: divide and conquer."""
+    # We implement reduction by computing w mod n using the schoolbook approach:
+    # Process from MSB limb down, doing: acc = (acc << 64) + w[i], then acc mod n.
+    # Since we can't hold >256-bit in Scalar256 easily, we use iterative approach:
+    # result = 0; for i from 7 downto 0: result = (result * 2^64 + w[i]) mod n
+    # But result * 2^64 would overflow. Instead, we note 2^64 mod n is a constant.
+    #
+    # R = 2^64 mod n. Then: result = result * R + w[i] (mod n), iterating from MSB.
+    # But we need to do large-number mod n. Simpler: repeated conditional subtract.
+    #
+    # Most practical: iterate from high limb, shift result left by 64, add limb,
+    # then do conditional subtracts of n until < n.
+    # Since n is close to 2^256, at most 2 subtracts per step suffice for the
+    # top half; the bottom half only needs 1.
+    #
+    # Alternative: use the fact that for ECDSA, the wide product of two <n values
+    # produces at most 2*256 = 512 bits, and n ~ 2^256, so quotient < 2^256.
+    # We'll use the iterative shift approach.
+
+    # Start with the top 4 limbs (the "high half" of the 512-bit number)
+    # and reduce downward.
+    # Method: treat 8 limbs as two 256-bit halves: hi = w[7..4], lo = w[3..0]
+    # result = (hi * 2^256 + lo) mod n
+    # 2^256 mod n = 2^256 - n (since n < 2^256)
+    # 2^256 mod n = (2^256) - n
+    #   n  = FFFFFFFF00000000 FFFFFFFFFFFFFFFF BCE6FAADA7179E84 F3B9CAC2FC632551
+    # 2^256 = 1_00000000_00000000 00000000_00000000 00000000_00000000 00000000_00000000
+    # 2^256 - n = 00000000FFFFFFFF 0000000000000000 4319055258E8617B 0C46353D039CDAAF
+    val R_L0: u64 = 0x0C46353D039CDAAF
+    val R_L1: u64 = 0x4319055258E8617B
+    val R_L2: u64 = 0x0000000000000000
+    val R_L3: u64 = 0x00000000FFFFFFFF
+
+    # hi_part = Scalar256 from w[4..7]
+    val hi = Scalar256(l0: w[4], l1: w[5], l2: w[6], l3: w[7])
+    val lo = Scalar256(l0: w[0], l1: w[1], l2: w[2], l3: w[3])
+    val r_const = Scalar256(l0: R_L0, l1: R_L1, l2: R_L2, l3: R_L3)
+
+    # Compute hi * R mod n (R = 2^256 mod n is only ~128 bits, so hi * R < 2^384)
+    # We need hi * r_const, which is a 512-bit product, then reduce mod n.
+    # This is recursive! But r_const is small (~128 bit effective), so hi * r_const
+    # has its high half much smaller. We do one level of recursion.
+    val hi_r_wide = _sc_mul_wide(hi, r_const)
+    # The product hi * r_const can be at most ~384 bits. Its top 4 limbs are small.
+    # Reduce again: hi2 * R + lo2
+    val hi2 = Scalar256(l0: hi_r_wide[4], l1: hi_r_wide[5], l2: hi_r_wide[6], l3: hi_r_wide[7])
+    val lo2 = Scalar256(l0: hi_r_wide[0], l1: hi_r_wide[1], l2: hi_r_wide[2], l3: hi_r_wide[3])
+
+    # hi2 is at most ~128 bits. hi2 * r_const is at most ~256 bits (fits in Scalar256).
+    val hi2_r_wide = _sc_mul_wide(hi2, r_const)
+    # This should have negligible high limbs (at most 1-2 bits)
+    val hi3 = Scalar256(l0: hi2_r_wide[4], l1: hi2_r_wide[5], l2: hi2_r_wide[6], l3: hi2_r_wide[7])
+    val lo3 = Scalar256(l0: hi2_r_wide[0], l1: hi2_r_wide[1], l2: hi2_r_wide[2], l3: hi2_r_wide[3])
+
+    # hi3 should be essentially zero or tiny. One more multiply if needed,
+    # but for practical 256×256 products this is zero. Add lo3 + lo2 + lo mod n.
+    # Actually let's be safe: hi3 * R is tiny, add that too.
+    val hi3_r_wide = _sc_mul_wide(hi3, r_const)
+    val lo4 = Scalar256(l0: hi3_r_wide[0], l1: hi3_r_wide[1], l2: hi3_r_wide[2], l3: hi3_r_wide[3])
+
+    # Sum: lo + lo2 + lo3 + lo4 (mod n)
+    val sum1 = sc_add(lo, lo2)
+    val sum2 = sc_add(sum1, lo3)
+    val sum3 = sc_add(sum2, lo4)
+    sum3
+
+fn sc_mul(a: Scalar256, b: Scalar256) -> Scalar256:
+    """Scalar multiplication mod n."""
+    val wide = _sc_mul_wide(a, b)
+    _sc_reduce_wide(wide)
+
+fn sc_sq(a: Scalar256) -> Scalar256:
+    """Scalar squaring mod n."""
+    sc_mul(a, a)
+
+fn sc_inv(a: Scalar256) -> Scalar256:
+    """Scalar inverse mod n via Fermat's little theorem: a^(n-2) mod n.
+    Uses a simple square-and-multiply with the bits of n-2."""
+    # n-2 = FFFFFFFF00000000FFFFFFFFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC63254F
+    # (last byte 0x51 - 2 = 0x4F)
+    val exp = _sc_n_minus_2_bytes()
+    var result = scalar_one()
+    var base = a
+    # Process MSB-first (32 bytes big-endian)
+    var i: u64 = 0
+    while i < 32:
+        var bit: u64 = 0
+        while bit < 8:
+            result = sc_sq(result)
+            val byte_val: u64 = exp[i].to_u64()
+            val bit_set: u64 = (byte_val >> (7 - bit)) & 1
+            if bit_set == 1:
+                result = sc_mul(result, a)
+            bit = bit + 1
+        i = i + 1
+    result
+
+fn _sc_n_minus_2_bytes() -> [u8]:
+    """n - 2 as 32 big-endian bytes."""
+    var b: [u8] = []
+    # n = FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+    # n-2 = FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC63254F
+    b.push(0xFF); b.push(0xFF); b.push(0xFF); b.push(0xFF)  # bytes 0-3
+    b.push(0x00); b.push(0x00); b.push(0x00); b.push(0x00)  # bytes 4-7
+    b.push(0xFF); b.push(0xFF); b.push(0xFF); b.push(0xFF)  # bytes 8-11
+    b.push(0xFF); b.push(0xFF); b.push(0xFF); b.push(0xFF)  # bytes 12-15
+    b.push(0xBC); b.push(0xE6); b.push(0xFA); b.push(0xAD)  # bytes 16-19
+    b.push(0xA7); b.push(0x17); b.push(0x9E); b.push(0x84)  # bytes 20-23
+    b.push(0xF3); b.push(0xB9); b.push(0xCA); b.push(0xC2)  # bytes 24-27
+    b.push(0xFC); b.push(0x63); b.push(0x25); b.push(0x4F)  # bytes 28-31
+    b
+
+fn sc_is_zero(a: Scalar256) -> bool:
+    val r = _sc_reduce(a)
+    if r.l0 != 0: return false
+    if r.l1 != 0: return false
+    if r.l2 != 0: return false
+    if r.l3 != 0: return false
+    true
+
+# ============================================================================
+# RFC 6979 §3.2 — Deterministic nonce generation
+# ============================================================================
+
+fn _rfc6979_generate_k(privkey: [u8], msg_hash: [u8]) -> [u8]:
+    """Generate deterministic k per RFC 6979 §3.2 using HMAC-SHA-256.
+
+    Args:
+        privkey:  32 bytes big-endian private key
+        msg_hash: 32 bytes SHA-256 hash of the message
+
+    Returns: 32 bytes big-endian k value in [1, n-1]
+    """
+    # Step a: h1 = msg_hash (already provided)
+    # Step b: V = 0x01 * 32
+    var v_buf: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        v_buf.push(0x01)
+        i = i + 1
+
+    # Step c: K = 0x00 * 32
+    var k_buf: [u8] = []
+    i = 0
+    while i < 32:
+        k_buf.push(0x00)
+        i = i + 1
+
+    # Step d: K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
+    var d_data: [u8] = []
+    i = 0
+    while i < 32:
+        d_data.push(v_buf[i])
+        i = i + 1
+    d_data.push(0x00)
+    i = 0
+    while i < 32:
+        d_data.push(privkey[i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        d_data.push(msg_hash[i])
+        i = i + 1
+    k_buf = sha256_hmac(k_buf, d_data)
+
+    # Step e: V = HMAC_K(V)
+    v_buf = sha256_hmac(k_buf, v_buf)
+
+    # Step f: K = HMAC_K(V || 0x01 || int2octets(x) || bits2octets(h1))
+    var f_data: [u8] = []
+    i = 0
+    while i < 32:
+        f_data.push(v_buf[i])
+        i = i + 1
+    f_data.push(0x01)
+    i = 0
+    while i < 32:
+        f_data.push(privkey[i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        f_data.push(msg_hash[i])
+        i = i + 1
+    k_buf = sha256_hmac(k_buf, f_data)
+
+    # Step g: V = HMAC_K(V)
+    v_buf = sha256_hmac(k_buf, v_buf)
+
+    # Step h: Loop until valid k found
+    var attempts: u64 = 0
+    while attempts < 100:
+        # h.1: V = HMAC_K(V)
+        v_buf = sha256_hmac(k_buf, v_buf)
+        # h.2: T = V (32 bytes = 256 bits = qlen for P-256)
+        val candidate = scalar_from_bytes(v_buf)
+        # h.3: Check 1 <= k < n
+        if _sc_is_valid_k(candidate):
+            return v_buf
+        # h.3 retry: K = HMAC_K(V || 0x00), V = HMAC_K(V)
+        var retry_data: [u8] = []
+        i = 0
+        while i < 32:
+            retry_data.push(v_buf[i])
+            i = i + 1
+        retry_data.push(0x00)
+        k_buf = sha256_hmac(k_buf, retry_data)
+        v_buf = sha256_hmac(k_buf, v_buf)
+        attempts = attempts + 1
+    # Should never reach here for valid inputs
+    v_buf
+
+fn _sc_is_valid_k(k: Scalar256) -> bool:
+    """Check that k is in [1, n-1]: not zero and less than n."""
+    if sc_is_zero(k):
+        return false
+    # Check k < n: try subtract n, if borrow then k < n
+    val (_sub, borrow) = _sc_sub_n_with_borrow(k)
+    borrow == 1
+
+# ============================================================================
+# ECDSA Sign (RFC 6979)
+# ============================================================================
+
+fn p256_ecdsa_sign(privkey: [u8], msg_hash: [u8]) -> [u8]:
+    """ECDSA sign with RFC 6979 deterministic nonce.
+
+    Args:
+        privkey:  32 bytes big-endian private key d in [1, n-1]
+        msg_hash: 32 bytes SHA-256 hash of the message
+
+    Returns: 64 bytes r||s (32 bytes each, big-endian).
+             Empty array on error.
+    """
+    if privkey.len() != 32:
+        return []
+    if msg_hash.len() != 32:
+        return []
+
+    val k_bytes = _rfc6979_generate_k(privkey, msg_hash)
+    val k = scalar_from_bytes(k_bytes)
+
+    # R = k*G
+    val r_jac = _scalar_mul_affine(k_bytes, _gx(), _gy())
+    val (rx, _ry) = _to_affine(r_jac)
+    val r_bytes = fe_to_bytes(rx)
+
+    # r = x(R) mod n
+    val r = scalar_from_bytes(r_bytes)
+    val r_reduced = _sc_reduce(r)
+    if sc_is_zero(r_reduced):
+        return []
+
+    # s = k^-1 * (hash + r*d) mod n
+    val d = scalar_from_bytes(privkey)
+    val z = scalar_from_bytes(msg_hash)
+    val r_d = sc_mul(r_reduced, d)
+    val z_plus_rd = sc_add(z, r_d)
+    val k_inv = sc_inv(k)
+    val s = sc_mul(k_inv, z_plus_rd)
+
+    if sc_is_zero(s):
+        return []
+
+    # Encode r || s
+    val r_out = scalar_to_bytes(r_reduced)
+    val s_out = scalar_to_bytes(s)
+    var sig: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        sig.push(r_out[i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        sig.push(s_out[i])
+        i = i + 1
+    sig
+
+# ============================================================================
+# ECDSA Verify
+# ============================================================================
+
+fn _jac_add_jac(p1: JacP256, p2: JacP256) -> JacP256:
+    """Full Jacobian + Jacobian point addition (both in Jacobian coords).
+    Needed for ECDSA verify: u1*G + u2*Q where both results are Jacobian."""
+    if p1.inf:
+        return p2
+    if p2.inf:
+        return p1
+
+    # Convert to common denominator
+    val z1sq = fe_sq(p1.z)
+    val z2sq = fe_sq(p2.z)
+    val z1cu = fe_mul(z1sq, p1.z)
+    val z2cu = fe_mul(z2sq, p2.z)
+
+    val u1 = fe_mul(p1.x, z2sq)  # U1 = X1 * Z2^2
+    val u2 = fe_mul(p2.x, z1sq)  # U2 = X2 * Z1^2
+    val s1 = fe_mul(p1.y, z2cu)  # S1 = Y1 * Z2^3
+    val s2 = fe_mul(p2.y, z1cu)  # S2 = Y2 * Z1^3
+
+    if fe_eq(u1, u2):
+        if fe_eq(s1, s2):
+            return _jac_double(p1)
+        return _jac_inf()
+
+    val h = fe_sub(u2, u1)       # H = U2 - U1
+    val r = fe_sub(s2, s1)       # r = S2 - S1
+    val hh = fe_sq(h)            # HH = H^2
+    val hhh = fe_mul(hh, h)      # HHH = H^3
+    val v = fe_mul(u1, hh)       # V = U1 * H^2
+
+    val rr = fe_sq(r)
+    val v2 = fe_add(v, v)
+    val x3 = fe_sub(fe_sub(rr, hhh), v2)
+
+    val vmx = fe_sub(v, x3)
+    val rvmx = fe_mul(r, vmx)
+    val s1hhh = fe_mul(s1, hhh)
+    val y3 = fe_sub(rvmx, s1hhh)
+
+    val z3 = fe_mul(fe_mul(p1.z, p2.z), h)
+
+    JacP256(x: x3, y: y3, z: z3, inf: false)
+
+fn p256_ecdsa_verify(pubkey: [u8], msg_hash: [u8], sig: [u8]) -> bool:
+    """Verify an ECDSA P-256 signature.
+
+    Args:
+        pubkey:   65 bytes uncompressed public key (04 || x || y)
+        msg_hash: 32 bytes SHA-256 hash of the message
+        sig:      64 bytes r||s
+
+    Returns: true if signature is valid.
+    """
+    if pubkey.len() != 65:
+        return false
+    if msg_hash.len() != 32:
+        return false
+    if sig.len() != 64:
+        return false
+    if pubkey[0u64] != 0x04u8:
+        return false
+
+    # Parse r, s from signature
+    var r_bytes: [u8] = []
+    var s_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        r_bytes.push(sig[i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        s_bytes.push(sig[32 + i])
+        i = i + 1
+
+    val r = scalar_from_bytes(r_bytes)
+    val s = scalar_from_bytes(s_bytes)
+
+    # Check r, s in [1, n-1]
+    if sc_is_zero(r):
+        return false
+    if sc_is_zero(s):
+        return false
+    if _sc_is_valid_k(r) == false:
+        return false
+    if _sc_is_valid_k(s) == false:
+        return false
+
+    # w = s^-1 mod n
+    val w = sc_inv(s)
+
+    # u1 = hash * w mod n
+    val z = scalar_from_bytes(msg_hash)
+    val u1 = sc_mul(z, w)
+
+    # u2 = r * w mod n
+    val u2 = sc_mul(r, w)
+
+    # R' = u1*G + u2*Q
+    val u1_bytes = scalar_to_bytes(u1)
+    val u2_bytes = scalar_to_bytes(u2)
+
+    # Parse public key Q
+    var qx_bytes: [u8] = []
+    var qy_bytes: [u8] = []
+    i = 0
+    while i < 32:
+        qx_bytes.push(pubkey[1 + i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        qy_bytes.push(pubkey[33 + i])
+        i = i + 1
+
+    val qx = fe_from_bytes(qx_bytes)
+    val qy = fe_from_bytes(qy_bytes)
+
+    val p1 = _scalar_mul_affine(u1_bytes, _gx(), _gy())
+    val p2 = _scalar_mul_affine(u2_bytes, qx, qy)
+
+    val rp = _jac_add_jac(p1, p2)
+    if rp.inf:
+        return false
+
+    val (rpx, _rpy) = _to_affine(rp)
+    val rpx_bytes = fe_to_bytes(rpx)
+
+    # Check: r == x(R') mod n
+    val rp_scalar = scalar_from_bytes(rpx_bytes)
+    val rp_reduced = _sc_reduce(rp_scalar)
+    val r_reduced = _sc_reduce(r)
+
+    # Compare
+    if rp_reduced.l0 != r_reduced.l0: return false
+    if rp_reduced.l1 != r_reduced.l1: return false
+    if rp_reduced.l2 != r_reduced.l2: return false
+    if rp_reduced.l3 != r_reduced.l3: return false
+    true
+
+# ============================================================================
+# ECDH wrappers (delegate to ecdh_p256.spl)
+# ============================================================================
+
+fn p256_ecdh(privkey: [u8], peer_pubkey: [u8]) -> [u8]:
+    """ECDH key exchange. Returns 32-byte shared secret (x-coordinate).
+
+    Args:
+        privkey:     32 bytes big-endian private key
+        peer_pubkey: 65 bytes uncompressed peer public key (04||x||y)
+
+    Returns: 32 bytes shared secret X, or empty on error.
+    """
+    p256_ecdh_shared_x(privkey, peer_pubkey)
+
+fn p256_keygen(privkey: [u8]) -> [u8]:
+    """Generate uncompressed public key from private key.
+
+    Args:
+        privkey: 32 bytes big-endian private key
+
+    Returns: 65 bytes uncompressed public key (04||x||y), or empty on error.
+    """
+    p256_keypair_pub(privkey)
+
+# ============================================================================
+# Field arithmetic wrappers (byte-level API as requested by task spec)
+# ============================================================================
+
+fn p256_add(a: [u8], b: [u8]) -> [u8]:
+    """Mod-p addition of two 32-byte big-endian field elements."""
+    val fa = fe_from_bytes(a)
+    val fb = fe_from_bytes(b)
+    fe_to_bytes(fe_add(fa, fb))
+
+fn p256_sub(a: [u8], b: [u8]) -> [u8]:
+    """Mod-p subtraction of two 32-byte big-endian field elements."""
+    val fa = fe_from_bytes(a)
+    val fb = fe_from_bytes(b)
+    fe_to_bytes(fe_sub(fa, fb))
+
+fn p256_mul(a: [u8], b: [u8]) -> [u8]:
+    """Mod-p multiplication of two 32-byte big-endian field elements."""
+    val fa = fe_from_bytes(a)
+    val fb = fe_from_bytes(b)
+    fe_to_bytes(fe_mul(fa, fb))
+
+fn p256_inv(a: [u8]) -> [u8]:
+    """Mod-p inverse of a 32-byte big-endian field element."""
+    val fa = fe_from_bytes(a)
+    fe_to_bytes(fe_inv(fa))
+
+# ============================================================================
+# Point operations (byte-level API)
+# ============================================================================
+
+fn p256_scalar_mult(k: [u8], px: [u8], py: [u8]) -> [u8]:
+    """Scalar multiplication k*P. Returns 65-byte uncompressed point or empty."""
+    if k.len() != 32:
+        return []
+    if px.len() != 32:
+        return []
+    if py.len() != 32:
+        return []
+    val fpx = fe_from_bytes(px)
+    val fpy = fe_from_bytes(py)
+    val jac = _scalar_mul_affine(k, fpx, fpy)
+    val (ax, ay) = _to_affine(jac)
+    val x_bytes = fe_to_bytes(ax)
+    val y_bytes = fe_to_bytes(ay)
+    var result: [u8] = []
+    result.push(0x04u8)
+    var i: u64 = 0
+    while i < 32:
+        result.push(x_bytes[i])
+        i = i + 1
+    i = 0
+    while i < 32:
+        result.push(y_bytes[i])
+        i = i + 1
+    result
+
+fn p256_point_on_curve(px: [u8], py: [u8]) -> bool:
+    """Check if affine point (px, py) is on the P-256 curve.
+    Verifies: y^2 == x^3 - 3x + b (mod p)."""
+    val x = fe_from_bytes(px)
+    val y = fe_from_bytes(py)
+    val y2 = fe_sq(y)
+    val x2 = fe_sq(x)
+    val x3 = fe_mul(x2, x)
+    # -3x = sub(0, 3x) = sub(0, add(add(x,x),x))
+    val three_x = fe_add(fe_add(x, x), x)
+    val neg3x = fe_sub(fe_zero(), three_x)
+    val b_val = _curve_b()
+    val rhs = fe_add(fe_add(x3, neg3x), b_val)
+    fe_eq(y2, rhs)
+
+fn _curve_b() -> FeP256:
+    """P-256 curve parameter b."""
+    fe_from_bytes([
+        0x5Au8, 0xC6u8, 0x35u8, 0xD8u8, 0xAAu8, 0x3Au8, 0x93u8, 0xE7u8,
+        0xB3u8, 0xEBu8, 0xBDu8, 0x55u8, 0x76u8, 0x98u8, 0x86u8, 0xBCu8,
+        0x65u8, 0x1Du8, 0x06u8, 0xB0u8, 0xCCu8, 0x53u8, 0xB0u8, 0xF6u8,
+        0x3Bu8, 0xCEu8, 0x3Cu8, 0x3Eu8, 0x27u8, 0xD2u8, 0x60u8, 0x4Bu8
+    ])

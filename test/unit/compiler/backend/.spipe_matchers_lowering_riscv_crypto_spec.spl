@@ -1,0 +1,86 @@
+"""RV64 Zvk cipher intrinsic lowering — golden byte-level tests.
+
+Tests lower_cipher_intrinsic_riscv end-to-end against known byte sequences.
+Caps have all Zvk extensions enabled (has_zvkned, has_zvknh, has_zvkg, has_v).
+Golden bytes are RVV OP-V encodings verified via:
+  word = funct6<<26 | vm<<25 | vs2<<20 | vs1<<15 | funct3<<12 | vd<<7 | 0x57
+  stored little-endian (4 bytes).
+"""
+
+use std.spipe.*
+use compiler.backend.lowering.{LoweringResult, lower_cipher_intrinsic_riscv}
+use compiler.backend.feature_caps.{Rv64Caps}
+
+fn _list_hex(bytes: [i64]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var s: text = ""
+    var i: u64 = 0
+    while i < bytes.len().to_u64():
+        val b = bytes[i.to_i64()]
+        s = s + hex_chars.char_at(((b / 16) % 16).to_u64())
+        s = s + hex_chars.char_at((b % 16).to_u64())
+        i = i + 1
+    s
+
+# All Zvk caps enabled.
+val TEST_RV64_CAPS = Rv64Caps(
+    has_zvkned: true,
+    has_zvknh: true,
+    has_zvkg: true,
+    has_v: true,
+    vlen_bits: 128
+)
+
+describe "RV64 Zvk cipher intrinsic lowering — AES rounds":
+
+    it "vaesem.vv v1,v2 (crypto_aes_round [1,2]) — mid-round encrypt":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_round", [1, 2], TEST_RV64_CAPS)
+        expect result.lowered == true
+        expect result.reason == ""
+        expect _list_hex(result.bytes) == "d72020a6"
+
+    it "vaesem.vv output length is 4 bytes":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_round", [1, 2], TEST_RV64_CAPS)
+        expect result.bytes.len() == 4
+
+    it "vaesef.vv v1,v2 (crypto_aes_round_last [1,2]) — final-round encrypt":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_round_last", [1, 2], TEST_RV64_CAPS)
+        expect result.lowered == true
+        expect result.reason == ""
+        expect _list_hex(result.bytes) == "d72020a2"
+
+    it "vaesef.vv output length is 4 bytes":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_round_last", [1, 2], TEST_RV64_CAPS)
+        expect result.bytes.len() == 4
+
+    it "vaesdm.vv v1,v2 (crypto_aes_inv_round [1,2]) — mid-round decrypt":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_inv_round", [1, 2], TEST_RV64_CAPS)
+        expect result.lowered == true
+        expect result.reason == ""
+        expect _list_hex(result.bytes) == "d72020ae"
+
+    it "vaesdm.vv output length is 4 bytes":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_inv_round", [1, 2], TEST_RV64_CAPS)
+        expect result.bytes.len() == 4
+
+    it "vaesdf.vv v1,v2 (crypto_aes_inv_round_last [1,2]) — final-round decrypt":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_inv_round_last", [1, 2], TEST_RV64_CAPS)
+        expect result.lowered == true
+        expect result.reason == ""
+        expect _list_hex(result.bytes) == "d72020aa"
+
+    it "vaesdf.vv output length is 4 bytes":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_inv_round_last", [1, 2], TEST_RV64_CAPS)
+        expect result.bytes.len() == 4
+
+describe "RV64 Zvk cipher intrinsic lowering — failure cases":
+
+    it "unknown intrinsic returns lowered=false, reason=unknown":
+        val result = lower_cipher_intrinsic_riscv("unknown_intrinsic", [0, 0], TEST_RV64_CAPS)
+        expect result.lowered == false
+        expect result.reason == "unknown"
+
+    it "crypto_aes_round with 1 arg returns lowered=false, reason=bad-arity":
+        val result = lower_cipher_intrinsic_riscv("crypto_aes_round", [0], TEST_RV64_CAPS)
+        expect result.lowered == false
+        expect result.reason == "bad-arity"

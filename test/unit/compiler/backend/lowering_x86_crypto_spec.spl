@@ -1,0 +1,120 @@
+"""x86_64 cipher intrinsic lowering — golden byte-level tests.
+
+Tests lower_cipher_intrinsic_x86 end-to-end against known byte sequences.
+Caps use legacy SSE path (has_avx=false) to match the 2-arg golden encodings.
+Golden bytes verified against Intel SDM encodings for AES-NI, CRC32, PCLMULQDQ.
+"""
+
+use std.spipe.*
+use compiler.backend.lowering.{LoweringResult, lower_cipher_intrinsic_x86}
+use compiler.backend.feature_caps.{X86Caps}
+
+fn _list_hex(bytes: [i64]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var s: text = ""
+    var i: u64 = 0
+    while i < bytes.len().to_u64():
+        val b = bytes[i.to_i64()]
+        s = s + hex_chars.char_at(((b / 16) % 16).to_u64())
+        s = s + hex_chars.char_at((b % 16).to_u64())
+        i = i + 1
+    s
+
+# Legacy SSE caps — has_avx=false so AES/CLMUL use 2-arg destructive forms.
+val TEST_X86_CAPS = X86Caps(
+    has_aes: true,
+    has_sha_ni: true,
+    has_sse42: true,
+    has_pclmul: true,
+    has_avx: false,
+    has_avx2: false,
+    has_avx512: false
+)
+
+describe "x86 cipher intrinsic lowering — AES-NI":
+
+    it "AESENC xmm0,xmm1 (crypto_aes_round [0,1])":
+        val result = lower_cipher_intrinsic_x86("crypto_aes_round", [0, 1], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(true)
+        expect(result.reason).to_equal("")
+        expect(_list_hex(result.bytes)).to_equal("660f38dcc1")
+
+    it "AESENC output length is 5 bytes":
+        val result = lower_cipher_intrinsic_x86("crypto_aes_round", [0, 1], TEST_X86_CAPS)
+        expect(result.bytes.len()).to_equal(5)
+
+    it "AESENCLAST xmm0,xmm1 (crypto_aes_round_last [0,1])":
+        val result = lower_cipher_intrinsic_x86("crypto_aes_round_last", [0, 1], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(true)
+        expect(result.reason).to_equal("")
+        expect(_list_hex(result.bytes)).to_equal("660f38ddc1")
+
+    it "AESENCLAST output length is 5 bytes":
+        val result = lower_cipher_intrinsic_x86("crypto_aes_round_last", [0, 1], TEST_X86_CAPS)
+        expect(result.bytes.len()).to_equal(5)
+
+    it "AESDEC xmm2,xmm3 (crypto_aes_inv_round [2,3])":
+        val result = lower_cipher_intrinsic_x86("crypto_aes_inv_round", [2, 3], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(true)
+        expect(result.reason).to_equal("")
+        expect(_list_hex(result.bytes)).to_equal("660f38ded3")
+
+    it "AESDEC output length is 5 bytes":
+        val result = lower_cipher_intrinsic_x86("crypto_aes_inv_round", [2, 3], TEST_X86_CAPS)
+        expect(result.bytes.len()).to_equal(5)
+
+describe "x86 cipher intrinsic lowering — CRC32":
+
+    it "CRC32 r32,r8 (crc32_u8 [0,1])":
+        val result = lower_cipher_intrinsic_x86("crc32_u8", [0, 1], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(true)
+        expect(result.reason).to_equal("")
+        expect(_list_hex(result.bytes)).to_equal("f20f38f0c1")
+
+    it "CRC32 r32,r8 output length is 5 bytes":
+        val result = lower_cipher_intrinsic_x86("crc32_u8", [0, 1], TEST_X86_CAPS)
+        expect(result.bytes.len()).to_equal(5)
+
+    it "CRC32 r64,r64 with REX.W (crc32_u64 [0,0])":
+        val result = lower_cipher_intrinsic_x86("crc32_u64", [0, 0], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(true)
+        expect(result.reason).to_equal("")
+        expect(_list_hex(result.bytes)).to_equal("f2480f38f1c0")
+
+    it "CRC32 r64,r64 output length is 6 bytes (REX prefix)":
+        val result = lower_cipher_intrinsic_x86("crc32_u64", [0, 0], TEST_X86_CAPS)
+        expect(result.bytes.len()).to_equal(6)
+
+describe "x86 cipher intrinsic lowering — PCLMULQDQ":
+
+    it "PCLMULQDQ xmm0,xmm1,0x00 (clmul_lo [0,1])":
+        val result = lower_cipher_intrinsic_x86("clmul_lo", [0, 1], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(true)
+        expect(result.reason).to_equal("")
+        expect(_list_hex(result.bytes)).to_equal("660f3a44c100")
+
+    it "PCLMULQDQ clmul_lo output length is 6 bytes":
+        val result = lower_cipher_intrinsic_x86("clmul_lo", [0, 1], TEST_X86_CAPS)
+        expect(result.bytes.len()).to_equal(6)
+
+    it "PCLMULQDQ xmm0,xmm1,0x11 (clmul_hi [0,1])":
+        val result = lower_cipher_intrinsic_x86("clmul_hi", [0, 1], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(true)
+        expect(result.reason).to_equal("")
+        expect(_list_hex(result.bytes)).to_equal("660f3a44c111")
+
+    it "PCLMULQDQ clmul_hi output length is 6 bytes":
+        val result = lower_cipher_intrinsic_x86("clmul_hi", [0, 1], TEST_X86_CAPS)
+        expect(result.bytes.len()).to_equal(6)
+
+describe "x86 cipher intrinsic lowering — failure cases":
+
+    it "unknown intrinsic name returns lowered=false, reason=unknown":
+        val result = lower_cipher_intrinsic_x86("sha_not_real", [0, 1], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(false)
+        expect(result.reason).to_equal("unknown")
+
+    it "crypto_aes_round with 1 arg returns lowered=false, reason=bad-arity":
+        val result = lower_cipher_intrinsic_x86("crypto_aes_round", [0], TEST_X86_CAPS)
+        expect(result.lowered).to_equal(false)
+        expect(result.reason).to_equal("bad-arity")
