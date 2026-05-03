@@ -1,9 +1,9 @@
 # src/compiler/70.backend/lowering/intrinsic_lowering_riscv.spl
 #
-# RV64 Zvk Cipher Intrinsic Lowering — Pure Simple
+# RV64 Cipher + Scalar Bit-Manip Intrinsic Lowering — Pure Simple
 #
-# Maps canonical MirInstKind.Intrinsic `name` strings to RVV Zvk byte
-# sequences via the emit_* helpers in encode_rvv_zvk.spl, gated by Rv64Caps.
+# Maps canonical MirInstKind.Intrinsic `name` strings to RVV Zvk or RV64
+# scalar Zbb/Zbkb byte sequences, gated by Rv64Caps.
 #
 # Arity contract (positional args list):
 #   crypto_aes_round          args=[vd, vs2]          -> 2  (vaesem.vv)
@@ -13,6 +13,13 @@
 #   crypto_sha256_rnds2       args=[vd, vs2, vs1]     -> 3  (vsha2cl.vv + vsha2ch.vv)
 #   clmul_lo                  args=[vd, vs2, vs1]     -> 3  (vghsh.vv)
 #   clmul_hi                  args=[vd, vs2]          -> 2  (vgmul.vv)
+#   bit_rotate_left           args=[rd, rs1, rs2]     -> 3  (rol)
+#   bit_rotate_right          args=[rd, rs1, rs2]     -> 3  (ror)
+#   bit_popcount              args=[rd, rs]           -> 2  (cpop)
+#   bit_clz                   args=[rd, rs]           -> 2  (clz)
+#   bit_ctz                   args=[rd, rs]           -> 2  (ctz)
+#   bit_bswap                 args=[rd, rs]           -> 2  (rev8)
+#   bit_bitreverse            args=[rd, rs]           -> 2  (brev8 + rev8)
 #
 # LoweringResult reasons:
 #   ""          — success; bytes is non-empty
@@ -27,6 +34,7 @@ use compiler.backend.backend.native.encode_rvv_zvk.{
     emit_vsha2ch_vv, emit_vsha2cl_vv,
     emit_vghsh_vv, emit_vgmul_vv
 }
+use compiler.backend.native.riscv_encoding.{riscv_encode_r_type, riscv_encode_i_type}
 
 # ============================================================================
 # TargetIdiom mapping for RV64 Zvk intrinsics
@@ -62,23 +70,40 @@ fn intrinsic_to_target_idiom_riscv(name: text) -> TargetIdiom?:
 
 fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
     match idiom:
-        case RotateLeft:            true
-        case RotateRight:           true
-        case Popcount:              true
-        case CountLeadingZeros:     true
-        case CountTrailingZeros:    true
-        case ByteSwap:              true
-        case BitReverse:            true
         case MatrixDot:             true
         case MatrixOuterProduct:    true
         case MatrixFmaKernel:       true
         case _:                     false
 
+fn append_bytes(dst: [i64], src: [i64]) -> [i64]:
+    var out = dst
+    var i = 0
+    while i < src.length:
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn riscv_word_to_le4(word: i64) -> [i64]:
+    var w = word
+    if w < 0:
+        w = w + 4294967296
+    val b0 = w % 256
+    val b1 = (w / 256) % 256
+    val b2 = (w / 65536) % 256
+    val b3 = (w / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn emit_scalar_bitmanip_r_type(funct7: i64, rs2: i64, rs1: i64, funct3: i64, rd: i64) -> [i64]:
+    riscv_word_to_le4(riscv_encode_r_type(funct7, rs2, rs1, funct3, rd, 0x33))
+
+fn emit_scalar_bitmanip_i_type(funct12: i64, rs1: i64, funct3: i64, rd: i64) -> [i64]:
+    riscv_word_to_le4(riscv_encode_i_type(funct12, rs1, funct3, rd, 0x13))
+
 # ============================================================================
 # lower_cipher_intrinsic_riscv — main lowering entry point
 # ============================================================================
 
-"""Lower a canonical cipher intrinsic to an RVV Zvk byte sequence.
+"""Lower a canonical cipher intrinsic to RV64 byte sequences.
 
 Steps:
   1. Resolve name -> TargetIdiom; unknown names return reason="unknown".
@@ -90,6 +115,8 @@ Steps:
 
 For crypto_sha256_rnds2 the result is vsha2cl.vv + vsha2ch.vv concatenated
 (8 bytes total) because the SHA-2 round pair requires both low and high halves.
+For bit_bitreverse the result is brev8 + rev8 (8 bytes total) because RV64
+needs both scalar instructions to reverse all bits in the register.
 """
 fn lower_cipher_intrinsic_riscv(name: text, args: [i64], caps: Rv64Caps) -> LoweringResult:
     var empty: [i64] = []
@@ -140,15 +167,8 @@ fn lower_cipher_intrinsic_riscv(name: text, args: [i64], caps: Rv64Caps) -> Lowe
                     var vs1 = args[2]
                     var lo = emit_vsha2cl_vv(vd, vs2, vs1)
                     var hi = emit_vsha2ch_vv(vd, vs2, vs1)
-                    var bytes: [i64] = []
-                    var i = 0
-                    while i < lo.length:
-                        bytes = bytes + [lo[i]]
-                        i = i + 1
-                    i = 0
-                    while i < hi.length:
-                        bytes = bytes + [hi[i]]
-                        i = i + 1
+                    var bytes = append_bytes([], lo)
+                    bytes = append_bytes(bytes, hi)
                     LoweringResult(bytes, true, "")
 
                 case "clmul_lo":
@@ -161,6 +181,49 @@ fn lower_cipher_intrinsic_riscv(name: text, args: [i64], caps: Rv64Caps) -> Lowe
                     if args.length != 2:
                         return LoweringResult(empty, false, "bad-arity")
                     var bytes = emit_vgmul_vv(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_rotate_left":
+                    if args.length != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_scalar_bitmanip_r_type(0x30, args[2], args[1], 0x1, args[0])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_rotate_right":
+                    if args.length != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_scalar_bitmanip_r_type(0x30, args[2], args[1], 0x5, args[0])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_popcount":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_scalar_bitmanip_i_type(0x602, args[1], 0x1, args[0])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_clz":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_scalar_bitmanip_i_type(0x600, args[1], 0x1, args[0])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_ctz":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_scalar_bitmanip_i_type(0x601, args[1], 0x1, args[0])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_bswap":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_scalar_bitmanip_i_type(0x6b8, args[1], 0x5, args[0])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_bitreverse":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_scalar_bitmanip_i_type(0x687, args[1], 0x5, args[0])
+                    bytes = append_bytes(bytes, emit_scalar_bitmanip_i_type(0x6b8, args[0], 0x5, args[0]))
                     LoweringResult(bytes, true, "")
 
                 case _:

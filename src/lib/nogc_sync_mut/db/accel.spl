@@ -77,7 +77,7 @@ struct RowBitmap:
         val full_words = row_count / 32
         var idx = 0
         while idx < full_words:
-            words[idx as i32] = ~0u32
+            words[idx as i32] = 0xFFFFFFFFu32
             idx = idx + 1
         val tail_bits = row_count % 32
         if tail_bits > 0:
@@ -113,8 +113,9 @@ struct RowBitmap:
     fn count() -> i64:
         var total = 0
         var idx = 0
-        while idx < self.words.len():
-            total = total + popcount_u32(self.words[idx as i32])
+        while idx < self.row_count:
+            if self.get(idx):
+                total = total + 1
             idx = idx + 1
         total
 
@@ -155,7 +156,7 @@ struct RowBitmap:
         var idx = 0
         while idx < limit:
             val rhs_word = if idx < rhs.words.len(): rhs.words[idx as i32] else: 0u32
-            words.push(self.words[idx as i32] & (~rhs_word))
+            words.push(self.words[idx as i32] & (0xFFFFFFFFu32 ^ rhs_word))
             idx = idx + 1
         RowBitmap(row_count: self.row_count, words: words)
 
@@ -198,11 +199,12 @@ fn row_bitmap_indices(bitmap: RowBitmap) -> [i64]:
     result
 
 fn popcount_u32(word: u32) -> i64:
-    var remaining = word
     var total = 0
-    while remaining != 0u32:
-        remaining = remaining & (remaining - 1u32)
-        total = total + 1
+    var bit_idx = 0
+    while bit_idx < 32:
+        if ((word >> (bit_idx as u32)) & 1u32) != 0u32:
+            total = total + 1
+        bit_idx = bit_idx + 1
     total
 
 fn accel_capability_report() -> AccelCapabilityReport:
@@ -275,12 +277,7 @@ fn byte_span_find_delimiter(span: ByteSpan) -> i64:
     -1
 
 fn text_find_delimiter(value: text) -> i64:
-    var idx = 0
-    while idx < value.len():
-        if is_delimiter_text_char(value.char_at(idx)):
-            return idx
-        idx = idx + 1
-    -1
+    byte_span_find_delimiter(text_to_byte_span(value))
 
 fn text_equals_span(lhs: text, rhs: text) -> bool:
     lhs == rhs
@@ -304,6 +301,22 @@ fn is_delimiter_text_char(ch: text) -> bool:
     ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ch == "," or
     ch == "|" or ch == "\"" or ch == "'"
 
+fn byte_span_matches_at(haystack: ByteSpan, start: i64, needle: ByteSpan) -> bool:
+    var idx = 0
+    while idx < needle.len:
+        if haystack.bytes[haystack.start + start + idx] != needle.bytes[needle.start + idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn is_token_boundary_byte(byte: u8) -> bool:
+    byte == (" " as u8) or byte == ("\t" as u8) or byte == ("\n" as u8) or
+    byte == ("\r" as u8) or byte == ("," as u8) or byte == ("|" as u8) or
+    byte == ("\"" as u8) or byte == ("'" as u8) or byte == ("(" as u8) or
+    byte == (")" as u8) or byte == ("[" as u8) or byte == ("]" as u8) or
+    byte == ("{" as u8) or byte == ("}" as u8) or byte == (":" as u8) or
+    byte == (";" as u8) or byte == ("/" as u8) or byte == ("\\" as u8)
+
 fn text_matches_at(value: text, start: i64, token: text) -> bool:
     var offset = 0
     while offset < token.len():
@@ -315,16 +328,18 @@ fn text_matches_at(value: text, start: i64, token: text) -> bool:
 fn text_contains_token(value: text, token: text) -> bool:
     if token == "":
         return false
-    if not value.contains(token):
+    val value_span = text_to_byte_span(value)
+    val token_span = text_to_byte_span(token)
+    if token_span.len == 0 or value_span.len < token_span.len:
         return false
-    val token_len = token.len()
-    val first = token.char_at(0)
+    val token_len = token_span.len
+    val first = token_span.bytes[token_span.start]
     var start = 0
-    while start <= value.len() - token_len:
-        if value.char_at(start) == first and text_matches_at(value, start, token):
-            val left_ok = if start == 0: true else: is_token_boundary_char(value.char_at(start - 1))
+    while start <= value_span.len - token_len:
+        if value_span.bytes[value_span.start + start] == first and byte_span_matches_at(value_span, start, token_span):
+            val left_ok = if start == 0: true else: is_token_boundary_byte(value_span.bytes[value_span.start + start - 1])
             val right_idx = start + token_len
-            val right_ok = if right_idx >= value.len(): true else: is_token_boundary_char(value.char_at(right_idx))
+            val right_ok = if right_idx >= value_span.len: true else: is_token_boundary_byte(value_span.bytes[value_span.start + right_idx])
             if left_ok and right_ok:
                 return true
         start = start + 1
