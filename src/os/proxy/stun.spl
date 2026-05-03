@@ -171,10 +171,10 @@ fn _append_bytes(buf: [u8], src: [u8]) -> [u8]:
 # Message type encode / decode
 # =============================================================================
 
-val _COOKIE_B0: i64 = (0x2112A442 >> 24) & 0xFF  # 0x21
-val _COOKIE_B1: i64 = (0x2112A442 >> 16) & 0xFF  # 0x12
-val _COOKIE_B2: i64 = (0x2112A442 >> 8)  & 0xFF  # 0xa4
-val _COOKIE_B3: i64 = 0x2112A442 & 0xFF           # 0x42
+val _COOKIE_B0: i64 = 0x21
+val _COOKIE_B1: i64 = 0x12
+val _COOKIE_B2: i64 = 0xa4
+val _COOKIE_B3: i64 = 0x42
 
 fn _class_to_i64(c: StunClass) -> i64:
     if val StunClass.Request = c:
@@ -362,7 +362,7 @@ fn _parse_one_attr(data: [u8], pos: i64, txn_id: [u8]) -> _AttrParseResult?:
             val byte_val = rt_bytes_u8_at(chars, k)
             # Build text from bytes: ASCII range
             if byte_val >= 0x20 and byte_val <= 0x7E:
-                val ch = byte_val.to_i32().to_char()
+                val ch = byte_val.chr()
                 uname = uname + ch
             k = k + 1
         return _AttrParseResult(
@@ -395,7 +395,7 @@ fn _parse_one_attr(data: [u8], pos: i64, txn_id: [u8]) -> _AttrParseResult?:
         while j < attr_len:
             val byte_val = _read_u8(data, value_pos + j)
             if byte_val >= 0x20 and byte_val <= 0x7E:
-                val ch = byte_val.to_i32().to_char()
+                val ch = byte_val.chr()
                 reason = reason + ch
             j = j + 1
         return _AttrParseResult(
@@ -446,16 +446,15 @@ fn stun_parse(bytes: [u8]) -> StunParseResult:
     if (type_code & 0xC000) != 0:
         return StunParseResult.Err(reason: StunError.BadMessageType)
 
-    # Decode class and method from type_code
+    # Decode class and method from type_code (integers 0-3 and 1 respectively)
     val class_int  = _decode_class(type_code)
     val method_int = _decode_method(type_code)
 
-    val maybe_class  = _i64_to_class(class_int)
-    val maybe_method = _i64_to_method(method_int)
-
-    if val null = maybe_class:
+    # Only Binding method (1) supported
+    if method_int != 1:
         return StunParseResult.Err(reason: StunError.BadMessageType)
-    if val null = maybe_method:
+    # Class must be 0..3
+    if class_int < 0 or class_int > 3:
         return StunParseResult.Err(reason: StunError.BadMessageType)
 
     # Extract transaction ID (12 bytes at offset 8)
@@ -472,51 +471,41 @@ fn stun_parse(bytes: [u8]) -> StunParseResult:
 
     while pos < end_pos:
         val maybe_attr = _parse_one_attr(bytes, pos, txn_id)
-        if val null = maybe_attr:
+        if val parsed = maybe_attr:
+            attrs.push(parsed.attr)
+            pos = parsed.next_pos
+        else:
             # Attribute parse failed — stop (be lenient, return what we have)
             pos = end_pos
-        else:
-            if val _AttrParseResult(attr: a, next_pos: np) = maybe_attr:
-                attrs.push(a)
-                pos = np
 
-    if val StunClass.Request = maybe_class:
-        if val StunMethod.Binding = maybe_method:
-            return StunParseResult.Ok(msg: StunMessage(
-                class_: StunClass.Request,
-                method: StunMethod.Binding,
-                transaction_id: txn_id,
-                attributes: attrs
-            ))
-
-    if val StunClass.Indication = maybe_class:
-        if val StunMethod.Binding = maybe_method:
-            return StunParseResult.Ok(msg: StunMessage(
-                class_: StunClass.Indication,
-                method: StunMethod.Binding,
-                transaction_id: txn_id,
-                attributes: attrs
-            ))
-
-    if val StunClass.SuccessResp = maybe_class:
-        if val StunMethod.Binding = maybe_method:
-            return StunParseResult.Ok(msg: StunMessage(
-                class_: StunClass.SuccessResp,
-                method: StunMethod.Binding,
-                transaction_id: txn_id,
-                attributes: attrs
-            ))
-
-    if val StunClass.ErrorResp = maybe_class:
-        if val StunMethod.Binding = maybe_method:
-            return StunParseResult.Ok(msg: StunMessage(
-                class_: StunClass.ErrorResp,
-                method: StunMethod.Binding,
-                transaction_id: txn_id,
-                attributes: attrs
-            ))
-
-    StunParseResult.Err(reason: StunError.BadMessageType)
+    # Build StunMessage with the correct class
+    if class_int == 0:
+        return StunParseResult.Ok(msg: StunMessage(
+            class_: StunClass.Request,
+            method: StunMethod.Binding,
+            transaction_id: txn_id,
+            attributes: attrs
+        ))
+    if class_int == 1:
+        return StunParseResult.Ok(msg: StunMessage(
+            class_: StunClass.Indication,
+            method: StunMethod.Binding,
+            transaction_id: txn_id,
+            attributes: attrs
+        ))
+    if class_int == 2:
+        return StunParseResult.Ok(msg: StunMessage(
+            class_: StunClass.SuccessResp,
+            method: StunMethod.Binding,
+            transaction_id: txn_id,
+            attributes: attrs
+        ))
+    StunParseResult.Ok(msg: StunMessage(
+        class_: StunClass.ErrorResp,
+        method: StunMethod.Binding,
+        transaction_id: txn_id,
+        attributes: attrs
+    ))
 
 # =============================================================================
 # Public build API
