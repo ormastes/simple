@@ -1,0 +1,595 @@
+"""Whirlpool Hash Function — ISO/IEC 10118-3, NESSIE final (2003).
+
+Implements the Whirlpool hash algorithm (NESSIE final / ISO 10118-3 §13).
+Produces a 512-bit (64-byte) digest.
+
+Design:
+  - Miyaguchi-Preneel wide-pipe compression over 64-byte blocks.
+  - 10-round AES-like block cipher W with 8×8 byte-matrix state.
+  - Round function: AddRoundKey(MixRows(ShiftColumns(SubBytes(state))), K[r]).
+  - Key schedule: K[0] = H_prev; K[r] = round_function(K[r-1], RC[r]).
+  - Cipher: eta[0] = M XOR H; eta[r] = round_function(eta[r-1], K[r]).
+  - Output: H_new = eta[10] XOR H XOR M  (Miyaguchi-Preneel).
+  - IV = all-zero 64-byte state.
+  - Padding: append 0x80, zero-pad to ≡32 (mod 64), append 256-bit big-endian
+    bit-count (32 bytes). The length encoding is 32 bytes, NOT 8 (unlike SHA-2).
+
+References:
+  ISO/IEC 10118-3:2004 §13 (Whirlpool hash function).
+  P. S. L. M. Barreto, V. Rijmen — "The Whirlpool Hashing Function" (2003).
+  https://www.larc.usp.br/~pbarreto/whirlpool.zip (reference implementation).
+"""
+
+# ---------------------------------------------------------------------------
+# rt_bytes_u8_at extern — indexed access into [u8] arrays
+# ---------------------------------------------------------------------------
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+# ---------------------------------------------------------------------------
+# Whirlpool S-box (E table) — ISO/IEC 10118-3 §13.7.
+# 256 bytes; S[i] gives the substituted byte for input i.
+# ---------------------------------------------------------------------------
+
+fn _wp_sbox(index: u64) -> i64:
+    if index == 0: 0x18
+    else if index == 1: 0x23
+    else if index == 2: 0xC6
+    else if index == 3: 0xE8
+    else if index == 4: 0x87
+    else if index == 5: 0xF8
+    else if index == 6: 0x98
+    else if index == 7: 0xB8
+    else if index == 8: 0x01
+    else if index == 9: 0x4F
+    else if index == 10: 0x36
+    else if index == 11: 0xA6
+    else if index == 12: 0xD2
+    else if index == 13: 0xF5
+    else if index == 14: 0x79
+    else if index == 15: 0x6F
+    else if index == 16: 0x91
+    else if index == 17: 0x52
+    else if index == 18: 0x60
+    else if index == 19: 0xBC
+    else if index == 20: 0x9B
+    else if index == 21: 0x8E
+    else if index == 22: 0xA3
+    else if index == 23: 0x0C
+    else if index == 24: 0x7B
+    else if index == 25: 0x35
+    else if index == 26: 0x1D
+    else if index == 27: 0xE0
+    else if index == 28: 0xD7
+    else if index == 29: 0xC2
+    else if index == 30: 0x2E
+    else if index == 31: 0x4B
+    else if index == 32: 0xFE
+    else if index == 33: 0x57
+    else if index == 34: 0x15
+    else if index == 35: 0x77
+    else if index == 36: 0x37
+    else if index == 37: 0xE5
+    else if index == 38: 0x9F
+    else if index == 39: 0xF0
+    else if index == 40: 0x4A
+    else if index == 41: 0xDA
+    else if index == 42: 0x58
+    else if index == 43: 0xC9
+    else if index == 44: 0x29
+    else if index == 45: 0x0A
+    else if index == 46: 0xB1
+    else if index == 47: 0xA0
+    else if index == 48: 0x6B
+    else if index == 49: 0x85
+    else if index == 50: 0xBD
+    else if index == 51: 0x5D
+    else if index == 52: 0x10
+    else if index == 53: 0xF4
+    else if index == 54: 0xCB
+    else if index == 55: 0x3E
+    else if index == 56: 0x05
+    else if index == 57: 0x67
+    else if index == 58: 0xE4
+    else if index == 59: 0x27
+    else if index == 60: 0x41
+    else if index == 61: 0x8B
+    else if index == 62: 0xA7
+    else if index == 63: 0x7D
+    else if index == 64: 0x95
+    else if index == 65: 0xD8
+    else if index == 66: 0xFB
+    else if index == 67: 0xEE
+    else if index == 68: 0x7C
+    else if index == 69: 0x66
+    else if index == 70: 0xDD
+    else if index == 71: 0x17
+    else if index == 72: 0x47
+    else if index == 73: 0x9E
+    else if index == 74: 0xCA
+    else if index == 75: 0x2D
+    else if index == 76: 0xBF
+    else if index == 77: 0x07
+    else if index == 78: 0xAD
+    else if index == 79: 0x5A
+    else if index == 80: 0x83
+    else if index == 81: 0x33
+    else if index == 82: 0x63
+    else if index == 83: 0x02
+    else if index == 84: 0xAA
+    else if index == 85: 0x71
+    else if index == 86: 0xC8
+    else if index == 87: 0x19
+    else if index == 88: 0x49
+    else if index == 89: 0xD9
+    else if index == 90: 0xF2
+    else if index == 91: 0xE3
+    else if index == 92: 0x5B
+    else if index == 93: 0x88
+    else if index == 94: 0x9A
+    else if index == 95: 0x26
+    else if index == 96: 0x32
+    else if index == 97: 0xB0
+    else if index == 98: 0xE9
+    else if index == 99: 0x0F
+    else if index == 100: 0xD5
+    else if index == 101: 0x80
+    else if index == 102: 0xBE
+    else if index == 103: 0xCD
+    else if index == 104: 0x34
+    else if index == 105: 0x48
+    else if index == 106: 0xFF
+    else if index == 107: 0x7A
+    else if index == 108: 0x90
+    else if index == 109: 0x5F
+    else if index == 110: 0x20
+    else if index == 111: 0x68
+    else if index == 112: 0x1A
+    else if index == 113: 0xAE
+    else if index == 114: 0xB4
+    else if index == 115: 0x54
+    else if index == 116: 0x93
+    else if index == 117: 0x22
+    else if index == 118: 0x64
+    else if index == 119: 0xF1
+    else if index == 120: 0x73
+    else if index == 121: 0x12
+    else if index == 122: 0x40
+    else if index == 123: 0x08
+    else if index == 124: 0xC3
+    else if index == 125: 0xEC
+    else if index == 126: 0xDB
+    else if index == 127: 0xA1
+    else if index == 128: 0x8D
+    else if index == 129: 0x3D
+    else if index == 130: 0x97
+    else if index == 131: 0x00
+    else if index == 132: 0xCF
+    else if index == 133: 0x2B
+    else if index == 134: 0x76
+    else if index == 135: 0x82
+    else if index == 136: 0xD6
+    else if index == 137: 0x1B
+    else if index == 138: 0xB5
+    else if index == 139: 0xAF
+    else if index == 140: 0x6A
+    else if index == 141: 0x50
+    else if index == 142: 0x45
+    else if index == 143: 0xF3
+    else if index == 144: 0x30
+    else if index == 145: 0xEF
+    else if index == 146: 0x3F
+    else if index == 147: 0x55
+    else if index == 148: 0xA2
+    else if index == 149: 0xEA
+    else if index == 150: 0x65
+    else if index == 151: 0xBA
+    else if index == 152: 0x2F
+    else if index == 153: 0xC0
+    else if index == 154: 0xDE
+    else if index == 155: 0x1C
+    else if index == 156: 0xFD
+    else if index == 157: 0x4D
+    else if index == 158: 0x92
+    else if index == 159: 0x75
+    else if index == 160: 0x06
+    else if index == 161: 0x8A
+    else if index == 162: 0xB2
+    else if index == 163: 0xE6
+    else if index == 164: 0x0E
+    else if index == 165: 0x1F
+    else if index == 166: 0x62
+    else if index == 167: 0xD4
+    else if index == 168: 0xA8
+    else if index == 169: 0x96
+    else if index == 170: 0xF9
+    else if index == 171: 0xC5
+    else if index == 172: 0x25
+    else if index == 173: 0x59
+    else if index == 174: 0x84
+    else if index == 175: 0x72
+    else if index == 176: 0x39
+    else if index == 177: 0x4C
+    else if index == 178: 0x5E
+    else if index == 179: 0x78
+    else if index == 180: 0x38
+    else if index == 181: 0x8C
+    else if index == 182: 0xD1
+    else if index == 183: 0xA5
+    else if index == 184: 0xE2
+    else if index == 185: 0x61
+    else if index == 186: 0xB3
+    else if index == 187: 0x21
+    else if index == 188: 0x9C
+    else if index == 189: 0x1E
+    else if index == 190: 0x43
+    else if index == 191: 0xC7
+    else if index == 192: 0xFC
+    else if index == 193: 0x04
+    else if index == 194: 0x51
+    else if index == 195: 0x99
+    else if index == 196: 0x6D
+    else if index == 197: 0x0D
+    else if index == 198: 0xFA
+    else if index == 199: 0xDF
+    else if index == 200: 0x7E
+    else if index == 201: 0x24
+    else if index == 202: 0x3B
+    else if index == 203: 0xAB
+    else if index == 204: 0xCE
+    else if index == 205: 0x11
+    else if index == 206: 0x8F
+    else if index == 207: 0x4E
+    else if index == 208: 0xB7
+    else if index == 209: 0xEB
+    else if index == 210: 0x3C
+    else if index == 211: 0x81
+    else if index == 212: 0x94
+    else if index == 213: 0xF7
+    else if index == 214: 0xB9
+    else if index == 215: 0x13
+    else if index == 216: 0x2C
+    else if index == 217: 0xD3
+    else if index == 218: 0xE7
+    else if index == 219: 0x6E
+    else if index == 220: 0xC4
+    else if index == 221: 0x03
+    else if index == 222: 0x56
+    else if index == 223: 0x44
+    else if index == 224: 0x7F
+    else if index == 225: 0xA9
+    else if index == 226: 0x2A
+    else if index == 227: 0xBB
+    else if index == 228: 0xC1
+    else if index == 229: 0x53
+    else if index == 230: 0xDC
+    else if index == 231: 0x0B
+    else if index == 232: 0x9D
+    else if index == 233: 0x6C
+    else if index == 234: 0x31
+    else if index == 235: 0x74
+    else if index == 236: 0xF6
+    else if index == 237: 0x46
+    else if index == 238: 0xAC
+    else if index == 239: 0x89
+    else if index == 240: 0x14
+    else if index == 241: 0xE1
+    else if index == 242: 0x16
+    else if index == 243: 0x3A
+    else if index == 244: 0x69
+    else if index == 245: 0x09
+    else if index == 246: 0x70
+    else if index == 247: 0xB6
+    else if index == 248: 0xD0
+    else if index == 249: 0xED
+    else if index == 250: 0xCC
+    else if index == 251: 0x42
+    else if index == 252: 0x98
+    else if index == 253: 0xA4
+    else if index == 254: 0x28
+    else: 0xF5
+
+# ---------------------------------------------------------------------------
+# GF(2^8) multiply — reduction polynomial x^8+x^4+x^3+x^2+1 = 0x11D
+# ---------------------------------------------------------------------------
+
+fn _gf_mul(a_in: i64, b_in: i64) -> i64:
+    """Multiply two bytes in GF(2^8) under Whirlpool's polynomial 0x11D."""
+    var a = a_in & 0xFF
+    var b = b_in & 0xFF
+    var p = 0
+    var i = 0
+    while i < 8:
+        if (b & 1) != 0:
+            p = p ^ a
+        val hi_bit = (a & 0x80) != 0
+        a = (a << 1) & 0xFF
+        if hi_bit:
+            a = a ^ 0x1D
+        b = (b >> 1) & 0xFF
+        i = i + 1
+    p & 0xFF
+
+# ---------------------------------------------------------------------------
+# State helpers — 8x8 byte matrix stored as flat 64-element list.
+# state[r][c] = flat[r*8 + c]
+# ---------------------------------------------------------------------------
+
+fn _state_get(state: list, row: i64, col: i64) -> i64:
+    state.get(row * 8 + col) & 0xFF
+
+fn _make_zero_state() -> list:
+    var s = []
+    var i = 0
+    while i < 64:
+        s.push(0)
+        i = i + 1
+    s
+
+fn _xor_states(a: list, b: list) -> list:
+    var out = []
+    var i = 0
+    while i < 64:
+        out.push((a.get(i) ^ b.get(i)) & 0xFF)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Round constant RC[r] — row 0 bytes = S[8*(r-1)+j] for j in 0..7,
+# rows 1..7 all zero.  r is 1-based (rounds 1..10).
+# ---------------------------------------------------------------------------
+
+fn _round_constant(r: i64) -> list:
+    var rc = _make_zero_state()
+    var j = 0
+    while j < 8:
+        rc[j] = _wp_sbox((8 * (r - 1) + j).to_u64())
+        j = j + 1
+    rc
+
+# ---------------------------------------------------------------------------
+# SubBytes — apply S-box to every cell
+# ---------------------------------------------------------------------------
+
+fn _sub_bytes(state: list) -> list:
+    var out = []
+    var i = 0
+    while i < 64:
+        out.push(_wp_sbox(state.get(i).to_u64()))
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# ShiftColumns — column j is shifted DOWN by j positions (cyclically).
+# out[i][j] = state[(i - j + 8) mod 8][j]
+# ---------------------------------------------------------------------------
+
+fn _shift_columns(state: list) -> list:
+    var out = _make_zero_state()
+    var col = 0
+    while col < 8:
+        var row = 0
+        while row < 8:
+            val src_row = ((row - col) + 8 * 8) % 8
+            out[row * 8 + col] = _state_get(state, src_row, col)
+            row = row + 1
+        col = col + 1
+    out
+
+# ---------------------------------------------------------------------------
+# MixRows — per-row matrix multiply over GF(2^8).
+# Circulant MDS matrix C, first row = (1, 1, 4, 1, 8, 5, 2, 9).
+# C[out_col][in_col] = C_row[(out_col - in_col + 8) mod 8] where
+# C_row = (1, 1, 4, 1, 8, 5, 2, 9).
+# out[i][j] = XOR_{k=0}^{7} gmul(C_row[(j - k + 8) % 8], state[i][k])
+# ---------------------------------------------------------------------------
+
+fn _mds_coeff(index: i64) -> i64:
+    """First row of the circulant MDS matrix: (1, 1, 4, 1, 8, 5, 2, 9)."""
+    if index == 0: 1
+    else if index == 1: 1
+    else if index == 2: 4
+    else if index == 3: 1
+    else if index == 4: 8
+    else if index == 5: 5
+    else if index == 6: 2
+    else: 9
+
+fn _mix_rows(state: list) -> list:
+    var out = _make_zero_state()
+    var row = 0
+    while row < 8:
+        var col = 0
+        while col < 8:
+            var acc = 0
+            var k = 0
+            while k < 8:
+                val c_idx = ((col - k) + 64) % 8
+                val coeff = _mds_coeff(c_idx)
+                val cell = _state_get(state, row, k)
+                acc = acc ^ _gf_mul(coeff, cell)
+                k = k + 1
+            out[row * 8 + col] = acc & 0xFF
+            col = col + 1
+        row = row + 1
+    out
+
+# ---------------------------------------------------------------------------
+# AddRoundKey — XOR state with round key (both 64-cell lists)
+# ---------------------------------------------------------------------------
+
+fn _add_round_key(state: list, key: list) -> list:
+    _xor_states(state, key)
+
+# ---------------------------------------------------------------------------
+# One Whirlpool round (excluding key schedule — key is passed in)
+# rho(state, key) = AddRoundKey(MixRows(ShiftColumns(SubBytes(state))), key)
+# ---------------------------------------------------------------------------
+
+fn _whirlpool_round(state: list, key: list) -> list:
+    val s1 = _sub_bytes(state)
+    val s2 = _shift_columns(s1)
+    val s3 = _mix_rows(s2)
+    _add_round_key(s3, key)
+
+# ---------------------------------------------------------------------------
+# Key schedule — K[0] = H_prev (initial whitening key)
+# K[r] = whirlpool_round(K[r-1], RC[r]) for r = 1..10
+# Returns list of 11 round-key states (indices 0..10).
+# ---------------------------------------------------------------------------
+
+fn _key_schedule(h_state: list) -> list:
+    var keys = []
+    var k = h_state
+    # keys[0] = copy of h_state
+    var ci = 0
+    while ci < 64:
+        k
+        ci = ci + 1
+
+    # Store key 0
+    var keys_flat = []
+    ci = 0
+    while ci < 64:
+        keys_flat.push(h_state.get(ci))
+        ci = ci + 1
+
+    var r = 1
+    while r <= 10:
+        val rc = _round_constant(r)
+        k = _whirlpool_round(k, rc)
+        var ki = 0
+        while ki < 64:
+            keys_flat.push(k.get(ki))
+            ki = ki + 1
+        r = r + 1
+    keys_flat
+
+fn _get_round_key(keys_flat: list, round: i64) -> list:
+    var k = []
+    var i = 0
+    while i < 64:
+        k.push(keys_flat.get(round * 64 + i))
+        i = i + 1
+    k
+
+# ---------------------------------------------------------------------------
+# Whirlpool block cipher (used inside compression)
+# Encrypts block_state under key_state using 10 rounds.
+# Returns the 10-round cipher output.
+# ---------------------------------------------------------------------------
+
+fn _whirlpool_cipher(block_state: list, key_state: list) -> list:
+    val keys_flat = _key_schedule(key_state)
+    val k0 = _get_round_key(keys_flat, 0)
+    # Initial whitening: eta[0] = block XOR K[0]
+    var eta = _add_round_key(block_state, k0)
+    var r = 1
+    while r <= 10:
+        val kr = _get_round_key(keys_flat, r)
+        eta = _whirlpool_round(eta, kr)
+        r = r + 1
+    eta
+
+# ---------------------------------------------------------------------------
+# Miyaguchi-Preneel compression
+# H_new = W(M, H) XOR H XOR M
+# ---------------------------------------------------------------------------
+
+fn _compress(h_state: list, m_state: list) -> list:
+    val cipher_out = _whirlpool_cipher(m_state, h_state)
+    # H_new = cipher_out XOR h_state XOR m_state
+    val xor1 = _xor_states(cipher_out, h_state)
+    _xor_states(xor1, m_state)
+
+# ---------------------------------------------------------------------------
+# Message block <-> state conversion (big-endian byte order per ISO §13.5)
+# Block byte k → state[k/8][k%8] per the μ map (row-major, index 0..63)
+# ---------------------------------------------------------------------------
+
+fn _block_to_state(block: [u8], offset: u64) -> list:
+    var s = []
+    var i: u64 = 0
+    while i < 64:
+        s.push(_u8_at(block, offset + i).to_i64())
+        i = i + 1
+    s
+
+fn _state_to_bytes(state: list) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 64:
+        out.push((state.get(i) & 0xFF).to_u8())
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Padding — ISO §13.5.
+# Append 0x80, zero-fill until total_len ≡ 32 (mod 64),
+# then append 32-byte big-endian bit count.
+# For inputs up to 2^61 bytes (>>practical), only the last 8 bytes of the
+# 32-byte length field are non-zero.
+# ---------------------------------------------------------------------------
+
+fn _pad_message(data: [u8]) -> [u8]:
+    val data_len = data.len().to_u64()
+    val bit_len = data_len * 8
+
+    var padded: [u8] = []
+    var i: u64 = 0
+    while i < data_len:
+        padded.push(_u8_at(data, i))
+        i = i + 1
+
+    # Append 0x80
+    padded.push(0x80u8)
+
+    # Pad with zeros until length ≡ 32 (mod 64)
+    # We need: (padded.len() + 32) ≡ 0 (mod 64)
+    # i.e. padded.len() ≡ 32 (mod 64)
+    var cur_len = padded.len().to_u64()
+    while (cur_len % 64) != 32:
+        padded.push(0x00u8)
+        cur_len = cur_len + 1
+
+    # Append 32-byte big-endian bit count.
+    # Bytes 0..23 are zero for practical inputs; bytes 24..31 encode bit_len.
+    var li = 0
+    while li < 24:
+        padded.push(0x00u8)
+        li = li + 1
+
+    # 8-byte big-endian encoding of bit_len
+    padded.push(((bit_len >> 56) & 0xFF).to_u8())
+    padded.push(((bit_len >> 48) & 0xFF).to_u8())
+    padded.push(((bit_len >> 40) & 0xFF).to_u8())
+    padded.push(((bit_len >> 32) & 0xFF).to_u8())
+    padded.push(((bit_len >> 24) & 0xFF).to_u8())
+    padded.push(((bit_len >> 16) & 0xFF).to_u8())
+    padded.push(((bit_len >> 8) & 0xFF).to_u8())
+    padded.push((bit_len & 0xFF).to_u8())
+
+    padded
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+fn whirlpool(data: [u8]) -> [u8]:
+    """Compute the Whirlpool hash of data. Returns 64-byte digest."""
+    val padded = _pad_message(data)
+    val num_blocks = padded.len().to_u64() / 64
+
+    # IV = all-zero state
+    var h_state = _make_zero_state()
+
+    var block_idx: u64 = 0
+    while block_idx < num_blocks:
+        val m_state = _block_to_state(padded, block_idx * 64)
+        h_state = _compress(h_state, m_state)
+        block_idx = block_idx + 1
+
+    _state_to_bytes(h_state)

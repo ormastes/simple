@@ -475,30 +475,26 @@ fn socks5_parse_response(data: [u8]) -> ResponseResult:
 # Response: VER(0x01) STATUS  — 0x00=success, non-zero=failure
 # ============================================================================
 
-fn _userpass_build_buf(user_bytes: [u8], pass_bytes: [u8]) -> [u8]:
-    """Internal: build the RFC 1929 request from pre-encoded byte arrays.
-    Separated from socks5_userpass_request to isolate cross-module
-    rt_text_to_bytes interaction issues."""
-    val ulen: i64 = user_bytes.len().to_i64()
-    val plen: i64 = pass_bytes.len().to_i64()
-    var buf: [u8] = []
-    buf = _pb(buf, SOCKS5_USERPASS_VER)
-    buf = _pb(buf, ulen)
+fn _text_push_into(buf: [u8], s: text) -> [u8]:
+    """Push UTF-8 bytes of s into buf using rt_text_to_bytes; return buf.
+    Caller must not hold any other rt_text_to_bytes slice across this call."""
+    val bytes = rt_text_to_bytes(s)
+    buf = _pb(buf, bytes.len())
     var i: i64 = 0
-    while i < ulen:
-        buf = _pb(buf, rt_bytes_u8_at(user_bytes, i))
+    while i < bytes.len():
+        buf.push(bytes[i])
         i = i + 1
-    buf = _pb(buf, plen)
-    var j: i64 = 0
-    while j < plen:
-        buf = _pb(buf, rt_bytes_u8_at(pass_bytes, j))
-        j = j + 1
     return buf
 
 fn socks5_userpass_request(user: text, pass: text) -> [u8]:
-    """Encode RFC 1929 username/password auth request.
-    Delegates to _userpass_build_buf after converting text → bytes."""
-    return _userpass_build_buf(rt_text_to_bytes(user), rt_text_to_bytes(pass))
+    """Encode RFC 1929 username/password auth request: VER ULEN UNAME PLEN PASSWD.
+    Calls _text_push_into twice in sequence — each rt_text_to_bytes call is
+    fully consumed before the next, avoiding the shared-buffer clobber."""
+    var buf: [u8] = []
+    buf = _pb(buf, SOCKS5_USERPASS_VER)
+    buf = _text_push_into(buf, user)
+    buf = _text_push_into(buf, pass)
+    return buf
 
 fn socks5_userpass_parse_response(data: [u8]) -> UserPassResponseResult:
     """Parse RFC 1929 username/password auth response.

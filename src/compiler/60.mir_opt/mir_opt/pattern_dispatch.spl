@@ -1,25 +1,23 @@
-# Pattern-Idiom Pass Dispatch — Wave K3 → K4 bridge
+# Pattern-Idiom Pass Dispatch — Wave K4 MIR rewriter
 #
 # Module-level pass entry point that the canonical optimisation pipeline calls
 # under dispatch key "vectorization" (see mod.spl run_pass_on_module).
 #
-# Phase 3 (this commit) installs the entry point, walks every function /
-# block / instruction, increments a hit counter when a Call's callee shape is
-# consistent with one of the recognised cipher software routines, and returns
-# the module UNCHANGED.  The real MIR rewrite (replace the recognised Call
-# with MirInstKind.Intrinsic(name=rule.intrinsic, args=...)) is the next wave
-# (Phase 4 of the rewrite).
+# Phase 4 (this commit) replaces recognised software cipher Call sites with
+# MirInstKind.Intrinsic, gated on X86Caps capability flags.
 #
 # Wiring:  src/compiler/60.mir_opt/mir_opt/mod.spl line ~467
 #          case "vectorization":
 #              result_module = run_pattern_idiom_pass(result_module)
 #
 # See:
-#   /home/ormastes/.claude/plans/wake-4-hours-swift-hejlsberg.md (Phase 3)
 #   src/compiler/60.mir_opt/mir_opt/pattern/rules_crypto.spl (rule table)
 #   src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl (Rule schema)
+#   src/compiler/70.backend/feature_caps.spl (X86Caps, TargetIdiom)
 
-use compiler.mir.mir_data.{MirModule}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirConstValue, LocalId, BlockId}
+use compiler.mir_opt.mir_opt.pattern.rules_crypto.{lookup_rule_for_callee}
+use compiler.backend.feature_caps.{X86Caps, TargetIdiom}
 
 # ============================================================================
 # Stats record
@@ -36,33 +34,176 @@ fn pattern_idiom_stats_zero() -> PatternIdiomStats:
     PatternIdiomStats(0, 0, 0, 0)
 
 # ============================================================================
-# Pass entry point
+# Intrinsic name -> TargetIdiom mapping
 # ============================================================================
 
-"""Run the pattern-idiom pass on a module.
+"""Map a canonical cipher intrinsic name to its TargetIdiom tag.
 
-Wave K3 contract: returns the module unchanged.  Walks every function ×
-block × instruction, accumulates visit counters, and (when implemented in
-Wave K4) replaces recognised software cipher Call sites with
-MirInstKind.Intrinsic.
-
-The dispatcher in mod.spl invokes this under the "vectorization" pass name
-(historically a no-op slot — now repurposed for portable MIR-idiom rewriting
-per the cipher-instr-set design).
+Returns nil for unrecognised names.  Used to gate capability checks
+before rewriting a Call to MirInstKind.Intrinsic.
 """
-fn run_pattern_idiom_pass(module: MirModule) -> MirModule:
+fn idiom_for_intrinsic(name: text) -> TargetIdiom?:
+    if name == "crypto_aes_round":
+        Some(TargetIdiom.AesEnc)
+    elif name == "crypto_aes_round_last":
+        Some(TargetIdiom.AesEncLast)
+    elif name == "crypto_aes_inv_round":
+        Some(TargetIdiom.AesDec)
+    elif name == "crypto_aes_inv_round_last":
+        Some(TargetIdiom.AesDecLast)
+    elif name == "crypto_aes_imc":
+        Some(TargetIdiom.AesImc)
+    elif name == "crypto_aes_keygen_assist":
+        Some(TargetIdiom.AesKeygenAssist)
+    elif name == "crypto_sha256_rounds2":
+        Some(TargetIdiom.Sha256Rounds2)
+    elif name == "crypto_sha256_msg1":
+        Some(TargetIdiom.Sha256Msg1)
+    elif name == "crypto_sha256_msg2":
+        Some(TargetIdiom.Sha256Msg2)
+    elif name == "crc32_u8":
+        Some(TargetIdiom.Crc32U8)
+    elif name == "crc32_u32":
+        Some(TargetIdiom.Crc32U32)
+    elif name == "crc32_u64":
+        Some(TargetIdiom.Crc32U64)
+    elif name == "clmul_lo":
+        Some(TargetIdiom.ClmulLo)
+    elif name == "clmul_hi":
+        Some(TargetIdiom.ClmulHi)
+    else:
+        nil
+
+# ============================================================================
+# Callee symbol extraction
+# ============================================================================
+
+"""Extract the callee function name from a Call's func operand.
+
+Convention: Call.func is MirOperand(kind: Const(MirConstValue.Str(name), _))
+for named static calls.  Returns nil for indirect / unknown shapes.
+"""
+fn extract_callee_name(func_op: MirOperand) -> text?:
+    match func_op.kind:
+        case Const(value, _):
+            match value:
+                case Str(name): Some(name)
+                case _: nil
+        case _: nil
+
+# ============================================================================
+# Block rewriter
+# ============================================================================
+
+"""Rewrite one basic block, replacing recognised cipher Calls with Intrinsic.
+
+For each Call instruction:
+  1. Extract callee name from func operand.
+  2. Look up cipher rule via lookup_rule_for_callee.
+  3. Resolve rule.intrinsic -> TargetIdiom via idiom_for_intrinsic.
+  4. Gate on caps.supports(idiom).
+  5. On hit: emit MirInstKind.Intrinsic(dest, rule.intrinsic, args).
+
+Increments stats.visited_calls for every Call seen, and stats.cipher_hits
+for every successful rewrite.
+"""
+fn rewrite_block(block: MirBlock, caps: X86Caps, stats: PatternIdiomStats) -> MirBlock:
+    var new_insts: [MirInst] = []
+    for inst in block.instructions:
+        match inst.kind:
+            case Call(dest, func_op, args):
+                stats.visited_calls = stats.visited_calls + 1
+                var rewritten = false
+                val maybe_callee = extract_callee_name(func_op)
+                if maybe_callee.?:
+                    val callee = maybe_callee.unwrap()
+                    val maybe_rule = lookup_rule_for_callee(callee)
+                    if maybe_rule.?:
+                        val rule = maybe_rule.unwrap()
+                        val maybe_idiom = idiom_for_intrinsic(rule.intrinsic)
+                        if maybe_idiom.?:
+                            val idiom = maybe_idiom.unwrap()
+                            if caps.supports(idiom):
+                                var new_inst = MirInst(
+                                    kind: MirInstKind.Intrinsic(dest, rule.intrinsic, args),
+                                    span: inst.span
+                                )
+                                new_insts.push(new_inst)
+                                stats.cipher_hits = stats.cipher_hits + 1
+                                rewritten = true
+                if not rewritten:
+                    new_insts.push(inst)
+            case _:
+                new_insts.push(inst)
+    MirBlock(
+        id: block.id,
+        label: block.label,
+        instructions: new_insts,
+        terminator: block.terminator
+    )
+
+# ============================================================================
+# Pass entry points
+# ============================================================================
+
+"""Run the pattern-idiom rewrite pass with explicit X86Caps.
+
+Walks every function x block x instruction.  Recognised software cipher
+Call sites are replaced with MirInstKind.Intrinsic when caps.supports the
+required idiom.  Stats counters are updated for each visit and each hit.
+
+The dispatcher in mod.spl invokes run_pattern_idiom_pass (the no-caps
+wrapper below) under the "vectorization" pass name.
+"""
+fn run_pattern_idiom_pass_x86(module: MirModule, caps: X86Caps) -> MirModule:
     var stats = pattern_idiom_stats_zero()
+    var result = module
     for sym in module.functions.keys():
         stats.visited_functions = stats.visited_functions + 1
         var func = module.functions[sym]
+        var new_blocks: [MirBlock] = []
         for block in func.blocks:
             stats.visited_blocks = stats.visited_blocks + 1
-    # TODO(phase-4-rewrite):
-    #   - Iterate block.instructions; case Call(dest, func_op, args):
-    #       extract callee symbol text from func_op
-    #       lookup_rule_for_callee(callee_text) -> Rule?
-    #       on hit: emit MirInstKind.Intrinsic(dest, rule.intrinsic, args) and
-    #               increment stats.cipher_hits
-    #   - Gate on TargetCaps.supports(idiom) before rewrite
-    #   - Surface stats via the opt-remark sink (Phase 7)
-    module
+            var rewritten_block = rewrite_block(block, caps, stats)
+            new_blocks.push(rewritten_block)
+        result.functions[sym] = MirFunction(
+            symbol:                   func.symbol,
+            name:                     func.name,
+            signature:                func.signature,
+            locals:                   func.locals,
+            blocks:                   new_blocks,
+            entry_block:              func.entry_block,
+            span:                     func.span,
+            generic_params:           func.generic_params,
+            is_generic_template:      func.is_generic_template,
+            specialization_of:        func.specialization_of,
+            type_bindings:            func.type_bindings,
+            layout_phase:             func.layout_phase,
+            is_kernel:                func.is_kernel,
+            is_export_c:              func.is_export_c,
+            export_name:              func.export_name,
+            has_driver_manifest_attr: func.has_driver_manifest_attr,
+            driver_manifest_attr:     func.driver_manifest_attr,
+            has_vhdl_metadata:        func.has_vhdl_metadata,
+            vhdl_metadata:            func.vhdl_metadata,
+            has_fast_math:            func.has_fast_math
+        )
+    result
+
+"""Run the pattern-idiom pass on a module using baseline (no-extension) caps.
+
+This is the entry point wired in mod.spl.  It delegates to
+run_pattern_idiom_pass_x86 with all-false X86Caps so that no rewrites
+happen in the default pipeline until an explicit caps-aware caller is wired.
+Existing tests continue to pass unchanged.
+"""
+fn run_pattern_idiom_pass(module: MirModule) -> MirModule:
+    val default_caps = X86Caps(
+        has_aes: false,
+        has_sha_ni: false,
+        has_sse42: false,
+        has_pclmul: false,
+        has_avx2: false,
+        has_avx512: false
+    )
+    run_pattern_idiom_pass_x86(module, default_caps)

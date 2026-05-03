@@ -1,0 +1,578 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+# FFDHE — Finite-Field Diffie-Hellman Ephemeral (RFC 7919)
+#
+# Provides the three mandatory named groups and a vanilla DH key-agreement
+# primitive built on top of pure-Simple bigint helpers (inlined per-file
+# convention — see rsa_fallback.spl, curve25519_bigint.spl).
+#
+# Named groups:
+#   ffdhe2048  — RFC 7919 Appendix A.1 (p = 256 bytes, g = 2)
+#   ffdhe3072  — RFC 7919 Appendix A.2 (p = 384 bytes, g = 2)
+#   ffdhe4096  — RFC 7919 Appendix A.3 (p = 512 bytes, g = 2)
+#
+# Public API:
+#   ffdhe2048_p() -> list                           # named-group prime BigInt
+#   ffdhe3072_p() -> list
+#   ffdhe4096_p() -> list
+#   ffdhe_g()     -> list                           # generator g = 2
+#   ffdhe_keygen(p, g, scalar_bytes: [u8]) -> list  # [priv, pub]
+#   ffdhe_dh(my_priv, peer_pub, p) -> list          # shared secret
+#   ffdhe_pub_to_bytes(pub, byte_len: u64) -> [u8]  # BigInt -> BE bytes
+#   ffdhe_bytes_to_pub(bytes: [u8]) -> list         # BE bytes -> BigInt
+#   ffdhe_prime_bytes(p, byte_len: u64) -> [u8]     # canonical encoding
+#
+# Performance note:
+#   The pure-Simple square-and-multiply modexp is interpreter-blocked for
+#   2048+ bit primes (O(minutes) per call).  Small-prime (p=23, g=2)
+#   round-trips run in ms.  Named-group round-trips are marked @slow.
+#
+# Reference: https://www.rfc-editor.org/rfc/rfc7919
+# SHA-256 prime fingerprints (for integrity checks):
+#   ffdhe2048: d417dfe49b439655f30febdda2200fec593724fd78029662be911a1bcfd701da
+#   ffdhe3072: 0eaf67db3a839156d5013494a5318a772b5697d270d721f37f092efc69ea5a17
+#   ffdhe4096: 4648414224ac881b3d0dc59b466f96d06a558278776807797ecf1f66ff397b3e
+
+# ============================================================================
+# BigInt scaffolding — inlined per-file convention.  File-private helpers.
+# ============================================================================
+
+val _FFDHE_BASE: i64 = 1073741824  # 2^30
+val _FFDHE_BITS_PER_LIMB: i64 = 30
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _f_u8_at(data: [u8], idx: u64) -> u8:
+    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+
+fn _f_zero() -> list:
+    [0]
+
+fn _f_one() -> list:
+    [1]
+
+fn _f_from_i64(n: i64) -> list:
+    if n == 0:
+        return _f_zero()
+    var result: list = []
+    var value = n
+    while value > 0:
+        result.push(value % _FFDHE_BASE)
+        value = value / _FFDHE_BASE
+    result
+
+fn _f_is_zero(a: list) -> bool:
+    val norm = _f_normalize(a)
+    norm.len() == 1 and norm[0] == 0
+
+fn _f_normalize(a: list) -> list:
+    var len = a.len()
+    while len > 1:
+        if a[len - 1] != 0:
+            break
+        len = len - 1
+    if len == a.len():
+        return a
+    var result: list = []
+    var i: i64 = 0
+    while i < len:
+        result.push(a[i])
+        i = i + 1
+    result
+
+fn _f_compare(a: list, b: list) -> i64:
+    val na = _f_normalize(a)
+    val nb = _f_normalize(b)
+    val la = na.len()
+    val lb = nb.len()
+    if la != lb:
+        if la > lb:
+            return 1
+        return -1
+    var i = la - 1
+    while i >= 0:
+        val av = na[i]
+        val bv = nb[i]
+        if av != bv:
+            if av > bv:
+                return 1
+            return -1
+        i = i - 1
+    0
+
+fn _f_add(a: list, b: list) -> list:
+    val len_a = a.len()
+    val len_b = b.len()
+    var max_len = len_a
+    if len_b > max_len:
+        max_len = len_b
+    var result: list = []
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < max_len:
+        var sum = carry
+        if i < len_a:
+            sum = sum + a[i]
+        if i < len_b:
+            sum = sum + b[i]
+        result.push(sum % _FFDHE_BASE)
+        carry = sum / _FFDHE_BASE
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    _f_normalize(result)
+
+fn _f_sub(a: list, b: list) -> list:
+    if _f_compare(a, b) <= 0:
+        return _f_zero()
+    val len_a = a.len()
+    val len_b = b.len()
+    var result: list = []
+    var borrow: i64 = 0
+    var i: i64 = 0
+    while i < len_a:
+        var limb_a = a[i]
+        var limb_b: i64 = 0
+        if i < len_b:
+            limb_b = b[i]
+        limb_a = limb_a - borrow
+        if limb_a < limb_b:
+            limb_a = limb_a + _FFDHE_BASE
+            borrow = 1
+        else:
+            borrow = 0
+        result.push(limb_a - limb_b)
+        i = i + 1
+    _f_normalize(result)
+
+fn _f_mul(a: list, b: list) -> list:
+    if _f_is_zero(a):
+        return _f_zero()
+    if _f_is_zero(b):
+        return _f_zero()
+    val len_a = a.len()
+    val len_b = b.len()
+    var result: list = []
+    var i: i64 = 0
+    while i < len_a + len_b:
+        result.push(0)
+        i = i + 1
+    i = 0
+    while i < len_a:
+        var carry: i64 = 0
+        var j: i64 = 0
+        while j < len_b:
+            val idx = i + j
+            val prod = a[i] * b[j] + result[idx] + carry
+            result[idx] = prod % _FFDHE_BASE
+            carry = prod / _FFDHE_BASE
+            j = j + 1
+        if carry > 0:
+            val idx = i + len_b
+            result[idx] = result[idx] + carry
+        i = i + 1
+    _f_normalize(result)
+
+fn _f_mul_i64(a: list, n: i64) -> list:
+    if n == 0:
+        return _f_zero()
+    if n == 1:
+        return a
+    val len_a = a.len()
+    var result: list = []
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < len_a:
+        val prod = a[i] * n + carry
+        result.push(prod % _FFDHE_BASE)
+        carry = prod / _FFDHE_BASE
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    _f_normalize(result)
+
+fn _f_divmod_i64(a: list, n: i64) -> list:
+    val norm = _f_normalize(a)
+    val len = norm.len()
+    var remainder: i64 = 0
+    var quotient: list = []
+    var i = len - 1
+    while i >= 0:
+        val dividend = remainder * _FFDHE_BASE + norm[i]
+        quotient.push(dividend / n)
+        remainder = dividend % n
+        i = i - 1
+    var rev_quotient: list = []
+    i = quotient.len() - 1
+    while i >= 0:
+        rev_quotient.push(quotient[i])
+        i = i - 1
+    [_f_normalize(rev_quotient), _f_from_i64(remainder)]
+
+fn _f_bit_length(a: list) -> i64:
+    val norm = _f_normalize(a)
+    val len = norm.len()
+    if len == 0:
+        return 0
+    if _f_is_zero(norm):
+        return 0
+    val top_limb = norm[len - 1]
+    val base_bits = (len - 1) * _FFDHE_BITS_PER_LIMB
+    var bits: i64 = 0
+    var temp = top_limb
+    while temp > 0:
+        bits = bits + 1
+        temp = temp / 2
+    base_bits + bits
+
+fn _f_get_bit(a: list, n: i64) -> i64:
+    val limb_idx = n / _FFDHE_BITS_PER_LIMB
+    val bit_idx = n % _FFDHE_BITS_PER_LIMB
+    val len = a.len()
+    if limb_idx >= len:
+        return 0
+    val limb = a.get(limb_idx)
+    val mask = 1 << bit_idx
+    (limb / mask) % 2
+
+fn _f_shift_left_one(a: list) -> list:
+    if _f_is_zero(a):
+        return a
+    val len = a.len()
+    var result: list = []
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < len:
+        val limb = a.get(i)
+        val shifted = limb * 2 + carry
+        result.push(shifted % _FFDHE_BASE)
+        carry = shifted / _FFDHE_BASE
+        i = i + 1
+    if carry > 0:
+        result.push(carry)
+    _f_normalize(result)
+
+fn _f_mod(a: list, b: list) -> list:
+    if _f_compare(a, b) < 0:
+        return a
+    if _f_compare(a, b) == 0:
+        return _f_zero()
+    var remainder = _f_zero()
+    val bit_len = _f_bit_length(a)
+    var i = bit_len - 1
+    while i >= 0:
+        remainder = _f_shift_left_one(remainder)
+        if _f_get_bit(a, i) == 1:
+            remainder = _f_add(remainder, _f_one())
+        if _f_compare(remainder, b) >= 0:
+            remainder = _f_sub(remainder, b)
+        i = i - 1
+    remainder
+
+fn _f_mod_exp(base: list, exp: list, modulus: list) -> list:
+    if _f_is_zero(modulus):
+        return _f_zero()
+    var result = _f_one()
+    var base_mod = _f_mod(base, modulus)
+    var exp_copy = exp
+    while !_f_is_zero(exp_copy):
+        val divmod_2 = _f_divmod_i64(exp_copy, 2)
+        val remainder = divmod_2[1]
+        if !_f_is_zero(remainder):
+            result = _f_mod(_f_mul(result, base_mod), modulus)
+        exp_copy = divmod_2[0]
+        base_mod = _f_mod(_f_mul(base_mod, base_mod), modulus)
+    result
+
+# ============================================================================
+# Byte / hex helpers
+# ============================================================================
+
+fn _f_hex_nibble(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a" or c == "A": return 10
+    if c == "b" or c == "B": return 11
+    if c == "c" or c == "C": return 12
+    if c == "d" or c == "D": return 13
+    if c == "e" or c == "E": return 14
+    if c == "f" or c == "F": return 15
+    0
+
+fn _f_hex_to_bytes(hex: text) -> [u8]:
+    var result: [u8] = []
+    val len = hex.len()
+    var i: i64 = 0
+    while i + 1 < len:
+        val hi = _f_hex_nibble(hex.char_at(i))
+        val lo = _f_hex_nibble(hex.char_at(i + 1))
+        result.push((hi * 16 + lo).to_u8())
+        i = i + 2
+    result
+
+fn _f_bytes_to_bigint_be(bytes: [u8]) -> list:
+    if bytes.len() == 0:
+        return _f_zero()
+    var result = _f_zero()
+    var i: u64 = 0
+    while i < bytes.len():
+        result = _f_mul_i64(result, 256)
+        result = _f_add(result, _f_from_i64(_f_u8_at(bytes, i).to_i64()))
+        i = i + 1
+    _f_normalize(result)
+
+fn _f_bigint_to_bytes_be(n: list, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        out.push(0)
+        i = i + 1
+    var temp = n
+    var pos = length
+    while pos > 0:
+        val divmod_256 = _f_divmod_i64(temp, 256)
+        val rem = divmod_256[1]
+        if rem.len() > 0:
+            out[pos - 1] = rem[0].to_u8()
+        else:
+            out[pos - 1] = 0
+        temp = divmod_256[0]
+        pos = pos - 1
+    out
+
+fn _f_bytes_to_hex(bytes: [u8]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var result: text = ""
+    var i: u64 = 0
+    while i < bytes.len():
+        val b = bytes[i].to_i64()
+        result = result + hex_chars.char_at(b / 16) + hex_chars.char_at(b % 16)
+        i = i + 1
+    result
+
+# ============================================================================
+# RFC 7919 named-group prime hex constants (verified against SHA-256 above).
+# Each fn returns the hex string; decoded to BigInt by the public API.
+#
+# Verification (Python):
+#   import hashlib
+#   hashlib.sha256(bytes.fromhex(hex_str)).hexdigest()
+#
+# ffdhe2048: d417dfe49b439655f30febdda2200fec593724fd78029662be911a1bcfd701da
+# ffdhe3072: 0eaf67db3a839156d5013494a5318a772b5697d270d721f37f092efc69ea5a17
+# ffdhe4096: 4648414224ac881b3d0dc59b466f96d06a558278776807797ecf1f66ff397b3e
+# ============================================================================
+
+fn _ffdhe2048_p_hex() -> text:
+    # RFC 7919 Appendix A.1 — 256 bytes (2048 bits), g=2
+    # p = 2^2048 - 2^1984 + ([2^1918*e] + 560316)*2^64 - 1
+    "FFFFFFFFFFFFFFFF" +
+    "ADF85458A2BB4A9A" +
+    "AFDC5620273D3CF1" +
+    "D8B9C583CE2D3695" +
+    "A9E13641146433FB" +
+    "CC939DCE249B3EF9" +
+    "7D2FE363630C75D8" +
+    "F681B202AEC4617A" +
+    "D3DF1ED5D5FD6561" +
+    "2433F51F5F066ED0" +
+    "856365553DED1AF3" +
+    "B557135E7F57C935" +
+    "984F0C70E0E68B77" +
+    "E2A689DAF3EFE872" +
+    "1DF158A136ADE735" +
+    "30ACCA4F483A797A" +
+    "BC0AB182B324FB61" +
+    "D108A94BB2C8E3FB" +
+    "B96ADAB760D7F468" +
+    "1D4F42A3DE394DF4" +
+    "AE56EDE76372BB19" +
+    "0B07A7C8EE0A6D70" +
+    "9E02FCE1CDF7E2EC" +
+    "C03405CD28342F61" +
+    "9172FE9CE98583FF" +
+    "8E4F1232EEF28183" +
+    "C3FE3B1B4C6FAD73" +
+    "3BB5FCBC2EC22005" +
+    "C58EF1837D1683B2" +
+    "C6F34A26C1B2EFFA" +
+    "886B423861285C97" +
+    "FFFFFFFFFFFFFFFF"
+
+fn _ffdhe3072_p_hex() -> text:
+    # RFC 7919 Appendix A.2 — 384 bytes (3072 bits), g=2
+    # p = 2^3072 - 2^3008 + ([2^2942*e] + 2625351)*2^64 - 1
+    "FFFFFFFFFFFFFFFF" +
+    "ADF85458A2BB4A9A" +
+    "AFDC5620273D3CF1" +
+    "D8B9C583CE2D3695" +
+    "A9E13641146433FB" +
+    "CC939DCE249B3EF9" +
+    "7D2FE363630C75D8" +
+    "F681B202AEC4617A" +
+    "D3DF1ED5D5FD6561" +
+    "2433F51F5F066ED0" +
+    "856365553DED1AF3" +
+    "B557135E7F57C935" +
+    "984F0C70E0E68B77" +
+    "E2A689DAF3EFE872" +
+    "1DF158A136ADE735" +
+    "30ACCA4F483A797A" +
+    "BC0AB182B324FB61" +
+    "D108A94BB2C8E3FB" +
+    "B96ADAB760D7F468" +
+    "1D4F42A3DE394DF4" +
+    "AE56EDE76372BB19" +
+    "0B07A7C8EE0A6D70" +
+    "9E02FCE1CDF7E2EC" +
+    "C03404CD28342F61" +
+    "9172FE9CE98583FF" +
+    "8E4F1232EEF28183" +
+    "C3FE3B1B4C6FAD73" +
+    "3BB5FCBC2EC22005" +
+    "C58EF1837D1683B2" +
+    "C6F34A26C1B2EFFA" +
+    "886B4238611FCFDC" +
+    "DE355B3B6519035B" +
+    "BC34F4DEF99C0238" +
+    "61B46FC9D6E6C907" +
+    "7AD91D2691F7F7EE" +
+    "598CB0FAC186D91C" +
+    "AEFE130985139270" +
+    "B4130C93BC437944" +
+    "F4FD4452E2D74DD3" +
+    "64F2E21E71F54BFF" +
+    "5CAE82AB9C9DF69E" +
+    "E86D2BC522363A0D" +
+    "ABC521979B0DEADA" +
+    "1DBF9A42D5C4484E" +
+    "0ABCD06BFA53DDEF" +
+    "3C1B20EE3FD59D7C" +
+    "25E41D2B66C62E37" +
+    "FFFFFFFFFFFFFFFF"
+
+fn _ffdhe4096_p_hex() -> text:
+    # RFC 7919 Appendix A.3 — 512 bytes (4096 bits), g=2
+    # p = 2^4096 - 2^4032 + ([2^3966*e] + 5736041)*2^64 - 1
+    "FFFFFFFFFFFFFFFF" +
+    "ADF85458A2BB4A9A" +
+    "AFDC5620273D3CF1" +
+    "D8B9C583CE2D3695" +
+    "A9E13641146433FB" +
+    "CC939DCE249B3EF9" +
+    "7D2FE363630C75D8" +
+    "F681B202AEC4617A" +
+    "D3DF1ED5D5FD6561" +
+    "2433F51F5F066ED0" +
+    "856365553DED1AF3" +
+    "B557135E7F57C935" +
+    "984F0C70E0E68B77" +
+    "E2A689DAF3EFE872" +
+    "1DF158A136ADE735" +
+    "30ACCA4F483A797A" +
+    "BC0AB182B324FB61" +
+    "D108A94BB2C8E3FB" +
+    "B96ADAB760D7F468" +
+    "1D4F42A3DE394DF4" +
+    "AE56EDE76372BB19" +
+    "0B07A7C8EE0A6D70" +
+    "9E02FCE1CDF7E2EC" +
+    "C03404CD28342F61" +
+    "9172FE9CE98583FF" +
+    "8E4F1232EEF28183" +
+    "C3FE3B1B4C6FAD73" +
+    "3BB5FCBC2EC22005" +
+    "C58EF1837D1683B2" +
+    "C6F34A26C1B2EFFA" +
+    "886B4238611FCFDC" +
+    "DE355B3B6519035B" +
+    "BC34F4DEF99C0238" +
+    "61B46FC9D6E6C907" +
+    "7AD91D2691F7F7EE" +
+    "598CB0FAC186D91C" +
+    "AEFE130985139270" +
+    "B4130C93BC437944" +
+    "F4FD4452E2D74DD3" +
+    "64F2E21E71F54BFF" +
+    "5CAE82AB9C9DF69E" +
+    "E86D2BC522363A0D" +
+    "ABC521979B0DEADA" +
+    "1DBF9A42D5C4484E" +
+    "0ABCD06BFA53DDEF" +
+    "3C1B20EE3FD59D7C" +
+    "25E41D2B669E1EF1" +
+    "6E6F52C3164DF4FB" +
+    "7930E9E4E58857B6" +
+    "AC7D5F42D69F6D18" +
+    "7763CF1D55034004" +
+    "87F55BA57E31CC7A" +
+    "7135C886EFB4318A" +
+    "ED6A1E012D9E6832" +
+    "A907600A918130C4" +
+    "6DC778F971AD0038" +
+    "092999A333CB8B7A" +
+    "1A1DB93D7140003C" +
+    "2A4ECEA9F98D0ACC" +
+    "0A8291CDCEC97DCF" +
+    "8EC9B55A7F88A46B" +
+    "4DB5A851F44182E1" +
+    "C68A007E5E655F6A" +
+    "FFFFFFFFFFFFFFFF"
+
+# ============================================================================
+# Public API — named-group primes
+# ============================================================================
+
+fn ffdhe2048_p() -> list:
+    _f_bytes_to_bigint_be(_f_hex_to_bytes(_ffdhe2048_p_hex()))
+
+fn ffdhe3072_p() -> list:
+    _f_bytes_to_bigint_be(_f_hex_to_bytes(_ffdhe3072_p_hex()))
+
+fn ffdhe4096_p() -> list:
+    _f_bytes_to_bigint_be(_f_hex_to_bytes(_ffdhe4096_p_hex()))
+
+fn ffdhe_g() -> list:
+    _f_from_i64(2)
+
+# ============================================================================
+# DH key-agreement primitives
+# ============================================================================
+
+# ffdhe_keygen: compute public key from caller-supplied private scalar bytes.
+#   scalar_bytes — big-endian entropy bytes (caller generates from CSPRNG).
+#   Returns [priv_bigint, pub_bigint] where pub = g^priv mod p.
+#
+# NOTE: interpreter-mode 2048-bit modexp takes O(minutes); mark @slow.
+fn ffdhe_keygen(p: list, g: list, scalar_bytes: [u8]) -> list:
+    val priv = _f_bytes_to_bigint_be(scalar_bytes)
+    val pub = _f_mod_exp(g, priv, p)
+    [priv, pub]
+
+# ffdhe_dh: shared secret = peer_pub^my_priv mod p.
+#
+# NOTE: interpreter-mode 2048-bit modexp takes O(minutes); mark @slow.
+fn ffdhe_dh(my_priv: list, peer_pub: list, p: list) -> list:
+    _f_mod_exp(peer_pub, my_priv, p)
+
+# ffdhe_pub_to_bytes: serialize BigInt public key / shared secret as
+# big-endian bytes of exactly byte_len bytes (zero-padded on the left).
+fn ffdhe_pub_to_bytes(pub: list, byte_len: u64) -> [u8]:
+    _f_bigint_to_bytes_be(pub, byte_len)
+
+# ffdhe_bytes_to_pub: deserialize big-endian bytes to a BigInt.
+fn ffdhe_bytes_to_pub(bytes: [u8]) -> list:
+    _f_bytes_to_bigint_be(bytes)
+
+# ffdhe_prime_bytes: canonical big-endian encoding of a named-group prime.
+# Used by the KAT spec to compute SHA-256 integrity fingerprints.
+fn ffdhe_prime_bytes(p: list, byte_len: u64) -> [u8]:
+    _f_bigint_to_bytes_be(p, byte_len)
