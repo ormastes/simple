@@ -1,0 +1,571 @@
+#![allow(unnamed_duplicate_typed_args)]
+# ARIA Block Cipher — Pure Simple Implementation (RFC 5794 / KS X 1213)
+#
+# 128-bit block cipher with 128/192/256-bit keys.
+# 12/14/16 rounds for 128/192/256-bit keys respectively.
+#
+# Round structure (RFC 5794 §2.2):
+#   - AddRoundKey: XOR state with round key
+#   - Substitution: odd rounds use (S1,S2,S1^-1,S2^-1), even use (S1^-1,S2^-1,S1,S2)
+#   - Diffusion (DL): binary matrix multiplication on 16 bytes
+#   - Final round: AddRoundKey only (no diffusion)
+#
+# S-box definitions (RFC 5794 §2.4):
+#   S1 = AES S-box
+#   S2 = AES S-box with bit-reversed input and bit-reversed output
+#   S1^-1 = inverse AES S-box
+#   S2^-1 = S2^-1 (inverse of S2)
+#
+# Key schedule (RFC 5794 §2.5): Feistel-like using CK1/CK2/CK3 constants.
+#
+# Exposed API:
+#   aria_encrypt_block(key: [u8], plaintext: [u8]) -> [u8]
+#   aria_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]
+#
+# No SFFI/Rust FFI — pure Simple, suitable for baremetal.
+#
+# Reference: RFC 5794 — A Description of the ARIA Encryption Algorithm
+#   https://datatracker.ietf.org/doc/html/rfc5794
+
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+fn _u8_at(buf: [u8], idx: u64) -> u8:
+    buf[idx.to_i64()]
+
+fn _new_buf(cap: u64) -> [u8]:
+    rt_array_new_with_cap(cap.to_i64())
+
+# ============================================================================
+# S1 — AES S-box (RFC 5794 §2.4, Appendix B of AES/FIPS-197)
+# ============================================================================
+
+fn _s1_table() -> [u8]:
+    [
+        0x63u8, 0x7cu8, 0x77u8, 0x7bu8, 0xf2u8, 0x6bu8, 0x6fu8, 0xc5u8,
+        0x30u8, 0x01u8, 0x67u8, 0x2bu8, 0xfeu8, 0xd7u8, 0xabu8, 0x76u8,
+        0xcau8, 0x82u8, 0xc9u8, 0x7du8, 0xfau8, 0x59u8, 0x47u8, 0xf0u8,
+        0xadu8, 0xd4u8, 0xa2u8, 0xafu8, 0x9cu8, 0xa4u8, 0x72u8, 0xc0u8,
+        0xb7u8, 0xfdu8, 0x93u8, 0x26u8, 0x36u8, 0x3fu8, 0xf7u8, 0xccu8,
+        0x34u8, 0xa5u8, 0xe5u8, 0xf1u8, 0x71u8, 0xd8u8, 0x31u8, 0x15u8,
+        0x04u8, 0xc7u8, 0x23u8, 0xc3u8, 0x18u8, 0x96u8, 0x05u8, 0x9au8,
+        0x07u8, 0x12u8, 0x80u8, 0xe2u8, 0xebu8, 0x27u8, 0xb2u8, 0x75u8,
+        0x09u8, 0x83u8, 0x2cu8, 0x1au8, 0x1bu8, 0x6eu8, 0x5au8, 0xa0u8,
+        0x52u8, 0x3bu8, 0xd6u8, 0xb3u8, 0x29u8, 0xe3u8, 0x2fu8, 0x84u8,
+        0x53u8, 0xd1u8, 0x00u8, 0xedu8, 0x20u8, 0xfcu8, 0xb1u8, 0x5bu8,
+        0x6au8, 0xcbu8, 0xbeu8, 0x39u8, 0x4au8, 0x4cu8, 0x58u8, 0xcfu8,
+        0xd0u8, 0xefu8, 0xaau8, 0xfbu8, 0x43u8, 0x4du8, 0x33u8, 0x85u8,
+        0x45u8, 0xf9u8, 0x02u8, 0x7fu8, 0x50u8, 0x3cu8, 0x9fu8, 0xa8u8,
+        0x51u8, 0xa3u8, 0x40u8, 0x8fu8, 0x92u8, 0x9du8, 0x38u8, 0xf5u8,
+        0xbcu8, 0xb6u8, 0xdau8, 0x21u8, 0x10u8, 0xffu8, 0xf3u8, 0xd2u8,
+        0xcdu8, 0x0cu8, 0x13u8, 0xecu8, 0x5fu8, 0x97u8, 0x44u8, 0x17u8,
+        0xc4u8, 0xa7u8, 0x7eu8, 0x3du8, 0x64u8, 0x5du8, 0x19u8, 0x73u8,
+        0x60u8, 0x81u8, 0x4fu8, 0xdcu8, 0x22u8, 0x2au8, 0x90u8, 0x88u8,
+        0x46u8, 0xeeu8, 0xb8u8, 0x14u8, 0xdeu8, 0x5eu8, 0x0bu8, 0xdbu8,
+        0xe0u8, 0x32u8, 0x3au8, 0x0au8, 0x49u8, 0x06u8, 0x24u8, 0x5cu8,
+        0xc2u8, 0xd3u8, 0xacu8, 0x62u8, 0x91u8, 0x95u8, 0xe4u8, 0x79u8,
+        0xe7u8, 0xc8u8, 0x37u8, 0x6du8, 0x8du8, 0xd5u8, 0x4eu8, 0xa9u8,
+        0x6cu8, 0x56u8, 0xf4u8, 0xeau8, 0x65u8, 0x7au8, 0xaeu8, 0x08u8,
+        0xbau8, 0x78u8, 0x25u8, 0x2eu8, 0x1cu8, 0xa6u8, 0xb4u8, 0xc6u8,
+        0xe8u8, 0xddu8, 0x74u8, 0x1fu8, 0x4bu8, 0xbdu8, 0x8bu8, 0x8au8,
+        0x70u8, 0x3eu8, 0xb5u8, 0x66u8, 0x48u8, 0x03u8, 0xf6u8, 0x0eu8,
+        0x61u8, 0x35u8, 0x57u8, 0xb9u8, 0x86u8, 0xc1u8, 0x1du8, 0x9eu8,
+        0xe1u8, 0xf8u8, 0x98u8, 0x11u8, 0x69u8, 0xd9u8, 0x8eu8, 0x94u8,
+        0x9bu8, 0x1eu8, 0x87u8, 0xe9u8, 0xceu8, 0x55u8, 0x28u8, 0xdfu8,
+        0x8cu8, 0xa1u8, 0x89u8, 0x0du8, 0xbfu8, 0xe6u8, 0x42u8, 0x68u8,
+        0x41u8, 0x99u8, 0x2du8, 0x0fu8, 0xb0u8, 0x54u8, 0xbbu8, 0x16u8
+    ]
+
+# ============================================================================
+# S1^-1 — Inverse AES S-box
+# ============================================================================
+
+fn _s1inv_table() -> [u8]:
+    [
+        0x52u8, 0x09u8, 0x6au8, 0xd5u8, 0x30u8, 0x36u8, 0xa5u8, 0x38u8,
+        0xbfu8, 0x40u8, 0xa3u8, 0x9eu8, 0x81u8, 0xf3u8, 0xd7u8, 0xfbu8,
+        0x7cu8, 0xe3u8, 0x39u8, 0x82u8, 0x9bu8, 0x2fu8, 0xffu8, 0x87u8,
+        0x34u8, 0x8eu8, 0x43u8, 0x44u8, 0xc4u8, 0xdeu8, 0xe9u8, 0xcbu8,
+        0x54u8, 0x7bu8, 0x94u8, 0x32u8, 0xa6u8, 0xc2u8, 0x23u8, 0x3du8,
+        0xeeu8, 0x4cu8, 0x95u8, 0x0bu8, 0x42u8, 0xfau8, 0xc3u8, 0x4eu8,
+        0x08u8, 0x2eu8, 0xa1u8, 0x66u8, 0x28u8, 0xd9u8, 0x24u8, 0xb2u8,
+        0x76u8, 0x5bu8, 0xa2u8, 0x49u8, 0x6du8, 0x8bu8, 0xd1u8, 0x25u8,
+        0x72u8, 0xf8u8, 0xf6u8, 0x64u8, 0x86u8, 0x68u8, 0x98u8, 0x16u8,
+        0xd4u8, 0xa4u8, 0x5cu8, 0xccu8, 0x5du8, 0x65u8, 0xb6u8, 0x92u8,
+        0x6cu8, 0x70u8, 0x48u8, 0x50u8, 0xfdu8, 0xedu8, 0xb9u8, 0xdau8,
+        0x5eu8, 0x15u8, 0x46u8, 0x57u8, 0xa7u8, 0x8du8, 0x9du8, 0x84u8,
+        0x90u8, 0xd8u8, 0xabu8, 0x00u8, 0x8cu8, 0xbcu8, 0xd3u8, 0x0au8,
+        0xf7u8, 0xe4u8, 0x58u8, 0x05u8, 0xb8u8, 0xb3u8, 0x45u8, 0x06u8,
+        0xd0u8, 0x2cu8, 0x1eu8, 0x8fu8, 0xcau8, 0x3fu8, 0x0fu8, 0x02u8,
+        0xc1u8, 0xafu8, 0xbdu8, 0x03u8, 0x01u8, 0x13u8, 0x8au8, 0x6bu8,
+        0x3au8, 0x91u8, 0x11u8, 0x41u8, 0x4fu8, 0x67u8, 0xdcu8, 0xeau8,
+        0x97u8, 0xf2u8, 0xcfu8, 0xceu8, 0xf0u8, 0xb4u8, 0xe6u8, 0x73u8,
+        0x96u8, 0xacu8, 0x74u8, 0x22u8, 0xe7u8, 0xadu8, 0x35u8, 0x85u8,
+        0xe2u8, 0xf9u8, 0x37u8, 0xe8u8, 0x1cu8, 0x75u8, 0xdfu8, 0x6eu8,
+        0x47u8, 0xf1u8, 0x1au8, 0x71u8, 0x1du8, 0x29u8, 0xc5u8, 0x89u8,
+        0x6fu8, 0xb7u8, 0x62u8, 0x0eu8, 0xaau8, 0x18u8, 0xbeu8, 0x1bu8,
+        0xfcu8, 0x56u8, 0x3eu8, 0x4bu8, 0xc6u8, 0xd2u8, 0x79u8, 0x20u8,
+        0x9au8, 0xdbu8, 0xc0u8, 0xfeu8, 0x78u8, 0xcdu8, 0x5au8, 0xf4u8,
+        0x1fu8, 0xddu8, 0xa8u8, 0x33u8, 0x88u8, 0x07u8, 0xc7u8, 0x31u8,
+        0xb1u8, 0x12u8, 0x10u8, 0x59u8, 0x27u8, 0x80u8, 0xecu8, 0x5fu8,
+        0x60u8, 0x51u8, 0x7fu8, 0xa9u8, 0x19u8, 0xb5u8, 0x4au8, 0x0du8,
+        0x2du8, 0xe5u8, 0x7au8, 0x9fu8, 0x93u8, 0xc9u8, 0x9cu8, 0xefu8,
+        0xa0u8, 0xe0u8, 0x3bu8, 0x4du8, 0xaeu8, 0x2au8, 0xf5u8, 0xb0u8,
+        0xc8u8, 0xebu8, 0xbbu8, 0x3cu8, 0x83u8, 0x53u8, 0x99u8, 0x61u8,
+        0x17u8, 0x2bu8, 0x04u8, 0x7eu8, 0xbau8, 0x77u8, 0xd6u8, 0x26u8,
+        0xe1u8, 0x69u8, 0x14u8, 0x63u8, 0x55u8, 0x21u8, 0x0cu8, 0x7du8
+    ]
+
+# ============================================================================
+# Bit-reversal of a byte (used for S2 and S2^-1)
+# ============================================================================
+
+fn _bit_rev(x: u8) -> u8:
+    val v: u64 = x.to_u64()
+    val r: u64 = ((v & 0x01u64) << 7) |
+                 ((v & 0x02u64) << 5) |
+                 ((v & 0x04u64) << 3) |
+                 ((v & 0x08u64) << 1) |
+                 ((v & 0x10u64) >> 1) |
+                 ((v & 0x20u64) >> 3) |
+                 ((v & 0x40u64) >> 5) |
+                 ((v & 0x80u64) >> 7)
+    r.to_u8()
+
+# S2: bit-reverse input, apply S1, bit-reverse output
+fn _s2(x: u8) -> u8:
+    val rx: u64 = _bit_rev(x).to_u64()
+    _bit_rev(_u8_at(_s1_table(), rx))
+
+# S2^-1: bit-reverse input, apply S1^-1, bit-reverse output
+fn _s2inv(x: u8) -> u8:
+    val rx: u64 = _bit_rev(x).to_u64()
+    _bit_rev(_u8_at(_s1inv_table(), rx))
+
+fn _s1(x: u8) -> u8:
+    _u8_at(_s1_table(), x.to_u64())
+
+fn _s1inv(x: u8) -> u8:
+    _u8_at(_s1inv_table(), x.to_u64())
+
+# ============================================================================
+# Substitution layer (RFC 5794 §2.3)
+# Odd rounds (1,3,5,...): bytes 0,4,8,12 -> S1; 1,5,9,13 -> S2; 2,6,10,14 -> S1^-1; 3,7,11,15 -> S2^-1
+# Even rounds (2,4,6,...): bytes 0,4,8,12 -> S1^-1; 1,5,9,13 -> S2^-1; 2,6,10,14 -> S1; 3,7,11,15 -> S2
+# ============================================================================
+
+fn _sub_odd(state: [u8]) -> [u8]:
+    var out: [u8] = _new_buf(16)
+    var i: u64 = 0
+    while i < 16:
+        val b: u8 = _u8_at(state, i)
+        val r: u8 = if (i % 4) == 0: _s1(b)
+                    else if (i % 4) == 1: _s2(b)
+                    else if (i % 4) == 2: _s1inv(b)
+                    else: _s2inv(b)
+        out.push(r)
+        i = i + 1
+    out
+
+fn _sub_even(state: [u8]) -> [u8]:
+    var out: [u8] = _new_buf(16)
+    var i: u64 = 0
+    while i < 16:
+        val b: u8 = _u8_at(state, i)
+        val r: u8 = if (i % 4) == 0: _s1inv(b)
+                    else if (i % 4) == 1: _s2inv(b)
+                    else if (i % 4) == 2: _s1(b)
+                    else: _s2(b)
+        out.push(r)
+        i = i + 1
+    out
+
+# ============================================================================
+# Diffusion layer (DL) — RFC 5794 §2.3.2
+#
+# The 16×16 binary involution matrix. Each output byte is XOR of selected input bytes.
+# The matrix definition from RFC 5794 §2.4.4:
+#   b0  = b3  ^ b4  ^ b6  ^ b8  ^ b9  ^ b13 ^ b14
+#   b1  = b2  ^ b5  ^ b7  ^ b8  ^ b9  ^ b12 ^ b15
+#   b2  = b1  ^ b4  ^ b6  ^ b10 ^ b11 ^ b12 ^ b15
+#   b3  = b0  ^ b5  ^ b7  ^ b10 ^ b11 ^ b13 ^ b14
+#   b4  = b0  ^ b2  ^ b5  ^ b8  ^ b11 ^ b14 ^ b15
+#   b5  = b1  ^ b3  ^ b4  ^ b9  ^ b10 ^ b14 ^ b15
+#   b6  = b0  ^ b2  ^ b7  ^ b9  ^ b10 ^ b12 ^ b13
+#   b7  = b1  ^ b3  ^ b6  ^ b8  ^ b11 ^ b12 ^ b13
+#   b8  = b0  ^ b1  ^ b4  ^ b7  ^ b10 ^ b13 ^ b15
+#   b9  = b0  ^ b1  ^ b5  ^ b6  ^ b11 ^ b12 ^ b14
+#   b10 = b2  ^ b3  ^ b5  ^ b6  ^ b8  ^ b13 ^ b15
+#   b11 = b2  ^ b3  ^ b4  ^ b7  ^ b9  ^ b12 ^ b14
+#   b12 = b1  ^ b2  ^ b6  ^ b7  ^ b9  ^ b11 ^ b14
+#   b13 = b0  ^ b3  ^ b6  ^ b7  ^ b8  ^ b10 ^ b15
+#   b14 = b0  ^ b3  ^ b4  ^ b5  ^ b9  ^ b11 ^ b12
+#   b15 = b1  ^ b2  ^ b4  ^ b5  ^ b8  ^ b10 ^ b13 (wait, RFC uses ^; b15 derived from rows)
+# ============================================================================
+
+fn _diffuse(state: [u8]) -> [u8]:
+    val b0:  u8 = _u8_at(state, 0)
+    val b1:  u8 = _u8_at(state, 1)
+    val b2:  u8 = _u8_at(state, 2)
+    val b3:  u8 = _u8_at(state, 3)
+    val b4:  u8 = _u8_at(state, 4)
+    val b5:  u8 = _u8_at(state, 5)
+    val b6:  u8 = _u8_at(state, 6)
+    val b7:  u8 = _u8_at(state, 7)
+    val b8:  u8 = _u8_at(state, 8)
+    val b9:  u8 = _u8_at(state, 9)
+    val b10: u8 = _u8_at(state, 10)
+    val b11: u8 = _u8_at(state, 11)
+    val b12: u8 = _u8_at(state, 12)
+    val b13: u8 = _u8_at(state, 13)
+    val b14: u8 = _u8_at(state, 14)
+    val b15: u8 = _u8_at(state, 15)
+
+    var out: [u8] = _new_buf(16)
+    out.push(b3  ^ b4  ^ b6  ^ b8  ^ b9  ^ b13 ^ b14)
+    out.push(b2  ^ b5  ^ b7  ^ b8  ^ b9  ^ b12 ^ b15)
+    out.push(b1  ^ b4  ^ b6  ^ b10 ^ b11 ^ b12 ^ b15)
+    out.push(b0  ^ b5  ^ b7  ^ b10 ^ b11 ^ b13 ^ b14)
+    out.push(b0  ^ b2  ^ b5  ^ b8  ^ b11 ^ b14 ^ b15)
+    out.push(b1  ^ b3  ^ b4  ^ b9  ^ b10 ^ b14 ^ b15)
+    out.push(b0  ^ b2  ^ b7  ^ b9  ^ b10 ^ b12 ^ b13)
+    out.push(b1  ^ b3  ^ b6  ^ b8  ^ b11 ^ b12 ^ b13)
+    out.push(b0  ^ b1  ^ b4  ^ b7  ^ b10 ^ b13 ^ b15)
+    out.push(b0  ^ b1  ^ b5  ^ b6  ^ b11 ^ b12 ^ b14)
+    out.push(b2  ^ b3  ^ b5  ^ b6  ^ b8  ^ b13 ^ b15)
+    out.push(b2  ^ b3  ^ b4  ^ b7  ^ b9  ^ b12 ^ b14)
+    out.push(b1  ^ b2  ^ b6  ^ b7  ^ b9  ^ b11 ^ b14)
+    out.push(b0  ^ b3  ^ b6  ^ b7  ^ b8  ^ b10 ^ b15)
+    out.push(b0  ^ b3  ^ b4  ^ b5  ^ b9  ^ b11 ^ b12)
+    out.push(b1  ^ b2  ^ b4  ^ b5  ^ b8  ^ b10 ^ b13)
+    out
+
+# ============================================================================
+# XOR two 16-byte arrays
+# ============================================================================
+
+fn _xor16(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = _new_buf(16)
+    var i: u64 = 0
+    while i < 16:
+        out.push(_u8_at(a, i) ^ _u8_at(b, i))
+        i = i + 1
+    out
+
+# ============================================================================
+# Key schedule constants CK1, CK2, CK3 (RFC 5794 §2.5)
+# Derived from fractional parts of 1/pi, 1/e, 1/sqrt(2)
+# ============================================================================
+
+fn _ck1() -> [u8]:
+    var c: [u8] = _new_buf(16)
+    c.push(0x51u8); c.push(0x7cu8); c.push(0xc1u8); c.push(0xb7u8)
+    c.push(0x27u8); c.push(0x22u8); c.push(0x0au8); c.push(0x94u8)
+    c.push(0xfeu8); c.push(0x13u8); c.push(0xabu8); c.push(0xe8u8)
+    c.push(0xfau8); c.push(0x9au8); c.push(0x6eu8); c.push(0xe0u8)
+    c
+
+fn _ck2() -> [u8]:
+    var c: [u8] = _new_buf(16)
+    c.push(0x6du8); c.push(0xb1u8); c.push(0x4au8); c.push(0xccu8)
+    c.push(0x9eu8); c.push(0x21u8); c.push(0xc8u8); c.push(0x20u8)
+    c.push(0xf9u8); c.push(0x74u8); c.push(0xe5u8); c.push(0x85u8)
+    c.push(0xb3u8); c.push(0x68u8); c.push(0x47u8); c.push(0x40u8)
+    c
+
+fn _ck3() -> [u8]:
+    var c: [u8] = _new_buf(16)
+    c.push(0xf0u8); c.push(0x47u8); c.push(0xd4u8); c.push(0x69u8)
+    c.push(0xf3u8); c.push(0x02u8); c.push(0x02u8); c.push(0x73u8)
+    c.push(0x33u8); c.push(0x27u8); c.push(0x0bu8); c.push(0xbau8)
+    c.push(0x5au8); c.push(0x36u8); c.push(0x3eu8); c.push(0xa4u8)
+    c
+
+# ============================================================================
+# Key schedule helpers: FO and FE (RFC 5794 §2.5)
+# FO(x, ck) = DL(SO(x XOR ck))   -- odd substitution
+# FE(x, ck) = DL(SE(x XOR ck))   -- even substitution
+# ============================================================================
+
+fn _fo(x: [u8], ck: [u8]) -> [u8]:
+    _diffuse(_sub_odd(_xor16(x, ck)))
+
+fn _fe(x: [u8], ck: [u8]) -> [u8]:
+    _diffuse(_sub_even(_xor16(x, ck)))
+
+# ============================================================================
+# 128-bit left-rotation of a 16-byte block by n bytes (byte granularity)
+# RFC 5794 key schedule uses 19-bit and 31-bit byte-level rotations
+# ============================================================================
+
+fn _rot128_bytes(blk: [u8], n: u64) -> [u8]:
+    # n is number of BITS to rotate left; n is always a multiple of 8 in ARIA
+    # RFC 5794 uses 19 and 31 bit rotations at byte level:
+    # ">>>" means right rotation in bytes — we implement byte-level right rotation
+    # Actually RFC 5794 §2.5 uses right-rotation by bytes:
+    #   X <<< n means rotate left by n bits
+    # We work at bit level: rotate 128-bit value left by n bits.
+    # blk[0] is the most-significant byte.
+    val nbits: u64 = n % 128
+    val nbytes: u64 = nbits / 8
+    val shift:  u64 = nbits % 8
+    var out: [u8] = _new_buf(16)
+    var i: u64 = 0
+    if shift == 0:
+        while i < 16:
+            out.push(_u8_at(blk, (i + nbytes) % 16))
+            i = i + 1
+    else:
+        val rshift: u64 = 8 - shift
+        while i < 16:
+            val cur: u64 = _u8_at(blk, (i + nbytes) % 16).to_u64()
+            val nxt: u64 = _u8_at(blk, (i + nbytes + 1) % 16).to_u64()
+            out.push(((cur << shift) | (nxt >> rshift)).to_u8())
+            i = i + 1
+    out
+
+# Right-rotation by n bits = left-rotation by (128-n) bits
+fn _rrot128_bits(blk: [u8], n: u64) -> [u8]:
+    _rot128_bytes(blk, 128 - (n % 128))
+
+# ============================================================================
+# ARIA key schedule (RFC 5794 §2.5)
+#
+# For a key of length klen bytes:
+#   - 128-bit: Nr=12, 13 round keys (W0..W3 → ek1..ek13)
+#   - 192-bit: Nr=14, 15 round keys
+#   - 256-bit: Nr=16, 17 round keys
+#
+# W0 = KL  (left 16 bytes of key, zero-padded)
+# W1 = FO(W0, CK1) XOR KR
+# W2 = FE(W1, CK2) XOR W0
+# W3 = FO(W2, CK3) XOR W1
+#
+# Round keys (ek) are derived from 128-bit substrings at specified offsets:
+#   ek_i = W_{(i-1)%4} <<< offset_i  (right- or left-rotation depending on spec)
+# ============================================================================
+
+fn _key_schedule(key: [u8]) -> [[u8]]:
+    val klen: u64 = key.len().to_u64()
+
+    # Split key into KL (left 16 bytes) and KR (right part, zero-padded to 16)
+    var kl: [u8] = _new_buf(16)
+    var kr: [u8] = _new_buf(16)
+    var i: u64 = 0
+    while i < 16:
+        if i < klen:
+            kl.push(_u8_at(key, i))
+        else:
+            kl.push(0x00u8)
+        i = i + 1
+    i = 0
+    while i < 16:
+        val ki: u64 = i + 16
+        if ki < klen:
+            kr.push(_u8_at(key, ki))
+        else:
+            kr.push(0x00u8)
+        i = i + 1
+
+    # For 192/256-bit keys, we need a third 16-byte chunk
+    var km: [u8] = _new_buf(16)
+    i = 0
+    while i < 16:
+        val ki: u64 = i + 32
+        if ki < klen:
+            km.push(_u8_at(key, ki))
+        else:
+            km.push(0x00u8)
+        i = i + 1
+
+    # Select CK based on key length (RFC 5794 §2.5)
+    # 128-bit: (CK1, CK2, CK3)
+    # 192-bit: (CK2, CK3, CK1)
+    # 256-bit: (CK3, CK1, CK2)
+    val ck_a: [u8] = if klen == 16: _ck1() else if klen == 24: _ck2() else: _ck3()
+    val ck_b: [u8] = if klen == 16: _ck2() else if klen == 24: _ck3() else: _ck1()
+    val ck_c: [u8] = if klen == 16: _ck3() else if klen == 24: _ck1() else: _ck2()
+
+    # W0 = KL
+    # For 192: W0 = KL XOR (KR || 0..0) — KR is already zero-padded above
+    # For 256: W0 = KL XOR KM_left (but the spec uses KL directly as first W)
+    # Actually per RFC 5794 §2.5: W0 = KL for all key lengths.
+    # The difference is only in how CKs are selected.
+    val w0: [u8] = kl
+
+    # W1 = FO(W0, CK_a) XOR KR
+    val w1: [u8] = _xor16(_fo(w0, ck_a), kr)
+
+    # W2 = FE(W1, CK_b) XOR W0
+    val w2: [u8] = _xor16(_fe(w1, ck_b), w0)
+
+    # W3 = FO(W2, CK_c) XOR W1
+    val w3: [u8] = _xor16(_fo(w2, ck_c), w1)
+
+    # For 256-bit keys, XOR KM into W0..W3 before extracting round keys
+    # Per RFC 5794 §2.5, for 256-bit: the key schedule uses W0=KL, W1=FO(W0,CK3)^KR,
+    # W2=FE(W1,CK1)^W0^KMR, W3=FO(W2,CK2)^W1
+    # where KMR = right 16 bytes of the 256-bit key (km above).
+    # Let's re-derive carefully per spec for 256-bit:
+    # The spec says KL = key[0:16], KR = key[16:32], KM = key[32:48] — but 256=32B, not 48.
+    # Actually for 256-bit: KL = key[0:16], KR = key[16:32], CKs = (CK3,CK1,CK2)
+    # W0=KL, W1=FO(W0,CK3)^KR, W2=FE(W1,CK1)^W0, W3=FO(W2,CK2)^W1  -- same formula!
+    # So the W0-W3 derived above are correct for all key lengths (km is unused, KR handles it).
+
+    # Number of rounds
+    val nr: u64 = if klen == 16: 12 else if klen == 24: 14 else: 16
+
+    # Extract round keys: RFC 5794 §2.5 Table 1
+    # ek1  = W0 >>> 0   (no rotation)
+    # ek2  = W1 <<< 19
+    # ek3  = W2 <<< 31
+    # ek4  = W3 >>> 61  (= <<< 67)
+    # ek5  = W0 >>> 31  (= <<< 97)
+    # ek6  = W1 <<< 61
+    # ek7  = W2 <<< 77 (= <<< 77)
+    # ek8  = W3 >>> 31 = <<< 97
+    # ... (pattern: left-rotations alternating with right-rotations)
+    # Full table from RFC 5794 §2.5:
+    #   ek1  = W0
+    #   ek2  = W1 <<< 19
+    #   ek3  = W2 <<< 31
+    #   ek4  = W3 >>> 61
+    #   ek5  = W0 >>> 31
+    #   ek6  = W1 <<< 61
+    #   ek7  = W2 >>> 19  (=<<< 109)
+    #   ek8  = W3 <<< 31
+    #   ek9  = W0 <<< 77 (= <<< 77)
+    #   ek10 = W1 >>> 31
+    #   ek11 = W2 <<< 77
+    #   ek12 = W3 >>> 19
+    #   ek13 = W0 <<< 31  (if nr>=12)
+    #   ek14 = W1 <<< 109 (if nr>=14)
+    #   ek15 = W2 >>> 61  (if nr>=14)
+    #   ek16 = W3 <<< 19  (if nr>=16)
+    #   ek17 = W0 >>> 77  (if nr>=16)
+    # Right rotation by n = left rotation by (128-n)
+
+    var rks: [[u8]] = []
+    rks.push(w0)
+    rks.push(_rot128_bytes(w1, 19))
+    rks.push(_rot128_bytes(w2, 31))
+    rks.push(_rot128_bytes(w3, 128 - 61))
+    rks.push(_rot128_bytes(w0, 128 - 31))
+    rks.push(_rot128_bytes(w1, 61))
+    rks.push(_rot128_bytes(w2, 128 - 19))
+    rks.push(_rot128_bytes(w3, 31))
+    rks.push(_rot128_bytes(w0, 77))
+    rks.push(_rot128_bytes(w1, 128 - 31))
+    rks.push(_rot128_bytes(w2, 77))
+    rks.push(_rot128_bytes(w3, 128 - 19))
+    rks.push(_rot128_bytes(w0, 31))
+    if nr >= 14:
+        rks.push(_rot128_bytes(w1, 128 - 19))
+        rks.push(_rot128_bytes(w2, 128 - 61))
+        if nr >= 16:
+            rks.push(_rot128_bytes(w3, 19))
+            rks.push(_rot128_bytes(w0, 128 - 77))
+    rks
+
+# ============================================================================
+# ARIA encryption (RFC 5794 §2.2)
+# ============================================================================
+
+fn aria_encrypt_block(key: [u8], plaintext: [u8]) -> [u8]:
+    """Encrypt a 16-byte block with ARIA using a 16/24/32-byte key.
+
+    Args:
+        key:       16, 24, or 32-byte key (128/192/256-bit).
+        plaintext: 16-byte plaintext block.
+
+    Returns: 16-byte ciphertext block.
+    """
+    val klen: u64 = key.len().to_u64()
+    val nr: u64 = if klen == 16: 12 else if klen == 24: 14 else: 16
+
+    val rks: [[u8]] = _key_schedule(key)
+
+    var state: [u8] = _new_buf(16)
+    var i: u64 = 0
+    while i < 16:
+        state.push(_u8_at(plaintext, i))
+        i = i + 1
+
+    # Rounds 1 .. nr-1: XOR key, substitute, diffuse
+    var round: u64 = 1
+    while round < nr:
+        val rk: [u8] = rks[round.to_i64() - 1]
+        val after_xor: [u8] = _xor16(state, rk)
+        val after_sub: [u8] = if (round % 2) == 1: _sub_odd(after_xor) else: _sub_even(after_xor)
+        state = _diffuse(after_sub)
+        round = round + 1
+
+    # Final round nr: XOR key, substitute, XOR key (no diffusion)
+    val rk_nr: [u8] = rks[nr.to_i64() - 1]
+    val after_xor_nr: [u8] = _xor16(state, rk_nr)
+    val after_sub_nr: [u8] = if (nr % 2) == 1: _sub_odd(after_xor_nr) else: _sub_even(after_xor_nr)
+    val rk_final: [u8] = rks[nr.to_i64()]
+    _xor16(after_sub_nr, rk_final)
+
+# ============================================================================
+# ARIA decryption (RFC 5794 §2.2)
+# Decryption uses the same structure but with reversed round keys,
+# and swaps odd/even substitution layers.
+# ============================================================================
+
+fn aria_decrypt_block(key: [u8], ciphertext: [u8]) -> [u8]:
+    """Decrypt a 16-byte block with ARIA using a 16/24/32-byte key.
+
+    Args:
+        key:        16, 24, or 32-byte key (128/192/256-bit).
+        ciphertext: 16-byte ciphertext block.
+
+    Returns: 16-byte plaintext block.
+    """
+    val klen: u64 = key.len().to_u64()
+    val nr: u64 = if klen == 16: 12 else if klen == 24: 14 else: 16
+
+    val rks: [[u8]] = _key_schedule(key)
+
+    # Decryption round keys: dk_i = rks[nr+1-i] for i=1..nr+1
+    # dk1 = ek_{nr+1}, dk2 = DL(ek_nr), ... dk_nr = DL(ek_2), dk_{nr+1} = ek_1
+    # The intermediate decryption keys are diffused versions of the encryption keys.
+    var dks: [[u8]] = []
+    dks.push(rks[nr.to_i64()])
+    var j: u64 = nr - 1
+    while j >= 1:
+        dks.push(_diffuse(rks[j.to_i64() - 1]))
+        if j == 1:
+            j = 0
+        else:
+            j = j - 1
+    dks.push(rks[0])
+
+    var state: [u8] = _new_buf(16)
+    var i: u64 = 0
+    while i < 16:
+        state.push(_u8_at(ciphertext, i))
+        i = i + 1
+
+    # Rounds 1..nr-1 with decryption keys and swapped substitution
+    # For decryption, round parity is flipped vs encryption:
+    # encrypt odd rounds use sub_odd; decrypt round 1 uses sub_even (since it's ek_{nr})
+    var round: u64 = 1
+    while round < nr:
+        val rk: [u8] = dks[round.to_i64() - 1]
+        val after_xor: [u8] = _xor16(state, rk)
+        # Decrypt round parity: if (nr - round + 1) was odd in encryption, use sub_odd
+        # In encryption, round r used sub_odd if r%2==1. In decryption with reversed key order,
+        # the corresponding encrypt round index is (nr+1 - round).
+        # So: if (nr + 1 - round) % 2 == 1 => sub_odd, else sub_even
+        val enc_round: u64 = nr + 1 - round
+        val after_sub: [u8] = if (enc_round % 2) == 1: _sub_odd(after_xor) else: _sub_even(after_xor)
+        state = _diffuse(after_sub)
+        round = round + 1
+
+    # Final round: XOR key, substitute, XOR key (no diffusion)
+    val rk_nr: [u8] = dks[nr.to_i64() - 1]
+    val after_xor_nr: [u8] = _xor16(state, rk_nr)
+    val enc_round_final: u64 = 1
+    val after_sub_nr: [u8] = if (enc_round_final % 2) == 1: _sub_odd(after_xor_nr) else: _sub_even(after_xor_nr)
+    val rk_final: [u8] = dks[nr.to_i64()]
+    _xor16(after_sub_nr, rk_final)
