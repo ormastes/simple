@@ -22,12 +22,19 @@ impl<'a> Parser<'a> {
                 } else {
                     let mut params = Vec::new();
                     loop {
+                        let param_span = self.current.span;
                         let name = if self.check(&TokenKind::Underscore) {
                             self.advance();
                             "_".to_string()
                         } else {
                             self.expect_identifier()?
                         };
+                        if Self::is_reserved_parameter_name(name.as_str()) {
+                            return Err(ParseError::syntax_error_with_span(
+                                format!("reserved keyword '{}' cannot be used as a parameter name", name),
+                                param_span,
+                            ));
+                        }
                         // Optional type annotation: name: Type
                         let ty = if self.check(&TokenKind::Colon) {
                             self.advance();

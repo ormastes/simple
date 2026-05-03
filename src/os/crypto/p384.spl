@@ -378,90 +378,9 @@ fn _fe_mul_wide(a: Fe384, b: Fe384) -> [u64]:
     prod
 
 fn _fe_reduce_wide(w: [u64]) -> Fe384:
-    """Reduce a 768-bit (24-limb) value mod p using the iterative method.
-
-    2^384 mod p = 2^128 + 2^96 - 2^32 + 1
-    In 12 limbs (LE 32-bit): R = [1, -1, 0, 2^32... wait, let me be precise]
-
-    Actually: 2^384 = p + (2^128 + 2^96 - 2^32 + 1)
-    So 2^384 mod p = 2^128 + 2^96 - 2^32 + 1
-
-    In 12 LE 32-bit limbs:
-    R[0] = 1, R[1] = 0xFFFFFFFF (which is -1 mod 2^32, but we store unsigned)
-    Actually let me compute properly:
-    2^128 + 2^96 - 2^32 + 1
-    = limb0: 1 (2^0)
-      limb1: 0xFFFFFFFF (because -2^32 + ... we need to be careful)
-
-    Let me do this properly:
-    2^128 + 2^96 - 2^32 + 1 as a 384-bit number:
-    = 0x000000000000000000000000000000000000000000000001 00000001 FFFFFFFF 00000001
-
-    Breaking into 32-bit limbs (LE):
-    limb0 = 0x00000001 (bits 0-31)
-    limb1 = 0xFFFFFFFF (bits 32-63): this is -1 mod 2^32... wait:
-    Actually: 2^128 + 2^96 - 2^32 + 1
-    Let's write in hex:
-    = 0x100000001FFFFFFFF00000001
-    That's a 97-bit number. In 12 LE 32-bit limbs:
-    limb0 = 0x00000001
-    limb1 = 0xFFFFFFFF  (from -2^32 + ... hmm, no)
-
-    Let me just compute: 2^128 + 2^96 - 2^32 + 1
-    = 2^128 + 2^96 - 2^32 + 1
-    In decimal = 340282366920938463463374607431768211457 + 79228162514264337593543950336 - 4294967296 + 1
-    In hex:
-    2^128 = 0x100000000000000000000000000000000
-    2^96  = 0x1000000000000000000000000
-    -2^32 = -0x100000000
-    +1    = 0x1
-
-    Sum = 0x100000000000000000000000000000000
-        + 0x000000001000000000000000000000000
-        - 0x000000000000000000000000100000000
-        + 0x000000000000000000000000000000001
-
-        = 0x100000001000000000000000000000001
-        -                         0x100000000
-        = 0x0FFFFFFFF00000001  -- no wait
-
-    Let me be more careful with the hex:
-    2^128 = 1 followed by 32 hex zeros = 0x1_00000000_00000000_00000000_00000000
-    2^96  = 0x1_00000000_00000000_00000000
-    -2^32 = -0x1_00000000
-    +1    = 0x1
-
-    Adding them (working in bits):
-    2^128 + 2^96 = 0x1_00000001_00000000_00000000_00000000
-    + 1 - 2^32  = 0x1_00000001_00000000_FFFFFFFF_00000001
-
-    Wait: 0x00000000_00000000 - 0x1_00000000 + 1
-        = 0xFFFFFFFF_FFFFFFFF_00000001 - that's not right either.
-
-    The lower 64 bits: 0 - 2^32 + 1 = -4294967295 which is 2^64 - 4294967295
-    = 0xFFFFFFFF00000001
-    And there's a borrow of 1 from the next group.
-
-    So: 2^96 - borrow = 2^96 - 1
-    Upper: 2^128 + (2^96 - 1) = 0x100000000FFFFFFFF (in the upper 128-bit part starting at bit 64)
-
-    Actually let me think in 32-bit limbs (LE):
-    limb0 (bits 0-31): from +1 - 0 = 1 -> 0x00000001
-    limb1 (bits 32-63): from -2^32: we subtract 1 from limb1 = 0 - 1 = borrow, limb = 0xFFFFFFFF
-    limb2 (bits 64-95): borrow from limb1, 0 - 1 = borrow, limb = 0xFFFFFFFF
-    limb3 (bits 96-127): from +2^96: 1 - borrow(1) = 0 -> 0x00000000
-    limb4 (bits 128-159): from +2^128: 1 -> 0x00000001
-    limbs 5-11: 0
-
-    So R = [0x00000001, 0xFFFFFFFF, 0xFFFFFFFF, 0x00000000, 0x00000001, 0, 0, 0, 0, 0, 0, 0]
-
-    Verification: 1 + 0xFFFFFFFF*2^32 + 0xFFFFFFFF*2^64 + 0*2^96 + 1*2^128
-    = 1 + (2^32-1)*2^32 + (2^32-1)*2^64 + 2^128
-    = 1 + 2^64 - 2^32 + 2^96 - 2^64 + 2^128
-    = 1 - 2^32 + 2^96 + 2^128 ✓
-
-    We'll use this for iterative reduction.
-    """
+    """Reduce 768-bit (24-limb) value mod p via iterative R-multiplication.
+    R = 2^384 mod p = 2^128 + 2^96 - 2^32 + 1
+    LE 32-bit limbs: [1, 0xFFFFFFFF, 0xFFFFFFFF, 0, 1, 0, 0, 0, 0, 0, 0, 0]."""
     # Split into hi (limbs 12..23) and lo (limbs 0..11)
     # result = hi * R + lo, then iterate until hi portion is zero
     var lo: [u64] = []
