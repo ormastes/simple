@@ -8,10 +8,10 @@
 # Disjoint scope: feature_flags.spl and opt_remarks.spl are the source of
 # truth for parsing logic; this module only orchestrates extraction from argv.
 
-use app.build.feature_flags.{FeatureFlag, parse_target_features, apply_feature_overrides_x86}
+use app.build.feature_flags.{FeatureFlag, parse_target_features, apply_feature_overrides_x86, apply_feature_overrides_aarch64, apply_feature_overrides_rv64}
 use app.build.opt_remarks.{OptRemarkConfig, parse_opt_remarks, opt_remark_config_disabled}
 use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default}
-use compiler.backend.feature_caps.{X86Caps}
+use compiler.backend.feature_caps.{X86Caps, Aarch64Caps, Rv64Caps, TargetCapsKind, x86_caps_from_target, aarch64_caps_from_target, rv64_caps_from_target, caps_kind_from_triple}
 
 # ============================================================================
 # BuildDriverFlags — combined result of the two new CLI flags
@@ -22,13 +22,15 @@ struct BuildDriverFlags:
     target_features: [FeatureFlag]
     opt_remarks:     OptRemarkConfig
     parse_error:     text
+    target:          text
 
 """Return a zero-value BuildDriverFlags (no overrides, no remarks)."""
 fn build_driver_flags_none() -> BuildDriverFlags:
     BuildDriverFlags(
         target_features: [],
         opt_remarks: opt_remark_config_disabled(),
-        parse_error: ""
+        parse_error: "",
+        target: ""
     )
 
 # ============================================================================
@@ -46,19 +48,24 @@ Unknown flags in argv are ignored; this function is additive.
 fn parse_build_driver_flags(args: [text]) -> BuildDriverFlags:
     var features_raw = ""
     var remarks_raw  = ""
+    var target_raw   = ""
     val tf_prefix  = "--target-features="
     val opt_prefix = "--opt-remark="
+    val tgt_prefix = "--target="
     for arg in args:
         if arg.starts_with(tf_prefix):
             features_raw = arg[tf_prefix.len():]
         elif arg.starts_with(opt_prefix):
             remarks_raw = arg[opt_prefix.len():]
+        elif arg.starts_with(tgt_prefix):
+            target_raw = arg[tgt_prefix.len():]
     val remarks = parse_opt_remarks(remarks_raw)
     if features_raw.trim() == "":
         return BuildDriverFlags(
             target_features: [],
             opt_remarks: remarks,
-            parse_error: ""
+            parse_error: "",
+            target: target_raw
         )
     val result = parse_target_features(features_raw)
     val flags = result[0]
@@ -67,12 +74,14 @@ fn parse_build_driver_flags(args: [text]) -> BuildDriverFlags:
         return BuildDriverFlags(
             target_features: [],
             opt_remarks: remarks,
-            parse_error: err
+            parse_error: err,
+            target: target_raw
         )
     BuildDriverFlags(
         target_features: flags,
         opt_remarks: remarks,
-        parse_error: ""
+        parse_error: "",
+        target: target_raw
     )
 
 # ============================================================================
@@ -80,7 +89,21 @@ fn parse_build_driver_flags(args: [text]) -> BuildDriverFlags:
 # ============================================================================
 
 fn build_driver_flags_to_target_opt_ctx(driver_flags: BuildDriverFlags) -> TargetOptContext:
+    val cipher_remark = driver_flags.opt_remarks.cipher_enabled
+    val triple = driver_flags.target
+    if triple.starts_with("aarch64") or triple.starts_with("armv8"):
+        val base = aarch64_caps_from_target(triple)
+        val caps = apply_feature_overrides_aarch64(base, driver_flags.target_features)
+        val kind = TargetCapsKind.Aarch64(caps)
+        val x86_stub = X86Caps(false, false, false, false, false, false, false, false)
+        return TargetOptContext(x86_caps: x86_stub, cipher_remark: cipher_remark, caps_kind: kind)
+    if triple.starts_with("rv64") or triple.starts_with("riscv64"):
+        val base = rv64_caps_from_target(triple)
+        val caps = apply_feature_overrides_rv64(base, driver_flags.target_features)
+        val kind = TargetCapsKind.Rv64(caps)
+        val x86_stub = X86Caps(false, false, false, false, false, false, false, false)
+        return TargetOptContext(x86_caps: x86_stub, cipher_remark: cipher_remark, caps_kind: kind)
     val base_caps = X86Caps(false, false, false, false, false, false, false, false)
     val caps = apply_feature_overrides_x86(base_caps, driver_flags.target_features)
-    val cipher_remark = driver_flags.opt_remarks.cipher_enabled
-    TargetOptContext(caps, cipher_remark)
+    val kind = TargetCapsKind.X86(caps)
+    TargetOptContext(x86_caps: caps, cipher_remark: cipher_remark, caps_kind: kind)

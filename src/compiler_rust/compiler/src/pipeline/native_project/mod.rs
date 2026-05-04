@@ -66,7 +66,7 @@ pub(crate) static RUNTIME_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Set the runtime path override (called from CLI arg parsing).
 pub fn set_runtime_path_override(path: PathBuf) {
-    let _ = RUNTIME_PATH_OVERRIDE.set(path);
+    let _set_result = RUNTIME_PATH_OVERRIDE.set(path);
 }
 
 /// CLI-provided cross-compilation target override.
@@ -75,7 +75,7 @@ static TARGET_OVERRIDE: OnceLock<simple_common::target::Target> = OnceLock::new(
 
 /// Set the cross-compilation target override (called from CLI arg parsing).
 pub fn set_target_override(target: simple_common::target::Target) {
-    let _ = TARGET_OVERRIDE.set(target);
+    let _set_result = TARGET_OVERRIDE.set(target);
 }
 
 /// Get the effective compilation target (override or host).
@@ -411,7 +411,7 @@ impl NativeProjectBuilder {
                     cache_dir_display = cache_dir.display()
                 );
             }
-            let _ = std::fs::remove_dir_all(&cache_dir);
+            let _remove_cache_result = std::fs::remove_dir_all(&cache_dir);
         }
 
         let use_incremental = self.config.incremental && !self.config.clean;
@@ -716,7 +716,7 @@ impl NativeProjectBuilder {
                         &module_prefix,
                     );
                     let cached_o = objects_dir.join(format!("{:016x}.o", hash));
-                    let _ = std::fs::copy(obj_path, cached_o);
+                    let _copy_result = std::fs::copy(obj_path, cached_o);
                 }
             }
         }

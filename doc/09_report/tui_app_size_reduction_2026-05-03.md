@@ -20,7 +20,7 @@ Date: 2026-05-04
 
 ## Simple Hello Sections
 
-- text=382157, data=18912, bss=400, dec=401469
+- text=381221, data=18896, bss=400, dec=400517
 - .text: 046d68
 - .rodata: 00c580
 - .eh_frame: 006534
@@ -30,7 +30,7 @@ Date: 2026-05-04
 
 ## Simple Minimal TUI Sections
 
-- text=382773, data=18976, bss=400, dec=402149
+- text=381837, data=18960, bss=400, dec=401197
 - .text: 046f18
 - .rodata: 00c5d8
 - .eh_frame: 006584

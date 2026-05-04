@@ -48,285 +48,297 @@ fn safetycontext_new() -> SafetyContext:
 # Safety Checker
 # ============================================================================
 
-class SafetyChecker:
+struct SafetyChecker:
     """Validates safety requirements in HIR."""
     context: SafetyContext
 
+
+impl SafetyChecker:
     static fn create() -> SafetyChecker:
         SafetyChecker(context: safetycontext_new())
 
-    me check_module(module: HirModule) -> [SafetyError]:
-        """Check an entire module for safety violations."""
-        # Check all functions
-        for _for_item_0 in module.functions:
-            val name = _for_item_0[0]
-            val func = _for_item_0[1]
-            self.check_function(func)
 
-        # Check all methods in classes
-        for _for_item_1 in module.classes:
-            val name = _for_item_1[0]
-            val class_ = _for_item_1[1]
-            for method in class_.methods:
-                self.check_function(method)
+fn safetychecker_check_module(self: SafetyChecker, module: HirModule) -> [SafetyError]:
+    """Check an entire module for safety violations."""
+    # Check all functions
+    for _for_item_0 in module.functions:
+        val name = _for_item_0[0]
+        val func = _for_item_0[1]
+        safetychecker_check_function(self, func)
 
-        # Check all methods in impls
-        for impl_ in module.impls:
-            for method in impl_.methods:
-                self.check_function(method)
+    # Check all methods in classes
+    for _for_item_1 in module.classes:
+        val name = _for_item_1[0]
+        val class_ = _for_item_1[1]
+        for method in class_.methods:
+            safetychecker_check_function(self, method)
 
-        self.context.errors
+    # Check all methods in impls
+    for impl_ in module.impls:
+        for method in impl_.methods:
+            safetychecker_check_function(self, method)
 
-    me check_function(func: HirFunction):
-        """Check a function body for safety violations."""
-        self.check_block(func.body)
+    self.context.errors
 
-    me check_block(block: HirBlock):
-        """Check a block of statements."""
-        for stmt in block.stmts:
-            self.check_stmt(stmt)
 
-        if block.has_value:
-            self.check_expr(block.value_value)
+fn safetychecker_check_function(self: SafetyChecker, func: HirFunction):
+    """Check a function body for safety violations."""
+    safetychecker_check_block(self, func.body)
 
-    me check_stmt(stmt: HirStmt):
-        """Check a statement for safety violations."""
-        match stmt.kind:
-            case Expr(expr):
-                self.check_expr(expr)
 
-            case Val(_, _, init):
-                if has_init:
-                    self.check_expr(init_value)
+fn safetychecker_check_block(self: SafetyChecker, block: HirBlock):
+    """Check a block of statements."""
+    for stmt in block.stmts:
+        safetychecker_check_stmt(self, stmt)
 
-            case Var(_, _, init):
-                if has_init:
-                    self.check_expr(init_value)
+    if block.has:
+        safetychecker_check_expr(self, block.value)
 
-            case Assign(target, value):
-                self.check_expr(target)
-                self.check_expr(value)
 
-            case AssignOp(_, target, value):
-                self.check_expr(target)
-                self.check_expr(value)
+fn safetychecker_check_stmt(self: SafetyChecker, stmt: HirStmt):
+    """Check a statement for safety violations."""
+    match stmt.kind:
+        case Expr(expr):
+            safetychecker_check_expr(self, expr)
 
-            case _:
-                pass
+        case Val(_, _, init):
+            safetychecker_check_expr(self, init)
 
-    me check_expr(expr: HirExpr):
-        """Check an expression for safety violations."""
-        match expr.kind:
-            # Unsafe block - enter unsafe context
-            case UnsafeBlock(body):
-                val was_unsafe = self.context.in_unsafe
-                self.context_enter_unsafe(context)
-                self.check_block(body)
-                if not was_unsafe:
-                    self.context_exit_unsafe(context)
+        case Var(_, _, init):
+            safetychecker_check_expr(self, init)
 
-            # Inline assembly - must be in unsafe block
-            case InlineAsm(asm_code):
-                self.context_check_inline_asm(context, expr.span)
-                # Type check constraint expressions
-                for constraint in asm_code.constraints:
-                    self.check_expr(constraint.value)
+        case Assign(target, value):
+            safetychecker_check_expr(self, target)
+            safetychecker_check_expr(self, value)
 
-            # Binary operations
-            case Binary(_, left, right):
-                self.check_expr(left)
-                self.check_expr(right)
+        case AssignOp(_, target, value):
+            safetychecker_check_expr(self, target)
+            safetychecker_check_expr(self, value)
 
-            # Unary operations
-            case Unary(_, operand):
-                self.check_expr(operand)
+        case _:
+            pass
 
-            # Control flow
-            case If(cond, then_, else_):
-                self.check_expr(cond)
-                self.check_block(then_)
-                if has_else_:
-                    self.check_block(else__value)
 
-            case MatchCase(scrutinee, arms):
-                self.check_expr(scrutinee)
-                for arm in arms:
-                    if arm.has_guard:
-                        self.check_expr(arm.guard_value)
-                    self.check_expr(arm.body)
+fn safetychecker_check_args(self: SafetyChecker, args: [HirCallArg]):
+    """Check safety in call arguments."""
+    for arg in args:
+        val arg_val: HirExpr = arg.value
+        safetychecker_check_expr(self, arg_val)
 
-            case Loop(body, _):
-                self.check_block(body)
 
-            case While(cond, body, _):
-                self.check_expr(cond)
-                self.check_block(body)
+fn safetychecker_check_expr(self: SafetyChecker, expr: HirExpr):
+    """Check an expression for safety violations."""
+    match expr.kind:
+        # Unsafe block - enter unsafe context
+        case UnsafeBlock(body):
+            val was_unsafe = self.context.in_unsafe
+            self.context.in_unsafe = true
+            safetychecker_check_block(self, body)
+            if not was_unsafe:
+                self.context.in_unsafe = false
 
-            case For(_, iter, body, _):
-                self.check_expr(iter)
-                self.check_block(body)
+        # Inline assembly - must be in unsafe block
+        case InlineAsm(asm_code):
+            if not self.context.in_unsafe:
+                self.context.errors = self.context.errors.push(SafetyError.InlineAsmOutsideUnsafe(expr.span))
+            # Type check constraint expressions
+            for constraint in asm_code.constraints:
+                val cval: HirExpr = constraint.value
+                safetychecker_check_expr(self, cval)
 
-            # Function calls
-            case Call(callee, args, _):
-                self.check_expr(callee)
-                for arg in args:
-                    self.check_expr(arg.value)
+        # Binary operations
+        case Binary(_, left, right):
+            safetychecker_check_expr(self, left)
+            safetychecker_check_expr(self, right)
 
-            case MethodCall(receiver, _, args, _):
-                self.check_expr(receiver)
-                for arg in args:
-                    self.check_expr(arg.value)
+        # Unary operations
+        case Unary(_, operand):
+            safetychecker_check_expr(self, operand)
 
-            # Collections
-            case ArrayLit(elements, _):
-                for elem in elements:
-                    self.check_expr(elem)
+        # Control flow
+        case If(cond, then_, else_):
+            safetychecker_check_expr(self, cond)
+            safetychecker_check_block(self, then_)
+            if else_.?:
+                safetychecker_check_block(self, else_.unwrap())
 
-            case TupleLit(elements):
-                for elem in elements:
-                    self.check_expr(elem)
+        case MatchCase(scrutinee, arms):
+            safetychecker_check_expr(self, scrutinee)
+            for arm in arms:
+                if arm.has_guard:
+                    safetychecker_check_expr(self, arm.guard)
+                safetychecker_check_block(self, arm.body)
 
-            case DictLit(entries, _, _):
-                for _item_0 in entries:
-                    val key = _item_0[0]
-                    val value = _item_0[1]
-                    self.check_expr(key)
-                    self.check_expr(value)
+        case Loop(body, _):
+            safetychecker_check_block(self, body)
 
-            # Blocks
-            case Block(block):
-                self.check_block(block)
+        case While(cond, body, _):
+            safetychecker_check_expr(self, cond)
+            safetychecker_check_block(self, body)
 
-            case LossBlock(body):
-                self.check_block(body)
+        case For(_, iter, body, _):
+            safetychecker_check_expr(self, iter)
+            safetychecker_check_block(self, body)
 
-            case NogradBlock(body):
-                self.check_block(body)
+        # Function calls
+        case Call(callee, args, _):
+            safetychecker_check_expr(self, callee)
+            safetychecker_check_args(self, args)
 
-            # Lambdas
-            case Lambda(_, body, _):
-                self.check_expr(body)
+        case MethodCall(receiver, _, args, _):
+            safetychecker_check_expr(self, receiver)
+            safetychecker_check_args(self, args)
 
-            # Returns and breaks
-            case Return(value):
-                if has_value:
-                    self.check_expr(value_value)
+        # Collections
+        case ArrayLit(elements, _):
+            for elem in elements:
+                safetychecker_check_expr(self, elem)
 
-            case Break(_, value):
-                if has_value:
-                    self.check_expr(value_value)
+        case TupleLit(elements):
+            for elem in elements:
+                safetychecker_check_expr(self, elem)
 
-            case Throw(value):
-                self.check_expr(value)
+        case DictLit(entries, _, _):
+            for _item_0 in entries:
+                val key = _item_0[0]
+                val value = _item_0[1]
+                safetychecker_check_expr(self, key)
+                safetychecker_check_expr(self, value)
 
-            case Try(expr):
-                self.check_expr(expr)
+        # Blocks
+        case Block(block):
+            safetychecker_check_block(self, block)
 
-            # Optional operations
-            case OptionalChain(base, _):
-                self.check_expr(base)
+        case LossBlock(body):
+            safetychecker_check_block(self, body)
 
-            case NullCoalesce(left, right):
-                self.check_expr(left)
-                self.check_expr(right)
+        case NogradBlock(body):
+            safetychecker_check_block(self, body)
 
-            case ExistsCheck(base):
-                self.check_expr(base)
+        # Lambdas
+        case Lambda(_, body, _):
+            safetychecker_check_expr(self, body)
 
-            case Unwrap(base):
-                self.check_expr(base)
+        # Returns and breaks
+        case Return(value):
+            if value.?:
+                safetychecker_check_expr(self, value.unwrap())
 
-            # Field access and indexing
-            case Field(base, _, _):
-                self.check_expr(base)
+        case Break(_, value):
+            if value.?:
+                safetychecker_check_expr(self, value.unwrap())
 
-            case Index(base, index):
-                self.check_expr(base)
-                self.check_expr(index)
+        case Throw(value):
+            safetychecker_check_expr(self, value)
 
-            # Struct and enum literals
-            case StructLit(_, fields):
-                for _item_1 in fields:
-                    val expr = _item_1[1]
-                    self.check_expr(expr)
+        case Try(expr_):
+            safetychecker_check_expr(self, expr_)
 
-            case EnumLit(_, _, payload):
-                if has_payload:
-                    match payload_value:
-                        case Tuple(exprs):
-                            for expr in exprs:
-                                self.check_expr(expr)
-                        case Struct(fields):
-                            for _item_2 in fields:
-                                val expr = _item_2[1]
-                                self.check_expr(expr)
-                        case _:
-                            pass
+        # Optional operations
+        case OptionalChain(base, _):
+            safetychecker_check_expr(self, base)
 
-            # Casts
-            case Cast(expr, _):
-                self.check_expr(expr)
+        case NullCoalesce(left, right):
+            safetychecker_check_expr(self, left)
+            safetychecker_check_expr(self, right)
 
-            case As(expr, _):
-                self.check_expr(expr)
+        case ExistsCheck(base):
+            safetychecker_check_expr(self, base)
 
-            # Range
-            case Range(start, end, _, step):
-                if has_start:
-                    self.check_expr(start_value)
-                if has_end:
-                    self.check_expr(end_value)
-                if has_step:
-                    self.check_expr(step_value)
+        case Unwrap(base):
+            safetychecker_check_expr(self, base)
 
-            # Comprehensions
-            case Comprehension(_, expr, clauses):
-                self.check_expr(expr)
-                for clause in clauses:
-                    match clause.kind:
-                        case For(_, iter):
-                            self.check_expr(iter)
-                        case If(cond):
-                            self.check_expr(cond)
+        # Field access and indexing
+        case Field(base, _, _):
+            safetychecker_check_expr(self, base)
 
-            # Async
-            case Await(expr):
-                self.check_expr(expr)
+        case Index(base, index):
+            safetychecker_check_expr(self, base)
+            safetychecker_check_expr(self, index)
 
-            case Yield(value):
-                if has_value:
-                    self.check_expr(value_value)
+        # Struct and enum literals
+        case StructLit(_, fields):
+            for _item_1 in fields:
+                val fval = _item_1[1]
+                safetychecker_check_expr(self, fval)
 
-            # Literals and simple expressions
-            case IntLit(_, _):
-                pass
+        case EnumLit(_, _, payload):
+            if payload.?:
+                match payload.unwrap():
+                    case Tuple(exprs):
+                        for expr_ in exprs:
+                            safetychecker_check_expr(self, expr_)
+                    case Struct(fields):
+                        for _item_2 in fields:
+                            val fval = _item_2[1]
+                            safetychecker_check_expr(self, fval)
+                    case _:
+                        pass
 
-            case FloatLit(_, _):
-                pass
+        # Casts
+        case Cast(expr_, _):
+            safetychecker_check_expr(self, expr_)
 
-            case StringLit(_, _):
-                pass
+        case As(expr_, _):
+            safetychecker_check_expr(self, expr_)
 
-            case BoolLit(_):
-                pass
+        # Range
+        case Range(start, end_, _, step):
+            if start.?:
+                safetychecker_check_expr(self, start.unwrap())
+            if end_.?:
+                safetychecker_check_expr(self, end_.unwrap())
+            if step.?:
+                safetychecker_check_expr(self, step.unwrap())
 
-            case CharLit(_):
-                pass
+        # Comprehensions
+        case Comprehension(_, expr_, clauses):
+            safetychecker_check_expr(self, expr_)
+            for clause in clauses:
+                match clause.kind:
+                    case For(_, iter):
+                        safetychecker_check_expr(self, iter)
+                    case If(cond):
+                        safetychecker_check_expr(self, cond)
 
-            case UnitLit:
-                pass
+        # Async
+        case Await(expr_):
+            safetychecker_check_expr(self, expr_)
 
-            case NilLit:
-                pass
+        case Yield(value):
+            if value.?:
+                safetychecker_check_expr(self, value.unwrap())
 
-            case Var(_):
-                pass
+        # Literals and simple expressions
+        case IntLit(_, _):
+            pass
 
-            case Error:
-                pass
+        case FloatLit(_, _):
+            pass
 
-            case _:
-                pass
+        case StringLit(_, _):
+            pass
+
+        case BoolLit(_):
+            pass
+
+        case CharLit(_):
+            pass
+
+        case UnitLit:
+            pass
+
+        case NilLit:
+            pass
+
+        case Var(_):
+            pass
+
+        case Error:
+            pass
+
+        case _:
+            pass
 
 # ============================================================================
 # Exports

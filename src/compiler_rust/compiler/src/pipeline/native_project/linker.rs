@@ -718,12 +718,23 @@ int main(int argc, char** argv) {
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
+        let omit_unwind = cfg!(target_os = "linux")
+            && selected_runtime
+                .as_ref()
+                .is_some_and(|(_, is_native_all)| !is_native_all)
+            && self.runtime_bundle_prefers_core_c_lane();
         if is_clang_cl {
             for lib in &link_config.libraries {
+                if omit_unwind && *lib == "unwind" {
+                    continue;
+                }
                 cmd.arg(format!("{}.lib", lib));
             }
         } else {
             for lib in &link_config.libraries {
+                if omit_unwind && *lib == "unwind" {
+                    continue;
+                }
                 cmd.arg(format!("-l{}", lib));
             }
         }

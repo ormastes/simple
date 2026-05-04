@@ -3,7 +3,7 @@
 # Walks HIR modules to find cross-module symbol accesses and check visibility.
 
 use compiler.hir.hir_types.{HirModule, Symbol, SymbolId, SymbolTable}
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock, HirFunction, HirMatchArm}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock, HirFunction, HirMatchArm, HirCallArg}
 use visibility_checker.{VisibilityChecker, VisibilityWarning}
 use compiler.common.diagnostics.span.{Span}
 
@@ -45,6 +45,16 @@ fn check_block_visibility(
     if block.has:
         check_expr_visibility(block.value, symbols, checker)
 
+fn check_args_visibility(
+    args: [HirCallArg],
+    symbols: SymbolTable,
+    checker: VisibilityChecker
+):
+    """Check visibility in call arguments."""
+    for arg in args:
+        val arg_val: HirExpr = arg.value
+        check_expr_visibility(arg_val, symbols, checker)
+
 fn check_stmt_visibility(
     stmt: HirStmt,
     symbols: SymbolTable,
@@ -52,19 +62,17 @@ fn check_stmt_visibility(
 ):
     """Check visibility in a statement."""
     match stmt.kind:
-        case hirstmtkind_Let(_, _, init, _):
-            if has_init:
-                check_expr_visibility(init_value, symbols, checker)
-        case hirstmtkind_Assign(target, value):
+        case Let(_, _, init):
+            check_expr_visibility(init, symbols, checker)
+        case Assign(target, _, value):
             check_expr_visibility(target, symbols, checker)
             check_expr_visibility(value, symbols, checker)
-        case hirstmtkind_Expr(expr):
+        case Expr(expr):
             check_expr_visibility(expr, symbols, checker)
-        case hirstmtkind_Return(value):
-            if has_value:
-                check_expr_visibility(value_value, symbols, checker)
-        default:
-            pass_do_nothing
+        case Block(block):
+            check_block_visibility(block, symbols, checker)
+        case _:
+            pass
 
 fn check_expr_visibility(
     expr: HirExpr,
@@ -76,73 +84,67 @@ fn check_expr_visibility(
     This is where we detect cross-module symbol accesses and check visibility.
     """
     match expr.kind:
-        case hirexprkind_Var(symbol_id):
+        case Var(symbol_id):
             # Variable/function/class reference - check visibility
             check_symbol_visibility(symbol_id, symbols, checker, expr.span)
 
-        case hirexprkind_Field(base, field, resolved):
+        case Field(base, _, resolved):
             check_expr_visibility(base, symbols, checker)
-            if has_resolved:
-                check_symbol_visibility(resolved_value, symbols, checker, expr.span)
+            if resolved.?:
+                check_symbol_visibility(resolved.unwrap(), symbols, checker, expr.span)
 
-        case hirexprkind_Call(callee, args, _):
+        case Call(callee, args, _):
             check_expr_visibility(callee, symbols, checker)
-            for arg in args:
-                check_expr_visibility(arg.value, symbols, checker)
+            check_args_visibility(args, symbols, checker)
 
-        case hirexprkind_MethodCall(receiver, method, args, resolution):
+        case MethodCall(receiver, _, args, _):
             check_expr_visibility(receiver, symbols, checker)
-            for arg in args:
-                check_expr_visibility(arg.value, symbols, checker)
+            check_args_visibility(args, symbols, checker)
 
-        case hirexprkind_Binary(op, left, right):
+        case Binary(_, left, right):
             check_expr_visibility(left, symbols, checker)
             check_expr_visibility(right, symbols, checker)
 
-        case hirexprkind_Unary(op, operand):
+        case Unary(_, operand):
             check_expr_visibility(operand, symbols, checker)
 
-        case hirexprkind_If(cond, then_block, else_block):
+        case If(cond, then_block, else_block):
             check_expr_visibility(cond, symbols, checker)
             check_block_visibility(then_block, symbols, checker)
-            if has_else_block:
-                check_block_visibility(else_block_value, symbols, checker)
+            if else_block.?:
+                check_block_visibility(else_block.unwrap(), symbols, checker)
 
-        case hirexprkind_Block(block):
+        case Block(block):
             check_block_visibility(block, symbols, checker)
 
-        case hirexprkind_ArrayLit(elements, _):
+        case ArrayLit(elements, _):
             for elem in elements:
                 check_expr_visibility(elem, symbols, checker)
 
-        case hirexprkind_TupleLit(elements):
+        case TupleLit(elements):
             for elem in elements:
                 check_expr_visibility(elem, symbols, checker)
 
-        case hirexprkind_Match(subject, arms):
+        case MatchCase(subject, arms):
             check_expr_visibility(subject, symbols, checker)
-            for arm: HirMatchArm in arms:
+            for arm in arms:
                 if arm.has_guard:
                     check_expr_visibility(arm.guard, symbols, checker)
-                check_expr_visibility(arm.body, symbols, checker)
+                check_block_visibility(arm.body, symbols, checker)
 
-        case hirexprkind_Return(value):
-            if has_value:
-                check_expr_visibility(value_value, symbols, checker)
+        case Return(value):
+            if value.?:
+                check_expr_visibility(value.unwrap(), symbols, checker)
 
-        case hirexprkind_Index(base, index):
+        case Index(base, index):
             check_expr_visibility(base, symbols, checker)
             check_expr_visibility(index, symbols, checker)
 
-        case hirexprkind_Lambda(params, body):
+        case Lambda(_, body, _):
             check_expr_visibility(body, symbols, checker)
 
-        case hirexprkind_Assign(target, value):
-            check_expr_visibility(target, symbols, checker)
-            check_expr_visibility(value, symbols, checker)
-
-        default:
-            pass_do_nothing
+        case _:
+            pass
 
 fn check_symbol_visibility(
     symbol_id: SymbolId,
@@ -152,20 +154,20 @@ fn check_symbol_visibility(
 ):
     """Check if accessing this symbol violates visibility rules."""
     val symbol_opt = symbols.get(symbol_id)
-    if not has_symbol_opt:
+    if not symbol_opt.?:
         return  # Symbol not found, likely an error elsewhere
 
-    val symbol = symbol_opt_value
+    val symbol = symbol_opt.unwrap()
 
     # Check if symbol has a defining module
-    if not symbol.has_defining_module:
+    if not symbol.defining_module.?:
         return  # Local symbol, no visibility check needed
 
-    val defining_module = symbol.defining_module_value
+    val defining_module = symbol.defining_module.unwrap()
 
     # Check visibility and record warning if needed
     val warning = checker.check_symbol_access(symbol, defining_module, access_span)
-    if has_warning:
-        checker.record_warning(warning_value)
+    if warning.?:
+        checker.record_warning(warning.unwrap())
 
 # Export public API

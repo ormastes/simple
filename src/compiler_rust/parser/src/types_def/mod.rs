@@ -565,8 +565,8 @@ impl<'a> Parser<'a> {
                     // Methods whose first param is not `self` or `me` are implicitly static
                     // (factory methods like `fn wrap(v: T) -> Foo<T>` don't need `self`).
                     if !is_static && f.name != "new" {
-                        let has_self_param = !f.params.is_empty()
-                            && (f.params[0].name == "self" || f.params[0].name == "me");
+                        let has_self_param =
+                            !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
                         if has_self_param {
                             // Instance method with explicit self/me — no injection needed
                         } else if f.is_me_method {
@@ -776,8 +776,8 @@ impl<'a> Parser<'a> {
                     // Skip auto-injection for constructors (methods named "new").
                     // Methods whose first param is not `self` or `me` are implicitly static.
                     if !is_static && f.name != "new" {
-                        let has_self_param = !f.params.is_empty()
-                            && (f.params[0].name == "self" || f.params[0].name == "me");
+                        let has_self_param =
+                            !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
                         if has_self_param {
                             // Instance method with explicit self/me — no injection needed
                         } else if f.is_me_method {
