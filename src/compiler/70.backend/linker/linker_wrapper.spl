@@ -475,13 +475,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("SimpleOS target: cc subprocess fallback unsupported (check sysroot + CRT files)")
     # Fallback: use cc (gcc/clang) for linking
     debug("linker", "link_native_cc: fallback linking with cc")
-    var cmd = "cc"
+    var args: [text] = []
     for obj in object_files:
-        cmd = cmd + " " + obj
+        args = args.push(obj)
 
     # Library paths
     for lp in config.library_paths:
-        cmd = cmd + " -L" + lp
+        args = args.push("-L" + lp)
 
     # Auto-detect runtime library
     # "none" means skip runtime library entirely (e.g., LLVM pipeline provides runtime objects directly)
@@ -489,49 +489,60 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir != "" and runtime_dir != "none":
-        cmd = cmd + " -L{runtime_dir} -lsimple_compiler"
-        cmd = cmd + " -Wl,-rpath,{runtime_dir}"
+        args = args.push("-L" + runtime_dir)
+        args = args.push("-lsimple_compiler")
+        args = args.push("-Wl,-rpath," + runtime_dir)
 
     # Standard libraries (OS-aware; no -lgcc_s — clang provides compiler-rt)
-    val uname = shell("uname -s")
-    var os_name = uname.stdout
-    os_name = os_name.trim()
-    if os_name == "Darwin":
-        cmd = cmd + " -lc -lpthread -lm -lSystem -lSDL2"
-    elif os_name == "FreeBSD":
-        cmd = cmd + " -lc -lpthread -lm -lSDL2"
+    val os_name = host_os()
+    if os_name == "macos" or os_name == "darwin":
+        args = args.push("-lc")
+        args = args.push("-lpthread")
+        args = args.push("-lm")
+        args = args.push("-lSystem")
+        args = args.push("-lSDL2")
+    elif os_name == "freebsd":
+        args = args.push("-lc")
+        args = args.push("-lpthread")
+        args = args.push("-lm")
+        args = args.push("-lSDL2")
     else:
-        cmd = cmd + " -lc -lpthread -ldl -lm -lSDL2"
+        args = args.push("-lc")
+        args = args.push("-lpthread")
+        args = args.push("-ldl")
+        args = args.push("-lm")
+        args = args.push("-lSDL2")
 
     for flag in unresolved_symbol_flags_for_cc(os_name):
-        cmd = cmd + " " + flag
+        args = args.push(flag)
 
     # Libraries from config
     for lib in config.libraries:
-        cmd = cmd + " -l" + lib
+        args = args.push("-l" + lib)
 
     # Dead code elimination + deduplication (per-platform, via cc -Wl,)
-    if os_name == "Darwin":
-        cmd = cmd + " -Wl,-dead_strip"
+    if os_name == "macos" or os_name == "darwin":
+        args = args.push("-Wl,-dead_strip")
     else:
-        cmd = cmd + " -Wl,--gc-sections"
+        args = args.push("-Wl,--gc-sections")
         # ICF (identical code folding) — safe mode works with ld.bfd/lld/mold via cc driver
-        cmd = cmd + " -Wl,--icf=safe"
+        args = args.push("-Wl,--icf=safe")
 
     # Extra flags
     for flag in config.extra_flags:
-        cmd = cmd + " " + flag
+        args = args.push(flag)
 
-    cmd = cmd + " -o " + output
+    args = args.push("-o")
+    args = args.push(output)
 
     if config.verbose:
-        print "[linker-wrapper] cc command: {cmd}"
+        print "[linker-wrapper] cc fallback via process_run"
 
-    val link = shell(cmd)
-    if link.exit_code == 0:
+    val (stdout, stderr, code) = process_run("cc", args)
+    if code == 0:
         Ok(output)
     else:
-        val err_msg = if link.stderr != "": link.stderr else: "Unknown linking error"
+        val err_msg = if stderr != "": stderr else: "Unknown linking error"
         Err("cc linking failed: {err_msg}")
 
 fn _is_mingw_env() -> bool:

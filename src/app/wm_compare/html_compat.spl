@@ -23,6 +23,7 @@ use std.cli.cli_util.{get_cli_args}
 use std.nogc_sync_mut.ffi.io.{
     file_write_text,
     dir_create_all}
+use common.string_builder.{StringBuilder}
 
 # rt_file_read_text and rt_file_read_bytes are wrapped in Option by the
 # bootstrap interpreter, so we declare them directly and use the `?? ""`
@@ -451,7 +452,7 @@ fn _read_int_at(data: [u8], start: i32) -> (i32, i32):
     (v, i)
 
 fn decode_ppm_local(data: [u8]) -> LocalPpm:
-    """Decode a PPM P6 (binary RGB) byte array to ARGB u32 pixels.
+    """Decode a PPM P6/P3 byte array to ARGB u32 pixels.
 
     Hand-rolled to use `as i32` rather than `.to_i32()` so it works under
     the bootstrap interpreter that types `[u8].len()` as i64.
@@ -459,9 +460,11 @@ fn decode_ppm_local(data: [u8]) -> LocalPpm:
     val n: i32 = data.len() as i32
     if n < 11:
         return _local_ppm_err("ppm too short ({n} bytes)")
-    # Magic must be P6
-    if (data[0] as i32) != 80 or (data[1] as i32) != 54:
-        return _local_ppm_err("not a P6 PPM (magic mismatch)")
+    # Magic must be P6 (binary) or P3 (ASCII).
+    val is_p6 = (data[0] as i32) == 80 and (data[1] as i32) == 54
+    val is_p3 = (data[0] as i32) == 80 and (data[1] as i32) == 51
+    if not is_p6 and not is_p3:
+        return _local_ppm_err("not a P6/P3 PPM (magic mismatch)")
 
     val (width, p1) = _read_int_at(data, 2)
     val (height, p2) = _read_int_at(data, p1)
@@ -471,6 +474,23 @@ fn decode_ppm_local(data: [u8]) -> LocalPpm:
         return _local_ppm_err("invalid dimensions {width}x{height}")
     if maxval != 255:
         return _local_ppm_err("unsupported maxval {maxval} (only 255)")
+
+    if is_p3:
+        var pixels_p3: [u32] = []
+        var ppos = p3
+        var pi: i32 = 0
+        val ptotal: i32 = width * height
+        while pi < ptotal:
+            val (r_i, rp) = _read_int_at(data, ppos)
+            val (g_i, gp) = _read_int_at(data, rp)
+            val (b_i, bp) = _read_int_at(data, gp)
+            ppos = bp
+            val r: u32 = r_i as u32
+            val g: u32 = g_i as u32
+            val b: u32 = b_i as u32
+            pixels_p3 = pixels_p3 + [(0xFF000000 as u32) | (r << 16) | (g << 8) | b]
+            pi = pi + 1
+        return LocalPpm(width: width, height: height, pixels: pixels_p3, ok: true, error: "")
 
     # Pixel data starts after exactly one whitespace byte after maxval.
     var pos: i32 = p3
@@ -500,31 +520,30 @@ fn decode_ppm_local(data: [u8]) -> LocalPpm:
 # ============================================================================
 
 fn _write_ppm_local(pixels: [u32], width: i32, height: i32, path: text) -> bool:
-    """PPM P6 writer that sidesteps the interpreter `.to_u8()` on i64 bug.
-
-    `export_comparison_ppm` calls `.to_u8()` on `(pixel >> N) & 0xFF` which
-    the interpreter types as i64, on which `.to_u8()` is undefined. We
-    use `as u8` which the interpreter accepts.
+    """PPM P3 writer. Runtime byte writes currently produce zero-byte files
+    under the bootstrap path used by this harness, while text writes are stable.
     """
     if pixels.len() == 0 or width <= 0 or height <= 0:
         return false
-
-    val header = "P6\n{width} {height}\n255\n"
-    var data: [u8] = []
-    for ch in header:
-        data = data + [ch as u8]
-
+    val sb = StringBuilder.new()
+    sb.push("P3\n")
+    sb.push(width.to_string())
+    sb.push(" ")
+    sb.push(height.to_string())
+    sb.push("\n255\n")
     var i = 0
     val n = pixels.len()
     while i < n:
         val p = pixels[i]
-        val r_byte: u8 = ((p >> 16) & 0xFF) as u8
-        val g_byte: u8 = ((p >> 8) & 0xFF) as u8
-        val b_byte: u8 = (p & 0xFF) as u8
-        data = data + [r_byte, g_byte, b_byte]
+        sb.push(((p >> 16) & 0xFF).to_string())
+        sb.push(" ")
+        sb.push(((p >> 8) & 0xFF).to_string())
+        sb.push(" ")
+        sb.push((p & 0xFF).to_string())
+        sb.push("\n")
         i = i + 1
 
-    rt_file_write_bytes(path, data)
+    file_write_text(path, sb.to_text())
 
 # ============================================================================
 # Compare
