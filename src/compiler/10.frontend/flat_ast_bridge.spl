@@ -362,6 +362,36 @@ fn convert_decl_fn(idx: i64) -> Function:
         span: span
     )
 
+fn convert_decl_method_fn(idx: i64, target_name: text) -> Function:
+    val base = convert_decl_fn(idx)
+    val method_mode = decl_is_async[idx]
+    val prefix = target_name + "__"
+    val method_name = if base.name.starts_with(prefix):
+        base.name.substring(prefix.len(), base.name.len())
+    else:
+        base.name
+    Function(
+        name: method_name,
+        type_params: base.type_params,
+        params: base.params,
+        has_return_type: base.has_return_type,
+        return_type: base.return_type,
+        body: base.body,
+        visibility: base.visibility,
+        is_async: false,
+        is_static: method_mode == 1,
+        is_public: base.is_public,
+        is_method: method_mode != 1,
+        is_mutable: method_mode == 2,
+        is_const: base.is_const,
+        is_kernel: base.is_kernel,
+        is_extern: base.is_extern,
+        attributes: base.attributes,
+        has_doc_comment: base.has_doc_comment,
+        doc_comment: base.doc_comment,
+        span: base.span
+    )
+
 fn convert_decl_extern_fn(idx: i64) -> Function:
     val name = decl_name[idx]
     val p_names = decl_param_names[idx]
@@ -506,6 +536,26 @@ fn flat_ast_to_module(path: text) -> Module:
                 doc_comment: "",
                 span: span
             )
+        elif tag == DECL_IMPL:
+            val target_name = decl_name[idx]
+            val method_ids = decl_body_stmts[idx]
+            var methods: Dict<text, Function> = {}
+            var mi = 0
+            while mi < method_ids.len():
+                val method_id = method_ids[mi]
+                val fn_ = convert_decl_method_fn(method_id, target_name)
+                methods[fn_.name] = fn_
+                mi = mi + 1
+            impls = impls.push(Impl(
+                type_: Type(kind: TypeKind.Named(target_name, []), span: span),
+                has_trait_: false,
+                trait_: Type(kind: TypeKind.Infer, span: span),
+                type_params: [],
+                where_clause: [],
+                methods: methods,
+                assoc_types: [],
+                span: span
+            ))
         elif tag == DECL_VAL or tag == DECL_VAR:
             val c_name = decl_name[idx]
             val body = decl_body_stmts[idx]
