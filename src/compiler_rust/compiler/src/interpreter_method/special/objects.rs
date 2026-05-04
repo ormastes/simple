@@ -151,17 +151,6 @@ pub fn handle_constructor_methods(
                     .map(|m| m.as_ref()),
             );
         }
-        // Debug tracing for static method resolution (enable via SIMPLE_DEBUG_STATIC_OVERLOAD=1)
-        if std::env::var("SIMPLE_DEBUG_STATIC_OVERLOAD").is_ok() {
-            eprintln!(
-                "[debug static overload] {}.{} candidates={} arg_types={:?}",
-                class_name,
-                method,
-                candidates.len(),
-                positional_values.iter().map(|v| v.type_name()).collect::<Vec<_>>()
-            );
-        }
-
         if let Some(method_def) = candidates
             .into_iter()
             .filter_map(|candidate| {
