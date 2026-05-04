@@ -23,6 +23,8 @@
 #     clmul_lo                  args=[dst, src]  imm8=0x00  -> 2
 #     clmul_hi                  args=[dst, src]  imm8=0x11  -> 2
 #   Common (arity unchanged):
+#     bit_rotate_left           args=[dst, src, count_imm8]  -> 3
+#     bit_rotate_right          args=[dst, src, count_imm8]  -> 3
 #     crypto_aes_imc            args=[dst, src]             -> 2
 #     crypto_aes_keygen_assist  args=[dst, src, rcon_u8]   -> 3
 #     crypto_sha256_rounds2     args=[dst, src, _implicit]  -> 3
@@ -90,10 +92,43 @@ fn emit_popcnt_r64(dst: i64, src: i64) -> [i64]:
     bytes.push(0xc0 + ((dst % 8) * 8) + (src % 8))
     bytes
 
+fn emit_mov_r64_r64(dst: i64, src: i64) -> [i64]:
+    var bytes: [i64] = []
+    var rex = 0x48
+    if src >= 8:
+        rex = rex + 4
+    if dst >= 8:
+        rex = rex + 1
+    bytes.push(rex)
+    bytes.push(0x89)
+    bytes.push(0xc0 + ((src % 8) * 8) + (dst % 8))
+    bytes
+
+fn emit_rotate_imm8_r64(dst: i64, count: i64, is_left: bool) -> [i64]:
+    var bytes: [i64] = []
+    val rex = if dst >= 8: 0x49 else: 0x48
+    var imm8 = count % 256
+    if imm8 < 0:
+        imm8 = imm8 + 256
+    bytes.push(rex)
+    bytes.push(0xc1)
+    val subop = if is_left: 0 else: 1
+    bytes.push(0xc0 + (subop * 8) + (dst % 8))
+    bytes.push(imm8)
+    bytes
+
+fn append_bytes(dst: [i64], src: [i64]) -> [i64]:
+    var out = dst
+    var i = 0
+    while i < src.length:
+        out.push(src[i])
+        i = i + 1
+    out
+
 fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
     match idiom:
-        case RotateLeft:            true
-        case RotateRight:           true
+        case RotateLeft:            false
+        case RotateRight:           false
         case CountLeadingZeros:     true
         case CountTrailingZeros:    true
         case ByteSwap:              false
@@ -167,6 +202,23 @@ fn lower_cipher_intrinsic_x86(name: text, args: [i64], caps: X86Caps) -> Lowerin
             # Step 2: capability gate
             if not caps.supports(idiom):
                 return LoweringResult(empty, false, "no-cap")
+            match name:
+                case "bit_rotate_left":
+                    if args.length != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_mov_r64_r64(args[0], args[1])
+                    bytes = append_bytes(bytes, emit_rotate_imm8_r64(args[0], args[2], true))
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_rotate_right":
+                    if args.length != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_mov_r64_r64(args[0], args[1])
+                    bytes = append_bytes(bytes, emit_rotate_imm8_r64(args[0], args[2], false))
+                    return LoweringResult(bytes, true, "")
+
+                case _:
+                    pass
             if intrinsic_requires_placeholder_lowering(idiom):
                 return LoweringResult(empty, false, "unimplemented")
 

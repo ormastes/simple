@@ -416,7 +416,10 @@ impl NativeProjectBuilder {
 
         // 3. Create temp directory for .o files
         let mut temp_dir = Some(tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?);
-        let temp_dir_path = temp_dir.as_ref().unwrap().path().to_path_buf();
+        let temp_dir_path = temp_dir
+            .as_ref()
+            .map(|dir| dir.path().to_path_buf())
+            .ok_or_else(|| "tempdir unexpectedly missing".to_string())?;
 
         // 4. Read all source files and determine dirty set
         let compile_start = Instant::now();

@@ -108,11 +108,18 @@ struct PublicExportField:
 struct PublicExportClass:
     name: text
     fields: [PublicExportField]
+    methods: [PublicExportMethod]
 
 struct PublicExportFunction:
     name: text
     params: [text]
     return_type: text
+
+struct PublicExportMethod:
+    name: text
+    params: [text]
+    return_type: text
+    is_static: bool
 
 struct PublicExportParse:
     exported_classes: [PublicExportClass]
@@ -141,12 +148,12 @@ fn _parse_public_exports(source: text) -> PublicExportParse:
             val class_name = _parse_class_name(line)
             if class_name == "":
                 return PublicExportParse(exported_classes: classes, exported_functions: functions, error: "failed to parse exported class declaration")
-            val fields_result = _parse_class_fields(lines, i + 1)
-            if fields_result.error != "":
-                return PublicExportParse(exported_classes: classes, exported_functions: functions, error: fields_result.error)
-            classes = classes.push(PublicExportClass(name: class_name, fields: fields_result.fields))
+            val class_result = _parse_export_class(lines, i + 1)
+            if class_result.error != "":
+                return PublicExportParse(exported_classes: classes, exported_functions: functions, error: class_result.error)
+            classes = classes.push(PublicExportClass(name: class_name, fields: class_result.fields, methods: class_result.methods))
             pending_export = false
-            i = fields_result.next_index
+            i = class_result.next_index
             continue
         if pending_export and line.starts_with("fn "):
             val function_result = _parse_export_function(line)
@@ -163,11 +170,16 @@ fn _parse_public_exports(source: text) -> PublicExportParse:
 
 struct PublicFieldParse:
     fields: [PublicExportField]
+    methods: [PublicExportMethod]
     next_index: i64
     error: text
 
 struct PublicFunctionParse:
     exported_fn: PublicExportFunction
+    error: text
+
+struct PublicMethodParse:
+    exported_method: PublicExportMethod
     error: text
 
 fn _parse_class_name(line: text) -> text:
@@ -179,8 +191,15 @@ fn _parse_class_name(line: text) -> text:
         return rest
     parts[0].trim()
 
-fn _parse_class_fields(lines: [text], start_index: i64) -> PublicFieldParse:
+fn _leading_spaces(line: text) -> i64:
+    var i = 0
+    while i < line.len() and line[i:i + 1] == " ":
+        i = i + 1
+    i
+
+fn _parse_export_class(lines: [text], start_index: i64) -> PublicFieldParse:
     var fields: [PublicExportField] = []
+    var methods: [PublicExportMethod] = []
     var i = start_index
     while i < lines.len():
         val raw = lines[i]
@@ -188,11 +207,27 @@ fn _parse_class_fields(lines: [text], start_index: i64) -> PublicFieldParse:
         if trimmed == "":
             i = i + 1
             continue
-        if trimmed.starts_with("@") or trimmed.starts_with("fn ") or trimmed.starts_with("class "):
-            return PublicFieldParse(fields: fields, next_index: i, error: "")
+        val indent = _leading_spaces(raw)
+        if indent < 4:
+            return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "")
+        if indent > 4:
+            i = i + 1
+            continue
+        if trimmed.starts_with("@"):
+            i = i + 1
+            continue
+        if trimmed.starts_with("static fn ") or trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+            val method_result = _parse_export_method(trimmed)
+            if method_result.error != "":
+                return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: method_result.error)
+            methods = methods.push(method_result.exported_method)
+            i = i + 1
+            continue
+        if trimmed.starts_with("class "):
+            return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "")
         val field_parts = trimmed.split(":")
         if field_parts.len() < 2:
-            return PublicFieldParse(fields: fields, next_index: i, error: "failed to parse exported field: {trimmed}")
+            return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "failed to parse exported field: {trimmed}")
         val field_name = field_parts[0].trim()
         var type_part = field_parts[1].trim()
         var has_bits = false
@@ -201,26 +236,60 @@ fn _parse_class_fields(lines: [text], start_index: i64) -> PublicFieldParse:
             has_bits = true
             val bits_parts = type_part.split("@bits(")
             if bits_parts.len() < 2:
-                return PublicFieldParse(fields: fields, next_index: i, error: "failed to parse @bits width for field: {field_name}")
+                return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "failed to parse @bits width for field: {field_name}")
             val bits_text_parts = bits_parts[1].split(")")
             if bits_text_parts.len() == 0:
-                return PublicFieldParse(fields: fields, next_index: i, error: "failed to parse @bits width for field: {field_name}")
+                return PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "failed to parse @bits width for field: {field_name}")
             bits_width = bits_text_parts[0].trim()
             type_part = bits_parts[0].trim()
         fields = fields.push(PublicExportField(name: field_name, type_name: type_part, raw_decl: trimmed, has_bits: has_bits, bits_width: bits_width))
         i = i + 1
-    PublicFieldParse(fields: fields, next_index: i, error: "")
+    PublicFieldParse(fields: fields, methods: methods, next_index: i, error: "")
+
+fn _parse_export_method(line: text) -> PublicMethodParse:
+    val normalized = if line.starts_with("static fn "):
+        line.substring(10).trim()
+    elif line.starts_with("fn "):
+        line.substring(3).trim()
+    else:
+        line.substring(3).trim()
+    val parsed = _parse_signature_parts(normalized)
+    if parsed.error != "":
+        return PublicMethodParse(exported_method: PublicExportMethod(name: "", params: [], return_type: "", is_static: false), error: parsed.error)
+    PublicMethodParse(
+        exported_method: PublicExportMethod(
+            name: parsed.name,
+            params: parsed.params,
+            return_type: parsed.return_type,
+            is_static: line.starts_with("static fn ")
+        ),
+        error: ""
+    )
 
 fn _parse_export_function(line: text) -> PublicFunctionParse:
-    val after_fn = line.substring(3).trim()
-    val fn_parts = after_fn.split("(")
+    val parsed = _parse_signature_parts(line.substring(3).trim())
+    if parsed.error != "":
+        return PublicFunctionParse(exported_fn: PublicExportFunction(name: "", params: [], return_type: ""), error: parsed.error)
+    PublicFunctionParse(
+        exported_fn: PublicExportFunction(name: parsed.name, params: parsed.params, return_type: parsed.return_type),
+        error: ""
+    )
+
+struct PublicSignatureParse:
+    name: text
+    params: [text]
+    return_type: text
+    error: text
+
+fn _parse_signature_parts(signature: text) -> PublicSignatureParse:
+    val fn_parts = signature.split("(")
     if fn_parts.len() < 2:
-        return PublicFunctionParse(exported_fn: PublicExportFunction(name: "", params: [], return_type: ""), error: "failed to parse exported function declaration")
+        return PublicSignatureParse(name: "", params: [], return_type: "", error: "failed to parse exported function declaration")
     val fn_name = fn_parts[0].trim()
     val tail = fn_parts[1]
     val tail_parts = tail.split(")")
     if tail_parts.len() < 2:
-        return PublicFunctionParse(exported_fn: PublicExportFunction(name: "", params: [], return_type: ""), error: "failed to parse exported function declaration")
+        return PublicSignatureParse(name: "", params: [], return_type: "", error: "failed to parse exported function declaration")
     val params_text = tail_parts[0].trim()
     var params: [text] = []
     if params_text != "":
@@ -230,7 +299,7 @@ fn _parse_export_function(line: text) -> PublicFunctionParse:
             val param = parts[i].trim()
             val param_parts = param.split(":")
             if param_parts.len() < 2:
-                return PublicFunctionParse(exported_fn: PublicExportFunction(name: "", params: [], return_type: ""), error: "failed to parse parameter in exported function: {fn_name}")
+                return PublicSignatureParse(name: "", params: [], return_type: "", error: "failed to parse parameter in exported function: {fn_name}")
             params = params.push(param_parts[1].trim())
             i = i + 1
     val return_type = if tail_parts[1].contains("->"):
@@ -243,10 +312,7 @@ fn _parse_export_function(line: text) -> PublicFunctionParse:
             suffix_parts[0].trim()
     else:
         "unit"
-    PublicFunctionParse(
-        exported_fn: PublicExportFunction(name: fn_name, params: params, return_type: return_type),
-        error: ""
-    )
+    PublicSignatureParse(name: fn_name, params: params, return_type: return_type, error: "")
 
 fn _emit_public_c_header(lib_name: text, functions: [PublicExportFunction], classes: [PublicExportClass]) -> text:
     val guard_name = _public_guard_name(lib_name)
@@ -264,16 +330,31 @@ fn _emit_public_c_header(lib_name: text, functions: [PublicExportFunction], clas
     lines.push("")
     lines.push("void spl_library_init(void);")
     lines.push("void spl_library_shutdown(void);")
+    if _public_has_result_functions(functions):
+        lines.push("typedef struct spl_error_t spl_error_t;")
+        lines.push("const char* spl_error_message(const spl_error_t* err);")
+        lines.push("void spl_error_free(spl_error_t* err);")
     lines.push("")
 
     var ci = 0
     while ci < classes.len():
         val class_ = classes[ci]
         val prefix = "spl_" + class_.name
-        lines.push("typedef struct {prefix}* {prefix}_t;")
+        lines.push("typedef struct {prefix} {prefix}_t;")
         lines.push("")
-        lines.push("{prefix}_t {prefix}_create({_public_ctor_params(class_.fields)});")
-        lines.push("void {prefix}_destroy({prefix}_t self);")
+        val create_method = _public_find_class_create_method(class_)
+        if create_method.?:
+            val method = create_method.unwrap()
+            lines.push("{prefix}_t* {prefix}_create(" + _public_c_fn_param_list(method.params) + ");")
+        else:
+            lines.push("{prefix}_t* {prefix}_create(" + _public_ctor_params(class_.fields) + ");")
+        lines.push("void {prefix}_destroy({prefix}_t* self);")
+        var mi = 0
+        while mi < class_.methods.len():
+            val method = class_.methods[mi]
+            if method.name != "create":
+                lines.push(_public_c_method_decl(class_, method))
+            mi = mi + 1
         lines.push("")
         lines.push("typedef struct {prefix}_layout {")
         var fi = 0
@@ -311,13 +392,16 @@ fn _emit_public_cpp_header(lib_name: text, classes: [PublicExportClass], functio
     lines.push("#include <string>")
     lines.push("#include <utility>")
     lines.push("#include <cstddef>")
+    lines.push("#ifdef SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS")
+    lines.push("#include <stdexcept>")
+    lines.push("#endif")
     lines.push("")
     lines.push("namespace spl {")
     lines.push("")
     lines.push("class Library {")
     lines.push("public:")
-    lines.push("    Library() { spl_library_init(); }")
-    lines.push("    ~Library() { spl_library_shutdown(); }")
+    lines.push("    Library() noexcept { spl_library_init(); }")
+    lines.push("    ~Library() noexcept { spl_library_shutdown(); }")
     lines.push("    Library(const Library&) = delete;")
     lines.push("    Library& operator=(const Library&) = delete;")
     lines.push("};")
@@ -328,11 +412,17 @@ fn _emit_public_cpp_header(lib_name: text, classes: [PublicExportClass], functio
         val class_ = classes[ci]
         val prefix = "spl_" + class_.name
         lines.push("class {class_.name} {")
-        lines.push("    {prefix}_t handle_;")
+        lines.push("    {prefix}_t* handle_;")
         lines.push("")
         lines.push("public:")
-        lines.push("    {class_.name}({_public_cpp_ctor_params(class_.fields)}) : handle_({prefix}_create({_public_cpp_ctor_args(class_.fields)})) {}")
-        lines.push("    ~{class_.name}() {")
+        lines.push("    explicit {class_.name}({prefix}_t* handle) noexcept : handle_(handle) {}")
+        val create_method = _public_find_class_create_method(class_)
+        if create_method.?:
+            val method = create_method.unwrap()
+            lines.push("    static {class_.name} create(" + _public_cpp_fn_params(method.params) + ") {")
+            lines.push("        return {class_.name}({prefix}_create(" + _public_cpp_fn_args(method.params) + "));")
+            lines.push("    }")
+        lines.push("    ~{class_.name}() noexcept {")
         lines.push("        if (handle_) {prefix}_destroy(handle_);")
         lines.push("    }")
         lines.push("")
@@ -351,6 +441,16 @@ fn _emit_public_cpp_header(lib_name: text, classes: [PublicExportClass], functio
         lines.push("        }")
         lines.push("        return *this;")
         lines.push("    }")
+        var mi = 0
+        while mi < class_.methods.len():
+            val method = class_.methods[mi]
+            if method.name != "create":
+                val wrapper_lines = _public_cpp_method_wrapper(class_, method)
+                var wi = 0
+                while wi < wrapper_lines.len():
+                    lines.push(wrapper_lines[wi])
+                    wi = wi + 1
+            mi = mi + 1
         lines.push("};")
         lines.push("")
         ci = ci + 1
@@ -361,17 +461,11 @@ fn _emit_public_cpp_header(lib_name: text, classes: [PublicExportClass], functio
         var fi = 0
         while fi < functions.len():
             val func = functions[fi]
-            val cpp_ret = _public_cpp_type(func.return_type)
-            val cpp_params = _public_cpp_fn_params(func.params)
-            val c_args = _public_cpp_fn_args(func.params)
-            lines.push("inline {cpp_ret} {func.name}({cpp_params}) {")
-            val call_expr = "spl_" + func.name + "(" + c_args + ")"
-            if cpp_ret == "void":
-                lines.push("    {call_expr};")
-            else:
-                lines.push("    return {call_expr};")
-            lines.push("}")
-            lines.push("")
+            val wrapper_lines = _public_cpp_free_function_wrapper(func)
+            var wi = 0
+            while wi < wrapper_lines.len():
+                lines.push(wrapper_lines[wi])
+                wi = wi + 1
             fi = fi + 1
 
     lines.push("} // namespace spl")
@@ -422,16 +516,30 @@ fn _public_c_field_decl(field: PublicExportField) -> text:
     "{c_type} {field.name};"
 
 fn _public_c_fn_decl(func: PublicExportFunction) -> text:
+    val export_name = func.name
+    if _public_is_result_type(func.return_type):
+        val ok_type = _public_result_ok_type(func.return_type)
+        val base = _public_c_fn_param_list(func.params)
+        val params = if base == "void": "spl_error_t** err_out" else: base + ", spl_error_t** err_out"
+        return _public_c_type(ok_type) + " " + export_name + "(" + params + ");"
     val ret = _public_c_type(func.return_type)
-    val export_name = "spl_" + func.name
     if func.params.len() == 0:
         return "{ret} {export_name}(void);"
+    "{ret} {export_name}(" + _public_c_fn_param_list(func.params) + ");"
+
+fn _public_c_method_decl(class_: PublicExportClass, method: PublicExportMethod) -> text:
+    val prefix = "spl_" + class_.name
+    val export_name = prefix + "_" + method.name
+    val ret = if method.return_type == class_.name: prefix + "_t*" else: _public_c_type(method.return_type)
     var params: [text] = []
+    if not method.is_static:
+        params = params.push(prefix + "_t* self")
     var i = 0
-    while i < func.params.len():
-        params = params.push(_public_c_type(func.params[i]) + " arg" + "{i}")
+    while i < method.params.len():
+        params = params.push(_public_c_type(method.params[i]) + " arg" + "{i}")
         i = i + 1
-    "{ret} {export_name}(" + params.join(", ") + ");"
+    val params_str = if params.len() == 0: "void" else: params.join(", ")
+    "{ret} {export_name}(" + params_str + ");"
 
 fn _public_cpp_fn_params(params: [text]) -> text:
     if params.len() == 0:
@@ -450,6 +558,123 @@ fn _public_cpp_fn_args(params: [text]) -> text:
         args = args.push("arg" + "{i}")
         i = i + 1
     args.join(", ")
+
+fn _public_cpp_method_wrapper(class_: PublicExportClass, method: PublicExportMethod) -> [text]:
+    val prefix = "spl_" + class_.name
+    val export_name = prefix + "_" + method.name
+    val cpp_ret = _public_cpp_type(method.return_type)
+    val cpp_params = _public_cpp_fn_params(method.params)
+    val call_args = if method.params.len() == 0:
+        "handle_"
+    else:
+        "handle_, " + _public_cpp_fn_args(method.params)
+    var lines: [text] = []
+    lines.push("    " + cpp_ret + " " + method.name + "(" + cpp_params + ") {")
+    if cpp_ret == "void":
+        lines.push("        " + export_name + "(" + call_args + ");")
+    else:
+        lines.push("        return " + export_name + "(" + call_args + ");")
+    lines.push("    }")
+    lines.push("")
+    lines
+
+fn _public_cpp_free_function_wrapper(func: PublicExportFunction) -> [text]:
+    if _public_is_result_type(func.return_type):
+        return _public_cpp_result_wrapper(func)
+    val cpp_ret = _public_cpp_type(func.return_type)
+    val cpp_params = _public_cpp_fn_params(func.params)
+    val c_args = _public_cpp_fn_args(func.params)
+    var lines: [text] = []
+    lines.push("inline {cpp_ret} {func.name}({cpp_params}) {")
+    val call_expr = "::" + func.name + "(" + c_args + ")"
+    if cpp_ret == "void":
+        lines.push("    {call_expr};")
+    else:
+        lines.push("    return {call_expr};")
+    lines.push("}")
+    lines.push("")
+    lines
+
+fn _public_cpp_result_wrapper(func: PublicExportFunction) -> [text]:
+    val ok_type = _public_cpp_type(_public_result_ok_type(func.return_type))
+    val cpp_params = _public_cpp_fn_params(func.params)
+    val c_args = _public_cpp_fn_args(func.params)
+    var lines: [text] = []
+    var params_with_outputs = if cpp_params == "": "" else: cpp_params + ", "
+    params_with_outputs = params_with_outputs + ok_type + "* out_value, std::string* out_error = nullptr"
+    lines.push("inline bool " + func.name + "(" + params_with_outputs + ") noexcept {")
+    lines.push("    spl_error_t* err = nullptr;")
+    val c_call_args = if c_args == "": "&err" else: c_args + ", &err"
+    lines.push("    " + ok_type + " result = ::" + func.name + "(" + c_call_args + ");")
+    lines.push("    if (err) {")
+    lines.push("        if (out_error) {")
+    lines.push("            *out_error = spl_error_message(err);")
+    lines.push("        }")
+    lines.push("        spl_error_free(err);")
+    lines.push("        return false;")
+    lines.push("    }")
+    lines.push("    if (out_value) {")
+    lines.push("        *out_value = result;")
+    lines.push("    }")
+    lines.push("    if (out_error) {")
+    lines.push("        out_error->clear();")
+    lines.push("    }")
+    lines.push("    return true;")
+    lines.push("}")
+    lines.push("")
+    lines.push("#ifdef SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS")
+    lines.push("inline " + ok_type + " " + func.name + "_or_throw(" + cpp_params + ") {")
+    lines.push("    " + ok_type + " value{};")
+    lines.push("    std::string error;")
+    val throw_args = if c_args == "": "&value, &error" else: c_args + ", &value, &error"
+    lines.push("    if (!" + func.name + "(" + throw_args + ")) {")
+    lines.push("        throw std::runtime_error(error);")
+    lines.push("    }")
+    lines.push("    return value;")
+    lines.push("}")
+    lines.push("#endif")
+    lines.push("")
+    lines
+
+fn _public_find_class_create_method(class_: PublicExportClass) -> Option<PublicExportMethod>:
+    var i = 0
+    while i < class_.methods.len():
+        val method = class_.methods[i]
+        if method.is_static and method.name == "create":
+            return Some(method)
+        i = i + 1
+    None
+
+fn _public_c_fn_param_list(params: [text]) -> text:
+    if params.len() == 0:
+        return "void"
+    var rendered: [text] = []
+    var i = 0
+    while i < params.len():
+        rendered = rendered.push(_public_c_type(params[i]) + " arg" + "{i}")
+        i = i + 1
+    rendered.join(", ")
+
+fn _public_is_result_type(type_name: text) -> bool:
+    val normalized = type_name.trim()
+    normalized.starts_with("Result<")
+
+fn _public_result_ok_type(type_name: text) -> text:
+    val normalized = type_name.trim()
+    val inner = normalized.replace("Result<", "")
+    val parts = inner.split(",")
+    if parts.len() == 0:
+        return "void*"
+    val ok_type = parts[0].trim()
+    ok_type.replace(">", "")
+
+fn _public_has_result_functions(functions: [PublicExportFunction]) -> bool:
+    var i = 0
+    while i < functions.len():
+        if _public_is_result_type(functions[i].return_type):
+            return true
+        i = i + 1
+    false
 
 fn _public_c_type(type_name: text) -> text:
     val normalized = type_name.trim()
