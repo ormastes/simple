@@ -10,6 +10,42 @@ fn has_nonempty_archive_payload(path: &Path) -> bool {
     path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
 }
 
+fn archive_from_dir(dir: &Path, stem: &str) -> Option<PathBuf> {
+    let deps_lib = dir.join("deps").join(format!("{stem}.a"));
+    if has_nonempty_archive_payload(&deps_lib) {
+        return Some(deps_lib);
+    }
+    let lib = dir.join(format!("{stem}.a"));
+    if has_nonempty_archive_payload(&lib) {
+        return Some(lib);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let win_lib = match stem {
+            "libsimple_runtime" => "simple_runtime.lib",
+            "libsimple_native_all" => "simple_native_all.lib",
+            _ => "",
+        };
+        if !win_lib.is_empty() {
+            let path = dir.join(win_lib);
+            if has_nonempty_archive_payload(&path) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn archive_from_path_or_dir(path: &Path, stem: &str) -> Option<PathBuf> {
+    if path.is_dir() {
+        return archive_from_dir(path, stem);
+    }
+    if has_nonempty_archive_payload(path) {
+        return Some(path.to_path_buf());
+    }
+    None
+}
+
 /// Find a C compiler -- delegates to `simple_common::platform::cc_detect`.
 pub(crate) fn find_c_compiler() -> String {
     simple_common::platform::cc_detect::find_c_compiler()
@@ -105,6 +141,56 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
     }
 }
 
+/// Find the pure-Simple core runtime library.
+pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
+    if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
+        for lane_dir in ["simple-core", "simple_core"] {
+            if let Some(path) = archive_from_dir(&dir.join(lane_dir), "libsimple_runtime") {
+                return Some(path);
+            }
+        }
+    }
+
+    for env_var in ["SIMPLE_SIMPLE_CORE_PATH", "SIMPLE_CORE_RUNTIME_PATH"] {
+        if let Ok(path) = std::env::var(env_var) {
+            let p = PathBuf::from(path);
+            if let Some(found) = archive_from_path_or_dir(&p, "libsimple_runtime") {
+                return Some(found);
+            }
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for lane_dir in ["simple-core", "simple_core"] {
+                if let Some(path) = archive_from_dir(&dir.join(lane_dir), "libsimple_runtime") {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    let candidates = [
+        "build/simple-core/deps/libsimple_runtime.a",
+        "build/simple-core/libsimple_runtime.a",
+        "build/simple_core/deps/libsimple_runtime.a",
+        "build/simple_core/libsimple_runtime.a",
+        "src/compiler_rust/target/simple-core/deps/libsimple_runtime.a",
+        "src/compiler_rust/target/simple-core/libsimple_runtime.a",
+        "src/compiler_rust/target/simple_core/deps/libsimple_runtime.a",
+        "src/compiler_rust/target/simple_core/libsimple_runtime.a",
+    ];
+
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if has_nonempty_archive_payload(&path) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
 /// Find the combined native_all library (runtime + compiler with Cranelift FFI).
 pub(crate) fn find_native_all_library() -> Option<PathBuf> {
     if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
@@ -178,54 +264,37 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
 /// Find the Simple runtime library.
 pub(crate) fn find_runtime_library() -> Option<PathBuf> {
     if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
-        let deps_lib = dir.join("deps").join("libsimple_runtime.a");
-        if has_nonempty_archive_payload(&deps_lib) {
-            return Some(deps_lib);
-        }
-        let lib = dir.join("libsimple_runtime.a");
-        if has_nonempty_archive_payload(&lib) {
-            return Some(lib);
-        }
-        #[cfg(target_os = "windows")]
-        for name in &["simple_runtime.lib"] {
-            let lib = dir.join(name);
-            if has_nonempty_archive_payload(&lib) {
-                return Some(lib);
+        for lane_dir in ["core-c-bootstrap", "core_c_bootstrap"] {
+            if let Some(path) = archive_from_dir(&dir.join(lane_dir), "libsimple_runtime") {
+                return Some(path);
             }
+        }
+        if let Some(path) = archive_from_dir(dir, "libsimple_runtime") {
+            return Some(path);
         }
     }
 
     if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
         let p = PathBuf::from(&path);
-        let deps_lib = p.join("deps").join("libsimple_runtime.a");
-        if has_nonempty_archive_payload(&deps_lib) {
-            return Some(deps_lib);
+        for lane_dir in ["core-c-bootstrap", "core_c_bootstrap"] {
+            if let Some(found) = archive_from_dir(&p.join(lane_dir), "libsimple_runtime") {
+                return Some(found);
+            }
         }
-        let lib = p.join("libsimple_runtime.a");
-        if has_nonempty_archive_payload(&lib) {
-            return Some(lib);
-        }
-        if has_nonempty_archive_payload(&p) {
-            return Some(p);
+        if let Some(found) = archive_from_path_or_dir(&p, "libsimple_runtime") {
+            return Some(found);
         }
     }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let deps_path = dir.join("deps").join("libsimple_runtime.a");
-            if has_nonempty_archive_payload(&deps_path) {
-                return Some(deps_path);
-            }
-            let path = dir.join("libsimple_runtime.a");
-            if has_nonempty_archive_payload(&path) {
-                return Some(path);
-            }
-            #[cfg(target_os = "windows")]
-            {
-                let path = dir.join("simple_runtime.lib");
-                if has_nonempty_archive_payload(&path) {
+            for lane_dir in ["core-c-bootstrap", "core_c_bootstrap"] {
+                if let Some(path) = archive_from_dir(&dir.join(lane_dir), "libsimple_runtime") {
                     return Some(path);
                 }
+            }
+            if let Some(path) = archive_from_dir(dir, "libsimple_runtime") {
+                return Some(path);
             }
         }
     }

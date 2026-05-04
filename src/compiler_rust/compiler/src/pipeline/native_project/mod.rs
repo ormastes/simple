@@ -172,9 +172,9 @@ pub struct NativeBuildConfig {
     pub backend: String,
     /// Explicit runtime library directory (overrides env var and auto-discovery).
     pub runtime_path: Option<PathBuf>,
-    /// Runtime bundle selection: "auto", the default "core-c" lane
-    /// ("runtime"/"core"/"core_c" aliases), or the explicit hosted lane
-    /// ("hosted"/"rust-hosted"/"all" aliases).
+    /// Runtime bundle selection: "auto", "simple-core", the bootstrap
+    /// fallback "core-c-bootstrap" (legacy aliases: "runtime"/"core"/"core_c"),
+    /// or the explicit hosted lane ("hosted"/"rust-hosted"/"all" aliases).
     pub runtime_bundle: String,
     /// Discover files from the explicit entrypoint's reachable import closure.
     pub entry_closure: bool,

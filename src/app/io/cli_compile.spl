@@ -832,6 +832,7 @@ fn cli_native_build(args: [text]) -> i64:
             cli_print_shared_opt_level_help()
             print "  --list-optimizations Print implemented optimization groups and levels"
             print "  --strip              Strip symbols from output"
+            print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap, rust-hosted"
             print "  --entry-closure      Compile only modules reachable from --entry"
             print "  --log <on|off>       Compile normal SimpleOS logging in or out"
             print "  --verbose, -v        Verbose output"
@@ -1037,13 +1038,48 @@ fn cli_native_build(args: [text]) -> i64:
     else:
         val driver = _cli_driver_binary()
         if driver != "":
-            var driver_args: [text] = []
-            for arg in args:
-                driver_args.push(arg)
+            val driver_args = cli_normalize_runtime_bundle_aliases(args)
             val result = _cli_process_run(driver, driver_args)
             if result.0 != "":
                 print_raw(result.0)
             if result.1 != "":
                 _cli_eprint(result.1.trim())
             return result.2
-        return rt_native_build(args)
+        return rt_native_build(cli_normalize_runtime_bundle_aliases(args))
+
+fn cli_normalize_runtime_bundle_aliases(args: [text]) -> [text]:
+    """Map semantic lane names onto legacy driver values when delegating.
+
+    The Rust driver is the authoritative implementation for runtime lanes, but
+    bootstrap and cached delegated binaries can lag behind the source tree.
+    Normalize the new semantic names here so `bin/simple native-build` accepts
+    them immediately without requiring a freshly rebuilt delegated driver.
+    """
+    var normalized: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--runtime-bundle" and i + 1 < args.len():
+            normalized.push(arg)
+            val value = args[i + 1]
+            if value == "simple-core" or value == "simple_core" or value == "core-c-bootstrap" or value == "core_c_bootstrap":
+                normalized.push("runtime")
+            elif value == "rust-hosted":
+                normalized.push("hosted")
+            else:
+                normalized.push(value)
+            i = i + 2
+            continue
+        elif arg.starts_with("--runtime-bundle="):
+            val value = arg.substring(17)
+            if value == "simple-core" or value == "simple_core" or value == "core-c-bootstrap" or value == "core_c_bootstrap":
+                normalized.push("--runtime-bundle=runtime")
+            elif value == "rust-hosted":
+                normalized.push("--runtime-bundle=hosted")
+            else:
+                normalized.push(arg)
+            i = i + 1
+            continue
+        normalized.push(arg)
+        i = i + 1
+    return normalized

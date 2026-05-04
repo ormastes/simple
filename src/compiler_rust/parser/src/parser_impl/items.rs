@@ -228,6 +228,15 @@ impl<'a> Parser<'a> {
                 let start_span = self.current.span;
                 self.advance(); // consume 'use'
                 let (path, target) = self.parse_use_path_and_target()?;
+                let (path, target) = if path.segments.len() == 1 && matches!(target, ImportTarget::Glob) {
+                    // `pub use Foo` is a local re-export of an already-imported symbol,
+                    // not "re-export everything from module Foo". Normalize it to the
+                    // same empty-path bare export shape as `export Foo`.
+                    let symbol = path.segments[0].clone();
+                    (ModulePath::new(Vec::new()), ImportTarget::Single(symbol))
+                } else {
+                    (path, target)
+                };
                 Ok(Node::ExportUseStmt(ExportUseStmt {
                     span: Span::new(
                         start_span.start,

@@ -371,11 +371,13 @@ pub(crate) fn bind_args_with_values(
     };
 
     let mut bound = HashMap::new();
-    eprintln!(
-        "[DEBUG bind_args_with_values] called with {} args, {} params",
-        args.len(),
-        params_to_bind.len()
-    );
+    if crate::is_debug_mode() {
+        eprintln!(
+            "[DEBUG bind_args_with_values] called with {} args, {} params",
+            args.len(),
+            params_to_bind.len()
+        );
+    }
     for (idx, param) in params_to_bind.iter().enumerate() {
         let value = if idx < args.len() {
             // Automatically await Promise arguments
@@ -395,15 +397,19 @@ pub(crate) fn bind_args_with_values(
             ));
         };
 
-        eprintln!(
-            "[DEBUG bind_args_with_values] param '{}' value before coerce: {:?}",
-            param.name, value
-        );
+        if crate::is_debug_mode() {
+            eprintln!(
+                "[DEBUG bind_args_with_values] param '{}' value before coerce: {:?}",
+                param.name, value
+            );
+        }
         let value = coerce_unsigned(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
-        eprintln!(
-            "[DEBUG bind_args_with_values] param '{}' value after coerce: {:?}",
-            param.name, value
-        );
+        if crate::is_debug_mode() {
+            eprintln!(
+                "[DEBUG bind_args_with_values] param '{}' value after coerce: {:?}",
+                param.name, value
+            );
+        }
         validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
         bound.insert(param.name.clone(), value);
     }

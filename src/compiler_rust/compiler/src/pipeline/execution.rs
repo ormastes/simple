@@ -123,7 +123,19 @@ fn runtime_bundle_env_requests_core_c() -> bool {
     std::env::var("SIMPLE_NATIVE_RUNTIME_BUNDLE")
         .ok()
         .as_deref()
-        .is_some_and(|value| matches!(value, "runtime" | "core" | "core-c" | "core_c"))
+        .is_some_and(|value| {
+            matches!(
+                value,
+                "simple-core"
+                    | "simple_core"
+                    | "core-c-bootstrap"
+                    | "core_c_bootstrap"
+                    | "runtime"
+                    | "core"
+                    | "core-c"
+                    | "core_c"
+            )
+        })
 }
 
 fn single_file_prefers_runtime_only(source_path: Option<&Path>, options: &crate::linker::NativeBinaryOptions) -> bool {

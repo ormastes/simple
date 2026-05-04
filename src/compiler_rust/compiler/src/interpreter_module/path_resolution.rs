@@ -1038,6 +1038,16 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
                     }
                 }
 
+                // Strategy: "compiler_shared.*" → src/compiler_shared/ with numbered prefix support
+                if parts.len() > 1 && parts[0] == "compiler_shared" {
+                    let compiler_shared_dir = src_candidate.join("compiler_shared");
+                    if compiler_shared_dir.is_dir() {
+                        if let Some(found) = resolve_with_numbered_dirs(&compiler_shared_dir, &parts[1..]) {
+                            return Ok(found);
+                        }
+                    }
+                }
+
                 if parts.len() > 1 && parts[0] == "core" {
                     let compiler_dir = src_candidate.join("compiler");
                     if compiler_dir.is_dir() {

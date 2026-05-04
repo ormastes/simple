@@ -125,7 +125,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
                 println!("  --list-optimizations Print implemented optimization groups and levels");
                 println!(
-                    "  --runtime-bundle <mode> Runtime lane to link: auto (default), core-c/runtime, or hosted/all"
+                    "  --runtime-bundle <mode> Runtime lane to link: auto (default), simple-core, core-c-bootstrap, or rust-hosted"
                 );
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
@@ -238,7 +238,9 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     runtime_bundle = args_vec[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!("error: --runtime-bundle requires a value (auto, core-c/runtime, hosted/all)");
+                    eprintln!(
+                        "error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, rust-hosted)"
+                    );
                     return 1;
                 }
             }

@@ -7,7 +7,7 @@ use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports,
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     find_archive_tool, find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_native_all_library,
-    find_runtime_library, is_system_symbol, strip_llvm_constructors,
+    is_system_symbol, strip_llvm_constructors,
 };
 
 impl NativeProjectBuilder {
@@ -480,7 +480,7 @@ int main(int argc, char** argv) {
 
         let main_o = self.compile_main_stub(temp_dir)?;
         let init_o = self.generate_init_caller(temp_dir, object_paths, None)?;
-        let selected_runtime = self.selected_runtime_library(temp_dir);
+        let selected_runtime = self.selected_runtime_library(temp_dir)?;
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
         let has_native_all = selected_runtime
             .as_ref()
@@ -733,7 +733,7 @@ int main(int argc, char** argv) {
             && selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
-            && self.runtime_bundle_prefers_core_c_lane();
+            && self.runtime_bundle_prefers_core_lane();
         if is_clang_cl {
             for lib in &link_config.libraries {
                 if omit_unwind && *lib == "unwind" {
@@ -823,14 +823,15 @@ int main(int argc, char** argv) {
             if selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
-                && self.runtime_bundle_prefers_core_c_lane()
+                && self.runtime_bundle_prefers_core_lane()
             {
                 Err(format!(
                     "link failed: {}\
-\nnote: the default native app lane is `core-c` and links `libsimple_runtime.a` only. \
-If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bundle hosted` \
-(legacy alias: `--runtime-bundle all`).",
-                    stderr
+\nnote: the selected core lane (`{}`) links `libsimple_runtime.a` only. \
+If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bundle rust-hosted` \
+(legacy aliases: `--runtime-bundle hosted` or `--runtime-bundle all`).",
+                    stderr,
+                    self.resolve_runtime_lane().display_name()
                 ))
             } else {
                 Err(format!("link failed: {}", stderr))

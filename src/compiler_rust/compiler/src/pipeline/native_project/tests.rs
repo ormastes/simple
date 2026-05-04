@@ -467,7 +467,7 @@ fn test_discover_files_from_entry_uses_matching_source_root() {
 }
 
 #[test]
-fn test_runtime_bundle_auto_prefers_core_c_runtime_for_non_compiler_entry() {
+fn test_runtime_bundle_auto_prefers_core_c_bootstrap_for_non_compiler_entry_when_simple_core_is_absent() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
@@ -487,7 +487,7 @@ fn test_runtime_bundle_auto_prefers_core_c_runtime_for_non_compiler_entry() {
         "/project/examples/10_tooling/trace32_tools/t32_mcp/frontend_light.spl",
     ));
 
-    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
     assert_eq!(selected, runtime);
     assert!(!is_native_all);
 }
@@ -510,9 +510,35 @@ fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_entry() {
         .config(config);
     builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
 
-    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
     assert_eq!(selected, native_all);
     assert!(is_native_all);
+}
+
+#[test]
+fn test_runtime_bundle_auto_prefers_simple_core_for_non_compiler_entry_when_available() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let simple_core_dir = temp.path().join("simple-core");
+    std::fs::create_dir_all(&simple_core_dir).unwrap();
+    let simple_core = simple_core_dir.join("libsimple_runtime.a");
+    let runtime = temp.path().join("libsimple_runtime.a");
+    std::fs::write(&simple_core, b"simple-core").unwrap();
+    std::fs::write(&runtime, b"core-c").unwrap();
+
+    let config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let mut builder =
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native"))
+            .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
+
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected, simple_core);
+    assert!(!is_native_all);
 }
 
 #[test]
@@ -556,12 +582,12 @@ fn test_runtime_bundle_auto_rejects_native_all_for_non_compiler_entry() {
         "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
     ));
 
-    let selected_runtime = builder.selected_runtime_library(temp.path());
+    let selected_runtime = builder.selected_runtime_library(temp.path()).unwrap();
     let err = builder
         .reject_unexpected_native_all(selected_runtime.as_ref())
         .unwrap_err();
-    assert!(err.contains("default core-c entry"));
-    assert!(err.contains("--runtime-bundle hosted"));
+    assert!(err.contains("core-c-bootstrap"));
+    assert!(err.contains("--runtime-bundle rust-hosted"));
     assert!(err.contains("tool_runner.spl"));
 }
 
@@ -587,12 +613,12 @@ fn test_runtime_bundle_hosted_allows_native_all_for_non_compiler_entry() {
         "/project/examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl",
     ));
 
-    let selected_runtime = builder.selected_runtime_library(temp.path());
+    let selected_runtime = builder.selected_runtime_library(temp.path()).unwrap();
     builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
 }
 
 #[test]
-fn test_runtime_bundle_core_c_alias_prefers_runtime_for_non_compiler_entry() {
+fn test_runtime_bundle_core_c_bootstrap_alias_prefers_runtime_for_non_compiler_entry() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let runtime = temp.path().join("libsimple_runtime.a");
@@ -604,16 +630,66 @@ fn test_runtime_bundle_core_c_alias_prefers_runtime_for_non_compiler_entry() {
         runtime_path: Some(temp.path().to_path_buf()),
         ..Default::default()
     };
-    config.runtime_bundle = "core-c".to_string();
+    config.runtime_bundle = "core-c-bootstrap".to_string();
 
     let mut builder =
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/t32_mcp_native"))
             .config(config);
     builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
-    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap();
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
     assert_eq!(selected, runtime);
     assert!(!is_native_all);
+}
+
+#[test]
+fn test_runtime_bundle_simple_core_prefers_simple_core_archive_when_available() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let simple_core_dir = temp.path().join("simple-core");
+    std::fs::create_dir_all(&simple_core_dir).unwrap();
+    let simple_core = simple_core_dir.join("libsimple_runtime.a");
+    let core_c = temp.path().join("libsimple_runtime.a");
+    std::fs::write(&simple_core, b"simple-core").unwrap();
+    std::fs::write(&core_c, b"core-c").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "simple-core".to_string();
+
+    let mut builder =
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native"))
+            .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
+
+    let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected, simple_core);
+    assert!(!is_native_all);
+}
+
+#[test]
+fn test_runtime_bundle_simple_core_errors_when_archive_is_missing() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("libsimple_runtime.a");
+    std::fs::write(&runtime, b"core-c").unwrap();
+
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "simple-core".to_string();
+
+    let mut builder =
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native"))
+            .config(config);
+    builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
+
+    let err = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(err.contains("no simple-core runtime archive"));
+    assert!(err.contains("core-c-bootstrap"));
 }
 
 #[test]
@@ -636,7 +712,7 @@ fn test_runtime_bundle_legacy_all_alias_allows_native_all_for_non_compiler_entry
     .config(config);
     builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
-    let selected_runtime = builder.selected_runtime_library(temp.path());
+    let selected_runtime = builder.selected_runtime_library(temp.path()).unwrap();
     builder.reject_unexpected_native_all(selected_runtime.as_ref()).unwrap();
 }
 
