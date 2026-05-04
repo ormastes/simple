@@ -12,8 +12,8 @@
 # - Verification statements (assert, assume, admit)
 # - Special statements (defer, guard, pass, skip)
 
-use inference.types.{Type, TypeVarId, UnifyError, InferError}
-use inference.infer.{InferenceEngine}
+use compiler.hir.inference.types.*
+use compiler.hir.inference.infer.{InferenceEngine}
 from ast import {Node}
 from ast import {ContinueStmt, PassStmt}
 from ast import {ProofHintStmt}
@@ -325,7 +325,7 @@ fn bind_pattern(pattern: Pattern, ty: Type, env: Dict<text, Type>) -> Dict<text,
         case Tuple(patterns):
             # Decompose tuple type into element types
             match ty:
-                case Type.Tuple(elements):
+                case Tuple(elements):
                     var i = 0
                     while i < patterns.len() and i < elements.len():
                         new_env = bind_pattern(patterns[i], elements[i], new_env)
@@ -338,7 +338,7 @@ fn bind_pattern(pattern: Pattern, ty: Type, env: Dict<text, Type>) -> Dict<text,
         case Array(patterns):
             # Extract array element type from the array type
             match ty:
-                case Type.Array(elem, _):
+                case Array(elem, _):
                     for pat in patterns:
                         new_env = bind_pattern(pat, elem, new_env)
                 case _:
@@ -349,7 +349,7 @@ fn bind_pattern(pattern: Pattern, ty: Type, env: Dict<text, Type>) -> Dict<text,
         case StructPattern(name, fields):
             # Extract field types from struct type
             match ty:
-                case Type.Struct(_, struct_fields, _):
+                case Struct(_, struct_fields, _):
                     for (field_name, field_pat) in fields:
                         # Find the matching struct field by name
                         var field_ty = ty
@@ -486,7 +486,7 @@ fn check_return(engine: InferenceEngine, stmt: ReturnStmt,
     else:
         # Return with no value - must be unit type
         if current_fn_ret_type.?:
-            engine.unify(Type.Unit, current_fn_ret_type.unwrap())?
+            engine.unify(Unit, current_fn_ret_type.unwrap())?
 
     Ok(env)
 
@@ -500,7 +500,7 @@ fn check_if_stmt(engine: InferenceEngine, stmt: IfStmt,
 
     # Check condition is bool
     val cond_ty = infer_expr(engine, stmt.condition, env)?
-    engine.unify(cond_ty, Type.Bool)?
+    engine.unify(cond_ty, Bool)?
 
     # Check then block
     val _ = check_block(engine, stmt.then_block, env, current_fn_ret_type)?
@@ -508,7 +508,7 @@ fn check_if_stmt(engine: InferenceEngine, stmt: IfStmt,
     # Check elif branches
     for (elif_cond, elif_block) in stmt.elif_branches:
         val elif_cond_ty = infer_expr(engine, elif_cond, env)?
-        engine.unify(elif_cond_ty, Type.Bool)?
+        engine.unify(elif_cond_ty, Bool)?
         val _ = check_block(engine, elif_block, env, current_fn_ret_type)?
 
     # Check else block
@@ -532,7 +532,7 @@ fn check_match_stmt(engine: InferenceEngine, stmt: MatchStmt,
         # Check guard condition (if present)
         if arm.guard.?:
             val guard_ty = infer_expr(engine, arm.guard.unwrap(), env)?
-            engine.unify(guard_ty, Type.Bool)?
+            engine.unify(guard_ty, Bool)?
 
         # Check arm body
         val _ = check_block(engine, arm.body, env, current_fn_ret_type)?
@@ -563,7 +563,7 @@ fn check_while(engine: InferenceEngine, stmt: WhileStmt,
 
     # Check condition is bool
     val cond_ty = infer_expr(engine, stmt.condition, env)?
-    engine.unify(cond_ty, Type.Bool)?
+    engine.unify(cond_ty, Bool)?
 
     # Check loop body
     val _ = check_block(engine, stmt.body, env, current_fn_ret_type)?
@@ -629,7 +629,7 @@ fn check_guard(engine: InferenceEngine, stmt: GuardStmt,
     # Check guard condition (if present)
     if stmt.condition.?:
         val cond_ty = infer_expr(engine, stmt.condition.unwrap(), env)?
-        engine.unify(cond_ty, Type.Bool)?
+        engine.unify(cond_ty, Bool)?
 
     # Check result expression
     val result_ty = infer_expr(engine, stmt.result, env)?
@@ -650,7 +650,7 @@ fn check_assert(engine: InferenceEngine, stmt: AssertStmt,
 
     # Assert condition must be bool
     val cond_ty = infer_expr(engine, stmt.condition, env)?
-    engine.unify(cond_ty, Type.Bool)?
+    engine.unify(cond_ty, Bool)?
 
     Ok(env)
 
@@ -660,7 +660,7 @@ fn check_assume(engine: InferenceEngine, stmt: AssumeStmt,
 
     # Assume condition must be bool
     val cond_ty = infer_expr(engine, stmt.condition, env)?
-    engine.unify(cond_ty, Type.Bool)?
+    engine.unify(cond_ty, Bool)?
 
     Ok(env)
 
@@ -670,7 +670,7 @@ fn check_admit(engine: InferenceEngine, stmt: AdmitStmt,
 
     # Admit condition must be bool
     val cond_ty = infer_expr(engine, stmt.condition, env)?
-    engine.unify(cond_ty, Type.Bool)?
+    engine.unify(cond_ty, Bool)?
 
     Ok(env)
 
@@ -730,7 +730,7 @@ fn check_block(engine: InferenceEngine, block: Block, env: Dict<text, Type>,
     Returns the type of the last expression (or Unit if block is empty).
     """
     var current_env = env
-    var last_ty = Type.Unit
+    var last_ty = Unit
 
     for stmt in block.statements:
         # Check statement and update environment
@@ -742,7 +742,7 @@ fn check_block(engine: InferenceEngine, block: Block, env: Dict<text, Type>,
             case ExprStmt(expr):
                 last_ty = infer_expr(engine, expr, current_env)?
             case _:
-                last_ty = Type.Unit
+                last_ty = Unit
 
     Ok(last_ty)
 
@@ -768,15 +768,15 @@ fn extract_element_type(engine: InferenceEngine, iterable_ty: Type) -> Result<Ty
     - Type variable: Create fresh variable and unify
     """
     match iterable_ty:
-        case Type.Array(elem, _):
+        case Array(elem, _):
             # Array<T> → T
             Ok(elem)
 
-        case Type.Optional(inner):
+        case Optional(inner):
             # Optional<T> → T (iterates 0 or 1 times)
             Ok(inner)
 
-        case Type.Tuple(elements):
+        case Tuple(elements):
             # Tuple<T1, T2, ...> → T1 | T2 | ... (union)
             if elements.len() == 0:
                 # Empty tuple - create fresh var
@@ -786,19 +786,19 @@ fn extract_element_type(engine: InferenceEngine, iterable_ty: Type) -> Result<Ty
                 Ok(elements[0])
             else:
                 # Multiple elements - return union type
-                Ok(Type.Union(elements))
+                Ok(Union(elements))
 
-        case Type.Var(_):
+        case Var(_):
             # Type variable - create fresh variable for element
             # and unify iterable with Array<elem>
             val elem_var = engine.fresh_var()
-            val array_ty = Type.Array(elem_var, nil)
+            val array_ty = Array(elem_var, nil)
             engine.unify(iterable_ty, array_ty)?
             Ok(elem_var)
 
-        case Type.Dict(_, value):
+        case Dict(_, value):
             # Dict<K, V> → (K, V) when iterating
-            Ok(Type.Tuple([iterable_ty, value]))
+            Ok(Tuple([iterable_ty, value]))
 
         case _:
             # Not an iterable type

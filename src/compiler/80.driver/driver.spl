@@ -60,6 +60,7 @@ extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_time_monotonic_ns() -> i64
+extern fn rt_env_get(key: text) -> text
 extern fn compiler__driver__driver__CompilerDriver_dot_compile(driver: CompilerDriver) -> CompileResult
 
 # Lightweight logging helpers (module-level free functions for simplicity)
@@ -80,13 +81,7 @@ fn log_error(msg: text):
 var _last_phase_ns: i64 = 0
 
 fn log_phase(msg: text):
-    val now = rt_time_monotonic_ns()
-    if _last_phase_ns > 0:
-        val elapsed_ms = (now - _last_phase_ns) / 1000000
-        eprint("[BOOTSTRAP-PHASE] {msg} (prev phase: {elapsed_ms}ms)")
-    else:
-        eprint("[BOOTSTRAP-PHASE] {msg}")
-    _last_phase_ns = now
+    eprint("[BOOTSTRAP-PHASE] {msg}")
 
 class CheckBackendImpl(Backend):
     fn name() -> text:
@@ -312,9 +307,9 @@ pub class CompilerDriver:
 
         # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
         log_phase("phase3:hir_typecheck:start")
-        log_trace("BEFORE phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
+        log_trace("BEFORE phase 3")
         val analyze_ok = self.lower_and_check_impl()
-        log_trace("AFTER phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
+        log_trace("AFTER phase 3")
         if not analyze_ok:
             log_error("phase 3 FAILED")
             # Determine error type from first error
@@ -435,17 +430,17 @@ pub class CompilerDriver:
     me parse_all_impl() -> bool:
         val log = self.ctx.logger
         val sources = self.ctx.sources
-        log_debug("parsing {sources.len()} sources")
+        log_debug("parsing sources")
         var src_idx = 0
         while src_idx < sources.len():
             val source = sources[src_idx]
-            log_trace("parsing: {source.path} (module={source.module_name}, len={source.content.len()})")
+            log_trace("parsing source")
             val module = self.parse_source(source)
             self.ctx.modules[source.module_name] = module
-            log_trace("stored module, total={self.ctx.modules.keys().len()}")
+            log_trace("stored module")
             src_idx = src_idx + 1
 
-        log_debug("parsing done, modules={self.ctx.modules.keys().len()}")
+        log_debug("parsing done")
         self.ctx.errors.len() == 0
 
     fn parse_source(source: SourceFile) -> Module:
@@ -469,12 +464,12 @@ pub class CompilerDriver:
             source_path_map[src.module_name] = src.path
 
         val module_names = self.ctx.modules.keys()
-        log_debug("lowering {module_names.len()} modules to HIR")
+        log_debug("lowering modules to HIR")
         for name in module_names:
-            log_trace("processing module: {name}")
+            log_trace("processing module")
             val module = self.ctx.modules[name]
             if module == nil:
-                log_error("module is nil for key {name}")
+                log_error("module is nil")
                 continue
 
             # Set per-module filename so Symbol.defining_module is populated
@@ -486,11 +481,11 @@ pub class CompilerDriver:
 
             # Step 1: Lower to HIR
             val hir_module = lowering.lower_module(module)
-            log_trace("HIR lowered for {name}")
+            log_trace("HIR lowered")
 
             # Step 2: Method resolution (UFCS)
             val (resolved_module, resolve_errors) = resolve_methods(hir_module)
-            log_trace("methods resolved, errors={resolve_errors.len()}")
+            log_trace("methods resolved")
 
             # Collect method resolution errors
             var err_idx = 0
@@ -501,9 +496,9 @@ pub class CompilerDriver:
 
             # Step 2b: Visibility checking (cross-module access validation)
             val vis_warnings = check_module_visibility(resolved_module, name)
-            log_trace("visibility checked, warnings={vis_warnings.len()}")
+            log_trace("visibility checked")
             for vis_warn in vis_warnings:
-                log_debug("visibility warning in {name}: {vis_warn}")
+                log_debug("visibility warning")
 
             # Step 2c: Evaluate static assertions
             for static_assert in resolved_module.static_asserts:
@@ -533,7 +528,7 @@ pub class CompilerDriver:
                 val func = resolved_module.functions[func_sym]
                 if func.is_const:
                     val func_name = func.name
-                    log_trace("comptime-checking const fn '{func_name}'")
+                    log_trace("comptime-checking const fn")
                     # Check for extern calls in const fn body
                     if func.is_extern:
                         comptime_check_extern_call(func_name, func_name)
@@ -556,8 +551,8 @@ pub class CompilerDriver:
                                 pass
             val ct_warnings = comptime_checker_get_warnings()
             for ct_warn in ct_warnings:
-                log_debug("comptime warning in {name}: {ct_warn}")
-            log_trace("comptime checking done, {ct_warnings.len()} warnings")
+                log_debug("comptime warning")
+            log_trace("comptime checking done")
 
             # Step 2f: Const-folding pass — evaluate const fn calls with constant args
             val folded_module = run_const_fold_pass(resolved_module)
@@ -578,7 +573,7 @@ pub class CompilerDriver:
 
             # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.hir_modules[name] = folded_module
-            log_trace("stored HIR module '{name}', total={self.ctx.hir_modules.keys().len()}")
+            log_trace("stored HIR module")
 
         # Step 3b: Trait coherence checking (Check mode only)
         # Trait coherence errors (orphan rules, overlapping impls, blanket conflicts)
@@ -591,9 +586,9 @@ pub class CompilerDriver:
         log_debug("running effect inference pass...")
         val (updated_hir, effect_warnings) = run_effect_pass(self.ctx.hir_modules)
         self.ctx.hir_modules = updated_hir
-        log_debug("effect inference done, {effect_warnings.len()} warnings")
+        log_debug("effect inference done")
 
-        log_debug("HIR lowering complete: {self.ctx.hir_modules.keys().len()} modules")
+        log_debug("HIR lowering complete")
         self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
@@ -660,12 +655,12 @@ pub class CompilerDriver:
         classes by substituting concrete type arguments. Call sites are
         rewritten to use the mangled names of specialized definitions.
         """
-        log_debug("running monomorphization on {self.ctx.hir_modules.keys().len()} modules")
+        log_debug("running monomorphization")
         val (mono_modules, mono_stats) = run_monomorphization(self.ctx.hir_modules)
         # BUG-001 diagnostic: verify module count survives monomorphization
-        log_debug("monomorphization output: {mono_modules.keys().len()} modules (input was {self.ctx.hir_modules.keys().len()})")
+        log_debug("monomorphization output ready")
         self.ctx.hir_modules = mono_modules
-        log_debug("monomorphization: {mono_stats.specializations_created} specializations, hir_modules={self.ctx.hir_modules.keys().len()}")
+        log_debug("monomorphization done")
         self.ctx.errors.len() == 0
 
     # --------------------------------------------------------------------------
@@ -842,8 +837,12 @@ pub class CompilerDriver:
 
         # Optimize MIR (use optimization level from options)
         log_phase("aot:optimize_mir:start")
-        val opt_config = self.get_optimization_config()
-        self.optimize_mir(opt_config)
+        val skip_mir_opt = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_OPT") ?? ""
+        if skip_mir_opt == "1":
+            eprint("[BOOTSTRAP-PHASE] aot:optimize_mir:skipped")
+        else:
+            val opt_config = self.get_optimization_config()
+            self.optimize_mir(opt_config)
         log_phase("aot:optimize_mir:done")
 
         # AOP weaving (after optimization, before codegen)

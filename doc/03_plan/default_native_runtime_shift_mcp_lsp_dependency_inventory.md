@@ -73,5 +73,9 @@ These are needed after startup for normal tool calls. They can be ported after s
   - `initialize` returns protocol/capabilities/serverInfo.
   - `tools/list` returns an empty tools array in this reduced-source probe because `src/compiler` is intentionally omitted to avoid the known compiler HIR blocker.
 - Simple LSP MCP output framing is now deterministic `Content-Length`; a startup-only core-C probe returns a framed initialize response (`Content-Length: 379`) for a framed initialize request.
-- The two-message framed pipe still only returns the first response, so lifecycle/tool-list smoke parity remains open.
-- Full tool parity still requires fixing the full `src/compiler` entry-closure build and then rerunning the smoke tests against the real package closure.
+- Regression coverage: `test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source` builds the reduced-source Simple LSP MCP startup binary through the current Rust native-project builder and asserts the framed initialize response.
+- Full Simple LSP MCP with `--source src/compiler --source src/app --source src/lib` now links on `core-c`; the build still generates internal Simple stubs, so it is not yet a package-closure PASS.
+- Full MCP with `--source src/compiler --source src/app --source src/lib` now links on `core-c`; it also generates internal Simple stubs, so it is not yet a package-closure PASS.
+- Full Simple LSP MCP now passes a two-message framed initialize + tools/list smoke on `core-c`: two `Content-Length` responses, id `2` present, and real LSP tool names including `lsp_definition` and `lsp_type_definition`.
+- Full MCP JSON-lines initialize + tools/list smoke is non-crashing on `core-c`, but `tools/list` still returns `{"tools":[]}` because the large tool table accumulation path is not core-lane safe yet.
+- Full package parity still requires removing generated unresolved-symbol stubs and making the MCP tool table produce real tool schemas on the core lane.

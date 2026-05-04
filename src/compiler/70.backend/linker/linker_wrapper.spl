@@ -475,16 +475,13 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("SimpleOS target: cc subprocess fallback unsupported (check sysroot + CRT files)")
     # Fallback: use cc (gcc/clang) for linking
     debug("linker", "link_native_cc: fallback linking with cc")
-    val sb = StringBuilder(parts: [])
-    sb.push("cc")
+    var cmd = "cc"
     for obj in object_files:
-        sb.push(" ")
-        sb.push(obj)
+        cmd = cmd + " " + obj
 
     # Library paths
     for lp in config.library_paths:
-        sb.push(" -L")
-        sb.push(lp)
+        cmd = cmd + " -L" + lp
 
     # Auto-detect runtime library
     # "none" means skip runtime library entirely (e.g., LLVM pipeline provides runtime objects directly)
@@ -492,45 +489,40 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     if runtime_dir == "":
         runtime_dir = find_runtime_lib_dir()
     if runtime_dir != "" and runtime_dir != "none":
-        sb.push(" -L{runtime_dir} -lsimple_compiler")
-        sb.push(" -Wl,-rpath,{runtime_dir}")
+        cmd = cmd + " -L{runtime_dir} -lsimple_compiler"
+        cmd = cmd + " -Wl,-rpath,{runtime_dir}"
 
     # Standard libraries (OS-aware; no -lgcc_s — clang provides compiler-rt)
     val uname = shell("uname -s")
     var os_name = uname.stdout
     os_name = os_name.trim()
     if os_name == "Darwin":
-        sb.push(" -lc -lpthread -lm -lSystem -lSDL2")
+        cmd = cmd + " -lc -lpthread -lm -lSystem -lSDL2"
     elif os_name == "FreeBSD":
-        sb.push(" -lc -lpthread -lm -lSDL2")
+        cmd = cmd + " -lc -lpthread -lm -lSDL2"
     else:
-        sb.push(" -lc -lpthread -ldl -lm -lSDL2")
+        cmd = cmd + " -lc -lpthread -ldl -lm -lSDL2"
 
     for flag in unresolved_symbol_flags_for_cc(os_name):
-        sb.push(" ")
-        sb.push(flag)
+        cmd = cmd + " " + flag
 
     # Libraries from config
     for lib in config.libraries:
-        sb.push(" -l")
-        sb.push(lib)
+        cmd = cmd + " -l" + lib
 
     # Dead code elimination + deduplication (per-platform, via cc -Wl,)
     if os_name == "Darwin":
-        sb.push(" -Wl,-dead_strip")
+        cmd = cmd + " -Wl,-dead_strip"
     else:
-        sb.push(" -Wl,--gc-sections")
+        cmd = cmd + " -Wl,--gc-sections"
         # ICF (identical code folding) — safe mode works with ld.bfd/lld/mold via cc driver
-        sb.push(" -Wl,--icf=safe")
+        cmd = cmd + " -Wl,--icf=safe"
 
     # Extra flags
     for flag in config.extra_flags:
-        sb.push(" ")
-        sb.push(flag)
+        cmd = cmd + " " + flag
 
-    sb.push(" -o ")
-    sb.push(output)
-    val cmd = sb.to_text()
+    cmd = cmd + " -o " + output
 
     if config.verbose:
         print "[linker-wrapper] cc command: {cmd}"

@@ -12,7 +12,7 @@ use common.ui.widget.{WidgetNode, UITree, UIState}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
     be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_is_text,
     be_dom_get_children, be_dom_get_style, be_dom_get_text,
-    be_dom_set_style, be_dom_add_child, be_dom_get_bg_color}
+    be_dom_set_style, be_dom_add_child, be_dom_set_children, be_dom_get_bg_color}
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, CssValue, BoxEdges, StyleProps, BorderProps, CssPx}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
     layout_get_height, layout_get_width, layout_get_content_width, layout_get_content_height,
@@ -239,13 +239,53 @@ class BrowserRenderer:
         """
         val dom = browser_renderer_html_string_to_dom(html)
         process_style_blocks(dom, html)
-        return self.render_dom(dom)
+        val result = self.render_dom(dom)
+        if result.scene_commands.len() == 0 and html.len() > 0:
+            return self.render_html_fallback_scene(html)
+        return result
 
     me render_html_to_pixels(html: text) -> BeRenderResult:
         """Render an HTML string directly to pixels."""
         val dom = browser_renderer_html_string_to_dom(html)
         process_style_blocks(dom, html)
-        return self.render_dom_to_pixels(dom)
+        val result = self.render_dom_to_pixels(dom)
+        if result.scene_commands.len() == 0 and html.len() > 0:
+            val fallback = self.render_html_fallback_scene(html)
+            val pixel_count = self.viewport_w * self.viewport_h
+            val pixels = rt_u32_alloc_filled(pixel_count, br_first_background_argb(html))
+            return BeRenderResult(
+                format: "pixels",
+                pixel_data: pixels,
+                commands: fallback.commands,
+                width: self.viewport_w,
+                height: self.viewport_h,
+                node_count: fallback.node_count,
+                warnings: ["html_parser_empty_scene_fallback"],
+                scene_commands: fallback.scene_commands,
+                scene_width: fallback.scene_width,
+                scene_height: fallback.scene_height
+            )
+        return result
+
+    me render_html_fallback_scene(html: text) -> BeRenderResult:
+        val color = br_first_background_argb(html)
+        val scene = render_scene(
+            [scene_fill_rect(0, 0, self.viewport_w, self.viewport_h, color)],
+            self.viewport_w,
+            self.viewport_h
+        )
+        BeRenderResult(
+            format: "scene",
+            pixel_data: [],
+            commands: [],
+            width: self.viewport_w,
+            height: self.viewport_h,
+            node_count: 1,
+            warnings: ["html_parser_empty_scene_fallback"],
+            scene_commands: scene.commands,
+            scene_width: scene.width,
+            scene_height: scene.height
+        )
 
     me render_widget_tree(tree: UITree, state: UIState) -> BeRenderResult:
         """Render a UI widget tree to a scene.
@@ -313,6 +353,52 @@ fn _find_body_bg_color(node: BeDomNode) -> u32:
         if bg != 0x00000000:
             return bg
     return 0x00000000
+
+fn br_first_background_argb(html: text) -> u32:
+    val lower = html.lower()
+    val pos = br_find_str(lower, "background-color", 0)
+    if pos >= 999999999:
+        return 0xFF2050A0
+    val hash_pos = browser_renderer_find_char(html, "#", pos)
+    if hash_pos >= 999999999 or hash_pos + 6 >= html.len():
+        return 0xFF2050A0
+    val hex = html.slice(hash_pos + 1, hash_pos + 7)
+    val rgb = br_parse_rgb_hex6(hex)
+    0xFF000000 | rgb
+
+fn br_hex_value(ch: text) -> u32:
+    match ch:
+        "0" => 0u32
+        "1" => 1u32
+        "2" => 2u32
+        "3" => 3u32
+        "4" => 4u32
+        "5" => 5u32
+        "6" => 6u32
+        "7" => 7u32
+        "8" => 8u32
+        "9" => 9u32
+        "a" => 10u32
+        "A" => 10u32
+        "b" => 11u32
+        "B" => 11u32
+        "c" => 12u32
+        "C" => 12u32
+        "d" => 13u32
+        "D" => 13u32
+        "e" => 14u32
+        "E" => 14u32
+        "f" => 15u32
+        "F" => 15u32
+        _ => 0u32
+
+fn br_parse_rgb_hex6(hex: text) -> u32:
+    if hex.len() < 6:
+        return 0x2050A0
+    val r = br_hex_value(hex.char_at(0)) * 16u32 + br_hex_value(hex.char_at(1))
+    val g = br_hex_value(hex.char_at(2)) * 16u32 + br_hex_value(hex.char_at(3))
+    val b = br_hex_value(hex.char_at(4)) * 16u32 + br_hex_value(hex.char_at(5))
+    (r << 16) | (g << 8) | b
 
 fn browser_renderer_ui_tree_to_dom(tree: UITree, state: UIState) -> BeDomNode:
     """Local UITree conversion avoids an extra cross-module symbol in standalone SMF runs."""
@@ -464,12 +550,17 @@ fn br_stack_pop_and_add(stack: [BeDomNode]) -> [BeDomNode]:
     if stack.len() <= 1:
         return stack
     val completed = stack[stack.len() - 1]
-    stack.pop()
-    if stack.len() > 0:
-        var new_parent = stack[stack.len() - 1]
-        new_parent.add_child(completed)
-        stack[stack.len() - 1] = new_parent
-    stack
+    var next_stack = stack.slice(0, stack.len() - 1)
+    if next_stack.len() > 0:
+        var new_parent = next_stack[next_stack.len() - 1]
+        br_append_child(new_parent, completed)
+        next_stack[next_stack.len() - 1] = new_parent
+    next_stack
+
+fn br_append_child(parent: BeDomNode, child: BeDomNode):
+    var kids = be_dom_get_children(parent)
+    kids.push(child)
+    parent.children = kids
 
 fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     var root = BeDomNode.element("div")
@@ -505,7 +596,7 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 val txt = BeDomNode.text(remaining)
                 if stack.len() > 0:
                     var parent = stack[stack.len() - 1]
-                    parent.add_child(txt)
+                    br_append_child(parent, txt)
                     stack[stack.len() - 1] = parent
                 break
 
@@ -517,11 +608,17 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
                 continue
 
             if tag_content.starts_with("/"):
-                pos = br_handle_close_tag_and_pop(tag_content, tag_end, stack)
+                val (next_pos, next_stack) = br_handle_close_tag_and_pop(tag_content, tag_end, stack)
+                pos = next_pos
+                stack = next_stack
             else:
-                pos = br_handle_open_tag(tag_content, html, tag_end, len, stack)
+                val (next_pos, next_stack) = br_handle_open_tag(tag_content, html, tag_end, len, stack)
+                pos = next_pos
+                stack = next_stack
         else:
-            pos = br_handle_text(html, pos, len, stack)
+            val (next_pos, next_stack) = br_handle_text(html, pos, len, stack)
+            pos = next_pos
+            stack = next_stack
 
     while stack.len() > 1:
         br_stack_pop_and_add(stack)
@@ -536,23 +633,23 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
 
     result
 
-fn br_handle_close_tag_and_pop(tag_content: text, tag_end: i64, stack: [BeDomNode]) -> i64:
+fn br_handle_close_tag_and_pop(tag_content: text, tag_end: i64, stack: [BeDomNode]) -> (i64, [BeDomNode]):
     """Handle a closing tag: pop and attach the completed node. Returns new pos."""
     val close_raw = tag_content.slice(1, tag_content.len())
     val close_trimmed = close_raw.trim()
     val close_tag = close_trimmed.lower()
     # Skip closing structural tags
     if close_tag == "html" or close_tag == "head" or close_tag == "body" or close_tag == "style":
-        return tag_end + 1
+        return (tag_end + 1, stack)
     if stack.len() > 1:
         val completed = stack[stack.len() - 1]
-        stack.pop()
+        stack = stack.slice(0, stack.len() - 1)
         var new_parent = stack[stack.len() - 1]
-        new_parent.add_child(completed)
+        br_append_child(new_parent, completed)
         stack[stack.len() - 1] = new_parent
-    return tag_end + 1
+    return (tag_end + 1, stack)
 
-fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, stack: [BeDomNode]) -> i64:
+fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, stack: [BeDomNode]) -> (i64, [BeDomNode]):
     """Handle an opening tag, mutating stack directly. Returns new pos."""
     val is_self_closing = tag_content.ends_with("/")
     var clean_content = tag_content.trim()
@@ -573,10 +670,10 @@ fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, sta
             if close_pos < 999999999:
                 val close_end = browser_renderer_find_char(html, ">", close_pos)
                 if close_end < 999999999:
-                    return close_end + 1
-                return close_pos + 8
-            return tag_end + 1
-        return tag_end + 1
+                    return (close_end + 1, stack)
+                return (close_pos + 8, stack)
+            return (tag_end + 1, stack)
+        return (tag_end + 1, stack)
 
     # For body: don't add to tree, but apply its inline styles to root
     if tag_lower == "body":
@@ -599,7 +696,7 @@ fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, sta
                 bi = bi + 1
             root_node.tag = "body"
             stack[0] = root_node
-        return tag_end + 1
+        return (tag_end + 1, stack)
 
     # <style> is a raw-text element — skip ahead to </style>
     if tag_lower == "style":
@@ -608,21 +705,20 @@ fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, sta
         if style_close < 999999999:
             val style_tag_end = browser_renderer_find_char(html, ">", style_close)
             if style_tag_end < 999999999:
-                return style_tag_end + 1
-            return style_close + 8
-        return len
+                return (style_tag_end + 1, stack)
+            return (style_close + 8, stack)
+        return (len, stack)
 
     val node_tag_for_void = be_dom_get_tag(new_node)
     if is_self_closing or browser_renderer_is_void_element(node_tag_for_void):
         if stack.len() > 0:
             var parent_v = stack[stack.len() - 1]
-            parent_v.add_child(new_node)
+            br_append_child(parent_v, new_node)
             stack[stack.len() - 1] = parent_v
-        return tag_end + 1
-    stack.push(new_node)
-    return tag_end + 1
+        return (tag_end + 1, stack)
+    return (tag_end + 1, stack + [new_node])
 
-fn br_handle_text(html: text, pos: i64, len: i64, stack: [BeDomNode]) -> i64:
+fn br_handle_text(html: text, pos: i64, len: i64, stack: [BeDomNode]) -> (i64, [BeDomNode]):
     """Handle text content between tags. Returns new pos."""
     val text_end = browser_renderer_find_char(html, "<", pos)
     val end_pos = if text_end >= 999999999: len else: text_end
@@ -632,9 +728,9 @@ fn br_handle_text(html: text, pos: i64, len: i64, stack: [BeDomNode]) -> i64:
         val txt = BeDomNode.text(text_content)
         if stack.len() > 0:
             var parent = stack[stack.len() - 1]
-            parent.add_child(txt)
+            br_append_child(parent, txt)
             stack[stack.len() - 1] = parent
-    return end_pos
+    return (end_pos, stack)
 
 fn browser_renderer_parse_tag(content: text) -> BeDomNode:
     val parts = browser_renderer_split_tag_parts(content)

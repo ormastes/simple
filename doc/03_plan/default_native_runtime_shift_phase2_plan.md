@@ -228,7 +228,9 @@ Port the runtime and service dependencies used by `src/app/mcp` and `src/app/sim
 - Startup-critical groups identified: framed stdio, raw stdout response writes, pure Simple JSON helpers, `rt_exit`, startup diagnostics, and static tools/list schema generation.
 - Tool-only or later-port groups identified: file/env workspace helpers, process execution, async process/session control, time helpers, and TRACE32/dialog passthrough.
 - First framed-stdio core-C ABI pieces are covered by `test_core_c_runtime_required_abi_stdout_stderr_and_values`; remaining startup work is Simple-side protocol smoke on a core lane.
-- Core-lane MCP/LSP build probes recorded in the inventory: full builds still fail in compiler-module HIR before runtime closure validation; startup-only Simple LSP MCP now links on `core-c` and answers initialize over deterministic `Content-Length` framing. JSON-lines initialize/tools-list also works in the reduced-source probe, with empty tools because `src/compiler` is intentionally omitted.
+- Core-lane MCP/LSP build probes recorded in the inventory: full Simple LSP MCP and full MCP now link on `core-c`, but both still generate internal Simple stubs and therefore are not package-closure PASS gates yet.
+- Full Simple LSP MCP now answers a two-message framed initialize + tools/list smoke on `core-c` with real LSP tool schemas. Full MCP answers JSON-lines initialize + tools/list without crashing, but tools/list is still empty because the large tool-table accumulation path remains unsafe on the core lane.
+- Reduced-source Simple LSP MCP startup is covered by `test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source`.
 
 ## Workstream 3: Package MCP/LSP Binaries On Core Lanes
 
