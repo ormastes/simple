@@ -361,6 +361,11 @@ impl NativeProjectBuilder {
     }
 
     /// Build the project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when file discovery, source loading, incremental cache
+    /// setup, compilation, or linking fails.
     pub fn build(self) -> Result<NativeBuildResult, String> {
         crate::codegen::inline_asm::clear_inline_asm_blocks();
 

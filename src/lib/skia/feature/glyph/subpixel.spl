@@ -26,7 +26,7 @@ fn subpixel_offset(fractional_x: f64) -> SubpixelOffset:
 # Input: N-wide grayscale row. Output: 3N-wide RGB bytes (R,G,B per source pixel).
 fn lcd_filter_5tap(gray_row: [u8], order: LcdOrder) -> [u8]:
     val n = gray_row.len()
-    var out: [u8] = []
+    var filtered_bytes: [u8] = []
     var i: i64 = 0
     while i < n:
         # Gather 5 taps with zero-padding at borders
@@ -60,13 +60,19 @@ fn lcd_filter_5tap(gray_row: [u8], order: LcdOrder) -> [u8]:
         val b_clamped: i64 = if b_raw > 255: 255 else: b_raw
 
         if order == LcdOrder.Rgb:
-            out = [...out, r_clamped as u8, g_clamped as u8, b_clamped as u8]
+            filtered_bytes.append(r_clamped as u8)
+            filtered_bytes.append(g_clamped as u8)
+            filtered_bytes.append(b_clamped as u8)
         else if order == LcdOrder.Bgr:
-            out = [...out, b_clamped as u8, g_clamped as u8, r_clamped as u8]
+            filtered_bytes.append(b_clamped as u8)
+            filtered_bytes.append(g_clamped as u8)
+            filtered_bytes.append(r_clamped as u8)
         else:
-            out = [...out, r_clamped as u8, g_clamped as u8, b_clamped as u8]
+            filtered_bytes.append(r_clamped as u8)
+            filtered_bytes.append(g_clamped as u8)
+            filtered_bytes.append(b_clamped as u8)
         i = i + 1
-    out
+    filtered_bytes
 
 # Apply gamma correction to a single channel value.
 # If gamma == 1.0, returns value unchanged.
@@ -168,10 +174,13 @@ fn apply_lcd_filter(bitmap: GlyphBitmap, order: LcdOrder) -> GlyphBitmap:
             var col: i64 = 0
             while col < w:
                 val idx = row * w + col
-                gray_row = [...gray_row, bitmap.pixels[idx]]
+                gray_row.append(bitmap.pixels[idx])
                 col = col + 1
             val filtered = lcd_filter_5tap(gray_row, order)
-            out_pixels = [...out_pixels, ...filtered]
+            var filtered_idx: i64 = 0
+            while filtered_idx < filtered.len():
+                out_pixels.append(filtered[filtered_idx])
+                filtered_idx = filtered_idx + 1
             row = row + 1
         GlyphBitmap(width: w, height: h, left: bitmap.left, top: bitmap.top, pixels: out_pixels)
     else:
@@ -186,12 +195,12 @@ fn apply_lcd_filter(bitmap: GlyphBitmap, order: LcdOrder) -> GlyphBitmap:
             var row: i64 = 0
             while row < h:
                 val idx = row * w + col
-                gray_col = [...gray_col, bitmap.pixels[idx]]
+                gray_col.append(bitmap.pixels[idx])
                 row = row + 1
             # Use Rgb for Vrgb, Bgr for Vbgr (channel order within the vertical filter)
             val col_order = if order == LcdOrder.Vrgb: LcdOrder.Rgb else: LcdOrder.Bgr
             val filtered = lcd_filter_5tap(gray_col, col_order)
-            col_results = [...col_results, filtered]
+            col_results.append(filtered)
             col = col + 1
         # Assemble output: for each pixel (row, col), pick the 3 bytes from col_results[col]
         # at position row*3, row*3+1, row*3+2
@@ -202,7 +211,9 @@ fn apply_lcd_filter(bitmap: GlyphBitmap, order: LcdOrder) -> GlyphBitmap:
             while col2 < w:
                 val col_data = col_results[col2]
                 val base = row * 3
-                out_pixels = [...out_pixels, col_data[base], col_data[base + 1], col_data[base + 2]]
+                out_pixels.append(col_data[base])
+                out_pixels.append(col_data[base + 1])
+                out_pixels.append(col_data[base + 2])
                 col2 = col2 + 1
             row = row + 1
         GlyphBitmap(width: w, height: h, left: bitmap.left, top: bitmap.top, pixels: out_pixels)
