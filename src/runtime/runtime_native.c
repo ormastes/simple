@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 
 #define RT_VALUE_TAG_MASK 0x7ULL
 #define RT_VALUE_TAG_INT 0x0ULL
@@ -732,6 +733,51 @@ void rt_file_close(void* handle) {
 int rt_file_move(const char* src, const char* dst) {
     if (!src || !dst) return 0;
     return rename(src, dst) == 0 ? 1 : 0;
+}
+
+char* rt_env_cwd(void) {
+    return rt_getcwd();
+}
+
+int rt_file_write_text(const char* path, const char* content) {
+    return rt_file_write(path, content);
+}
+
+int rt_file_append_text(const char* path, const char* content) {
+    return rt_file_append(path, content);
+}
+
+static int rt_core_mkdir_one(const char* path) {
+    if (!path || !*path) return 0;
+    if (mkdir(path, 0777) == 0) return 1;
+    return rt_is_dir(path) ? 1 : 0;
+}
+
+int rt_dir_create_all(const char* path) {
+    if (!path || !*path) return 0;
+    char* copy = spl_strdup(path);
+    if (!copy) return 0;
+
+    char* p = copy;
+    if (p[0] == '/') p++;
+    for (; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (!rt_core_mkdir_one(copy)) {
+                free(copy);
+                return 0;
+            }
+            *p = '/';
+        }
+    }
+
+    int ok = rt_core_mkdir_one(copy);
+    free(copy);
+    return ok;
+}
+
+int rt_mkdir_p(const char* path) {
+    return rt_dir_create_all(path);
 }
 
 char* rt_file_read_bytes(const char* path) {

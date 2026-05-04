@@ -304,6 +304,7 @@ bool        rt_env_set(const char* key, const char* value);
 /* ===== Cross-Platform System Functions ===== */
 
 char*    rt_getcwd(void);
+char*    rt_env_cwd(void);
 bool     rt_is_dir(const char* path);
 bool     rt_rename(const char* src, const char* dst);
 void     rt_sleep_ms_native(int64_t ms);
@@ -339,7 +340,9 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 const char* rt_file_read_text(const char* path);
 int         rt_file_exists(const char* path);
 int         rt_file_write(const char* path, const char* content);
+int         rt_file_write_text(const char* path, const char* content);
 int         rt_file_append(const char* path, const char* content);
+int         rt_file_append_text(const char* path, const char* content);
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const char* path);
@@ -348,6 +351,8 @@ const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
 SplArray*   rt_dir_walk(const char* path);
 SplArray*   rt_dir_list_array(const char* path);
+int         rt_dir_create_all(const char* path);
+int         rt_mkdir_p(const char* path);
 
 /* ===== Dynamic Loading (WFFI) ===== */
 /* Now provided by Rust wffi_native.rs (accepts tagged RuntimeValues).
