@@ -20,22 +20,22 @@ All multi-arch dispatch via `match caps_kind:` blocks calling existing per-arch 
 ## Implementation Sequencing
 
 ```
-Phase 1 (Multi-Arch MIR Rewrite)
+Phase 1 (Multi-Arch MIR Rewrite)       -- DONE
   |
   v
-Phase 2 (Separate Pass Keys)     -- can overlap with Phase 1 tail
+Phase 2 (Separate Pass Keys)           -- DONE
   |
   v
-Phase 3A (Rules + Idioms)        -- depends on Phase 1
+Phase 3A (Rules + Idioms)              -- DONE
   |
   v
-Phase 3B (Backend Encoders)      -- deferrable indefinitely
+Phase 3B (Backend Encoders)            -- DONE
   |
   v
-Phase 4 (Cost Model)             -- depends on Phase 1 + 3A
+Phase 4 (Cost Model)                   -- DONE
 ```
 
-Phases 2 and 3A can proceed in parallel once Phase 1 lands.
+Phases 1, 2, 3A, 4 landed. Phase 3B (actual instruction encoders) is deferred — stubs return `"unimplemented"` so the original Call stays in place.
 
 ---
 
@@ -121,12 +121,12 @@ Phases 2 and 3A can proceed in parallel once Phase 1 lands.
 | `std.common.sha512.sha512_msg_schedule_1` | `crypto_sha512_msg1` | `sha512` |
 | `std.common.sha512.sha512_msg_schedule_2` | `crypto_sha512_msg2` | `sha512` |
 
-### Phase 3B: Backend Encoders (Deferrable)
+### Phase 3B: Backend Encoders — DONE
 
-- AArch64 SHA-512 encoder (`emit_sha512h`, `emit_sha512h2`, etc.)
-- RISC-V Zvknhb SHA-512 encoder (same Zvk opcodes with SEW=64)
-- ROL/ROR encoders for all three architectures
-- Until landed, rules with `"unimplemented"` lowering leave the original Call in place (correct fallback)
+- AArch64 SHA-512: `emit_sha512h`, `emit_sha512h2`, `emit_sha512su0`, `emit_sha512su1`, `emit_extr_x` (rotate)
+- RISC-V Zvknhb SHA-512: `vsha2cl.vv`, `vsha2ch.vv`, `vsha2ms.vv` (SEW=64); Zbb: `cpop`+`andi` (parity), `rol`/`ror`
+- x86: POPCNT+AND (parity), ROL/ROR, LZCNT/TZCNT, BSWAP
+- Remaining stubs: `bit_parity` on AArch64 (needs multi-instruction NEON), `bit_bitreverse` on x86, SHA-512 on x86 (no HW)
 
 ### Risks
 
@@ -183,8 +183,8 @@ Phases 2 and 3A can proceed in parallel once Phase 1 lands.
 | SHA-256 | SHA-NI | SHA256H | Zvknh | Done | Done |
 | CRC32 | SSE4.2 | CRC32 | — | Done | Done |
 | CLMUL | PCLMULQDQ | PMULL | Zvkg | Done | Done |
-| SHA-512 | — | SHA512H | Zvknhb | Phase 3A | Phase 3B |
+| SHA-512 | — | SHA512H | Zvknhb | Done | Done (ARM/RV), N/A (x86) |
 | SM3 | — | — | Zvksh | Future | Future |
 | SM4 | — | — | Zksed | Future | Future |
 | ChaCha20 | (AVX2 vec) | (NEON vec) | — | Future | N/A |
-| Bit-manip | (POPCNT etc) | (NEON etc) | (Zbb/Zbkb) | Phase 3A | Phase 3B |
+| Bit-manip | (POPCNT etc) | (NEON etc) | (Zbb/Zbkb) | Done | Done (partial parity on ARM) |

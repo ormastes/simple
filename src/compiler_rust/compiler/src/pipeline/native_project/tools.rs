@@ -191,7 +191,7 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
 pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
     let cc = find_c_compiler();
     let output = std::process::Command::new(&cc)
-        .arg(format!("--target={}", triple))
+        .arg(format!("--target={triple}"))
         .arg("-print-libgcc-file-name")
         .output()
         .ok()?;
@@ -218,7 +218,7 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
         "/usr/local/opt/llvm@18/bin",
         "/usr/local/opt/llvm/bin",
     ] {
-        let path = format!("{}/llvm-objcopy", prefix);
+        let path = format!("{prefix}/llvm-objcopy");
         if std::path::Path::new(&path).exists() {
             return Some(path);
         }

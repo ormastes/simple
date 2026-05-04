@@ -14,17 +14,24 @@
 #   crc32_u64                 args=[rd, rn, rm]          -> 3  (CRC32X, 4 bytes)
 #   clmul_lo                  args=[rd, rn, rm]          -> 3  (PMULL, 4 bytes)
 #   clmul_hi                  args=[rd, rn, rm]          -> 3  (PMULL2, 4 bytes)
+#   crypto_sha512_rnds2       args=[rd, rn, rm]          -> 3  (SHA512H + SHA512H2, 8 bytes)
+#   crypto_sha512_msg1        args=[rd, rn]              -> 2  (SHA512SU0, 4 bytes)
+#   crypto_sha512_msg2        args=[rd, rn, rm]          -> 3  (SHA512SU1, 4 bytes)
 #   bit_bswap                 args=[rd, rn]              -> 2  (REV, 4 bytes)
 #   bit_clz                   args=[rd, rn]              -> 2  (CLZ, 4 bytes)
 #   bit_ctz                   args=[rd, rn]              -> 2  (RBIT + CLZ, 8 bytes)
 #   bit_bitreverse            args=[rd, rn]              -> 2  (RBIT, 4 bytes)
+#   bit_rotate_right          args=[rd, rn, imm]         -> 3  (EXTR/ROR, 4 bytes)
+#   bit_rotate_left           args=[rd, rn, imm]         -> 3  (EXTR/ROR neg, 4 bytes)
 
 use compiler.backend.lowering.intrinsic_lowering_x86.{LoweringResult}
 use compiler.backend.backend.native.encode_aarch64_crypto.{
     emit_aese, emit_aesd, emit_aesmc_aarch64, emit_aesimc_aarch64,
     emit_sha256h, emit_sha256h2,
+    emit_sha512h, emit_sha512h2, emit_sha512su0, emit_sha512su1,
     emit_crc32b, emit_crc32w, emit_crc32x,
-    emit_pmull, emit_pmull2
+    emit_pmull, emit_pmull2,
+    emit_extr_x
 }
 
 # Aarch64Caps and TargetIdiom come from the parallel-agent feature_caps.spl.
@@ -73,8 +80,8 @@ fn intrinsic_to_target_idiom_aarch64(name: text) -> TargetIdiom?:
 
 fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
     match idiom:
-        case RotateLeft:            true
-        case RotateRight:           true
+        case RotateLeft:            false
+        case RotateRight:           false
         case Popcount:              true
         case CountLeadingZeros:     false
         case CountTrailingZeros:    false
@@ -178,6 +185,21 @@ fn lower_cipher_intrinsic_aarch64(name: text, args: [i64], caps: Aarch64Caps) ->
                     var bytes = emit_rbit_x(args[0], args[1])
                     return LoweringResult(bytes, true, "")
 
+                case "bit_rotate_right":
+                    # ROR Xd, Xn, #imm is EXTR Xd, Xn, Xn, #imm
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_extr_x(args[0], args[1], args[2])
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_rotate_left":
+                    # ROL Xd, Xn, #imm = ROR Xd, Xn, #(64-imm)
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var neg_shift = 64 - args[2]
+                    var bytes = emit_extr_x(args[0], args[1], neg_shift)
+                    return LoweringResult(bytes, true, "")
+
                 case _:
                     pass
 
@@ -258,20 +280,35 @@ fn lower_cipher_intrinsic_aarch64(name: text, args: [i64], caps: Aarch64Caps) ->
                     LoweringResult(bytes, true, "")
 
                 case "bit_parity":
-                    # Needs NEON CNT + reduction; Phase 3B.
+                    # Parity requires NEON CNT + ADDV + AND (>=12 bytes),
+                    # which exceeds the current _concat8 (8-byte) helper.
+                    # Approach: FMOV Dd,Xn → CNT Vd.8B → ADDV Bd → UMOV Wd →
+                    #           AND Wd,Wd,#1.  Needs a multi-instruction concat
+                    #           helper or direct byte-array builder.
                     LoweringResult(empty, false, "unimplemented")
 
                 case "crypto_sha512_rnds2":
-                    # Needs SHA512H/SHA512H2 encoder; Phase 3B.
-                    LoweringResult(empty, false, "unimplemented")
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # SHA-512 rounds: SHA512H Qd,Qn,Vm.2D + SHA512H2 Qd,Qn,Vm.2D
+                    var sh_bytes = emit_sha512h(args[0], args[1], args[2])
+                    var sh2_bytes = emit_sha512h2(args[0], args[1], args[2])
+                    var bytes = _concat8(sh_bytes, sh2_bytes)
+                    LoweringResult(bytes, true, "")
 
                 case "crypto_sha512_msg1":
-                    # Needs SHA512SU0 encoder; Phase 3B.
-                    LoweringResult(empty, false, "unimplemented")
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # SHA-512 schedule update 0: SHA512SU0 Vd.2D, Vn.2D
+                    var bytes = emit_sha512su0(args[0], args[1])
+                    LoweringResult(bytes, true, "")
 
                 case "crypto_sha512_msg2":
-                    # Needs SHA512SU1 encoder; Phase 3B.
-                    LoweringResult(empty, false, "unimplemented")
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    # SHA-512 schedule update 1: SHA512SU1 Vd.2D, Vn.2D, Vm.2D
+                    var bytes = emit_sha512su1(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
 
                 case _:
                     LoweringResult(empty, false, "unknown")

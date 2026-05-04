@@ -34,6 +34,11 @@
 #     crc32_u8                  args=[dst, src]             -> 2
 #     crc32_u32                 args=[dst, src]             -> 2
 #     crc32_u64                 args=[dst, src]             -> 2
+#     bit_popcount              args=[dst, src]             -> 2
+#     bit_clz                   args=[dst, src]             -> 2  (LZCNT, requires BMI1)
+#     bit_ctz                   args=[dst, src]             -> 2  (TZCNT, requires BMI1)
+#     bit_parity                args=[dst, src]             -> 2  (POPCNT + AND 1)
+#     bit_bswap                 args=[dst]                  -> 1
 
 use compiler.mir.intrinsics.{
     CRYPTO_AES_ROUND, CRYPTO_AES_ROUND_LAST,
@@ -92,6 +97,47 @@ fn emit_popcnt_r64(dst: i64, src: i64) -> [i64]:
     bytes.push(0xc0 + ((dst % 8) * 8) + (src % 8))
     bytes
 
+fn emit_lzcnt_r64(dst: i64, src: i64) -> [i64]:
+    # LZCNT r64, r/m64: F3 REX.W 0F BD /r
+    var bytes: [i64] = []
+    var rex = 0x48
+    if dst >= 8:
+        rex = rex + 4
+    if src >= 8:
+        rex = rex + 1
+    bytes.push(0xf3)
+    bytes.push(rex)
+    bytes.push(0x0f)
+    bytes.push(0xbd)
+    bytes.push(0xc0 + ((dst % 8) * 8) + (src % 8))
+    bytes
+
+fn emit_tzcnt_r64(dst: i64, src: i64) -> [i64]:
+    # TZCNT r64, r/m64: F3 REX.W 0F BC /r
+    var bytes: [i64] = []
+    var rex = 0x48
+    if dst >= 8:
+        rex = rex + 4
+    if src >= 8:
+        rex = rex + 1
+    bytes.push(0xf3)
+    bytes.push(rex)
+    bytes.push(0x0f)
+    bytes.push(0xbc)
+    bytes.push(0xc0 + ((dst % 8) * 8) + (src % 8))
+    bytes
+
+fn emit_and_imm8_r64(dst: i64, imm8: i64) -> [i64]:
+    # AND r/m64, imm8 (sign-extended): REX.W 83 /4 ib
+    # ModRM: mod=11 (0xc0), reg=4 (/4 subop), rm=dst%8
+    var bytes: [i64] = []
+    val rex = if dst >= 8: 0x49 else: 0x48
+    bytes.push(rex)
+    bytes.push(0x83)
+    bytes.push(0xe0 + (dst % 8))
+    bytes.push(imm8 % 256)
+    bytes
+
 fn emit_mov_r64_r64(dst: i64, src: i64) -> [i64]:
     var bytes: [i64] = []
     var rex = 0x48
@@ -129,8 +175,8 @@ fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
     match idiom:
         case RotateLeft:            false
         case RotateRight:           false
-        case CountLeadingZeros:     true
-        case CountTrailingZeros:    true
+        case CountLeadingZeros:     false
+        case CountTrailingZeros:    false
         case ByteSwap:              false
         case BitReverse:            true
         case MatrixDot:             true
@@ -365,20 +411,38 @@ fn lower_cipher_intrinsic_x86(name: text, args: [i64], caps: X86Caps) -> Lowerin
                     var bytes = emit_popcnt_r64(args[0], args[1])
                     LoweringResult(bytes, true, "")
 
+                case "bit_clz":
+                    # LZCNT r64, r/m64 — count leading zeros.  args=[dst, src].
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_lzcnt_r64(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
+                case "bit_ctz":
+                    # TZCNT r64, r/m64 — count trailing zeros.  args=[dst, src].
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_tzcnt_r64(args[0], args[1])
+                    LoweringResult(bytes, true, "")
+
                 case "bit_parity":
-                    # POPCNT + AND 1 sequence; Phase 3B encoder not landed yet.
-                    LoweringResult(empty, false, "unimplemented")
+                    # Parity = POPCNT(src) & 1.  args=[dst, src].
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_popcnt_r64(args[0], args[1])
+                    bytes = append_bytes(bytes, emit_and_imm8_r64(args[0], 1))
+                    LoweringResult(bytes, true, "")
 
                 case "crypto_sha512_rnds2":
-                    # x86 has no SHA-512 instruction; Phase 3B.
+                    # x86 has no SHA-512 hardware instruction — permanent software fallback.
                     LoweringResult(empty, false, "unimplemented")
 
                 case "crypto_sha512_msg1":
-                    # x86 has no SHA-512 instruction; Phase 3B.
+                    # x86 has no SHA-512 hardware instruction — permanent software fallback.
                     LoweringResult(empty, false, "unimplemented")
 
                 case "crypto_sha512_msg2":
-                    # x86 has no SHA-512 instruction; Phase 3B.
+                    # x86 has no SHA-512 hardware instruction — permanent software fallback.
                     LoweringResult(empty, false, "unimplemented")
 
                 case _:

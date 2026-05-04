@@ -119,22 +119,13 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
             let c_str = CStr::from_ptr(arg_ptr as *const i8);
             match c_str.to_str() {
                 Ok(s) => args.push(s.to_string()),
-                Err(e) => {
-                    tracing::warn!(
-                        index = i,
-                        error = %e,
-                        "Failed to decode argument as UTF-8, skipping"
-                    );
-                }
+                Err(_e) => {}
             }
         }
     }
 
     // Store in global storage (replacing any previous value)
-    let arg_count = args.len();
     *PROGRAM_ARGS.lock() = args;
-
-    tracing::debug!(arg_count, "Program arguments set");
 }
 
 /// Set program arguments from Vec<String> (convenience for driver).
@@ -154,7 +145,6 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
 pub fn rt_set_args_vec(args: &[String]) {
     install_parent_death_watchdog();
     *PROGRAM_ARGS.lock() = args.to_vec();
-    tracing::debug!(arg_count = args.len(), "Program arguments set from Vec");
 }
 
 /// Get program arguments as a RuntimeValue array.
@@ -197,8 +187,6 @@ pub extern "C" fn rt_get_args() -> RuntimeValue {
         rt_array_push(array_handle, str_value);
     }
 
-    tracing::trace!(arg_count = args.len(), "Arguments retrieved");
-
     array_handle
 }
 
@@ -217,7 +205,6 @@ pub extern "C" fn rt_get_argc() -> i32 {
 #[no_mangle]
 pub extern "C" fn rt_clear_args() {
     PROGRAM_ARGS.lock().clear();
-    tracing::debug!("Program arguments cleared");
 }
 
 /// Auto-initialize arguments from std::env::args() if not already set.
@@ -239,10 +226,6 @@ fn auto_init_args_if_empty() {
     let args: Vec<String> = std::env::args().collect();
 
     if !args.is_empty() {
-        tracing::debug!(
-            arg_count = args.len(),
-            "Auto-initialized arguments from std::env::args()"
-        );
         *args_lock = args;
     }
 }

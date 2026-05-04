@@ -384,6 +384,17 @@ impl HirLowering:
         # Lower parameters
         var params: [HirParam] = []
         val fn_params = function_params(fn_)
+        if fn_.is_method and not fn_.is_static and self.current_method_self_type.? and (fn_params.len() == 0 or fn_params[0].name != "self"):
+            val self_type = self.current_method_self_type.unwrap()
+            val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
+            params = params.push(HirParam(
+                symbol: self_symbol,
+                name: "self",
+                type_: self_type,
+                has_default: false,
+                default: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: fn_.span), span: fn_.span),
+                span: fn_.span
+            ))
         var pi = 0
         while pi < fn_params.len():
             params = params.push(self.lower_param(fn_params[pi]))
@@ -500,10 +511,13 @@ impl HirLowering:
             fields = fields.push(self.lower_field(f))
 
         var methods: Dict<text, SymbolId> = {}
+        val previous_self_type = self.current_method_self_type
+        self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(symbol, []), span: class_span))
         for name in class_methods.keys():
             val fn_: Function = class_methods[name]
             val hir_fn = self.lower_function(fn_)
             methods[name] = hir_fn.symbol
+        self.current_method_self_type = previous_self_type
 
         self.symbols.pop_scope()
 
@@ -850,10 +864,13 @@ impl HirLowering:
         val trait_ = impl_.trait_.map(\t: self.lower_type(t))
 
         var methods: Dict<text, SymbolId> = {}
+        val previous_self_type = self.current_method_self_type
+        self.current_method_self_type = Some(type_)
         for name in impl_.methods.keys():
             val fn_ = impl_.methods[name]
             val hir_fn = self.lower_function(fn_)
             methods[name] = hir_fn.symbol
+        self.current_method_self_type = previous_self_type
 
         # Lower associated type implementations
         var assoc_type_impls: [HirAssocTypeImpl] = []

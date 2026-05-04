@@ -13,9 +13,13 @@
 #   crypto_sha256_rnds2       args=[vd, vs2, vs1]     -> 3  (vsha2cl.vv + vsha2ch.vv)
 #   clmul_lo                  args=[vd, vs2, vs1]     -> 3  (vghsh.vv)
 #   clmul_hi                  args=[vd, vs2]          -> 2  (vgmul.vv)
+#   crypto_sha512_rnds2       args=[vd, vs2, vs1]     -> 3  (vsha2cl.vv + vsha2ch.vv, SEW=64)
+#   crypto_sha512_msg1        args=[vd, vs2, vs1]     -> 3  (vsha2ms.vv, SEW=64)
+#   crypto_sha512_msg2        args=[vd, vs2, vs1]     -> 3  (vsha2ms.vv, SEW=64)
 #   bit_rotate_left           args=[rd, rs1, rs2]     -> 3  (rol)
 #   bit_rotate_right          args=[rd, rs1, rs2]     -> 3  (ror)
 #   bit_popcount              args=[rd, rs]           -> 2  (cpop)
+#   bit_parity                args=[rd, rs]           -> 2  (cpop + andi 1)
 #   bit_clz                   args=[rd, rs]           -> 2  (clz)
 #   bit_ctz                   args=[rd, rs]           -> 2  (ctz)
 #   bit_bswap                 args=[rd, rs]           -> 2  (rev8)
@@ -31,7 +35,7 @@ use compiler.backend.feature_caps.{TargetIdiom, Rv64Caps}
 use compiler.backend.lowering.intrinsic_lowering_x86.{LoweringResult}
 use compiler.backend.backend.native.encode_rvv_zvk.{
     emit_vaesef_vv, emit_vaesem_vv, emit_vaesdf_vv, emit_vaesdm_vv,
-    emit_vsha2ch_vv, emit_vsha2cl_vv,
+    emit_vsha2ch_vv, emit_vsha2cl_vv, emit_vsha2ms_vv,
     emit_vghsh_vv, emit_vgmul_vv
 }
 # ============================================================================
@@ -72,8 +76,6 @@ fn intrinsic_to_target_idiom_riscv(name: text) -> TargetIdiom?:
 
 fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
     match idiom:
-        case RotateLeft:            true
-        case RotateRight:           true
         case MatrixDot:             true
         case MatrixOuterProduct:    true
         case MatrixFmaKernel:       true
@@ -117,14 +119,18 @@ Steps:
   1. Resolve name -> TargetIdiom; unknown names return reason="unknown".
   2. Check caps.supports(idiom); unsupported targets return reason="no-cap".
   3. Return reason="unimplemented" for recognised portable intrinsics whose
-     backend encoder has not landed yet.
+     backend encoder has not landed yet (matrix_dot, matrix_outer_product,
+     matrix_fma_kernel).
   4. Validate args arity; mismatches return reason="bad-arity".
   5. Dispatch to the matching emit_* helper and return the bytes.
 
-For crypto_sha256_rnds2 the result is vsha2cl.vv + vsha2ch.vv concatenated
-(8 bytes total) because the SHA-2 round pair requires both low and high halves.
+For crypto_sha256_rnds2 and crypto_sha512_rnds2 the result is vsha2cl.vv +
+vsha2ch.vv concatenated (8 bytes total) because the SHA-2 round pair requires
+both low and high halves.  SHA-512 uses the same encodings with SEW=64
+(set by vsetvli at the call site, not in the instruction encoding).
 For bit_bitreverse the result is brev8 + rev8 (8 bytes total) because RV64
 needs both scalar instructions to reverse all bits in the register.
+For bit_parity the result is cpop + andi (8 bytes) — popcount then mask bit 0.
 """
 fn lower_cipher_intrinsic_riscv(name: text, args: [i64], caps: Rv64Caps) -> LoweringResult:
     var empty: [i64] = []
@@ -142,13 +148,17 @@ fn lower_cipher_intrinsic_riscv(name: text, args: [i64], caps: Rv64Caps) -> Lowe
             match name:
                 case "bit_rotate_left":
                     if args.len() != 3:
-                        return LoweringResult(empty, false, "unimplemented")
-                    return LoweringResult(empty, false, "unimplemented")
+                        return LoweringResult(empty, false, "bad-arity")
+                    # rol rd, rs1, rs2 — Zbb/Zbkb: funct7=0x30, funct3=0x1
+                    var bytes = emit_scalar_bitmanip_r_type(0x30, args[2], args[1], 0x1, args[0])
+                    return LoweringResult(bytes, true, "")
 
                 case "bit_rotate_right":
                     if args.len() != 3:
-                        return LoweringResult(empty, false, "unimplemented")
-                    return LoweringResult(empty, false, "unimplemented")
+                        return LoweringResult(empty, false, "bad-arity")
+                    # ror rd, rs1, rs2 — Zbb/Zbkb: funct7=0x30, funct3=0x5
+                    var bytes = emit_scalar_bitmanip_r_type(0x30, args[2], args[1], 0x5, args[0])
+                    return LoweringResult(bytes, true, "")
 
                 case "bit_bswap":
                     if args.len() != 2:
@@ -240,20 +250,44 @@ fn lower_cipher_intrinsic_riscv(name: text, args: [i64], caps: Rv64Caps) -> Lowe
                     LoweringResult(bytes, true, "")
 
                 case "bit_parity":
-                    # Needs Zbb cpop + andi; Phase 3B.
-                    LoweringResult(empty, false, "unimplemented")
+                    # Zbb: cpop rd, rs1 then andi rd, rd, 1
+                    if args.len() != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var rd = args[0]
+                    var rs1 = args[1]
+                    # cpop rd, rs1 — funct12=0x602, funct3=0x1
+                    var bytes = emit_scalar_bitmanip_i_type(0x602, rs1, 0x1, rd)
+                    # andi rd, rd, 1 — I-type: imm=1, funct3=0x7, opcode=0x13
+                    bytes = append_bytes(bytes, emit_scalar_bitmanip_i_type(1, rd, 0x7, rd))
+                    LoweringResult(bytes, true, "")
 
                 case "crypto_sha512_rnds2":
-                    # Needs Zvknhb vsha2ms; Phase 3B.
-                    LoweringResult(empty, false, "unimplemented")
+                    # Zvknhb: vsha2cl.vv + vsha2ch.vv (SEW=64 for SHA-512).
+                    # Same encoding as SHA-256; SEW is set by vsetvli at call site.
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var vd = args[0]
+                    var vs2 = args[1]
+                    var vs1 = args[2]
+                    var lo = emit_vsha2cl_vv(vd, vs2, vs1)
+                    var hi = emit_vsha2ch_vv(vd, vs2, vs1)
+                    var bytes = append_bytes([], lo)
+                    bytes = append_bytes(bytes, hi)
+                    LoweringResult(bytes, true, "")
 
                 case "crypto_sha512_msg1":
-                    # Needs Zvknhb encoder; Phase 3B.
-                    LoweringResult(empty, false, "unimplemented")
+                    # Zvknhb: vsha2ms.vv — message schedule (SEW=64 for SHA-512).
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_vsha2ms_vv(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
 
                 case "crypto_sha512_msg2":
-                    # Needs Zvknhb encoder; Phase 3B.
-                    LoweringResult(empty, false, "unimplemented")
+                    # Zvknhb: vsha2ms.vv — message schedule (SEW=64 for SHA-512).
+                    if args.len() != 3:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_vsha2ms_vv(args[0], args[1], args[2])
+                    LoweringResult(bytes, true, "")
 
                 case _:
                     LoweringResult(empty, false, "unknown")
