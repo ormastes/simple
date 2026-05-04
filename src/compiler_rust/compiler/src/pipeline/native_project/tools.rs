@@ -24,6 +24,87 @@ pub(crate) fn find_cxx_compiler() -> String {
     simple_common::platform::cc_detect::find_cxx_compiler()
 }
 
+fn host_archive_name() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "simple_runtime.lib"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "libsimple_runtime.a"
+    }
+}
+
+fn host_object_extension() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "obj"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "o"
+    }
+}
+
+pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    let archive = build_dir.join(host_archive_name());
+    if has_nonempty_archive_payload(&archive) {
+        return Some(archive);
+    }
+
+    let runtime_root = PathBuf::from("src/runtime");
+    if !runtime_root.join("runtime.c").exists() || !runtime_root.join("runtime_native.c").exists() {
+        return None;
+    }
+
+    std::fs::create_dir_all(build_dir).ok()?;
+
+    let cc = find_c_compiler();
+    let ar = find_archive_tool();
+    let obj_ext = host_object_extension();
+    let mut objects = Vec::new();
+
+    for source in [
+        "runtime.c",
+        "runtime_native.c",
+        "runtime_thread.c",
+        "runtime_fork.c",
+        "runtime_memtrack.c",
+    ] {
+        let object = build_dir.join(format!("{}.{}", source.trim_end_matches(".c"), obj_ext));
+        let status = std::process::Command::new(&cc)
+            .arg("-c")
+            .arg("-O2")
+            .arg("-ffunction-sections")
+            .arg("-fdata-sections")
+            .arg("-fPIC")
+            .arg("-std=gnu11")
+            .arg("-Isrc/runtime")
+            .arg("-Isrc/runtime/platform")
+            .arg(runtime_root.join(source))
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .ok()?;
+        if !status.success() {
+            return None;
+        }
+        objects.push(object);
+    }
+
+    let status = std::process::Command::new(&ar)
+        .arg("rcs")
+        .arg(&archive)
+        .args(&objects)
+        .status()
+        .ok()?;
+    if status.success() && has_nonempty_archive_payload(&archive) {
+        Some(archive)
+    } else {
+        None
+    }
+}
+
 /// Find the combined native_all library (runtime + compiler with Cranelift FFI).
 pub(crate) fn find_native_all_library() -> Option<PathBuf> {
     if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {

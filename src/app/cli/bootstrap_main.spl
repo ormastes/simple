@@ -1,21 +1,156 @@
+use app.io.cli_ops.{_cli_eprint}
+use lazy compiler.driver.bootstrap_api.{aot_native_file_with_backend, aot_native_project_with_backend}
+use compiler.common.driver_core_types.{CompileResult}
+
 extern fn rt_cli_get_args() -> [text]
-extern fn rt_native_build(args: [text]) -> i64
 
 # Keep in sync with ./VERSION file
 fn bootstrap_version() -> text:
     "0.9.8"
 
+fn native_build_help() -> i64:
+    print "Simple Native Build"
+    print ""
+    print "Usage: simple native-build [options] [source-dirs...]"
+    print ""
+    print "Options:"
+    print "  --source <dir>       Source directory to compile (repeatable)"
+    print "  -o <path>            Output binary path"
+    print "  --entry <file>       Entry file"
+    print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
+    print "  --release            Release build"
+    print "  --release-optimized  Max optimization profile"
+    print "  --opt-level <n>      MIR/native optimization level"
+    print "  --strip              Strip symbols from output"
+    print "  --verbose, -v        Verbose output"
+    0
+
+fn compile_result_exit(result: CompileResult, context: text) -> i64:
+    match result:
+        case CompileResult.Success(_): 0
+        case CompileResult.ParseError(errs):
+            _cli_eprint("Parse error in {context}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.TypeError(errs):
+            _cli_eprint("Type error in {context}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.BlockError(errs):
+            _cli_eprint("Block error in {context}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.ResolveError(errs):
+            _cli_eprint("Resolve error in {context}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.BorrowError(errs):
+            _cli_eprint("Borrow error in {context}:")
+            for e in errs:
+                _cli_eprint("  {e}")
+            1
+        case CompileResult.CodegenError(msg):
+            _cli_eprint("Codegen error in {context}: {msg}")
+            1
+        case CompileResult.RuntimeError(msg):
+            _cli_eprint("Runtime error in {context}: {msg}")
+            1
+        case _:
+            _cli_eprint("error: compile failed ({context})")
+            1
+
 fn run_native_build_bootstrap(args: [text]) -> i64:
-    rt_native_build(args)
+    var backend = ""
+    var backend_explicit = false
+    var entry_point = ""
+    var output = "a.out"
+    var strip = false
+    var source_dirs: [text] = []
+    var release = true
+    var opt_level = 3
+    var i = 0
+    if args.len() > 0 and args[0] == "native-build":
+        i = 1
+
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            return native_build_help()
+        elif arg.starts_with("--backend="):
+            backend = arg.substring(10)
+            backend_explicit = true
+        elif arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
+            backend_explicit = true
+        elif arg == "--source" and i + 1 < args.len():
+            i = i + 1
+            source_dirs.push(args[i])
+        elif arg.starts_with("--source="):
+            source_dirs.push(arg.substring(9))
+        elif arg == "--entry" and i + 1 < args.len():
+            i = i + 1
+            entry_point = args[i]
+        elif arg.starts_with("--entry="):
+            entry_point = arg.substring(8)
+        elif arg == "-o" and i + 1 < args.len():
+            i = i + 1
+            output = args[i]
+        elif arg.starts_with("-o") and arg.len() > 2:
+            output = arg.substring(2)
+        elif arg == "--strip":
+            strip = true
+        elif arg == "--release":
+            release = true
+            if opt_level < 2:
+                opt_level = 2
+        elif arg == "--release-optimized":
+            release = true
+            opt_level = 3
+        elif arg == "--opt-level" and i + 1 < args.len():
+            i = i + 1
+            opt_level = args[i].to_int()
+        elif arg.starts_with("--opt-level="):
+            opt_level = arg.substring(12).to_int()
+        i = i + 1
+
+    if not backend_explicit or (backend != "llvm-lib" and backend != "llvmlib"):
+        _cli_eprint("error: bootstrap native-build only supports --backend llvm-lib")
+        return 1
+    if entry_point == "":
+        _cli_eprint("error: --entry is required")
+        return 1
+
+    val result = if source_dirs.len() > 0:
+        aot_native_project_with_backend(source_dirs, entry_point, output, "llvm-lib", strip, release, opt_level)
+    else:
+        aot_native_file_with_backend(entry_point, output, "llvm-lib", release, opt_level)
+    compile_result_exit(result, "native-build")
+
+fn get_cli_args() -> [text]:
+    val raw_args = rt_cli_get_args() ?? []
+    var start_idx = 1
+    if raw_args.len() > 1 and raw_args[1].ends_with("bootstrap_main.spl"):
+        start_idx = 2
+    var args: [text] = []
+    var i = start_idx
+    while i < raw_args.len():
+        args.push(raw_args[i])
+        i = i + 1
+    args
 
 fn main() -> i64:
-    val all_args = rt_cli_get_args() ?? []
+    val all_args = get_cli_args()
     val argc = all_args.len()
-    if argc < 2:
+    if argc < 1:
         print "Simple Bootstrap Compiler v{bootstrap_version()}"
         print "Usage: simple compile <file> [-o <output>] [--native] [--opt-level=<level>] [--list-optimizations]"
         return 0
-    val first = all_args[1]
+    val first = all_args[0]
     if first == "--version":
         print "simple-bootstrap {bootstrap_version()}"
         return 0
@@ -30,10 +165,10 @@ fn main() -> i64:
     if first == "native-build":
         return run_native_build_bootstrap(all_args)
     if first == "compile":
-        if argc < 3:
+        if argc < 2:
             print "error: missing source file"
             return 1
-        val source_file = all_args[2]
+        val source_file = all_args[1]
         print "compile: {source_file}"
         return 0
     print "error: unknown command '{first}'"

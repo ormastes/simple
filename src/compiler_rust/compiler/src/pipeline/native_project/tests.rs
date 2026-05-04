@@ -908,6 +908,133 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     assert!(!super::tools::is_system_symbol("app__mcp__main"));
 }
 
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_generate_stub_object_skips_optional_weak_entry_hooks() {
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    if std::process::Command::new(&cc).arg("--version").output().is_err() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let main_c = temp.path().join("main.c");
+    let main_o = temp.path().join("main.o");
+
+    std::fs::write(
+        &main_c,
+        r#"
+extern int __attribute__((weak)) spl_main(void);
+extern void __attribute__((weak)) rt_set_args(int argc, char** argv);
+extern void __attribute__((weak)) __simple_runtime_init(void);
+extern void __attribute__((weak)) __simple_runtime_shutdown(void);
+extern void __attribute__((weak)) __simple_call_module_inits(void);
+
+int main(int argc, char** argv) {
+    if (__simple_runtime_init) __simple_runtime_init();
+    if (__simple_call_module_inits) __simple_call_module_inits();
+    if (rt_set_args) rt_set_args(argc, argv);
+    return spl_main ? spl_main() : 0;
+}
+"#,
+    )
+    .unwrap();
+
+    assert!(std::process::Command::new(&cc)
+        .args(["-c", "-ffunction-sections", "-fdata-sections"])
+        .arg(&main_c)
+        .arg("-o")
+        .arg(&main_o)
+        .status()
+        .unwrap()
+        .success());
+
+    let imports = ModuleImports {
+        import_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+        all_mangled: std::sync::Arc::new(std::collections::HashMap::new()),
+        re_exports: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
+        populate_global_struct_defs: false,
+        populate_global_enum_defs: false,
+    };
+
+    let stub_o = super::stubs::generate_stub_object(temp.path(), &[], &main_o, None, &imports).unwrap();
+    let output = std::process::Command::new("nm")
+        .arg("-g")
+        .arg(&stub_o)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("spl_main"));
+    assert!(!stdout.contains("rt_set_args"));
+    assert!(!stdout.contains("__simple_runtime_init"));
+    assert!(!stdout.contains("__simple_runtime_shutdown"));
+    assert!(!stdout.contains("__simple_call_module_inits"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_core_c_lane_builds_and_runs_hello_world_small() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let output_dir = PathBuf::from("/tmp/simple-core-c-regression");
+    let _ = std::fs::create_dir_all(&output_dir);
+    let output = output_dir.join("hello_simple");
+
+    let result = NativeProjectBuilder::new(repo_root.clone(), output.clone())
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            runtime_bundle: "core-c".to_string(),
+            strip: true,
+            incremental: false,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(repo_root.join("src/lib"))
+        .source_dir(repo_root.join("src/app"))
+        .entry_file(repo_root.join("examples/01_getting_started/hello_native.spl"))
+        .build()
+        .unwrap();
+
+    assert!(result.binary_size < 128_000, "hello too large: {}", result.binary_size);
+
+    let run = std::process::Command::new(&output).output().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert!(
+            run.status.success(),
+            "hello exit: code={:?} signal={:?} stdout=`{}` stderr=`{}` path={}",
+            run.status.code(),
+            run.status.signal(),
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr),
+            output.display()
+        );
+    }
+    #[cfg(not(unix))]
+    {
+        assert!(
+            run.status.success(),
+            "hello exit: code={:?} stdout=`{}` stderr=`{}` path={}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr),
+            output.display()
+        );
+    }
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "Hello World");
+}
+
 #[test]
 fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
     let temp = tempfile::tempdir().unwrap();

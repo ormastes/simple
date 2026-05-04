@@ -101,6 +101,9 @@ pub(super) fn call_value_with_args(
 /// Built-in extern functions that are always available without explicit declaration.
 /// These are the "prelude" functions - print, math, and conversion utilities.
 pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
+    // Bootstrap driver bridge
+    "compiler__driver__driver__compiler_driver_create",
+    "compiler__driver__driver__CompilerDriver_dot_compile",
     // I/O functions (print now adds newline by default, like Python)
     "print",      // prints with newline (new behavior)
     "print_raw",  // prints without newline (for old print behavior)

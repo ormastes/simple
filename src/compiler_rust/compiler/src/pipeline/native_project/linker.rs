@@ -194,6 +194,10 @@ impl NativeProjectBuilder {
             "rt_string_new",
             "rt_string_data",
             "rt_string_len",
+            "rt_print_str",
+            "rt_println_str",
+            "rt_print_value",
+            "rt_println_value",
             "rt_array_new",
             "rt_array_len",
         ] {
@@ -295,7 +299,7 @@ int main(int argc, char** argv) {
         } else if has_entry {
             r#"
 extern "C" {
-    int spl_main(void);
+    int __attribute__((weak)) spl_main(void);
     void __attribute__((weak)) rt_set_args(int argc, char** argv);
     void __attribute__((weak)) __simple_runtime_init(void);
     void __attribute__((weak)) __simple_runtime_shutdown(void);
@@ -305,7 +309,7 @@ int main(int argc, char** argv) {
     if (__simple_runtime_init) __simple_runtime_init();
     if (__simple_call_module_inits) __simple_call_module_inits();
     if (rt_set_args) rt_set_args(argc, argv);
-    int r = spl_main();
+    int r = spl_main ? spl_main() : 0;
     if (__simple_runtime_shutdown) __simple_runtime_shutdown();
     return r;
 }
@@ -701,7 +705,14 @@ int main(int argc, char** argv) {
                 {
                     cmd.arg("-Wl,-force_load").arg(runtime_lib);
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                {
+                    let roots =
+                        Self::runtime_retention_symbols(object_paths, &main_o, init_o.as_ref(), runtime_lib, imports)?;
+                    Self::add_elf_undefined_roots(&mut cmd, &roots);
+                    cmd.arg(runtime_lib);
+                }
+                #[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "freebsd")))]
                 cmd.arg(runtime_lib);
             }
         }

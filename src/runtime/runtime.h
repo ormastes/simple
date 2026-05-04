@@ -226,6 +226,20 @@ char*    rt_stdin_read_line(void);         /* reads line from stdin, NULL on EOF
 int64_t  rt_stdout_write_text(const char* s); /* writes text without newline, returns len */
 void     rt_stdout_flush(void);            /* flushes stdout */
 
+/* ===== Minimal RuntimeValue ABI for core-c lane ===== */
+
+int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
+int64_t  rt_string_len(int64_t string);
+const uint8_t* rt_string_data(int64_t string);
+void     rt_print_str(const uint8_t* ptr, uint64_t len);
+void     rt_println_str(const uint8_t* ptr, uint64_t len);
+void     rt_eprint_str(const uint8_t* ptr, uint64_t len);
+void     rt_eprintln_str(const uint8_t* ptr, uint64_t len);
+void     rt_print_value(int64_t value);
+void     rt_println_value(int64_t value);
+void     rt_eprint_value(int64_t value);
+void     rt_eprintln_value(int64_t value);
+
 /* ===== Output ===== */
 
 void     spl_print(const char* s);
@@ -287,6 +301,9 @@ char*    spl_strdup(const char* s);
 void        spl_init_args(int argc, char** argv);
 int64_t     spl_arg_count(void);
 const char* spl_get_arg(int64_t idx);
+void        rt_set_args(int argc, char** argv);
+int32_t     rt_get_argc(void);
+SplArray*   rt_get_args(void);
 
 /* ===== File Prefetch (CLI keyword support) ===== */
 

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::NativeProjectBuilder;
 use super::tools::strip_llvm_constructors;
-use super::tools::{find_native_all_library, find_runtime_library};
+use super::tools::{build_core_c_runtime_library, find_native_all_library, find_runtime_library};
 
 fn runtime_bundle_requests_core_c(value: &str) -> bool {
     matches!(value, "runtime" | "core" | "core-c" | "core_c")
@@ -121,8 +121,8 @@ impl NativeProjectBuilder {
         if let Some(ref rp) = self.config.runtime_path {
             push_runtime_candidates(rp);
         } else {
-            if let Some(runtime) = find_runtime_library() {
-                if prefer_core_c_lane {
+            if prefer_core_c_lane {
+                if let Some(runtime) = build_core_c_runtime_library(&temp_dir.join("core_c_runtime")) {
                     candidates.push((runtime, false));
                 }
             }

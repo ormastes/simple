@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rayon::prelude::*;
+use simple_parser::ast::{Block, Expr, FunctionDef, Node, ReturnStmt, Type, Visibility};
 
 use crate::codegen::common_backend::module_prefix_from_path;
 use crate::codegen::Codegen;
@@ -14,6 +15,96 @@ use crate::monomorphize::monomorphize_module;
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
 use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::mangle_mir;
+
+fn is_script_statement(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Let(_)
+            | Node::Const(_)
+            | Node::Static(_)
+            | Node::Assignment(_)
+            | Node::Return(_)
+            | Node::If(_)
+            | Node::Match(_)
+            | Node::For(_)
+            | Node::While(_)
+            | Node::Loop(_)
+            | Node::Break(_)
+            | Node::Continue(_)
+            | Node::Context(_)
+            | Node::With(_)
+            | Node::Expression(_)
+    )
+}
+
+fn has_explicit_main(items: &[Node]) -> bool {
+    items
+        .iter()
+        .any(|item| matches!(item, Node::Function(func) if func.name == "main"))
+}
+
+fn wrap_entry_script_as_main(mut module: simple_parser::ast::Module) -> simple_parser::ast::Module {
+    if has_explicit_main(&module.items) {
+        return module;
+    }
+
+    let mut lifted = Vec::new();
+    let mut script_body = Vec::new();
+    for item in module.items {
+        if is_script_statement(&item) {
+            script_body.push(item);
+        } else {
+            lifted.push(item);
+        }
+    }
+
+    if script_body.is_empty() {
+        return simple_parser::ast::Module {
+            name: module.name,
+            items: lifted,
+        };
+    }
+
+    let body_span = simple_parser::token::Span::new(0, 0, 0, 0);
+    script_body.push(Node::Return(ReturnStmt {
+        span: body_span,
+        value: Some(Expr::Integer(0)),
+    }));
+
+    let main_fn = FunctionDef {
+        span: body_span,
+        name: "main".to_string(),
+        generic_params: Vec::new(),
+        params: Vec::new(),
+        return_type: Some(Type::Simple("i64".to_string())),
+        where_clause: Vec::new(),
+        body: Block {
+            span: body_span,
+            statements: script_body,
+        },
+        visibility: Visibility::Private,
+        effects: Vec::new(),
+        decorators: Vec::new(),
+        attributes: Vec::new(),
+        doc_comment: None,
+        contract: None,
+        is_abstract: false,
+        is_sync: false,
+        bounds_block: None,
+        is_static: false,
+        is_me_method: false,
+        is_generator: false,
+        return_constraint: None,
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: std::collections::HashMap::new(),
+    };
+    lifted.push(Node::Function(main_fn));
+    simple_parser::ast::Module {
+        name: module.name,
+        items: lifted,
+    }
+}
 
 pub(crate) fn native_hir_resolver_roots(project_root: &Path, source_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -170,6 +261,7 @@ pub(crate) fn compile_file_to_object(
     let ast = parser
         .parse()
         .map_err(|e| format!("{}: parse: {e}", file_path.display()))?;
+    let ast = if is_entry { wrap_entry_script_as_main(ast) } else { ast };
 
     // Build per-module use_map from AST `use` statements.
     let use_map = build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);

@@ -105,6 +105,7 @@ type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 // Import shared functions from parent module
 use super::{evaluate_expr, is_debug_mode};
+use crate::interpreter::interpreter_call::exec_function_with_values;
 use crate::interpreter::interpreter_native_net;
 
 // Import diagram tracing
@@ -134,6 +135,22 @@ fn resolve_fmt_for_print(
             v.clone()
         })
         .collect()
+}
+
+fn call_loaded_function_by_name(
+    lookup_name: &str,
+    args: &[Value],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let func = functions
+        .get(lookup_name)
+        .cloned()
+        .ok_or_else(|| CompileError::semantic(format!("function `{lookup_name}` not found for extern bridge")))?;
+    exec_function_with_values(&func, args, env, functions, classes, enums, impl_methods)
 }
 
 /// Central extern function dispatcher
@@ -175,6 +192,28 @@ pub(crate) fn call_extern_function(
 
     // Dispatch to appropriate module
     match name {
+        // Bootstrap driver bridge externs. These names are emitted as `extern fn`
+        // shims in Simple bootstrap helpers, but the actual implementations live
+        // in interpreted Simple driver code already loaded into `functions`.
+        "compiler__driver__driver__compiler_driver_create" => call_loaded_function_by_name(
+            "compiler_driver_create",
+            &evaluated,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        ),
+        "compiler__driver__driver__CompilerDriver_dot_compile" => call_loaded_function_by_name(
+            "CompilerDriver_dot_compile",
+            &evaluated,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        ),
+
         // ====================================================================
         // I/O Operations (7 print + 2 input + 4 MCP stdio = 13 functions)
         // ====================================================================

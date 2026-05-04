@@ -40,6 +40,17 @@ fn has_equivalent_defined_symbol(sym: &str, defined: &std::collections::HashSet<
     false
 }
 
+fn is_optional_weak_hook_symbol(sym: &str) -> bool {
+    matches!(
+        sym,
+        "spl_main"
+            | "rt_set_args"
+            | "__simple_runtime_init"
+            | "__simple_runtime_shutdown"
+            | "__simple_call_module_inits"
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FreestandingUnresolvedMode {
     DeferToLinker,
@@ -533,6 +544,7 @@ pub(crate) fn generate_stub_object(
         .filter(|s| {
             !s.starts_with("_ZSt") && !s.starts_with("_ZNSt") && !s.starts_with("ZSt") && !s.starts_with("ZNSt")
         })
+        .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_system_symbol(s))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();

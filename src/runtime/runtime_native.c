@@ -26,6 +26,93 @@
 #include <unistd.h>
 #include <sys/types.h>
 
+#define RT_VALUE_TAG_MASK 0x7ULL
+#define RT_VALUE_TAG_INT 0x0ULL
+#define RT_VALUE_TAG_HEAP 0x1ULL
+#define RT_VALUE_TAG_SPECIAL 0x3ULL
+#define RT_VALUE_SPECIAL_NIL 0x0ULL
+#define RT_VALUE_SPECIAL_TRUE 0x1ULL
+#define RT_VALUE_SPECIAL_FALSE 0x2ULL
+#define RT_VALUE_HEAP_STRING 0x53545231U
+
+typedef struct RtCoreString {
+    uint32_t kind;
+    uint32_t reserved;
+    uint64_t len;
+    char data[];
+} RtCoreString;
+
+static inline int64_t rt_core_from_special(uint64_t payload) {
+    return (int64_t)((payload << 3) | RT_VALUE_TAG_SPECIAL);
+}
+
+static inline int64_t rt_core_nil(void) {
+    return rt_core_from_special(RT_VALUE_SPECIAL_NIL);
+}
+
+static inline int rt_core_is_int(int64_t value) {
+    return (((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_INT;
+}
+
+static inline int rt_core_is_heap(int64_t value) {
+    return (((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP;
+}
+
+static inline int rt_core_is_special(int64_t value) {
+    return (((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_SPECIAL;
+}
+
+static inline int64_t rt_core_as_int(int64_t value) {
+    return value >> 3;
+}
+
+static inline uint64_t rt_core_special_payload(int64_t value) {
+    return ((uint64_t)value) >> 3;
+}
+
+static inline RtCoreString* rt_core_as_string(int64_t value) {
+    if (!rt_core_is_heap(value)) return NULL;
+    RtCoreString* s = (RtCoreString*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!s || s->kind != RT_VALUE_HEAP_STRING) return NULL;
+    return s;
+}
+
+static void rt_core_write_bytes(FILE* stream, const uint8_t* ptr, uint64_t len) {
+    if (!ptr || len == 0) return;
+    fwrite(ptr, 1, (size_t)len, stream);
+}
+
+static void rt_core_print_value_to(FILE* stream, int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) {
+        rt_core_write_bytes(stream, (const uint8_t*)s->data, s->len);
+        return;
+    }
+
+    if (rt_core_is_int(value)) {
+        fprintf(stream, "%lld", (long long)rt_core_as_int(value));
+        return;
+    }
+
+    if (rt_core_is_special(value)) {
+        switch (rt_core_special_payload(value)) {
+            case RT_VALUE_SPECIAL_NIL:
+                return;
+            case RT_VALUE_SPECIAL_TRUE:
+                fputs("true", stream);
+                return;
+            case RT_VALUE_SPECIAL_FALSE:
+                fputs("false", stream);
+                return;
+            default:
+                fprintf(stream, "<special:%llu>", (unsigned long long)rt_core_special_payload(value));
+                return;
+        }
+    }
+
+    fprintf(stream, "<value:0x%llx>", (unsigned long long)(uint64_t)value);
+}
+
 /* ================================================================
  * I/O Operations
  * ================================================================ */
@@ -68,6 +155,87 @@ int64_t rt_stdout_write_text(const char* s) {
 
 void rt_stdout_flush(void) {
     fflush(stdout);
+}
+
+int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
+    if (!bytes && len > 0) return rt_core_nil();
+
+    RtCoreString* s = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)len + 1);
+    if (!s) return rt_core_nil();
+    s->kind = RT_VALUE_HEAP_STRING;
+    s->reserved = 0;
+    s->len = len;
+    if (len > 0 && bytes) {
+        memcpy(s->data, bytes, (size_t)len);
+    }
+    s->data[len] = '\0';
+    return (int64_t)(((uint64_t)(uintptr_t)s) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_string_len(int64_t string) {
+    RtCoreString* s = rt_core_as_string(string);
+    return s ? (int64_t)s->len : -1;
+}
+
+const uint8_t* rt_string_data(int64_t string) {
+    RtCoreString* s = rt_core_as_string(string);
+    return s ? (const uint8_t*)s->data : NULL;
+}
+
+void rt_print_str(const uint8_t* ptr, uint64_t len) {
+    rt_core_write_bytes(stdout, ptr, len);
+    fflush(stdout);
+}
+
+void rt_println_str(const uint8_t* ptr, uint64_t len) {
+    rt_print_str(ptr, len);
+    fputc('\n', stdout);
+    fflush(stdout);
+}
+
+void rt_eprint_str(const uint8_t* ptr, uint64_t len) {
+    rt_core_write_bytes(stderr, ptr, len);
+    fflush(stderr);
+}
+
+void rt_eprintln_str(const uint8_t* ptr, uint64_t len) {
+    rt_eprint_str(ptr, len);
+    fputc('\n', stderr);
+    fflush(stderr);
+}
+
+void rt_print_value(int64_t value) {
+    rt_core_print_value_to(stdout, value);
+    fflush(stdout);
+}
+
+void rt_println_value(int64_t value) {
+    rt_core_print_value_to(stdout, value);
+    fputc('\n', stdout);
+    fflush(stdout);
+}
+
+void rt_eprint_value(int64_t value) {
+    rt_core_print_value_to(stderr, value);
+    fflush(stderr);
+}
+
+void rt_eprintln_value(int64_t value) {
+    rt_core_print_value_to(stderr, value);
+    fputc('\n', stderr);
+    fflush(stderr);
+}
+
+void rt_set_args(int argc, char** argv) {
+    spl_init_args(argc, argv);
+}
+
+int32_t rt_get_argc(void) {
+    return (int32_t)spl_arg_count();
+}
+
+SplArray* rt_get_args(void) {
+    return rt_cli_get_args();
 }
 
 /* ================================================================
