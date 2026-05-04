@@ -14,6 +14,8 @@ use lazy app.compile.native.{compile_native}
 use compiler.driver.driver_types.{CompileOptions, CompileMode, CompileResult, OutputFormat}
 use compiler.common.driver_core_types.{compileoptions_normalize_mir_optimization}
 use compiler.mir_opt.{mir_optimization_inventory_lines}
+use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default}
+use app.build.build_cli.{parse_build_driver_flags, build_driver_flags_to_target_opt_ctx}
 
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 extern fn rt_native_build(args: [text]) -> i64
@@ -61,7 +63,7 @@ fn cli_print_shared_optimization_inventory(command: text):
         print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
 
 # Pure Simple compiler implementation (no Rust FFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, target_opt_ctx: TargetOptContext) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -103,6 +105,7 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
         options.opt_level = opt_level
     if backend != "" and backend != "auto":
         options.backend = backend
+    options.target_opt_ctx = target_opt_ctx
     options = compileoptions_normalize_mir_optimization(options)
 
     val driver = CompilerDriver.create(options)
@@ -134,7 +137,7 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         source_file.replace(".spl", ".lsm")
     val smf_out = out + ".smf.tmp"
 
-    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev")
+    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev", target_opt_context_default())
     if compile_status != 0:
         return compile_status
 
@@ -207,6 +210,9 @@ fn cli_compile(args: [text]) -> i64:
         return opt_level_validation
     if not cli_compile_uses_simple_driver(args):
         return cli_compile_via_runtime(args)
+
+    val _driver_flags = parse_build_driver_flags(args)
+    val _compile_target_opt_ctx = build_driver_flags_to_target_opt_ctx(_driver_flags)
 
     var source_file: text = ""
     var output_file: text = ""
@@ -447,7 +453,7 @@ fn cli_compile(args: [text]) -> i64:
             out = source_file.replace(".spl", "")
         # Use Pure Simple compiler driver for all LLVM backends
         if backend == "llvm-lib" or backend == "llvmlib":
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile)
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx)
         return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
@@ -469,7 +475,7 @@ fn cli_compile(args: [text]) -> i64:
         return cli_compile_via_runtime(args)
 
     # Use Pure Simple compiler driver for all compilation
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:
@@ -993,6 +999,9 @@ fn cli_native_build(args: [text]) -> i64:
             release = true
             opt_level = cli_native_default_opt_level()
 
+        val _nb_driver_flags = parse_build_driver_flags(args)
+        val _nb_target_opt_ctx = build_driver_flags_to_target_opt_ctx(_nb_driver_flags)
+
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
             use compiler.driver.driver_types.{CompileOptions, CompileMode, OutputFormat}
@@ -1005,6 +1014,7 @@ fn cli_native_build(args: [text]) -> i64:
             options.backend = "llvm-lib"
             options.release = release
             options.opt_level = opt_level
+            options.target_opt_ctx = _nb_target_opt_ctx
             options = compileoptions_normalize_mir_optimization(options)
             val driver = CompilerDriver.create(options)
             CompilerDriver.run_compile(driver)
