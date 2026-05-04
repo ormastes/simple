@@ -240,7 +240,7 @@ Remove the temporary explicit hosted packaging commands and ship MCP/LSP artifac
 
 ### Current State
 
-- package docs explicitly note that MCP/LSP package builds still use `--runtime-bundle rust-hosted`
+- MCP/LSP package docs now use core-C package build commands instead of explicit `rust-hosted` commands.
 - registry launchers and wrappers already expect wrapper/native-first distribution
 
 ### Deliverables
@@ -283,6 +283,15 @@ Remove the temporary explicit hosted packaging commands and ship MCP/LSP artifac
 - packaged binaries respond to `initialize` and `tools/list`
 - package closure audit confirms no hosted runtime artifacts
 - npm or registry wrapper smoke remains green with downloaded package contents
+
+### Progress 2026-05-04
+
+- Package-shape app-only builds now succeed on `core-c`:
+  - `bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/mcp/main.spl --strip --output /tmp/simple_mcp_core_c_app_probe`
+  - `bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output /tmp/simple_lsp_mcp_core_c_app_probe`
+- App-only MCP and Simple LSP MCP binaries pass initialize + tools/list smoke on `core-c`; MCP includes `debug_create_session`, `simple_check`, and `test_daemon_status`, and Simple LSP MCP includes `lsp_definition`.
+- Closure audit on those app-only core-C binaries found no `libsimple_native_all.a`, `rust-hosted`, or unwind strings/symbols.
+- `doc/07_guide/tooling/mcp.md` now documents core-C package validation commands for MCP/LSP instead of `rust-hosted`.
 
 ## Sequencing
 

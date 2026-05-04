@@ -286,6 +286,7 @@ char*    spl_sprintf(const char* fmt, ...);
 
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
+SplArray* rt_process_run(const char* cmd, SplArray* args);
 
 /* ===== Process Async ===== */
 

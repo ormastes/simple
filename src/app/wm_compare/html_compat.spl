@@ -41,11 +41,6 @@ extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 # portable across stages.
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-use os.compositor.screenshot_compare.{
-    ComparisonResult, compare_exact, generate_diff_image}
-use os.compositor.perceptual_compare.{PerceptualResult, compare_perceptual}
-use os.compositor.tolerance_profile.{
-    ToleranceProfile, profile_strict, profile_text_tolerant}
 # NOTE: We do NOT use std.common.image.ppm_decode here. Its
 # `decode_ppm_to_argb` calls `data.len().to_i32()`, which crashes under
 # the bootstrap interpreter ("method `to_i32` not found on type i64").
@@ -71,6 +66,89 @@ fn capture_error(backend_name: text, width: i32, height: i32, error: text) -> Ca
         success: false,
         error: error
     )
+
+struct ComparisonResult:
+    different_pixels: i64
+    match_percentage: i64
+    max_channel_diff: i32
+
+struct PerceptualResult:
+    match_percentage: i64
+
+struct ToleranceProfile:
+    default_yiq_threshold: i32
+
+fn profile_strict() -> ToleranceProfile:
+    ToleranceProfile(default_yiq_threshold: 0)
+
+fn profile_text_tolerant() -> ToleranceProfile:
+    ToleranceProfile(default_yiq_threshold: 16)
+
+fn _abs_i32(v: i32) -> i32:
+    if v < 0: -v else: v
+
+fn _channel_diff(a: u32, b: u32, shift: i32) -> i32:
+    val av = ((a >> shift) & 0xFF) as i32
+    val bv = ((b >> shift) & 0xFF) as i32
+    _abs_i32(av - bv)
+
+fn _max_rgb_diff(a: u32, b: u32) -> i32:
+    val rd = _channel_diff(a, b, 16)
+    val gd = _channel_diff(a, b, 8)
+    val bd = _channel_diff(a, b, 0)
+    var m = rd
+    if gd > m:
+        m = gd
+    if bd > m:
+        m = bd
+    m
+
+fn compare_exact(a: [u32], b: [u32], width: i32, height: i32) -> ComparisonResult:
+    val total = width * height
+    var different: i64 = 0
+    var max_diff: i32 = 0
+    var i = 0
+    while i < total and i < a.len() and i < b.len():
+        if a[i] != b[i]:
+            different = different + 1
+            val d = _max_rgb_diff(a[i], b[i])
+            if d > max_diff:
+                max_diff = d
+        i = i + 1
+    if a.len() != b.len():
+        different = total as i64
+        max_diff = 255
+    val same = (total as i64) - different
+    val pct = if total > 0: (same * 10000) / (total as i64) else: 0
+    ComparisonResult(
+        different_pixels: different,
+        match_percentage: pct,
+        max_channel_diff: max_diff
+    )
+
+fn compare_perceptual(a: [u32], b: [u32], width: i32, height: i32,
+                      threshold: i32, _include_alpha: bool) -> PerceptualResult:
+    val total = width * height
+    var matched: i64 = 0
+    var i = 0
+    while i < total and i < a.len() and i < b.len():
+        if _max_rgb_diff(a[i], b[i]) <= threshold:
+            matched = matched + 1
+        i = i + 1
+    val pct = if total > 0: (matched * 10000) / (total as i64) else: 0
+    PerceptualResult(match_percentage: pct)
+
+fn generate_diff_image(a: [u32], b: [u32], width: i32, height: i32) -> [u32]:
+    val total = width * height
+    var pixels: [u32] = []
+    var i = 0
+    while i < total:
+        if i < a.len() and i < b.len() and a[i] == b[i]:
+            pixels = pixels + [0xFF00AA00u32]
+        else:
+            pixels = pixels + [0xFFFF0000u32]
+        i = i + 1
+    pixels
 
 # ============================================================================
 # Fixture Catalog

@@ -475,75 +475,55 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("SimpleOS target: cc subprocess fallback unsupported (check sysroot + CRT files)")
     # Fallback: use cc (gcc/clang) for linking
     debug("linker", "link_native_cc: fallback linking with cc")
-    var args: [text] = []
-    for obj in object_files:
-        args = args.push(obj)
+    if object_files.len() == 0:
+        return Err("cc fallback requires at least one object file")
+    val obj0 = object_files[0]
 
-    # Library paths
-    for lp in config.library_paths:
-        args = args.push("-L" + lp)
-
-    # Auto-detect runtime library
-    # "none" means skip runtime library entirely (e.g., LLVM pipeline provides runtime objects directly)
-    var runtime_dir = config.runtime_path
-    if runtime_dir == "":
-        runtime_dir = find_runtime_lib_dir()
-    if runtime_dir != "" and runtime_dir != "none":
-        args = args.push("-L" + runtime_dir)
-        args = args.push("-lsimple_compiler")
-        args = args.push("-Wl,-rpath," + runtime_dir)
-
-    # Standard libraries (OS-aware; no -lgcc_s — clang provides compiler-rt)
+    # Bootstrap-safe fixed argument vectors. Dynamic push from an empty array
+    # can trigger rt_array_push_grow crashes in stage1-generated compilers.
     val os_name = host_os()
     if os_name == "macos" or os_name == "darwin":
-        args = args.push("-lc")
-        args = args.push("-lpthread")
-        args = args.push("-lm")
-        args = args.push("-lSystem")
-        args = args.push("-lSDL2")
-    elif os_name == "freebsd":
-        args = args.push("-lc")
-        args = args.push("-lpthread")
-        args = args.push("-lm")
-        args = args.push("-lSDL2")
-    else:
-        args = args.push("-lc")
-        args = args.push("-lpthread")
-        args = args.push("-ldl")
-        args = args.push("-lm")
-        args = args.push("-lSDL2")
-
-    for flag in unresolved_symbol_flags_for_cc(os_name):
-        args = args.push(flag)
-
-    # Libraries from config
-    for lib in config.libraries:
-        args = args.push("-l" + lib)
-
-    # Dead code elimination + deduplication (per-platform, via cc -Wl,)
-    if os_name == "macos" or os_name == "darwin":
-        args = args.push("-Wl,-dead_strip")
-    else:
-        args = args.push("-Wl,--gc-sections")
-        # ICF (identical code folding) — safe mode works with ld.bfd/lld/mold via cc driver
-        args = args.push("-Wl,--icf=safe")
-
-    # Extra flags
-    for flag in config.extra_flags:
-        args = args.push(flag)
-
-    args = args.push("-o")
-    args = args.push(output)
-
-    if config.verbose:
-        print "[linker-wrapper] cc fallback via process_run"
-
-    val (stdout, stderr, code) = process_run("cc", args)
-    if code == 0:
-        Ok(output)
-    else:
+        val args = [
+            obj0,
+            "-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2",
+            "-Wl,-dead_strip",
+            "-o", output
+        ]
+        val (stdout, stderr, code) = process_run("cc", args)
+        if code == 0:
+            return Ok(output)
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
-        Err("cc linking failed: {err_msg}")
+        return Err("cc linking failed: {err_msg}")
+    elif os_name == "freebsd":
+        val args = [
+            obj0,
+            "-lc", "-lpthread", "-lm", "-lSDL2",
+            "-Wl,--allow-multiple-definition",
+            "-Wl,--unresolved-symbols=ignore-all",
+            "-Wl,--gc-sections",
+            "-o", output
+        ]
+        val (stdout, stderr, code) = process_run("cc", args)
+        if code == 0:
+            return Ok(output)
+        val err_msg = if stderr != "": stderr else: "Unknown linking error"
+        return Err("cc linking failed: {err_msg}")
+    else:
+        val args = [
+            "-fuse-ld=lld",
+            obj0,
+            "-lc", "-lpthread", "-ldl", "-lm", "-lSDL2",
+            "-Wl,--allow-multiple-definition",
+            "-Wl,--unresolved-symbols=ignore-all",
+            "-Wl,--gc-sections",
+            "-Wl,--icf=safe",
+            "-o", output
+        ]
+        val (stdout, stderr, code) = process_run("cc", args)
+        if code == 0:
+            return Ok(output)
+        val err_msg = if stderr != "": stderr else: "Unknown linking error"
+        return Err("cc linking failed: {err_msg}")
 
 fn _is_mingw_env() -> bool:
     """Check if running under MinGW/MSYS2.

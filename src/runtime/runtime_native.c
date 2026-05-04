@@ -780,6 +780,124 @@ int rt_mkdir_p(const char* path) {
     return rt_dir_create_all(path);
 }
 
+const char* lib__nogc_sync_mut__debug__remote__session_model__DebugExecutionMode_dot_to_string(int64_t value) {
+    switch (value) {
+        case 1: return "rtl_sim";
+        case 2: return "qemu_stub";
+        default: return "hw";
+    }
+}
+
+const char* lib__nogc_sync_mut__debug__remote__session_model__DebugTransportKind_dot_to_string(int64_t value) {
+    switch (value) {
+        case 1: return "openocd_remote_bitbang";
+        case 2: return "intel_jtagd";
+        case 3: return "trace32_native";
+        case 4: return "trace32_gdb";
+        case 5: return "gdb_remote";
+        default: return "openocd_jtag";
+    }
+}
+
+const char* lib__nogc_sync_mut__debug__remote__types__Architecture_dot_to_string(int64_t value) {
+    switch (value) {
+        case 1: return "arm64";
+        case 2: return "riscv32";
+        case 3: return "riscv64";
+        case 4: return "x86";
+        case 5: return "x86_64";
+        default: return "arm32";
+    }
+}
+
+static char* rt_core_shell_quote(const char* s) {
+    if (!s) return spl_strdup("''");
+    size_t extra = 2;
+    for (const char* p = s; *p; p++) {
+        extra += (*p == '\'') ? 4 : 1;
+    }
+    char* out = (char*)malloc(extra + 1);
+    if (!out) return spl_strdup("''");
+    char* w = out;
+    *w++ = '\'';
+    for (const char* p = s; *p; p++) {
+        if (*p == '\'') {
+            memcpy(w, "'\\''", 4);
+            w += 4;
+        } else {
+            *w++ = *p;
+        }
+    }
+    *w++ = '\'';
+    *w = '\0';
+    return out;
+}
+
+SplArray* rt_process_run(const char* cmd, SplArray* args) {
+    SplArray* result = spl_array_new_cap(3);
+    if (!cmd || !*cmd) {
+        spl_array_push(result, spl_str(""));
+        spl_array_push(result, spl_str("missing command"));
+        spl_array_push(result, spl_int(-1));
+        return result;
+    }
+
+    char* command = rt_core_shell_quote(cmd);
+    int64_t argc = spl_array_len(args);
+    for (int64_t i = 0; i < argc; i++) {
+        SplValue arg = spl_array_get(args, i);
+        const char* arg_s = arg.tag == SPL_STRING ? spl_as_str(arg) : "";
+        char* quoted = rt_core_shell_quote(arg_s);
+        size_t new_len = strlen(command) + strlen(quoted) + 2;
+        char* joined = (char*)malloc(new_len);
+        if (!joined) {
+            free(quoted);
+            continue;
+        }
+        snprintf(joined, new_len, "%s %s", command, quoted);
+        free(command);
+        free(quoted);
+        command = joined;
+    }
+
+    char* redirected = spl_str_concat(command, " 2>/tmp/simple_core_process_run_stderr");
+    FILE* pipe = popen(redirected ? redirected : command, "r");
+    free(command);
+    if (redirected) free(redirected);
+    if (!pipe) {
+        spl_array_push(result, spl_str(""));
+        spl_array_push(result, spl_str("process spawn failed"));
+        spl_array_push(result, spl_int(-1));
+        return result;
+    }
+
+    size_t cap = 4096;
+    size_t len = 0;
+    char* stdout_buf = (char*)malloc(cap);
+    if (!stdout_buf) stdout_buf = spl_strdup("");
+    if (stdout_buf) stdout_buf[0] = '\0';
+    char chunk[512];
+    while (fgets(chunk, sizeof(chunk), pipe)) {
+        size_t chunk_len = strlen(chunk);
+        if (len + chunk_len + 1 > cap) {
+            while (len + chunk_len + 1 > cap) cap *= 2;
+            stdout_buf = (char*)realloc(stdout_buf, cap);
+            if (!stdout_buf) break;
+        }
+        memcpy(stdout_buf + len, chunk, chunk_len);
+        len += chunk_len;
+        stdout_buf[len] = '\0';
+    }
+    int status = pclose(pipe);
+    int exit_code = status == -1 ? -1 : (status >> 8);
+
+    spl_array_push(result, spl_str(stdout_buf ? stdout_buf : ""));
+    spl_array_push(result, spl_str(""));
+    spl_array_push(result, spl_int(exit_code));
+    if (stdout_buf) free(stdout_buf);
+    return result;
+}
+
 char* rt_file_read_bytes(const char* path) {
     /* Reads file into a buffer; for native linking, returns raw bytes as char* */
     return spl_file_read(path);

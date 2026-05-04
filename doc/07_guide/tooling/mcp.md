@@ -112,16 +112,17 @@ If schema validation fails:
    SIMPLE_LIB=src bin/simple test test/integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
    ```
 
-5. If the npm package or registry wrapper changed, also run:
+5. If the npm package or registry wrapper changed, also run the core-lane
+   package builds and smoke the produced binaries:
 
    ```bash
-   bin/simple native-build --runtime-bundle rust-hosted --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
-   bin/simple native-build --runtime-bundle rust-hosted --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
+   bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
+   bin/simple native-build --runtime-bundle core-c --source src/app --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
+   scripts/check-mcp-native-smoke.shs
    ```
 
-   These packaging builds are a temporary explicit hosted lane while MCP/LSP is
-   still being ported off `rust-hosted`. Do not treat that lane as the default
-   runtime selection for non-compiler apps.
+   The package binaries must stay on a core lane. Do not use
+   `--runtime-bundle rust-hosted` for MCP/LSP package validation.
 
 Do not publish npm, registry metadata, or plugin bundles while either
 `*_json_valid` or `*_schema_valid` is false.

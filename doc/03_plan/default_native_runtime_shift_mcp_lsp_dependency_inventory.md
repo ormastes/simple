@@ -77,5 +77,8 @@ These are needed after startup for normal tool calls. They can be ported after s
 - Full Simple LSP MCP with `--source src/compiler --source src/app --source src/lib` now links on `core-c`; the build still generates internal Simple stubs, so it is not yet a package-closure PASS.
 - Full MCP with `--source src/compiler --source src/app --source src/lib` now links on `core-c`; it also generates internal Simple stubs, so it is not yet a package-closure PASS.
 - Full Simple LSP MCP now passes a two-message framed initialize + tools/list smoke on `core-c`: two `Content-Length` responses, id `2` present, and real LSP tool names including `lsp_definition` and `lsp_type_definition`.
-- Full MCP JSON-lines initialize + tools/list smoke is non-crashing on `core-c`, but `tools/list` still returns `{"tools":[]}` because the large tool table accumulation path is not core-lane safe yet.
-- Full package parity still requires removing generated unresolved-symbol stubs and making the MCP tool table produce real tool schemas on the core lane.
+- App-only MCP and Simple LSP MCP package-shape builds now succeed on `core-c` with `--source src/app --entry-closure`; this avoids pulling the broader compiler/lib source roots into the package closure.
+- App-only MCP JSON-lines initialize + tools/list smoke passes on `core-c`; `tools/list` includes real static tool schemas such as `debug_create_session`, `simple_check`, and `test_daemon_status`.
+- App-only Simple LSP MCP framed initialize + tools/list smoke passes on `core-c`; `tools/list` includes real LSP tool schemas such as `lsp_definition`.
+- Closure audit for the app-only MCP and Simple LSP MCP core-C binaries found no `libsimple_native_all.a`, `rust-hosted`, or unwind symbols/strings.
+- The native linker still emits its generic `_stubs.o` allowlist, but app-only builds no longer report direct unresolved internal/runtime symbols in the package probes.
