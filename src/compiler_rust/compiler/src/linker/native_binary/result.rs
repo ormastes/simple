@@ -365,7 +365,7 @@ mod tests {
         assert!(libs.contains(&"m".to_string()));
         assert!(libs.contains(&"gcc_s".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
-        assert!(libs.contains(&"simple_native_all".to_string()));
+        assert!(!libs.contains(&"simple_native_all".to_string()));
         assert!(!libs.contains(&"lzma".to_string()));
     }
 
@@ -375,7 +375,7 @@ mod tests {
         let libs = NativeBinaryOptions::default_libraries_for_target(&target);
         assert!(libs.contains(&"System".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
-        assert!(libs.contains(&"simple_native_all".to_string()));
+        assert!(!libs.contains(&"simple_native_all".to_string()));
         assert!(!libs.contains(&"c".to_string()));
         assert!(!libs.contains(&"pthread".to_string()));
         assert!(!libs.contains(&"dl".to_string()));
@@ -391,7 +391,7 @@ mod tests {
         assert!(libs.contains(&"ws2_32".to_string()));
         assert!(libs.contains(&"advapi32".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
-        assert!(libs.contains(&"simple_native_all".to_string()));
+        assert!(!libs.contains(&"simple_native_all".to_string()));
     }
 
     #[test]
@@ -403,7 +403,7 @@ mod tests {
         assert!(libs.contains(&"m".to_string()));
         assert!(libs.contains(&"execinfo".to_string()));
         assert!(libs.contains(&"simple_runtime".to_string()));
-        assert!(libs.contains(&"simple_native_all".to_string()));
+        assert!(!libs.contains(&"simple_native_all".to_string()));
     }
 
     #[test]

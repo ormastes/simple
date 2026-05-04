@@ -23,7 +23,8 @@ use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder}
 use compiler.backend.mir_to_llvm.{MirToLlvm}
-use compiler.mir_opt.mod.{optimize_module, OptLevel}
+use compiler.mir_opt.mod.{optimize_module, optimize_module_with_context, TargetOptContext, target_opt_context_default, OptLevel}
+use compiler.backend.feature_caps.{X86Caps}
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
@@ -63,17 +64,19 @@ class LlvmBackend:
     emit_assembly: bool
     debug_info: bool
     bare_metal: bool           # Bare-metal mode (no OS, no stdlib)
+    target_opt_ctx: TargetOptContext
 
     static fn create(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
         """Create backend with default CPU selection (x86-64-v3 for x86_64)."""
         LlvmBackend(
             target: target,
             opt_level: opt_level,
-            cpu_override: nil,  # Auto-select based on target
+            cpu_override: nil,
             emit_llvm_ir: false,
             emit_assembly: false,
             debug_info: false,
-            bare_metal: false
+            bare_metal: false,
+            target_opt_ctx: target_opt_context_default()
         )
 
     static fn create_baremetal(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
@@ -95,8 +98,9 @@ class LlvmBackend:
             cpu_override: nil,
             emit_llvm_ir: false,
             emit_assembly: false,
-            debug_info: true,    # Enable debug info for bare-metal (helps with GDB)
-            bare_metal: true
+            debug_info: true,
+            bare_metal: true,
+            target_opt_ctx: target_opt_context_default()
         )
 
     static fn compatibility_build(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
@@ -122,7 +126,8 @@ class LlvmBackend:
             emit_llvm_ir: false,
             emit_assembly: false,
             debug_info: false,
-            bare_metal: false
+            bare_metal: false,
+            target_opt_ctx: target_opt_context_default()
         )
 
     static fn create_wasm(opt_level: OptimizationLevel) -> LlvmBackend:
@@ -138,7 +143,8 @@ class LlvmBackend:
             emit_llvm_ir: false,
             emit_assembly: false,
             debug_info: false,
-            bare_metal: false
+            bare_metal: false,
+            target_opt_ctx: target_opt_context_default()
         )
 
     static fn default_backend() -> LlvmBackend:
@@ -189,6 +195,18 @@ class LlvmBackend:
             debug_info: true
         )
 
+    fn with_target_opt_ctx(ctx: TargetOptContext) -> LlvmBackend:
+        LlvmBackend(
+            target: self.target,
+            opt_level: self.opt_level,
+            cpu_override: self.cpu_override,
+            emit_llvm_ir: self.emit_llvm_ir,
+            emit_assembly: self.emit_assembly,
+            debug_info: self.debug_info,
+            bare_metal: self.bare_metal,
+            target_opt_ctx: ctx
+        )
+
     fn get_target_config() -> LlvmTargetConfig:
         """Get effective target configuration."""
         if self.bare_metal:
@@ -220,9 +238,9 @@ class LlvmBackend:
         """
         val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Wasm32, self.cpu_override)
 
-        # Run MIR optimization passes
+        # Run MIR optimization passes (with target capabilities for cipher intrinsics)
         val mir_opt_level = to_mir_opt_level(self.opt_level)
-        var optimized_module = optimize_module(module, mir_opt_level)
+        var optimized_module = optimize_module_with_context(module, mir_opt_level, self.target_opt_ctx)
 
         # Translate MIR to LLVM IR
         var translator = MirToLlvm.create(optimized_module.name, CodegenTarget.Wasm32, self.cpu_override)
@@ -245,9 +263,9 @@ class LlvmBackend:
         else:
             LlvmTargetConfig.for_target_portable_numeric(self.target, self.cpu_override)
 
-        # Run MIR optimization passes before LLVM IR emission
+        # Run MIR optimization passes before LLVM IR emission (with target capabilities)
         val mir_opt_level = to_mir_opt_level(self.opt_level)
-        var optimized_module = optimize_module(module, mir_opt_level)
+        var optimized_module = optimize_module_with_context(module, mir_opt_level, self.target_opt_ctx)
 
         # Translate MIR to LLVM IR
         var translator = if self.bare_metal:

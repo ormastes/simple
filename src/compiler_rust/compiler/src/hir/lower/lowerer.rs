@@ -246,17 +246,11 @@ impl Lowerer {
     /// Set global struct definitions for cross-module field resolution.
     /// The type resolver uses these to look up field indices when the struct type
     /// isn't in the per-file registry.
-    pub fn set_global_struct_defs(
-        &mut self,
-        defs: GlobalStructDefs,
-    ) {
+    pub fn set_global_struct_defs(&mut self, defs: GlobalStructDefs) {
         self.global_struct_defs = Some(defs);
     }
 
-    pub fn set_duplicate_global_struct_defs(
-        &mut self,
-        defs: DuplicateGlobalStructDefs,
-    ) {
+    pub fn set_duplicate_global_struct_defs(&mut self, defs: DuplicateGlobalStructDefs) {
         self.duplicate_global_struct_defs = Some(defs);
     }
 
@@ -284,10 +278,7 @@ impl Lowerer {
     /// W15-H: paired with `register_global_enums()`, which the
     /// `native_project` compiler driver calls before `lower_module(&ast)`.
     /// See the doc comment on `global_enum_defs` for the why.
-    pub fn set_global_enum_defs(
-        &mut self,
-        defs: GlobalEnumDefs,
-    ) {
+    pub fn set_global_enum_defs(&mut self, defs: GlobalEnumDefs) {
         self.global_enum_defs = Some(defs);
     }
 

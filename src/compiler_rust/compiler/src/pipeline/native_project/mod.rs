@@ -392,7 +392,7 @@ impl NativeProjectBuilder {
             return Err("No .spl files found in source directories".to_string());
         }
         if self.config.verbose {
-            eprintln!("Found {} .spl files", files.len());
+            eprintln!("Found {0} .spl files", files.len());
         }
 
         // 2. Set up incremental state
@@ -401,7 +401,10 @@ impl NativeProjectBuilder {
 
         if self.config.clean {
             if self.config.verbose {
-                eprintln!("Clean build: removing cache at {}", cache_dir.display());
+                eprintln!(
+                    "Clean build: removing cache at {cache_dir_display}",
+                    cache_dir_display = cache_dir.display()
+                );
             }
             let _ = std::fs::remove_dir_all(&cache_dir);
         }
@@ -475,14 +478,14 @@ impl NativeProjectBuilder {
 
         let cached_count = cached_objects.len();
         if self.config.verbose && use_incremental {
-            eprintln!("Incremental: {} cached, {} to compile", cached_count, to_compile.len());
+            eprintln!("Incremental: {cached_count} cached, {} to compile", to_compile.len());
         }
 
         // Canonicalize the entry file path for comparison during compilation
         let canonical_entry: Option<PathBuf> = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
         if self.config.verbose {
             match &canonical_entry {
-                Some(p) => eprintln!("Canonical entry: {}", p.display()),
+                Some(p) => eprintln!("Canonical entry: {entry_display}", entry_display = p.display()),
                 None => eprintln!("Canonical entry: <none>"),
             }
         }
@@ -499,12 +502,12 @@ impl NativeProjectBuilder {
                 );
                 if let Ok(symbol) = std::env::var("SIMPLE_DEBUG_IMPORT_SYMBOL") {
                     if let Some(candidates) = result.all_mangled.get(&symbol) {
-                        eprintln!("Import candidates for {}:", symbol);
+                        eprintln!("Import candidates for {symbol}:");
                         for candidate in candidates {
-                            eprintln!("  {}", candidate);
+                            eprintln!("  {candidate}");
                         }
                     } else {
-                        eprintln!("Import candidates for {}: <none>", symbol);
+                        eprintln!("Import candidates for {symbol}: <none>");
                     }
                 }
             }
@@ -563,7 +566,7 @@ impl NativeProjectBuilder {
 
         // Always log individual failures when present (bootstrap visibility).
         if failed > 0 {
-            eprintln!("\nFAILED FILES ({}):", failed);
+            eprintln!("\nFAILED FILES ({failed}):");
             for (path, msg) in &failures {
                 eprintln!("  - {} => {}", path.display(), msg);
             }
@@ -620,7 +623,7 @@ impl NativeProjectBuilder {
                 ));
             }
 
-            eprintln!("\nWarning: {} non-critical file(s) failed to compile (skipped)", failed);
+            eprintln!("\nWarning: {failed} non-critical file(s) failed to compile (skipped)");
         }
 
         if self.config.verbose {
@@ -683,11 +686,11 @@ impl NativeProjectBuilder {
                 ));
             }
 
-            eprintln!("\nWarning: {} non-critical file(s) failed to compile (skipped)", failed);
+            eprintln!("\nWarning: {failed} non-critical file(s) failed to compile (skipped)");
         }
 
         if object_paths.is_empty() {
-            return Err(format!("All {} files failed to compile", files.len()));
+            return Err(format!("All {0} files failed to compile", files.len()));
         }
 
         // 6. Cache freshly compiled objects
@@ -719,7 +722,10 @@ impl NativeProjectBuilder {
         if let Err(e) = link_result {
             if let Some(dir) = temp_dir.take() {
                 let path = dir.keep();
-                eprintln!("Link failed. Objects kept at: {}", path.display());
+                eprintln!(
+                    "Link failed. Objects kept at: {path_display}",
+                    path_display = path.display()
+                );
             }
             return Err(e);
         }
@@ -728,7 +734,10 @@ impl NativeProjectBuilder {
         if std::env::var("SIMPLE_KEEP_NATIVE_OBJS").is_ok() {
             if let Some(dir) = temp_dir.take() {
                 let path = dir.keep();
-                eprintln!("Keeping native object files in {}", path.display());
+                eprintln!(
+                    "Keeping native object files in {path_display}",
+                    path_display = path.display()
+                );
             }
         }
 

@@ -152,11 +152,14 @@ pub fn handle_constructor_methods(
             );
         }
         eprintln!(
-            "[debug static overload] {}.{} candidates={} arg_types={:?}",
+            "[debug static overload] {}.{} candidates={} arg_types={:?} all_methods={:?} generic_params={:?} is_generic_template={}",
             class_name,
             method,
             candidates.len(),
-            positional_values.iter().map(|v| v.type_name()).collect::<Vec<_>>()
+            positional_values.iter().map(|v| v.type_name()).collect::<Vec<_>>(),
+            class_def.methods.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+            class_def.generic_params,
+            class_def.is_generic_template
         );
         for candidate in &candidates {
             eprintln!(
