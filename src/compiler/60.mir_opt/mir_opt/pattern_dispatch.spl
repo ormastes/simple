@@ -14,7 +14,8 @@
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirOperand, MirOperandKind, MirConstValue, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mir_opt.pattern.rules_crypto.{lookup_rule_for_callee}
-use compiler.backend.feature_caps.{X86Caps, TargetIdiom, TargetCapsKind, caps_kind_supports, caps_kind_target_name}
+use compiler.backend.feature_caps.{X86Caps, TargetIdiom, TargetCapsKind, caps_kind_supports, caps_kind_target_name, caps_kind_cost}
+use compiler.mir_opt.mir_opt.pattern.cost_model.{should_rewrite_default}
 
 # ============================================================================
 # Stats record
@@ -85,6 +86,14 @@ fn idiom_for_intrinsic(name: text) -> TargetIdiom?:
         Some(TargetIdiom.ByteSwap)
     elif name == "bit_bitreverse":
         Some(TargetIdiom.BitReverse)
+    elif name == "bit_parity":
+        Some(TargetIdiom.Parity)
+    elif name == "crypto_sha512_rnds2":
+        Some(TargetIdiom.Sha512Rounds2)
+    elif name == "crypto_sha512_msg1":
+        Some(TargetIdiom.Sha512Msg1)
+    elif name == "crypto_sha512_msg2":
+        Some(TargetIdiom.Sha512Msg2)
     elif name == "crypto_clmul":
         Some(TargetIdiom.ClmulLo)
     elif name == "matrix_dot":
@@ -259,17 +268,19 @@ fn rewrite_block_generic(block: MirBlock, caps_kind: TargetCapsKind, stats: Patt
                         if maybe_idiom.?:
                             val idiom = maybe_idiom.unwrap()
                             if caps_kind_supports(caps_kind, idiom):
-                                var new_inst = MirInst(
-                                    kind: MirInstKind.Intrinsic(dest, rule.intrinsic, args),
-                                    span: inst.span
-                                )
-                                new_insts.push(new_inst)
-                                stats.cipher_hits = stats.cipher_hits + 1
-                                rewritten = true
-                                if stats.cipher_remark:
-                                    val r_name = rule.name
-                                    val r_intr = rule.intrinsic
-                                    print "[cipher] {callee} -> {r_intr} via {r_name} (target: {target_name})"
+                                val hw_cost = caps_kind_cost(caps_kind, idiom)
+                                if should_rewrite_default(hw_cost, rule.software_cost):
+                                    var new_inst = MirInst(
+                                        kind: MirInstKind.Intrinsic(dest, rule.intrinsic, args),
+                                        span: inst.span
+                                    )
+                                    new_insts.push(new_inst)
+                                    stats.cipher_hits = stats.cipher_hits + 1
+                                    rewritten = true
+                                    if stats.cipher_remark:
+                                        val r_name = rule.name
+                                        val r_intr = rule.intrinsic
+                                        print "[cipher] {callee} -> {r_intr} via {r_name} (target: {target_name})"
                 if not rewritten:
                     new_insts.push(inst)
             case _:

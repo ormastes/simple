@@ -97,6 +97,10 @@ pub(crate) fn find_native_all_library() -> Option<PathBuf> {
 /// Find the Simple runtime library.
 pub(crate) fn find_runtime_library() -> Option<PathBuf> {
     if let Some(dir) = RUNTIME_PATH_OVERRIDE.get() {
+        let deps_lib = dir.join("deps").join("libsimple_runtime.a");
+        if has_nonempty_archive_payload(&deps_lib) {
+            return Some(deps_lib);
+        }
         let lib = dir.join("libsimple_runtime.a");
         if has_nonempty_archive_payload(&lib) {
             return Some(lib);
@@ -112,6 +116,10 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
 
     if let Ok(path) = std::env::var("SIMPLE_RUNTIME_PATH") {
         let p = PathBuf::from(&path);
+        let deps_lib = p.join("deps").join("libsimple_runtime.a");
+        if has_nonempty_archive_payload(&deps_lib) {
+            return Some(deps_lib);
+        }
         let lib = p.join("libsimple_runtime.a");
         if has_nonempty_archive_payload(&lib) {
             return Some(lib);
@@ -123,6 +131,10 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            let deps_path = dir.join("deps").join("libsimple_runtime.a");
+            if has_nonempty_archive_payload(&deps_path) {
+                return Some(deps_path);
+            }
             let path = dir.join("libsimple_runtime.a");
             if has_nonempty_archive_payload(&path) {
                 return Some(path);
@@ -138,12 +150,12 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
     }
 
     let mut candidates: Vec<&str> = vec![
-        "src/compiler_rust/target/debug/libsimple_runtime.a",
         "src/compiler_rust/target/debug/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/release/libsimple_runtime.a",
+        "src/compiler_rust/target/debug/libsimple_runtime.a",
         "src/compiler_rust/target/release/deps/libsimple_runtime.a",
-        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
+        "src/compiler_rust/target/release/libsimple_runtime.a",
         "src/compiler_rust/target/bootstrap/deps/libsimple_runtime.a",
+        "src/compiler_rust/target/bootstrap/libsimple_runtime.a",
     ];
 
     #[cfg(target_os = "windows")]

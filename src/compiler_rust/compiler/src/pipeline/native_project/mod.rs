@@ -270,6 +270,7 @@ impl NativeProjectBuilder {
 
     /// Add a source directory to scan.
     /// Preserves the logical path so symlinked source roots keep their module prefix.
+    #[must_use]
     pub fn source_dir(mut self, dir: PathBuf) -> Self {
         let absolute = if dir.is_absolute() {
             dir
@@ -281,36 +282,42 @@ impl NativeProjectBuilder {
     }
 
     /// Set build configuration.
+    #[must_use]
     pub fn config(mut self, config: NativeBuildConfig) -> Self {
         self.config = config;
         self
     }
 
     /// Set verbose mode.
+    #[must_use]
     pub fn verbose(mut self, v: bool) -> Self {
         self.config.verbose = v;
         self
     }
 
     /// Set strip mode.
+    #[must_use]
     pub fn strip(mut self, s: bool) -> Self {
         self.config.strip = s;
         self
     }
 
     /// Set number of threads.
+    #[must_use]
     pub fn threads(mut self, n: usize) -> Self {
         self.config.num_threads = Some(n);
         self
     }
 
     /// Set per-file timeout.
+    #[must_use]
     pub fn timeout(mut self, secs: u64) -> Self {
         self.config.file_timeout = secs;
         self
     }
 
     /// Set the entry file whose `main` function becomes the program entry point (`spl_main`).
+    #[must_use]
     pub fn entry_file(mut self, path: PathBuf) -> Self {
         self.entry_file = Some(safe_canonicalize(&path));
         self

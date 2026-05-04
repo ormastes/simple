@@ -45,6 +45,12 @@ enum TargetIdiom:
     CountTrailingZeros
     ByteSwap
     BitReverse
+    # Parity (popcount mod 2)
+    Parity
+    # SHA-512
+    Sha512Rounds2
+    Sha512Msg1
+    Sha512Msg2
     # Matrix/vector micro-kernels
     MatrixDot
     MatrixOuterProduct
@@ -73,6 +79,10 @@ fn idiom_feature_class(idiom: TargetIdiom) -> TargetFeatureClass:
         case CountTrailingZeros:  TargetFeatureClass.BitManip
         case ByteSwap:            TargetFeatureClass.BitManip
         case BitReverse:          TargetFeatureClass.BitManip
+        case Parity:             TargetFeatureClass.BitManip
+        case Sha512Rounds2:      TargetFeatureClass.Crypto
+        case Sha512Msg1:         TargetFeatureClass.Crypto
+        case Sha512Msg2:         TargetFeatureClass.Crypto
         case MatrixDot:           TargetFeatureClass.Matrix
         case MatrixOuterProduct:  TargetFeatureClass.Matrix
         case MatrixFmaKernel:     TargetFeatureClass.Matrix
@@ -97,7 +107,7 @@ fn aarch64_supports_feature_class(caps: Aarch64Caps, class_: TargetFeatureClass)
         case FixedWidthSimd: caps.has_neon
         case ScalableSimd:   caps.has_sve2
         case BitManip:       caps.has_neon
-        case Crypto:         caps.has_aes or caps.has_sha2 or caps.has_pmull or caps.has_crc32
+        case Crypto:         caps.has_aes or caps.has_sha2 or caps.has_pmull or caps.has_crc32 or caps.has_sha512
         case Matrix:         caps.has_neon or caps.has_sve2
 
 fn rv64_supports_feature_class(caps: Rv64Caps, class_: TargetFeatureClass) -> bool:
@@ -106,7 +116,7 @@ fn rv64_supports_feature_class(caps: Rv64Caps, class_: TargetFeatureClass) -> bo
         case FixedWidthSimd: caps.has_v
         case ScalableSimd:   caps.has_v
         case BitManip:       caps.has_zbb or caps.has_zbkb
-        case Crypto:         caps.has_zvkned or caps.has_zvknh or caps.has_zvkg
+        case Crypto:         caps.has_zvkned or caps.has_zvknh or caps.has_zvkg or caps.has_zvknhb
         case Matrix:         caps.has_v
 
 fn preferred_lane_count_for_bits(vector_bits: i64, element_bits: i64) -> i64:
@@ -192,6 +202,10 @@ impl TargetCaps for X86Caps:
             case CountTrailingZeros: false
             case ByteSwap:         true
             case BitReverse:       self.has_avx2 or self.has_avx512
+            case Parity:           self.has_popcnt
+            case Sha512Rounds2:    false
+            case Sha512Msg1:       false
+            case Sha512Msg2:       false
             case MatrixDot:        self.has_avx2 or self.has_avx512
             case MatrixOuterProduct: self.has_avx2 or self.has_avx512
             case MatrixFmaKernel:  self.has_avx2 or self.has_avx512
@@ -229,6 +243,10 @@ impl TargetCaps for X86Caps:
             case CountTrailingZeros: 2
             case ByteSwap:         1
             case BitReverse:       3
+            case Parity:           2
+            case Sha512Rounds2:    -1
+            case Sha512Msg1:       -1
+            case Sha512Msg2:       -1
             case MatrixDot:        4
             case MatrixOuterProduct: 4
             case MatrixFmaKernel:  4
@@ -317,6 +335,7 @@ struct Aarch64Caps:
     has_crc32: bool
     has_neon: bool
     has_sve2: bool
+    has_sha512: bool
 
 impl TargetCaps for Aarch64Caps:
     fn supports(idiom: TargetIdiom) -> bool:
@@ -343,6 +362,10 @@ impl TargetCaps for Aarch64Caps:
             case CountTrailingZeros: self.has_neon
             case ByteSwap:         self.has_neon
             case BitReverse:       self.has_sve2
+            case Parity:           self.has_neon
+            case Sha512Rounds2:    self.has_sha512
+            case Sha512Msg1:       self.has_sha512
+            case Sha512Msg2:       self.has_sha512
             case MatrixDot:        self.has_neon or self.has_sve2
             case MatrixOuterProduct: self.has_neon or self.has_sve2
             case MatrixFmaKernel:  self.has_neon or self.has_sve2
@@ -380,6 +403,10 @@ impl TargetCaps for Aarch64Caps:
             case CountTrailingZeros: 2
             case ByteSwap:         1
             case BitReverse:       3
+            case Parity:           2
+            case Sha512Rounds2:    6
+            case Sha512Msg1:       4
+            case Sha512Msg2:       4
             case MatrixDot:        4
             case MatrixOuterProduct: 4
             case MatrixFmaKernel:  4
@@ -416,7 +443,8 @@ fn aarch64_caps_from_target(triple: text) -> Aarch64Caps:
             has_pmull: true,
             has_crc32: true,
             has_neon: true,
-            has_sve2: false
+            has_sve2: false,
+            has_sha512: true
         )
     elif triple == "armv8.2-A+crypto":
         Aarch64Caps(
@@ -426,7 +454,8 @@ fn aarch64_caps_from_target(triple: text) -> Aarch64Caps:
             has_pmull: true,
             has_crc32: true,
             has_neon: true,
-            has_sve2: false
+            has_sve2: false,
+            has_sha512: false
         )
     elif triple == "aarch64+crypto":
         Aarch64Caps(
@@ -436,7 +465,8 @@ fn aarch64_caps_from_target(triple: text) -> Aarch64Caps:
             has_pmull: true,
             has_crc32: false,
             has_neon: true,
-            has_sve2: false
+            has_sve2: false,
+            has_sha512: false
         )
     else:
         Aarch64Caps(
@@ -446,7 +476,8 @@ fn aarch64_caps_from_target(triple: text) -> Aarch64Caps:
             has_pmull: false,
             has_crc32: false,
             has_neon: true,
-            has_sve2: false
+            has_sve2: false,
+            has_sha512: false
         )
 
 # ============================================================================
@@ -460,6 +491,7 @@ struct Rv64Caps:
     has_zvkg: bool
     has_zbb: bool
     has_zbkb: bool
+    has_zvknhb: bool
     has_v: bool
     vlen_bits: i64
 
@@ -488,6 +520,10 @@ impl TargetCaps for Rv64Caps:
             case CountTrailingZeros: self.has_zbb
             case ByteSwap:         self.has_zbb
             case BitReverse:       self.has_zbb and self.has_zbkb
+            case Parity:           self.has_zbb
+            case Sha512Rounds2:    self.has_zvknhb
+            case Sha512Msg1:       self.has_zvknhb
+            case Sha512Msg2:       self.has_zvknhb
             case MatrixDot:        self.has_v
             case MatrixOuterProduct: self.has_v
             case MatrixFmaKernel:  self.has_v
@@ -525,6 +561,10 @@ impl TargetCaps for Rv64Caps:
             case CountTrailingZeros: 2
             case ByteSwap:         1
             case BitReverse:       2
+            case Parity:           2
+            case Sha512Rounds2:    6
+            case Sha512Msg1:       4
+            case Sha512Msg2:       4
             case MatrixDot:        4
             case MatrixOuterProduct: 4
             case MatrixFmaKernel:  4
@@ -567,6 +607,7 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
             has_zvkg: true,
             has_zbb: has_zbb,
             has_zbkb: has_zbkb,
+            has_zvknhb: true,
             has_v: true,
             vlen_bits: vlen
         )
@@ -577,6 +618,7 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
             has_zvkg: false,
             has_zbb: has_zbb,
             has_zbkb: has_zbkb,
+            has_zvknhb: false,
             has_v: true,
             vlen_bits: vlen
         )
@@ -587,6 +629,7 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
             has_zvkg: false,
             has_zbb: has_zbb,
             has_zbkb: has_zbkb,
+            has_zvknhb: false,
             has_v: true,
             vlen_bits: vlen
         )
@@ -597,6 +640,7 @@ fn rv64_caps_from_target(triple: text) -> Rv64Caps:
             has_zvkg: false,
             has_zbb: has_zbb,
             has_zbkb: has_zbkb,
+            has_zvknhb: false,
             has_v: false,
             vlen_bits: 128
         )

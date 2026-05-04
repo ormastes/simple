@@ -348,6 +348,12 @@ impl NativeBinaryOptions {
         // Check adjacent to current executable (e.g., /usr/lib/simple/)
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
+                // Check deps/ subdirectory (for bootstrap/custom profiles)
+                let deps_dir = exe_dir.join("deps");
+                if Self::runtime_lib_exists(&deps_dir) {
+                    return deps_dir.canonicalize().ok();
+                }
+
                 // Check ../lib relative to executable
                 let lib_dir = exe_dir.join("../lib");
                 if Self::runtime_lib_exists(&lib_dir) {
@@ -358,12 +364,6 @@ impl NativeBinaryOptions {
                 if Self::runtime_lib_exists(exe_dir) {
                     return Some(exe_dir.to_path_buf());
                 }
-
-                // Check deps/ subdirectory (for bootstrap/custom profiles)
-                let deps_dir = exe_dir.join("deps");
-                if Self::runtime_lib_exists(&deps_dir) {
-                    return deps_dir.canonicalize().ok();
-                }
             }
         }
 
@@ -371,24 +371,32 @@ impl NativeBinaryOptions {
         // Try release, debug, and bootstrap directories (including deps/ for profile builds)
         let cargo_target_paths = [
             // Standard cargo target directory
-            "target/release",
             "target/debug",
-            "target/bootstrap",
+            "target/debug/deps",
+            "target/release",
+            "target/release/deps",
             "target/bootstrap/deps",
+            "target/bootstrap",
             // Rust compiler subdirectory (Simple project layout)
-            "src/compiler_rust/target/release",
             "src/compiler_rust/target/debug",
-            "src/compiler_rust/target/bootstrap",
+            "src/compiler_rust/target/debug/deps",
+            "src/compiler_rust/target/release",
+            "src/compiler_rust/target/release/deps",
             "src/compiler_rust/target/bootstrap/deps",
+            "src/compiler_rust/target/bootstrap",
             // Workspace root (when running from subdirectory)
-            "../target/release",
             "../target/debug",
-            "../target/bootstrap",
+            "../target/debug/deps",
+            "../target/release",
+            "../target/release/deps",
             "../target/bootstrap/deps",
-            "../../target/release",
+            "../target/bootstrap",
             "../../target/debug",
-            "../../target/bootstrap",
+            "../../target/debug/deps",
+            "../../target/release",
+            "../../target/release/deps",
             "../../target/bootstrap/deps",
+            "../../target/bootstrap",
         ];
 
         for path in cargo_target_paths {
@@ -408,13 +416,12 @@ impl NativeBinaryOptions {
             if let Some(root) = workspace_root {
                 for profile in ["release", "debug", "bootstrap"] {
                     let lib_path = root.join("target").join(profile);
-                    if Self::runtime_lib_exists(&lib_path) {
-                        return Some(lib_path);
-                    }
-                    // Also check deps/ subdirectory (custom profiles put libs there)
                     let deps_path = lib_path.join("deps");
                     if Self::runtime_lib_exists(&deps_path) {
                         return Some(deps_path);
+                    }
+                    if Self::runtime_lib_exists(&lib_path) {
+                        return Some(lib_path);
                     }
                 }
             }

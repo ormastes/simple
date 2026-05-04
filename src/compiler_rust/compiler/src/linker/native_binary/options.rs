@@ -314,6 +314,11 @@ impl NativeBinaryOptions {
 
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
+                let deps_dir = exe_dir.join("deps");
+                if Self::runtime_lib_exists(&deps_dir) {
+                    return deps_dir.canonicalize().ok();
+                }
+
                 let lib_dir = exe_dir.join("../lib");
                 if Self::runtime_lib_exists(&lib_dir) {
                     return lib_dir.canonicalize().ok();
@@ -322,31 +327,34 @@ impl NativeBinaryOptions {
                 if Self::runtime_lib_exists(exe_dir) {
                     return Some(exe_dir.to_path_buf());
                 }
-
-                let deps_dir = exe_dir.join("deps");
-                if Self::runtime_lib_exists(&deps_dir) {
-                    return deps_dir.canonicalize().ok();
-                }
             }
         }
 
         let cargo_target_paths = [
-            "target/release",
             "target/debug",
-            "target/bootstrap",
+            "target/debug/deps",
+            "target/release",
+            "target/release/deps",
             "target/bootstrap/deps",
-            "src/compiler_rust/target/release",
+            "target/bootstrap",
             "src/compiler_rust/target/debug",
-            "src/compiler_rust/target/bootstrap",
+            "src/compiler_rust/target/debug/deps",
+            "src/compiler_rust/target/release",
+            "src/compiler_rust/target/release/deps",
             "src/compiler_rust/target/bootstrap/deps",
-            "../target/release",
+            "src/compiler_rust/target/bootstrap",
             "../target/debug",
-            "../target/bootstrap",
+            "../target/debug/deps",
+            "../target/release",
+            "../target/release/deps",
             "../target/bootstrap/deps",
-            "../../target/release",
+            "../target/bootstrap",
             "../../target/debug",
-            "../../target/bootstrap",
+            "../../target/debug/deps",
+            "../../target/release",
+            "../../target/release/deps",
             "../../target/bootstrap/deps",
+            "../../target/bootstrap",
         ];
 
         for path in cargo_target_paths {
@@ -362,12 +370,12 @@ impl NativeBinaryOptions {
             if let Some(root) = workspace_root {
                 for profile in ["release", "debug", "bootstrap"] {
                     let lib_path = root.join("target").join(profile);
-                    if Self::runtime_lib_exists(&lib_path) {
-                        return Some(lib_path);
-                    }
                     let deps_path = lib_path.join("deps");
                     if Self::runtime_lib_exists(&deps_path) {
                         return Some(deps_path);
+                    }
+                    if Self::runtime_lib_exists(&lib_path) {
+                        return Some(lib_path);
                     }
                 }
             }

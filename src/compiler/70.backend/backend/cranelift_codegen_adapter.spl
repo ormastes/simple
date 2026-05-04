@@ -271,14 +271,14 @@ fn translate_instruction(
         case Copy(dest, src):
             val src_val = load_local(ctx, src.id, value_map, slot_map, func)
             value_map[dest.id] = src_val
-            if slot_map.has(dest.id):
+            if slot_map.has(dest.id) and not type_is_aggregate(local_type(dest.id, func)):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, src_val, addr, 0)
 
         case Move(dest, src):
             val src_val = load_local(ctx, src.id, value_map, slot_map, func)
             value_map[dest.id] = src_val
-            if slot_map.has(dest.id):
+            if slot_map.has(dest.id) and not type_is_aggregate(local_type(dest.id, func)):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
                 cranelift_store(ctx, src_val, addr, 0)
 
@@ -495,8 +495,11 @@ fn load_local(
         return value_map[local_id]
     # Fall back to loading from stack slot
     if slot_map.has(local_id):
-        val ty = mir_type_to_cl(local_type(local_id, func))
         val addr = cranelift_stack_addr(ctx, slot_map[local_id], 0)
+        val local_ty = local_type(local_id, func)
+        if type_is_aggregate(local_ty):
+            return addr
+        val ty = mir_type_to_cl(local_ty)
         return cranelift_load(ctx, ty, addr, 0)
     # Default: zero
     cranelift_iconst(ctx, CL_TYPE_I64, 0)
@@ -689,10 +692,14 @@ fn type_is_float(ty: MirType) -> bool:
         case F32 | F64: true
         case _: false
 
+fn type_is_aggregate(ty: MirType) -> bool:
+    match ty.kind:
+        case Struct(_) | Enum(_) | Array(_, _) | Slice(_) | Tuple(_): true
+        case _: false
+
 fn operand_size(operand: MirOperand, func: MirFunction) -> i64:
     operand_type(operand, func).size_bytes()
 
 # ============================================================================
 # Exports
 # ============================================================================
-

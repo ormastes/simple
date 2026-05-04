@@ -88,9 +88,13 @@ impl NativeProjectBuilder {
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
 
         let mut push_runtime_candidates = |dir: &Path| {
+            let runtime_deps = dir.join("deps").join("libsimple_runtime.a");
             let runtime = dir.join("libsimple_runtime.a");
             let native_all = dir.join("libsimple_native_all.a");
             if prefer_core_c_lane {
+                if runtime_deps.exists() {
+                    candidates.push((runtime_deps, false));
+                }
                 if runtime.exists() {
                     candidates.push((runtime, false));
                 }
@@ -104,6 +108,9 @@ impl NativeProjectBuilder {
                 if native_all.exists() {
                     let lib = strip_llvm_constructors(&native_all, temp_dir).unwrap_or(native_all.clone());
                     candidates.push((lib, true));
+                }
+                if runtime_deps.exists() {
+                    candidates.push((runtime_deps, false));
                 }
                 if runtime.exists() {
                     candidates.push((runtime, false));

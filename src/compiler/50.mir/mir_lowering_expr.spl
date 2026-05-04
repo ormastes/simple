@@ -936,6 +936,10 @@ impl MirLowering:
         var wb_index: LocalId = 0
         var wb_field_idx: i64 = 0
         var wb_receiver: LocalId = 0
+        val receiver_type = if receiver.type_.?:
+            self.lower_type(receiver.type_.unwrap())
+        else:
+            MirType.i64()
 
         if self.is_mutating_method(method):
             match receiver.kind:
@@ -946,18 +950,14 @@ impl MirLowering:
                     val wb_ptr = wb_b.emit_gep(
                         mir_operand_copy(wb_base),
                         [mir_operand_copy(wb_index)],
-                        MirType.ptr(MirType.i64(), false)
+                        MirType.ptr(receiver_type, false)
                     )
-                    wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), MirType.i64())
+                    wb_receiver = wb_b.emit_load(mir_operand_copy(wb_ptr), receiver_type)
                     self.builder = wb_b
                     wb_kind = 1
                 case Field(base, field_name, resolved):
                     wb_base = self.lower_expr(base)
                     wb_field_idx = self.resolve_field_index(base, field_name, resolved)
-                    val receiver_type = if receiver.type_.?:
-                        self.lower_type(receiver.type_.unwrap())
-                    else:
-                        MirType.i64()
                     var wb_b = self.builder
                     wb_receiver = wb_b.emit_get_field(mir_operand_copy(wb_base), wb_field_idx, receiver_type)
                     self.builder = wb_b
@@ -976,7 +976,8 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_call(method_operand, arg_operands, return_type)
                 self.builder = b
-                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                val wb_value = if result.?: result.unwrap() else: wb_receiver
+                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
                 if result.?:
                     result.unwrap()
                 else:
@@ -995,7 +996,8 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_call(method_operand, arg_operands, return_type)
                 self.builder = b
-                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                val wb_value = if result.?: result.unwrap() else: wb_receiver
+                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
                 if result.?:
                     result.unwrap()
                 else:
@@ -1014,7 +1016,8 @@ impl MirLowering:
                 var b = self.builder
                 val result = b.emit_call(func_operand, arg_operands, return_type)
                 self.builder = b
-                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_receiver)
+                val wb_value = if result.?: result.unwrap() else: wb_receiver
+                self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, wb_value)
                 if result.?:
                     result.unwrap()
                 else:
@@ -1061,7 +1064,7 @@ impl MirLowering:
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
         arg_operands
 
-    me emit_method_writeback(wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64, wb_receiver: LocalId):
+    me emit_method_writeback(wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64, receiver_value: LocalId):
         """Emit the post-call store-back for a mutating method on an
         indexed or field receiver. No-op when `wb_kind == 0`.
 
@@ -1076,11 +1079,11 @@ impl MirLowering:
             self.builder.emit_call(func_operand, [
                 mir_operand_copy(wb_base),
                 mir_operand_copy(wb_index),
-                mir_operand_copy(wb_receiver)
+                mir_operand_copy(receiver_value)
             ], MirType.unit())
         else if wb_kind == 2:
             var b = self.builder
-            b.emit_set_field(mir_operand_copy(wb_base), wb_field_idx, mir_operand_copy(wb_receiver))
+            b.emit_set_field(mir_operand_copy(wb_base), wb_field_idx, mir_operand_copy(receiver_value))
             self.builder = b
 
     me lower_gpu_intrinsic_call(name: text, args: [HirCallArg]) -> LocalId:
