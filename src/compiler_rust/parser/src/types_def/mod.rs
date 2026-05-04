@@ -560,21 +560,32 @@ impl<'a> Parser<'a> {
                     // Set the is_static flag on the function
                     f.is_static = is_static;
 
-                    // Auto-inject 'self' parameter for instance methods (non-static) if not present
-                    // Skip auto-injection for constructors (methods named "new")
-                    if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
-                        // Inject implicit self parameter at the beginning
-                        let self_param = Parameter {
-                            span: f.span,
-                            name: "self".to_string(),
-                            ty: None, // Type is implicit (will be inferred as the struct/class type)
-                            default: None,
-                            mutability: Mutability::Immutable,
-                            inject: false,
-                            variadic: false,
-                            call_site_label: None,
-                        };
-                        f.params.insert(0, self_param);
+                    // Auto-inject 'self' parameter for instance methods (non-static) if not present.
+                    // Skip auto-injection for constructors (methods named "new").
+                    // Methods whose first param is not `self` or `me` are implicitly static
+                    // (factory methods like `fn wrap(v: T) -> Foo<T>` don't need `self`).
+                    if !is_static && f.name != "new" {
+                        let has_self_param = !f.params.is_empty()
+                            && (f.params[0].name == "self" || f.params[0].name == "me");
+                        if has_self_param {
+                            // Instance method with explicit self/me — no injection needed
+                        } else if f.is_me_method {
+                            // `me method()` syntax — inject self for mutable methods
+                            let self_param = Parameter {
+                                span: f.span,
+                                name: "self".to_string(),
+                                ty: None,
+                                default: None,
+                                mutability: Mutability::Immutable,
+                                inject: false,
+                                variadic: false,
+                                call_site_label: None,
+                            };
+                            f.params.insert(0, self_param);
+                        } else {
+                            // No self/me param and not a `me` method — treat as static
+                            f.is_static = true;
+                        }
                     }
                     methods.push(f);
                 } else {
@@ -761,21 +772,31 @@ impl<'a> Parser<'a> {
                     // Set the is_static flag on the function
                     f.is_static = is_static;
 
-                    // Auto-inject 'self' parameter for instance methods (non-static) if not present
-                    // Skip auto-injection for constructors (methods named "new")
-                    if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
-                        // Inject implicit self parameter at the beginning
-                        let self_param = Parameter {
-                            span: f.span,
-                            name: "self".to_string(),
-                            ty: None, // Type is implicit (will be inferred as the class type)
-                            default: None,
-                            mutability: Mutability::Immutable,
-                            inject: false,
-                            variadic: false,
-                            call_site_label: None,
-                        };
-                        f.params.insert(0, self_param);
+                    // Auto-inject 'self' parameter for instance methods (non-static) if not present.
+                    // Skip auto-injection for constructors (methods named "new").
+                    // Methods whose first param is not `self` or `me` are implicitly static.
+                    if !is_static && f.name != "new" {
+                        let has_self_param = !f.params.is_empty()
+                            && (f.params[0].name == "self" || f.params[0].name == "me");
+                        if has_self_param {
+                            // Instance method with explicit self/me — no injection needed
+                        } else if f.is_me_method {
+                            // `me method()` syntax — inject self for mutable methods
+                            let self_param = Parameter {
+                                span: f.span,
+                                name: "self".to_string(),
+                                ty: None,
+                                default: None,
+                                mutability: Mutability::Immutable,
+                                inject: false,
+                                variadic: false,
+                                call_site_label: None,
+                            };
+                            f.params.insert(0, self_param);
+                        } else {
+                            // No self/me param and not a `me` method — treat as static
+                            f.is_static = true;
+                        }
                     }
                     methods.push(f);
                 } else {

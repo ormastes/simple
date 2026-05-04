@@ -13,7 +13,7 @@ Design:
   - Padding: append 0x01, then zero bytes to 64-byte boundary.
   - Three running values: h (chaining), N (512-bit bit-count), Σ (checksum).
   - IV: 512 zero bytes for Streebog-512; 0x01 repeated 64 times for Streebog-256.
-  - Output: full 64-byte h for -512; first 32 bytes of h for -256.
+  - Output: full 64-byte h for -512; bytes h[32..64] for -256 (most significant half).
 
 References:
   RFC 6986 — GOST R 34.11-2012 (Streebog hash function).
@@ -304,67 +304,12 @@ fn _tau(idx: i64) -> i64:
     (8 * (idx % 8)) + (idx / 8)
 
 # ---------------------------------------------------------------------------
-# A (linear/MDS transform) — GOST R 34.11-2012, §5.2.3
-# Operates on a 64-byte state viewed as 8 rows of 8 bytes.
-# Each row is multiplied by the 8x8 MDS matrix M over GF(2^8).
-# Reduction polynomial: x^8 + x^4 + x^3 + x^2 + 1 = 0x11D.
-# MDS matrix M[in_col][out_row] extracted from gostcrypto T-table.
+# A (linear transform L) — GOST R 34.11-2012, §5.2.3
+# Operates on a 64-byte state viewed as 8 rows of 8 bytes (each row = LE u64).
+# Each row is transformed by the 64x64 GF(2) bit-matrix encoded in _streebog_a_rows.
+# The bit-matrix was derived from gostcrypto T-tables and expects little-endian
+# u64 input/output (bytes within each 8-byte word are reversed before/after use).
 # ---------------------------------------------------------------------------
-
-fn _gf_mul_streebog(a_in: i64, b_in: i64) -> i64:
-    # GF(2^8) multiply with reducing polynomial x^8+x^4+x^3+x^2+1 = 0x11D.
-    # The low 8 bits of 0x11D are 0x1D, XOR-ed in when the high bit overflows.
-    var a = a_in & 0xFF
-    var b = b_in & 0xFF
-    var p = 0
-    var i = 0
-    while i < 8:
-        if (b & 1) != 0:
-            p = p ^ a
-        var hi = (a & 0x80) != 0
-        a = (a << 1) & 0xFF
-        if hi:
-            a = a ^ 0x1D
-        b = (b >> 1) & 0xFF
-        i = i + 1
-    p & 0xFF
-
-fn _mds_coeff(in_col: i64, out_row: i64) -> i64:
-    # MDS matrix M[in_col][out_row] — full 8x8 matrix over GF(2^8).
-    # Extracted from gostcrypto T-table: T[in_col][pi^{-1}[1]].bytes[out_row].
-    # Row 0 of in_col 0: 83 e0 8e 2b 4b 31 1c 64
-    if in_col == 0:
-        if out_row == 0: 0x83  else if out_row == 1: 0xE0  else if out_row == 2: 0x8E
-        else if out_row == 3: 0x2B  else if out_row == 4: 0x4B  else if out_row == 5: 0x31
-        else if out_row == 6: 0x1C  else: 0x64
-    else if in_col == 1:
-        if out_row == 0: 0x18  else if out_row == 1: 0xDC  else if out_row == 2: 0xF5
-        else if out_row == 3: 0x9E  else if out_row == 4: 0x4F  else if out_row == 5: 0x47
-        else if out_row == 6: 0x8B  else: 0xA4
-    else if in_col == 2:
-        if out_row == 0: 0x28  else if out_row == 1: 0x77  else if out_row == 2: 0x32
-        else if out_row == 3: 0x8A  else if out_row == 4: 0xD9  else if out_row == 5: 0x86
-        else if out_row == 6: 0x7D  else: 0xF9
-    else if in_col == 3:
-        if out_row == 0: 0x9E  else if out_row == 1: 0xA8  else if out_row == 2: 0x10
-        else if out_row == 3: 0x18  else if out_row == 4: 0x65  else if out_row == 5: 0x8C
-        else if out_row == 6: 0x06  else: 0x5B
-    else if in_col == 4:
-        if out_row == 0: 0x38  else if out_row == 1: 0xC1  else if out_row == 2: 0x93
-        else if out_row == 3: 0xBA  else if out_row == 4: 0x8C  else if out_row == 5: 0x65
-        else if out_row == 6: 0x21  else: 0x03
-    else if in_col == 5:
-        if out_row == 0: 0x50  else if out_row == 1: 0x89  else if out_row == 2: 0x8A
-        else if out_row == 3: 0x32  else if out_row == 4: 0xA9  else if out_row == 5: 0x9C
-        else if out_row == 6: 0xCC  else: 0xAC
-    else if in_col == 6:
-        if out_row == 0: 0x8E  else if out_row == 1: 0x98  else if out_row == 2: 0x83
-        else if out_row == 3: 0x1A  else if out_row == 4: 0x01  else if out_row == 5: 0x0F
-        else if out_row == 6: 0xB6  else: 0x46
-    else:
-        if out_row == 0: 0x64  else if out_row == 1: 0x87  else if out_row == 2: 0x46
-        else if out_row == 3: 0xB2  else if out_row == 4: 0x07  else if out_row == 5: 0x8B
-        else if out_row == 6: 0x47  else: 0x83
 
 # ---------------------------------------------------------------------------
 # State is a flat list of 64 bytes (i64 values).
@@ -485,20 +430,34 @@ fn _streebog_a_rows() -> [[u8]]:
     ]
 
 fn _streebog_l_word(word: list) -> list:
+    # The A-rows table was built for little-endian u64 words.
+    # Reverse the input word bytes (big-endian → little-endian) before
+    # processing, then reverse the output bytes back.
     val rows = _streebog_a_rows()
+    var rev = []
+    var ri = 7
+    while ri >= 0:
+        rev.push(word.get(ri) & 0xFF)
+        ri = ri - 1
     var out = [0, 0, 0, 0, 0, 0, 0, 0]
     var bit_idx = 0
     while bit_idx < 64:
         val byte_idx = bit_idx / 8
         val bit_in_byte = 7 - (bit_idx % 8)
-        if (((word.get(byte_idx) & 0xFF) >> bit_in_byte) & 1) != 0:
+        if (((rev.get(byte_idx) & 0xFF) >> bit_in_byte) & 1) != 0:
             val row = rows[bit_idx]
             var j = 0
             while j < 8:
                 out[j] = (out.get(j) ^ row[j]) & 0xFF
                 j = j + 1
         bit_idx = bit_idx + 1
-    out
+    # Reverse output back to match the state byte order
+    var result = []
+    var oi = 7
+    while oi >= 0:
+        result.push(out.get(oi) & 0xFF)
+        oi = oi - 1
+    result
 
 fn _apply_l(state: list) -> list:
     var out = _make_zero_state()
@@ -534,9 +493,8 @@ fn _lps(state: list) -> list:
 
 fn _round_key_byte(round: i64, byte_idx: i64) -> i64:
     # Returns byte `byte_idx` of round constant C[round].
-    # The embedded tables below are stored in reverse byte order relative to
-    # RFC 6986; map the requested RFC byte index onto the stored layout.
-    val idx = 63 - byte_idx
+    # Tables stored in forward (little-endian) byte order matching gostcrypto.
+    val idx = byte_idx
     # C[0]:
     if round == 0:
         if idx == 0: 0x07  else if idx == 1: 0x45  else if idx == 2: 0xA6  else if idx == 3: 0xF2
@@ -806,14 +764,15 @@ fn _g_N(h: list, m: list, N: list) -> list:
 # ---------------------------------------------------------------------------
 
 fn _add512(a: list, b: list) -> list:
+    # Little-endian 512-bit addition: byte 0 is the least-significant byte.
     var out = _make_zero_state()
     var carry = 0
-    var i = 63
-    while i >= 0:
+    var i = 0
+    while i < 64:
         var sum = (a.get(i) & 0xFF) + (b.get(i) & 0xFF) + carry
         out[i] = sum & 0xFF
         carry = (sum >> 8) & 0xFF
-        i = i - 1
+        i = i + 1
     out
 
 # ---------------------------------------------------------------------------
@@ -822,15 +781,16 @@ fn _add512(a: list, b: list) -> list:
 # ---------------------------------------------------------------------------
 
 fn _u64_to_state(v: i64) -> list:
+    # Little-endian: byte 0 = LSB.
     var s = _make_zero_state()
-    s[56] = (v >> 56) & 0xFF
-    s[57] = (v >> 48) & 0xFF
-    s[58] = (v >> 40) & 0xFF
-    s[59] = (v >> 32) & 0xFF
-    s[60] = (v >> 24) & 0xFF
-    s[61] = (v >> 16) & 0xFF
-    s[62] = (v >> 8) & 0xFF
-    s[63] = v & 0xFF
+    s[0] = v & 0xFF
+    s[1] = (v >> 8) & 0xFF
+    s[2] = (v >> 16) & 0xFF
+    s[3] = (v >> 24) & 0xFF
+    s[4] = (v >> 32) & 0xFF
+    s[5] = (v >> 40) & 0xFF
+    s[6] = (v >> 48) & 0xFF
+    s[7] = (v >> 56) & 0xFF
     s
 
 # ---------------------------------------------------------------------------
@@ -858,13 +818,14 @@ fn _state_to_bytes(state: list) -> [u8]:
 # ---------------------------------------------------------------------------
 
 fn _final_padded_block(data: [u8], prefix_len: u64) -> list:
+    # Pad: message bytes at [0..prefix_len), then 0x01 at [prefix_len], then zeros.
+    # Matches gostcrypto: buf + b'\x01' + b'\x00' * (63 - len(buf)).
     var block = _make_zero_state()
-    val marker_idx = 63 - prefix_len.to_i64()
-    block[marker_idx] = 0x01
     var i: u64 = 0
     while i < prefix_len:
-        block[marker_idx + 1 + i.to_i64()] = _sb_u8_at(data, prefix_len - 1 - i).to_i64()
+        block[i.to_i64()] = _sb_u8_at(data, i).to_i64()
         i = i + 1
+    block[prefix_len.to_i64()] = 0x01
     block
 
 # ---------------------------------------------------------------------------
@@ -895,11 +856,11 @@ fn _streebog_hash(data: [u8], iv: list, out_len: u64) -> [u8]:
     h = _g_N(h, N, zero_n)
     h = _g_N(h, sigma, zero_n)
 
-    # Extract output: first out_len bytes
+    # Extract output: bytes [0..out_len) of h (state is little-endian).
     var result: [u8] = []
     var j: u64 = 0
     while j < out_len:
-        result.push((h.get(63 - j.to_i64()) & 0xFF).to_u8())
+        result.push((h.get(j.to_i64()) & 0xFF).to_u8())
         j = j + 1
     result
 

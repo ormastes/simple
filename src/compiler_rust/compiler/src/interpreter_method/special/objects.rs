@@ -151,22 +151,14 @@ pub fn handle_constructor_methods(
                     .map(|m| m.as_ref()),
             );
         }
-        eprintln!(
-            "[debug static overload] {}.{} candidates={} arg_types={:?} all_methods={:?} generic_params={:?} is_generic_template={} method_details={:?}",
-            class_name,
-            method,
-            candidates.len(),
-            positional_values.iter().map(|v| v.type_name()).collect::<Vec<_>>(),
-            class_def.methods.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
-            class_def.generic_params,
-            class_def.is_generic_template,
-            class_def.methods.iter().map(|m| format!("{}(is_static={}, params={:?})", m.name, m.is_static, m.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>())).collect::<Vec<_>>()
-        );
-        for candidate in &candidates {
+        // Debug tracing for static method resolution (enable via SIMPLE_DEBUG_STATIC_OVERLOAD=1)
+        if std::env::var("SIMPLE_DEBUG_STATIC_OVERLOAD").is_ok() {
             eprintln!(
-                "[debug static overload] candidate params={:?} tys={:?}",
-                candidate.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
-                candidate.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>()
+                "[debug static overload] {}.{} candidates={} arg_types={:?}",
+                class_name,
+                method,
+                candidates.len(),
+                positional_values.iter().map(|v| v.type_name()).collect::<Vec<_>>()
             );
         }
 
