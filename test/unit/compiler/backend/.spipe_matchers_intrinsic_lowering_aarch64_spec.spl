@@ -40,6 +40,10 @@ fn caps_sve2() -> Aarch64Caps:
     # NEON + SVE2 for bitreverse/matrix-capable paths
     Aarch64Caps(false, false, false, false, false, true, true, false)
 
+fn caps_sha512() -> Aarch64Caps:
+    # Full crypto + SHA-512 extension
+    Aarch64Caps(true, true, false, true, true, true, false, true)
+
 # ============================================================================
 # Name -> TargetIdiom mapping
 # ============================================================================
@@ -63,6 +67,30 @@ describe "intrinsic_to_target_idiom_aarch64 — name mapping":
 
     it "matrix_dot maps to MatrixDot idiom":
         var result = intrinsic_to_target_idiom_aarch64("matrix_dot")
+        expect result.is_some() == true
+
+    it "crypto_sha512_rnds2 maps to Sha512Rounds2 idiom":
+        var result = intrinsic_to_target_idiom_aarch64("crypto_sha512_rnds2")
+        expect result.is_some() == true
+
+    it "crypto_sha512_msg1 maps to Sha512Msg1 idiom":
+        var result = intrinsic_to_target_idiom_aarch64("crypto_sha512_msg1")
+        expect result.is_some() == true
+
+    it "crypto_sha512_msg2 maps to Sha512Msg2 idiom":
+        var result = intrinsic_to_target_idiom_aarch64("crypto_sha512_msg2")
+        expect result.is_some() == true
+
+    it "bit_rotate_left maps to RotateLeft idiom":
+        var result = intrinsic_to_target_idiom_aarch64("bit_rotate_left")
+        expect result.is_some() == true
+
+    it "bit_rotate_right maps to RotateRight idiom":
+        var result = intrinsic_to_target_idiom_aarch64("bit_rotate_right")
+        expect result.is_some() == true
+
+    it "bit_parity maps to Parity idiom":
+        var result = intrinsic_to_target_idiom_aarch64("bit_parity")
         expect result.is_some() == true
 
     it "unknown name returns nil":
@@ -227,5 +255,85 @@ describe "lower_cipher_intrinsic_aarch64 — portable bit/matrix scaffolding":
 
     it "matrix_dot is recognised and returns unimplemented on capable caps":
         var r = lower_cipher_intrinsic_aarch64("matrix_dot", [0, 1], caps_full_crypto())
+        expect r.lowered == false
+        expect r.reason == "unimplemented"
+
+# ============================================================================
+# SHA-512 lowering — requires has_sha512=true caps
+# ============================================================================
+
+describe "lower_cipher_intrinsic_aarch64 — SHA-512 lowering":
+    it "crypto_sha512_rnds2 emits 8 bytes (SHA512H+SHA512H2) when has_sha512":
+        var r = lower_cipher_intrinsic_aarch64("crypto_sha512_rnds2", [0, 1, 2], caps_sha512())
+        expect r.lowered == true
+        expect r.bytes.len() == 8
+
+    it "crypto_sha512_msg1 emits 4 bytes (SHA512SU0) when has_sha512":
+        var r = lower_cipher_intrinsic_aarch64("crypto_sha512_msg1", [0, 1], caps_sha512())
+        expect r.lowered == true
+        expect r.bytes.len() == 4
+
+    it "crypto_sha512_msg2 emits 4 bytes (SHA512SU1) when has_sha512":
+        var r = lower_cipher_intrinsic_aarch64("crypto_sha512_msg2", [0, 1, 2], caps_sha512())
+        expect r.lowered == true
+        expect r.bytes.len() == 4
+
+    it "crypto_sha512_rnds2 on caps without has_sha512 returns no-cap":
+        var r = lower_cipher_intrinsic_aarch64("crypto_sha512_rnds2", [0, 1, 2], caps_full_crypto())
+        expect r.lowered == false
+        expect r.reason == "no-cap"
+
+    it "crypto_sha512_msg1 on caps without has_sha512 returns no-cap":
+        var r = lower_cipher_intrinsic_aarch64("crypto_sha512_msg1", [0, 1], caps_full_crypto())
+        expect r.lowered == false
+        expect r.reason == "no-cap"
+
+    it "crypto_sha512_rnds2 with 2 args returns bad-arity":
+        var r = lower_cipher_intrinsic_aarch64("crypto_sha512_rnds2", [0, 1], caps_sha512())
+        expect r.lowered == false
+        expect r.reason == "bad-arity"
+
+    it "crypto_sha512_msg1 with 3 args returns bad-arity":
+        var r = lower_cipher_intrinsic_aarch64("crypto_sha512_msg1", [0, 1, 2], caps_sha512())
+        expect r.lowered == false
+        expect r.reason == "bad-arity"
+
+    it "crypto_sha512_msg2 with 2 args returns bad-arity":
+        var r = lower_cipher_intrinsic_aarch64("crypto_sha512_msg2", [0, 1], caps_sha512())
+        expect r.lowered == false
+        expect r.reason == "bad-arity"
+
+# ============================================================================
+# Rotate lowering — EXTR instruction, works on any NEON-capable caps
+# ============================================================================
+
+describe "lower_cipher_intrinsic_aarch64 — rotate lowering":
+    it "bit_rotate_right emits 4 bytes (EXTR/ROR) on capable caps":
+        var r = lower_cipher_intrinsic_aarch64("bit_rotate_right", [0, 1, 7], caps_full_crypto())
+        expect r.lowered == true
+        expect r.bytes.len() == 4
+
+    it "bit_rotate_left emits 4 bytes (EXTR/ROR neg) on capable caps":
+        var r = lower_cipher_intrinsic_aarch64("bit_rotate_left", [0, 1, 7], caps_full_crypto())
+        expect r.lowered == true
+        expect r.bytes.len() == 4
+
+    it "bit_rotate_right with 2 args returns bad-arity":
+        var r = lower_cipher_intrinsic_aarch64("bit_rotate_right", [0, 1], caps_full_crypto())
+        expect r.lowered == false
+        expect r.reason == "bad-arity"
+
+    it "bit_rotate_left with 2 args returns bad-arity":
+        var r = lower_cipher_intrinsic_aarch64("bit_rotate_left", [0, 1], caps_full_crypto())
+        expect r.lowered == false
+        expect r.reason == "bad-arity"
+
+# ============================================================================
+# Parity — currently unimplemented on AArch64 (multi-instruction sequence)
+# ============================================================================
+
+describe "lower_cipher_intrinsic_aarch64 — parity lowering":
+    it "bit_parity returns unimplemented on capable caps":
+        var r = lower_cipher_intrinsic_aarch64("bit_parity", [0, 1], caps_full_crypto())
         expect r.lowered == false
         expect r.reason == "unimplemented"
