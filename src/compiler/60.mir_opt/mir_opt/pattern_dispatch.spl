@@ -1,14 +1,10 @@
 # Pattern-Idiom Pass Dispatch — Wave K4 MIR rewriter
 #
 # Module-level pass entry point that the canonical optimisation pipeline calls
-# under dispatch key "vectorization" (see mod.spl run_pass_on_module).
+# under dispatch key "pattern_idiom" (see mod.spl pipeline_optimize).
 #
-# Phase 4 (this commit) replaces recognised software cipher Call sites with
-# MirInstKind.Intrinsic, gated on X86Caps capability flags.
-#
-# Wiring:  src/compiler/60.mir_opt/mir_opt/mod.spl line ~467
-#          case "vectorization":
-#              result_module = run_pattern_idiom_pass(result_module)
+# Replaces recognised software cipher Call sites with MirInstKind.Intrinsic,
+# gated on TargetCapsKind capability flags (multi-arch: x86, AArch64, RV64).
 #
 # See:
 #   src/compiler/60.mir_opt/mir_opt/pattern/rules_crypto.spl (rule table)
@@ -17,7 +13,7 @@
 
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirConstValue, LocalId, BlockId}
 use compiler.mir_opt.mir_opt.pattern.rules_crypto.{lookup_rule_for_callee}
-use compiler.backend.feature_caps.{X86Caps, TargetIdiom}
+use compiler.backend.feature_caps.{X86Caps, TargetIdiom, TargetCapsKind, caps_kind_supports, caps_kind_target_name}
 
 # ============================================================================
 # Stats record
@@ -239,3 +235,83 @@ fn run_pattern_idiom_pass(module: MirModule) -> MirModule:
         has_avx512: false
     )
     run_pattern_idiom_pass_x86(module, default_caps, false)
+
+# ============================================================================
+# Multi-arch generic entry points (Phase 1)
+# ============================================================================
+
+fn rewrite_block_generic(block: MirBlock, caps_kind: TargetCapsKind, stats: PatternIdiomStats) -> MirBlock:
+    var new_insts: [MirInst] = []
+    val target_name = caps_kind_target_name(caps_kind)
+    for inst in block.instructions:
+        match inst.kind:
+            case Call(dest, func_op, args):
+                stats.visited_calls = stats.visited_calls + 1
+                var rewritten = false
+                val maybe_callee = extract_callee_name(func_op)
+                if maybe_callee.?:
+                    val callee = maybe_callee.unwrap()
+                    val maybe_rule = lookup_rule_for_callee(callee)
+                    if maybe_rule.?:
+                        val rule = maybe_rule.unwrap()
+                        val maybe_idiom = idiom_for_intrinsic(rule.intrinsic)
+                        if maybe_idiom.?:
+                            val idiom = maybe_idiom.unwrap()
+                            if caps_kind_supports(caps_kind, idiom):
+                                var new_inst = MirInst(
+                                    kind: MirInstKind.Intrinsic(dest, rule.intrinsic, args),
+                                    span: inst.span
+                                )
+                                new_insts.push(new_inst)
+                                stats.cipher_hits = stats.cipher_hits + 1
+                                rewritten = true
+                                if stats.cipher_remark:
+                                    val r_name = rule.name
+                                    val r_intr = rule.intrinsic
+                                    print "[cipher] {callee} -> {r_intr} via {r_name} (target: {target_name})"
+                if not rewritten:
+                    new_insts.push(inst)
+            case _:
+                new_insts.push(inst)
+    MirBlock(
+        id: block.id,
+        label: block.label,
+        instructions: new_insts,
+        terminator: block.terminator
+    )
+
+fn run_pattern_idiom_pass_generic(module: MirModule, caps_kind: TargetCapsKind, cipher_remark: bool) -> MirModule:
+    var stats = pattern_idiom_stats_zero()
+    stats.cipher_remark = cipher_remark
+    var result = module
+    for sym in module.functions.keys():
+        stats.visited_functions = stats.visited_functions + 1
+        var func: MirFunction = module.functions[sym]
+        var new_blocks: [MirBlock] = []
+        for block in func.blocks:
+            stats.visited_blocks = stats.visited_blocks + 1
+            var rewritten_block = rewrite_block_generic(block, caps_kind, stats)
+            new_blocks.push(rewritten_block)
+        result.functions[sym] = MirFunction(
+            symbol:                   func.symbol,
+            name:                     func.name,
+            signature:                func.signature,
+            locals:                   func.locals,
+            blocks:                   new_blocks,
+            entry_block:              func.entry_block,
+            span:                     func.span,
+            generic_params:           func.generic_params,
+            is_generic_template:      func.is_generic_template,
+            specialization_of:        func.specialization_of,
+            type_bindings:            func.type_bindings,
+            layout_phase:             func.layout_phase,
+            is_kernel:                func.is_kernel,
+            is_export_c:              func.is_export_c,
+            export_name:              func.export_name,
+            has_driver_manifest_attr: func.has_driver_manifest_attr,
+            driver_manifest_attr:     func.driver_manifest_attr,
+            has_vhdl_metadata:        func.has_vhdl_metadata,
+            vhdl_metadata:            func.vhdl_metadata,
+            has_fast_math:            func.has_fast_math
+        )
+    result

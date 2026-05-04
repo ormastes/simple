@@ -17,7 +17,7 @@ trait and `TargetFeatureClass` enum — but via a fundamentally **different dete
 | Trigger | ANY matching loop pattern (no explicit programmer intent) | Call to known stdlib symbol (e.g. `std.common.aes.cipher.aes_round_software`) |
 | Gate | `TargetCaps.supports(SimdI32x4)` etc. | `TargetCaps.supports(AesEnc)` etc. |
 | Rewrite | Scalar loop → vector loop (loop peeling, alignment) | `Call(dest, func, args)` ��� `Intrinsic(dest, name, args)` |
-| Dispatch key | `"vectorization"` | `"vectorization"` (shared!) |
+| Dispatch key | `"vectorization"` | `"pattern_idiom"` |
 
 Both converge at the backend: `MirInstKind.Intrinsic` → byte encoder (`encode_x86_64_crypto.spl`, `encode_rvv_zvk.spl`, etc.)
 
@@ -111,21 +111,32 @@ to crypto operations.
 
 ## Current Gaps
 
-### 1. Pattern Dispatch is x86-Only
+### 1. Generic Pattern Dispatch Exists; Per-Target Lowering Still Has Gaps
 
-`run_pattern_idiom_pass_x86(module, X86Caps, remark)` accepts only `X86Caps`.
-AArch64 and RISC-V backends have instruction encoders but **no MIR-level rewrite pass**.
+`pattern_dispatch.spl` now exposes a generic MIR rewrite entry point keyed by
+`TargetCapsKind`, so x86, AArch64, and RV64 can all rewrite recognised crypto
+and bit-idiom calls into MIR intrinsics before backend lowering.
 
-**To extend:** Create `run_pattern_idiom_pass_aarch64(module, Aarch64Caps, remark)` and
-`run_pattern_idiom_pass_rv64(module, Rv64Caps, remark)` using the same `lookup_rule_for_callee`
-table — the TargetIdiom mapping is arch-independent; only `caps.supports(idiom)` differs.
+What still remains target-specific is the intrinsic lowering depth after that
+rewrite:
+- x86 `bit_clz` / `bit_ctz` still return `no-cap` pending explicit `lzcnt` /
+  `tzcnt` feature modeling and zero-input semantics.
+- AArch64 generic `bit_popcount` still does not lower through the portable
+  intrinsic-lowering path, even though native ISel now has a concrete scalar
+  fallback.
+- `matrix_*` idioms are recognised but still intentionally return
+  `unimplemented`.
 
-### 2. Shared "vectorization" Pass Key
+### 2. Pass-Key Separation Is Partially Complete
 
-Crypto and SIMD share the `"vectorization"` dispatch key. Implications:
-- Cannot disable one without the other via pass-name filtering
-- Fix: add distinct keys `"crypto_idiom"` and `"auto_vectorize"`, or use `TargetFeatureClass`
-  filtering within the shared pass.
+Crypto idiom rewriting no longer rides the shared `"vectorization"` pass key;
+it now runs under `"pattern_idiom"`.
+
+Remaining follow-up:
+- auto-vectorization still uses the legacy `"vectorization"` name internally
+  in some docs and comments
+- a future split into `"auto_vectorize"`, `"crypto_idiom"`, and `"bit_idiom"`
+  may still be worthwhile if finer-grained pass toggles are needed
 
 ### 3. Missing Algorithm Coverage
 
@@ -142,7 +153,15 @@ Crypto and SIMD share the `"vectorization"` dispatch key. Implications:
 | ChaCha20 | (AVX2 vectorize) | (NEON vectorize) | — | **No** |
 | Poly1305 | (CLMUL assist) | (PMULL assist) | (Zvkg) | **Partial** (via CLMUL) |
 
-### 4. Bit-Manipulation Idioms (TargetIdiom exists, no stdlib symbol rules)
+### 4. Bit-Manipulation and SIMD Follow-On Work
+
+Several back-end-facing blockers remain intentionally open outside this sync:
+- masked / predicated MIR ops are still incomplete
+- reduction vectorization is still analysis/logging-heavy rather than full
+  lowering
+- bulk-copy SIMD is still blocked on array-layout/runtime preconditions
+
+### 5. Bit-Manipulation Idioms (TargetIdiom exists, no stdlib symbol rules)
 
 `RotateLeft`, `RotateRight`, `Popcount`, `CountLeadingZeros`, `CountTrailingZeros`,
 `ByteSwap`, `BitReverse` have `TargetIdiom` variants and cost entries but no entries
@@ -152,11 +171,11 @@ in `rules_crypto.spl`. These need stdlib symbol bindings.
 
 ## Extension Plan
 
-### Phase 1: Multi-Arch MIR Rewrite (lift x86-only gate)
+### Phase 1: Finish Post-Rewrite Lowering Coverage
 
-1. Generalize `rewrite_block` to accept `trait TargetCaps` (dynamic dispatch or enum union)
-2. Create `run_pattern_idiom_pass_aarch64` and `run_pattern_idiom_pass_rv64`
-3. Wire into `mod.spl` via target-triple dispatch at the `"vectorization"` pass key
+1. Add explicit x86 `lzcnt` / `tzcnt` capability modeling and define zero-input semantics
+2. Thread AArch64 generic `bit_popcount` through the portable intrinsic-lowering path
+3. Land concrete `matrix_*` lowering or keep them fenced behind a separate feature gate
 
 ### Phase 2: Separate Pass Keys
 

@@ -30,8 +30,8 @@ use compiler.mir_opt.mir_opt.tco (create_tco_pass, tco_run_on_function)
 use compiler.mir_opt.mir_opt.gvn (create_gvn_pass, gvn_run_on_function)
 use compiler.mir_opt.mir_opt.predicate_promote (run_predicate_promote)
 use compiler.mir_opt.mir_opt.auto_vectorize (run_auto_vectorize)
-use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass, run_pattern_idiom_pass_x86)
-use compiler.backend.feature_caps.{X86Caps}
+use compiler.mir_opt.mir_opt.pattern_dispatch (run_pattern_idiom_pass, run_pattern_idiom_pass_x86, run_pattern_idiom_pass_generic)
+use compiler.backend.feature_caps.{X86Caps, TargetCapsKind}
 
 # ============================================================================
 # Target Optimization Context
@@ -40,10 +40,11 @@ use compiler.backend.feature_caps.{X86Caps}
 struct TargetOptContext:
     x86_caps: X86Caps
     cipher_remark: bool
+    caps_kind: TargetCapsKind
 
 fn target_opt_context_default() -> TargetOptContext:
     val caps = X86Caps(false, false, false, false, false, false, false, false)
-    TargetOptContext(caps, false)
+    TargetOptContext(x86_caps: caps, cipher_remark: false, caps_kind: TargetCapsKind.None_)
 
 # ============================================================================
 # Optimization Level
@@ -223,6 +224,7 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                         "common_subexpr_elim",
                         "tail_call_optimization",
                         "inline_functions",
+                        "pattern_idiom",
                         "body_outlining",
                         "loop_invariant_motion",
                         "collection_opt",
@@ -240,6 +242,7 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                         "common_subexpr_elim",
                         "tail_call_optimization",
                         "inline_aggressive",
+                        "pattern_idiom",
                         "body_outlining",
                         "loop_invariant_motion",
                         "collection_opt",
@@ -247,7 +250,6 @@ fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
                         "loop_unroll",
                         "strength_reduction",
                         "global_value_numbering",
-                        "vectorization",
                         "dead_code_elimination",
                         "constant_folding"
                     ], target_ctx: ctx)
@@ -287,7 +289,7 @@ fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
     pipeline_optimize(pipeline, module)
 
 fn optimize_module_with_caps(module: MirModule, level: OptLevel, caps: X86Caps, cipher_remark: bool) -> MirModule:
-    val ctx = TargetOptContext(caps, cipher_remark)
+    val ctx = TargetOptContext(x86_caps: caps, cipher_remark: cipher_remark, caps_kind: TargetCapsKind.X86(caps))
     optimize_module_with_context(module, level, ctx)
 
 fn optimize_module_with_context(module: MirModule, level: OptLevel, ctx: TargetOptContext) -> MirModule:
@@ -371,8 +373,11 @@ fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
         case "global_value_numbering":
             var gvn = create_gvn_pass()
             gvn_run_on_function(gvn, func)
-        case "vectorization":
+        case "pattern_idiom":
             # Module-level pass, not per-function — no-op here
+            func
+        case "vectorization":
+            # Reserved for future auto-vectorization — no-op here
             func
         case _:
             # Unknown pass - return function unchanged
@@ -387,8 +392,12 @@ fn pipeline_optimize(pipeline: OptimizationPipeline, module: MirModule) -> MirMo
     var optimized_module = module
     val ctx = pipeline.target_ctx
     for pass_name in pipeline.passes:
-        if pass_name == "vectorization":
-            optimized_module = run_pattern_idiom_pass_x86(optimized_module, ctx.x86_caps, ctx.cipher_remark)
+        if pass_name == "pattern_idiom":
+            match ctx.caps_kind:
+                case None_:
+                    optimized_module = run_pattern_idiom_pass_x86(optimized_module, ctx.x86_caps, ctx.cipher_remark)
+                case _:
+                    optimized_module = run_pattern_idiom_pass_generic(optimized_module, ctx.caps_kind, ctx.cipher_remark)
         else:
             optimized_module = run_pass_on_module(pass_name, optimized_module)
     optimized_module
@@ -482,6 +491,8 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
             # Module-level pass: pattern-match + log; no MIR rewrite in Wave K3.
             # See: doc/05_design/simd_auto_vectorize_design.md §2, §10
             result_module = run_auto_vectorize(result_module)
+        case "pattern_idiom":
+            pass_do_nothing
         case "vectorization":
             pass_do_nothing
         case _:
