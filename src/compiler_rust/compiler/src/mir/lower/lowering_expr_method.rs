@@ -6,6 +6,18 @@ use crate::hir::{DispatchMode, HirExpr, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
+    fn builtin_method_receiver_name(&self, ty: TypeId) -> Option<&'static str> {
+        if let Some(name) = builtin_type_name(ty) {
+            return Some(name);
+        }
+        let registry = self.type_registry?;
+        match registry.get(ty) {
+            Some(HirType::Array { .. }) => Some("Array"),
+            Some(HirType::Tuple(_) | HirType::LabeledTuple(_)) => Some("Tuple"),
+            _ => None,
+        }
+    }
+
     fn enum_payload_type_for_method_receiver(&self, ty: TypeId) -> Option<TypeId> {
         let registry = self.type_registry?;
         match registry.get(ty) {
@@ -278,7 +290,7 @@ impl<'a> MirLowerer<'a> {
         let func_name = if let Some(registry) = self.type_registry {
             if let Some(type_name) = registry.get_type_name(receiver.ty) {
                 format!("{}.{}", type_name, method)
-            } else if let Some(type_name) = builtin_type_name(receiver.ty) {
+            } else if let Some(type_name) = self.builtin_method_receiver_name(receiver.ty) {
                 format!("{}.{}", type_name, method)
             } else if let Some(local_ty) = receiver_local_ty {
                 if let Some(type_name) = registry.get_type_name(local_ty) {
@@ -289,7 +301,7 @@ impl<'a> MirLowerer<'a> {
                         );
                     }
                     format!("{}.{}", type_name, method)
-                } else if let Some(type_name) = builtin_type_name(local_ty) {
+                } else if let Some(type_name) = self.builtin_method_receiver_name(local_ty) {
                     if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                         eprintln!(
                             "[MIR-METHOD-DISPATCH] '{}' qualified via builtin type '{}' (receiver.ty was unnamed)",

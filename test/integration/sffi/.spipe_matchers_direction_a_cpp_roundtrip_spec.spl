@@ -14,7 +14,8 @@ Full pipeline verification for Direction A (Simple -> C++):
 2. Generate C and C++ headers from exported types/functions
 3. Compile C++ consumer against the generated headers
 4. Link C++ consumer against the shared library
-5. Execute and verify RAII lifecycle, move semantics, and noexcept
+5. Execute and verify RAII lifecycle, move semantics, noexcept default API,
+   and opt-in exception facade
 
 Requires: g++ (or c++) on the host system. Tests skip gracefully if unavailable.
 """
@@ -122,6 +123,17 @@ describe "Direction A: Simple -> C++ round-trip":
             expect (header).contains("Calculator(Calculator&& other) noexcept")
             expect (header).contains("~Calculator()")
 
+        it "emits noexcept result wrapper by default and gates throwing facade":
+            val hpp_path = TEST_DIR + "/calculator.hpp"
+            if not rt_file_exists(hpp_path):
+                return "skip: C++ header not generated"
+
+            val header = rt_file_read_text(hpp_path) ?? ""
+            expect (header).contains("bool calculator_checked_divide(")
+            expect (header).contains("std::string* out_error = nullptr")
+            expect (header).contains("#ifdef SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS")
+            expect (header).contains("calculator_checked_divide_or_throw")
+
         it "includes static_assert for layout verification":
             val hpp_path = TEST_DIR + "/calculator.hpp"
             if not rt_file_exists(hpp_path):
@@ -139,13 +151,38 @@ describe "Direction A: Simple -> C++ round-trip":
             expect (header).contains("#include \"calculator.h\"")
 
     describe "C++ consumer compilation and execution":
-        it "compiles C++ test program against generated headers":
+        it "compiles default C++ test program against generated headers with exceptions disabled":
             if not has_cpp_compiler():
                 return "skip: no C++ compiler available (g++/c++)"
 
             val cxx = cpp_compiler()
             val cpp_source = FIXTURE_DIR + "/test_calculator.cpp"
             val output_bin = TEST_DIR + "/test_calculator_cpp"
+
+            val (out, err, code) = rt_process_run(cxx, [
+                "-std=c++14",
+                "-fno-exceptions",
+                "-o", output_bin,
+                "-I" + TEST_DIR,
+                "-L" + TEST_DIR,
+                "-lcalculator",
+                "-Wl,-rpath," + TEST_DIR,
+                cpp_source
+            ])
+
+            if code != 0:
+                print("g++ stdout: " + out)
+                print("g++ stderr: " + err)
+            expect code == 0
+            assert_ok(rt_file_exists(output_bin), "C++ output binary missing")
+
+        it "compiles optional throwing facade when explicitly enabled":
+            if not has_cpp_compiler():
+                return "skip: no C++ compiler available (g++/c++)"
+
+            val cxx = cpp_compiler()
+            val cpp_source = FIXTURE_DIR + "/test_calculator_throwing.cpp"
+            val output_bin = TEST_DIR + "/test_calculator_cpp_throwing"
 
             val (out, err, code) = rt_process_run(cxx, [
                 "-std=c++14",
@@ -161,7 +198,7 @@ describe "Direction A: Simple -> C++ round-trip":
                 print("g++ stdout: " + out)
                 print("g++ stderr: " + err)
             expect code == 0
-            assert_ok(rt_file_exists(output_bin), "C++ output binary missing")
+            assert_ok(rt_file_exists(output_bin), "throwing C++ output binary missing")
 
         it "executes C++ test program and verifies PASS output":
             if not has_cpp_compiler():
@@ -170,6 +207,23 @@ describe "Direction A: Simple -> C++ round-trip":
             val output_bin = TEST_DIR + "/test_calculator_cpp"
             if not rt_file_exists(output_bin):
                 return "skip: test binary not built"
+
+            val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " " + output_bin
+            val (out, err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])
+
+            if code != 0:
+                print("test stdout: " + out)
+                print("test stderr: " + err)
+            expect code == 0
+            expect (out).contains("PASS")
+
+        it "executes optional throwing facade test program":
+            if not has_cpp_compiler():
+                return "skip: no C++ compiler available (g++/c++)"
+
+            val output_bin = TEST_DIR + "/test_calculator_cpp_throwing"
+            if not rt_file_exists(output_bin):
+                return "skip: throwing test binary not built"
 
             val env_cmd = "LD_LIBRARY_PATH=" + TEST_DIR + " " + output_bin
             val (out, err, code) = rt_process_run("/bin/sh", ["-c", env_cmd])

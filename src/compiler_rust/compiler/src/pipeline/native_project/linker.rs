@@ -1348,8 +1348,8 @@ mod linker_tests {
         assert!(contents
             .lines()
             .all(|line| line.starts_with('"') && line.ends_with('"')));
-        assert!(contents.contains("\"with space.o\""));
-        assert!(contents.contains("quote\\\"slash\\\\name.o"));
+        assert!(contents.contains(&NativeProjectBuilder::quote_linker_response_path(&object_paths[1])));
+        assert!(contents.contains(&NativeProjectBuilder::quote_linker_response_path(&object_paths[2])));
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

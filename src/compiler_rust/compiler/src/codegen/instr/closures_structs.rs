@@ -211,12 +211,17 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 | TypeId::STRING
                 | TypeId::CHAR
         )
+    ) || matches!(
+        lookup_name.rsplit_once('.'),
+        Some(("Array" | "array" | "Tuple" | "tuple" | "str" | "String" | "string", _))
     );
+    let prefer_builtin_first = lookup_name.contains('.') && allow_qualified_builtin;
 
-    // First check if this is a builtin method (String, Array methods)
-    // Try to compile as builtin for unqualified names, plus qualified builtin
-    // names on actual builtin scalar/string receiver types like `i64.to_float`.
-    if !lookup_name.contains('.') || allow_qualified_builtin {
+    // Only run builtin lowering first for qualified builtin scalar/string
+    // receivers like `i64.to_float`. For bare names like `bitmap.get(...)`,
+    // prefer resolving an actual method implementation before falling back to
+    // collection builtins such as `rt_index_get`.
+    if prefer_builtin_first {
         if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
             if let Some(d) = dest {
                 ctx.vreg_values.insert(*d, result);
@@ -561,6 +566,12 @@ pub(crate) fn compile_method_call_static<M: Module>(
                 }
             }
         } else {
+            if let Some(result) = try_compile_builtin_method_call(ctx, builder, receiver, lookup_name, args)? {
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, result);
+                }
+                return Ok(());
+            }
             let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
             let result = call_runtime_2(ctx, builder, "rt_function_not_found", name_ptr, name_len);
             if let Some(d) = dest {

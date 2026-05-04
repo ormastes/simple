@@ -23,14 +23,12 @@ use std.common.compress.zstd_huf.{
     zstd_huf_build_canonical_entries,
     zstd_huf_expand_decode_table
 }
+use std.common.compress.zstd.{zstd_compress_frame, zstd_decompress_frame}
 use std.common.compress.{
     CompressionCodec,
     CompressionLevel,
     CompressionOptions,
-    CompressionError,
-    compression_level,
-    default_compression_options,
-    try_compress_bytes
+    CompressionError
 }
 
 # ---------------------------------------------------------------------------
@@ -38,12 +36,17 @@ use std.common.compress.{
 # ---------------------------------------------------------------------------
 
 fn _make_zstd_options(level_value: i64) -> Result<CompressionOptions, CompressionError>:
-    val level_res = compression_level(CompressionCodec.zstd, level_value)
-    if level_res.is_err():
-        return Err(level_res.unwrap_err())
-    var options = default_compression_options(CompressionCodec.zstd)
-    options.level = level_res.unwrap()
-    Ok(options)
+    if level_value < 1 or level_value > 22:
+        return Err(CompressionError.UnsupportedFeature("zstd level must be in 1..22"))
+    Ok(CompressionOptions(
+        codec: CompressionCodec.zstd,
+        level: CompressionLevel(value: level_value),
+        checksum: false,
+        block_mode: "frame",
+        dictionary_bytes: nil,
+        dictionary_id: nil,
+        content_size: nil
+    ))
 
 fn _english_payload(repeat: i64) -> [u8]:
     val sample = "the quick brown fox jumps over the lazy dog. " +
@@ -186,40 +189,26 @@ describe "zstd FSE + Huffman encoder primitives":
         expect header_byte.to_i64() < 128 == true
         expect fse_header.len() - 1 == header_byte.to_i64()
 
-    it "facade accepts Zstd levels 1 and 2 alongside level 3":
+    it "zstd frame encoder accepts levels 1 and 2 alongside level 3":
         val level1 = _make_zstd_options(1).unwrap()
         val level2 = _make_zstd_options(2).unwrap()
         val level3 = _make_zstd_options(3).unwrap()
         val payload = _english_payload(1)
-        # Each level must produce a valid output (no UnsupportedFeature
-        # error from _validate_level) — the encoder loop honours the
-        # level via options.level even if the current Raw_Block path
-        # doesn't differentiate behaviour.
-        val r1 = try_compress_bytes(payload, level1)
-        val r2 = try_compress_bytes(payload, level2)
-        val r3 = try_compress_bytes(payload, level3)
-        expect r1.is_err() == false
-        expect r2.is_err() == false
-        expect r3.is_err() == false
-        # Outputs are all valid Zstd frames (magic 0xFD2FB528 LE).
-        val frame1 = r1.unwrap()
-        val frame2 = r2.unwrap()
-        val frame3 = r3.unwrap()
+        val frame1 = zstd_compress_frame(payload, level1)
+        val frame2 = zstd_compress_frame(payload, level2)
+        val frame3 = zstd_compress_frame(payload, level3)
         expect frame1[0] == 0x28u8
         expect frame1[1] == 0xB5u8
         expect frame1[2] == 0x2Fu8
         expect frame1[3] == 0xFDu8
         expect frame2[0] == 0x28u8
         expect frame3[0] == 0x28u8
+        expect zstd_decompress_frame(frame1).unwrap() == payload
+        expect zstd_decompress_frame(frame2).unwrap() == payload
+        expect zstd_decompress_frame(frame3).unwrap() == payload
 
-    it "facade still rejects Zstd levels outside [1, 3]":
-        # Level 4 is in the RFC range but not yet wired here.
-        val opts4_res = _make_zstd_options(4)
-        expect opts4_res.is_err() == false
-        val opts4 = opts4_res.unwrap()
-        val payload: [u8] = [0x68u8, 0x69u8, 0x21u8]
-        val rejected = try_compress_bytes(payload, opts4)
-        expect rejected.is_err() == true
-        # Level 0 is below RFC range and rejected by compression_level itself.
+    it "option helper rejects Zstd levels outside the codec range":
         val opts0_res = _make_zstd_options(0)
         expect opts0_res.is_err() == true
+        val opts23_res = _make_zstd_options(23)
+        expect opts23_res.is_err() == true

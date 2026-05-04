@@ -75,10 +75,11 @@ pub struct CheckResult {
 
 /// Run check command on multiple files
 pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
+    let files = expand_check_inputs(files);
     let mut all_results = Vec::new();
     let mut has_errors = false;
 
-    for file in files {
+    for file in &files {
         if !options.quiet && options.verbose {
             println!("Checking {}...", file.display());
         }
@@ -130,6 +131,36 @@ pub fn run_check(files: &[PathBuf], options: CheckOptions) -> i32 {
         1
     } else {
         0
+    }
+}
+
+fn expand_check_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut expanded = Vec::new();
+    for input in inputs {
+        expand_check_input(input, &mut expanded);
+    }
+    expanded.sort();
+    expanded.dedup();
+    expanded
+}
+
+fn expand_check_input(path: &Path, out: &mut Vec<PathBuf>) {
+    if path.is_dir() {
+        let mut entries = match fs::read_dir(path) {
+            Ok(entries) => entries.filter_map(Result::ok).map(|e| e.path()).collect::<Vec<_>>(),
+            Err(_) => {
+                return;
+            }
+        };
+        entries.sort();
+        for entry in entries {
+            expand_check_input(&entry, out);
+        }
+        return;
+    }
+
+    if path.extension().and_then(|ext| ext.to_str()) == Some("spl") {
+        out.push(path.to_path_buf());
     }
 }
 

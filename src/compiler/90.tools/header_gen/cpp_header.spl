@@ -2,7 +2,9 @@
 #
 # Generates C++ wrapper (.hpp) files for @export("C") classes and functions.
 # Wraps the C header with RAII classes, move semantics, and std::string
-# overloads for a natural C++ API.
+# overloads for a natural C++ API. The default wrapper surface is noexcept
+# so consumers can compile with exceptions disabled. An optional throwing
+# facade is emitted behind SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS.
 #
 # Each exported Simple class becomes a C++ class that:
 # - Holds an opaque handle from the C API
@@ -54,10 +56,12 @@ fn emit_cpp_header(lib_name: text, exported_types: [MirTypeDef], exported_fns: [
     # Standard C++ includes
     lines.push(r"#include <memory>")
     lines.push(r"#include <string>")
-    lines.push(r"#include <stdexcept>")
     lines.push(r"#include <functional>")
     lines.push(r"#include <utility>")
     lines.push(r"#include <cstddef>")
+    lines.push(r"#ifdef SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS")
+    lines.push(r"#include <stdexcept>")
+    lines.push(r"#endif")
     lines.push(r"")
 
     # Open namespace
@@ -198,8 +202,8 @@ fn _emit_library_guard() -> [text]:
     lines.push(r" */")
     lines.push(r"class Library {")
     lines.push(r"public:")
-    lines.push(r"    Library() { spl_library_init(); }")
-    lines.push(r"    ~Library() { spl_library_shutdown(); }")
+    lines.push(r"    Library() noexcept { spl_library_init(); }")
+    lines.push(r"    ~Library() noexcept { spl_library_shutdown(); }")
     lines.push(r"    Library(const Library&) = delete;")
     lines.push(r"    Library& operator=(const Library&) = delete;")
     lines.push(r"};")
@@ -235,7 +239,7 @@ fn _emit_wrapper_class(type_def: MirTypeDef, module: MirModule) -> [text]:
             pass_dn
 
     # Destructor
-    lines.push(r"    ~" + c_name + r"() {")
+    lines.push(r"    ~" + c_name + r"() noexcept {")
     lines.push(r"        if (handle_) " + prefix + r"_destroy(handle_);")
     lines.push(r"    }")
     lines.push(r"")
@@ -304,7 +308,7 @@ fn _emit_constructor(c_name: text, prefix: text, fields: [MirFieldDef]) -> [text
     val params_str = if cpp_params.len() == 0: "" else: cpp_params.join(", ")
     val args_str = if c_args.len() == 0: "" else: c_args.join(", ")
 
-    lines.push("explicit " + c_name + "(" + params_str + ")")
+    lines.push("explicit " + c_name + "(" + params_str + ") noexcept")
     lines.push("    : handle_(" + prefix + "_create(" + args_str + ")) {}")
     lines.push("")
     lines
@@ -312,8 +316,9 @@ fn _emit_constructor(c_name: text, prefix: text, fields: [MirFieldDef]) -> [text
 fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [text]:
     """Emit a C++ method that delegates to the C function.
 
-    If the method returns Result<T,E>, generates an error-converting wrapper
-    that catches spl_error_t and throws std::runtime_error.
+    If the method returns Result<T,E>, generates a default noexcept wrapper
+    that reports errors via out-parameters, plus an optional throwing facade
+    behind SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS.
     """
     var lines: [text] = []
 
@@ -354,7 +359,6 @@ fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [
     val needs_string_return = _is_text_type(func.signature.return_type)
 
     lines.push(ret_type + " " + method_name + "(" + params_str + ") noexcept {")
-    lines.push("    try {")
     if is_void:
         lines.push("        " + c_fn_name + "(" + args_str + ");")
     elif needs_string_return:
@@ -362,11 +366,6 @@ fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [
         lines.push("        return _result ? std::string(_result) : std::string();")
     else:
         lines.push("        return " + c_fn_name + "(" + args_str + ");")
-    lines.push("    } catch (...) {")
-    lines.push("        _spl_set_last_error(\"C++ exception in " + method_name + "\", -1);")
-    if not is_void:
-        lines.push("        return " + ret_type + "{};")
-    lines.push("    }")
     lines.push("}")
     lines.push("")
     lines
@@ -374,8 +373,9 @@ fn _emit_method_wrapper(prefix: text, method_name: text, func: MirFunction) -> [
 fn _emit_function_wrapper(func: MirFunction) -> [text]:
     """Emit a C++ free function wrapper for an exported standalone function.
 
-    If the function returns Result<T,E>, generates an error-converting wrapper
-    that catches spl_error_t and throws std::runtime_error.
+    If the function returns Result<T,E>, generates a default noexcept wrapper
+    that reports errors via out-parameters, plus an optional throwing facade
+    behind SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS.
     """
     var lines: [text] = []
 
@@ -426,7 +426,6 @@ fn _emit_function_wrapper(func: MirFunction) -> [text]:
     val needs_string_return = _is_text_type(func.signature.return_type)
 
     lines.push(r"inline " + ret_type + " " + cpp_name + "(" + params_str + ") noexcept {")
-    lines.push("    try {")
     if is_void:
         lines.push("        " + export_name + "(" + args_str + ");")
     elif needs_string_return:
@@ -434,11 +433,6 @@ fn _emit_function_wrapper(func: MirFunction) -> [text]:
         lines.push("        return _result ? std::string(_result) : std::string();")
     else:
         lines.push("        return " + export_name + "(" + args_str + ");")
-    lines.push("    } catch (...) {")
-    lines.push("        _spl_set_last_error(\"C++ exception in " + cpp_name + "\", -1);")
-    if not is_void:
-        lines.push("        return " + ret_type + "{};")
-    lines.push("    }")
     lines.push(r"}")
     lines.push(r"")
     lines

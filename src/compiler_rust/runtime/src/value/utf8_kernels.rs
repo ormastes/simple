@@ -33,12 +33,13 @@ pub(crate) fn avx2_count_codepoints(bytes: &[u8]) -> i64 {
     scalar_count_codepoints(bytes)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn neon_count_codepoints(bytes: &[u8]) -> i64 {
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return neon_count_codepoints_impl(bytes);
-    }
-    #[allow(unreachable_code)]
+    unsafe { neon_count_codepoints_impl(bytes) }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) fn neon_count_codepoints(bytes: &[u8]) -> i64 {
     scalar_count_codepoints(bytes)
 }
 
@@ -52,12 +53,13 @@ pub(crate) fn avx2_validate(bytes: &[u8]) -> bool {
     scalar_validate(bytes)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn neon_validate(bytes: &[u8]) -> bool {
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return neon_validate_impl(bytes);
-    }
-    #[allow(unreachable_code)]
+    unsafe { neon_validate_impl(bytes) }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) fn neon_validate(bytes: &[u8]) -> bool {
     scalar_validate(bytes)
 }
 
@@ -71,12 +73,13 @@ pub(crate) fn avx2_find_invalid(bytes: &[u8]) -> i64 {
     scalar_find_invalid(bytes)
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn neon_find_invalid(bytes: &[u8]) -> i64 {
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return neon_find_invalid_impl(bytes);
-    }
-    #[allow(unreachable_code)]
+    unsafe { neon_find_invalid_impl(bytes) }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub(crate) fn neon_find_invalid(bytes: &[u8]) -> i64 {
     scalar_find_invalid(bytes)
 }
 

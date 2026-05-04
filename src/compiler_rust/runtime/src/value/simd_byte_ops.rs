@@ -34,7 +34,12 @@
 /// AES-GCM byte ops rely on.
 #[inline]
 pub fn add_u8x16(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    add_u8x16_impl(a, b)
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+#[inline]
+fn add_u8x16_impl(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
     unsafe {
         use core::arch::x86_64::*;
         let av = _mm_loadu_si128(a.as_ptr() as *const __m128i);
@@ -42,9 +47,13 @@ pub fn add_u8x16(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
         let rv = _mm_add_epi8(av, bv);
         let mut out = [0_u8; 16];
         _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, rv);
-        return out;
+        out
     }
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+fn add_u8x16_impl(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
     unsafe {
         use core::arch::aarch64::*;
         let av = vld1q_u8(a.as_ptr());
@@ -52,9 +61,16 @@ pub fn add_u8x16(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
         let rv = vaddq_u8(av, bv);
         let mut out = [0_u8; 16];
         vst1q_u8(out.as_mut_ptr(), rv);
-        return out;
+        out
     }
-    #[allow(unreachable_code)]
+}
+
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(target_arch = "aarch64", target_feature = "neon"),
+)))]
+#[inline]
+fn add_u8x16_impl(a: [u8; 16], b: [u8; 16]) -> [u8; 16] {
     [
         a[0].wrapping_add(b[0]),
         a[1].wrapping_add(b[1]),

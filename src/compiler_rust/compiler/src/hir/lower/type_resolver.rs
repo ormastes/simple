@@ -58,6 +58,9 @@ impl Lowerer {
         if spec.is_empty() {
             return None;
         }
+        if let Some(inner) = spec.strip_prefix("Simple(\"").and_then(|rest| rest.strip_suffix("\")")) {
+            return self.resolve_type(&Type::Simple(inner.to_string())).ok();
+        }
         if let Some(inner) = spec.strip_suffix('?') {
             let inner_ty = self.resolve_global_type_spec(inner.trim())?;
             return Some(self.module.types.register(HirType::Enum {

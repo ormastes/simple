@@ -16,6 +16,8 @@
 #   clmul_hi                  args=[rd, rn, rm]          -> 3  (PMULL2, 4 bytes)
 #   bit_bswap                 args=[rd, rn]              -> 2  (REV, 4 bytes)
 #   bit_clz                   args=[rd, rn]              -> 2  (CLZ, 4 bytes)
+#   bit_ctz                   args=[rd, rn]              -> 2  (RBIT + CLZ, 8 bytes)
+#   bit_bitreverse            args=[rd, rn]              -> 2  (RBIT, 4 bytes)
 
 use compiler.backend.lowering.intrinsic_lowering_x86.{LoweringResult}
 use compiler.backend.backend.native.encode_aarch64_crypto.{
@@ -71,9 +73,9 @@ fn intrinsic_requires_placeholder_lowering(idiom: TargetIdiom) -> bool:
         case RotateRight:           true
         case Popcount:              true
         case CountLeadingZeros:     false
-        case CountTrailingZeros:    true
+        case CountTrailingZeros:    false
         case ByteSwap:              false
-        case BitReverse:            true
+        case BitReverse:            false
         case MatrixDot:             true
         case MatrixOuterProduct:    true
         case MatrixFmaKernel:       true
@@ -104,6 +106,10 @@ fn emit_rev_x(rd: i64, rn: i64) -> [i64]:
 
 fn emit_clz_x(rd: i64, rn: i64) -> [i64]:
     val encoding = 0xDAC01000 or (bit_shl(rn, 5)) or rd
+    emit_u32_le_aarch64(encoding)
+
+fn emit_rbit_x(rd: i64, rn: i64) -> [i64]:
+    val encoding = 0xDAC00000 or (bit_shl(rn, 5)) or rd
     emit_u32_le_aarch64(encoding)
 
 # ============================================================================
@@ -138,6 +144,39 @@ fn lower_cipher_intrinsic_aarch64(name: text, args: [i64], caps: Aarch64Caps) ->
             # Step 2: capability gate
             if not caps.supports(idiom):
                 return LoweringResult(empty, false, "no-cap")
+
+            # Direct scalar bitmanip lowers should report arity before
+            # falling through the generic placeholder path.
+            match name:
+                case "bit_bswap":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_rev_x(args[0], args[1])
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_clz":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_clz_x(args[0], args[1])
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_ctz":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var rbit_bytes = emit_rbit_x(args[0], args[1])
+                    var clz_bytes = emit_clz_x(args[0], args[0])
+                    var bytes = _concat8(rbit_bytes, clz_bytes)
+                    return LoweringResult(bytes, true, "")
+
+                case "bit_bitreverse":
+                    if args.length != 2:
+                        return LoweringResult(empty, false, "bad-arity")
+                    var bytes = emit_rbit_x(args[0], args[1])
+                    return LoweringResult(bytes, true, "")
+
+                case _:
+                    pass
+
             if intrinsic_requires_placeholder_lowering(idiom):
                 return LoweringResult(empty, false, "unimplemented")
 
@@ -212,18 +251,6 @@ fn lower_cipher_intrinsic_aarch64(name: text, args: [i64], caps: Aarch64Caps) ->
                     if args.length != 3:
                         return LoweringResult(empty, false, "bad-arity")
                     var bytes = emit_pmull2(args[0], args[1], args[2])
-                    LoweringResult(bytes, true, "")
-
-                case "bit_bswap":
-                    if args.length != 2:
-                        return LoweringResult(empty, false, "bad-arity")
-                    var bytes = emit_rev_x(args[0], args[1])
-                    LoweringResult(bytes, true, "")
-
-                case "bit_clz":
-                    if args.length != 2:
-                        return LoweringResult(empty, false, "bad-arity")
-                    var bytes = emit_clz_x(args[0], args[1])
                     LoweringResult(bytes, true, "")
 
                 case _:

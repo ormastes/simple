@@ -11,6 +11,11 @@ use super::memory_warning::MemoryWarningCollector;
 use crate::module_resolver::ModuleResolver;
 use crate::type_inference_config::TypeInferenceConfig;
 
+type GlobalStructDefs = std::sync::Arc<HashMap<String, Vec<(String, String)>>>;
+type DuplicateGlobalStructDefs = std::sync::Arc<HashMap<String, Vec<Vec<(String, String)>>>>;
+type AmbiguousFieldNames = std::sync::Arc<HashSet<String>>;
+type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<usize>)>>>;
+
 pub struct Lowerer {
     pub(super) module: HirModule,
     pub(super) globals: HashMap<String, TypeId>,
@@ -61,19 +66,16 @@ pub struct Lowerer {
     /// Function names imported via `use` statements (should not become globals in MIR)
     pub(super) imported_function_names: HashSet<String>,
     /// Global struct definitions from all compilation units for cross-module field resolution.
-    #[allow(clippy::type_complexity)]
-    // reason: Arc<HashMap<String, Vec<(String, String)>>> is the cross-module struct field index
-    pub(super) global_struct_defs: Option<std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>>,
+    pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Duplicate struct/class definitions keyed by bare type name. Each value
     /// preserves all colliding layouts so field fallback can pick a unique
     /// variant by field name without merging incompatible offsets.
-    pub(super) duplicate_global_struct_defs:
-        Option<std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, String)>>>>>,
+    pub(super) duplicate_global_struct_defs: Option<DuplicateGlobalStructDefs>,
     /// Field names that appear in more than one globally-known struct.
     /// Cross-module lookups skip these to avoid picking the wrong struct's
     /// byte offset (see the BeDomNode/BeLayoutBox `children` collision that
     /// originally motivated the old "single-field structs only" filter).
-    pub(super) ambiguous_field_names: Option<std::sync::Arc<std::collections::HashSet<String>>>,
+    pub(super) ambiguous_field_names: Option<AmbiguousFieldNames>,
     /// Global enum definitions from all compilation units, keyed by enum
     /// name with payload arity per variant. Set by the native_project
     /// compiler driver before `lower_module` runs and consumed by
@@ -83,10 +85,7 @@ pub struct Lowerer {
     /// chain) leave `lookup(EnumName)` returning None and the enum-variant
     /// early-return in `expr/access.rs::lower_field_access` falls through
     /// to the field-access fallback (W13-F class 1, fixed in W15-H).
-    #[allow(clippy::type_complexity)]
-    // reason: Arc<HashMap<String, Vec<(String, Option<usize>)>>> mirrors global_struct_defs
-    pub(super) global_enum_defs:
-        Option<std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>>,
+    pub(super) global_enum_defs: Option<GlobalEnumDefs>,
 }
 
 impl Lowerer {
@@ -249,20 +248,20 @@ impl Lowerer {
     /// isn't in the per-file registry.
     pub fn set_global_struct_defs(
         &mut self,
-        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, String)>>>,
+        defs: GlobalStructDefs,
     ) {
         self.global_struct_defs = Some(defs);
     }
 
     pub fn set_duplicate_global_struct_defs(
         &mut self,
-        defs: std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, String)>>>>,
+        defs: DuplicateGlobalStructDefs,
     ) {
         self.duplicate_global_struct_defs = Some(defs);
     }
 
     /// Get global struct definitions (if set).
-    pub fn global_struct_defs(&self) -> Option<&std::collections::HashMap<String, Vec<(String, String)>>> {
+    pub fn global_struct_defs(&self) -> Option<&HashMap<String, Vec<(String, String)>>> {
         self.global_struct_defs.as_deref()
     }
 
@@ -271,7 +270,7 @@ impl Lowerer {
     /// `get_field_info`, which falls back to a method call instead. See the
     /// comment on `global_struct_defs` and the `native_project/compiler.rs`
     /// setup site for background.
-    pub fn set_ambiguous_field_names(&mut self, names: std::sync::Arc<std::collections::HashSet<String>>) {
+    pub fn set_ambiguous_field_names(&mut self, names: AmbiguousFieldNames) {
         self.ambiguous_field_names = Some(names);
     }
 
@@ -287,7 +286,7 @@ impl Lowerer {
     /// See the doc comment on `global_enum_defs` for the why.
     pub fn set_global_enum_defs(
         &mut self,
-        defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+        defs: GlobalEnumDefs,
     ) {
         self.global_enum_defs = Some(defs);
     }

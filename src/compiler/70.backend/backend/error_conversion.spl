@@ -305,23 +305,26 @@ fn emit_result_function_declaration(export_name: text, ok_c_type: text, params: 
 # ============================================================================
 
 fn emit_cpp_error_method_wrapper(method_name: text, c_fn_name: text, ok_cpp_type: text, cpp_params: [text], c_args: [text], is_void_ok: bool) -> [text]:
-    """Generate a C++ method wrapper that converts spl_error_t to exception.
+    """Generate default noexcept + optional throwing C++ wrappers for Result exports.
 
-    For Result-returning methods in the C++ wrapper class, generates:
-      T method_name(args...) {
-          spl_error_t* err = nullptr;
-          T result = c_fn_name(handle_, args..., &err);
-          if (err) {
-              std::string msg = spl_error_message(err);
-              spl_error_free(err);
-              throw std::runtime_error(msg);
-          }
-          return result;
-      }
+    Default wrapper:
+      bool method_name(args..., T* out_value, std::string* out_error = nullptr) noexcept
+
+    Optional facade when SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS is defined:
+      T method_name_or_throw(args...)
     """
     var lines: [text] = []
-    val ret_ty = if is_void_ok: "void" else: ok_cpp_type
-    val params_str = cpp_params.join(", ")
+    val value_out_param = if is_void_ok: "" else: ok_cpp_type + "* out_value"
+
+    var params_with_outputs: [text] = []
+    var pi = 0
+    while pi < cpp_params.len():
+        params_with_outputs.push(cpp_params[pi])
+        pi = pi + 1
+    if value_out_param != "":
+        params_with_outputs.push(value_out_param)
+    params_with_outputs.push(r"std::string* out_error = nullptr")
+    val params_str = params_with_outputs.join(", ")
 
     # Build the C call args with &err appended
     var call_args: [text] = []
@@ -332,32 +335,92 @@ fn emit_cpp_error_method_wrapper(method_name: text, c_fn_name: text, ok_cpp_type
     call_args.push(r"&err")
     val call_args_str = call_args.join(", ")
 
-    lines.push(ret_ty + " " + method_name + "(" + params_str + ") {")
+    lines.push(r"bool " + method_name + "(" + params_str + r") noexcept {")
     lines.push(r"    spl_error_t* err = nullptr;")
     if is_void_ok:
-        lines.push(r"    " + c_fn_name + "(" + call_args_str + ");")
+        lines.push(r"    " + c_fn_name + "(" + call_args_str + r");")
     else:
-        lines.push(r"    " + ret_ty + " result = " + c_fn_name + "(" + call_args_str + ");")
+        lines.push(r"    " + ok_cpp_type + " result = " + c_fn_name + "(" + call_args_str + r");")
     lines.push(r"    if (err) {")
-    lines.push(r"        std::string msg = spl_error_message(err);")
+    lines.push(r"        if (out_error) {")
+    lines.push(r"            *out_error = spl_error_message(err);")
+    lines.push(r"        }")
     lines.push(r"        spl_error_free(err);")
-    lines.push(r"        throw std::runtime_error(msg);")
+    lines.push(r"        return false;")
     lines.push(r"    }")
-    if not is_void_ok:
-        lines.push(r"    return result;")
+    if is_void_ok:
+        lines.push(r"    if (out_error) {")
+        lines.push(r"        out_error->clear();")
+        lines.push(r"    }")
+    else:
+        lines.push(r"    if (out_value) {")
+        lines.push(r"        *out_value = result;")
+        lines.push(r"    }")
+        lines.push(r"    if (out_error) {")
+        lines.push(r"        out_error->clear();")
+        lines.push(r"    }")
+    lines.push(r"    return true;")
     lines.push(r"}")
+    lines.push(r"")
+
+    var throw_args: [text] = []
+    var tai = 1
+    while tai < c_args.len():
+        throw_args.push(c_args[tai])
+        tai = tai + 1
+    val throw_params = cpp_params.join(", ")
+
+    lines.push(r"#ifdef SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS")
+    if is_void_ok:
+        var call_parts: [text] = []
+        var ci = 0
+        while ci < throw_args.len():
+            call_parts.push(throw_args[ci])
+            ci = ci + 1
+        call_parts.push(r"&error")
+        val throw_call = call_parts.join(", ")
+        lines.push(r"void " + method_name + r"_or_throw(" + throw_params + r") {")
+        lines.push(r"    std::string error;")
+        lines.push(r"    if (!" + method_name + r"(" + throw_call + r")) {")
+        lines.push(r"        throw std::runtime_error(error);")
+        lines.push(r"    }")
+    else:
+        var call_parts: [text] = []
+        var ci = 0
+        while ci < throw_args.len():
+            call_parts.push(throw_args[ci])
+            ci = ci + 1
+        call_parts.push(r"&value")
+        call_parts.push(r"&error")
+        val throw_call = call_parts.join(", ")
+        lines.push(ok_cpp_type + " " + method_name + r"_or_throw(" + throw_params + r") {")
+        lines.push(r"    " + ok_cpp_type + r" value{};")
+        lines.push(r"    std::string error;")
+        lines.push(r"    if (!" + method_name + r"(" + throw_call + r")) {")
+        lines.push(r"        throw std::runtime_error(error);")
+        lines.push(r"    }")
+        lines.push(r"    return value;")
+        lines.push(r"}")
+    if is_void_ok:
+        lines.push(r"}")
+    lines.push(r"#endif")
     lines.push(r"")
     lines
 
 fn emit_cpp_error_free_function_wrapper(cpp_name: text, c_fn_name: text, ok_cpp_type: text, cpp_params: [text], c_args: [text], is_void_ok: bool) -> [text]:
-    """Generate a C++ free function wrapper that converts spl_error_t to exception.
-
-    Same as emit_cpp_error_method_wrapper but for standalone functions with
-    'inline' prefix.
-    """
+    """Generate default noexcept + optional throwing free-function wrappers."""
     var lines: [text] = []
-    val ret_ty = if is_void_ok: "void" else: ok_cpp_type
-    val params_str = cpp_params.join(", ")
+    val value_out_param = if is_void_ok: "" else: ok_cpp_type + "* out_value"
+
+    var params_with_outputs: [text] = []
+    var pi = 0
+    while pi < cpp_params.len():
+        params_with_outputs.push(cpp_params[pi])
+        pi = pi + 1
+    if value_out_param != "":
+        params_with_outputs.push(value_out_param)
+    params_with_outputs.push(r"std::string* out_error = nullptr")
+    val params_str = params_with_outputs.join(", ")
 
     var call_args: [text] = []
     var ai = 0
@@ -367,20 +430,70 @@ fn emit_cpp_error_free_function_wrapper(cpp_name: text, c_fn_name: text, ok_cpp_
     call_args.push(r"&err")
     val call_args_str = call_args.join(", ")
 
-    lines.push(r"inline " + ret_ty + " " + cpp_name + "(" + params_str + ") {")
+    lines.push(r"inline bool " + cpp_name + "(" + params_str + r") noexcept {")
     lines.push(r"    spl_error_t* err = nullptr;")
     if is_void_ok:
         lines.push(r"    " + c_fn_name + "(" + call_args_str + ");")
     else:
-        lines.push(r"    " + ret_ty + " result = " + c_fn_name + "(" + call_args_str + ");")
+        lines.push(r"    " + ok_cpp_type + " result = " + c_fn_name + "(" + call_args_str + ");")
     lines.push(r"    if (err) {")
-    lines.push(r"        std::string msg = spl_error_message(err);")
+    lines.push(r"        if (out_error) {")
+    lines.push(r"            *out_error = spl_error_message(err);")
+    lines.push(r"        }")
     lines.push(r"        spl_error_free(err);")
-    lines.push(r"        throw std::runtime_error(msg);")
+    lines.push(r"        return false;")
     lines.push(r"    }")
-    if not is_void_ok:
-        lines.push(r"    return result;")
+    if is_void_ok:
+        lines.push(r"    if (out_error) {")
+        lines.push(r"        out_error->clear();")
+        lines.push(r"    }")
+    else:
+        lines.push(r"    if (out_value) {")
+        lines.push(r"        *out_value = result;")
+        lines.push(r"    }")
+        lines.push(r"    if (out_error) {")
+        lines.push(r"        out_error->clear();")
+        lines.push(r"    }")
+    lines.push(r"    return true;")
     lines.push(r"}")
+    lines.push(r"")
+
+    val throw_params = cpp_params.join(", ")
+
+    lines.push(r"#ifdef SIMPLE_SFFI_ENABLE_CPP_EXCEPTIONS")
+    if is_void_ok:
+        var call_parts: [text] = []
+        var ci = 0
+        while ci < c_args.len():
+            call_parts.push(c_args[ci])
+            ci = ci + 1
+        call_parts.push(r"&error")
+        val throw_call = call_parts.join(", ")
+        lines.push(r"inline void " + cpp_name + r"_or_throw(" + throw_params + r") {")
+        lines.push(r"    std::string error;")
+        lines.push(r"    if (!" + cpp_name + r"(" + throw_call + r")) {")
+        lines.push(r"        throw std::runtime_error(error);")
+        lines.push(r"    }")
+    else:
+        var call_parts: [text] = []
+        var ci = 0
+        while ci < c_args.len():
+            call_parts.push(c_args[ci])
+            ci = ci + 1
+        call_parts.push(r"&value")
+        call_parts.push(r"&error")
+        val throw_call = call_parts.join(", ")
+        lines.push(r"inline " + ok_cpp_type + " " + cpp_name + r"_or_throw(" + throw_params + r") {")
+        lines.push(r"    " + ok_cpp_type + r" value{};")
+        lines.push(r"    std::string error;")
+        lines.push(r"    if (!" + cpp_name + r"(" + throw_call + r")) {")
+        lines.push(r"        throw std::runtime_error(error);")
+        lines.push(r"    }")
+        lines.push(r"    return value;")
+        lines.push(r"}")
+    if is_void_ok:
+        lines.push(r"}")
+    lines.push(r"#endif")
     lines.push(r"")
     lines
 

@@ -172,7 +172,9 @@ pub struct NativeBuildConfig {
     pub backend: String,
     /// Explicit runtime library directory (overrides env var and auto-discovery).
     pub runtime_path: Option<PathBuf>,
-    /// Runtime bundle selection: "auto", "runtime"/"core-c", or "hosted"/"all".
+    /// Runtime bundle selection: "auto", the default "core-c" lane
+    /// ("runtime"/"core"/"core_c" aliases), or the explicit hosted lane
+    /// ("hosted"/"rust-hosted"/"all" aliases).
     pub runtime_bundle: String,
     /// Discover files from the explicit entrypoint's reachable import closure.
     pub entry_closure: bool,
@@ -247,6 +249,7 @@ pub struct NativeProjectBuilder {
 
 impl NativeProjectBuilder {
     /// Create a new builder.
+    #[must_use]
     pub fn new(project_root: PathBuf, output: PathBuf) -> Self {
         // Skip canonicalize -- it segfaults in self-hosted binaries (Cranelift/libc interaction)
         let project_root = if project_root.is_absolute() {

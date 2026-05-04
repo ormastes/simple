@@ -5,8 +5,8 @@
 use nogc_sync_mut.database.core.{SdnTable, SdnRow}
 use std.db.accel.{
     accel_capability_report,
-    DB_ACCEL_DEFAULT_BATCH_SIZE, RowBitmap, VectorBatch,
-    make_vector_batch, row_bitmap_indices, text_equals_span
+    DB_ACCEL_DEFAULT_BATCH_SIZE, RowBitmap,
+    row_bitmap_indices, text_equals_span
 }
 
 val QUERY_ACCEL_SIMD_ACTIVE = accel_capability_report().simd_active
@@ -47,21 +47,28 @@ struct Filter:
         self.matches_value(fv)
 
     fn matches_value(fv: text) -> bool:
-        match self.op:
-            CompareOp.Eq: text_equals_span(fv, self.value)
-            CompareOp.Ne: not text_equals_span(fv, self.value)
-            CompareOp.Gt: fv > self.value
-            CompareOp.Ge: fv >= self.value
-            CompareOp.Lt: fv < self.value
-            CompareOp.Le: fv <= self.value
-            CompareOp.Contains: fv.contains(self.value)
-            CompareOp.StartsWith: fv.starts_with(self.value)
-            CompareOp.EndsWith: fv.ends_with(self.value)
-            CompareOp.InSet:
-                for candidate in self.any_values:
-                    if text_equals_span(fv, candidate):
-                        return true
-                false
+        if self.op == CompareOp.Eq:
+            return text_equals_span(fv, self.value)
+        if self.op == CompareOp.Ne:
+            return not text_equals_span(fv, self.value)
+        if self.op == CompareOp.Gt:
+            return fv > self.value
+        if self.op == CompareOp.Ge:
+            return fv >= self.value
+        if self.op == CompareOp.Lt:
+            return fv < self.value
+        if self.op == CompareOp.Le:
+            return fv <= self.value
+        if self.op == CompareOp.Contains:
+            return fv.contains(self.value)
+        if self.op == CompareOp.StartsWith:
+            return fv.starts_with(self.value)
+        if self.op == CompareOp.EndsWith:
+            return fv.ends_with(self.value)
+        for candidate in self.any_values:
+            if text_equals_span(fv, candidate):
+                return true
+        false
 
 # ============================================================================
 # QueryBuilder
@@ -120,25 +127,32 @@ class QueryBuilder:
         if self.has_limit_count and self.limit_count == 0:
             return []
 
-        var results = self.table.rows
+        var row_ids = all_row_ids(self.table.rows.len())
 
         if self.filters.len() > 0:
             if QUERY_ACCEL_SIMD_ACTIVE and self.filters.len() > 2:
                 val bitmap = self.execute_bitmap()
-                results = []
-                for row_idx in row_bitmap_indices(bitmap):
-                    results.push(self.table.rows[row_idx])
+                row_ids = row_bitmap_indices(bitmap)
             else:
-                results = self.execute_scalar_fast_path()
+                row_ids = self.execute_scalar_row_ids()
 
         # Apply sorting (merge sort - O(n log n) stable sort)
         if self.has_sort_field:
-            results = merge_sort_rows(results, self.sort_field, self.sort_desc)
+            row_ids = merge_sort_row_ids(self.table.rows, row_ids, self.sort_field, self.sort_desc)
 
         # Apply limit
         if self.has_limit_count:
-            results = results.take(self.limit_count)
+            row_ids = row_ids.take(self.limit_count)
 
+        var results: [SdnRow] = [SdnRow.empty(); row_ids.len()]
+        var result_idx = 0
+        for row_idx in row_ids:
+            val copied_row = SdnRow.empty()
+            for column in self.table.columns:
+                if val Some(value) = self.table.rows[row_idx].get(column):
+                    copied_row.set(column, value)
+            results[result_idx as i32] = copied_row
+            result_idx = result_idx + 1
         results
 
     # Count results
@@ -149,10 +163,11 @@ class QueryBuilder:
     fn exists() -> bool:
         self.count() > 0
 
-    fn execute_scalar_fast_path() -> [SdnRow]:
-        var results: [SdnRow] = []
+    fn execute_scalar_row_ids() -> [i64]:
+        var results: [i64] = []
         val stop_early = self.has_limit_count and not self.has_sort_field and self.limit_count > 0
         val filter_count = self.filters.len()
+        var row_idx = 0
 
         if filter_count == 1:
             val filter0 = self.filters[0]
@@ -160,9 +175,10 @@ class QueryBuilder:
             for row in self.table.rows:
                 if val Some(fv0) = row.get(field0):
                     if value_matches_filter_fast(fv0, filter0):
-                        results.push(row)
+                        results.push(row_idx)
                         if stop_early and results.len() >= self.limit_count:
                             break
+                row_idx = row_idx + 1
             return results
 
         if filter_count == 2:
@@ -170,53 +186,58 @@ class QueryBuilder:
             val filter1 = self.filters[1]
             val field0 = filter0.field
             val field1 = filter1.field
+            row_idx = 0
             for row in self.table.rows:
                 if val Some(fv0) = row.get(field0):
                     if value_matches_filter_fast(fv0, filter0):
                         if val Some(fv1) = row.get(field1):
                             if value_matches_filter_fast(fv1, filter1):
-                                results.push(row)
+                                results.push(row_idx)
                                 if stop_early and results.len() >= self.limit_count:
                                     break
+                row_idx = row_idx + 1
             return results
 
+        row_idx = 0
         for row in self.table.rows:
             if row_matches_all_filters_fast(row, self.filters):
-                results.push(row)
+                results.push(row_idx)
                 if stop_early and results.len() >= self.limit_count:
                     break
+            row_idx = row_idx + 1
         results
 
     fn execute_bitmap() -> RowBitmap:
-        var bitmap = RowBitmap.full(self.table.rows.len())
+        var bitmap: RowBitmap = RowBitmap.full(self.table.rows.len())
         for filter in self.filters:
             bitmap = bitmap.and_with(self.execute_filter_bitmap(filter))
         bitmap
 
     fn execute_filter_bitmap(filter: Filter) -> RowBitmap:
         val total_rows = self.table.rows.len()
-        var bitmap = RowBitmap.empty(total_rows)
+        var bitmap: RowBitmap = RowBitmap.empty(total_rows)
         var start = 0
         while start < total_rows:
             val batch_len = if start + DB_ACCEL_DEFAULT_BATCH_SIZE > total_rows:
                 total_rows - start
             else:
                 DB_ACCEL_DEFAULT_BATCH_SIZE
-            val batch = make_vector_batch(self.table.rows, start, batch_len)
-            bitmap = self.fill_batch_bitmap(filter, batch, bitmap)
+            bitmap = self.fill_batch_bitmap(filter, start, batch_len, bitmap)
             start = start + batch_len
         bitmap
 
-    fn fill_batch_bitmap(filter: Filter, batch: VectorBatch<SdnRow>, bitmap: RowBitmap) -> RowBitmap:
-        var updated = bitmap
-        var idx = 0
-        while idx < batch.len:
-            val row = batch.values[batch.start + idx]
-            val field_value = row.get(filter.field)
-            if val Some(fv) = field_value:
+    fn fill_batch_bitmap(filter: Filter, start: i64, batch_len: i64, bitmap: RowBitmap) -> RowBitmap:
+        var updated: RowBitmap = bitmap
+        val batch_end = start + batch_len
+        var row_idx = 0
+        for row in self.table.rows:
+            if row_idx < start or row_idx >= batch_end:
+                row_idx = row_idx + 1
+                continue
+            if val Some(fv) = row.get(filter.field):
                 if filter.matches_value(fv):
-                    updated.set(batch.start + idx)
-            idx = idx + 1
+                    updated.set(row_idx)
+            row_idx = row_idx + 1
         updated
 
 # ============================================================================
@@ -229,40 +250,59 @@ class QueryBuilder:
 
 use nogc_sync_mut.database.core.{SdnDatabase}
 
-# Merge sort for arrays of SdnRow - O(n log n) stable sort
-fn merge_sort_rows(rows: [SdnRow], field: text, desc: bool) -> [SdnRow]:
-    if rows.len() <= 1:
-        return rows
-    val mid = rows.len() / 2
-    var left: [SdnRow] = []
-    var right: [SdnRow] = []
-    for i in 0..mid:
-        left = left.push(rows[i])
-    for i in mid..rows.len():
-        right = right.push(rows[i])
-    merge_rows(left=merge_sort_rows(left, field, desc), right=merge_sort_rows(right, field, desc), field=field, desc=desc)
+# Stable insertion sort for row indices.
+# Native recursion over temporary arrays is still fragile here, so keep the
+# sort iterative until that path is fixed more generally.
+fn merge_sort_row_ids(rows: [SdnRow], row_ids: [i64], field: text, desc: bool) -> [i64]:
+    var sorted = row_ids
+    var i = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        val key_value = rows[key].get(field) ?? ""
+        var j = i - 1
+        while j >= 0:
+            val current_value = rows[sorted[j]].get(field) ?? ""
+            val should_shift = if desc:
+                current_value < key_value
+            else:
+                current_value > key_value
+            if not should_shift:
+                break
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    sorted
 
-fn merge_rows(left: [SdnRow], right: [SdnRow], field: text, desc: bool) -> [SdnRow]:
-    var result: [SdnRow] = []
+fn merge_row_ids(rows: [SdnRow], left: [i64], right: [i64], field: text, desc: bool) -> [i64]:
+    var result: [i64] = []
     var i = 0
     var j = 0
     while i < left.len() and j < right.len():
-        val a = left[i].get(field) ?? ""
-        val b = right[j].get(field) ?? ""
+        val a = rows[left[i]].get(field) ?? ""
+        val b = rows[right[j]].get(field) ?? ""
         val take_left = if desc: a >= b else: a <= b
         if take_left:
-            result = result.push(left[i])
+            result.push(left[i])
             i = i + 1
         else:
-            result = result.push(right[j])
+            result.push(right[j])
             j = j + 1
     while i < left.len():
-        result = result.push(left[i])
+        result.push(left[i])
         i = i + 1
     while j < right.len():
-        result = result.push(right[j])
+        result.push(right[j])
         j = j + 1
     result
+
+fn all_row_ids(row_count: i64) -> [i64]:
+    var row_ids: [i64] = []
+    var row_idx = 0
+    while row_idx < row_count:
+        row_ids.push(row_idx)
+        row_idx = row_idx + 1
+    row_ids
 
 fn query_table(db: SdnDatabase, table_name: text) -> QueryBuilder?:
     val table = db.get_table(table_name)?
@@ -283,18 +323,25 @@ fn row_matches_filter_fast(row: SdnRow, filter: Filter) -> bool:
     value_matches_filter_fast(fv, filter)
 
 fn value_matches_filter_fast(fv: text, filter: Filter) -> bool:
-    match filter.op:
-        CompareOp.Eq: text_equals_span(fv, filter.value)
-        CompareOp.Ne: not text_equals_span(fv, filter.value)
-        CompareOp.Gt: fv > filter.value
-        CompareOp.Ge: fv >= filter.value
-        CompareOp.Lt: fv < filter.value
-        CompareOp.Le: fv <= filter.value
-        CompareOp.Contains: fv.contains(filter.value)
-        CompareOp.StartsWith: fv.starts_with(filter.value)
-        CompareOp.EndsWith: fv.ends_with(filter.value)
-        CompareOp.InSet:
-            for candidate in filter.any_values:
-                if text_equals_span(fv, candidate):
-                    return true
-            false
+    if filter.op == CompareOp.Eq:
+        return text_equals_span(fv, filter.value)
+    if filter.op == CompareOp.Ne:
+        return not text_equals_span(fv, filter.value)
+    if filter.op == CompareOp.Gt:
+        return fv > filter.value
+    if filter.op == CompareOp.Ge:
+        return fv >= filter.value
+    if filter.op == CompareOp.Lt:
+        return fv < filter.value
+    if filter.op == CompareOp.Le:
+        return fv <= filter.value
+    if filter.op == CompareOp.Contains:
+        return fv.contains(filter.value)
+    if filter.op == CompareOp.StartsWith:
+        return fv.starts_with(filter.value)
+    if filter.op == CompareOp.EndsWith:
+        return fv.ends_with(filter.value)
+    for candidate in filter.any_values:
+        if text_equals_span(fv, candidate):
+            return true
+    false

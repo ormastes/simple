@@ -71,6 +71,11 @@ fn config_cache() -> &'static Mutex<Option<CachedConfig>> {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+#[doc(hidden)]
+pub fn reset_host_cpu_config_cache_for_tests() {
+    *config_cache().lock().unwrap() = None;
+}
+
 pub fn active_simd_tier() -> SimdTier {
     if let Ok(value) = std::env::var("SIMPLE_SIMD_TIER") {
         if let Ok(tier) = value.parse::<SimdTier>() {
@@ -412,39 +417,52 @@ fn write_config(path: &Path, config: &HostCpuConfig) -> Result<(), HostCpuConfig
 
 fn render_config(config: &HostCpuConfig) -> String {
     format!(
-        "version: {}\n\
-target_triple: {}\n\
-generated_by: \"{}\"\n\
-support:\n\
-    simd_tier: {}\n\
-    instruction_sets: {}\n\
-simple_support:\n\
-    simd_tier_fallbacks: {}\n\
-    instruction_sets: {}\n\
-enabled:\n\
-    simd_tier: {}\n\
-    instruction_sets: {}\n",
+        concat!(
+            "version: {}\n",
+            "target_triple: {}\n",
+            "generated_by: \"{}\"\n",
+            "support:\n",
+            "    simd_tier: {}\n",
+            "    instruction_sets: {}\n",
+            "simple_support:\n",
+            "    simd_tier_fallbacks: {}\n",
+            "    instruction_sets: {}\n",
+            "enabled:\n",
+            "    simd_tier: {}\n",
+            "    instruction_sets: {}\n"
+        ),
         config.version,
-        config.target_triple,
+        quoted(&config.target_triple),
         config.generated_by,
-        config.support.simd_tier.as_str(),
+        quoted(config.support.simd_tier.as_str()),
         render_string_list(&config.support.instruction_sets),
         render_tier_list(&config.simple_support.simd_tier_fallbacks),
         render_string_list(&config.simple_support.instruction_sets),
-        config.enabled.simd_tier.as_str(),
+        quoted(config.enabled.simd_tier.as_str()),
         render_string_list(&config.enabled.instruction_sets),
     )
 }
 
 fn render_string_list(values: &[String]) -> String {
-    format!("[{}]", values.join(", "))
+    format!(
+        "[{}]",
+        values.iter().map(|value| quoted(value)).collect::<Vec<_>>().join(", ")
+    )
 }
 
 fn render_tier_list(values: &[SimdTier]) -> String {
     format!(
         "[{}]",
-        values.iter().map(|value| value.as_str()).collect::<Vec<_>>().join(", ")
+        values
+            .iter()
+            .map(|value| quoted(value.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
     )
+}
+
+fn quoted(value: &str) -> String {
+    format!("\"{value}\"")
 }
 
 #[cfg(test)]
@@ -559,6 +577,28 @@ mod tests {
             }
 
             assert_eq!(active, SimdTier::X86_64Avx2);
+        });
+    }
+
+    #[test]
+    fn active_simd_tier_uses_config_enabled_tier_without_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cpu_config.sdn");
+
+        with_cpu_config_path(&path, || {
+            let mut config = detected_config();
+            config.enabled.simd_tier = SimdTier::Scalar;
+            config.enabled.instruction_sets.clear();
+            fs::write(&path, render_config(&config)).unwrap();
+
+            let source = fs::read_to_string(&path).unwrap();
+            let doc = parse_document(&source).unwrap();
+            let enabled = doc.get("enabled").unwrap();
+            assert_eq!(enabled.get("simd_tier").and_then(SdnValue::as_str), Some("scalar"));
+
+            let parsed = host_cpu_config().unwrap();
+            assert_eq!(parsed.enabled.simd_tier, SimdTier::Scalar);
+            assert_eq!(active_simd_tier(), SimdTier::Scalar);
         });
     }
 

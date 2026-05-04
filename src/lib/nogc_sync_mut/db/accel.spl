@@ -125,11 +125,14 @@ struct RowBitmap:
         self.count().to_float() / self.row_count.to_float()
 
     fn and_with(rhs: RowBitmap) -> RowBitmap:
-        val limit = row_bitmap_min_words(self.words.len(), rhs.words.len())
-        var words: [u32] = []
+        val limit = row_bitmap_min_words(
+            row_bitmap_word_count(self.row_count),
+            row_bitmap_word_count(rhs.row_count)
+        )
+        var words: [u32] = [0u32; limit]
         var idx = 0
         while idx < limit:
-            words.push(self.words[idx as i32] & rhs.words[idx as i32])
+            words[idx as i32] = self.words[idx as i32] & rhs.words[idx as i32]
             idx = idx + 1
         RowBitmap(
             row_count: row_bitmap_min(self.row_count, rhs.row_count),
@@ -137,13 +140,16 @@ struct RowBitmap:
         )
 
     fn or_with(rhs: RowBitmap) -> RowBitmap:
-        val limit = row_bitmap_max_words(self.words.len(), rhs.words.len())
-        var words: [u32] = []
+        val limit = row_bitmap_max_words(
+            row_bitmap_word_count(self.row_count),
+            row_bitmap_word_count(rhs.row_count)
+        )
+        var words: [u32] = [0u32; limit]
         var idx = 0
         while idx < limit:
-            val lhs_word = if idx < self.words.len(): self.words[idx as i32] else: 0u32
-            val rhs_word = if idx < rhs.words.len(): rhs.words[idx as i32] else: 0u32
-            words.push(lhs_word | rhs_word)
+            val lhs_word = if idx < row_bitmap_word_count(self.row_count): self.words[idx as i32] else: 0u32
+            val rhs_word = if idx < row_bitmap_word_count(rhs.row_count): rhs.words[idx as i32] else: 0u32
+            words[idx as i32] = lhs_word | rhs_word
             idx = idx + 1
         RowBitmap(
             row_count: row_bitmap_max(self.row_count, rhs.row_count),
@@ -151,12 +157,12 @@ struct RowBitmap:
         )
 
     fn and_not(rhs: RowBitmap) -> RowBitmap:
-        val limit = self.words.len()
-        var words: [u32] = []
+        val limit = row_bitmap_word_count(self.row_count)
+        var words: [u32] = [0u32; limit]
         var idx = 0
         while idx < limit:
-            val rhs_word = if idx < rhs.words.len(): rhs.words[idx as i32] else: 0u32
-            words.push(self.words[idx as i32] & (0xFFFFFFFFu32 ^ rhs_word))
+            val rhs_word = if idx < row_bitmap_word_count(rhs.row_count): rhs.words[idx as i32] else: 0u32
+            words[idx as i32] = self.words[idx as i32] & (0xFFFFFFFFu32 ^ rhs_word)
             idx = idx + 1
         RowBitmap(row_count: self.row_count, words: words)
 
@@ -180,8 +186,9 @@ fn row_bitmap_max_words(lhs: i64, rhs: i64) -> i64:
 
 fn row_bitmap_indices(bitmap: RowBitmap) -> [i64]:
     var result: [i64] = []
+    val word_limit = row_bitmap_word_count(bitmap.row_count)
     var word_idx = 0
-    while word_idx < bitmap.words.len():
+    while word_idx < word_limit:
         var word = bitmap.words[word_idx as i32]
         if word != 0u32:
             var bit_idx = 0
@@ -279,13 +286,30 @@ fn byte_span_find_delimiter(span: ByteSpan) -> i64:
 
 fn text_find_delimiter(value: text) -> i64:
     var best = -1
-    val delimiters = [" ", "\t", "\n", "\r", ",", "|", "\"", "'"]
-    var idx = 0
-    while idx < delimiters.len():
-        val found = value.find(delimiters[idx as i32])
-        if found >= 0 and (best < 0 or found < best):
-            best = found
-        idx = idx + 1
+    val found_space = value.find(" ")
+    if found_space >= 0 and (best < 0 or found_space < best):
+        best = found_space
+    val found_tab = value.find("\t")
+    if found_tab >= 0 and (best < 0 or found_tab < best):
+        best = found_tab
+    val found_newline = value.find("\n")
+    if found_newline >= 0 and (best < 0 or found_newline < best):
+        best = found_newline
+    val found_cr = value.find("\r")
+    if found_cr >= 0 and (best < 0 or found_cr < best):
+        best = found_cr
+    val found_comma = value.find(",")
+    if found_comma >= 0 and (best < 0 or found_comma < best):
+        best = found_comma
+    val found_pipe = value.find("|")
+    if found_pipe >= 0 and (best < 0 or found_pipe < best):
+        best = found_pipe
+    val found_dquote = value.find("\"")
+    if found_dquote >= 0 and (best < 0 or found_dquote < best):
+        best = found_dquote
+    val found_squote = value.find("'")
+    if found_squote >= 0 and (best < 0 or found_squote < best):
+        best = found_squote
     best
 
 fn text_equals_span(lhs: text, rhs: text) -> bool:

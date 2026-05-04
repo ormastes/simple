@@ -1,6 +1,6 @@
 # TUI App Size Reduction Verification
 
-Date: 2026-05-03
+Date: 2026-05-04
 
 ## Build Inputs
 
@@ -13,37 +13,45 @@ Date: 2026-05-03
 
 | Artifact | Bytes | Approx |
 |---|---:|---:|
-| Simple hello | 423024 | 0.4 MB |
-| Simple minimal TUI | 427120 | 0.4 MB |
+| Simple hello | 410736 | 0.4 MB |
+| Simple minimal TUI | 410736 | 0.4 MB |
 | C hello | 14472 | 14.1 KB |
 | C ncurses hello | 14472 | 14.1 KB |
 
 ## Simple Hello Sections
 
-- text=395588, data=19208, bss=400, dec=415196
-- .text: 047f38
-- .rodata: 00c4d0
+- text=382157, data=18912, bss=400, dec=401469
+- .text: 046d68
+- .rodata: 00c580
+- .eh_frame: 006534
+- .gcc_except_table: 001360
 - .data: 000a90
 - .bss: 000120
 
 ## Simple Minimal TUI Sections
 
-- text=396456, data=19272, bss=400, dec=416128
-- .text: 0480e8
-- .rodata: 00c528
+- text=382773, data=18976, bss=400, dec=402149
+- .text: 046f18
+- .rodata: 00c5d8
+- .eh_frame: 006584
+- .gcc_except_table: 001360
 - .data: 000a90
 - .bss: 000120
 
 ## Anchor Strings
 
 ### Simple hello
+- sha1: 1
 - sha256: 1
 
 ### Simple minimal TUI
+- sha1: 1
 - sha256: 1
 
 ## Notes
 
 - The generated TUI entry uses `app.ui.tui.standalone.run_standalone_tui`.
+- The Simple artifacts are built on the explicit narrow native lane: `--runtime-bundle core-c`.
 - The audit intentionally records anchor strings instead of claiming full transitive Rust crate closure proof.
+- Set `MAX_HELLO_SIMPLE_BYTES` and/or `MAX_MINIMAL_TUI_BYTES` to turn the audit into a size-budget gate.
 - Use `scripts/check-tui-standalone-closure.shs` alongside this report for the import-surface guard.

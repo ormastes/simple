@@ -87,10 +87,10 @@ pub use heap::{HeapHeader, HeapObjectType};
 pub use collections::{RuntimeArray, RuntimeString, RuntimeTuple};
 pub use dict::RuntimeDict;
 pub use aes::{
-    rt_aes128_encrypt_block_into, rt_aes128_encrypt_block_pure, rt_aes256_encrypt_block_into,
-    rt_aes256_encrypt_block_pure, rt_aes_decrypt_block_with_expanded, rt_aes_encrypt_block_with_expanded, rt_aes_rcon,
-    rt_aes_sbox, rt_tls13_aes128_gcm_decrypt, rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt,
-    rt_tls13_aes256_gcm_encrypt,
+    rt_aes128_decrypt_block_pure, rt_aes128_encrypt_block_into, rt_aes128_encrypt_block_pure,
+    rt_aes256_encrypt_block_into, rt_aes256_encrypt_block_pure, rt_aes_decrypt_block_with_expanded,
+    rt_aes_encrypt_block_with_expanded, rt_aes_rcon, rt_aes_sbox, rt_tls13_aes128_gcm_decrypt,
+    rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt, rt_tls13_aes256_gcm_encrypt,
 };
 
 // Re-export object types

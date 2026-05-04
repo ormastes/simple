@@ -45,7 +45,8 @@ Simple-facing API:
 - native loader sibling-library probe ordering
 - embedded package `runtime_variants` selection
 - fail-closed package manifest parsing
-- compiler stdlib variant-root search order
+- compiler stdlib variant-root search order, modeled to match the real
+  `src/lib/std/variants/<tier>/src` layout
 - compiler and driver tier-sensitive cache-key formation
 
 Those behaviors remain in the `.spl` as explicit contract-model scenarios, not

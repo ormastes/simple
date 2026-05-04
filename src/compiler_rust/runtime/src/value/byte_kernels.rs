@@ -73,20 +73,24 @@ pub(crate) fn avx2_byte_rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 pub(crate) fn neon_byte_find(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return neon_byte_find_impl(haystack, needle, start);
+    {
+        unsafe { neon_byte_find_impl(haystack, needle, start) }
     }
-    #[allow(unreachable_code)]
-    scalar_byte_find(haystack, needle, start)
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar_byte_find(haystack, needle, start)
+    }
 }
 
 pub(crate) fn neon_byte_rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return neon_byte_rfind_impl(haystack, needle);
+    {
+        unsafe { neon_byte_rfind_impl(haystack, needle) }
     }
-    #[allow(unreachable_code)]
-    scalar_byte_rfind(haystack, needle)
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        scalar_byte_rfind(haystack, needle)
+    }
 }
 
 pub(crate) fn byte_split_ranges_for_tier(simd_tier: SimdTier, haystack: &str, delimiter: &str) -> Vec<(usize, usize)> {

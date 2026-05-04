@@ -1343,11 +1343,12 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
     use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
     use simple_parser::token::Span;
     use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
     use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
 
     fn simd_tier_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1369,7 +1370,9 @@ mod tests {
             None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
         }
 
+        reset_host_cpu_config_cache_for_tests();
         let result = f();
+        reset_host_cpu_config_cache_for_tests();
 
         match previous_simd_tier.as_deref() {
             Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
@@ -1381,23 +1384,80 @@ mod tests {
             None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
         }
 
+        reset_host_cpu_config_cache_for_tests();
         result
     }
 
-    fn config_document(enabled_tier: &str, instruction_sets: &str) -> String {
+    fn render_string_list(values: &[String]) -> String {
         format!(
-            "version: 1\n\
-target_triple: test-triple\n\
-generated_by: \"test\"\n\
-support:\n\
-    simd_tier: x86_64_avx2\n\
-    instruction_sets: [sse2, avx2]\n\
-simple_support:\n\
-    simd_tier_fallbacks: [x86_64_avx2, x86_64_sse2, scalar]\n\
-    instruction_sets: [sse2, avx2]\n\
-enabled:\n\
-    simd_tier: {enabled_tier}\n\
-    instruction_sets: [{instruction_sets}]\n"
+            "[{}]",
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn render_tier_list(values: &[SimdTier]) -> String {
+        format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| format!("\"{}\"", value.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn instruction_sets_for_tier(tier: SimdTier) -> &'static [&'static str] {
+        match tier {
+            SimdTier::Scalar => &[],
+            SimdTier::X86_64Sse2 => &["sse2"],
+            SimdTier::X86_64Avx2 => &["sse2", "avx2"],
+            SimdTier::X86_64Avx512 => &["sse2", "avx2", "avx512f"],
+            SimdTier::Aarch64Neon => &["neon"],
+            SimdTier::Aarch64Sve => &["neon", "sve"],
+            SimdTier::Aarch64Sve2 => &["neon", "sve", "sve2"],
+            SimdTier::Riscv64Rvv => &["rvv"],
+            SimdTier::Wasm128 => &["wasm128"],
+        }
+    }
+
+    fn config_document(base: &HostCpuConfig, enabled_tier: SimdTier) -> String {
+        let enabled_instruction_sets = instruction_sets_for_tier(enabled_tier)
+            .iter()
+            .filter(|instruction_set| {
+                base.simple_support
+                    .instruction_sets
+                    .iter()
+                    .any(|supported| supported == **instruction_set)
+            })
+            .map(|instruction_set| (*instruction_set).to_string())
+            .collect::<Vec<_>>();
+
+        format!(
+            concat!(
+                "version: 1\n",
+                "target_triple: \"{}\"\n",
+                "generated_by: \"test\"\n",
+                "support:\n",
+                "    simd_tier: \"{}\"\n",
+                "    instruction_sets: {}\n",
+                "simple_support:\n",
+                "    simd_tier_fallbacks: {}\n",
+                "    instruction_sets: {}\n",
+                "enabled:\n",
+                "    simd_tier: \"{}\"\n",
+                "    instruction_sets: {}\n"
+            ),
+            base.target_triple,
+            base.support.simd_tier.as_str(),
+            render_string_list(&base.support.instruction_sets),
+            render_tier_list(&base.simple_support.simd_tier_fallbacks),
+            render_string_list(&base.simple_support.instruction_sets),
+            enabled_tier.as_str(),
+            render_string_list(&enabled_instruction_sets),
         )
     }
 
@@ -1467,18 +1527,29 @@ enabled:\n\
         let project_root = temp.path();
         let base_dir = project_root.join("src/app");
         let scalar_config = project_root.join("scalar_cpu_config.sdn");
-        let sse2_config = project_root.join("sse2_cpu_config.sdn");
+        let variant_config = project_root.join("variant_cpu_config.sdn");
+        let base = with_simd_envs(None, Some(&scalar_config), || host_cpu_config().unwrap());
+        let Some(variant_tier) = base
+            .simple_support
+            .simd_tier_fallbacks
+            .iter()
+            .copied()
+            .find(|tier| !tier.is_scalar())
+        else {
+            return;
+        };
+        let variant_name = variant_tier.as_str();
         fs::create_dir_all(&base_dir).unwrap();
         fs::create_dir_all(project_root.join("src/lib/std/src/io")).unwrap();
-        fs::create_dir_all(project_root.join("src/lib/std/variants/x86_64_sse2/src/io")).unwrap();
+        fs::create_dir_all(project_root.join(format!("src/lib/std/variants/{variant_name}/src/io"))).unwrap();
         fs::write(project_root.join("src/lib/std/src/io/__init__.spl"), "export scalar\n").unwrap();
         fs::write(
-            project_root.join("src/lib/std/variants/x86_64_sse2/src/io/__init__.spl"),
+            project_root.join(format!("src/lib/std/variants/{variant_name}/src/io/__init__.spl")),
             "export sse2\n",
         )
         .unwrap();
-        fs::write(&scalar_config, config_document("scalar", "")).unwrap();
-        fs::write(&sse2_config, config_document("x86_64_sse2", "sse2")).unwrap();
+        fs::write(&scalar_config, config_document(&base, SimdTier::Scalar)).unwrap();
+        fs::write(&variant_config, config_document(&base, variant_tier)).unwrap();
 
         let use_stmt = use_stmt(
             &["std", "io"],
@@ -1488,14 +1559,14 @@ enabled:\n\
         let scalar = with_simd_envs(None, Some(&scalar_config), || {
             resolve_use_to_path(&use_stmt, &base_dir).unwrap()
         });
-        let sse2 = with_simd_envs(None, Some(&sse2_config), || {
+        let variant = with_simd_envs(None, Some(&variant_config), || {
             resolve_use_to_path(&use_stmt, &base_dir).unwrap()
         });
 
         assert_eq!(scalar, project_root.join("src/lib/std/src/io/__init__.spl"));
         assert_eq!(
-            sse2,
-            project_root.join("src/lib/std/variants/x86_64_sse2/src/io/__init__.spl")
+            variant,
+            project_root.join(format!("src/lib/std/variants/{variant_name}/src/io/__init__.spl"))
         );
     }
 

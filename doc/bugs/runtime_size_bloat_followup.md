@@ -318,7 +318,8 @@ Concrete evidence:
   - `--source src/app`
 - `src/compiler_rust/compiler/src/pipeline/native_project/config.rs`
   prefers the broad bundle when the source dirs look compiler-like
-- removing `src/compiler` and forcing `--runtime-bundle runtime` changed the
+- removing `src/compiler` and forcing `--runtime-bundle core-c` (legacy alias:
+  `runtime`) changed the
   measured binaries on **2026-05-03** to:
   - stripped Simple hello: **423,016 bytes**
   - stripped Simple minimal TUI app: **427,112 bytes**
@@ -335,7 +336,8 @@ Interpretation:
 Follow-on implication:
 
 - keep compiler-capable lanes on `libsimple_native_all.a`
-- route minimal app/native UI lanes explicitly through `--runtime-bundle runtime`
+- route minimal app/native UI lanes explicitly through `--runtime-bundle core-c`
+  (legacy alias: `runtime`)
 - avoid passing `src/compiler` to narrow app builds unless the entry actually
   requires compiler services
 

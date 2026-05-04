@@ -163,9 +163,6 @@ mod tests {
     #[test]
     fn rfc6070_tc3_sha1_c4096() {
         let dk = pbkdf2_hmac_sha1(b"password", b"salt", 4096, 20);
-        assert_eq!(
-            hex(&dk),
-            "4b007901b765489abead49d926f721d065a429c1"
-        );
+        assert_eq!(hex(&dk), "4b007901b765489abead49d926f721d065a429c1");
     }
 }

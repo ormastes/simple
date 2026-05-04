@@ -38,9 +38,9 @@ fn mask_shift(n: i64) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// Element-wise wrapping ADD of two 4-lane i32 vectors.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
 pub fn add_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     unsafe {
         use core::arch::x86_64::*;
         let av = _mm_loadu_si128(a.as_ptr() as *const __m128i);
@@ -48,9 +48,14 @@ pub fn add_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = _mm_add_epi32(av, bv);
         let mut out = [0_i32; 4];
         _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, rv);
-        return out;
+        out
     }
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+}
+
+/// Element-wise wrapping ADD of two 4-lane i32 vectors.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+pub fn add_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     unsafe {
         use core::arch::aarch64::*;
         let av = vld1q_s32(a.as_ptr());
@@ -58,9 +63,17 @@ pub fn add_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = vaddq_s32(av, bv);
         let mut out = [0_i32; 4];
         vst1q_s32(out.as_mut_ptr(), rv);
-        return out;
+        out
     }
-    #[allow(unreachable_code)]
+}
+
+/// Element-wise wrapping ADD of two 4-lane i32 vectors.
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(target_arch = "aarch64", target_feature = "neon"),
+)))]
+#[inline]
+pub fn add_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [
         a[0].wrapping_add(b[0]),
         a[1].wrapping_add(b[1]),
@@ -70,9 +83,9 @@ pub fn add_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
 }
 
 /// Element-wise wrapping SUB of two 4-lane i32 vectors.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
 pub fn sub_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     unsafe {
         use core::arch::x86_64::*;
         let av = _mm_loadu_si128(a.as_ptr() as *const __m128i);
@@ -80,9 +93,14 @@ pub fn sub_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = _mm_sub_epi32(av, bv);
         let mut out = [0_i32; 4];
         _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, rv);
-        return out;
+        out
     }
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+}
+
+/// Element-wise wrapping SUB of two 4-lane i32 vectors.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+pub fn sub_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     unsafe {
         use core::arch::aarch64::*;
         let av = vld1q_s32(a.as_ptr());
@@ -90,9 +108,17 @@ pub fn sub_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = vsubq_s32(av, bv);
         let mut out = [0_i32; 4];
         vst1q_s32(out.as_mut_ptr(), rv);
-        return out;
+        out
     }
-    #[allow(unreachable_code)]
+}
+
+/// Element-wise wrapping SUB of two 4-lane i32 vectors.
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(target_arch = "aarch64", target_feature = "neon"),
+)))]
+#[inline]
+pub fn sub_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [
         a[0].wrapping_sub(b[0]),
         a[1].wrapping_sub(b[1]),
@@ -105,9 +131,9 @@ pub fn sub_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
 ///
 /// `_mm_mullo_epi32` is SSE4.1, not SSE2, so on plain SSE2 we fall through to
 /// the wrapping scalar path. NEON has `vmulq_s32`, which is used when active.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
 #[inline]
 pub fn mul_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
     unsafe {
         use core::arch::x86_64::*;
         let av = _mm_loadu_si128(a.as_ptr() as *const __m128i);
@@ -115,9 +141,17 @@ pub fn mul_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = _mm_mullo_epi32(av, bv);
         let mut out = [0_i32; 4];
         _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, rv);
-        return out;
+        out
     }
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+}
+
+/// Element-wise wrapping MUL of two 4-lane i32 vectors.
+///
+/// `_mm_mullo_epi32` is SSE4.1, not SSE2, so on plain SSE2 we fall through to
+/// the wrapping scalar path. NEON has `vmulq_s32`, which is used when active.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+pub fn mul_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     unsafe {
         use core::arch::aarch64::*;
         let av = vld1q_s32(a.as_ptr());
@@ -125,9 +159,20 @@ pub fn mul_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = vmulq_s32(av, bv);
         let mut out = [0_i32; 4];
         vst1q_s32(out.as_mut_ptr(), rv);
-        return out;
+        out
     }
-    #[allow(unreachable_code)]
+}
+
+/// Element-wise wrapping MUL of two 4-lane i32 vectors.
+///
+/// `_mm_mullo_epi32` is SSE4.1, not SSE2, so on plain SSE2 we fall through to
+/// the wrapping scalar path. NEON has `vmulq_s32`, which is used when active.
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_feature = "sse4.1"),
+    all(target_arch = "aarch64", target_feature = "neon"),
+)))]
+#[inline]
+pub fn mul_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [
         a[0].wrapping_mul(b[0]),
         a[1].wrapping_mul(b[1]),
@@ -137,9 +182,9 @@ pub fn mul_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
 }
 
 /// XOR two 4-lane i32 vectors.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
 pub fn xor_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     unsafe {
         use core::arch::x86_64::*;
         let av = _mm_loadu_si128(a.as_ptr() as *const __m128i);
@@ -147,9 +192,14 @@ pub fn xor_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = _mm_xor_si128(av, bv);
         let mut out = [0_i32; 4];
         _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, rv);
-        return out;
+        out
     }
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+}
+
+/// XOR two 4-lane i32 vectors.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+pub fn xor_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     unsafe {
         use core::arch::aarch64::*;
         let av = vld1q_s32(a.as_ptr());
@@ -157,16 +207,24 @@ pub fn xor_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = veorq_s32(av, bv);
         let mut out = [0_i32; 4];
         vst1q_s32(out.as_mut_ptr(), rv);
-        return out;
+        out
     }
-    #[allow(unreachable_code)]
+}
+
+/// XOR two 4-lane i32 vectors.
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(target_arch = "aarch64", target_feature = "neon"),
+)))]
+#[inline]
+pub fn xor_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [a[0] ^ b[0], a[1] ^ b[1], a[2] ^ b[2], a[3] ^ b[3]]
 }
 
 /// AND two 4-lane i32 vectors.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
 pub fn and_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     unsafe {
         use core::arch::x86_64::*;
         let av = _mm_loadu_si128(a.as_ptr() as *const __m128i);
@@ -174,9 +232,14 @@ pub fn and_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = _mm_and_si128(av, bv);
         let mut out = [0_i32; 4];
         _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, rv);
-        return out;
+        out
     }
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+}
+
+/// AND two 4-lane i32 vectors.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+pub fn and_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     unsafe {
         use core::arch::aarch64::*;
         let av = vld1q_s32(a.as_ptr());
@@ -184,16 +247,24 @@ pub fn and_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = vandq_s32(av, bv);
         let mut out = [0_i32; 4];
         vst1q_s32(out.as_mut_ptr(), rv);
-        return out;
+        out
     }
-    #[allow(unreachable_code)]
+}
+
+/// AND two 4-lane i32 vectors.
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(target_arch = "aarch64", target_feature = "neon"),
+)))]
+#[inline]
+pub fn and_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [a[0] & b[0], a[1] & b[1], a[2] & b[2], a[3] & b[3]]
 }
 
 /// OR two 4-lane i32 vectors.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
 pub fn or_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     unsafe {
         use core::arch::x86_64::*;
         let av = _mm_loadu_si128(a.as_ptr() as *const __m128i);
@@ -201,9 +272,14 @@ pub fn or_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = _mm_or_si128(av, bv);
         let mut out = [0_i32; 4];
         _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, rv);
-        return out;
+        out
     }
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+}
+
+/// OR two 4-lane i32 vectors.
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[inline]
+pub fn or_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     unsafe {
         use core::arch::aarch64::*;
         let av = vld1q_s32(a.as_ptr());
@@ -211,9 +287,17 @@ pub fn or_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
         let rv = vorrq_s32(av, bv);
         let mut out = [0_i32; 4];
         vst1q_s32(out.as_mut_ptr(), rv);
-        return out;
+        out
     }
-    #[allow(unreachable_code)]
+}
+
+/// OR two 4-lane i32 vectors.
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_feature = "sse2"),
+    all(target_arch = "aarch64", target_feature = "neon"),
+)))]
+#[inline]
+pub fn or_i32x4(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [a[0] | b[0], a[1] | b[1], a[2] | b[2], a[3] | b[3]]
 }
 

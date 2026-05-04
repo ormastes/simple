@@ -17,6 +17,20 @@ int main() {
     assert(spl::calculator_square(0) == 0);
     assert(spl::calculator_add(3, 4) == 7);
     assert(spl::calculator_add(-1, 1) == 0);
+    {
+        int64_t quotient = 0;
+        std::string error;
+        bool ok = spl::calculator_checked_divide(9, 3, &quotient, &error);
+        assert(ok);
+        assert(quotient == 3);
+        assert(error.empty());
+
+        quotient = -1;
+        ok = spl::calculator_checked_divide(9, 0, &quotient, &error);
+        assert(!ok);
+        assert(quotient == -1);
+        assert(error == "divide by zero");
+    }
 
     // Test class RAII lifecycle
     {

@@ -283,7 +283,7 @@ fn detect_native_test_project_root(source: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simple_simd::detect_profile;
+    use simple_simd::{detect_profile, reset_host_cpu_config_cache_for_tests};
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
 
@@ -293,13 +293,24 @@ mod tests {
     }
 
     fn render_string_list(values: &[String]) -> String {
-        format!("[{}]", values.join(", "))
+        format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 
     fn render_tier_list(values: &[SimdTier]) -> String {
         format!(
             "[{}]",
-            values.iter().map(|value| value.as_str()).collect::<Vec<_>>().join(", ")
+            values
+                .iter()
+                .map(|value| format!("\"{}\"", value.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 
@@ -330,18 +341,20 @@ mod tests {
             .collect::<Vec<_>>();
 
         format!(
-            "version: 1\n\
-target_triple: {}\n\
-generated_by: \"test\"\n\
-support:\n\
-    simd_tier: {}\n\
-    instruction_sets: {}\n\
-simple_support:\n\
-    simd_tier_fallbacks: {}\n\
-    instruction_sets: {}\n\
-enabled:\n\
-    simd_tier: {}\n\
-    instruction_sets: {}\n",
+            concat!(
+                "version: 1\n",
+                "target_triple: \"{}\"\n",
+                "generated_by: \"test\"\n",
+                "support:\n",
+                "    simd_tier: \"{}\"\n",
+                "    instruction_sets: {}\n",
+                "simple_support:\n",
+                "    simd_tier_fallbacks: {}\n",
+                "    instruction_sets: {}\n",
+                "enabled:\n",
+                "    simd_tier: \"{}\"\n",
+                "    instruction_sets: {}\n"
+            ),
             base.target_triple,
             base.support.simd_tier.as_str(),
             render_string_list(&base.support.instruction_sets),
@@ -426,38 +439,52 @@ enabled:\n\
         let config_path = temp.path().join("cpu_config.sdn");
         fs::write(&source, "test body").expect("source file");
 
+        let previous_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
+        let previous_override = std::env::var("SIMPLE_SIMD_TIER").ok();
+        std::env::remove_var("SIMPLE_CPU_CONFIG_PATH");
+        std::env::remove_var("SIMPLE_SIMD_TIER");
+        reset_host_cpu_config_cache_for_tests();
+
         let base = host_cpu_config().expect("host cpu config");
-        let active_tier = active_simd_tier();
+        let baseline_tier = active_simd_tier();
         let Some(configured_tier) = base
             .simple_support
             .simd_tier_fallbacks
             .iter()
             .copied()
-            .find(|tier| *tier != active_tier)
+            .find(|tier| *tier != baseline_tier)
         else {
+            match previous_config_path.as_deref() {
+                Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+                None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+            }
+            match previous_override.as_deref() {
+                Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+                None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+            }
             return;
         };
 
-        let previous_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
-        let previous_override = std::env::var("SIMPLE_SIMD_TIER").ok();
         std::env::set_var("SIMPLE_CPU_CONFIG_PATH", &config_path);
         std::env::remove_var("SIMPLE_SIMD_TIER");
+        reset_host_cpu_config_cache_for_tests();
 
         fs::write(&config_path, render_cpu_config(&base, configured_tier)).expect("cpu_config.sdn");
 
         let cache = BuildCache::new(false);
         let configured_hash = cache.source_hash(&source).expect("configured hash");
+        let resolved_tier = active_simd_tier();
 
         let mut active_hasher = DefaultHasher::new();
         fs::read(&source).expect("source bytes").hash(&mut active_hasher);
         source.hash(&mut active_hasher);
-        configured_tier.as_str().hash(&mut active_hasher);
+        resolved_tier.as_str().hash(&mut active_hasher);
         let expected_active_hash = active_hasher.finish();
 
         let mut detected_hasher = DefaultHasher::new();
         fs::read(&source).expect("source bytes").hash(&mut detected_hasher);
         source.hash(&mut detected_hasher);
-        active_tier.as_str().hash(&mut detected_hasher);
+        baseline_tier.as_str().hash(&mut detected_hasher);
         let baseline_hash = detected_hasher.finish();
 
         match previous_config_path.as_deref() {
@@ -468,8 +495,10 @@ enabled:\n\
             Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
             None => std::env::remove_var("SIMPLE_SIMD_TIER"),
         }
+        reset_host_cpu_config_cache_for_tests();
 
         assert_eq!(configured_hash, expected_active_hash);
+        assert_eq!(resolved_tier, configured_tier);
         assert_ne!(configured_hash, baseline_hash);
     }
 

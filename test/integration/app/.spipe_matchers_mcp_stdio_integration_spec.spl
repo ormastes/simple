@@ -10,6 +10,9 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 fn mcp_msg(body: text) -> text:
     "Content-Length: " + body.len().to_string() + "\r\n\r\n" + body
 
+fn mcp_jsonl(body: text) -> text:
+    body + "\n"
+
 fn init_request(id: text) -> text:
     val body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + id + "\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
     mcp_msg(body)
@@ -31,9 +34,17 @@ fn send_mcp(messages: text) -> text:
     result.stdout ?? ""
 
 describe "MCP Protocol Runtime":
+    it "accepts a single Content-Length framed initialize request":
+        val input = init_request("1")
+        val output = send_mcp(input)
+        expect output.contains("\"protocolVersion\":\"2025-06-18\"") == true
+        expect output.contains("\"serverInfo\":{\"name\":\"simple-mcp-full\"") == true
+        expect output.contains("\"error\":") == false
+
     it "survives initialize followed by tools/list on the same server process":
-        val req = generic_request("2", "tools/list", "{}")
-        val input = init_request("1") + initialized_notification() + req + shutdown_request("3")
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+        val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/list\",\"params\":{}}"
+        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
         val output = send_mcp(input)
         expect output.contains("\"protocolVersion\":\"2025-06-18\"") == true
         expect output.contains("\"result\":{\"tools\":[") == true
@@ -41,8 +52,9 @@ describe "MCP Protocol Runtime":
         expect output.contains("\"error\":") == false
 
     it "returns tool-level isError for unknown tool":
-        val req = generic_request("2", "tools/call", "{\"name\":\"no_such_tool\",\"arguments\":{}}")
-        val input = init_request("1") + initialized_notification() + req + shutdown_request("3")
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"spec\",\"version\":\"1.0\"}}}"
+        val req = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{}}}"
+        val input = mcp_jsonl(init) + mcp_jsonl("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}") + mcp_jsonl(req)
         val output = send_mcp(input)
         expect output.contains("\"isError\":true") == true
         expect output.contains("Unknown tool") == true

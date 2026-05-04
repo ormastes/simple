@@ -8,6 +8,9 @@ SIMPLE_BINARY="${SIMPLE_BINARY:-}"
 BUILD_DIR="build/size_audit"
 REPORT_PATH="doc/09_report/tui_app_size_reduction_2026-05-03.md"
 TMP_TUI_ENTRY="$BUILD_DIR/minimal_tui_entry.spl"
+REPORT_DATE="$(date -u +%F)"
+MAX_HELLO_SIMPLE_BYTES="${MAX_HELLO_SIMPLE_BYTES:-}"
+MAX_MINIMAL_TUI_BYTES="${MAX_MINIMAL_TUI_BYTES:-}"
 
 if [ -z "$SIMPLE_BINARY" ]; then
     if [ -x "src/compiler_rust/target/bootstrap/simple" ]; then
@@ -38,7 +41,7 @@ build_simple() {
     entry="$1"
     output="$2"
     SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BINARY" native-build \
-        --runtime-bundle runtime \
+        --runtime-bundle core-c \
         --source src/lib \
         --source src/app \
         --entry-closure \
@@ -87,7 +90,7 @@ fi
 section_summary() {
     path="$1"
     if command -v readelf >/dev/null 2>&1; then
-        readelf -SW "$path" | rg ' \.(text|rodata|data|bss) ' | awk '{print "- " $2 ": " $6}'
+        readelf -SW "$path" | rg ' \.(text|rodata|eh_frame|gcc_except_table|data|bss) ' | awk '{print "- " $2 ": " $6}'
     else
         echo "- readelf unavailable"
     fi
@@ -124,10 +127,22 @@ if [ "$NCURSES_BUILT" = true ]; then
     NCURSES_BYTES="$(bytes_of "$BUILD_DIR/hello_ncurses")"
 fi
 
+if [ -n "$MAX_HELLO_SIMPLE_BYTES" ] && [ "$HELLO_SIMPLE_BYTES" -gt "$MAX_HELLO_SIMPLE_BYTES" ]; then
+    echo "size_audit_ready=false"
+    echo "error=hello_simple_exceeds_budget:$HELLO_SIMPLE_BYTES>$MAX_HELLO_SIMPLE_BYTES"
+    exit 1
+fi
+
+if [ -n "$MAX_MINIMAL_TUI_BYTES" ] && [ "$MINIMAL_TUI_BYTES" -gt "$MAX_MINIMAL_TUI_BYTES" ]; then
+    echo "size_audit_ready=false"
+    echo "error=minimal_tui_exceeds_budget:$MINIMAL_TUI_BYTES>$MAX_MINIMAL_TUI_BYTES"
+    exit 1
+fi
+
 {
     echo "# TUI App Size Reduction Verification"
     echo
-    echo "Date: 2026-05-03"
+    echo "Date: $REPORT_DATE"
     echo
     echo "## Build Inputs"
     echo
@@ -172,7 +187,9 @@ fi
     echo "## Notes"
     echo
     echo "- The generated TUI entry uses \`app.ui.tui.standalone.run_standalone_tui\`."
+    echo "- The Simple artifacts are built on the explicit narrow native lane: \`--runtime-bundle core-c\`."
     echo "- The audit intentionally records anchor strings instead of claiming full transitive Rust crate closure proof."
+    echo "- Set \`MAX_HELLO_SIMPLE_BYTES\` and/or \`MAX_MINIMAL_TUI_BYTES\` to turn the audit into a size-budget gate."
     echo "- Use \`scripts/check-tui-standalone-closure.shs\` alongside this report for the import-surface guard."
 } >"$REPORT_PATH"
 

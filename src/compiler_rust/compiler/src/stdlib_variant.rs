@@ -57,7 +57,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
-    use simple_simd::{host_cpu_config, HostCpuConfig};
+    use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig};
 
     fn simd_tier_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -79,7 +79,9 @@ mod tests {
             None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
         }
 
+        reset_host_cpu_config_cache_for_tests();
         let result = f();
+        reset_host_cpu_config_cache_for_tests();
 
         match previous_simd_tier.as_deref() {
             Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
@@ -90,6 +92,7 @@ mod tests {
             Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
             None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
         }
+        reset_host_cpu_config_cache_for_tests();
         result
     }
 
@@ -98,13 +101,24 @@ mod tests {
     }
 
     fn render_string_list(values: &[String]) -> String {
-        format!("[{}]", values.join(", "))
+        format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 
     fn render_tier_list(values: &[SimdTier]) -> String {
         format!(
             "[{}]",
-            values.iter().map(|value| value.as_str()).collect::<Vec<_>>().join(", ")
+            values
+                .iter()
+                .map(|value| format!("\"{}\"", value.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     }
 
@@ -135,18 +149,20 @@ mod tests {
             .collect::<Vec<_>>();
 
         format!(
-            "version: 1\n\
-target_triple: {}\n\
-generated_by: \"test\"\n\
-support:\n\
-    simd_tier: {}\n\
-    instruction_sets: {}\n\
-simple_support:\n\
-    simd_tier_fallbacks: {}\n\
-    instruction_sets: {}\n\
-enabled:\n\
-    simd_tier: {}\n\
-    instruction_sets: {}\n",
+            concat!(
+                "version: 1\n",
+                "target_triple: \"{}\"\n",
+                "generated_by: \"test\"\n",
+                "support:\n",
+                "    simd_tier: \"{}\"\n",
+                "    instruction_sets: {}\n",
+                "simple_support:\n",
+                "    simd_tier_fallbacks: {}\n",
+                "    instruction_sets: {}\n",
+                "enabled:\n",
+                "    simd_tier: \"{}\"\n",
+                "    instruction_sets: {}\n"
+            ),
             base.target_triple,
             base.support.simd_tier.as_str(),
             render_string_list(&base.support.instruction_sets),
@@ -155,6 +171,13 @@ enabled:\n\
             enabled_tier.as_str(),
             render_string_list(&enabled_instruction_sets),
         )
+    }
+
+    fn base_host_config() -> (tempfile::TempDir, HostCpuConfig) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("seed_cpu_config.sdn");
+        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        (temp, base)
     }
 
     #[test]
@@ -213,9 +236,8 @@ enabled:\n\
 
     #[test]
     fn config_enabled_tier_is_used_without_override() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("cpu_config.sdn");
-        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        let (temp, base) = base_host_config();
+        let path = temp.path().join("configured_cpu_config.sdn");
         let configured_tier = base
             .simple_support
             .simd_tier_fallbacks
@@ -234,9 +256,8 @@ enabled:\n\
 
     #[test]
     fn explicit_override_takes_precedence_over_config_enabled_tier() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("cpu_config.sdn");
-        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        let (temp, base) = base_host_config();
+        let path = temp.path().join("configured_cpu_config.sdn");
         let configured_tier = base
             .simple_support
             .simd_tier_fallbacks
@@ -255,9 +276,8 @@ enabled:\n\
 
     #[test]
     fn invalid_override_falls_back_to_configured_enabled_tier() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("cpu_config.sdn");
-        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        let (temp, base) = base_host_config();
+        let path = temp.path().join("configured_cpu_config.sdn");
         let configured_tier = base
             .simple_support
             .simd_tier_fallbacks
@@ -276,9 +296,8 @@ enabled:\n\
 
     #[test]
     fn configured_enabled_tier_changes_stdlib_root_order_without_override() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("cpu_config.sdn");
-        let base = with_simd_envs(None, Some(&path), || host_cpu_config().unwrap());
+        let (temp, base) = base_host_config();
+        let path = temp.path().join("configured_cpu_config.sdn");
         let configured_tier = base
             .simple_support
             .simd_tier_fallbacks

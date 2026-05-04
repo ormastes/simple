@@ -55,7 +55,7 @@ class StringInterner:
 
     # Intern a string, return its ID
     me intern(s: text) -> i32:
-        if self.str_to_id.has(s):
+        if self.str_to_id.contains_key(s):
             self.str_to_id[s]
         else:
             val id = self.next_id.value
@@ -66,7 +66,7 @@ class StringInterner:
 
     # Get string by ID
     fn get(id: i32) -> text?:
-        if self.id_to_str.has(id):
+        if self.id_to_str.contains_key(id):
             Some(self.id_to_str[id])
         else:
             nil
@@ -77,7 +77,7 @@ class StringInterner:
 
     # Get ID by string (forward lookup)
     fn get_id(s: text) -> i32?:
-        if self.str_to_id.has(s):
+        if self.str_to_id.contains_key(s):
             Some(self.str_to_id[s])
         else:
             nil
@@ -123,7 +123,7 @@ struct SdnRow:
 
     # Get field value
     fn get(column: text) -> text?:
-        if self.fields.has(column):
+        if self.fields.contains_key(column):
             Some(self.fields[column])
         else:
             nil
@@ -157,9 +157,16 @@ struct SdnRow:
     me set(column: text, value: text):
         self.fields[column] = value
 
+    # Deep copy row contents so native callers do not rely on struct copies
+    fn copy() -> SdnRow:
+        val row = SdnRow(fields: {})
+        for (column, value) in self.fields:
+            row.set(column, value)
+        row
+
     # Check if has column
-    fn has(column: text) -> bool:
-        self.fields.has(column)
+    fn has_column(column: text) -> bool:
+        self.fields.contains_key(column)
 
 # ============================================================================
 # SdnTable - In-memory representation of SDN table
@@ -259,7 +266,8 @@ class SdnTable:
     # Update row by primary key
     me update_row(key: text, row: SdnRow) -> bool:
         for (i, current) in self.rows.enumerate():
-            if current.get("id") == Some(key):
+            val current_row: SdnRow = current
+            if current_row.get("id") == Some(key):
                 self.rows[i] = row
                 self.index[key] = i
                 return true
@@ -275,10 +283,11 @@ class SdnTable:
     # Soft delete (set valid=false)
     me mark_deleted(key: text) -> bool:
         for (i, current) in self.rows.enumerate():
-            if current.get("id") == Some(key):
+            val current_row: SdnRow = current
+            if current_row.get("id") == Some(key):
                 # NOTE: self.rows[idx].set() modifies a copy in bootstrap runtime
                 # Must read, modify, write back
-                var row = current
+                var row: SdnRow = current_row
                 row.set("valid", "false")
                 self.rows[i] = row
                 self.index[key] = i
@@ -309,7 +318,8 @@ class SdnTable:
     me rebuild_index():
         self.index.clear()
         for (i, row) in self.rows.enumerate():
-            if val Some(id_value) = row.get("id"):
+            val current_row: SdnRow = row
+            if val Some(id_value) = current_row.get("id"):
                 self.index[id_value] = i
 
 # ============================================================================
@@ -392,14 +402,14 @@ class SdnDatabase:
 
     # Get table by name
     fn get_table(name: text) -> SdnTable?:
-        if self.tables.has(name):
+        if self.tables.contains_key(name):
             Some(self.tables[name])
         else:
             nil
 
     # Get mutable table reference
     me get_table_mut(name: text) -> SdnTable?:
-        if self.tables.has(name):
+        if self.tables.contains_key(name):
             Some(self.tables[name])
         else:
             nil
@@ -422,7 +432,7 @@ class SdnDatabase:
 
     # Export a table to SDN text
     fn export_table_sdn(name: text) -> text?:
-        if not self.tables.has(name):
+        if not self.tables.contains_key(name):
             return nil
         val table: SdnTable = self.tables[name]
         Some(table.to_sdn())
