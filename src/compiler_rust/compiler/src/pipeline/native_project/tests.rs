@@ -1200,6 +1200,72 @@ fn test_core_c_lane_builds_and_runs_hello_world_small() {
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "Hello World");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let output_dir = PathBuf::from("/tmp/simple-lsp-mcp-core-c-startup");
+    let _ = std::fs::create_dir_all(&output_dir);
+    let output = output_dir.join("simple_lsp_mcp_startup");
+
+    let result = NativeProjectBuilder::new(repo_root.clone(), output.clone())
+        .config(NativeBuildConfig {
+            entry_closure: true,
+            runtime_bundle: "core-c".to_string(),
+            strip: true,
+            incremental: false,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(repo_root.join("src/app"))
+        .source_dir(repo_root.join("src/lib"))
+        .entry_file(repo_root.join("src/app/simple_lsp_mcp/main.spl"))
+        .build()
+        .unwrap();
+
+    assert!(
+        result.binary_size < 512_000,
+        "startup-only simple_lsp_mcp too large: {}",
+        result.binary_size
+    );
+
+    let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
+    let framed = format!("Content-Length: {}\r\n\r\n{}", request.len(), request);
+    let mut child = std::process::Command::new(&output)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child.stdin.as_mut().unwrap().write_all(framed.as_bytes()).unwrap();
+    }
+    let run = child.wait_with_output().unwrap();
+    assert!(
+        run.status.success(),
+        "simple_lsp_mcp startup exit: code={:?} stdout=`{}` stderr=`{}`",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.starts_with("Content-Length: "), "missing framed response: `{}`", stdout);
+    assert!(stdout.contains("\"id\":1"), "missing request id in response: `{}`", stdout);
+    assert!(
+        stdout.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\""),
+        "missing serverInfo in response: `{}`",
+        stdout
+    );
+}
+
 #[test]
 fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
     let temp = tempfile::tempdir().unwrap();
