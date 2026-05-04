@@ -884,13 +884,19 @@ fn eea3_encrypt(count: u32, bearer: u8, direction: u8, key: [u8], message: [u8],
 
     var ciphertext: [u8] = []
     val num_bytes = (length_bits + 7u64) / 8u64
+    val remainder = length_bits & 7u64
     var i: u64 = 0
     while i < num_bytes:
         val word_idx = i / 4u64
         val byte_pos = 3u64 - (i & 3u64)
         val shift = (byte_pos * 8u64).to_u32()
-        val ks_byte = ((ks[word_idx] >> shift) & 0xFFu32).to_u8()
-        ciphertext.push(_u8_at(message, i) ^ ks_byte)
+        val ks_byte = (_logical_shr32(ks[word_idx], shift) & 0xFFu32).to_u8()
+        var ct_byte = _u8_at(message, i) ^ ks_byte
+        # Mask the last byte to length_bits boundary (zero out unused trailing bits)
+        if (remainder != 0u64) and (i == num_bytes - 1u64):
+            val mask = ((0xFFu64 << (8u64 - remainder)) & 0xFFu64).to_u8()
+            ct_byte = ct_byte & mask
+        ciphertext.push(ct_byte)
         i = i + 1
 
     ciphertext
@@ -1017,5 +1023,9 @@ fn eia3_mac(count: u32, bearer: u8, direction: u8, key: [u8], message: [u8], len
         val shift_dn = (32u64 - l_off).to_u32()
         z_l = (ks[l_word] << shift_up) | _logical_shr32(ks[l_word + 1u64], shift_dn)
     t = t ^ z_l
+
+    # Final step: T ^= last keystream word (the MAC key word)
+    # Per TS 35.222 §6.2: MAC = T XOR z_{32*floor(L/32)+32}
+    t = t ^ ks[ks.len() - 1u64]
 
     t
