@@ -555,16 +555,39 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit_call_indirect(dest_name, ret_ty, ptr_val, arg_vals)
 
     me translate_intrinsic(dest: LocalId?, name: text, args: [MirOperand]):
-        var arg_vals: [text] = []
-        for arg in args:
-            arg_vals = arg_vals.push("i64 " + self.translate_operand(arg))
-        val args_str = arg_vals.join(", ")
-        if dest.?:
-            val dest_name = self.get_local(dest.unwrap().id)
-            val ret_ty = self.get_local_type(dest.unwrap().id)
-            self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
-        else:
-            self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+        # Dispatch cipher intrinsics to real LLVM x86 intrinsics.
+        # Falls back to __simple_intrinsic_<name> for unknown names.
+        match name:
+            case "crypto_aes_round":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesenc", args)
+            case "crypto_aes_round_last":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesenclast", args)
+            case "crypto_aes_inv_round":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesdec", args)
+            case "crypto_aes_inv_round_last":
+                self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesdeclast", args)
+            case "crypto_sha256_rounds2":
+                self.emit_sha256_rnds2_intrinsic(dest, args)
+            case "crc32_u8":
+                self.emit_crc32_intrinsic(dest, "llvm.x86.sse42.crc32.32.8", "i32", "i8", args)
+            case "crc32_u32":
+                self.emit_crc32_intrinsic(dest, "llvm.x86.sse42.crc32.32.32", "i32", "i32", args)
+            case "clmul_lo":
+                self.emit_clmul_intrinsic(dest, args, "0")
+            case "clmul_hi":
+                self.emit_clmul_intrinsic(dest, args, "17")
+            case _:
+                # Generic fallback: forward to runtime stub
+                var arg_vals: [text] = []
+                for arg in args:
+                    arg_vals = arg_vals.push("i64 " + self.translate_operand(arg))
+                val args_str = arg_vals.join(", ")
+                if dest.?:
+                    val dest_name = self.get_local(dest.unwrap().id)
+                    val ret_ty = self.get_local_type(dest.unwrap().id)
+                    self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+                else:
+                    self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
 
     me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text]):
         """Translate inline assembly to LLVM inline asm call."""
@@ -756,6 +779,99 @@ impl MirTextCodegen for MirToLlvm:
 # ============================================================================
 
 impl MirToLlvm:
+
+    me emit_aes2_intrinsic(dest: LocalId?, llvm_name: text, args: [MirOperand]):
+        """Emit a 2-operand AES-NI intrinsic: <16 x i8> @llvm_name(<16 x i8>, <16 x i8>).
+
+        The MIR args are i64 locals; we bitcast them to <16 x i8> before the
+        call and bitcast the result back to the dest local type.
+        """
+        val vec_ty = "<2 x i64>"
+        val arg0_raw = self.translate_operand(args[0])
+        val arg1_raw = self.translate_operand(args[1])
+        val bc0 = self.builder.fresh_local()
+        val bc1 = self.builder.fresh_local()
+        val nit = self.native_int()
+        self.builder.emit("  {bc0} = bitcast {nit} {arg0_raw} to {vec_ty}  ; aes arg0")
+        self.builder.emit("  {bc1} = bitcast {nit} {arg1_raw} to {vec_ty}  ; aes arg1")
+        if dest.?:
+            val dest_name = self.get_local(dest.unwrap().id)
+            val ret_ty = self.get_local_type(dest.unwrap().id)
+            val raw_result = self.builder.fresh_local()
+            self.builder.emit("  {raw_result} = call {vec_ty} @{llvm_name}({vec_ty} {bc0}, {vec_ty} {bc1})")
+            self.builder.emit("  {dest_name} = bitcast {vec_ty} {raw_result} to {ret_ty}  ; aes result")
+        else:
+            self.builder.emit("  call {vec_ty} @{llvm_name}({vec_ty} {bc0}, {vec_ty} {bc1})")
+
+    me emit_sha256_rnds2_intrinsic(dest: LocalId?, args: [MirOperand]):
+        """Emit @llvm.x86.sha256rnds2(<4 x i32>, <4 x i32>, <4 x i32>).
+
+        sha256rnds2 takes three <4 x i32> operands (the third is the W schedule
+        implicit input). MIR passes 3 args: [dst_acc, src, w_xmm0].
+        """
+        val vec_ty = "<2 x i64>"
+        val arg0_raw = self.translate_operand(args[0])
+        val arg1_raw = self.translate_operand(args[1])
+        val arg2_raw = self.translate_operand(args[2])
+        val bc0 = self.builder.fresh_local()
+        val bc1 = self.builder.fresh_local()
+        val bc2 = self.builder.fresh_local()
+        val nit = self.native_int()
+        self.builder.emit("  {bc0} = bitcast {nit} {arg0_raw} to {vec_ty}  ; sha256 arg0")
+        self.builder.emit("  {bc1} = bitcast {nit} {arg1_raw} to {vec_ty}  ; sha256 arg1")
+        self.builder.emit("  {bc2} = bitcast {nit} {arg2_raw} to {vec_ty}  ; sha256 w")
+        if dest.?:
+            val dest_name = self.get_local(dest.unwrap().id)
+            val ret_ty = self.get_local_type(dest.unwrap().id)
+            val raw_result = self.builder.fresh_local()
+            self.builder.emit("  {raw_result} = call {vec_ty} @llvm.x86.sha256rnds2({vec_ty} {bc0}, {vec_ty} {bc1}, {vec_ty} {bc2})")
+            self.builder.emit("  {dest_name} = bitcast {vec_ty} {raw_result} to {ret_ty}  ; sha256 result")
+        else:
+            self.builder.emit("  call {vec_ty} @llvm.x86.sha256rnds2({vec_ty} {bc0}, {vec_ty} {bc1}, {vec_ty} {bc2})")
+
+    me emit_crc32_intrinsic(dest: LocalId?, llvm_name: text, acc_ty: text, src_ty: text, args: [MirOperand]):
+        """Emit a CRC32 scalar intrinsic: i32 @llvm_name(i32, i8|i32).
+
+        MIR args are i64; truncate to the required scalar widths.
+        """
+        val nit = self.native_int()
+        val arg0_raw = self.translate_operand(args[0])
+        val arg1_raw = self.translate_operand(args[1])
+        val tc0 = self.builder.fresh_local()
+        val tc1 = self.builder.fresh_local()
+        self.builder.emit("  {tc0} = trunc {nit} {arg0_raw} to {acc_ty}  ; crc32 acc")
+        self.builder.emit("  {tc1} = trunc {nit} {arg1_raw} to {src_ty}  ; crc32 src")
+        if dest.?:
+            val dest_name = self.get_local(dest.unwrap().id)
+            val ret_ty = self.get_local_type(dest.unwrap().id)
+            val raw_result = self.builder.fresh_local()
+            self.builder.emit("  {raw_result} = call {acc_ty} @{llvm_name}({acc_ty} {tc0}, {src_ty} {tc1})")
+            self.builder.emit("  {dest_name} = zext {acc_ty} {raw_result} to {ret_ty}  ; crc32 result")
+        else:
+            self.builder.emit("  call {acc_ty} @{llvm_name}({acc_ty} {tc0}, {src_ty} {tc1})")
+
+    me emit_clmul_intrinsic(dest: LocalId?, args: [MirOperand], imm8: text):
+        """Emit @llvm.x86.pclmulqdq(<2 x i64>, <2 x i64>, i8 immarg).
+
+        imm8 = "0" for clmul_lo (low × low), "17" for clmul_hi (high × high).
+        MIR args are i64 locals; bitcast to <2 x i64>.
+        """
+        val vec_ty = "<2 x i64>"
+        val nit = self.native_int()
+        val arg0_raw = self.translate_operand(args[0])
+        val arg1_raw = self.translate_operand(args[1])
+        val bc0 = self.builder.fresh_local()
+        val bc1 = self.builder.fresh_local()
+        self.builder.emit("  {bc0} = bitcast {nit} {arg0_raw} to {vec_ty}  ; clmul arg0")
+        self.builder.emit("  {bc1} = bitcast {nit} {arg1_raw} to {vec_ty}  ; clmul arg1")
+        if dest.?:
+            val dest_name = self.get_local(dest.unwrap().id)
+            val ret_ty = self.get_local_type(dest.unwrap().id)
+            val raw_result = self.builder.fresh_local()
+            self.builder.emit("  {raw_result} = call {vec_ty} @llvm.x86.pclmulqdq({vec_ty} {bc0}, {vec_ty} {bc1}, i8 {imm8})")
+            self.builder.emit("  {dest_name} = bitcast {vec_ty} {raw_result} to {ret_ty}  ; clmul result")
+        else:
+            self.builder.emit("  call {vec_ty} @llvm.x86.pclmulqdq({vec_ty} {bc0}, {vec_ty} {bc1}, i8 {imm8})")
 
     me emit_runtime_declarations():
         """Emit declarations required by the textual LLVM backend."""

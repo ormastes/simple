@@ -74,3 +74,6 @@ It emits a `MatrixKernel` recipe for logging/future lowering.
 - dedicated rewrite path for matrix kernels
 - backend lowering for the new bitmanip intrinsic family
 - real target-triple plumbing into MIR auto-vectorize
+- x86 generic `bit_clz` / `bit_ctz` remain blocked until dedicated `lzcnt` /
+  `tzcnt`-class feature bits exist and we define the zero-input semantics policy
+  for any fallback path
