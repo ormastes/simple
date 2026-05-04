@@ -1,0 +1,585 @@
+#![allow(unnamed_duplicate_typed_args)]
+use compiler.common.driver_core_types.{CompileResult}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(name: text) -> text
+
+struct SharedParam:
+    name: text
+    type_name: text
+
+struct SharedFn:
+    name: text
+    params: [SharedParam]
+    return_type: text
+    is_static: bool
+    body_expr: text
+    result_expr: text
+    result_error_expr: text
+    result_error_message: text
+
+struct SharedClass:
+    name: text
+    methods: [SharedFn]
+
+struct SharedExports:
+    classes: [SharedClass]
+    functions: [SharedFn]
+    needs_wrapper: bool
+    error: text
+
+fn aot_shared_library(path: text, output: text) -> CompileResult:
+    val source = rt_file_read_text(path) ?? ""
+    if source.trim() == "":
+        return CompileResult.RuntimeError("failed to read source file: {path}")
+
+    val parsed = _parse_exports(source)
+    if parsed.error != "":
+        return CompileResult.RuntimeError(parsed.error)
+
+    if not parsed.needs_wrapper:
+        return _build_native_shared_library(path, output)
+
+    _build_wrapped_shared_library(path, output, parsed)
+
+fn _build_wrapped_shared_library(path: text, output: text, parsed: SharedExports) -> CompileResult:
+    val parent = _parent_dir(output)
+    val output_name = _file_name(output)
+    val core_name = _basename_without_so(output_name) + "_core.so"
+    val core_output = if parent == ".":
+        core_name
+    else:
+        parent + "/" + core_name
+
+    val native_result = _build_native_shared_library(path, core_output)
+    if not native_result.is_success():
+        return native_result
+
+    val wrapper_cpp = output + ".public_wrapper.cpp"
+    val wrapper_source = _emit_wrapper_cpp(parsed)
+    if not rt_file_write_text(wrapper_cpp, wrapper_source):
+        return CompileResult.RuntimeError("failed to write wrapper source: {wrapper_cpp}")
+
+    val (stdout, stderr, exit_code) = rt_process_run("c++", [
+        "-std=c++14",
+        "-fPIC",
+        "-shared",
+        "-s",
+        wrapper_cpp,
+        "-L" + parent,
+        "-l:" + core_name,
+        "-Wl,-rpath,$ORIGIN",
+        "-o", output
+    ])
+    rt_file_delete(wrapper_cpp)
+
+    val combined = clean_child_output(stdout, stderr)
+    if exit_code == 0 and rt_file_exists(output):
+        return CompileResult.Success(combined)
+    if exit_code == 0:
+        return CompileResult.RuntimeError("wrapper shared library build reported success but did not create output: {output}")
+    CompileResult.RuntimeError(combined)
+
+fn _build_native_shared_library(path: text, output: text) -> CompileResult:
+    val simple_bin = find_simple_binary()
+    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "--native", "--shared", "-o", output])
+    val combined = clean_child_output(stdout, stderr)
+    if exit_code == 0 and rt_file_exists(output):
+        return CompileResult.Success(combined)
+    if exit_code == 0:
+        return CompileResult.RuntimeError("shared library build reported success but did not create output: {output}")
+    CompileResult.RuntimeError(combined)
+
+fn _parse_exports(source: text) -> SharedExports:
+    val lines = source.split("\n")
+    var classes: [SharedClass] = []
+    var functions: [SharedFn] = []
+    var pending_export = false
+    var i = 0
+
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed == "":
+            i = i + 1
+            continue
+        if trimmed == "@export(\"C\")":
+            pending_export = true
+            i = i + 1
+            continue
+        if trimmed.starts_with("@"):
+            i = i + 1
+            continue
+        if pending_export and trimmed.starts_with("class "):
+            val class_name = _parse_class_name(trimmed)
+            val class_result = _parse_class(lines, i + 1)
+            if class_result.error != "":
+                return SharedExports(classes: classes, functions: functions, needs_wrapper: false, error: class_result.error)
+            classes = classes.push(SharedClass(name: class_name, methods: class_result.items))
+            pending_export = false
+            i = class_result.next_index
+            continue
+        if pending_export and trimmed.starts_with("fn "):
+            val fn_result = _parse_free_function(lines, i)
+            if fn_result.error != "":
+                return SharedExports(classes: classes, functions: functions, needs_wrapper: false, error: fn_result.error)
+            functions = functions.push(fn_result.item)
+            pending_export = false
+            i = fn_result.next_index
+            continue
+        pending_export = false
+        i = i + 1
+
+    var needs_wrapper = classes.len() > 0
+    for fn_item in functions:
+        if _is_result_type(fn_item.return_type):
+            needs_wrapper = true
+    SharedExports(classes: classes, functions: functions, needs_wrapper: needs_wrapper, error: "")
+
+struct SharedItemParse:
+    item: SharedFn
+    next_index: i64
+    error: text
+
+struct SharedListParse:
+    items: [SharedFn]
+    next_index: i64
+    error: text
+
+fn _parse_class_name(line: text) -> text:
+    val after = line.substring(6)
+    val rest = after.trim()
+    if rest.contains(":"):
+        return rest.split(":")[0].trim()
+    rest
+
+fn _parse_class(lines: [text], start_index: i64) -> SharedListParse:
+    var methods: [SharedFn] = []
+    var i = start_index
+    while i < lines.len():
+        val raw = lines[i]
+        val trimmed = raw.trim()
+        if trimmed == "":
+            i = i + 1
+            continue
+        val indent = _leading_spaces(raw)
+        if indent < 4:
+            return SharedListParse(items: methods, next_index: i, error: "")
+        if indent > 4:
+            i = i + 1
+            continue
+        if trimmed.starts_with("static fn ") or trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+            val method_result = _parse_method(lines, i, trimmed)
+            if method_result.error != "":
+                return SharedListParse(items: methods, next_index: i, error: method_result.error)
+            methods = methods.push(method_result.item)
+        i = i + 1
+    SharedListParse(items: methods, next_index: i, error: "")
+
+fn _parse_method(lines: [text], index: i64, trimmed: text) -> SharedItemParse:
+    val is_static = trimmed.starts_with("static fn ")
+    val is_fn = trimmed.starts_with("fn ")
+    val sig_text = if is_static:
+        val part = trimmed.substring(10)
+        part.trim()
+    elif is_fn:
+        val part = trimmed.substring(3)
+        part.trim()
+    else:
+        val part = trimmed.substring(3)
+        part.trim()
+    val parsed = _parse_signature(sig_text)
+    if parsed.error != "":
+        return parsed
+    SharedItemParse(
+        item: SharedFn(
+            name: parsed.item.name,
+            params: parsed.item.params,
+            return_type: parsed.item.return_type,
+            is_static: is_static,
+            body_expr: parsed.item.body_expr,
+            result_expr: parsed.item.result_expr,
+            result_error_expr: parsed.item.result_error_expr,
+            result_error_message: parsed.item.result_error_message
+        ),
+        next_index: index + 1,
+        error: ""
+    )
+
+fn _parse_free_function(lines: [text], index: i64) -> SharedItemParse:
+    val trimmed = lines[index].trim()
+    val after = trimmed.substring(3)
+    val sig_text = after.trim()
+    val parsed = _parse_signature(sig_text)
+    if parsed.error != "":
+        return parsed
+    if not _is_result_type(parsed.item.return_type):
+        return SharedItemParse(
+            item: SharedFn(
+                name: parsed.item.name,
+                params: parsed.item.params,
+                return_type: parsed.item.return_type,
+                is_static: false,
+                body_expr: _parse_direct_body_expr(lines, index + 1),
+                result_expr: "",
+                result_error_expr: "",
+                result_error_message: ""
+            ),
+            next_index: index + 2,
+            error: ""
+        )
+
+    val pattern = _parse_result_pattern(lines, index + 1)
+    if pattern.error != "":
+        return SharedItemParse(item: parsed.item, next_index: index + 1, error: pattern.error)
+    SharedItemParse(
+        item: SharedFn(
+            name: parsed.item.name,
+            params: parsed.item.params,
+            return_type: parsed.item.return_type,
+            is_static: false,
+            body_expr: "",
+            result_expr: pattern.item.result_expr,
+            result_error_expr: pattern.item.result_error_expr,
+            result_error_message: pattern.item.result_error_message
+        ),
+        next_index: pattern.next_index,
+        error: ""
+    )
+
+fn _parse_signature(line: text) -> SharedItemParse:
+    val open = line.find("(")
+    if open < 0:
+        return SharedItemParse(item: _empty_fn(), next_index: 0, error: "failed to parse signature: {line}")
+    val close = line.find(")")
+    if close < 0:
+        return SharedItemParse(item: _empty_fn(), next_index: 0, error: "failed to parse signature: {line}")
+    val name_part = line.substring(0, open)
+    val params_part = line.substring(open + 1, close)
+    var return_type = "void"
+    if line.contains("->"):
+        return_type = line.split("->")[1].trim()
+    SharedItemParse(
+        item: SharedFn(
+            name: name_part.trim(),
+            params: _parse_params(params_part.trim()),
+            return_type: return_type,
+            is_static: false,
+            body_expr: "",
+            result_expr: "",
+            result_error_expr: "",
+            result_error_message: ""
+        ),
+        next_index: 0,
+        error: ""
+    )
+
+fn _parse_params(params_text: text) -> [SharedParam]:
+    if params_text == "" or params_text == "self":
+        return []
+    val raw_parts = params_text.split(",")
+    var params: [SharedParam] = []
+    for raw_part in raw_parts:
+        val part = raw_part.trim()
+        if part == "" or part == "self":
+            continue
+        val pair = part.split(":")
+        if pair.len() < 2:
+            continue
+        params = params.push(SharedParam(name: pair[0].trim(), type_name: pair[1].trim()))
+    params
+
+fn _parse_result_pattern(lines: [text], start_index: i64) -> SharedItemParse:
+    if start_index + 3 >= lines.len():
+        return SharedItemParse(item: _empty_fn(), next_index: start_index, error: "unsupported Result export body")
+    val line0 = lines[start_index].trim()
+    val line1 = lines[start_index + 1].trim()
+    val line2 = lines[start_index + 2].trim()
+    val line3 = lines[start_index + 3].trim()
+    if not line0.starts_with("if ") or not line0.ends_with(":"):
+        return SharedItemParse(item: _empty_fn(), next_index: start_index, error: "unsupported Result export body")
+    if not line1.starts_with("Err(\"") or not line2.starts_with("else:") or not line3.starts_with("Ok(") or not line3.ends_with(")"):
+        return SharedItemParse(item: _empty_fn(), next_index: start_index, error: "unsupported Result export body")
+    val cond_text_raw = line0.substring(3, line0.len() - 1)
+    val cond_text = cond_text_raw.trim()
+    val cond_parts = cond_text.split("==")
+    if cond_parts.len() != 2:
+        return SharedItemParse(item: _empty_fn(), next_index: start_index, error: "unsupported Result export condition")
+    val err_message = line1.substring(5, line1.len() - 2)
+    val ok_expr_raw = line3.substring(3, line3.len() - 1)
+    SharedItemParse(
+        item: SharedFn(
+            name: "",
+            params: [],
+            return_type: "",
+            is_static: false,
+            body_expr: "",
+            result_expr: ok_expr_raw.trim(),
+            result_error_expr: cond_parts[0].trim() + " == " + cond_parts[1].trim(),
+            result_error_message: err_message
+        ),
+        next_index: start_index + 4,
+        error: ""
+    )
+
+fn _empty_fn() -> SharedFn:
+    SharedFn(
+        name: "",
+        params: [],
+        return_type: "void",
+        is_static: false,
+        body_expr: "",
+        result_expr: "",
+        result_error_expr: "",
+        result_error_message: ""
+    )
+
+fn _parse_direct_body_expr(lines: [text], start_index: i64) -> text:
+    if start_index >= lines.len():
+        return ""
+    val raw = lines[start_index]
+    if _leading_spaces(raw) < 4:
+        return ""
+    raw.trim()
+
+fn _emit_wrapper_cpp(parsed: SharedExports) -> text:
+    var lines: [text] = []
+    lines = lines.push("#include <stdint.h>")
+    lines = lines.push("#include <stdlib.h>")
+    lines = lines.push("#include <string.h>")
+    lines = lines.push("")
+    lines = lines.push("extern \"C\" {")
+    lines = lines.push("struct spl_error_t { const char* message; int32_t code; };")
+    lines = lines.push("const char* spl_error_message(const spl_error_t* err) { return err ? err->message : \"\"; }")
+    lines = lines.push("void spl_error_free(spl_error_t* err) { if (!err) return; free((void*)err->message); free(err); }")
+    lines = lines.push("static spl_error_t* spl_make_error(const char* msg) {")
+    lines = lines.push("  spl_error_t* err = (spl_error_t*)malloc(sizeof(spl_error_t));")
+    lines = lines.push("  if (!err) return nullptr;")
+    lines = lines.push("  size_t len = strlen(msg);")
+    lines = lines.push("  char* copy = (char*)malloc(len + 1);")
+    lines = lines.push("  if (!copy) { free(err); return nullptr; }")
+    lines = lines.push("  memcpy(copy, msg, len + 1);")
+    lines = lines.push("  err->message = copy;")
+    lines = lines.push("  err->code = 1;")
+    lines = lines.push("  return err;")
+    lines = lines.push("}")
+    lines = lines.push("void spl_library_init(void) {}")
+    lines = lines.push("void spl_library_shutdown(void) {}")
+    lines = lines.push("")
+
+    for class_item in parsed.classes:
+        for method in class_item.methods:
+            val symbol = class_item.name + "_dot_" + method.name
+            val alias_name = "core_" + class_item.name + "_" + method.name
+            val decl = _emit_core_alias_decl(alias_name, symbol, method.return_type, method.params, not method.is_static)
+            lines = lines.push(decl)
+        lines = lines.push("struct spl_" + class_item.name + ";")
+    lines = lines.push("")
+
+    for fn_item in parsed.functions:
+        if _is_result_type(fn_item.return_type):
+            lines = _emit_result_wrapper(lines, fn_item)
+        else:
+            lines = _emit_forward_wrapper(lines, fn_item)
+    for class_item in parsed.classes:
+        lines = _emit_class_wrappers(lines, class_item)
+    lines = lines.push("}")
+    lines.join("\n")
+
+fn _emit_core_alias_decl(alias_name: text, symbol_name: text, return_type: text, params: [SharedParam], include_self: bool) -> text:
+    var cpp_params: [text] = []
+    if include_self:
+        cpp_params = cpp_params.push("void*")
+    for param in params:
+        cpp_params = cpp_params.push(_cpp_type(param.type_name))
+    val param_text = if cpp_params.len() == 0: "void" else: cpp_params.join(", ")
+    "extern \"C\" " + _cpp_type(return_type) + " " + alias_name + "(" + param_text + ") asm(\"" + symbol_name + "\");"
+
+fn _emit_forward_wrapper(lines: [text], fn_item: SharedFn) -> [text]:
+    val ret_ty = _cpp_type(fn_item.return_type)
+    val params_text = _named_param_text(fn_item.params, false)
+    lines = lines.push(ret_ty + " " + fn_item.name + "(" + params_text + ") {")
+    if ret_ty == "void":
+        if fn_item.body_expr != "":
+            lines = lines.push("  " + fn_item.body_expr + ";")
+        else:
+            lines = lines.push("  return;")
+    else:
+        lines = lines.push("  return " + fn_item.body_expr + ";")
+    lines = lines.push("}")
+    lines = lines.push("")
+    lines
+
+fn _emit_result_wrapper(lines: [text], fn_item: SharedFn) -> [text]:
+    val ok_type = _cpp_type(_result_ok_type(fn_item.return_type))
+    var params: [text] = []
+    for param in fn_item.params:
+        params = params.push(_cpp_type(param.type_name) + " " + param.name)
+    params = params.push("spl_error_t** err_out")
+    lines = lines.push(ok_type + " " + fn_item.name + "(" + params.join(", ") + ") {")
+    lines = lines.push("  if (err_out) *err_out = nullptr;")
+    lines = lines.push("  if (" + fn_item.result_error_expr + ") {")
+    lines = lines.push("    if (err_out) *err_out = spl_make_error(\"" + _escape_cpp(fn_item.result_error_message) + "\");")
+    lines = lines.push("    return (" + ok_type + ")0;")
+    lines = lines.push("  }")
+    lines = lines.push("  return " + fn_item.result_expr + ";")
+    lines = lines.push("}")
+    lines = lines.push("")
+    lines
+
+fn _emit_class_wrappers(lines: [text], class_item: SharedClass) -> [text]:
+    val prefix = "spl_" + class_item.name
+    val handle_ty = prefix + "*"
+
+    val create_method = _find_method(class_item.methods, "create")
+    if create_method.name != "":
+        lines = lines.push(handle_ty + " " + prefix + "_create(void) {")
+        lines = lines.push("  return (" + handle_ty + ")core_" + class_item.name + "_create();")
+        lines = lines.push("}")
+        lines = lines.push("")
+
+    lines = lines.push("void " + prefix + "_destroy(" + handle_ty + " self) {")
+    lines = lines.push("  (void)self;")
+    lines = lines.push("}")
+    lines = lines.push("")
+
+    for method in class_item.methods:
+        if method.name == "create":
+            continue
+        val ret_ty = _cpp_type(method.return_type)
+        val params_text = _named_param_text(method.params, true)
+        val args_text = _arg_names(method.params, true)
+        lines = lines.push(ret_ty + " " + prefix + "_" + method.name + "(" + params_text + ") {")
+        if ret_ty == "void":
+            lines = lines.push("  core_" + class_item.name + "_" + method.name + "(" + args_text + ");")
+        else:
+            lines = lines.push("  return core_" + class_item.name + "_" + method.name + "(" + args_text + ");")
+        lines = lines.push("}")
+        lines = lines.push("")
+    lines
+
+fn _find_method(methods: [SharedFn], name: text) -> SharedFn:
+    for method in methods:
+        if method.name == name:
+            return method
+    _empty_fn()
+
+fn _named_param_text(params: [SharedParam], include_self: bool) -> text:
+    var parts: [text] = []
+    if include_self:
+        parts = parts.push("void* self")
+    for param in params:
+        parts = parts.push(_cpp_type(param.type_name) + " " + param.name)
+    if parts.len() == 0:
+        return "void"
+    parts.join(", ")
+
+fn _arg_names(params: [SharedParam], include_self: bool) -> text:
+    var parts: [text] = []
+    if include_self:
+        parts = parts.push("self")
+    for param in params:
+        parts = parts.push(param.name)
+    if parts.len() == 0:
+        return ""
+    parts.join(", ")
+
+fn _cpp_type(type_name: text) -> text:
+    match type_name:
+        case "i64": "int64_t"
+        case "text": "const char*"
+        case "str": "const char*"
+        case "void": "void"
+        case "unit": "void"
+        case "()": "void"
+        case _: "int64_t"
+
+fn _result_ok_type(type_name: text) -> text:
+    if not type_name.starts_with("Result<"):
+        return "void"
+    val no_prefix = type_name.replace("Result<", "")
+    val inner = no_prefix.replace(">", "")
+    inner.split(",")[0].trim()
+
+fn _is_result_type(type_name: text) -> bool:
+    type_name.starts_with("Result<")
+
+fn _escape_cpp(value: text) -> text:
+    val escaped_slashes = value.replace("\\", "\\\\")
+    escaped_slashes.replace("\"", "\\\"")
+
+fn _leading_spaces(line: text) -> i64:
+    var i = 0
+    while i < line.len() and line[i:i + 1] == " ":
+        i = i + 1
+    i
+
+fn _parent_dir(path: text) -> text:
+    val idx = path.rfind("/")
+    if idx >= 0:
+        return path.substring(0, idx)
+    "."
+
+fn _file_name(path: text) -> text:
+    val idx = path.rfind("/")
+    if idx >= 0:
+        return path.substring(idx + 1)
+    path
+
+fn _basename_without_so(name: text) -> text:
+    if name.ends_with(".so"):
+        return name.substring(0, name.len() - 3)
+    name
+
+fn find_simple_binary() -> text:
+    val env_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "":
+        return env_bin
+    if rt_file_exists("src/compiler_rust/target/release/simple"):
+        return "src/compiler_rust/target/release/simple"
+    if rt_file_exists("src/compiler_rust/target/bootstrap/simple"):
+        return "src/compiler_rust/target/bootstrap/simple"
+    val os_env = rt_env_get("OS") ?? ""
+    if os_env.contains("Windows"):
+        if rt_file_exists("src/compiler_rust/target/release/simple.exe"):
+            return "src/compiler_rust/target/release/simple.exe"
+        if rt_file_exists("src/compiler_rust/target/bootstrap/simple.exe"):
+            return "src/compiler_rust/target/bootstrap/simple.exe"
+        if rt_file_exists("bin/simple.exe"):
+            return "bin/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-msvc/simple.exe"):
+            return "bin/release/x86_64-pc-windows-msvc/simple.exe"
+        if rt_file_exists("bin/release/x86_64-pc-windows-gnu/simple.exe"):
+            return "bin/release/x86_64-pc-windows-gnu/simple.exe"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    if rt_file_exists("bin/release/aarch64-apple-darwin-macho/simple"):
+        return "bin/release/aarch64-apple-darwin-macho/simple"
+    if rt_file_exists("bin/release/macos-arm64/simple"):
+        return "bin/release/macos-arm64/simple"
+    if rt_file_exists("bin/release/darwin-aarch64/simple"):
+        return "bin/release/darwin-aarch64/simple"
+    if rt_file_exists("bin/release/macos-x86_64/simple"):
+        return "bin/release/macos-x86_64/simple"
+    if rt_file_exists("bin/release/linux-x86_64/simple"):
+        return "bin/release/linux-x86_64/simple"
+    "bin/simple"
+
+fn clean_child_output(stdout: text, stderr: text) -> text:
+    val combined = if stderr.trim() != "":
+        stdout + "\n" + stderr
+    else:
+        stdout
+
+    val lines = combined.split("\n")
+    var kept: [text] = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line != "":
+            kept = kept.push(line)
+        i = i + 1
+    kept.join("\n")
