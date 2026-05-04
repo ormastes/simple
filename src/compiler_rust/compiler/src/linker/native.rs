@@ -494,6 +494,7 @@ impl NativeLinker {
                 if options.pie {
                     cmd.arg("-pie");
                 }
+                cmd.arg("--gc-sections");
                 // Fold byte-identical functions (safe for non-fn-pointer-compared code)
                 cmd.arg("--icf=all");
             }
@@ -515,6 +516,7 @@ impl NativeLinker {
                 if options.pie {
                     cmd.arg("-pie");
                 }
+                cmd.arg("--gc-sections");
                 // Fold byte-identical functions (safe for non-fn-pointer-compared code)
                 cmd.arg("--icf=all");
             }
@@ -547,6 +549,7 @@ impl NativeLinker {
                     if options.pie {
                         cmd.arg("-pie");
                     }
+                    cmd.arg("--gc-sections");
                 }
             }
             Self::Msvc => {
