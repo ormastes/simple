@@ -139,9 +139,9 @@ fn _last_point(pts: [SkPoint]) -> SkPoint:
     else:
         pts[n - 1]
 
-fn _subdiv_quad(out: [SkPoint], ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64, depth: i32) -> i32:
+fn _subdiv_quad(points_out: [SkPoint], ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64, depth: i32) -> i32:
     if depth <= 0:
-        out.append(SkPoint(x: bx, y: by))
+        points_out.append(SkPoint(x: bx, y: by))
         0
     else:
         val lx = (ax + cx) / 2.0
@@ -151,13 +151,13 @@ fn _subdiv_quad(out: [SkPoint], ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by:
         val mx = (lx + rx) / 2.0
         val my = (ly + ry) / 2.0
         val nd = depth - 1
-        val _l = _subdiv_quad(out, ax, ay, lx, ly, mx, my, nd)
-        val _r = _subdiv_quad(out, mx, my, rx, ry, bx, by, nd)
+        val _l = _subdiv_quad(points_out, ax, ay, lx, ly, mx, my, nd)
+        val _r = _subdiv_quad(points_out, mx, my, rx, ry, bx, by, nd)
         0
 
-fn _subdiv_cubic(out: [SkPoint], ax: f64, ay: f64, c1x: f64, c1y: f64, c2x: f64, c2y: f64, bx: f64, by: f64, depth: i32) -> i32:
+fn _subdiv_cubic(points_out: [SkPoint], ax: f64, ay: f64, c1x: f64, c1y: f64, c2x: f64, c2y: f64, bx: f64, by: f64, depth: i32) -> i32:
     if depth <= 0:
-        out.append(SkPoint(x: bx, y: by))
+        points_out.append(SkPoint(x: bx, y: by))
         0
     else:
         val m1x = (ax + c1x) / 2.0
@@ -173,8 +173,8 @@ fn _subdiv_cubic(out: [SkPoint], ax: f64, ay: f64, c1x: f64, c1y: f64, c2x: f64,
         val midx = (n1x + n2x) / 2.0
         val midy = (n1y + n2y) / 2.0
         val nd = depth - 1
-        val _l = _subdiv_cubic(out, ax, ay, m1x, m1y, n1x, n1y, midx, midy, nd)
-        val _r = _subdiv_cubic(out, midx, midy, n2x, n2y, m3x, m3y, bx, by, nd)
+        val _l = _subdiv_cubic(points_out, ax, ay, m1x, m1y, n1x, n1y, midx, midy, nd)
+        val _r = _subdiv_cubic(points_out, midx, midy, n2x, n2y, m3x, m3y, bx, by, nd)
         0
 
 # Build edge list from a polygon. Edges wrap circularly (last -> first).
@@ -369,20 +369,20 @@ fn _max_f(a: f64, b: f64) -> f64:
     if a > b: a else: b
 
 fn _path_op_rects(a: _RectInfo, b: _RectInfo, op: PathOp) -> SkPath:
-    var out = sk_path_new()
+    var result_path = sk_path_new()
     val overlap = _rects_overlap(a, b)
     if op == PathOp.Union:
         if not overlap:
-            out = _emit_rect(out, a.left, a.top, a.right, a.bottom)
-            _emit_rect(out, b.left, b.top, b.right, b.bottom)
+            result_path = _emit_rect(result_path, a.left, a.top, a.right, a.bottom)
+            _emit_rect(result_path, b.left, b.top, b.right, b.bottom)
         else:
             # Emit both rects as subpaths under EvenOdd; for rect-vs-rect
             # Winding with consistent direction, the union region's
             # contains() predicate is also correct (both rects overlap the
             # common area with the same winding sign, giving |w|>=1
             # everywhere in A∪B).
-            out = _emit_rect(out, a.left, a.top, a.right, a.bottom)
-            _emit_rect(out, b.left, b.top, b.right, b.bottom)
+            result_path = _emit_rect(result_path, a.left, a.top, a.right, a.bottom)
+            _emit_rect(result_path, b.left, b.top, b.right, b.bottom)
     else:
         if op == PathOp.Intersect:
             if overlap:
@@ -390,13 +390,13 @@ fn _path_op_rects(a: _RectInfo, b: _RectInfo, op: PathOp) -> SkPath:
                 val t = _max_f(a.top, b.top)
                 val r = _min_f(a.right, b.right)
                 val bt = _min_f(a.bottom, b.bottom)
-                out = _emit_rect(out, l, t, r, bt)
+                result_path = _emit_rect(result_path, l, t, r, bt)
             else:
-                out = sk_path_new()
+                result_path = sk_path_new()
         else:
             if op == PathOp.Difference:
                 if not overlap:
-                    out = _emit_rect(out, a.left, a.top, a.right, a.bottom)
+                    result_path = _emit_rect(result_path, a.left, a.top, a.right, a.bottom)
                 else:
                     # A \ B as up-to-4 axis-aligned rect strips:
                     #   top    strip: [aL, aT, aR, min(aB, bT)]   if aT < bT
@@ -407,43 +407,43 @@ fn _path_op_rects(a: _RectInfo, b: _RectInfo, op: PathOp) -> SkPath:
                     if a.top < b.top:
                         val y_cut = _min_f(a.bottom, b.top)
                         if y_cut > a.top:
-                            out = _emit_rect(out, a.left, a.top, a.right, y_cut)
+                            result_path = _emit_rect(result_path, a.left, a.top, a.right, y_cut)
                     if a.bottom > b.bottom:
                         val y_cut = _max_f(a.top, b.bottom)
                         if a.bottom > y_cut:
-                            out = _emit_rect(out, a.left, y_cut, a.right, a.bottom)
+                            result_path = _emit_rect(result_path, a.left, y_cut, a.right, a.bottom)
                     val y0 = _max_f(a.top, b.top)
                     val y1 = _min_f(a.bottom, b.bottom)
                     if y1 > y0:
                         if a.left < b.left:
                             val x_cut = _min_f(a.right, b.left)
                             if x_cut > a.left:
-                                out = _emit_rect(out, a.left, y0, x_cut, y1)
+                                result_path = _emit_rect(result_path, a.left, y0, x_cut, y1)
                         if a.right > b.right:
                             val x_cut = _max_f(a.left, b.right)
                             if a.right > x_cut:
-                                out = _emit_rect(out, x_cut, y0, a.right, y1)
+                                result_path = _emit_rect(result_path, x_cut, y0, a.right, y1)
             else:
                 if op == PathOp.Xor:
                     if not overlap:
-                        out = _emit_rect(out, a.left, a.top, a.right, a.bottom)
-                        out = _emit_rect(out, b.left, b.top, b.right, b.bottom)
+                        result_path = _emit_rect(result_path, a.left, a.top, a.right, a.bottom)
+                        result_path = _emit_rect(result_path, b.left, b.top, b.right, b.bottom)
                     else:
                         # A xor B = (A\B) ∪ (B\A). Emit both symmetric diff strips.
                         val ra = _path_op_rects(a, b, PathOp.Difference)
                         val rb = _path_op_rects(b, a, PathOp.Difference)
-                        # Concatenate ra and rb into out.
+                        # Concatenate ra and rb into result_path.
                         var k: i64 = 0
                         val kn = ra.segments.len()
                         while k < kn:
                             val s = ra.segments[k]
-                            out = SkPath(fill_type: out.fill_type, segments: [...out.segments, s])
+                            result_path = SkPath(fill_type: result_path.fill_type, segments: [...result_path.segments, s])
                             k = k + 1
                         var m: i64 = 0
                         val mn = rb.segments.len()
                         while m < mn:
                             val s = rb.segments[m]
-                            out = SkPath(fill_type: out.fill_type, segments: [...out.segments, s])
+                            result_path = SkPath(fill_type: result_path.fill_type, segments: [...result_path.segments, s])
                             m = m + 1
                 else:
                     pass_do_nothing
@@ -451,9 +451,9 @@ fn _path_op_rects(a: _RectInfo, b: _RectInfo, op: PathOp) -> SkPath:
     # difference strips share a boundary; for our disjoint-strip emission it
     # doesn't matter, but EvenOdd is safer for general inputs.
     if op == PathOp.Xor:
-        out.with_fill_type(SkPathFillType.EvenOdd)
+        result_path.with_fill_type(SkPathFillType.EvenOdd)
     else:
-        out
+        result_path
 
 # ============================================================================
 # Public entry point: path_op(a, b, op) -> SkPath
