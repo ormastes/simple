@@ -2,11 +2,15 @@
 
 TRACE32 PRACTICE/CMM language server plugin for Claude Code.
 
-Runtime:
+Legacy repo-checkout runtime:
 
 ```bash
 bin/simple examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp
 ```
+
+This marketplace entry still assumes a hosted source-entry launch from a Simple
+repo checkout. Prefer a packaged `cmm-lsp` executable when one is available and
+verified; treat the `bin/simple ... mod.spl --lsp` path as legacy/debug-only.
 
 ## Common CMM Mistakes
 

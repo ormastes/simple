@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use super::tools::strip_llvm_constructors;
 use super::tools::{
-    build_core_c_runtime_library, find_native_all_library, find_runtime_library, find_simple_core_runtime_library,
+    build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library, find_native_all_library,
+    find_runtime_library, find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
 };
 use super::NativeProjectBuilder;
 
@@ -30,7 +31,10 @@ fn runtime_bundle_requests_simple_core(value: &str) -> bool {
 }
 
 fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
-    matches!(value, "core-c-bootstrap" | "core_c_bootstrap" | "runtime" | "core" | "core-c" | "core_c")
+    matches!(
+        value,
+        "core-c-bootstrap" | "core_c_bootstrap" | "runtime" | "core" | "core-c" | "core_c"
+    )
 }
 
 fn runtime_bundle_requests_hosted(value: &str) -> bool {
@@ -45,11 +49,16 @@ fn is_compiler_like_entry(path: &Path) -> bool {
         || p.ends_with("/src/app/cli")
 }
 
-fn runtime_path_has_simple_core(runtime_path: Option<&Path>) -> bool {
+fn runtime_path_has_abi_complete_simple_core(runtime_path: Option<&Path>) -> bool {
     runtime_path.is_some_and(|path| {
         ["simple-core", "simple_core"].iter().any(|lane_dir| {
             let dir = path.join(lane_dir);
-            dir.join("libsimple_runtime.a").exists() || dir.join("deps").join("libsimple_runtime.a").exists()
+            [
+                dir.join("deps").join("libsimple_runtime.a"),
+                dir.join("libsimple_runtime.a"),
+            ]
+            .iter()
+            .any(|candidate| candidate.exists() && runtime_archive_has_core_required_symbols(candidate))
         })
     })
 }
@@ -94,7 +103,8 @@ impl NativeProjectBuilder {
         } else if self.source_dirs.iter().any(|p| is_compiler_like_entry(p)) {
             return NativeRuntimeLane::RustHosted;
         }
-        if runtime_path_has_simple_core(self.config.runtime_path.as_deref()) || find_simple_core_runtime_library().is_some()
+        if runtime_path_has_abi_complete_simple_core(self.config.runtime_path.as_deref())
+            || find_abi_complete_simple_core_runtime_library().is_some()
         {
             NativeRuntimeLane::SimpleCore
         } else {

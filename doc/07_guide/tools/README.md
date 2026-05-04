@@ -35,14 +35,16 @@ Add to `.mcp.json`:
 {
   "mcpServers": {
     "simple-mcp-t32-lsp-dap": {
-      "command": "bin/simple",
-      "args": ["src/app/mcp_t32/main.spl"]
+      "command": "bin/t32_mcp_server"
     }
   }
 }
 ```
 
-Test: `echo '{"jsonrpc":"2.0","id":"1","method":"tools/list"}' | bin/simple run src/app/mcp_t32/main.spl`
+Test: `echo '{"jsonrpc":"2.0","id":"1","method":"tools/list"}' | bin/t32_mcp_server`
+
+Hosted `bin/simple ... .spl` entrypoints remain legacy/debug-only for this MCP
+surface.
 
 ---
 

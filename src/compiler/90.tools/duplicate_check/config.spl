@@ -5,6 +5,7 @@ use std.config_parser.{parse_sdn_config, find_section, get_config_int, get_confi
 use compiler.tools.duplicate_check.math_utils.{hash_string}
 
 struct DuplicationConfig:
+    selected_mode: text
     min_tokens: i64
     min_lines: i64
     ignore_identifiers: bool
@@ -32,8 +33,34 @@ struct DuplicationConfig:
     ollama_url: text              # Ollama base URL
     rebuild_embeddings: bool      # Force rebuild embedding cache
 
+fn analysis_mode(config: DuplicationConfig) -> text:
+    if config.selected_mode.len() > 0:
+        return config.selected_mode
+    if config.use_semantic:
+        return "semantic"
+    if config.use_cosine_similarity:
+        return "cosine"
+    "token"
+
+fn apply_analysis_mode(config: DuplicationConfig, mode: text) -> DuplicationConfig:
+    var updated = config
+    updated.selected_mode = mode
+    if mode == "semantic":
+        updated.use_semantic = true
+        updated.use_cosine_similarity = false
+    elif mode == "cosine":
+        updated.use_semantic = true
+        updated.use_cosine_similarity = true
+        updated.ignore_identifiers = false
+        updated.ignore_literals = false
+    else:
+        updated.use_semantic = true
+        updated.use_cosine_similarity = false
+    updated
+
 fn default_config() -> DuplicationConfig:
     DuplicationConfig(
+        selected_mode: "semantic",
         min_tokens: 30,
         min_lines: 5,
         ignore_identifiers: true,
@@ -44,7 +71,7 @@ fn default_config() -> DuplicationConfig:
         output_format: "text",
         report_path: "doc/01_research/analysis/duplicate_db.sdn",
         max_allowed: 0,
-        min_impact: 50,
+        min_impact: 10,
         exclude_patterns: ["test/", "doc/", "**/*_spec.spl", "**/*_test.spl"],
         use_ast_features: false,
         use_cosine_similarity: false,
@@ -105,6 +132,10 @@ fn parse_config_file(content: text) -> DuplicationConfig:
 
     # Semantic analysis config
     config.use_semantic = get_config_bool(section, "use-semantic", config.use_semantic)
+    config.selected_mode = get_config_field(section, "mode", config.selected_mode)
+    val mode = config.selected_mode
+    if mode.len() > 0:
+        config = apply_analysis_mode(config, mode)
 
     # Parse exclude patterns (list field)
     val exclude_str = get_config_field(section, "exclude", "")
@@ -156,7 +187,7 @@ use std.config_parser.{ConfigSection}
 
 fn compute_config_hash(config: DuplicationConfig) -> text:
     """Compute hash of config fields that affect detection results."""
-    val config_str = "{config.min_tokens}|{config.min_lines}|{config.ignore_identifiers}|{config.ignore_literals}|{config.ignore_comments}|{config.ignore_whitespace}|{config.similarity_threshold}|{config.min_impact}|{config.exclude_patterns.join(',')}|{config.use_ast_features}|{config.use_cosine_similarity}|{config.use_semantic}|{config.semantic_threshold}|{config.semantic_drift_threshold}|{config.semantic_model}|{config.ollama_url}|{config.rebuild_embeddings}"
+    val config_str = "{analysis_mode(config)}|{config.min_tokens}|{config.min_lines}|{config.ignore_identifiers}|{config.ignore_literals}|{config.ignore_comments}|{config.ignore_whitespace}|{config.similarity_threshold}|{config.min_impact}|{config.exclude_patterns.join(',')}|{config.use_ast_features}|{config.use_cosine_similarity}|{config.use_semantic}|{config.semantic_threshold}|{config.semantic_drift_threshold}|{config.semantic_model}|{config.ollama_url}|{config.rebuild_embeddings}"
     hash_string(config_str)
 
 fn load_config() -> DuplicationConfig:

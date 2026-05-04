@@ -1,7 +1,7 @@
-use compiler.tools.duplicate_check.config.{default_config}
+use compiler.tools.duplicate_check.config.{default_config, analysis_mode}
 use compiler.tools.duplicate_check.detector.{DuplicateBlock, DuplicateGroup}
 use compiler.tools.duplicate_check.formatter.{summarize_duplicate_groups, duplicate_lines_per_block, format_score_hundredths, format_ratio_tenths}
-use compiler.tools.duplicate_check.main.{collect_command_args, parse_args, collect_deprecated_lexical_flags}
+use compiler.tools.duplicate_check.main.{collect_command_args, parse_args}
 
 fn sample_block(file: text, line_start: i64, line_end: i64, hash_value: i64, code: text) -> DuplicateBlock:
     DuplicateBlock(
@@ -49,31 +49,38 @@ describe "duplicate_check command argument parsing":
         expect config.semantic_model == "nomic-embed-text"
         expect config.output_format == "json"
 
-    it "accepts deprecated lexical flags for compatibility":
-        val args = [
+    it "parses token mode and lexical thresholds":
+        val config = parse_args([
             "/tmp/dup_scope",
-            "--cosine",
+            "--mode",
+            "token",
             "--min-tokens",
             "30",
             "--min-lines=5",
             "--cache-path=/tmp/duplicate-check-cache.sdn",
             "--jobs",
             "4"
-        ]
-        val config = parse_args(args)
-        val deprecated = collect_deprecated_lexical_flags(args)
+        ])
 
-        expect config.use_semantic == true
-        expect config.min_tokens == 30
+        expect analysis_mode(config) == "token"
+        expect config.use_cosine_similarity == false
         expect config.min_lines == 5
+        expect config.min_tokens == 30
         expect config.incremental_cache_path == "/tmp/duplicate-check-cache.sdn"
         expect config.num_workers == 4
-        expect deprecated.len() == 5
-        expect deprecated[0] == "--cosine"
-        expect deprecated[1] == "--min-tokens"
-        expect deprecated[2] == "--min-lines"
-        expect deprecated[3] == "--cache-path"
-        expect deprecated[4] == "--jobs"
+
+    it "parses cosine mode and fuzzy threshold":
+        val config = parse_args([
+            "/tmp/dup_scope",
+            "--mode=cosine",
+            "--similarity-threshold",
+            "0.61"
+        ])
+
+        expect analysis_mode(config) == "cosine"
+        expect config.use_cosine_similarity == true
+        expect config.similarity_threshold > 0.60 == true
+        expect config.similarity_threshold < 0.62 == true
 
 describe "duplicate_check formatter shared helpers":
     it "summarizes duplicate groups with unique file counting":

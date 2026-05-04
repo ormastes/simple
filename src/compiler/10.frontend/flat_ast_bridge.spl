@@ -4,11 +4,17 @@
 # Module shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parse_module_body}
+use compiler.frontend.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path}
+use compiler.frontend.core.parser_decls.{parse_module_body}
 use compiler.core.ast.*
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_stmt.{STMT_GPU_LAUNCH, stmt_get_gpu_grid, stmt_get_gpu_block}
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL, TYPE_ARRAY_ANY, TYPE_ANY, TYPE_NIL}
+use compiler.core.types.{TYPE_DICT, TYPE_FN, TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
+use compiler.core.types.{TYPE_RESULT, TYPE_FUTURE, TYPE_POLL, TYPE_TASK, TYPE_GENERIC_ERASED}
+use compiler.core.types.{TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT, TYPE_NAMED_BASE, TYPE_UNION_BASE, type_tag_name}
+use compiler.frontend.parser_types.{Module as FrontendModule, Function as ParserFunction}
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{ComprehensionClause, ComprehensionKind, GpuLaunchConfig}
@@ -35,6 +41,54 @@ fn convert_decl_visibility(idx: i64) -> Visibility:
 fn convert_flat_type(type_expr_idx: i64) -> Type:
     if type_expr_idx <= 0:
         return Type(kind: TypeKind.Infer, span: make_span())
+    if type_expr_idx == TYPE_VOID:
+        return Type(kind: TypeKind.Named("void", []), span: make_span())
+    if type_expr_idx == TYPE_BOOL:
+        return Type(kind: TypeKind.Named("bool", []), span: make_span())
+    if type_expr_idx == TYPE_I64:
+        return Type(kind: TypeKind.Named("i64", []), span: make_span())
+    if type_expr_idx == TYPE_F64:
+        return Type(kind: TypeKind.Named("f64", []), span: make_span())
+    if type_expr_idx == TYPE_TEXT:
+        return Type(kind: TypeKind.Named("text", []), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_I64:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("i64", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_TEXT:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("text", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_BOOL:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("bool", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ARRAY_ANY:
+        return Type(kind: TypeKind.Array(Type(kind: TypeKind.Named("Any", []), span: make_span()), nil), span: make_span())
+    if type_expr_idx == TYPE_ANY:
+        return Type(kind: TypeKind.Named("Any", []), span: make_span())
+    if type_expr_idx == TYPE_NIL:
+        return Type(kind: TypeKind.Named("nil", []), span: make_span())
+    if type_expr_idx == TYPE_DICT:
+        return Type(kind: TypeKind.Named("Dict", []), span: make_span())
+    if type_expr_idx == TYPE_FN:
+        return Type(kind: TypeKind.Named("fn", []), span: make_span())
+    if type_expr_idx == TYPE_OPTION:
+        return Type(kind: TypeKind.Named("Option", []), span: make_span())
+    if type_expr_idx == TYPE_OPTION_I64:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("i64", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_F64:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("f64", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_TEXT:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("text", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_OPTION_BOOL:
+        return Type(kind: TypeKind.Named("Option", [Type(kind: TypeKind.Named("bool", []), span: make_span())]), span: make_span())
+    if type_expr_idx == TYPE_RESULT:
+        return Type(kind: TypeKind.Named("Result", []), span: make_span())
+    if type_expr_idx == TYPE_FUTURE:
+        return Type(kind: TypeKind.Named("Future", []), span: make_span())
+    if type_expr_idx == TYPE_POLL:
+        return Type(kind: TypeKind.Named("Poll", []), span: make_span())
+    if type_expr_idx == TYPE_TASK:
+        return Type(kind: TypeKind.Named("Task", []), span: make_span())
+    if type_expr_idx == TYPE_GENERIC_ERASED:
+        return Type(kind: TypeKind.Named("Generic", []), span: make_span())
+    if type_expr_idx >= TYPE_UNION_BASE:
+        return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
     val tag = expr_tag[type_expr_idx]
     if tag == EXPR_IDENT:
         Type(kind: TypeKind.Named(expr_s_val[type_expr_idx], []), span: make_span())
@@ -53,6 +107,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
         return Expr(kind: ExprKind.NilLit, span: make_span())
     val tag = expr_tag[idx]
     val span = make_span()
+    print "[flat-bridge] convert_flat_expr idx={idx} tag={tag}"
     if tag == EXPR_INT_LIT:
         return Expr(kind: ExprKind.IntLit(expr_i_val[idx]), span: span)
     elif tag == EXPR_FLOAT_LIT:
@@ -232,6 +287,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
 fn convert_flat_stmt(idx: i64) -> Stmt:
     val tag = stmt_tag[idx]
     val span = make_span()
+    print "[flat-bridge] convert_flat_stmt idx={idx} tag={tag}"
     if tag == STMT_EXPR:
         val e = convert_flat_expr(stmt_expr[idx])
         return Stmt(kind: StmtKind.Expr(e), span: span)
@@ -312,7 +368,8 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
     else:
         return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
 
-fn convert_decl_fn(idx: i64) -> Function:
+fn convert_decl_fn(idx: i64) -> ParserFunction:
+    print "[flat-bridge] convert_decl_fn idx={idx}"
     val name = decl_name[idx]
     val p_names = decl_param_names[idx]
     val p_types = decl_param_types[idx]
@@ -333,66 +390,70 @@ fn convert_decl_fn(idx: i64) -> Function:
 
     val ret = decl_ret_type[idx]
     val body_stmt_indices = decl_body_stmts[idx]
+    print "[flat-bridge] fn={name} ret={ret} body_len={body_stmt_indices.len()}"
     var stmts: [Stmt] = []
     var si = 0
     while si < body_stmt_indices.len():
+        print "[flat-bridge] body[{si}]={body_stmt_indices[si]}"
         stmts = stmts.push(convert_flat_stmt(body_stmt_indices[si]))
         si = si + 1
 
     val visibility = convert_decl_visibility(idx)
-    Function(
-        name: name,
-        type_params: [],
-        params: params,
-        has_return_type: ret > 0,
-        return_type: if ret > 0: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span),
-        body: Block(stmts: stmts, span: span),
-        visibility: visibility,
-        is_async: decl_is_async[idx] != 0,
-        is_static: false,
-        is_public: visibility.is_public(),
-        is_method: false,
-        is_mutable: false,
-        is_const: decl_get_is_comptime(idx),
-        is_kernel: idx < decl_is_gpu_kernel.len() and decl_is_gpu_kernel[idx] != 0,
-        is_extern: false,
-        attributes: [],
-        has_doc_comment: false,
-        doc_comment: "",
-        span: span
+    val fn_params: [Param] = params
+    parser_function_new(
+        name,
+        [],
+        fn_params,
+        ret > 0,
+        if ret > 0: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span),
+        Block(stmts: stmts, span: span),
+        visibility,
+        decl_is_async[idx] != 0,
+        false,
+        visibility.is_public(),
+        false,
+        false,
+        decl_get_is_comptime(idx),
+        idx < decl_is_gpu_kernel.len() and decl_is_gpu_kernel[idx] != 0,
+        false,
+        [],
+        false,
+        "",
+        span
     )
 
-fn convert_decl_method_fn(idx: i64, target_name: text) -> Function:
-    val base = convert_decl_fn(idx)
+fn convert_decl_method_fn(idx: i64, target_name: text) -> ParserFunction:
+    val base: ParserFunction = convert_decl_fn(idx)
     val method_mode = decl_is_async[idx]
     val prefix = target_name + "__"
     val method_name = if base.name.starts_with(prefix):
         base.name.substring(prefix.len(), base.name.len())
     else:
         base.name
-    Function(
-        name: method_name,
-        type_params: base.type_params,
-        params: base.params,
-        has_return_type: base.has_return_type,
-        return_type: base.return_type,
-        body: base.body,
-        visibility: base.visibility,
-        is_async: false,
-        is_static: method_mode == 1,
-        is_public: base.is_public,
-        is_method: method_mode != 1,
-        is_mutable: method_mode == 2,
-        is_const: base.is_const,
-        is_kernel: base.is_kernel,
-        is_extern: base.is_extern,
-        attributes: base.attributes,
-        has_doc_comment: base.has_doc_comment,
-        doc_comment: base.doc_comment,
-        span: base.span
+    val method_params: [Param] = base.params
+    parser_function_new(
+        method_name,
+        base.type_params,
+        method_params,
+        base.has_return_type,
+        base.return_type,
+        base.body,
+        base.visibility,
+        false,
+        method_mode == 1,
+        base.is_public,
+        method_mode != 1,
+        method_mode == 2,
+        base.is_const,
+        base.is_kernel,
+        base.is_extern,
+        base.attributes,
+        base.has_doc_comment,
+        base.doc_comment,
+        base.span
     )
 
-fn convert_decl_extern_fn(idx: i64) -> Function:
+fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
     val name = decl_name[idx]
     val p_names = decl_param_names[idx]
     val p_types = decl_param_types[idx]
@@ -412,26 +473,27 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
         pi = pi + 1
 
     val ret = decl_ret_type[idx]
-    Function(
-        name: name,
-        type_params: [],
-        params: params,
-        has_return_type: ret > 0,
-        return_type: if ret > 0: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span),
-        body: Block(stmts: [], span: span),
-        visibility: Visibility.Private,
-        is_async: false,
-        is_static: false,
-        is_public: false,
-        is_method: false,
-        is_mutable: false,
-        is_const: false,
-        is_kernel: false,
-        is_extern: true,
-        attributes: [],
-        has_doc_comment: false,
-        doc_comment: "",
-        span: span
+    val extern_params: [Param] = params
+    parser_function_new(
+        name,
+        [],
+        extern_params,
+        ret > 0,
+        if ret > 0: convert_flat_type(ret) else: Type(kind: TypeKind.Infer, span: span),
+        Block(stmts: [], span: span),
+        Visibility.Private,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        [],
+        false,
+        "",
+        span
     )
 
 fn text_parse_int_simple(s: text) -> i64:
@@ -461,9 +523,11 @@ fn text_parse_int_simple(s: text) -> i64:
         i = i + 1
     result
 
-fn flat_ast_to_module(path: text) -> Module:
+fn flat_ast_to_module(path: text) -> FrontendModule:
     val decls = module_get_decls()
-    var functions: Dict<text, Function> = {}
+    print "[flat-bridge] path={path}"
+    print "[flat-bridge] decls_len={decls.len()}"
+    var functions: Dict<text, ParserFunction> = {}
     var structs: Dict<text, Struct> = {}
     var enums: Dict<text, Enum> = {}
     var constants: Dict<text, Const> = {}
@@ -479,7 +543,9 @@ fn flat_ast_to_module(path: text) -> Module:
     var di = 0
     while di < decls.len():
         val idx = decls[di]
+        print "[flat-bridge] decls[{di}]={idx}"
         val tag = decl_tag[idx]
+        print "[flat-bridge] tag={tag}"
         if tag == DECL_FN:
             val fn_ = convert_decl_fn(idx)
             functions[fn_.name] = fn_
@@ -539,7 +605,7 @@ fn flat_ast_to_module(path: text) -> Module:
         elif tag == DECL_IMPL:
             val target_name = decl_name[idx]
             val method_ids = decl_body_stmts[idx]
-            var methods: Dict<text, Function> = {}
+            var methods: Dict<text, ParserFunction> = {}
             var mi = 0
             while mi < method_ids.len():
                 val method_id = method_ids[mi]
@@ -652,7 +718,8 @@ fn flat_ast_to_module(path: text) -> Module:
             ))
         di = di + 1
 
-    Module(
+    print "[flat-bridge] building frontend module path={path}"
+    val built_module = parser_module_new(
         name: path,
         imports: imports,
         exports: exports,
@@ -673,8 +740,10 @@ fn flat_ast_to_module(path: text) -> Module:
         arch_rules: arch_rules,
         mock_decls: []
     )
+    print "[flat-bridge] built frontend module path={path}"
+    built_module
 
-fn parse_and_build_module(source: text, path: text) -> Module:
+fn parse_and_build_module(source: text, path: text) -> FrontendModule:
     parser_init_with_path(source, path)
     parse_module_body()
     if parser_has_errors():

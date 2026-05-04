@@ -28,9 +28,9 @@ As of March 13, 2026:
 - the repo source is aligned to `0.1.2`
 - release binaries should be verified with the smoke tests and a local MCP handshake after publish
 
-Use the published binaries for experimentation, but prefer the source-backed
-`bin/simple run .../main.spl` commands below until `t32-v0.1.2` is
-published and re-verified.
+Use the published wrappers and binaries as the default path. Source-backed
+`bin/simple run .../main.spl` commands should be treated as explicit
+legacy/debug flows only and re-verified locally before use.
 
 ### Manual download
 
@@ -86,13 +86,8 @@ bin/simple native-build \
 Recommended local install from a repo checkout:
 
 ```bash
-claude mcp add t32-mcp -- \
-  /absolute/path/to/simple/bin/simple \
-  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
-
-claude mcp add t32-lsp-mcp -- \
-  /absolute/path/to/simple/bin/simple \
-  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
+claude mcp add t32-mcp -- /absolute/path/to/simple/bin/t32_mcp_server
+claude mcp add t32-lsp-mcp -- /absolute/path/to/simple/bin/t32_lsp_mcp_server
 ```
 
 For the CMM LSP Claude plugin itself, use the checked-in marketplace:
@@ -124,9 +119,9 @@ Project `.mcp.json` is also valid:
 }
 ```
 
-> If a future standalone binary is in PATH, you can use `t32-mcp-server` and
-> `t32-lsp-mcp-server` directly. Re-verify the published `t32-v0.1.2` Linux
-> binaries with a local MCP handshake before relying on them in Claude Code.
+> Source-entry launches via `bin/simple ... main.spl` remain legacy/debug-only.
+> Re-verify them locally and opt into hosted fallback explicitly before relying
+> on that path.
 
 ### Claude Desktop
 
@@ -151,14 +146,12 @@ Add to `~/.config/Claude/claude_desktop_config.json`:
 # Check the server responds to MCP initialize
 msg='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}'
 printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | \
-  /absolute/path/to/simple/bin/simple \
-  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
+  /absolute/path/to/simple/bin/t32_mcp_server
 
 # List available tools
 msg='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 printf 'Content-Length: %s\r\n\r\n%s' "${#msg}" "$msg" | \
-  /absolute/path/to/simple/bin/simple \
-  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
+  /absolute/path/to/simple/bin/t32_mcp_server
 ```
 
 ---
@@ -290,21 +283,22 @@ Once the T32 MCP servers and CMM LSP plugin are installed, try these prompts in 
 cd /path/to/simple
 
 # 1. T32 MCP — live debug session control (23 tools)
-claude mcp add t32-mcp -- \
-  /absolute/path/to/simple/bin/simple \
-  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
+claude mcp add t32-mcp -- /absolute/path/to/simple/bin/t32_mcp_server
 
 # 2. T32 LSP MCP — CMM analysis (6 tools)
-claude mcp add t32-lsp-mcp -- \
-  /absolute/path/to/simple/bin/simple \
-  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl
+claude mcp add t32-lsp-mcp -- /absolute/path/to/simple/bin/t32_lsp_mcp_server
 
 # 3. CMM LSP plugin — IDE features for .cmm files
 claude plugin marketplace add tools/claude-plugin/marketplace
 claude plugin install cmm-lsp@simple-local
 ```
 
-**Binary full paths:**
+**Default full paths:**
+- T32 MCP: `bin/t32_mcp_server`
+- T32 LSP MCP: `bin/t32_lsp_mcp_server`
+- CMM LSP plugin bundle: `tools/claude-plugin/marketplace/plugins/cmm-lsp`
+
+**Legacy/debug hosted paths:**
 - T32 MCP: `bin/simple run examples/10_tooling/trace32_tools/t32_mcp/main.spl`
 - T32 LSP MCP: `bin/simple run examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl`
 - CMM LSP: `bin/simple run examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp`

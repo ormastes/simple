@@ -1,7 +1,8 @@
 #!/bin/bash
 # System test: MCP server startup verification
 # Tests all 4 MCP servers with initialize + tools/list JSON-RPC
-# Tests both wrapper scripts and direct binary invocation.
+# Tests wrapper scripts by default and keeps direct hosted source-entry coverage
+# as explicit legacy verification.
 
 set -e
 
@@ -144,7 +145,7 @@ test_mcp_server() {
     output=$(run_mcp_startup_capture "$wrapper" "$tmo")
 
     # t32-lsp-mcp wrapper uses compiled .smf which may not produce output
-    # (known limitation — direct binary test validates functionality instead)
+    # (known limitation — legacy hosted source-entry coverage validates functionality instead)
     if [ "$name" = "t32-lsp-mcp" ] && [ -z "$output" ]; then
         check_known_issue "$name: returns jsonrpc" "$output" '"jsonrpc"' "compiled .smf stub"
         check_known_issue "$name: initialize response" "$output" '"result"' "compiled .smf stub"
@@ -180,8 +181,8 @@ test_mcp_server() {
     fi
 }
 
-# Test direct binary invocation (not through wrapper)
-test_direct_binary() {
+# Test hosted source-entry invocation (legacy/debug coverage, not default path)
+test_legacy_hosted_runtime() {
     local name="$1"
     local binary="$2"
     local entry="$3"
@@ -189,15 +190,15 @@ test_direct_binary() {
     local tmo="${5:-60}"
 
     echo ""
-    echo "--- Testing direct: $name ($binary $entry) ---"
+    echo "--- Testing legacy hosted runtime: $name ($binary $entry) ---"
 
     if [ ! -x "$binary" ]; then
-        check_skip "$name direct: binary exists" "not found: $binary"
+        check_skip "$name legacy-hosted: binary exists" "not found: $binary"
         return
     fi
 
     if [ ! -f "$entry" ]; then
-        check_skip "$name direct: entry exists" "not found: $entry"
+        check_skip "$name legacy-hosted: entry exists" "not found: $entry"
         return
     fi
 
@@ -208,12 +209,12 @@ test_direct_binary() {
         SIMPLE_TIMEOUT_SECONDS=120 SIMPLE_MEMORY_LIMIT_MB=200 \
         timeout "$tmo" "$binary" run "$entry" 2>/dev/null || true)
 
-    check_result "$name direct: returns jsonrpc" "$output" '"jsonrpc"'
+    check_result "$name legacy-hosted: returns jsonrpc" "$output" '"jsonrpc"'
     # t32-mcp cold frontend returns id:null (pre-existing JSON parser issue)
     if echo "$name" | grep -q "t32"; then
-        check_known_issue "$name direct: initialize response" "$output" '"id":1' "t32 cold frontend id parsing"
+        check_known_issue "$name legacy-hosted: initialize response" "$output" '"id":1' "t32 cold frontend id parsing"
     else
-        check_result "$name direct: initialize response" "$output" '"id":1'
+        check_result "$name legacy-hosted: initialize response" "$output" '"id":1'
     fi
 }
 
@@ -227,11 +228,11 @@ test_mcp_server "simple-mcp-full" "bin/simple_mcp_server" 60 "simple-mcp-full"
 test_mcp_server "simple-lsp-mcp" "bin/simple_lsp_mcp_server" 60 "simple-lsp-mcp"
 # t32-mcp cold frontend: tools/list id may not arrive before pipe closes (timing)
 test_mcp_server "t32-mcp" "bin/t32_mcp_server" 90 "t32-mcp"
-# t32-lsp-mcp wrapper: compiled .smf is minimal stub; wrapper may not produce output.
-# Test via direct binary instead (see below).
+# t32-lsp-mcp wrapper: compiled .smf is minimal stub; keep a separate
+# legacy-hosted source-entry check below for coverage.
 test_mcp_server "t32-lsp-mcp" "bin/t32_lsp_mcp_server" 90 "t32-lsp-mcp"
 
-# Direct binary tests
+# Legacy hosted source-entry tests
 RUNTIME=""
 for candidate in src/compiler_rust/target/release/simple src/compiler_rust/target/bootstrap/simple bin/simple bin/release/*/simple; do
     if [ -x "$candidate" ]; then
@@ -241,17 +242,17 @@ for candidate in src/compiler_rust/target/release/simple src/compiler_rust/targe
 done
 
 if [ -n "$RUNTIME" ]; then
-    test_direct_binary "simple-mcp" "$RUNTIME" "src/app/mcp/main.spl" "src" 60
-    test_direct_binary "simple-lsp-mcp" "$RUNTIME" "src/app/simple_lsp_mcp/main.spl" "src" 60
-    test_direct_binary "t32-mcp" "$RUNTIME" \
+    test_legacy_hosted_runtime "simple-mcp" "$RUNTIME" "src/app/mcp/main.spl" "src" 60
+    test_legacy_hosted_runtime "simple-lsp-mcp" "$RUNTIME" "src/app/simple_lsp_mcp/main.spl" "src" 60
+    test_legacy_hosted_runtime "t32-mcp" "$RUNTIME" \
         "examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl" \
         "examples/10_tooling/trace32_tools" 90
-    test_direct_binary "t32-lsp-mcp" "$RUNTIME" \
+    test_legacy_hosted_runtime "t32-lsp-mcp" "$RUNTIME" \
         "examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl" \
         "examples/10_tooling/trace32_tools" 90
 else
     echo ""
-    echo "--- SKIP: No Simple runtime found for direct binary tests ---"
+    echo "--- SKIP: No Simple runtime found for legacy hosted source-entry tests ---"
 fi
 
 echo ""

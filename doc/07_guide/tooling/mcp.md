@@ -115,9 +115,13 @@ If schema validation fails:
 5. If the npm package or registry wrapper changed, also run:
 
    ```bash
-   bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
-   bin/simple native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
+   bin/simple native-build --runtime-bundle rust-hosted --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_mcp_server
+   bin/simple native-build --runtime-bundle rust-hosted --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/simple_lsp_mcp/main.spl --strip --output build/bootstrap/mcp-package/simple_lsp_mcp_server
    ```
+
+   These packaging builds are a temporary explicit hosted lane while MCP/LSP is
+   still being ported off `rust-hosted`. Do not treat that lane as the default
+   runtime selection for non-compiler apps.
 
 Do not publish npm, registry metadata, or plugin bundles while either
 `*_json_valid` or `*_schema_valid` is false.

@@ -223,14 +223,36 @@ int64_t  rt_time_now_micros(void);  /* Microsecond precision monotonic time */
 /* ===== Stdin/Stdout I/O ===== */
 
 char*    rt_stdin_read_line(void);         /* reads line from stdin, NULL on EOF */
+int64_t  stdin_read_char(void);            /* reads one byte from stdin as tagged text */
 int64_t  rt_stdout_write_text(const char* s); /* writes text without newline, returns len */
+int64_t  print_raw(int64_t value);         /* writes tagged RuntimeValue to stdout */
+int64_t  rt_stdout_write(int64_t value);   /* writes tagged RuntimeValue to stdout */
 void     rt_stdout_flush(void);            /* flushes stdout */
+int64_t  rt_stderr_write(int64_t value);   /* writes tagged RuntimeValue to stderr */
+void     rt_stderr_flush(void);            /* flushes stderr */
 
 /* ===== Minimal RuntimeValue ABI for core-c lane ===== */
 
+void     __simple_runtime_init(void);
+void     __simple_runtime_shutdown(void);
+int64_t  rt_value_int(int64_t value);
+int64_t  rt_value_float(int64_t raw_bits);
+int64_t  rt_value_bool(int64_t value);
+int64_t  rt_value_nil(void);
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
+int64_t  rt_string_concat(int64_t left, int64_t right);
+int64_t  rt_len(int64_t value);
+int64_t  rt_to_string(int64_t value);
+int64_t  rt_native_eq(int64_t left, int64_t right);
+int64_t  rt_native_neq(int64_t left, int64_t right);
+int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
+int64_t  rt_string_starts_with(int64_t value, int64_t prefix);
+int64_t  rt_string_ends_with(int64_t value, int64_t suffix);
+int64_t  rt_string_replace(int64_t value, int64_t old_value, int64_t new_value);
+int64_t  rt_string_trim(int64_t value);
+int64_t  rt_string_to_int(int64_t value);
 void     rt_print_str(const uint8_t* ptr, uint64_t len);
 void     rt_println_str(const uint8_t* ptr, uint64_t len);
 void     rt_eprint_str(const uint8_t* ptr, uint64_t len);

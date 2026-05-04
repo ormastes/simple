@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Postinstall script: downloads the correct platform-specific
 // Simple bootstrap package (.spk) from GitHub Releases.
-// The .spk contains the Simple runtime binary + source tree,
-// which is needed to run MCP servers.
+// The package should contain a native `simple_lsp_mcp_server` binary for the
+// primary shipping lane. Hosted runtime fallback remains legacy-only.
 
 const https = require('https');
 const fs = require('fs');
@@ -66,7 +66,7 @@ async function main() {
   if (fs.existsSync(marker)) {
     const installed = fs.readFileSync(marker, 'utf8').trim();
     if (installed === `${VERSION}-${platform}`) {
-      console.log('Simple runtime already installed.');
+      console.log('Simple LSP-MCP package already installed.');
       return;
     }
   }
@@ -75,7 +75,7 @@ async function main() {
   const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${assetName}`;
   const dest = path.join(nativeDir, assetName);
 
-  console.log(`Downloading Simple runtime v${VERSION} for ${platform}...`);
+  console.log(`Downloading Simple LSP-MCP package v${VERSION} for ${platform}...`);
   console.log(`URL: ${url}`);
 
   // Clean previous install
@@ -128,11 +128,11 @@ async function main() {
     }
 
     fs.writeFileSync(marker, `${VERSION}-${platform}\n`);
-    console.log(`Installed Simple runtime to ${nativeDir}`);
+    console.log(`Installed Simple LSP-MCP package to ${nativeDir}`);
   } catch (err) {
     console.warn(`Warning: Could not download runtime: ${err.message}`);
     console.warn('Build from source: https://github.com/ormastes/simple');
-    console.warn('The MCP server will look for "simple" in PATH.');
+    console.warn('Hosted fallback is legacy-only; set SIMPLE_ALLOW_HOSTED_FALLBACK=1 if you need it temporarily.');
     if (REQUIRED_DOWNLOAD) {
       process.exitCode = 1;
     }

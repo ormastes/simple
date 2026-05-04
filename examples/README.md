@@ -99,8 +99,8 @@ bin/simple examples-check examples/03_concurrency --run --timeout 5
 # Interpreted mode (fast startup)
 bin/simple run examples/01_getting_started/hello_native.spl
 
-# Compiled mode (fast execution)
-bin/simple build examples/01_getting_started/hello_native.spl -o hello
+# Native mode (fast execution)
+bin/simple native-build --entry examples/01_getting_started/hello_native.spl -o hello --entry-closure --runtime-bundle auto
 ./hello
 
 # JIT mode (balanced)
@@ -133,6 +133,11 @@ bin/simple examples-check examples/03_concurrency --run --timeout 5
 ```
 
 The validator classifies results as normal errors, timeouts, or crashes with per-file isolation.
+
+For ordinary native app examples, `native-build --runtime-bundle auto` now
+prefers the `simple-core` lane and falls back to `core-c-bootstrap`. Use
+`--runtime-bundle rust-hosted` only for examples that still depend on hosted-only
+runtime services.
 
 ## 📊 Statistics
 

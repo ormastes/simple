@@ -4,8 +4,7 @@ use compiler.tools.duplicate_check.config.{DuplicationConfig, default_config}
 use compiler.tools.duplicate_check.detector.{collect_files}
 use compiler.tools.duplicate_check.math_utils.{find_substr}
 use std.nogc_sync_mut.io.file_ops.{file_read}
-use std.encoding.{hash_string_fnv}
-
+use std.nogc_sync_mut.io.process_ops.{shell_output}
 struct DocEntry:
     file_path: text
     line_number: i64
@@ -15,9 +14,9 @@ struct DocEntry:
     doc_comment: text
     has_doc: bool
 
-fn append_doc_entry(entries: [DocEntry], file_path: text, line_number: i64, item_name: text, item_kind: text, signature: text, pending_doc: text):
+fn make_doc_entry(file_path: text, line_number: i64, item_name: text, item_kind: text, signature: text, pending_doc: text) -> DocEntry:
     val has = pending_doc.len() > 0
-    entries.push(DocEntry(
+    DocEntry(
         file_path: file_path,
         line_number: line_number,
         item_name: item_name,
@@ -25,10 +24,12 @@ fn append_doc_entry(entries: [DocEntry], file_path: text, line_number: i64, item
         signature: signature,
         doc_comment: pending_doc,
         has_doc: has
-    ))
+    )
 
 fn extract_docs_from_file(file_path: text) -> [DocEntry]:
-    val content = file_read(file_path) ?? ""
+    var content = file_read(file_path) ?? ""
+    if content.len() == 0:
+        content = shell_output("cat '{file_path}' 2>/dev/null || true", "")
     if content.len() == 0:
         return []
 
@@ -53,12 +54,11 @@ fn extract_docs_from_file(file_path: text) -> [DocEntry]:
 
         # Check for function definition
         val is_fn = trimmed.starts_with("fn ")
-        val is_me = trimmed.starts_with("me ")
         val is_static_fn = trimmed.starts_with("static fn ")
-        if is_fn or is_me or is_static_fn:
+        if is_fn or is_static_fn:
             val sig = extract_signature(trimmed)
             val name = extract_fn_name(trimmed)
-            append_doc_entry(entries, file_path, i + 1, name, "fn", sig, pending_doc)
+            entries.push(make_doc_entry(file_path, i + 1, name, "fn", sig, pending_doc))
             pending_doc = ""
             i = i + 1
             continue
@@ -66,7 +66,7 @@ fn extract_docs_from_file(file_path: text) -> [DocEntry]:
         # Check for struct definition
         if trimmed.starts_with("struct "):
             val name = extract_type_name(trimmed, "struct ")
-            append_doc_entry(entries, file_path, i + 1, name, "struct", trimmed, pending_doc)
+            entries.push(make_doc_entry(file_path, i + 1, name, "struct", trimmed, pending_doc))
             pending_doc = ""
             i = i + 1
             continue
@@ -74,7 +74,7 @@ fn extract_docs_from_file(file_path: text) -> [DocEntry]:
         # Check for class definition
         if trimmed.starts_with("class "):
             val name = extract_type_name(trimmed, "class ")
-            append_doc_entry(entries, file_path, i + 1, name, "class", trimmed, pending_doc)
+            entries.push(make_doc_entry(file_path, i + 1, name, "class", trimmed, pending_doc))
             pending_doc = ""
             i = i + 1
             continue
@@ -82,7 +82,7 @@ fn extract_docs_from_file(file_path: text) -> [DocEntry]:
         # Check for enum definition
         if trimmed.starts_with("enum "):
             val name = extract_type_name(trimmed, "enum ")
-            append_doc_entry(entries, file_path, i + 1, name, "enum", trimmed, pending_doc)
+            entries.push(make_doc_entry(file_path, i + 1, name, "enum", trimmed, pending_doc))
             pending_doc = ""
             i = i + 1
             continue
@@ -103,7 +103,8 @@ fn extract_docs_from_directory(path: text, exclude: [text]) -> [DocEntry]:
     var all_entries: [DocEntry] = []
     for file in files:
         val file_entries = extract_docs_from_file(file)
-        all_entries.merge(file_entries)
+        for entry in file_entries:
+            all_entries.push(entry)
     all_entries
 
 fn process_doc_line(raw: text) -> text:
@@ -196,6 +197,10 @@ fn build_embedding_key(entry: DocEntry) -> text:
         sig_part
 
 fn content_hash(s: text) -> text:
-    val h = hash_string_fnv(s)
-    val abs_h = if h < 0: -h else: h
-    "{abs_h}"
+    val bytes = s.bytes()
+    var acc = bytes.len() + 17
+    var i = 0
+    while i < bytes.len():
+        acc = acc + bytes[i] + (i * 131)
+        i = i + 1
+    "{acc}"

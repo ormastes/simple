@@ -1,6 +1,6 @@
 # Code Duplication Detection Guide
 
-`simple duplicate-check` now runs semantic documentation similarity analysis by default.
+`simple duplicate-check` is a multi-mode duplication toolkit behind one CLI entrypoint.
 
 ---
 
@@ -10,8 +10,11 @@
 # Scan a directory with semantic analysis
 simple duplicate-check src/
 
-# Scan a focused subtree
-simple duplicate-check src/app/
+# Run lexical duplicate detection at the refactor default
+simple duplicate-check src/app/ --mode token --min-lines 5
+
+# Run fuzzy lexical similarity
+simple duplicate-check src/ --mode cosine --similarity-threshold 0.85
 
 # Tune semantic sensitivity
 simple duplicate-check src/ --semantic-threshold 0.92
@@ -20,15 +23,25 @@ simple duplicate-check src/ --semantic-threshold 0.92
 simple duplicate-check src/ --format json
 ```
 
-`--semantic` is still accepted, but it is optional because semantic analysis is already the default.
+Modes:
+- `semantic` is the default and looks for documentation/concept duplication.
+- `token` finds concrete lexical duplication and honors `--min-lines` and `--min-tokens`.
+- `cosine` finds fuzzy lexical near-duplicates and honors `--similarity-threshold`, `--min-lines`, and `--min-tokens`.
 
 ---
 
-## Compatibility With Removed Lexical Modes
+## Modes And Thresholds
 
-Legacy lexical flags such as `--min-tokens`, `--min-lines`, `--min-impact`, `--cosine`, `--parallel`, `--jobs`, `--no-cache`, and `--cache-path` are still accepted temporarily.
+`simple duplicate-check` supports:
+- `--mode semantic`
+- `--mode token`
+- `--mode cosine`
 
-When those flags are used, `simple duplicate-check` prints a deprecation warning and continues with semantic-only analysis. The command no longer performs token-window or cosine/token-feature duplication scans.
+The compatibility aliases `--semantic` and `--cosine` are still accepted. Lexical thresholds are active again:
+- `--min-lines`
+- `--min-tokens`
+- `--min-impact`
+- `--similarity-threshold`
 
 ---
 
@@ -40,6 +53,7 @@ Create `simple.duplicate-check.sdn` in the project root:
 duplicate-check:
   output-format: text
   max-allowed: 0
+  mode: semantic
 
   use-semantic: true
   semantic-threshold: 0.90
@@ -53,9 +67,10 @@ duplicate-check:
     - "doc/"
     - "**/*_spec.spl"
     - "**/*_test.spl"
+  min-lines: 5
+  min-tokens: 30
+  similarity-threshold: 0.85
 ```
-
-Lexical config keys may still parse for migration compatibility, but they no longer affect command behavior.
 
 ---
 
@@ -66,8 +81,8 @@ simple duplicate-check src/ --format=json > duplicates.json
 simple duplicate-check src/ --max-allowed 5
 ```
 
-- `text` prints the semantic similarity report.
-- `json` emits semantic matches and summary fields.
+- `text` prints a mode-specific report.
+- `json` emits a stable top-level `mode` field plus mode-specific result arrays.
 
 ---
 
@@ -100,6 +115,15 @@ Similar Docs (>0.90): 2 pairs
 ```
 
 ---
+
+## Refactor Workflow
+
+For refactors, run:
+- `bin/simple duplicate-check <dir> --mode semantic`
+- `bin/simple duplicate-check <dir> --mode token --min-lines 5`
+- `bin/simple duplicate-check <dir> --mode cosine --similarity-threshold 0.85`
+
+Use token mode as the default concrete extraction pass before helper consolidation.
 
 ## CI Integration
 

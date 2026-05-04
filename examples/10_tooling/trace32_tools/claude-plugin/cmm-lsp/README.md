@@ -1,8 +1,8 @@
 # cmm-lsp Claude Plugin
 
 Claude Code plugin bundle for the TRACE32 PRACTICE/CMM language server.
-This is not a separate binary. The executable is `cmm-lsp` or the checked-in
-Simple runtime path that the plugin launches.
+This is not a separate binary. The checked-in plugin bundle is intended for a
+repo checkout and still uses a hosted source-entry path.
 
 ## Install
 
@@ -24,16 +24,18 @@ Current limitation:
 - the checked-in bundle is intended for use from a repo checkout
 - the release tarball is not published in the latest public T32 release as of March 12, 2026
 - the checked-in `.lsp.json` still launches the workspace-relative Simple source entrypoint
+- treat that hosted launch path as legacy/debug-only until a packaged `cmm-lsp` binary is the default
 
 ## Runtime
 
-The checked-in plugin launches:
+Legacy repo-checkout runtime from the workspace root:
 
 ```bash
 bin/simple run examples/10_tooling/trace32_tools/cmm_lsp/mod.spl --lsp
 ```
 
-from the workspace root.
+Prefer the packaged `cmm-lsp` executable when it is available and verified for
+your platform.
 
 ## Common CMM Mistakes
 

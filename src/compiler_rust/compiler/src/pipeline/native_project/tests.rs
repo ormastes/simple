@@ -516,7 +516,7 @@ fn test_runtime_bundle_auto_prefers_hosted_runtime_for_compiler_entry() {
 }
 
 #[test]
-fn test_runtime_bundle_auto_prefers_simple_core_for_non_compiler_entry_when_available() {
+fn test_runtime_bundle_auto_falls_back_to_core_c_when_simple_core_is_incomplete() {
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let simple_core_dir = temp.path().join("simple-core");
@@ -532,13 +532,104 @@ fn test_runtime_bundle_auto_prefers_simple_core_for_non_compiler_entry_when_avai
     };
 
     let mut builder =
-        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native"))
-            .config(config);
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native")).config(config);
     builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, simple_core);
+    assert_eq!(selected, runtime);
     assert!(!is_native_all);
+}
+
+#[test]
+fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+
+    let core_c = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    assert!(
+        runtime_archive_has_core_required_symbols(&core_c),
+        "core-c runtime archive is missing one or more core-required ABI symbols: {}",
+        core_c.display()
+    );
+
+    if let Some(simple_core) = find_simple_core_runtime_library() {
+        assert!(
+            runtime_archive_has_core_required_symbols(&simple_core),
+            "discovered simple-core runtime archive is not ABI-complete: {}",
+            simple_core.display()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_core_c_runtime_required_abi_stdout_stderr_and_values() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
+    let source = temp.path().join("abi_probe.c");
+    let exe = temp.path().join("abi_probe");
+
+    std::fs::write(
+        &source,
+        r#"
+#include <stdint.h>
+#include "runtime.h"
+
+int main(void) {
+    __simple_runtime_init();
+    int64_t out = rt_string_new((const uint8_t*)"out:", 4);
+    int64_t err = rt_string_new((const uint8_t*)"err", 3);
+    rt_stdout_write(out);
+    print_raw(stdin_read_char());
+    rt_print_value(rt_value_int(7));
+    rt_print_value(rt_value_bool(1));
+    rt_print_value(rt_value_nil());
+    rt_stdout_flush();
+    rt_stderr_write(err);
+    rt_stderr_flush();
+    __simple_runtime_shutdown();
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+
+    let status = std::process::Command::new(find_c_compiler())
+        .arg("-I")
+        .arg(repo_root.join("src/runtime"))
+        .arg(&source)
+        .arg(&runtime)
+        .args(["-lpthread", "-ldl", "-lm"])
+        .arg("-o")
+        .arg(&exe)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to compile core-C ABI probe");
+
+    let mut child = std::process::Command::new(&exe)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child.stdin.as_mut().unwrap().write_all(b"Z").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "core-C ABI probe exited unsuccessfully");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "out:Z7true");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "err");
 }
 
 #[test]
@@ -660,8 +751,7 @@ fn test_runtime_bundle_simple_core_prefers_simple_core_archive_when_available() 
     config.runtime_bundle = "simple-core".to_string();
 
     let mut builder =
-        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native"))
-            .config(config);
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native")).config(config);
     builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
@@ -683,8 +773,7 @@ fn test_runtime_bundle_simple_core_errors_when_archive_is_missing() {
     config.runtime_bundle = "simple-core".to_string();
 
     let mut builder =
-        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native"))
-            .config(config);
+        NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/hello_native")).config(config);
     builder.entry_file = Some(PathBuf::from("/project/examples/demo/app.spl"));
 
     let err = builder.selected_runtime_library(temp.path()).unwrap_err();

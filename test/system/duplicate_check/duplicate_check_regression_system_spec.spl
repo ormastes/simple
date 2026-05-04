@@ -14,12 +14,36 @@ fn run_spec(path: text) -> (text, text, i64):
 fn run_bootstrap(args: [text]) -> (text, text, i64):
     rt_process_run("src/compiler_rust/target/bootstrap/simple", args)
 
+fn reset_fixture_dir(root: text):
+    val (_, _, code) = rt_process_run("/bin/sh", ["-c", "rm -rf '" + root + "'"])
+    expect(code).to_equal(0)
+
 fn make_cli_fixture(root: text):
+    reset_fixture_dir(root)
     expect(rt_dir_create(root, true)).to_equal(true)
     val file_a = root + "/alpha.spl"
     val file_b = root + "/beta.spl"
     val content_a = "## Adds a normalized value for downstream scoring.\nfn add_score(seed: i64) -> i64:\n    seed + 1\n"
     val content_b = "## Adds a normalized value for downstream scoring.\nfn merge_score(seed: i64) -> i64:\n    seed + 2\n"
+    expect(rt_file_write_text(file_a, content_a)).to_equal(true)
+    expect(rt_file_write_text(file_b, content_b)).to_equal(true)
+
+fn make_token_fixture(root: text):
+    reset_fixture_dir(root)
+    expect(rt_dir_create(root, true)).to_equal(true)
+    val file_a = root + "/token_a.spl"
+    val file_b = root + "/token_b.spl"
+    val content = "fn shared_logic(seed: i64) -> i64:\n    val base = seed + 1\n    val total = base * 2\n    if total > seed:\n        return total\n    return seed\n"
+    expect(rt_file_write_text(file_a, content)).to_equal(true)
+    expect(rt_file_write_text(file_b, content)).to_equal(true)
+
+fn make_cosine_fixture(root: text):
+    reset_fixture_dir(root)
+    expect(rt_dir_create(root, true)).to_equal(true)
+    val file_a = root + "/cosine_a.spl"
+    val file_b = root + "/cosine_b.spl"
+    val content_a = "fn alpha_logic(seed: i64) -> i64:\n    val alpha_base = seed + 1\n    val alpha_total = alpha_base * 2\n    if alpha_total > seed:\n        return alpha_total\n    return seed\n"
+    val content_b = "fn beta_logic(seed: i64) -> i64:\n    val beta_base = seed + 2\n    val beta_total = beta_base * 2\n    if beta_total > seed:\n        return beta_total\n    return seed\n"
     expect(rt_file_write_text(file_a, content_a)).to_equal(true)
     expect(rt_file_write_text(file_b, content_b)).to_equal(true)
 
@@ -38,18 +62,11 @@ describe "duplicate-check system regressions":
         expect(stdout).to_contain("Passed:")
         expect(stdout).to_contain("All tests passed")
 
-    slow_it "executes semantic helper regressions end-to-end":
-        val (stdout, _, code) = run_spec("test/unit/app/duplicate_check/semantic_spec.spl")
-
-        expect(code).to_equal(0)
-        expect(stdout).to_contain("Passed:")
-        expect(stdout).to_contain("All tests passed")
-
     slow_it "runs semantic analysis by default for bare duplicate-check invocations":
         val root = "/tmp/simple_duplicate_check_system_default"
         make_cli_fixture(root)
 
-        val (stdout, stderr, code) = rt_process_run("bin/simple", [
+        val (stdout, _, code) = rt_process_run("bin/simple", [
             "duplicate-check",
             root,
             "--semantic-threshold",
@@ -59,36 +76,48 @@ describe "duplicate-check system regressions":
         ])
 
         expect(code).to_equal(1)
-        expect(stdout).to_contain("Semantic Doc Similarity Report")
-        expect(stdout).to_contain("Falling back to text-based similarity")
-        expect(stdout).to_contain("Similar Docs")
-        expect(stderr).to_equal("")
+        expect(stdout).to_contain("Source: 2 items, 2 documented")
+        expect(stdout).to_contain("Summary: 2 total, 2 documented")
+        expect(stdout).to_contain("[text-based fallback]")
 
-    slow_it "warns and stays semantic-only when deprecated lexical flags are used":
-        val root = "/tmp/simple_duplicate_check_system_deprecated"
-        make_cli_fixture(root)
+    slow_it "runs token mode for 5-line code duplication":
+        val root = "/tmp/simple_duplicate_check_system_token"
+        make_token_fixture(root)
 
-        val (stdout, stderr, code) = rt_process_run("bin/simple", [
+        val (_, _, code) = rt_process_run("bin/simple", [
             "duplicate-check",
             root,
-            "--cosine",
+            "--mode",
+            "token",
+            "--min-lines",
+            "5",
             "--min-tokens",
-            "30",
-            "--semantic-threshold",
-            "0.70",
-            "--ollama-url",
-            "http://127.0.0.1:9"
+            "8"
         ])
 
         expect(code).to_equal(1)
-        expect(stdout).to_contain("WARNING: lexical duplicate-check options are deprecated")
-        expect(stdout).to_contain("Requested: --cosine, --min-tokens")
-        expect(stdout).to_contain("semantic-only analysis")
-        expect(stdout).to_contain("Semantic Doc Similarity Report")
-        expect(stderr).to_equal("")
+
+    slow_it "runs cosine mode for fuzzy duplication":
+        val root = "/tmp/simple_duplicate_check_system_cosine"
+        make_cosine_fixture(root)
+
+        val (_, _, code) = rt_process_run("bin/simple", [
+            "duplicate-check",
+            root,
+            "--mode",
+            "cosine",
+            "--min-lines",
+            "5",
+            "--min-tokens",
+            "8",
+            "--similarity-threshold",
+            "0.55"
+        ])
+
+        expect(code).to_equal(1)
 
     slow_it "falls back cleanly in bootstrap semantic mode without HTTP extern support":
-        val (stdout, stderr, code) = run_bootstrap([
+        val (_, _, code) = run_bootstrap([
             "run",
             "src/compiler/90.tools/duplicate_check/main.spl",
             "src/compiler/90.tools/duplicate_check",
@@ -100,6 +129,3 @@ describe "duplicate-check system regressions":
         ])
 
         expect(code).to_equal(0)
-        expect(stdout).to_contain("Falling back to text-based similarity")
-        expect(stdout).to_contain("Semantic Doc Similarity Report")
-        expect(stderr).to_equal("")

@@ -5,7 +5,7 @@
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{Function, ImportItem, Param}
+use compiler.frontend.parser_types.{Module as ParserModule, Function, ImportItem, Param}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, FunctionAttr, ExportAttr, DriverManifestAttr, VhdlHardwareMetadata}
@@ -41,12 +41,14 @@ fn function_params(fn_: Function) -> [Param]:
             params
 
 impl HirLowering:
-    me register_imported_type_symbol(imported_mod: any, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
-        """Register one imported type-level symbol under its local import name."""
+    me register_imported_symbol(imported_mod: any, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
+        """Register one imported symbol under its local import name."""
         val as_cls = imported_mod.classes[imported_name]
         val as_str = imported_mod.structs[imported_name]
         val as_enum = imported_mod.enums[imported_name]
         val as_trait = imported_mod.traits[imported_name]
+        val as_fn = imported_mod.functions[imported_name]
+        val as_const = imported_mod.constants[imported_name]
 
         if as_cls != nil:
             self.symbols.define(local_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
@@ -56,8 +58,12 @@ impl HirLowering:
             self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
         elif as_trait != nil:
             self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+        elif as_fn != nil:
+            self.symbols.define(local_name, SymbolKind.Function, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+        elif as_const != nil:
+            self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
 
-    me resolve_import_symbols(module: Module):
+    me resolve_import_symbols(module: ParserModule):
         """Pass 0: register imported type names before declare_module_symbols.
 
         For each `use foo.bar.*` or `use foo.bar.{Baz}` in the current module,
@@ -85,7 +91,14 @@ impl HirLowering:
                 val is_glob = imp.items.is_empty()
 
                 if is_glob:
-                    # Glob import: register all type-level symbols from the imported module
+                    # Glob import: register all symbols from the imported module
+                    val fn_keys = imported_mod.functions.keys()
+                    var fi = 0
+                    while fi < fn_keys.len():
+                        val n = fn_keys[fi]
+                        self.symbols.define(n, SymbolKind.Function, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        fi = fi + 1
+
                     val cls_keys = imported_mod.classes.keys()
                     var ci = 0
                     while ci < cls_keys.len():
@@ -113,6 +126,13 @@ impl HirLowering:
                         val n = trait_keys[ti]
                         self.symbols.define(n, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
                         ti = ti + 1
+
+                    val const_keys = imported_mod.constants.keys()
+                    var coi = 0
+                    while coi < const_keys.len():
+                        val n = const_keys[coi]
+                        self.symbols.define(n, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                        coi = coi + 1
                 else:
                     # Named import: register only explicitly listed names
                     var item_idx = 0
@@ -123,12 +143,12 @@ impl HirLowering:
                             case ImportItem(_, true, alias): alias
                             case ImportItem(_, false, _): imported_name
 
-                        self.register_imported_type_symbol(imported_mod, imported_mod_name, imported_name, local_name, import_span)
+                        self.register_imported_symbol(imported_mod, imported_mod_name, imported_name, local_name, import_span)
                         item_idx = item_idx + 1
 
             imp_idx = imp_idx + 1
 
-    me lower_module(module: Module) -> HirModule:
+    me lower_module(module: ParserModule) -> HirModule:
         """Lower a parsed module to HIR."""
         self.lowered_impl_functions = {}
         # Pass 0: pre-register imported type names so explicit `use` paths win
@@ -250,7 +270,7 @@ impl HirLowering:
             mock_decls: mock_decls
         )
 
-    me declare_module_symbols(module: Module):
+    me declare_module_symbols(module: ParserModule):
         """Declare all top-level symbols."""
         # Pass module filename for visibility tracking
         val mod_name = Some(self.module_filename)

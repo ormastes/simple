@@ -2,10 +2,12 @@
 
 use compiler.tools.duplicate_check.cache.{TokenCacheManager, new_token_cache_manager, get_tokens_cached, invalidate_file, clear_cache, get_cache_stats, get_file_mtime}
 use compiler.tools.duplicate_check.tokenizer.{SimpleToken, SimpleTokenKind}
-use app.io.mod.{file_write, file_exists, shell}
+use app.io.mod.{shell}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 fn create_test_file(path: text, content: text):
-    file_write(path, content)
+    expect rt_file_write_text(path, content) == true
 
 fn delete_test_file(path: text):
     shell("rm -f '{path}'")
@@ -45,14 +47,12 @@ describe "Token caching":
         val test_file = "/tmp/test_cache_tokens.spl"
         create_test_file(test_file, "fn test(): 42")
 
-        var call_count = 0
         fn tokenize_fn(path: text) -> [SimpleToken]:
-            call_count = call_count + 1
             create_sample_tokens()
 
         val tokens1 = get_tokens_cached(manager, test_file, tokenize_fn)
-        expect call_count == 1
         expect tokens1.len() == 2
+        expect (get_cache_stats(manager)).contains("1 files")
 
         delete_test_file(test_file)
 
@@ -61,39 +61,37 @@ describe "Token caching":
         val test_file = "/tmp/test_cache_reuse.spl"
         create_test_file(test_file, "fn test(): 42")
 
-        var call_count = 0
         fn tokenize_fn(path: text) -> [SimpleToken]:
-            call_count = call_count + 1
             create_sample_tokens()
 
         val tokens1 = get_tokens_cached(manager, test_file, tokenize_fn)
         val tokens2 = get_tokens_cached(manager, test_file, tokenize_fn)
 
-        expect call_count == 1
         expect tokens1.len() == tokens2.len()
+        expect (get_cache_stats(manager)).contains("1 files")
 
         delete_test_file(test_file)
 
-    slow_it "invalidates cache when file changes":
-        # Requires sleep to change mtime, too slow for regular tests
+    it "invalidates cache when file changes":
         val manager = new_token_cache_manager()
         val test_file = "/tmp/test_cache_invalidate.spl"
 
         create_test_file(test_file, "fn test(): 42")
 
-        var call_count = 0
         fn tokenize_fn(path: text) -> [SimpleToken]:
-            call_count = call_count + 1
-            create_sample_tokens()
+            val content = shell("cat '{path}'").stdout.trim()
+            [
+                SimpleToken(kind: SimpleTokenKind.Keyword, value: "fn", line: 1, column: 1, start_offset: 0, end_offset: 2),
+                SimpleToken(kind: SimpleTokenKind.Identifier, value: content, line: 1, column: 4, start_offset: 3, end_offset: 3 + content.len())
+            ]
 
         val tokens1 = get_tokens_cached(manager, test_file, tokenize_fn)
 
-        shell("sleep 1")
         create_test_file(test_file, "fn test(): 99")
 
         val tokens2 = get_tokens_cached(manager, test_file, tokenize_fn)
 
-        expect call_count == 2
+        expect tokens1[1].value == tokens2[1].value == false
 
         delete_test_file(test_file)
 

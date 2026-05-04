@@ -3,8 +3,10 @@
 //! and LLVM constructor stripping.
 
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 use super::{safe_canonicalize, RUNTIME_PATH_OVERRIDE};
+use simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS;
 
 fn has_nonempty_archive_payload(path: &Path) -> bool {
     path.is_file() && path.metadata().map(|meta| meta.len() > 0).unwrap_or(false)
@@ -82,16 +84,35 @@ fn host_object_extension() -> &'static str {
     }
 }
 
+fn find_core_c_runtime_source_root() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd);
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest_dir);
+
+    for base in candidates {
+        for ancestor in base.ancestors() {
+            let runtime_root = ancestor.join("src").join("runtime");
+            if runtime_root.join("runtime.c").exists() && runtime_root.join("runtime_native.c").exists() {
+                return Some(runtime_root);
+            }
+        }
+    }
+
+    None
+}
+
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     if has_nonempty_archive_payload(&archive) {
         return Some(archive);
     }
 
-    let runtime_root = PathBuf::from("src/runtime");
-    if !runtime_root.join("runtime.c").exists() || !runtime_root.join("runtime_native.c").exists() {
-        return None;
-    }
+    let runtime_root = find_core_c_runtime_source_root()?;
 
     std::fs::create_dir_all(build_dir).ok()?;
 
@@ -115,8 +136,8 @@ pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> 
             .arg("-fdata-sections")
             .arg("-fPIC")
             .arg("-std=gnu11")
-            .arg("-Isrc/runtime")
-            .arg("-Isrc/runtime/platform")
+            .arg(format!("-I{}", runtime_root.display()))
+            .arg(format!("-I{}", runtime_root.join("platform").display()))
             .arg(runtime_root.join(source))
             .arg("-o")
             .arg(&object)
@@ -189,6 +210,44 @@ pub(crate) fn find_simple_core_runtime_library() -> Option<PathBuf> {
     }
 
     None
+}
+
+fn archive_defined_symbols(path: &Path) -> Option<HashSet<String>> {
+    for tool in ["llvm-nm", "nm"] {
+        let output = std::process::Command::new(tool)
+            .arg("-g")
+            .arg("--defined-only")
+            .arg(path)
+            .output();
+        let Ok(output) = output else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let symbols = stdout
+            .lines()
+            .filter_map(|line| line.split_whitespace().last())
+            .filter(|token| !token.ends_with(':'))
+            .map(|token| token.trim_start_matches('_').to_string())
+            .collect::<HashSet<_>>();
+        return Some(symbols);
+    }
+    None
+}
+
+pub(crate) fn runtime_archive_has_core_required_symbols(path: &Path) -> bool {
+    let Some(symbols) = archive_defined_symbols(path) else {
+        return false;
+    };
+    CORE_REQUIRED_RUNTIME_SYMBOLS
+        .iter()
+        .all(|symbol| symbols.contains(symbol.trim_start_matches('_')))
+}
+
+pub(crate) fn find_abi_complete_simple_core_runtime_library() -> Option<PathBuf> {
+    find_simple_core_runtime_library().filter(|path| runtime_archive_has_core_required_symbols(path))
 }
 
 /// Find the combined native_all library (runtime + compiler with Cranelift FFI).

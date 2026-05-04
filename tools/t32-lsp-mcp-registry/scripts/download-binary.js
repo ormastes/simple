@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Postinstall script: downloads the correct platform-specific
 // Simple bootstrap package (.spk) from GitHub Releases.
-// The .spk contains the Simple runtime binary + source tree,
-// which is needed to run MCP servers.
+// The package should contain the wrapper/native assets required by T32 LSP-MCP.
+// Hosted `simple` fallback remains legacy-only and opt-in.
 
 const https = require('https');
 const fs = require('fs');
@@ -65,7 +65,7 @@ async function main() {
   if (fs.existsSync(marker)) {
     const installed = fs.readFileSync(marker, 'utf8').trim();
     if (installed === `${VERSION}-${platform}`) {
-      console.log('Simple runtime already installed.');
+      console.log('Simple T32 LSP-MCP package already installed.');
       return;
     }
   }
@@ -74,7 +74,7 @@ async function main() {
   const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${assetName}`;
   const dest = path.join(nativeDir, assetName);
 
-  console.log(`Downloading Simple runtime v${VERSION} for ${platform}...`);
+  console.log(`Downloading Simple T32 LSP-MCP package v${VERSION} for ${platform}...`);
   console.log(`URL: ${url}`);
 
   // Clean previous install
@@ -109,10 +109,11 @@ async function main() {
     }
 
     fs.writeFileSync(marker, `${VERSION}-${platform}\n`);
-    console.log(`Installed Simple runtime to ${nativeDir}`);
+    console.log(`Installed Simple T32 LSP-MCP package to ${nativeDir}`);
   } catch (err) {
-    console.warn(`Warning: Could not download runtime: ${err.message}`);
-    console.warn('The MCP server will look for "simple" in PATH.');
+    console.warn(`Warning: Could not download T32 LSP-MCP package assets: ${err.message}`);
+    console.warn('T32 LSP-MCP will remain unavailable until wrapper/native assets are installed.');
+    console.warn('Hosted fallback is legacy-only; enable SIMPLE_ALLOW_HOSTED_FALLBACK=1 only if you intentionally need it.');
     console.warn('Build from source: https://github.com/ormastes/simple');
     // Don't fail the install
   }

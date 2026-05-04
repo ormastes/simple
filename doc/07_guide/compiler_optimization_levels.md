@@ -35,7 +35,7 @@ Current implemented passes include:
 
 ### Native executable optimization
 
-Used by `simple compile --native`.
+Used by `simple native-build`.
 
 Current implemented native-path controls are:
 
@@ -68,7 +68,7 @@ Current implemented native-path controls are:
 
 ## Default
 
-`simple compile --native` now defaults to the **aggressive** profile so executable builds use the strongest currently implemented native optimization set by default.
+`simple native-build` now defaults to the **aggressive** profile so executable builds use the strongest currently implemented native optimization set by default.
 
 ## Notes
 

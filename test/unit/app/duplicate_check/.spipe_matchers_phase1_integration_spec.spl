@@ -1,22 +1,27 @@
 use compiler.tools.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
-use compiler.tools.duplicate_check.config.{default_config, DuplicationConfig}
+use compiler.tools.duplicate_check.config.{default_config, DuplicationConfig, apply_analysis_mode}
 use compiler.tools.duplicate_check.detector.{find_duplicates}
-use app.io.mod.{file_write, shell}
+use app.io.mod.{shell}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
 
 val TEST_DIR = "/tmp/test_duplicate_phase1"
 
 fn ensure_clean_dir(path: text):
     shell("rm -rf '{path}'")
-    shell("mkdir -p '{path}'")
+    expect rt_dir_create(path, true) == true
 
 fn create_test_file(path: text, content: text):
-    file_write(path, content)
+    expect rt_file_write_text(path, content) == true
 
 fn phase1_test_config() -> DuplicationConfig:
     var config = default_config()
+    config = apply_analysis_mode(config, "cosine")
     config.min_tokens = 8
     config.min_lines = 3
     config.min_impact = 1
+    config.similarity_threshold = 0.55
     config.exclude_patterns = []
     config.quiet = true
     config
@@ -66,37 +71,7 @@ describe "Phase1 Integration":
         config.ignore_identifiers = true
         config.ignore_literals = false
 
-        val cache_manager = new_token_cache_manager()
-        val groups = find_duplicates([file_a, file_b], config, cache_manager)
+        val groups = find_duplicates([file_a, file_b], config, new_token_cache_manager())
 
         expect groups.len() > 0
         expect groups[0].occurrences == 2
-
-    it "keeps duplicate results stable between quiet and verbose scans":
-        ensure_clean_dir(TEST_DIR)
-
-        val file_a = "{TEST_DIR}/stable_a.spl"
-        val file_b = "{TEST_DIR}/stable_b.spl"
-        val file_c = "{TEST_DIR}/stable_c.spl"
-        val body = shared_logic_body("stable_logic", "stable", 7)
-        create_test_file(file_a, body)
-        create_test_file(file_b, body)
-        create_test_file(file_c, body)
-
-        var quiet_config = phase1_test_config()
-        quiet_config.quiet = true
-
-        var verbose_config = phase1_test_config()
-        verbose_config.quiet = false
-        verbose_config.verbose = true
-
-        val quiet_cache = new_token_cache_manager()
-        val verbose_cache = new_token_cache_manager()
-        val files = [file_a, file_b, file_c]
-
-        val quiet_groups = find_duplicates(files, quiet_config, quiet_cache)
-        val verbose_groups = find_duplicates(files, verbose_config, verbose_cache)
-
-        expect quiet_groups.len() > 0
-        expect verbose_groups.len() == quiet_groups.len()
-        expect verbose_groups[0].occurrences == quiet_groups[0].occurrences

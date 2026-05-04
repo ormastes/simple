@@ -2,8 +2,8 @@
 mod runtime_symbols;
 
 pub use runtime_symbols::{
-    AbiVersion, RUNTIME_SYMBOL_NAMES, RuntimeSymbolProvider, RuntimeSymbolTier, runtime_symbols_for_baremetal,
-    symbol_tier_of,
+    AbiVersion, CORE_REQUIRED_RUNTIME_SYMBOLS, RUNTIME_SYMBOL_NAMES, RuntimeSymbolClass, RuntimeSymbolProvider,
+    RuntimeSymbolTier, runtime_symbols_for_baremetal, symbol_class_of, symbol_tier_of,
 };
 
 use std::sync::OnceLock;

@@ -13,10 +13,16 @@ description: "Code quality refactoring workflow — 5 phases: file size, duplica
 ## Phase 2: Duplication Removal
 
 ```bash
-bin/simple duplicate-check <dir>                          # Semantic duplication by default
-bin/simple duplicate-check <dir> --semantic-threshold 0.92  # Tighten semantic matching
-bin/simple duplicate-check <dir> --format json           # Machine-readable semantic report
+bin/simple duplicate-check <dir> --mode semantic
+bin/simple duplicate-check <dir> --mode token --min-lines 5
+bin/simple duplicate-check <dir> --mode cosine --similarity-threshold 0.85
+bin/simple duplicate-check <dir> --format json
 ```
+
+Guidance:
+- Run `semantic` to catch concept and documentation duplication.
+- Run `token` at `5+` lines before extracting concrete helpers.
+- Run `cosine` for fuzzy near-duplicates that differ in identifiers or literals.
 
 Fix: extract shared helpers, use parameter objects for repeated param lists (3+).
 

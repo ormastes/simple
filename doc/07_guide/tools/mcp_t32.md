@@ -14,10 +14,11 @@ The TRACE32 MCP server lives in `examples/10_tooling/trace32_tools/t32_mcp/` and
 Enable the TRACE32 Remote API in PowerView with `RCL.Port 20000` or a matching `RCL=NETASSIST` configuration, then add the MCP server:
 
 ```bash
-claude mcp add t32-mcp -- \
-  /absolute/path/to/simple/bin/simple \
-  /absolute/path/to/simple/examples/10_tooling/trace32_tools/t32_mcp/main.spl
+claude mcp add t32-mcp -- /absolute/path/to/simple/bin/t32_mcp_server
 ```
+
+Hosted `bin/simple ... frontend_cold.spl` launches are legacy/debug-only and
+should be used only with explicit `SIMPLE_ALLOW_HOSTED_FALLBACK=1` opt-in.
 
 The server uses `config/t32/t32_mcp.sdn` for defaults:
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Launcher for Simple LSP-MCP Server.
-// Finds the Simple runtime from the downloaded bootstrap package
-// and runs the LSP-MCP bridge entry point.
+// Prefer the native LSP-MCP binary in all normal cases.
+// Hosted `simple run src/app/simple_lsp_mcp/main.spl` fallback is legacy-only
+// and must be opted into explicitly with SIMPLE_ALLOW_HOSTED_FALLBACK=1.
 
 const { spawn, spawnSync } = require('child_process');
 const path = require('path');
@@ -105,10 +106,14 @@ function isHealthyBinary(candidate) {
 
 function resolveEnvRuntime(repoRoot) {
   const explicit = process.env.SIMPLE_BINARY;
-  if (explicit && fs.existsSync(explicit) && fs.existsSync(path.join(repoRoot, ENTRY))) {
+  if (allowHostedFallback() && explicit && fs.existsSync(explicit) && fs.existsSync(path.join(repoRoot, ENTRY))) {
     return { command: explicit, args: ['run', path.join(repoRoot, ENTRY)], repoRoot, mode: 'runtime' };
   }
   return null;
+}
+
+function allowHostedFallback() {
+  return process.env.SIMPLE_ALLOW_HOSTED_FALLBACK === '1';
 }
 
 function findRuntime() {
@@ -126,9 +131,11 @@ function findRuntime() {
     if (sourceServer) {
       return { command: sourceServer, args: [], repoRoot: sourceRoot, mode: 'native' };
     }
-    const sourceRuntime = resolveRuntimeBinary(sourceRoot);
-    if (sourceRuntime) {
-      return { command: sourceRuntime, args: ['run', path.join(sourceRoot, ENTRY)], repoRoot: sourceRoot, mode: 'runtime' };
+    if (allowHostedFallback()) {
+      const sourceRuntime = resolveRuntimeBinary(sourceRoot);
+      if (sourceRuntime) {
+        return { command: sourceRuntime, args: ['run', path.join(sourceRoot, ENTRY)], repoRoot: sourceRoot, mode: 'runtime' };
+      }
     }
   }
 
@@ -142,9 +149,11 @@ function findRuntime() {
   if (envDevRuntime) {
     return envDevRuntime;
   }
-  const devRuntime = resolveRuntimeBinary(projectRoot);
-  if (devRuntime) {
-    return { command: devRuntime, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
+  if (allowHostedFallback()) {
+    const devRuntime = resolveRuntimeBinary(projectRoot);
+    if (devRuntime) {
+      return { command: devRuntime, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
+    }
   }
 
   // 2. Check extracted bootstrap package
@@ -160,18 +169,32 @@ function findRuntime() {
       if (envBundledRuntime) {
         return envBundledRuntime;
       }
-      const bundledRuntime = resolveRuntimeBinary(pkgDir);
-      if (bundledRuntime) {
-        return { command: bundledRuntime, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
+      if (allowHostedFallback()) {
+        const bundledRuntime = resolveRuntimeBinary(pkgDir);
+        if (bundledRuntime) {
+          return { command: bundledRuntime, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
+        }
       }
     }
   }
 
-  // 3. Fall back to PATH
-  return { command: `simple${ext}`, args: ['run', path.join(process.cwd(), ENTRY)], repoRoot: process.cwd(), mode: 'runtime' };
-}
+  if (allowHostedFallback()) {
+    return { command: `simple${ext}`, args: ['run', path.join(process.cwd(), ENTRY)], repoRoot: process.cwd(), mode: 'runtime' };
+  }
 
-const { command, args, repoRoot, mode } = findRuntime();
+  throw new Error(
+    'No native Simple LSP-MCP server binary found. Build or install `simple_lsp_mcp_server`, ' +
+    'or set SIMPLE_ALLOW_HOSTED_FALLBACK=1 to opt into the legacy hosted runtime path.'
+  );
+}
+let resolved;
+try {
+  resolved = findRuntime();
+} catch (err) {
+  process.stderr.write(`Error: ${err.message}\n`);
+  process.exit(1);
+}
+const { command, args, repoRoot, mode } = resolved;
 
 const child = spawn(command, [...args, ...process.argv.slice(2)], {
   cwd: repoRoot,

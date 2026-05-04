@@ -25,7 +25,7 @@ dependencies such as `simple_runtime` and `simple_native_all`.
 
 ## Build Ownership
 
-The bridge project, not `bin/simple compile`, should resolve external package
+The bridge project, not `bin/simple native-build`, should resolve external package
 details:
 
 - system package lookup (`find_package`, pkg-config, custom paths)
@@ -33,7 +33,7 @@ details:
 - `target_link_libraries(...)`
 - platform-specific rpath or DLL placement
 
-Today, `simple compile --native` intentionally does not expose a general-purpose
+Today, `simple native-build` intentionally does not expose a general-purpose
 `-l`/`-L` pass-through API for arbitrary external host libraries. The supported
 and stable route is:
 

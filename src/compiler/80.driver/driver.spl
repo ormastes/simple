@@ -124,12 +124,21 @@ fn _driver_should_skip_dir(name: text) -> bool:
         i = i + 1
     false
 
+fn _driver_module_aliases(path: text, content: text, module_name: text) -> [SourceFile]:
+    var aliases: [SourceFile] = [SourceFile(path: path, content: content, module_name: module_name)]
+    if module_name.starts_with("compiler.10.frontend.core."):
+        val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
+        aliases = aliases.push(SourceFile(path: path, content: content, module_name: core_alias))
+    aliases
+
 fn _driver_collect_sources(p: text) -> [SourceFile]:
     """Collect source files from a path (file or directory). Returns list of SourceFile."""
     var result: [SourceFile] = []
     if p.ends_with(".spl"):
         # It's a source file
         if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
+            return result
+        if p.ends_with("/20.hir/hir_lowering/__init__.spl") or p.ends_with("\\20.hir\\hir_lowering\\__init__.spl"):
             return result
         if p.contains("/test/") or p.contains("/tests/") or p.contains("/doc/") or p.contains("/verification/"):
             return result
@@ -141,11 +150,9 @@ fn _driver_collect_sources(p: text) -> [SourceFile]:
             mod_path = mod_path.replace(".spl", "")
             mod_path = mod_path.replace(".sdn", "")
             val module_name = mod_path.replace("/", ".")
-            result = result.push(SourceFile(
-                path: p,
-                content: content,
-                module_name: module_name
-            ))
+            val aliases = _driver_module_aliases(p, content, module_name)
+            for alias in aliases:
+                result = result.push(alias)
     else:
         # Treat as directory — depth-first traversal with pruning
         val entries = rt_dir_list(p) ?? []
@@ -380,7 +387,7 @@ pub class CompilerDriver:
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
-        var seen_paths: Dict<text, bool> = {}
+        var seen_sources: Dict<text, bool> = {}
 
         # Start with user-provided roots
         var i = 0
@@ -389,8 +396,9 @@ pub class CompilerDriver:
             val input_path = self.ctx.options.input_files[i]
             val loaded = _driver_collect_sources(input_path)
             for s in loaded:
-                if not seen_paths.contains(s.path):
-                    seen_paths[s.path] = true
+                val source_key = s.path + "::" + s.module_name
+                if not seen_sources.contains(source_key):
+                    seen_sources[source_key] = true
                     all_sources = all_sources.push(s)
             if input_path.starts_with("src/"):
                 has_project_source = true
@@ -402,15 +410,17 @@ pub class CompilerDriver:
             val bulk_loaded = _driver_collect_sources_via_find(paths)
             if bulk_loaded.len() > 0:
                 for s in bulk_loaded:
-                    if not seen_paths.contains(s.path):
-                        seen_paths[s.path] = true
+                    val source_key = s.path + "::" + s.module_name
+                    if not seen_sources.contains(source_key):
+                        seen_sources[source_key] = true
                         all_sources = all_sources.push(s)
             else:
                 for p in paths:
                     val loaded = _driver_collect_sources(p)
                     for s in loaded:
-                        if not seen_paths.contains(s.path):
-                            seen_paths[s.path] = true
+                        val source_key = s.path + "::" + s.module_name
+                        if not seen_sources.contains(source_key):
+                            seen_sources[source_key] = true
                             all_sources = all_sources.push(s)
 
         # Single assignment avoids chained push issue

@@ -397,19 +397,7 @@ pub(crate) fn bind_args_with_values(
             ));
         };
 
-        if crate::is_debug_mode() {
-            eprintln!(
-                "[DEBUG bind_args_with_values] param '{}' value before coerce: {:?}",
-                param.name, value
-            );
-        }
         let value = coerce_unsigned(wrap_trait_object!(value, param.ty.as_ref()), param.ty.as_ref());
-        if crate::is_debug_mode() {
-            eprintln!(
-                "[DEBUG bind_args_with_values] param '{}' value after coerce: {:?}",
-                param.name, value
-            );
-        }
         validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
         bound.insert(param.name.clone(), value);
     }

@@ -29,6 +29,7 @@
 #define RT_VALUE_TAG_MASK 0x7ULL
 #define RT_VALUE_TAG_INT 0x0ULL
 #define RT_VALUE_TAG_HEAP 0x1ULL
+#define RT_VALUE_TAG_FLOAT 0x2ULL
 #define RT_VALUE_TAG_SPECIAL 0x3ULL
 #define RT_VALUE_SPECIAL_NIL 0x0ULL
 #define RT_VALUE_SPECIAL_TRUE 0x1ULL
@@ -58,6 +59,10 @@ static inline int rt_core_is_heap(int64_t value) {
     return (((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP;
 }
 
+static inline int rt_core_is_float(int64_t value) {
+    return (((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_FLOAT;
+}
+
 static inline int rt_core_is_special(int64_t value) {
     return (((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_SPECIAL;
 }
@@ -68,6 +73,14 @@ static inline int64_t rt_core_as_int(int64_t value) {
 
 static inline uint64_t rt_core_special_payload(int64_t value) {
     return ((uint64_t)value) >> 3;
+}
+
+static inline int64_t rt_core_numeric_arg(int64_t value) {
+    uint64_t raw = (uint64_t)value;
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_INT && raw >= 8) {
+        return (int64_t)(raw >> 3);
+    }
+    return value;
 }
 
 static inline RtCoreString* rt_core_as_string(int64_t value) {
@@ -146,6 +159,15 @@ char* rt_stdin_read_line(void) {
     return NULL; /* EOF */
 }
 
+int64_t stdin_read_char(void) {
+    int ch = fgetc(stdin);
+    if (ch == EOF) {
+        return rt_string_new(NULL, 0);
+    }
+    uint8_t byte = (uint8_t)ch;
+    return rt_string_new(&byte, 1);
+}
+
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
     int64_t len = (int64_t)strlen(s);
@@ -153,8 +175,54 @@ int64_t rt_stdout_write_text(const char* s) {
     return len;
 }
 
+int64_t print_raw(int64_t value) {
+    rt_core_print_value_to(stdout, value);
+    fflush(stdout);
+    return 0;
+}
+
+int64_t rt_stdout_write(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) {
+        rt_core_write_bytes(stdout, (const uint8_t*)s->data, s->len);
+        return (int64_t)s->len;
+    }
+    rt_core_print_value_to(stdout, value);
+    return 0;
+}
+
 void rt_stdout_flush(void) {
     fflush(stdout);
+}
+
+int64_t rt_stderr_write(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) {
+        rt_core_write_bytes(stderr, (const uint8_t*)s->data, s->len);
+        return (int64_t)s->len;
+    }
+    rt_core_print_value_to(stderr, value);
+    return 0;
+}
+
+void rt_stderr_flush(void) {
+    fflush(stderr);
+}
+
+int64_t rt_value_int(int64_t value) {
+    return (int64_t)(((uint64_t)value << 3) | RT_VALUE_TAG_INT);
+}
+
+int64_t rt_value_float(int64_t raw_bits) {
+    return (int64_t)(((uint64_t)raw_bits & ~RT_VALUE_TAG_MASK) | RT_VALUE_TAG_FLOAT);
+}
+
+int64_t rt_value_bool(int64_t value) {
+    return rt_core_from_special(value ? RT_VALUE_SPECIAL_TRUE : RT_VALUE_SPECIAL_FALSE);
+}
+
+int64_t rt_value_nil(void) {
+    return rt_core_nil();
 }
 
 int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
@@ -180,6 +248,195 @@ int64_t rt_string_len(int64_t string) {
 const uint8_t* rt_string_data(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
     return s ? (const uint8_t*)s->data : NULL;
+}
+
+int64_t rt_string_concat(int64_t left, int64_t right) {
+    RtCoreString* a = rt_core_as_string(left);
+    RtCoreString* b = rt_core_as_string(right);
+    int64_t left_text = left;
+    int64_t right_text = right;
+    if (!a) {
+        left_text = rt_to_string(left);
+        a = rt_core_as_string(left_text);
+    }
+    if (!b) {
+        right_text = rt_to_string(right);
+        b = rt_core_as_string(right_text);
+    }
+    if (!a || !b) return rt_core_nil();
+
+    uint64_t len = a->len + b->len;
+    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)len + 1);
+    if (!out) return rt_core_nil();
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = len;
+    if (a->len > 0) memcpy(out->data, a->data, (size_t)a->len);
+    if (b->len > 0) memcpy(out->data + a->len, b->data, (size_t)b->len);
+    out->data[len] = '\0';
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_len(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    return s ? (int64_t)s->len : 0;
+}
+
+int64_t rt_to_string(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) return value;
+
+    char buf[64];
+    if (rt_core_is_int(value)) {
+        int64_t n = (int64_t)((uint64_t)value >> 3);
+        int len = snprintf(buf, sizeof(buf), "%lld", (long long)n);
+        return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+    }
+    if (rt_core_is_float(value)) {
+        uint64_t bits = ((uint64_t)value) & ~RT_VALUE_TAG_MASK;
+        double f;
+        memcpy(&f, &bits, sizeof(f));
+        int len = snprintf(buf, sizeof(buf), "%.17g", f);
+        return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+    }
+    if (rt_core_is_special(value)) {
+        switch (rt_core_special_payload(value)) {
+            case RT_VALUE_SPECIAL_TRUE:
+                return rt_string_new((const uint8_t*)"true", 4);
+            case RT_VALUE_SPECIAL_FALSE:
+                return rt_string_new((const uint8_t*)"false", 5);
+            case RT_VALUE_SPECIAL_NIL:
+            default:
+                return rt_string_new(NULL, 0);
+        }
+    }
+    int len = snprintf(buf, sizeof(buf), "<value:0x%llx>", (unsigned long long)(uint64_t)value);
+    return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+}
+
+int64_t rt_native_eq(int64_t left, int64_t right) {
+    RtCoreString* a = rt_core_as_string(left);
+    RtCoreString* b = rt_core_as_string(right);
+    if (a || b) {
+        if (!a || !b || a->len != b->len) return 0;
+        return a->len == 0 || memcmp(a->data, b->data, (size_t)a->len) == 0;
+    }
+    return left == right;
+}
+
+int64_t rt_native_neq(int64_t left, int64_t right) {
+    return !rt_native_eq(left, right);
+}
+
+int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return rt_core_nil();
+    int64_t len = (int64_t)s->len;
+    int64_t begin = start;
+    int64_t finish = end;
+    int64_t stride = step;
+    if (stride == 0) stride = 1;
+    if (begin < 0) begin += len;
+    if (finish < 0) finish += len;
+    if (begin < 0) begin = 0;
+    if (finish < begin) finish = begin;
+    if (begin > len) begin = len;
+    if (finish > len) finish = len;
+    if (stride != 1) {
+        uint64_t out_len = 0;
+        for (int64_t i = begin; i < finish; i += stride) out_len++;
+        RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)out_len + 1);
+        if (!out) return rt_core_nil();
+        out->kind = RT_VALUE_HEAP_STRING;
+        out->reserved = 0;
+        out->len = out_len;
+        uint64_t out_i = 0;
+        for (int64_t i = begin; i < finish; i += stride) out->data[out_i++] = s->data[i];
+        out->data[out_len] = '\0';
+        return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    }
+    return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
+}
+
+int64_t rt_string_starts_with(int64_t value, int64_t prefix) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* p = rt_core_as_string(prefix);
+    if (!s || !p || p->len > s->len) return 0;
+    return p->len == 0 || memcmp(s->data, p->data, (size_t)p->len) == 0;
+}
+
+int64_t rt_string_ends_with(int64_t value, int64_t suffix) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* p = rt_core_as_string(suffix);
+    if (!s || !p || p->len > s->len) return 0;
+    return p->len == 0 || memcmp(s->data + (s->len - p->len), p->data, (size_t)p->len) == 0;
+}
+
+int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* old_s = rt_core_as_string(old_value);
+    RtCoreString* new_s = rt_core_as_string(new_value);
+    if (!s || !old_s || !new_s) return value;
+    if (old_s->len == 0) return value;
+
+    uint64_t count = 0;
+    for (uint64_t i = 0; i + old_s->len <= s->len;) {
+        if (memcmp(s->data + i, old_s->data, (size_t)old_s->len) == 0) {
+            count++;
+            i += old_s->len;
+        } else {
+            i++;
+        }
+    }
+    if (count == 0) return value;
+    uint64_t out_len = s->len;
+    if (new_s->len >= old_s->len) {
+        out_len += count * (new_s->len - old_s->len);
+    } else {
+        out_len -= count * (old_s->len - new_s->len);
+    }
+    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)out_len + 1);
+    if (!out) return rt_core_nil();
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = out_len;
+    uint64_t in_i = 0;
+    uint64_t out_i = 0;
+    while (in_i < s->len) {
+        if (in_i + old_s->len <= s->len && memcmp(s->data + in_i, old_s->data, (size_t)old_s->len) == 0) {
+            if (new_s->len > 0) memcpy(out->data + out_i, new_s->data, (size_t)new_s->len);
+            out_i += new_s->len;
+            in_i += old_s->len;
+        } else {
+            out->data[out_i++] = s->data[in_i++];
+        }
+    }
+    out->data[out_len] = '\0';
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
+int64_t rt_string_trim(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    uint64_t begin = 0;
+    uint64_t end = s->len;
+    while (begin < end && (s->data[begin] == ' ' || s->data[begin] == '\t' || s->data[begin] == '\n' || s->data[begin] == '\r')) {
+        begin++;
+    }
+    while (end > begin && (s->data[end - 1] == ' ' || s->data[end - 1] == '\t' || s->data[end - 1] == '\n' || s->data[end - 1] == '\r')) {
+        end--;
+    }
+    return rt_string_new((const uint8_t*)s->data + begin, end - begin);
+}
+
+int64_t rt_string_to_int(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return 0;
+    char buf[64];
+    uint64_t n = s->len < sizeof(buf) - 1 ? s->len : sizeof(buf) - 1;
+    if (n > 0) memcpy(buf, s->data, (size_t)n);
+    buf[n] = '\0';
+    return (int64_t)strtoll(buf, NULL, 10);
 }
 
 void rt_print_str(const uint8_t* ptr, uint64_t len) {

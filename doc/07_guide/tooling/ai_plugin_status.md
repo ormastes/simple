@@ -16,7 +16,7 @@ Status of all MCP servers, LSP plugins, agent plugins, and their cross-platform 
 - Compile cache (background, >1KB size check)
 - Debug logging (env: `<SERVER>_DEBUG_LOG=1`)
 - Native binary health probe with caching
-- Runtime fallback chain: `SIMPLE_BINARY` > colocated `bin/release/<platform>/simple` > `bin/simple` > Rust build outputs
+- Native-first startup chain: native server binary first; hosted `simple` fallback is legacy-only via `SIMPLE_ALLOW_HOSTED_FALLBACK=1`
 
 ## LSP Plugins (Claude Code Marketplace)
 

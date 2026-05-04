@@ -1,8 +1,11 @@
 #!/usr/bin/env simple
 # Duplication detection CLI
 
-use compiler.tools.duplicate_check.config (load_config, DuplicationConfig)
+use compiler.tools.duplicate_check.config (load_config, DuplicationConfig, analysis_mode, apply_analysis_mode)
 use compiler.tools.duplicate_check.debug (init_debug)
+use compiler.tools.duplicate_check.cache.{new_token_cache_manager}
+use compiler.tools.duplicate_check.detector.{collect_files, find_duplicates_with_options}
+use compiler.tools.duplicate_check.formatter.{print_text_report, print_json_report}
 use compiler.tools.duplicate_check.semantic.{run_semantic_analysis}
 use compiler.tools.duplicate_check.semantic_formatter.{print_semantic_text_report, print_semantic_json_report}
 use std.ffi.cli.{cli_get_args, cli_exit}
@@ -54,89 +57,64 @@ fn collect_command_args(all_args: [text]) -> [text]:
 fn print_usage():
     print "Usage: simple duplicate-check [path] [options]"
     print ""
-    print "Default behavior:"
-    print "  Run semantic documentation similarity analysis on the target path."
-    print ""
     print "Options:"
+    print "  --mode MODE         Analysis mode: semantic, token, cosine (default: semantic)"
     print "  --format FORMAT     Output format: text or json (default: text)"
     print "  --exclude PATTERN   Exclude files matching pattern"
     print "  --verbose, -v       Show detailed progress information"
     print "  --quiet, -q         Suppress all output except results"
-    print "  --semantic          Optional compatibility flag; semantic analysis is already the default"
+    print "  --semantic          Alias for --mode semantic"
+    print "  --token             Alias for --mode token"
+    print "  --cosine            Alias for --mode cosine"
+    print "  --similarity-threshold N  Cosine similarity threshold (default: 0.85)"
+    print "  --min-tokens N      Minimum tokens for token/cosine scans (default: 30)"
+    print "  --min-lines N       Minimum duplicated lines for token/cosine scans (default: 5)"
+    print "  --min-impact N      Minimum impact score for lexical reports"
     print "  --semantic-threshold N  Similarity threshold (default: 0.90)"
     print "  --semantic-model NAME   Ollama model (default: nomic-embed-text)"
     print "  --ollama-url URL    Ollama base URL (default: http://localhost:11434)"
     print "  --rebuild-embeddings  Force rebuild embedding cache"
-    print ""
-    print "Deprecated compatibility flags:"
-    print "  --min-tokens N      Accepted with warning; lexical duplication checking was removed"
-    print "  --min-lines N       Accepted with warning; lexical duplication checking was removed"
-    print "  --min-impact N      Accepted with warning; lexical duplication checking was removed"
-    print "  --cosine            Accepted with warning; semantic-only analysis now runs instead"
-    print "  --parallel          Accepted with warning; lexical duplication checking was removed"
-    print "  --jobs N            Accepted with warning; lexical duplication checking was removed"
-    print "  --no-cache          Accepted with warning; lexical duplication checking was removed"
-    print "  --cache-path PATH   Accepted with warning; lexical duplication checking was removed"
+    print "  --parallel          Enable the shared scheduling path"
+    print "  --jobs N            Advisory worker count for the scheduling path"
+    print "  --no-cache          Disable incremental cache reuse"
+    print "  --cache-path PATH   Incremental cache path"
     print "  --help, -h          Show this help"
 
-fn append_unique_flag(flags: [text], seen: {text: bool}, flag: text):
-    if seen[flag] ?? false:
-        return
-    seen[flag] = true
-    flags.push(flag)
+fn set_mode(config: DuplicationConfig, mode: text) -> DuplicationConfig:
+    if mode == "semantic" or mode == "token" or mode == "cosine":
+        return apply_analysis_mode(config, mode)
+    config
 
-fn collect_deprecated_lexical_flags(args: [text]) -> [text]:
-    var flags: [text] = []
-    var seen = {}
-    var i = 0
-    while i < args.len():
-        val arg = args[i]
+fn lexical_runtime_config(config: DuplicationConfig, mode: text) -> DuplicationConfig:
+    if mode == "cosine":
+        return apply_analysis_mode(config, "cosine")
 
-        if arg == "--min-tokens" or arg.starts_with("--min-tokens="):
-            append_unique_flag(flags, seen, "--min-tokens")
-            i = if arg == "--min-tokens" and i + 1 < args.len(): i + 2 else: i + 1
-        elif arg == "--min-lines" or arg.starts_with("--min-lines="):
-            append_unique_flag(flags, seen, "--min-lines")
-            i = if arg == "--min-lines" and i + 1 < args.len(): i + 2 else: i + 1
-        elif arg == "--min-impact" or arg.starts_with("--min-impact="):
-            append_unique_flag(flags, seen, "--min-impact")
-            i = if arg == "--min-impact" and i + 1 < args.len(): i + 2 else: i + 1
-        elif arg == "--cosine":
-            append_unique_flag(flags, seen, "--cosine")
-            i = i + 1
-        elif arg == "--parallel":
-            append_unique_flag(flags, seen, "--parallel")
-            i = i + 1
-        elif arg == "--jobs" or arg.starts_with("--jobs="):
-            append_unique_flag(flags, seen, "--jobs")
-            i = if arg == "--jobs" and i + 1 < args.len(): i + 2 else: i + 1
-        elif arg == "--no-cache":
-            append_unique_flag(flags, seen, "--no-cache")
-            i = i + 1
-        elif arg == "--cache-path" or arg.starts_with("--cache-path="):
-            append_unique_flag(flags, seen, "--cache-path")
-            i = if arg == "--cache-path" and i + 1 < args.len(): i + 2 else: i + 1
-        else:
-            i = i + 1
-    flags
-
-fn print_deprecation_warning(flags: [text]):
-    if flags.len() == 0:
-        return
-    print "WARNING: lexical duplicate-check options are deprecated and no longer change analysis."
-    print "  Requested: {flags.join(', ')}"
-    print "  `simple duplicate-check` now runs semantic-only analysis."
-    print ""
+    var runtime = config
+    runtime.use_cosine_similarity = false
+    runtime.selected_mode = "semantic"
+    if mode == "token":
+        # Token mode keeps the exact lexical threshold surface but uses the
+        # cosine grouping path at a perfect-match threshold so identical
+        # blocks still materialize deterministically in the CLI.
+        runtime.use_cosine_similarity = true
+        runtime.similarity_threshold = 0.999
+    runtime
 
 fn parse_args(args: [text]) -> DuplicationConfig:
     var config = load_config()
-    config.use_semantic = true
+    config = apply_analysis_mode(config, analysis_mode(config))
 
     var i = 0
     while i < args.len():
         val arg = args[i]
 
-        if arg == "--min-tokens" and i + 1 < args.len():
+        if arg == "--mode" and i + 1 < args.len():
+            config = set_mode(config, args[i + 1])
+            i = i + 2
+        elif arg.starts_with("--mode="):
+            config = set_mode(config, arg.slice("--mode=".len(), arg.len()))
+            i = i + 1
+        elif arg == "--min-tokens" and i + 1 < args.len():
             config.min_tokens = int(args[i + 1])
             i = i + 2
         elif arg.starts_with("--min-tokens="):
@@ -159,6 +137,12 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             i = i + 2
         elif arg.starts_with("--format="):
             config.output_format = arg.slice("--format=".len(), arg.len())
+            i = i + 1
+        elif arg == "--similarity-threshold" and i + 1 < args.len():
+            config.similarity_threshold = float(args[i + 1])
+            i = i + 2
+        elif arg.starts_with("--similarity-threshold="):
+            config.similarity_threshold = float(arg.slice("--similarity-threshold=".len(), arg.len()))
             i = i + 1
         elif arg == "--exclude" and i + 1 < args.len():
             config.exclude_patterns.push(args[i + 1])
@@ -184,12 +168,13 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             config.num_workers = int(arg.slice("--jobs=".len(), arg.len()))
             i = i + 1
         elif arg == "--cosine":
-            config.use_cosine_similarity = true
-            config.ignore_identifiers = false
-            config.ignore_literals = false
+            config = apply_analysis_mode(config, "cosine")
+            i = i + 1
+        elif arg == "--token":
+            config = apply_analysis_mode(config, "token")
             i = i + 1
         elif arg == "--semantic":
-            config.use_semantic = true
+            config = apply_analysis_mode(config, "semantic")
             i = i + 1
         elif arg == "--semantic-threshold" and i + 1 < args.len():
             config.semantic_threshold = float(args[i + 1])
@@ -245,20 +230,39 @@ fn main():
     val cmd_args = collect_command_args(raw_args)
 
     val config = parse_args(cmd_args)
-    val deprecated_flags = collect_deprecated_lexical_flags(cmd_args)
 
     val target_path = if cmd_args.len() > 0 and not cmd_args[0].starts_with("-"):
         cmd_args[0]
     else:
         "src/"
 
-    print_deprecation_warning(deprecated_flags)
+    val mode = analysis_mode(config)
+    if mode == "semantic":
+        val report = run_semantic_analysis(target_path, config)
+        if config.output_format == "json":
+            print_semantic_json_report(report)
+        else:
+            print_semantic_text_report(report, config)
 
-    val report = run_semantic_analysis(target_path, config)
+        val exit_code = if report.matches.len() > config.max_allowed: 1 else: 0
+        cli_exit(exit_code)
+
+    val files = collect_files(target_path, config)
+    val runtime_config = lexical_runtime_config(config, mode)
+    val cache_manager = new_token_cache_manager()
+    val groups = find_duplicates_with_options(
+        files,
+        runtime_config,
+        cache_manager,
+        runtime_config.use_parallel,
+        runtime_config.use_incremental,
+        runtime_config.incremental_cache_path
+    )
+
     if config.output_format == "json":
-        print_semantic_json_report(report)
+        print_json_report(groups, mode)
     else:
-        print_semantic_text_report(report, config)
+        print_text_report(groups, mode)
 
-    val exit_code = if report.matches.len() > config.max_allowed: 1 else: 0
+    val exit_code = if groups.len() > config.max_allowed: 1 else: 0
     cli_exit(exit_code)

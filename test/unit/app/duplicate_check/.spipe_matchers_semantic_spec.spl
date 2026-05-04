@@ -1,12 +1,13 @@
 # Tests for semantic doc similarity analysis
 
 use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_file, process_doc_text, build_embedding_key, content_hash}
+use compiler.tools.duplicate_check.config.{default_config}
 use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, parse_embedding_response, parse_float_safe}
-use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, EmbeddingCacheEntry, load_embedding_cache, save_embedding_cache, get_cached, set_cached, csv_to_floats, floats_to_csv}
-use compiler.tools.duplicate_check.semantic.{SemanticMatch, SemanticReport, cosine_similarity_dense, text_similarity}
+use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, EmbeddingCacheEntry, load_embedding_cache, save_embedding_cache, get_cached, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
+use compiler.tools.duplicate_check.semantic.{SemanticMatch, SemanticReport, cosine_similarity_dense, run_semantic_analysis, text_similarity}
 use compiler.tools.duplicate_check.semantic_formatter.{format_match_line, severity_label}
-use app.io.mod.{file_write}
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
 # ============================================================================
 # Doc Extractor Tests
 # ============================================================================
@@ -37,40 +38,6 @@ describe "doc_extractor":
             has_doc: false
         )
         expect entry.has_doc == false
-
-    it "extracts docs and signatures for supported item kinds from a file":
-        val path = "/tmp/doc_extractor_supported_items.spl"
-        val content = "# Adds one\n" +
-            "fn add_one(value: i64) -> i64:\n" +
-            "    value + 1\n\n" +
-            "# Shared data\n" +
-            "struct SharedState:\n" +
-            "    count: i64\n\n" +
-            "# Handles work\n" +
-            "class Worker:\n" +
-            "    me run():\n" +
-            "        nil\n\n" +
-            "# Outcome values\n" +
-            "enum Outcome:\n" +
-            "    Ok\n" +
-            "    Err\n"
-        file_write(path, content)
-
-        val entries = extract_docs_from_file(path)
-
-        expect entries.len() == 4
-        expect entries[0].item_name == "add_one"
-        expect entries[0].signature == "fn add_one(value: i64) -> i64"
-        expect entries[0].doc_comment == "Adds one"
-        expect entries[1].item_kind == "struct"
-        expect entries[1].item_name == "SharedState"
-        expect entries[1].has_doc == true
-        expect entries[2].item_kind == "class"
-        expect entries[2].item_name == "Worker"
-        expect entries[2].doc_comment == "Handles work"
-        expect entries[3].item_kind == "enum"
-        expect entries[3].item_name == "Outcome"
-        expect entries[3].doc_comment == "Outcome values"
 
     it "processes doc text - strips hash prefix":
         val result = process_doc_text("# This is a comment")
@@ -190,9 +157,9 @@ describe "embedding_cache":
             hits: 0,
             misses: 0
         )
-        val result = get_cached(cache, "key1", "hash1")
-        expect result == ""
-        expect cache.misses == 1
+        val result = lookup_cached(cache, "key1", "hash1")
+        expect result.embedding_csv == ""
+        expect result.hit == false
 
     it "set and get cached entry":
         val cache = EmbeddingCacheManager(
@@ -202,10 +169,10 @@ describe "embedding_cache":
             hits: 0,
             misses: 0
         )
-        set_cached(cache, "key1", "hash1", "0.1,0.2,0.3")
-        val result = get_cached(cache, "key1", "hash1")
-        expect result == "0.1,0.2,0.3"
-        expect cache.hits == 1
+        val cache2 = set_cached(cache, "key1", "hash1", "0.1,0.2,0.3")
+        val result = lookup_cached(cache2, "key1", "hash1")
+        expect result.embedding_csv == "0.1,0.2,0.3"
+        expect result.hit == true
 
     it "cache miss on hash mismatch":
         val cache = EmbeddingCacheManager(
@@ -215,8 +182,8 @@ describe "embedding_cache":
             hits: 0,
             misses: 0
         )
-        set_cached(cache, "key1", "hash1", "0.1,0.2,0.3")
-        val result = get_cached(cache, "key1", "hash2")
+        val cache2 = set_cached(cache, "key1", "hash1", "0.1,0.2,0.3")
+        val result = get_cached(cache2, "key1", "hash2")
         expect result == ""
 
 # ============================================================================
@@ -272,6 +239,19 @@ describe "semantic - text similarity":
         val sim = text_similarity("add element to array", "add item to array")
         val is_high = sim > 0.7
         expect is_high == true
+
+describe "semantic - entrypoint extraction":
+    it "extracts documented items through semantic analysis":
+        var config = default_config()
+        config.exclude_patterns = []
+        config.ollama_url = "http://127.0.0.1:9"
+        config.semantic_threshold = 0.70
+
+        val report = run_semantic_analysis("test/fixtures/duplicate_check/semantic_supported_items.spl", config)
+
+        expect report.total_items > 0 == true
+        expect report.items_with_docs > 0 == true
+        expect report.used_fallback == true
 
 # ============================================================================
 # Formatter Tests

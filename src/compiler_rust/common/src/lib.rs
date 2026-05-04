@@ -16,8 +16,8 @@ pub mod actor;
 pub use actor::{ActorHandle, ActorSpawner, Message, ThreadSpawner};
 
 pub use simple_runtime_abi::{
-    AbiVersion, RuntimeSymbolProvider, RuntimeSymbolTier, RUNTIME_SYMBOL_NAMES, symbol_tier_of,
-    runtime_symbols_for_baremetal,
+    runtime_symbols_for_baremetal, symbol_class_of, symbol_tier_of, AbiVersion, RuntimeSymbolClass,
+    RuntimeSymbolProvider, RuntimeSymbolTier, CORE_REQUIRED_RUNTIME_SYMBOLS, RUNTIME_SYMBOL_NAMES,
 };
 
 pub mod smf;

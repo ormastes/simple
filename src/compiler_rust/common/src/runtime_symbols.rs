@@ -104,6 +104,71 @@ pub enum RuntimeSymbolTier {
     Ext,
 }
 
+/// Runtime ABI classification used by native lane selection.
+///
+/// `CoreRequired` is the narrow ABI that a `simple-core` archive must provide
+/// before automatic native-build selection can prefer that lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeSymbolClass {
+    CoreRequired,
+    HostedOnly,
+    Unported,
+}
+
+pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
+    "__simple_runtime_init",
+    "__simple_runtime_shutdown",
+    "rt_alloc",
+    "rt_free",
+    "rt_realloc",
+    "rt_memcpy",
+    "rt_memset",
+    "rt_array_new",
+    "rt_array_get",
+    "rt_array_set",
+    "rt_array_push",
+    "rt_array_pop",
+    "rt_array_len",
+    "rt_string_new",
+    "rt_string_len",
+    "rt_string_data",
+    "rt_string_concat",
+    "rt_len",
+    "rt_to_string",
+    "rt_native_eq",
+    "rt_native_neq",
+    "rt_slice",
+    "rt_string_starts_with",
+    "rt_string_ends_with",
+    "rt_string_replace",
+    "rt_string_trim",
+    "rt_string_to_int",
+    "stdin_read_char",
+    "print_raw",
+    "rt_stdout_write",
+    "rt_stdout_flush",
+    "rt_stderr_write",
+    "rt_stderr_flush",
+    "rt_exit",
+    "rt_time_now_unix",
+    "rt_sleep_ms",
+    "rt_value_int",
+    "rt_value_float",
+    "rt_value_bool",
+    "rt_value_nil",
+    "rt_panic",
+];
+
+pub fn symbol_class_of(name: &str) -> RuntimeSymbolClass {
+    if CORE_REQUIRED_RUNTIME_SYMBOLS.contains(&name) {
+        return RuntimeSymbolClass::CoreRequired;
+    }
+    match symbol_tier_of(name) {
+        RuntimeSymbolTier::Sys | RuntimeSymbolTier::Async | RuntimeSymbolTier::Ext => RuntimeSymbolClass::HostedOnly,
+        RuntimeSymbolTier::Core | RuntimeSymbolTier::Alloc => RuntimeSymbolClass::Unported,
+    }
+}
+
 /// Classify a runtime symbol name into its tier.
 pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
     use RuntimeSymbolTier::*;
@@ -786,5 +851,13 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
+    }
+
+    #[test]
+    fn test_symbol_classification_marks_core_abi_and_hosted_symbols() {
+        assert_eq!(symbol_class_of("rt_alloc"), RuntimeSymbolClass::CoreRequired);
+        assert_eq!(symbol_class_of("rt_stdout_flush"), RuntimeSymbolClass::CoreRequired);
+        assert_eq!(symbol_class_of("rt_file_read_text"), RuntimeSymbolClass::HostedOnly);
+        assert_eq!(symbol_class_of("rt_array_clear"), RuntimeSymbolClass::Unported);
     }
 }

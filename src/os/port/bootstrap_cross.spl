@@ -67,6 +67,21 @@ fn path_is_dir(path: text) -> bool:
     """Runtime-compatible directory existence check."""
     process.run("test", ["-d", path]).exit_code == 0
 
+fn parent_dir(path: text) -> text?:
+    val idx = path.rfind("/")
+    if idx < 0:
+        return nil
+    path.substring(0, idx)
+
+fn base_name(path: text) -> text:
+    val idx = path.rfind("/")
+    if idx < 0:
+        return path
+    path.substring(idx + 1)
+
+fn ensure_dir(path: text) -> bool:
+    process.run("mkdir", ["-p", path]).exit_code == 0
+
 fn env_get_text(key: text) -> text:
     val value = rt_env_get(key)
     if value == nil:
@@ -174,20 +189,20 @@ fn expand_lib_sources(src_root: text) -> [text]:
     var out: [text] = []
     val lib_root = "{src_root}/src/lib"
     val top = fs.list_dir(lib_root)
-    if not top.is_ok():
+    if top.len() == 0:
         # Fall back to the un-expanded path; filter becomes a no-op.
         out.push(lib_root)
         return out
-    for entry in top.unwrap():
+    for entry in top:
         val top_path = "{lib_root}/{entry}"
         if not path_is_dir(top_path):
             continue
         val children = fs.list_dir(top_path)
-        if not children.is_ok():
+        if children.len() == 0:
             out.push(top_path)
         else:
             var any_sub = false
-            for sub in children.unwrap():
+            for sub in children:
                 val sub_path = "{top_path}/{sub}"
                 if path_is_dir(sub_path):
                     out.push(sub_path)
@@ -195,6 +210,32 @@ fn expand_lib_sources(src_root: text) -> [text]:
             if not any_sub:
                 out.push(top_path)
     out
+
+fn simpleos_lib_source_args(src_root: text) -> text:
+    """Return reduced `--source` args for SimpleOS without using `std.fs`.
+
+    The cross-bootstrap seed can be older than the host compiler, so keep this
+    path to shell/process primitives that the seed surface already supports.
+    """
+    val root = "{src_root}/src/lib"
+    val script =
+        "root=\"" + root + "\"; " +
+        "for top in \"$root\"/*; do " +
+        "[ -d \"$top\" ] || continue; " +
+        "has=0; " +
+        "for sub in \"$top\"/*; do " +
+        "[ -d \"$sub\" ] || continue; has=1; " +
+        "case \"$sub\" in */gpu|*/tls|*/cuda|*/torch|*/gpu_runtime|*/database|*/vulkan|*/opencl|*/ml|*/gfx) continue;; esac; " +
+        "printf ' --source %s' \"$sub\"; " +
+        "done; " +
+        "if [ \"$has\" -eq 0 ]; then " +
+        "case \"$top\" in */database) ;; *) printf ' --source %s' \"$top\";; esac; " +
+        "fi; " +
+        "done"
+    val result = process.run("sh", ["-c", script])
+    if result.exit_code != 0 or result.stdout.len() == 0:
+        return " --source {root}"
+    result.stdout
 
 struct CrossConfig:
     target: text              # Target triple (e.g. x86_64-simpleos)
@@ -405,9 +446,11 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
     print "[seed] Output: {output}"
 
     # Ensure output directory
-    val output_dir = output.rsplit_once("/")
+    val output_dir = parent_dir(output)
     if output_dir != nil:
-        fs.mkdir_p(output_dir.0)
+        if not ensure_dir(output_dir):
+            print "[seed] ERROR: could not create output directory"
+            return false
 
     # Build target spec path
     val target_spec = "src/os/toolchain/rust/{config.target}.json"
@@ -454,14 +497,12 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
     val cargo_output = "{RUST_SEED_DIR}/target/{config.target}/bootstrap/simple"
     if not path_exists(cargo_output):
         # Try with the spec file name
-        val spec_name = target_spec.rsplit_once("/")
-        if spec_name != nil:
-            val base = spec_name.1.replace(".json", "")
-            val alt_path = "{RUST_SEED_DIR}/target/{base}/bootstrap/simple"
-            if path_exists(alt_path):
-                fs.copy(alt_path, output)
-                print "[seed] Cross-compiled seed ready at {output}"
-                return true
+        val base = base_name(target_spec).replace(".json", "")
+        val alt_path = "{RUST_SEED_DIR}/target/{base}/bootstrap/simple"
+        if path_exists(alt_path):
+            fs.copy(alt_path, output)
+            print "[seed] Cross-compiled seed ready at {output}"
+            return true
         print "[seed] ERROR: Could not find cargo output binary"
         return false
 
@@ -504,33 +545,26 @@ fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
     print "[stage {stage}] Output: {output}"
 
     # Ensure output directory
-    val output_dir = output.rsplit_once("/")
+    val output_dir = parent_dir(output)
     if output_dir != nil:
-        fs.mkdir_p(output_dir.0)
+        if not ensure_dir(output_dir):
+            print "[stage {stage}] ERROR: could not create output directory"
+            return false
 
     # Build args.
     #
-    # For `-simpleos` targets, expand `{src}/src/lib` into concrete subtrees
-    # and drop host-only subsystems (GPU, TLS, CUDA, Torch) that would
-    # otherwise generate ~2367 auto-stubs. Host targets pass `src/lib`
-    # through unchanged, so host builds remain byte-identical.
-    var lib_sources: [text] = []
-    if config.target.ends_with("-simpleos"):
-        lib_sources = filter_simpleos_sources(
-            expand_lib_sources(src),
-            config.target
-        )
-    else:
-        lib_sources.push("{src}/src/lib")
     var args = "native-build" +
+        " --backend cranelift" +
         " --source {src}/src/compiler"
-    for s in lib_sources:
-        args = args + " --source {s}"
+    args = args + " --source {src}/src/lib"
     args = args +
         " --source {src}/src/app" +
-        " --entry {src}/src/app/cli/main.spl" +
+        " --clean" +
+        " --entry-closure" +
+        " --entry {src}/src/app/cli/bootstrap_main.spl" +
+        " --runtime-path {src}/src/compiler_rust/target/bootstrap" +
         " -o {output}" +
-        " --opt-level=aggressive"
+        " --opt-level=standard"
 
     if config.strip:
         args = args + " --strip"
@@ -590,8 +624,12 @@ fn package_bootstrap(config: CrossConfig) -> bool:
     print "[package] Creating archive: {archive}"
 
     # Create staging directory
-    fs.mkdir_p("{staging}/bin")
-    fs.mkdir_p("{staging}/sysroot")
+    if not ensure_dir("{staging}/bin"):
+        print "[package] ERROR: could not create bin staging directory"
+        return false
+    if not ensure_dir("{staging}/sysroot"):
+        print "[package] ERROR: could not create sysroot staging directory"
+        return false
 
     # Copy binary
     fs.copy(stage3, "{staging}/bin/simple")
